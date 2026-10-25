@@ -2,69 +2,68 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T13:45:00Z",
-  "round": "5 — the structural forward merge of #2179, review round 4's two findings (one a path traversal), and the architect's three items",
+  "completed": "2026-10-25T15:05:00Z",
+  "round": "6 — review round 5's three findings and two Minors, with the forward merge that clears two inherited red lanes",
   "proof": [
     {
-      "criterion": "The merged store rule: a session store that keeps sessions in a database is required, and `pvc` is refused — not `postgres` demanded, since #2179's `cloudsql-iam` keeps sessions off the disk exactly as `postgres` does.",
-      "surface": "The real CLI surface, `legion start --check-config`, over five configurations built from the shipped `deploy/kubernetes/daemon/legion.yaml.example`.",
-      "command": "cd packages/daemon && go build -o /legion/scratch/tmp/legion-head ./cmd/legion; then legion start --check-config --config {postgres,cloudsql,pvc,omitted,unknown}.yaml",
-      "observed": "postgres → `Config OK: project=WIDGETS`; cloudsql-iam → `Config OK`; pvc → `legion start: runtime.kubernetes.session_store must name a store that keeps sessions in a database, and is required (INFRA-80): an issue pod's disk is the pod's own ephemeral volume, deleted with the pod, so a session kept as a file on it ('pvc', also what an omitted session_store means) dies with it, the next launch's resume fails on the missing file (internal/launcher's sessionWritten), and three such failures retire the claim`; an omitted session_store → the same refusal; `mysql` → main's own unchanged error, `must be 'pvc', 'postgres' or 'cloudsql-iam'`.",
-      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
-      "negativeControl": "A `legion` built from `main@origin` (0306bcbe16df), run against the same two files, answers `Config OK: project=WIDGETS` for both `pvc` and the omitted store. The refusal is this change's, measured rather than asserted."
+      "criterion": "Finding 1. A deployment on the second database store can boot: the providers directory is passed where the pod mounts it, not where the store happens to be postgres.",
+      "surface": "The sandbox package's own rig, over both shared launch paths — a role's shim command and the daemon's boot image probe — and the pod spec each produces.",
+      "command": "cd packages/daemon && CGO_ENABLED=0 go test ./internal/runtime/sandbox -run TestTheProvidersDirectoryIsToldWhereThePodMountsIt -v",
+      "observed": "Three runtimes × two sites, all pass. A cloudsql-iam runtime with no provider key and no providers secret produces a shim command and a probe command carrying no --provider-env-dir, and a pod with no providers volume and no mount; the same runtime with a provider key, and a postgres runtime with none, carry the flag and the mount. Both sites ask r.mountsProviders(), which is the rule rather than the case, so a fourth store kind needs no edit.",
+      "headSha": "2056d96c3f4821dd3fc535e113845c72313c0794",
+      "negativeControl": "Run by me, not taken from a report: launcher.go and probe.go restored from legion/INFRA-80@origin into a scratch copy (grep -c 'mountsProviders()' on them → 0 0), the new test then fails in both cloudsql-iam cases — `told --provider-env-dir /var/run/legion/providers: true (…), want false` for the role's shim and for the image probe."
     },
     {
-      "criterion": "The e2e session exporter cannot write a host file outside the evidence directory, whatever key the session database holds — review round 4's security finding.",
-      "surface": "The real `session_copy` taken from `scripts/e2e/stage4b-sandbox-tree.sh` by name, driven into a destination nested inside a fresh temporary root with a sentinel file beside it, with the filesystem walked afterwards.",
-      "command": "bun test scripts/e2e/lib/stage4b-session-text.test.ts",
-      "observed": "22 pass. Crafted keys: `../`, absolute after the prefix, an embedded newline, bytes past ASCII, and the `.`/`..`/empty/collision refusals, plus a symlink planted in the destination. Nothing appeared outside the destination in any case; the sentinel's bytes are unchanged; each refusal names the key and not the session's bytes.",
-      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
-      "negativeControl": "Against the unfixed function in a scratch copy of the script, `12 fail, 10 pass`, the four traversal cases among the failures. That control was run twice: the first run passed 22/22 because a failed `cp` had left the fixed script in place, so it had proved nothing. The second was run with the unfixed function confirmed in place by grep first."
+      "criterion": "Finding 2. A session key the exporter refuses fails the run instead of being noted, and costs only its own transcript rather than every one.",
+      "surface": "The real session_copy, collect_transcripts and cleanup taken from scripts/e2e/stage4b-sandbox-tree.sh by name, with docker stubbed as psql answers and cleanup driven as the EXIT trap of a passed run.",
+      "command": "bun test scripts/e2e/lib/stage4b-session-text.test.ts; bun test scripts/e2e/lib",
+      "observed": "28 pass in the file, 518 pass overall with the two Docker-only nats-stream failures. A colliding pair is refused by key — both of them, never first-come, since first-come would let an agent's row that sorts earlier put its bytes at the colliding session's name — every other key is still written, the controller's sessions are still copied, session_copy returns non-zero, and cleanup prints `CHECK transcripts: FAIL: …` then `stage 4b e2e: FAIL (check transcripts, in the teardown after check <check>)` and exits 1. No session's bytes appear on stderr.",
+      "headSha": "2056d96c3f4821dd3fc535e113845c72313c0794",
+      "negativeControl": "Against the pushed script in a scratch copy: 11 fail, 17 pass, including `a prefix holding two keys of one name writes every other key, names both, and fails` and `a copy that leaves a session out fails the run's teardown check transcripts`."
     },
     {
-      "criterion": "The test fixture builds the architecture this change makes, and the migration tests still exercise the superseded one.",
-      "surface": "The sandbox package's own suite, and a grep over the daemon module.",
-      "command": "cd packages/daemon && CGO_ENABLED=0 go test ./internal/runtime/sandbox; grep -rn 'withoutVolume' packages/daemon/",
-      "observed": "The suite passes and the grep is empty. `sandboxObject` builds an issue Sandbox with no claim template; `withSupersededDisk` is the named opt-in at three call sites; `cleanup_test` models each issue's disk through its pod, as the runtime does.",
-      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
-      "negativeControl": "`TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape` requires a delete of the superseded Sandbox followed by a create, which never happens for a Sandbox owning no claim template — so a migration test that lost its opt-in fails rather than passing quietly. That was the one failure mode of the inversion."
+      "criterion": "Finding 3 and the Minors. The 'postgres is the only store' class is closed, in both directions, over the tree rather than over the list.",
+      "surface": "The whole repository, searched after the edits rather than before.",
+      "command": "grep -rni 'only store|one store|must be .postgres|store this runtime has' over md/go/ts/sh/yaml/example; grep -rniE \"outlives (any|the) (one )?pod|Sandbox-owned|volume was lost|recover the workspace|issue's volume\" over the same, excluding node_modules, dist, bun.lock and docs/solutions",
+      "observed": "No hit of the session-store class remains: every surviving `one store`/`only store` match is unrelated prose (`one stored …`, `a daemon-only store`). In the disk direction every survivor is correct or deliberate — `the issue's volume` is still the disk's name, `manifest.go:354` is the controller's Sandbox, which does own its claim template, `live_test.go:1145` and `live_lifecycle_test.go:1574` say `before INFRA-80` and are observations, and stage4b's `volume was lost` greps are negative assertions that the line never appears. One survivor was a real defect and is fixed: `internal/supervise/table.go:596` said a retired claim's session `goes with the issue's volume`, which is wrong in both directions now.",
+      "headSha": "2056d96c3f4821dd3fc535e113845c72313c0794",
+      "negativeControl": "The same searches before the edits return the located sites — the operator-facing `legion.yaml.example:70`, the published site page's three, `scripts/e2e/README.md`, both `AGENTS.md` files — which is how the list was built; the rule-versus-observation test is what left `version.go`'s contract history and the CHANGELOGs untouched."
     },
     {
-      "criterion": "The merge carries both changes rather than one of them.",
-      "surface": "The Go toolchain over the merged tree, including #2179's own new package.",
-      "command": "cd packages/daemon && gofmt -l . && go build ./... && go vet ./... && go vet -tags e2e ./... && CGO_ENABLED=0 go test ./internal/config ./internal/launcher ./internal/runtime/sandbox ./internal/runtime ./internal/api ./internal/ompsessions ./internal/sessionproxy ./internal/record ./internal/workflow ./internal/store ./internal/supervise ./internal/podsafety ./internal/workspace ./cmd/legion",
-      "observed": "All green, `#2179`'s `./internal/sessionproxy` suite passing unmodified. 14 conflicts across the two changes' shared core were resolved to main's `ompsessions.Store` API with this branch's invariant re-imposed on top of it.",
-      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
-      "negativeControl": "The same tree before the resolution does not compile, and `jj resolve --list` named all 14 files."
+      "criterion": "The two red lanes are cured at this head rather than inferred from main's tip.",
+      "surface": "The envoy Go module in the workspace, which is what the lanes compile.",
+      "command": "cd packages/envoy && go vet ./cmd/broker",
+      "observed": "Clean. Before the merge it failed with `cmd/broker/service_account_scope_test.go:50:3: too many arguments in call to startBroker — have (*testing.T, string, …) want (*testing.T, brokerOptions)`, which is what both lanes failed on. The merge takes main's #2194, which migrated the two service-account tests to the options form.",
+      "headSha": "2056d96c3f4821dd3fc535e113845c72313c0794",
+      "negativeControl": "The same command at legion/INFRA-80@origin before the merge produced the quoted failure; this branch changes no file under packages/envoy, which is why the cure had to come from main."
     }
   ],
   "filesChanged": [
-    "The merge `eceefebffe3f`: 14 conflicted files resolved — `config/kubernetes.go` and its test, `sandbox/{manifest,addresses,operatorpod,types}.go` and their tests, `launcher/launcher.go` and its test, `sandbox/{live_test,live_sessions_test,session_store_test}.go`, `api/settings.go`, `docs/kubernetes.md` — plus six files outside the conflict set that would not compile against the removed `SessionDSNKey`.",
-    "`scripts/e2e/stage4b-sandbox-tree.sh` (`5beb72e619e9`): `session_copy` derives each file's name from the key instead of using it, refuses rather than sanitises, asserts the resolved destination before any write, and lists keys as hex so a newline cannot split one key into two.",
-    "`scripts/e2e/lib/stage4b-session-text.test.ts`: the crafted-key tests and their filesystem walk.",
-    "`packages/daemon/internal/runtime/sandbox/{rig_test,layout_test,relaunch_test,lifecycle_test,cleanup_test,live_test}.go` (`98bd4a90f4b7`): the fixture default inverted, `withoutVolume` removed, `withSupersededDisk` added, `issueDiskName` moved out of the e2e-tagged file.",
-    "`scripts/e2e/README.md`: the `pod-baseline` row says `OMP_SESSION_STORAGE=sql`, and `setup-negative` that the pod's own disk goes with its pod.",
-    "The delta merge `ace35f9ce9f3`: one conflict in `docs/kubernetes.md`, taken immediately before the push because `main` moved again mid-round.",
-    "The pull request body: `CI`, `Threads`, `E2E (implementer)`, `Chain`, `Size`, the census's store sentence, and a compressed sweep section. Plus a comment carrying the Stage 4a runner's revised check list."
+    "packages/daemon/internal/runtime/sandbox/launcher.go, probe.go: --provider-env-dir is passed only where mountsProviders() is true, with both comments rewritten; probe.go's stuck() comment loses the same premise.",
+    "packages/daemon/internal/runtime/sandbox/session_store_test.go, probe_test.go: the four-case regression and a corrected doc comment.",
+    "scripts/e2e/stage4b-sandbox-tree.sh: session_copy refuses per key and copies the rest; collect_transcripts propagates the failure; cleanup records it as the teardown check `transcripts`.",
+    "scripts/e2e/lib/stage4b-session-text.test.ts: the collision, multi-collision and cleanup cases.",
+    "The prose class, both directions: deploy/kubernetes/daemon/legion.yaml.example, docs/site/src/content/docs/legion/running-legion.md (four places), scripts/e2e/README.md (five), AGENTS.md, packages/pi-legion/AGENTS.md, skills/legion-architect/SKILL.md, skills/legion-worker/references/{merge-gate,tools}.md and the generated claude-envoy copies, packages/daemon/internal/runtime/sandbox/{names,podkind,cleanup,manifest_test,relaunch_test}.go, live_operator_test.go, internal/supervise/table.go.",
+    "The merge commit itself, taken before the work and kept empty of it."
   ],
   "trickyParts": [
-    "The merge's one decision was not a conflict-resolution detail: this branch's refusal was spelled `session_store must be 'postgres'`, which after #2179 would refuse `cloudsql-iam` — a store whose sessions survive the pod exactly as `postgres`'s do. The rule is 'not pvc', and the message states the mechanism and names no permitted spelling, so a fourth store kind needs no edit here.",
-    "A key holding a newline could not be fixed by checking keys: psql prints one row a line, so such a key arrived as two keys before any check could see it. The listing returns `encode(convert_to(path,'UTF8'),'hex')` and the reader decodes byte for byte under `LC_ALL=C`.",
-    "The fixture inversion's one failure mode is a migration test that silently stops exercising the superseded shape. It is checked rather than asserted: the replacement test requires a delete-then-create that a Sandbox owning no claim template never produces."
+    "Both colliding keys are refused rather than the first being written. First-come would let an agent's session row that sorts earlier place its own bytes at the colliding session's name, which is the write the derivation exists to prevent, so the safe-looking choice reintroduces the attack one layer up.",
+    "probe.go's command is built in two parts so the flag can be omitted without moving --role-references, which keeps the golden probe.json untouched.",
+    "The rule-versus-observation test decided every prose edit: version.go's contract history and the CHANGELOGs record what a numbered contract changed and stay; a sentence telling a reader what a deployment must name is the defect."
   ],
   "deviations": [
-    "The first negative control for the traversal fix was invalid and passed 22/22: a failed `cp` in its setup had left the fixed script in place. It is recorded here and in the thread reply because an invalid control that passes is indistinguishable from a valid one, and because it is the near miss that makes the real control meaningful.",
-    "I published a pull request body built on a copy fetched two minutes earlier, and the live body had shrunk by 279 characters in between, so an edit by another role may have been overwritten. GitHub exposes no body history; I have told the reviewer exactly what I published and asked it to name anything of its own that is missing.",
-    "Every proof of the earlier rounds was re-run rather than carried: they were taken against a `legion` built from heads that no longer exist."
+    "The forward merge was taken first, as the architect directed, because the two red lanes were main's own #2162/#2185 combination and no work here could clear them.",
+    "One site outside the review's list was found by the closing search and fixed: internal/supervise/table.go:596. The search was run over the tree rather than over the list precisely to find that kind.",
+    "The merge commit was separated from the round's work after the subagents had edited inside it, so the merge carries no change of its own."
   ],
   "openQuestions": [
-    "Stage 4b is repaired and has run at no head, here or anywhere. `shellcheck` is not installed in this pod (`command -v shellcheck` returns nothing), so the scripts have `bash -n` and `bunx biome check scripts/e2e/lib` only.",
-    "Stage 4a's seven inverted checks are still unrun; the one live attempt died at `root-ready` before reaching them. The revised check list for the runner is a comment on the pull request, marking each of the 65 rows changed or unchanged, measured by command rather than by reading: 13 changed, one renamed, one new.",
-    "The reviewer's round-4 review body had not been submitted when this round completed; only its two inline threads were visible, and both are answered and resolved."
+    "Stage 4b is repaired and has run at no head. shellcheck is not installed in this pod, so the scripts have bash -n and bunx biome check only.",
+    "Stage 4a's inverted checks are still unrun; the runner's revised list, marking each of 65 rows changed or unchanged, is a comment on the pull request.",
+    "The branch was 9 behind main within a minute of the push, with no conflict. The two lanes at this head were still queued when the round completed; the daemon reads their settlement."
   ],
   "discoveredComplexity": [
-    "A repair is new code and gets the scrutiny new code gets — which is exactly the scrutiny a repair tends not to get, because everyone reads it as a fix to something already reviewed. The session exporter was written last round to repair a broken proof and shipped a path traversal, found by review rather than by the person who wrote it. This belongs in the issue's retro note as its own entry.",
-    "An invalid negative control that passes is indistinguishable from a valid one, and it is the only check whose failure mode is silence in both directions. Both halves of the near miss belong in the note: the control that passed because the setup had failed, and the real one that gave 12 fail, 10 pass.",
-    "Two changes rewriting the same mechanism in parallel resolve cleanly and can still mean something neither author intended. Here they met over how a store is named and projected and nowhere over who owns the disk, which was read in the other change's source rather than inferred from its title — but the one place they did meet carried a rule that would have refused a store the deployment intends to use."
+    "A merge generalises a rule and leaves its machinery behind. The configuration rule became 'a store that keeps sessions in a database' while two launch paths kept 'the store is postgres', and the failure landed on the daemon's boot rather than on a pod. The search that finds this is not 'what did the merge touch' but 'what reasons from the old premise'.",
+    "The text a merge cannot touch is the text that rots. docs/kubernetes.md survived because it was one of the fourteen conflicted files and every sentence was read against both sides; the pull request body, the site page and the file an operator copies were reached by no diff and kept the pre-merge rule.",
+    "Hardening creates new failure modes in its own right. Round 4's refusal was correct and made a new worst case reachable — every transcript lost, run green — which the hardening's author is the least likely reader to see, because it is read as a fix to something already reviewed."
   ]
 }
