@@ -2,17 +2,25 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-266",
-  "completed": "2026-10-25T08:35:00Z",
-  "round": 2,
-  "headSha": "714fecdade18bd9c1556920308f4f0ee4fa5d6be",
-  "codeHeadSha": "98ac7624699e4d7221e9fc7a54aca39418613553",
+  "completed": "2026-10-25T09:25:00Z",
+  "round": 3,
+  "headSha": "d7059b661335619c7b7d5f5e947e80d5650281f2",
+  "codeHeadSha": "69bed70c74a43d6de78d9dbf3da14d39d11591e1",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran at this head on PostgreSQL 17.11 and Playwright's Chromium in this pod: the two browser rows (`cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable bun run e2e -- --project=chromium e2e/settings.e2e.ts e2e/inbox.e2e.ts -g 'default assignee'` -> 2 passed (18.3s)); its curl sequence against a cmd/dispatch binary built at this head (same codes, list unchanged after the refusal, null clears); and the Go rows TestCreateIssueFallsBackToProjectDefaultAssignee, TestProjectDefaultAssigneeYieldsToEveryEarlierChainStep, TestCreateIssueWithoutProjectDefaultAssigneeStaysUnassigned, TestStaleProjectDefaultAssigneeFallsThroughToNobody, TestPutProjectDefaultAssignee* and TestProjectDefaultAssigneeRoutesRefuseAgentSessions, all passing."
+    "how": "Round 3, after the reviewer's two picker findings: re-ran Dispatch's browser rows at this head on PostgreSQL 17.11 and Playwright's Chromium (`cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable bun run e2e -- --project=chromium e2e/settings.e2e.ts e2e/inbox.e2e.ts -g 'default assignee'` -> 4 passed (31.3s)), and the two new rows with the head's packages/dispatch/e2e/ restored onto 98ac7624699e -> 2 failed for the defects they name: settings.e2e.ts:468 toHaveValue('bob') received '' (the pick snapped back while its save was held), settings.e2e.ts:525 toBeDisabled() received enabled (an unread default offered as Unassigned); the original settings row passed there. Round 2's API proof stands unchanged: this round touched only ProjectsSection.tsx, its unit and e2e tests, and prose."
   },
   "failed": 0,
   "failures": [],
   "proof": [
+    {
+      "criterion": "Round 3 (the reviewer's findings): each project's default-assignee picker saves one pick at a time with the last pick both stored and shown, a stale defaults read never overwrites a completed save, and Unassigned appears only for loaded data with no default — never while the defaults are unread or their read failed — with the unread control refusing edits.",
+      "surface": "The SPA built at d7059b661335 served by the real cmd/dispatch binary on PostgreSQL 17.11, driven in Chromium by a Playwright script whose routes hold, slow or refuse the PUT and the defaults read, beside Dispatch's own browser rows.",
+      "command": "bun <throwaway Playwright script> against http://127.0.0.1:8792 (scenarios S1-S8), and `cd packages/dispatch && DATABASE_URL=<a local Postgres> bun run e2e -- --project=chromium e2e/settings.e2e.ts e2e/inbox.e2e.ts -g 'default assignee'`",
+      "observed": "S1 four picks bob, carol, dave, alice while the first save was held: shown bob,carol,dave,alice at once; wire [sent bob] until it answered, then [answered bob, sent alice]; stored and shown alice, alice after reload. S2 five picks 60 ms apart, saves slowed 250 ms, ending Unassigned: PUTs [bob, bob, null], stored none, shown Unassigned. S3 a defaults read started mid-save that fetched CORE alice and answered 2 s after the save landed: shown carol throughout, server carol. S3b a read already out when the save started, answering the old value later: shown bob. S4 a refused save, nothing queued: the row's alert with Retry, control back to stored alice; Retry -> bob stored, alert gone. S5 a refused first save with carol queued: carol sent and kept, no alert. S6 CORE held, OPS picked: OPS PUT sent at once, both end as picked. S8 a failed refetch after a load: CORE still alice and enabled beside 'Couldn't load the default assignees.' with Retry. Browser rows: 4 passed (31.3s).",
+      "headSha": "d7059b661335619c7b7d5f5e947e80d5650281f2",
+      "negativeControl": "S7: with the defaults read held, 'Default assignee of CORE' is disabled with the single option 'Loading…'; a forced click, ArrowDown and Enter left it at 'Loading…' with 0 PUTs, and selectOption('bob@example.com') timed out on the disabled control; enabled at alice once the read answered. And the two new browser rows red at 98ac7624699e (head e2e restored): ':468' received '' for 'bob', ':525' received enabled."
+    },
     {
       "criterion": "A project's default is set and changed by a person through its route, and cleared only by an explicit null: a body that names no assignee is refused and stores nothing (round-1 finding; the architect's ruling: absent refused, explicit null clears).",
       "surface": "The real cmd/dispatch binary built at 714fecdade18 (code 98ac7624699e) on PostgreSQL 17.11, signed in as alice through the dev sign-in route, cookie writes carrying the dashboard Origin, driven with curl; events read from the events table.",
@@ -39,7 +47,7 @@
     }
   ],
   "errorCodeJudgement": "The architect asked whether 400 INVALID_PROJECT misleads for a body without assignee. It does not: the repository's INVALID_<resource> codes name a bad body on a write to that resource (projects.go already answers INVALID_PROJECT for a project create with no name, and INVALID_ISSUE is the issue routes' body code), and the message names the missing field. Not a finding.",
-  "ci": "Read at 98ac7624699e: PR Title 40176078013 success; Docs 40176015368 success; Tests 40176015407 queued (lint, typecheck, test); Worker Image 40176015416 in progress; Legion Envoy and Contracts 40176015344 queued. None of them waited on or rerun by the tester. At 2d30e173f5ae, Legion Envoy and Contracts 40167646297 failed in envoy-go-race alone (internal/bus durable-consumer test, outside this diff, not required by main); the architect owns it if it recurs.",
+  "ci": "Read at code head 69bed70c74a4: PR Title 40179193006 success; Tests 40179165743 queued (lint, typecheck, test); Docs 40179165753 in progress; Worker Image 40179165746 in progress; Legion Envoy and Contracts 40179165849 queued. None waited on or rerun by the tester. At 2d30e173f5ae, Legion Envoy and Contracts 40167646297 failed in envoy-go-race alone (internal/bus durable-consumer test, outside this diff, not required by main); the architect owns it if it recurs.",
   "rounds": [
     {
       "round": 1,
@@ -48,6 +56,12 @@
       "failures": [
         "PUT /api/v1/projects/{key}/default-assignee with {} answered 200 and cleared the stored default; pinned by TestPutProjectDefaultAssigneeRefusesABodyWithoutAssignee (0940abaf8b16)."
       ]
+    },
+    {
+      "round": 2,
+      "headSha": "87ae4f4864d2eaf4823e3eb14266e4989561e0e7",
+      "verdict": "pass",
+      "failures": []
     }
   ]
 }
