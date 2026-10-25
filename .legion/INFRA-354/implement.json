@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-354",
-  "completed": "2026-10-25T08:24:58Z",
+  "completed": "2026-10-25T09:19:05Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2185",
-  "codeHead": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
+  "codeHead": "9cdb4130c10a4555d0a6d9bd18cda6dd45a81d6e",
   "proof": [
     {
       "criterion": "Line 1 and line 4: two accounts may name the same service, and the broker starts on that configuration (the start-up path, not the parser alone).",
@@ -37,6 +37,14 @@
       "observed": "ok github.com/sjawhar/envoy/cmd/broker 61.199s; ok .../internal/broker/policy. TestOneServicesTwoAccountsEachGetItsSecret and TestAnAccountProvesOnlyTheServiceItIsListedFor both pass through podBroker.",
       "headSha": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
       "negativeControl": "In a copy outside the checkout, requester rewritten to trust any listed account (`if _, listed := services[deref(e.Subject)]; listed && e.Kind == \"pod\" && e.Service != nil`): TestAnAccountProvesOnlyTheServiceItIsListedFor FAILS with three 'granted' replies (OTHER_KEY to pods running as A and B under other-service's launcher, SERVICE_KEY to the pod running as other-service's account under example-service's launcher)."
+    },
+    {
+      "criterion": "Forward merge: the slice's behaviour and tests survive the merge of main, including the cross-service boundary.",
+      "surface": "The real compiled broker at the merged head: under the repository's real-process harness and started by hand, against a fresh Postgres Job and ClusterIP Service in the cluster, deleted after the run.",
+      "command": "cd packages/envoy && go test ./internal/broker/config ./internal/broker/requests ./internal/broker/api ./internal/broker/policy ./cmd/broker -count=1; go test ./cmd/broker -run 'TestOneServicesTwoAccountsEachGetItsSecret|TestAnAccountProvesOnlyTheServiceItIsListedFor' -v -count=1; handrun of the merged binary and of main 158654c89e8b's binary with BROKER_SERVICES naming two accounts for example-service.",
+      "observed": "All five packages ok; both real-binary tests PASS (pods A and B granted, pod C and the three cross-service pods denied with approver null); merged binary: broker listening, /healthz 200, SERVICE_KEY served; merged binary with one account twice: exit 1 'names the service account ... twice for \"example-service\"'.",
+      "headSha": "9cdb4130c10a4555d0a6d9bd18cda6dd45a81d6e",
+      "negativeControl": "main 158654c89e8b's binary on the two-account configuration exits 1: 'BROKER_SERVICES must give each service once'. The any-listed-account mutant of requester (copy outside the checkout) fails TestAnAccountProvesOnlyTheServiceItIsListedFor with three 'granted' replies."
     }
   ],
   "localChecks": [
@@ -83,5 +91,14 @@
       "docs/kubernetes.md first run-record bullet: dated to the change that first published the section, before the Service grants; the Service answers are yes since, as the last bullet records (commit 0bd14620).",
       "Thread PRRT_kwDORFy7ds6v_kJy: new packages/envoy/cmd/broker/pod_broker_test.go podBroker fixture (logIn, enroll, ask, values; no options) used by service_accounts_test.go and service_account_scope_test.go; replied and resolved (commit 3ec1bea3bc5d)."
     ]
+  },
+  "forwardMerge": {
+    "reason": "GitHub reported the pull request CONFLICTING (6 commits behind main) after approval at 3c5b8aaef2e4.",
+    "merge": "jj new legion/INFRA-354 main@origin (158654c89e8b); no rebase.",
+    "conflict": "docs/kubernetes.md only: main's #2182 (INFRA-234) carries the same cluster-workload Service selector fix and a dated run record. Conflicting hunks take main's text; this branch's two BROKER_SERVICES passages of that file are kept.",
+    "fingerprintBefore": "2f2e99836d00b05a44700695c0db16c372b65120a9b2f4a4124706392c80ec5b",
+    "fingerprintAfter": "b874ad58be0de04063e1fae70f36d8f3a1102e83a243caa1c1d248f1d7b73451",
+    "verdict": "changed: 59 lines of the docs/kubernetes.md cluster-workload section left the diff because main now carries them; nothing added; every other file byte-identical (fingerprint over ~(.legion | docs/solutions | docs/kubernetes.md) c74431614bd5... before and after).",
+    "comment": "https://github.com/sjawhar/legion/pull/2185#issuecomment-6395856078"
   }
 }
