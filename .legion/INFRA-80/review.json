@@ -2,56 +2,63 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T17:20:00Z",
+  "completed": "2026-10-25T17:50:00Z",
   "decision": "changes_requested",
-  "round": 8,
+  "round": 9,
   "critical": 0,
-  "important": 0,
-  "minor": 2,
+  "important": 1,
+  "minor": 1,
   "keyFindings": [
     {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:3715-3717",
-      "description": "Two texts this change makes false, in two files it rewrote. `docs/kubernetes.md:3715-3717` tells an operator that a pod relaunched onto another node waits for its `ReadWriteOnce` volume to detach from the old one, showing as transient `FailedAttachVolume` or `Multi-Attach` events until the old pod is gone. For an issue pod that is now wrong in both halves: the replacement does not take the predecessor's claim, so there is no detach and no Multi-Attach — what it may wait on is the predecessor's claim being reaped, a different mechanism with different events, which this change's own risk line already records. The paragraph covers issue and controller pods together and the statement still holds for the controller, so it needs the distinction rather than deletion. `scripts/e2e/stage4b-sandbox-tree.sh:3566-3567` says the three issue PVCs are 'each selected by the issue label its Sandbox's claim template put on it'; this change removes labels from that claim entirely — the API server prunes them — and the script's own `pod_disk` reads by name and says so, so the comment contradicts the code below it. Both are the stale-prose class this review has filed seven times, and both are in paths this change owns.",
-      "note": "My thermonuclear quality pass found these and excluded them on a scope rule I gave it — 'do not flag unchanged code'. That instruction was too narrow and the exclusion is mine, not its: what I have meant all along, and filed on seven times, is text a change makes false in a file it owns, not text whose own lines the diff touched. It asked me the question explicitly over IRC and then resolved it against my written boundary, which is the right thing for it to have done with the rule as written."
+      "severity": "important",
+      "file": "skills/legion-architect/SKILL.md:418",
+      "description": "A sentence this change *wrote* is false about the daemon's own behaviour, in a skill an architect reads to know what `child-closed` means. The diff replaces 'session kept and Sandbox `Suspended` with its volume' with 'session kept and the issue's Sandbox deleted with its pod, since it still owes the production check handed to it at the merge'. At a merged close the daemon queues no `IssueSuspend` at all: `internal/workflow/linger.go:82-84` sets `except = claim.RoleImplementer` when `merged`, and `:95-100` enqueues `record.IssueSuspend` only `if !merged`. So nothing deletes the Sandbox at the close — the implementer keeps its pod for the first production-check look, and the deletion follows the look's `pending` report or the check's close, which is what the rest of the same sentence then describes. The old text was wrong in its second half; the new text is wrong in its first, and more confidently. `packages/claude-envoy/legion/skills/legion-architect/SKILL.md:418` carries the same sentence, and `scripts/e2e/stage4b-sandbox-tree.sh:6028` has the matching clause 'the issue's Sandbox with its volume' at the point where the suspension does happen — there only 'with its volume' is wrong, since that Sandbox owns none. Found by the thermonuclear quality pass; verified here against `linger.go` before filing."
     },
     {
       "severity": "minor",
-      "file": "scripts/e2e/stage4b-sandbox-tree.sh:1017-1021",
-      "description": "Raised by the tester and routed to me for the judgement: `session_copy`'s stem rule accepts a leading `-`, so `-rf` is a plain name by the character test. It is bounded three ways today — every use is quoted, `mkdir -p --` and `realpath -m --` end their options, and the three stems in use are two literals and a pod name, which DNS-1123 forbids from beginning with `-`. My answer to the architect's question is that it is not worth a round of its own, and that since this round is open for the finding above it should ride in it: one character in the character class. The reason to take it is not today's reachability but that an option-looking name reaching a later consumer is the classic shape of this class, and the whole of this round's fix is about not relying on what a caller happens to pass."
+      "file": "docs/kubernetes.md:5137",
+      "description": "The stale-prose class, swept once more under the corrected scope rule — text this change makes false in a file it owns, whether or not the diff touched the line. Verified at this head: `docs/kubernetes.md:5137-5138` says the controller's pod has 'both its containers, the init container and the launcher', where round 4 deleted that init container (`podkind.go:328-334` returns nil); `:5165` tells an operator to read the controller's 'transcript on the volume', where every session is a database row; `internal/supervise/table.go:1113-1118` describes the close as releasing the Sandbox and the volume it owns once every claim has retired, through `store.IssueSuspension`'s release, with the session living on that volume — the retire-wait, the release mode and the file session are all removed by this change, and this is the doc comment on the workflow table's own entry; `internal/podsafety/podsafety.go:62-64` still offers 'files on the issue's volume' as a place Legion puts a session; `internal/runtime/sandbox/names.go:21-27` still describes a volume carried over from an earlier release. The pair also names test comments carrying the file-session rationale (`sandbox/controller_test.go`, `daemon/controller_sweep_test.go`, `supervise/issue_close_test.go`), which I did not verify individually."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/config/kubernetes.go:1148",
+      "description": "Part of the same group, separated because it was a deliberate keep: the unknown-name error still reads `must be 'pvc', 'postgres' or 'cloudsql-iam'`, so an operator who mistypes is told `pvc` is a value this release takes, two lines below the refusal that makes it one it does not. The round-5 census recorded keeping main's text here on purpose, so this is a judgement rather than an oversight and the implementer may argue it: the sibling refusal does explain itself, and the message is main's. My reading is that a list of accepted values should not name a refused one, and `kubernetes_test.go:781-784` pins it either way."
     }
   ],
-  "roundSevenVerification": {
-    "note": "The round-7 finding is fixed, and by interface rather than by guard, which is the stronger answer.",
+  "notAFinding": {
+    "issuePvcs": "The quality pass asked for `scripts/e2e/lib/namespace-rig.sh:68-76`'s `issue_pvcs` to be deleted as an orphan this change left, saying the change replaced its callers. That is wrong and I checked rather than forwarded it: `grep -rn issue_pvcs scripts/` finds only its comment and its definition at this head, and `main@origin`'s copy of the file has the same two hits, so it was already callerless before this branch. It is pre-existing dead code with a premise this change happens to contradict — the same adjudication as `production_audit`, and for the same reason: the scope rule is text a change makes false in a file it owns, not every true statement about a file."
+  },
+  "roundEightVerification": {
+    "note": "Both round-8 findings are fixed; I verified each at the head.",
     "verified": [
-      "session_copy takes PREFIX AREA STEM and no path (:1005-1006). The area keyword resolves to a root inside the function from a three-entry table (:1009-1016), so no caller supplies a destination.",
-      "The stem is refused unless it is a plain [A-Za-z0-9._-] name other than . and .. (:1017-1021), and root and destination are both realpath'd with the destination required to be a direct child of the root (:1022-1026) — before the listing, before any derivation and before mkdir (:1027-1029).",
-      "All three callers pass literals or a daemon-owned name: `review-pair subagents` (:1171), `transcripts pods` (:2609), `daemon-controller \"$pod\"` (:5716).",
-      "record_pair still computes a stem from the reviewer's recorded session path, but writes it as the contents of review-pair/session-stem rather than as any part of a path (:1175).",
-      "The agent-settable values now reach only the SQL key prefix, which selects which rows are read and never where they are written."
+      "The stem rule refuses `-*` beside the empty, `.`, `..` and non-plain cases (stage4b-sandbox-tree.sh:1021-1024), with the reason stated in the four lines above it — that every use here quotes and ends its options, and that an option-shaped name is this class's classic shape, so the point of anchoring the destination is not to depend on what a later consumer does. A pod name contains dashes but cannot begin with one, so no legitimate stem is refused.",
+      "docs/kubernetes.md:3715-3722 separates the controller's pod, whose Sandbox owns its claim and which does wait on a ReadWriteOnce detach, from an issue pod, which takes no predecessor claim and may instead wait on the predecessor's claim being reaped — the distinction I asked for rather than the deletion.",
+      "stage4b-sandbox-tree.sh:3570-3573 says the three PVCs are read by name and owned by their pods, agreeing with the `pod_disk` helper it cites."
     ]
   },
+  "testerCountJudgement": {
+    "askedBy": "the architect",
+    "position": "The tester's downgrade is right and I would not have it quoted as eight. Of the eight failures its suite shows against the previous head's script, only the leading-dash case is a behaviour difference; the other seven fail on the refusal message's wording. A count of negative controls where most differ only in text is the count-answering-a-different-question fault this tree has met all day, and catching it in one's own evidence before anyone quotes it is the right instinct. One control is sufficient here for a reason worth stating: the change is one character added to a character class whose other members are already proven refused by the same code path, so the behaviour under test is the dash alone and a single control exercises exactly it. What should not be said is 'eight controls'; what should be said is 'one behavioural control, and seven cases whose messages moved with it'."
+  },
   "ciAtCodeHead": {
-    "head": "00516adc6b344091c232c30e1d1e822e0d7cb685",
+    "head": "afba47fdc3c9fb9c67349f1ee3b3ef0cef4eea08",
     "requiredByBase": ["lint", "typecheck", "test", "pr-title"],
-    "read": "2026-10-25T17:15:00Z",
-    "verdict": "typecheck and pr-title completed success; lint and test still in_progress at my second read, taken after the thermonuclear pair rather than at the round's start. So the required four are not green at the head I reviewed, read rather than inferred, and a request for changes does not wait on them.",
-    "method": "The architect's method note is right and I have adopted it: a lane's conclusion is durable, so a later read settles what a longer wait would. I read the whole set twice at this head rather than once, and still caught both lanes running; the next round's read should be taken after they settle rather than at its start, which is what turns the acceptance's CI sentence into a measurement.",
-    "otherLanes": "broker-multiprocess, build, changes, claude-envoy, contracts, envoy-client, envoy-e2e-local, envoy-plugin, pi-envoy, pi-legion all completed success at this head; dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke and pi-shared were queued or running. Nothing inherited from an earlier commit.",
-    "compare": "gh api compare/00516adc6b34...072685a90f74 in its printing form: `ahead`, 2 files, .legion/INFRA-80/implement.json and .legion/INFRA-80/test.json."
+    "read": "2026-10-25T17:45:00Z",
+    "verdict": "lint, typecheck and pr-title completed success; test still in_progress at the read I took after the thermonuclear pair. Three of the required four green at this head, measured here and inherited from no earlier commit. A request for changes does not wait on the fourth.",
+    "note": "At the previous code head 00516adc all four settled success and envoy-go was success there too, which settles its earlier red as intermittent — but that is a statement about 00516adc and says nothing about this head, which is the whole of the correction adopted last round.",
+    "compare": "gh api compare/afba47fdc3c9...725d6fbd8cbe in its printing form: `ahead`, 2 files, .legion/INFRA-80/implement.json and .legion/INFRA-80/test.json."
   },
   "thermonuclear": {
-    "head": "072685a90f741fc7a7cff06a1c003e589d61276f",
-    "deepReview": "APPROVE — nothing stands. It enumerated the agent-controlled values rather than asserting coverage: session-table keys with every byte shape, the recorded sessionFile through re-registration and its basename, registration session and agent ids, transcript task ids, tool-call and tool-result data, and pod-observable output — and traced each to where it lands. It settled the containment edge cases (symlinked evidence root, pre-existing stem symlink, non-existent root) and found nothing standing in migration 0051, the displacement generation fence, the store kinds, the ephemeral volume rendering, the provider-mount guards or legionClaim.",
-    "codeQuality": "APPROVE — nothing stands within the boundary I set it; the area table is the single place a root is decided, the evidence readers match the exporter, and no dead state, orphaned golden or crossed size threshold. Its excluded prose lines are the finding above, and the exclusion was my instruction's.",
-    "checked": "I verified the exporter's new interface, its stem rule and its containment at the head, and both prose lines, before filing."
+    "head": "725d6fbd8cbe6da2714d527c563fb41eac4a0d5a",
+    "deepReview": "APPROVE — nothing stands. It traced a suspected traversal in the full-agent task id to a non-finding itself, on two independent grounds, and said so rather than filing it; its closing invariant pass found no defect in migration 0051, the displacement fence, either store kind, the ephemeral volume rendering, the provider mounts or legionClaim.",
+    "codeQuality": "CHANGES — the textual-cutover group above, found under the corrected scope rule, which is the rule that caught them: the narrow version I used in round 8 would have excluded every one.",
+    "checked": "I verified the SKILL.md sentence against linger.go, the five prose sites, and the issue_pvcs provenance against main before filing; I rejected one of the pair's three findings on that last check."
   },
   "threads": {
-    "openedRoundSeven": 1,
-    "answeredByImplementer": 1,
-    "resolved": 1,
+    "openedRoundEight": 0,
+    "unresolvedAtThisHead": 0,
     "botThreads": 0,
-    "note": "I replied on it at this head. Round 7's other item, the staged layout comment, was requested in the review body and is in place."
+    "note": "Round 8's two findings were in the review body rather than on threads, because their lines fall outside any diff hunk; both are fixed. This round's findings are in the body for the same reason."
   },
   "e2eLines": { "implementer": "present", "tester": "present" }
 }
