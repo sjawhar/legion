@@ -498,3 +498,29 @@ authorization {
 	}
 	t.Fatalf("no ERROR names ENVOY_SUBSCRIBE_ALL_TOPICS and the subject notifications.>:\n%s", output)
 }
+
+// Every machine's listener has a durable of its own, so each takes every inbox message off the
+// stream, and a listener that does not own the session still tries to reach it (the registry path
+// of session.HandleAgentMessage). Before INFRA-122 that listener dialled the owning listener's
+// machine id, which is no address of a session whose recorded host differs from it (a pod beside
+// a listener in a cluster, here the owner "inbox-owner" and a session on 127.0.0.1), so only the
+// owner delivered. Reaching a session at its recorded host must not let a second listener on the
+// bus that can reach that host deliver the same inbox message again: the session receives it once.
+func TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBus(t *testing.T) {
+	uri := testnats.URL(t)
+	binary := cmdtest.Build(t, "envoy-listener")
+	owner := startListenerProcess(t, binary, uri, "inbox-owner", "ENVOY_HOST_BRIDGE=127.0.0.1")
+	owner.waitHealthy(t)
+	other := startListenerProcess(t, binary, uri, "inbox-other")
+	other.waitHealthy(t)
+
+	serving := startServingPort(t, "ses_inbox_"+id.New(), http.StatusNoContent)
+	registerServingSession(t, owner, serving, "127.0.0.1", "notifications.team."+id.New())
+
+	inbox := newEnvelope("agent", contracts.AgentSubject(serving.sessionID), "a message for this session alone")
+	inbox.SourceSession = "ses_sender_" + id.New()
+	publish(t, connectPublisher(t, uri), inbox)
+
+	requirePromptCarries(t, serving.awaitPrompt(t, 10*time.Second), inbox)
+	serving.noPrompt(t, 3*time.Second)
+}
