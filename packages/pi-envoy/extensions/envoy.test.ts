@@ -6826,8 +6826,8 @@ describe("envoy OMP extension", () => {
   });
 
   // A hand-back the listener fails is abandoned whatever session its hold is under, and the
-  // session this process still registers takes its holds back at its next accepted registration
-  // (`registerSession`), so a later pass hands that hold back. Lost on the way, the listener
+  // session this process still registers takes its holds back at its next registration, answered
+  // or not (`registerSession`), so a later pass hands that hold back. Lost on the way, the listener
   // names this session for a role it gave up for as long as this process registers it — the
   // listener never reaps a live session's hold — so that role's tasks keep reaching a pane that
   // no longer does that work.
