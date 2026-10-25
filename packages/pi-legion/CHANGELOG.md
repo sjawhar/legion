@@ -551,6 +551,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Fixed
 
+- The `legion-architect` skill was 51,256 bytes, over Oh My Pi's 51,200-byte spill threshold, so it
+  reached an architect with its middle cut out; its Wake routing table moves unchanged to
+  `skill://legion-architect/references/wake-routing.md` (INFRA-376).
+
 - The Kubernetes daemon's image probe refuses a worker image the registry does not have once the
   kubelet has met that answer on two pulls, within about half a minute, naming the image and
   quoting the kubelet (`… failed its probe: the registry does not have image <image>: …`). It
