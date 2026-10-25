@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-221",
-  "completed": "2026-10-25T07:04:24Z",
+  "completed": "2026-10-25T07:19:52Z",
   "proof": [
     {
       "criterion": "A role that needs a tool its work requires can get it, in one documented step, without a person — the image half: the five clients are in the pod.",
@@ -51,6 +51,14 @@
       "observed": "Heading once and a condition named once in each of the five notes (1/1 x5); 'about scope' and 'a harness that passes the test' appear nowhere in docs/solutions. roleEnvironment's TMPDIR, GOCACHE and GOMODCACHE lines all come from 59214edf47fc (#2085, merged 2026-10-21T06:29:42Z); the INFRA-44 learning merged in #2088 at 2026-10-21T03:32:31Z; in this container TMPDIR=/legion/scratch/tmp on the 49G /legion volume while /tmp is on the container's /. The final read found one more claim not true against the section: the INFRA-43 note said a role reaches the root 'only by sourcing the env file' while the learning has every role source it, which leaves the export in the working shell; it now says to source it in the same invocation as the harness command. The LEGION-695, INFRA-42 and other claims read true. Only docs/solutions and .legion/ changed since 21c0047b; the worker image copies neither, so the image proof re-passes.",
       "headSha": "b4ebc2dd74e2ad31e87c5786057e4e126157c5b7",
       "negativeControl": "At the previous code head b82e5899a5e4 the LEGION-748 note counts 0 for the heading and contains 'That line is about scope' and 'a harness that passes the test'; its INFRA-44 note called the staging 'still the step' under the bullet that says 'No role container sets TMPDIR', which `echo $TMPDIR` in this container contradicts."
+    },
+    {
+      "criterion": "The test's first condition admits the page's own worked case: an install that lands on the issue's volume qualifies whether it goes through a runtime variable or a path on the volume the harness names (review round 9, thread PRRT_kwDORFy7ds6v_N-P).",
+      "surface": "This live role container's environment and mounts, which the condition describes, and the tree at 417d96141003: tools.md :84-94, its worked case :170-188, the INFRA-43 note, and the claude-envoy bundle.",
+      "command": "printf the nine variables; stat -f -c %T /legion; df -h /legion $HOME /tmp; grep -c 'through one of the variables the runtime actually sets' skills/legion-worker/references/tools.md (now and at b4ebc2dd); grep -c '/legion/harness/env.sh' on the INFRA-43 note; (cd packages/claude-envoy && bun run build && bun run check-dist); diff -r skills/legion-worker packages/claude-envoy/legion/skills/legion-worker",
+      "observed": "The nine resolve to /legion/scratch/{cache,data,state/implementer,tmp,bun/install/cache}, /legion/go/{build,mod} and /legion/uv/{cache,python/infra-221}: none is /legion/harness, the INFRA-43 harness root. /legion is one v9fs mount of 49G holding all of them, while $HOME and /tmp are on the container's /. The condition now reads 'lands on the issue's own volume, under /legion … whether through a variable the runtime sets for you there or under a path on that volume your harness names itself', so the worked case the page says 'passes both conditions' (:182) does; the old phrase counts 0 now and 1 at b4ebc2dd. The second condition is unchanged. check-dist printed 'dist/ and legion/ match a fresh build' and diff -r is empty. The INFRA-43 note's subshell example is gone (0) and the note keeps the scope claim, labelled as a statement of scope, not a change to the recipe. Image: this round changes skills/ text, which the image copies, but neither the Dockerfile nor a Go file, so the five-clients Job proof above holds by those inputs being byte-identical; the new image tag was still building at completion and was not driven.",
+      "headSha": "417d96141003ba5bad7dc6fd5f45aa983975c61f",
+      "negativeControl": "At b4ebc2dd the condition required 'through one of the variables the runtime actually sets for you', and /legion/harness is under none of the nine printed above, so by its own words (:93 'It is the withheld capability when either condition fails') the page classed its worked case as the withheld capability."
     }
   ],
   "filesChanged": [
