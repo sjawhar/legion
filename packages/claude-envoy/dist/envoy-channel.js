@@ -43260,8 +43260,9 @@ function dispatchSettings(env, config2) {
 
 // ../envoy-client/src/envoy-settings.ts
 var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 120000;
-var MIN_HEARTBEAT_MS = 25;
+var DEFAULT_HEARTBEAT_MS = 1e5;
+var DEFAULT_PASS_DEADLINE_MS = 30000;
+var MIN_INTERVAL_MS = 25;
 function natsSeedFromEnvironment(env) {
   const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
   if (file2 !== undefined) {
@@ -43349,12 +43350,15 @@ function envoySettings(env, config2, options = {}) {
     }
   }
   const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs = Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_INTERVAL_MS) : DEFAULT_HEARTBEAT_MS;
+  const rawPassDeadlineMs = Number(env.ENVOY_PASS_DEADLINE_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url2),
     token,
     inbound,
-    heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
+    heartbeatMs,
+    passDeadlineMs: Number.isFinite(rawPassDeadlineMs) && rawPassDeadlineMs > 0 ? Math.max(rawPassDeadlineMs, MIN_INTERVAL_MS) : Math.max(heartbeatMs, DEFAULT_PASS_DEADLINE_MS)
   };
 }
 function normalizeEnvoyUrl(value) {

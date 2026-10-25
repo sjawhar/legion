@@ -2802,7 +2802,7 @@ export default function envoyExtension(pi: PiApi): void {
       legionManaged(id) ||
       // The host's live id, never the module's `sessionID`: a fresh TUI mints its id after
       // `session_start`, so the two disagree until the registration heartbeat heals the drift
-      // (up to `ENVOY_HEARTBEAT_MS`, 120 s by default) and a brand-new terminal went unchecked
+      // (up to `ENVOY_HEARTBEAT_MS`, 100 s by default) and a brand-new terminal went unchecked
       // for that whole window. The period already carries the id that armed it, and a session
       // change resets the period to 0 and bumps the generation, so this is the discriminator —
       // `before_agent_start` and `tool_result` read the live id for the same reason. A `task`

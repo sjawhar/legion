@@ -4,6 +4,17 @@
 
 ### Fixed
 
+- A pass or a role move that never settles no longer stops the registration heartbeat. Both serial
+  queues (`passes`, `roleMoves`) give each task a deadline: past it the caller's call rejects, the
+  queue starts the next task, and the abandoned task is fenced, so its late continuation writes
+  nothing over what ran after it. The heartbeat tick also re-posts the registration itself, outside
+  the queues, while a pass is still running and nothing has been accepted for two refresh
+  intervals, so a pane whose pass is wedged keeps its `envoy ps` row and stays resolvable for its
+  role instead of being dropped five minutes in. A stall counts as a failed registration: the next
+  healthy tick re-asserts the role and fires the regain hook (`"reregistered"`), which re-runs a
+  Legion claim's readiness. The pane is told once per episode — one notification and one warning
+  line, not one per tick.
+
 - The run-end self-check's prompt counts as PROCEEDING a wait for a message, an answer or an event
   a human already said they will send and that is on its way: such a reply is an event, not an
   open question. Its WAITING case covered any information from a human, so an agent waiting for
@@ -126,6 +137,8 @@
 
 ### Added
 
+- `ENVOY_PASS_DEADLINE_MS` sets how long a queued session pass or role move may run before the
+  queue abandons it; the default is the heartbeat interval, or 30 s, whichever is longer.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
   `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
   repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.

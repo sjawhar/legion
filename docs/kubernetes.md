@@ -4515,7 +4515,7 @@ records `controllerLocator: {runtime, external: true, sessionId, registeredAt}` 
 --json`, `GET /legion/v1/state`), `runtime` being the daemon's own. On every orphan sweep it reads
 `GET /v1/roles/legion-<project>-controller` from the Envoy listener with its bearer. The controller is
 alive while the holder is the recorded session and its `last_seen` is within
-`max(worker_boot_timeout_seconds, 2 × 120 s)`, which is 240 s at the defaults. It is gone when the role
+`max(worker_boot_timeout_seconds, 3 × 100 s)`, which is 300 s at the defaults. It is gone when the role
 is unheld or expired, held by another session, or last seen that long ago. It is unknown, never gone,
 when the listener is unreachable, refuses with anything but a 404, or answers a body the probe cannot
 read.
