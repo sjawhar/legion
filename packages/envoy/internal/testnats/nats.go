@@ -17,6 +17,8 @@ package testnats
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -114,6 +116,12 @@ func URL(t testing.TB) string {
 // accountServer is a NATS server that hands each test a JetStream account no earlier test used.
 type accountServer struct {
 	host accountHost
+	// secret is the password of every account this server declares, drawn once per test binary.
+	// It is not the account's own name, which anything that reached the server's port could
+	// guess: the server listens on every interface (Docker publishes its port, and the local
+	// backend's nats-server binds them all, which internal/bus's remote-NATS tests need, since
+	// they dial this server by a non-loopback address of the machine to prove the remote guard).
+	secret string
 
 	mu sync.Mutex
 	// declared is how many accounts the server's configuration declares, and handedOut how many of
@@ -127,19 +135,32 @@ type accountServer struct {
 // startAccountServer starts a server declaring accounts accounts. Its log carries no -DV protocol
 // trace, since a reload's outcome is read from the log.
 func startAccountServer(accounts int) (*accountServer, error) {
-	host, err := startAccountHost(accounts)
+	secret, err := accountSecret()
 	if err != nil {
 		return nil, err
 	}
-	return &accountServer{host: host, declared: accounts, holders: map[string]string{}}, nil
+	host, err := startAccountHost(accounts, secret)
+	if err != nil {
+		return nil, err
+	}
+	return &accountServer{host: host, secret: secret, declared: accounts, holders: map[string]string{}}, nil
+}
+
+// accountSecret draws the password every account of one test binary's server shares.
+func accountSecret() (string, error) {
+	raw := make([]byte, 16)
+	if _, err := rand.Read(raw); err != nil {
+		return "", fmt.Errorf("draw the test server's account password: %w", err)
+	}
+	return hex.EncodeToString(raw), nil
 }
 
 // startContainerHost starts the shared account server as a NATS test container.
-func startContainerHost(accounts int) (accountHost, error) {
+func startContainerHost(accounts int, secret string) (accountHost, error) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, Image,
 		testcontainers.WithCmd("-js"),
-		tcnats.WithConfigFile(strings.NewReader(accountsConfig(accounts))))
+		tcnats.WithConfigFile(strings.NewReader(accountsConfig(accounts, secret))))
 	if err != nil {
 		return nil, errors.Join(err, testcontainers.TerminateContainer(ctr))
 	}
@@ -159,14 +180,14 @@ func (s *accountServer) url(t testing.TB) string {
 		return uri
 	}
 	if s.handedOut == s.declared {
-		if outcome := s.host.reload(t, accountsConfig(2*s.declared)); outcome != reloaded {
+		if outcome := s.host.reload(t, accountsConfig(2*s.declared, s.secret)); outcome != reloaded {
 			t.Fatalf("NATS refused %d accounts: %s", 2*s.declared, outcome)
 		}
 		s.declared *= 2
 	}
 	s.handedOut++
 	account := s.handedOut
-	uri := fmt.Sprintf("nats://t%d:t%d@%s", account, account, s.host.endpoint())
+	uri := fmt.Sprintf("nats://t%d:%s@%s", account, s.secret, s.host.endpoint())
 	// Wait for the account to answer, after the start or the reload that declared it.
 	Connect(t, uri).Close()
 	name := t.Name()
@@ -181,12 +202,13 @@ func (s *accountServer) url(t testing.TB) string {
 }
 
 // accountsConfig declares accounts T1 to Tn, each with JetStream and one user, tn, whose password
-// is its name.
-func accountsConfig(n int) string {
+// is secret: the one password of this server, drawn per test binary so that a server reachable off
+// loopback still hands an account to nothing that has not been told it.
+func accountsConfig(n int, secret string) string {
 	var config strings.Builder
 	config.WriteString("accounts {\n")
 	for account := 1; account <= n; account++ {
-		fmt.Fprintf(&config, "  T%d: { jetstream: enabled, users: [ { user: t%d, password: t%d } ] }\n", account, account, account)
+		fmt.Fprintf(&config, "  T%d: { jetstream: enabled, users: [ { user: t%d, password: %q } ] }\n", account, account, secret)
 	}
 	config.WriteString("}\n")
 	return config.String()

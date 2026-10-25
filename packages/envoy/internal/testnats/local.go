@@ -47,13 +47,14 @@ type accountHost interface {
 	terminate() error
 }
 
-// startAccountHost starts the shared account server declaring accounts accounts: a local
-// nats-server process when LocalServerEnv names one, and otherwise a container.
-func startAccountHost(accounts int) (accountHost, error) {
+// startAccountHost starts the shared account server declaring accounts accounts, each under the
+// one password secret: a local nats-server process when LocalServerEnv names one, and otherwise a
+// container.
+func startAccountHost(accounts int, secret string) (accountHost, error) {
 	if binary := strings.TrimSpace(os.Getenv(LocalServerEnv)); binary != "" {
-		return startLocalServer(binary, accountsConfig(accounts))
+		return startLocalServer(binary, accountsConfig(accounts, secret))
 	}
-	return startContainerHost(accounts)
+	return startContainerHost(accounts, secret)
 }
 
 // containerHost is the shared account server as a NATS test container.
@@ -96,6 +97,11 @@ func startLocalServer(binary, config string) (accountHost, error) {
 	if err := server.writeConfig(config); err != nil {
 		return nil, server.failed(err)
 	}
+	// The server listens on every interface, as the container backend's published port does, and
+	// as internal/bus's remote-NATS tests need: they dial this server by a non-loopback address
+	// of the machine to prove the guard on a NATS server that is not this machine's. What keeps
+	// that reachable port from handing an account to anything that finds it is the password
+	// accountsConfig writes, drawn once per test binary rather than being the account's own name.
 	server.cmd = exec.Command(binary,
 		"-c", server.configPath(), "-p", "-1", "-l", server.logPath())
 	if err := server.cmd.Start(); err != nil {

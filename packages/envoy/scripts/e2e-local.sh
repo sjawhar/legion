@@ -57,6 +57,11 @@ listener_port="${E2E_PORT:-19020}"
 session_port="${E2E_SESSION_PORT:-19021}"
 nats_container="${E2E_NATS_CONTAINER:-envoy-e2e-nats}"
 readonly nats_port listener_port session_port nats_container
+# The image the Docker backend runs. .github/workflows/envoy-and-contracts.yaml reads this
+# declaration with sed to pull the image before the run, so it has to stay one assignment at
+# column 0: inline it back into the docker run below and that step finds nothing and fails.
+nats_image="mirror.gcr.io/library/nats:2.10-alpine"
+readonly nats_image
 listener_url="http://127.0.0.1:${listener_port}"
 readonly listener_url
 nats_url="nats://127.0.0.1:${nats_port}"
@@ -174,7 +179,7 @@ wait_for_nats() {
 start_nats() {
   if [[ "$nats_backend" == docker ]]; then
     printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_container" "$nats_port"
-    docker run --name "$nats_container" -d -p "${nats_port}:4222" mirror.gcr.io/library/nats:2.10-alpine -js >/dev/null
+    docker run --name "$nats_container" -d -p "${nats_port}:4222" "$nats_image" -js >/dev/null
     nats_started=1
   else
     printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_server_bin" "$nats_port"

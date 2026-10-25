@@ -79,3 +79,19 @@ PATH="$backendless_path_dir" E2E_NATS_SERVER="" "$(command -v bash)" "$driver" \
   exit 1
 }
 printf 'PASS: refuses to run with neither docker nor nats-server, naming both\n'
+
+# The image lives in one place both sides read. .github/workflows/envoy-and-contracts.yaml pulls
+# it ahead of the run by scraping this declaration out of the driver; it used to scrape the
+# docker run line instead, and stopped finding it the moment that line moved into a function and
+# became indented, so the pull step failed and the acceptance step was skipped. This case runs
+# that step's own sed, so inlining the image back into docker run fails here rather than in CI.
+scraped_image="$(sed -n 's/^nats_image="\([^"]*\)".*$/\1/p' "$driver")"
+[[ -n "$scraped_image" ]] || {
+  printf 'ERR: no nats_image declaration at column 0 of %s\n' "$driver" >&2
+  exit 1
+}
+grep -q 'docker run .*"\$nats_image"' "$driver" || {
+  printf 'ERR: the docker run line of %s does not start $nats_image (%s)\n' "$driver" "$scraped_image" >&2
+  exit 1
+}
+printf 'PASS: the NATS image is declared once, where the workflow scrapes it: %s\n' "$scraped_image"

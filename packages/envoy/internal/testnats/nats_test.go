@@ -244,7 +244,7 @@ func TestAServerOutOfAccountsDoublesThemWithoutDisturbingOneInUse(t *testing.T) 
 	if server.declared != 4 {
 		t.Fatalf("the server declares %d accounts after handing out its third, want 4", server.declared)
 	}
-	if want := fmt.Sprintf("nats://t3:t3@%s", server.host.endpoint()); third != want {
+	if want := fmt.Sprintf("nats://t3:%s@%s", server.secret, server.host.endpoint()); third != want {
 		t.Fatalf("the third test's URL is %q, want %q", third, want)
 	}
 	if _, err := kv.Put("after-the-reload", []byte("1")); err != nil {

@@ -1193,8 +1193,8 @@ jobs:
       # outside it.
       - name: Pull the NATS image the script starts
         run: |
-          nats_image=$(sed -n 's/^docker run .* \([^ ]*nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)
-          [ -n "$nats_image" ] || { echo "::error::no nats image on the docker run line of scripts/e2e-local.sh"; exit 1; }
+          nats_image=$(sed -n 's/^nats_image="\([^"]*\)".*$/\1/p' scripts/e2e-local.sh)
+          [ -n "$nats_image" ] || { echo "::error::no nats_image declaration at column 0 of scripts/e2e-local.sh"; exit 1; }
           for attempt in 1 2 3; do
             docker pull "$nats_image" && break
             [ "$attempt" -lt 3 ] || exit 1
