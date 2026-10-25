@@ -2,30 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-354",
-  "completed": "2026-10-25T09:08:50Z",
-  "round": 2,
-  "reviewedHead": "bd184dc8b0c9603d9cdd5e6e672c8b6d7ef2bd05",
-  "codeHead": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
+  "completed": "2026-10-25T10:14:49Z",
+  "round": 3,
+  "reviewedHead": "d7804a2752ff0782ffb83f574effc6cfd15f7e8f",
+  "codeHead": "9cdb4130c10a4555d0a6d9bd18cda6dd45a81d6e",
   "decision": "approved",
   "critical": 0,
   "important": 0,
   "minor": 0,
   "keyFindings": [],
   "verified": [
-    "Round-1 findings closed: policy.go:313-318 Requester.Service now states the account-keyed rule and matches machine_state.go:214; docs/kubernetes.md:2784-2789 dates the older run-record bullet so it no longer contradicts :2807-2819; pod_broker_test.go's podBroker fixture (no options) replaces both tests' copied closures, every state/grant_id/record_id/approver/values/boot-log assertion survives, and the dropped empty-address guards are enforced by startBroker -> waitForBoundAddress (main_test.go:320-327).",
-    "Thermonuclear pair at bd184dc8: deep review APPROVE, code quality APPROVE, no findings; both ran go vet ./cmd/broker/ ./internal/broker/policy/ and a compile-only go test ./cmd/broker/, exit 0.",
-    "Both E2E lines name 3ec1bea3; the any-listed-account mutant still fails TestAnAccountProvesOnlyTheServiceItIsListedFor (implementer and tester, independently).",
-    "CI at code head 3ec1bea3 (compare to bd184dc8: .legion/ only): required lint, typecheck, test, pr-title success (Tests 40176473240, PR Title 40176508515); Legion Envoy and Contracts 40176473247 success incl. envoy-go and envoy-go-race, which run the real-binary tests on Postgres; Docs 40176473279 and Worker Image 40176473285 success.",
-    "Thread PRRT_kwDORFy7ds6v_kJy (mine): fixed in 3ec1bea3, resolved by the implementer, accepted in my reply."
+    "Forward merge of main 158654c89e8b (merge commit 9cdb4130, never a rebase); fingerprint changed, so a full round. Outside docs/kubernetes.md, .legion/ and docs/solutions/, the PR diff against its base is byte-identical before (5c182bd16f0a..3c5b8aae) and after (158654c89e8b..d7804a27): sha256 b0b6ebfa… both.",
+    "docs/kubernetes.md: the diff against main now holds only this branch's two BROKER_SERVICES passages (:3909-3919 deployment block, :4381-4390 controller paragraph); the cluster-workload selector fix and the dated run record (plan D10's intent) are main's, from #2182 (INFRA-234), coherent at :2794-2815 and :2877-2914; no conflict markers.",
+    "Thermonuclear pair at d7804a27: deep review APPROVE, code quality APPROVE, no findings; main's incoming commits touch nothing in packages/envoy and add no reader of ServicesByAccount, BROKER_SERVICES or parseServiceAccounts in packages/envoy or packages/daemon.",
+    "CI at code head 9cdb4130 (compare to d7804a27: .legion/ only): required lint, typecheck, test (Tests 40180063495) and pr-title (40180122744) success; Legion Envoy and Contracts 40180063437 success incl. envoy-go and envoy-go-race (real-binary tests on Postgres); Docs 40180063418, Worker Image 40180063454 success.",
+    "Both E2E lines name 9cdb4130 with surface, command, observation and negative control (the any-listed-account mutant still fails the scope test).",
+    "Thread PRRT_kwDORFy7ds6v_kJy resolved and answered in round 2; no other thread.",
+    "Inherited main text docs/kubernetes.md:160 vs :2852-2855 (psql in the image or not) is outside this PR and already tracked by dispatch://INFRA-372; nothing filed."
   ],
   "priorRounds": [
-    {
-      "round": 1,
-      "reviewedHead": "2a0e351d0a050a38091cd7e2fa0311dcf971ef4f",
-      "decision": "changes_requested",
-      "review": "https://github.com/sjawhar/legion/pull/2185#pullrequestreview-5642205959",
-      "important": 2,
-      "minor": 1
-    }
+    {"round": 1, "reviewedHead": "2a0e351d0a050a38091cd7e2fa0311dcf971ef4f", "decision": "changes_requested", "review": "https://github.com/sjawhar/legion/pull/2185#pullrequestreview-5642205959"},
+    {"round": 2, "reviewedHead": "3c5b8aaef2e4b119ad9a68844c87af1084dc1a7d", "decision": "approved", "review": "https://github.com/sjawhar/legion/pull/2185#pullrequestreview-5642400587"}
   ]
 }
