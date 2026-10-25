@@ -412,6 +412,18 @@ func perDocumentStateProblems(service *Service) []string {
 			return true
 		})
 	}
+	// The room budget charges a document while ygo holds its room, as the room state is kept, and
+	// holds a reservation only while a socket is being admitted to it.
+	service.budget.mu.Lock()
+	for room, entry := range service.budget.rooms {
+		if len(entry.charges) > 0 && !live[room] {
+			problems = append(problems, fmt.Sprintf("the room budget charges document %s, which has no live room", room))
+		}
+		if len(entry.reservations) > 0 {
+			problems = append(problems, fmt.Sprintf("the room budget holds %d reservations for document %s, want none once no socket is being admitted", len(entry.reservations), room))
+		}
+	}
+	service.budget.mu.Unlock()
 	service.suppressMu.Lock()
 	suppressed := len(service.suppressed)
 	service.suppressMu.Unlock()

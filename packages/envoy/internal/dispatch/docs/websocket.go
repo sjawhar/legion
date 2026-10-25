@@ -171,10 +171,25 @@ const documentSchemaCloseCode = contracts.DocumentSchemaCloseCode
 
 // refuseOutsideSchema completes the upgrade only to close it with documentSchemaCloseCode before
 // anything of the document is sent: a browser reads a close code, never the status of a refused
-// upgrade. The zero upgrader keeps the same-origin rule ygo's own upgrade applies with no
-// AllowedOrigins configured.
+// upgrade.
 func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, cause error) {
 	slog.Warn("dispatch: refuse a document socket outside Proof schema; a replacement from markdown repairs it", "room", room, "error", cause)
+	closeAtUpgrade(w, r, documentSchemaCloseCode, contracts.DocumentSchemaCloseReason)
+}
+
+// refuseOverRoomBudget refuses a browser the room budget has no room for (reserveRoom), as
+// refuseOutsideSchema refuses one, before any room is made for it and any document loaded: it
+// completes the upgrade only to close it with DocumentBusyCloseCode, the transient close, which the
+// editor shows and retries rather than dropping anything. The log names the bound and what the
+// open rooms are charged against it.
+func refuseOverRoomBudget(w http.ResponseWriter, r *http.Request, room string, cause error) {
+	slog.Warn("dispatch: refuse a document socket; the open documents fill their memory budget", "room", room, "error", cause)
+	closeAtUpgrade(w, r, contracts.DocumentBusyCloseCode, contracts.DocumentBusyCloseReason)
+}
+
+// closeAtUpgrade completes the upgrade only to close the socket with code and reason. The zero
+// upgrader keeps the same-origin rule ygo's own upgrade applies with no AllowedOrigins configured.
+func closeAtUpgrade(w http.ResponseWriter, r *http.Request, code int, reason string) {
 	var upgrader gws.Upgrader
 	connection, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
@@ -182,7 +197,7 @@ func refuseOutsideSchema(w http.ResponseWriter, r *http.Request, room string, ca
 	}
 	defer connection.Close()
 	deadline := time.Now().Add(time.Second)
-	if err := connection.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(documentSchemaCloseCode, contracts.DocumentSchemaCloseReason), deadline); err != nil {
+	if err := connection.WriteControl(gws.CloseMessage, gws.FormatCloseMessage(code, reason), deadline); err != nil {
 		return
 	}
 	// The client's close in reply completes the handshake; whatever it sent before that is
@@ -218,6 +233,20 @@ func (s *Service) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !s.canOpenRoom(room) || !s.canAddConnection() {
+		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
+		return
+	}
+	// The room budget admits the browser before anything below loads the document, holding what
+	// the stored document would cost until the room's load charges the room itself, and every way
+	// out of this handler returns what it still holds (reserveRoom). maxLiveRooms stays the count
+	// backstop above.
+	reservation, err := s.reserveRoom(r.Context(), room)
+	defer s.budget.release(reservation)
+	if errors.Is(err, errRoomBudgetFull) {
+		refuseOverRoomBudget(w, r, room, err)
+		return
+	}
+	if err != nil {
 		http.Error(w, ErrServiceUnavailable.Error(), http.StatusServiceUnavailable)
 		return
 	}
@@ -457,6 +486,10 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	s.unlockState(room, state)
 	replica := s.keepReplica(doc, contentMarkdown)
+	// The room's charge in the room budget replaces the reservations of the sockets admitted to it
+	// (reserveRoom), from the count its load just made (keepReplica). From here every update the
+	// room takes is charged until a later count of its rendering re-bases the charge (roomCharge).
+	charge := s.chargeLoadedRoom(room, replica)
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
 	doc.OnUpdate(func(update []byte, origin any) {
@@ -468,6 +501,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.finishSuppressedPersistence(published.slot, update)
 		}
 		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
+			charge.took(len(update), false)
 			s.recordSuppressedCommit(repair.slot, update)
 			// A repair's update is not classified or credited - its writer appends it in its own
 			// transaction - but it names this instance all the same: one that reaches the room's
@@ -481,6 +515,10 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		if s.beforeObserveUpdate != nil {
 			s.beforeObserveUpdate(room)
 		}
+		// Charged before the observer renders it, so the rendering it publishes holds this update
+		// and the count of that rendering re-bases the charge past it (renderedReplica.publishSize).
+		// The observer's first update copies the room into its replica, the room's second copy.
+		charge.took(len(update), true)
 		contentChanged := replica.observe(room, doc, func(tree *pmdoc.Node) {
 			s.observeAskBlocksForUpdate(room, tree)
 		})

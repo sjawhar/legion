@@ -21,6 +21,17 @@ func (s *Service) InjectSchemaInvalidForTest(ctx context.Context, artifactID str
 	})
 }
 
+// SetRoomBudgetForTest replaces the room budget's limit with bytes, or restores roomBudgetBytes for
+// zero, so a browser test can fill the budget with documents a test can type into. It is mounted
+// only through Dispatch's test-hook route; the real-process drives use the real budget.
+func (s *Service) SetRoomBudgetForTest(bytes int64) int64 {
+	if bytes <= 0 {
+		bytes = roomBudgetBytes
+	}
+	s.budget.setLimit(bytes)
+	return bytes
+}
+
 // AppendRenderOnlySchemaViolationForTest appends to artifactID's stored history a tree the
 // validator reads and the renderer refuses: a checked task whose empty first paragraph precedes a
 // heading has no markdown the browser reads back as a task. Tests here and in package api build

@@ -8,6 +8,7 @@ import (
 	"runtime"
 	"sync"
 	"sync/atomic"
+	"time"
 	"weak"
 
 	"github.com/reearth/ygo/crdt"
@@ -322,93 +323,104 @@ type renderedReplica struct {
 	// markdown is the room's rendered markdown when the update observer last saw it change, or at
 	// the room's load before any update has; nil while the document is outside the schema.
 	markdown *string
-	// bytes and elements are that rendering's size, published beside it for the peer update hook
-	// to load (Service.weighPeerUpdate). The hook runs on the peer's read loop, where taking mu
-	// would put every browser in the room behind its load (AGENTS.md:527-530), so the measurement
-	// travels as two atomics rather than under the lock the rendering itself is kept under.
-	// Both are sizeUnmeasured while the room has no rendering to measure, which is a document
-	// outside the schema; elements is elementsPastCounting for a rendering whose elements
-	// goldmark stopped counting, and zero below the element gate (publishSize). Past the gate an
-	// update's rendering publishes its bytes at once and its elements once the service's
-	// measurer has counted it (elementMeasurer), so elements can be one count behind bytes (size).
+	// bytes and elements are that rendering's size, published beside it: bytes for the peer update
+	// hook to load (Service.weighPeerUpdate), elements for the room budget to charge the room by
+	// (roomCharge). The hook runs on the peer's read loop, where taking mu would put every browser
+	// in the room behind its load (AGENTS.md:527-530), so the measurement travels as two atomics
+	// rather than under the lock the rendering itself is kept under. Both are sizeUnmeasured while
+	// the room has no rendering to measure, which is a document outside the schema; elements is
+	// elementsPastCounting for a rendering whose elements goldmark stopped counting. An update's
+	// rendering publishes its bytes at once and its elements once the service's measurer has
+	// counted it (elementMeasurer), at most once each roomCountInterval, so elements can be that
+	// interval and one count behind bytes (size).
 	bytes, elements atomic.Int64
-	// measurer is the service's, which counts this room's renderings past the element gate.
+	// measurer is the service's, which counts this room's renderings, and charge the room's charge
+	// in the room budget, which each count re-bases (storeCounted); nil for a replica no room's load
+	// charged (chargeLoadedRoom), a test's.
 	measurer *elementMeasurer
+	charge   *roomCharge
 	// sizeMu orders the measurer's count of a rendering against the publications that follow it
 	// (storeCounted). It is held for a few field writes alone, never across a render or a parse,
 	// so neither the update observer nor the measurer waits on the other's work.
 	sizeMu sync.Mutex
 	// published counts the replica's publications, and settled is the last of them that stored
-	// its own element count: the room's load, a rendering under the gate, or one the room could
-	// not read.
+	// its own element count: the room's load, or a rendering the room could not read.
 	published, settled uint64
-	// uncounted is the latest rendering past the gate the measurer has not taken yet, made by
-	// publication uncountedAt; a later one replaces it, and a later publication that settles
-	// withdraws it. queued is whether the measurer's queue lists the replica, so it is listed
-	// once however many renderings replace each other while it waits.
-	uncounted   *string
-	uncountedAt uint64
-	queued      bool
+	// uncounted is the latest rendering the measurer has not taken yet, made by publication
+	// uncountedAt when the room had taken uncountedUpdates bytes of updates; a later one replaces
+	// it, and a later publication that settles withdraws it. queued is whether the measurer lists
+	// the replica, in its queue or waiting out the interval, so it is listed once however many
+	// renderings replace each other meanwhile. countedAt is when the room's last count started:
+	// its load's, or the measurer's latest.
+	uncounted        *string
+	uncountedAt      uint64
+	uncountedUpdates int64
+	queued           bool
+	countedAt        time.Time
 }
 
 // sizeUnmeasured is what bytes and elements hold for a room whose document renders no markdown to
 // measure: a document outside the Proof schema, which the socket path refuses to open in the first
-// place (refuseOutsideSchema, websocket.go:176) and which a live document can still fall into
+// place (refuseOutsideSchema, websocket.go:175) and which a live document can still fall into
 // between two renders. The hook admits an update on such a room; the room's next render settles it.
 const sizeUnmeasured = -1
 
 // elementsPastCounting is what elements holds for a rendering goldmark stopped building: it makes
-// more elements than one document may hold, by how many is unknown (pmdoc.MeasureDocument), so it
-// weighs as past every bound the hook keeps.
+// more elements than one document may hold, by how many is unknown (pmdoc.MeasureDocument), so the
+// room budget charges it at the element bound (roomWeight).
 const elementsPastCounting = math.MaxInt64
 
-// elementGateBytes is the rendering at which the element half of the measurement starts being
-// counted: a quarter of the element bound in bytes, 16 KiB. Below it no markdown shape measured
-// here can reach pmdoc.MaxDocumentElements, since none makes more than four elements a byte: the
-// densest of this repository's own markdown files makes 1,421 a kibibyte, about 1.4 a byte
-// (pmdoc/elements.go:25-28), and the densest shape measured at all, a document of empty list
-// items, 3.04 a byte, which leaves the gate a margin of 1.3 rather than the three the design read
-// off the repository's files alone. TestNoMarkdownShapeMakesMoreThanFourElementsAByte is what
-// keeps that margin true, so the element count below the gate is published as zero without
-// measuring it. The gate is there because the measurement is not free: pmdoc.MeasureDocument
-// parses the rendering again, where the bytes are a len of the rendering the observer has already
-// made, so every changed keystroke on a room at or past the gate makes a count for the service's
-// measurer (elementMeasurer), and the room's load counts its rendering itself (keepReplica).
-const elementGateBytes = pmdoc.MaxDocumentElements / 4
-
-// publishSize publishes markdown's size for the peer update hook, the rendering the update
-// observer is keeping as the replica's own (updateChangesMarkdown). A rendering the room could not
-// read publishes no size, and one under the gate publishes zero elements, both at once. One at or
-// past the gate publishes its bytes at once and hands its elements to the service's measurer
-// (elementMeasurer), replacing the rendering the room already had waiting there, if any.
+// publishSize publishes markdown's size, the rendering the update observer is keeping as the
+// replica's own (updateChangesMarkdown). A rendering the room could not read publishes no size at
+// once. Any other publishes its bytes at once and hands its elements to the service's measurer
+// (elementMeasurer), replacing the rendering the room already had waiting there, if any; the
+// measurer counts it once the room's last count is roomCountInterval old.
 func (r *renderedReplica) publishSize(markdown *string) {
-	if markdown == nil || len(*markdown) < elementGateBytes {
-		r.publishCounted(markdown, 0)
+	if markdown == nil {
+		r.publishCounted(nil, 0)
 		return
 	}
 	r.sizeMu.Lock()
 	r.published++
 	r.bytes.Store(int64(len(*markdown)))
 	r.uncounted, r.uncountedAt = markdown, r.published
+	r.uncountedUpdates = r.charge.updatesTaken()
 	queue := !r.queued
 	r.queued = true
+	wait := time.Until(r.countedAt.Add(r.measurer.minInterval()))
 	r.sizeMu.Unlock()
 	if queue {
-		r.measurer.enqueue(weak.Make(r))
+		r.measurer.enqueueAfter(weak.Make(r), wait)
 	}
 }
 
 // publishLoadedSize publishes the size of markdown, the rendering the room loaded with
 // (keepReplica), counting its elements on the caller's goroutine, so a room never starts with no
-// element count to weigh its first update by. The load is not a keystroke, and a cold load already
-// costs far more than this one parse.
+// element count to charge it by. The load is not a keystroke, and a cold load already costs far
+// more than this one parse.
 func (r *renderedReplica) publishLoadedSize(markdown *string) {
 	elements := int64(0)
-	if markdown != nil && len(*markdown) >= elementGateBytes {
+	if markdown != nil {
 		elements = countElements(*markdown)
 	}
+	r.sizeMu.Lock()
+	r.countedAt = time.Now()
+	r.sizeMu.Unlock()
 	r.publishCounted(markdown, elements)
 }
+
+// roomCountInterval is the least time between two counts of one room's rendering after its load's:
+// a rendering published sooner waits out the rest of it in the measurer (enqueueAfter). A count is
+// a whole goldmark parse, 89 ms of one processor at a mebibyte of the shape a room holds and 58 ms
+// at 524 KiB of the keystroke benchmark's document (BenchmarkElementCountAgainstRender), and a
+// count of each changed rendering took the keystroke benchmark's p50 up by 29 to 36 per cent on
+// this pod's two processors (BenchmarkKeystrokeBesideReads). Five seconds keeps a room typed into
+// at the bound to under 2 per cent of one processor, while the bytes a room takes in five seconds
+// of typing, which its charge counts beside its last count, are a few kilobytes against the tens
+// of megabytes the count prices. So a room's charge is at most this interval and one count stale;
+// it is memory accounting, which refuses nothing in the room itself, and the update bytes charged
+// beside the count (roomCharge) are what cover the gap.
+const roomCountInterval = 5 * time.Second
 
 // publishCounted publishes markdown's size with elements, its count, already known, and withdraws
 // any rendering the room had waiting for the measurer: this one is newer, and a count of the older
@@ -433,22 +445,16 @@ func (r *renderedReplica) publishCounted(markdown *string, elements int64) {
 // holds up nobody for it.
 //
 // The byte half is never stale: the update observer publishes it with the rendering itself, so it
-// is as recent as the room's last update observer, as the whole measurement was before the count
-// moved off it. The element half is as recent as the measurer's last count of the room
-// (elementMeasurer), which can be one count older than that: past the element gate an update's
-// rendering is counted after its observer has returned, so until that count lands the hook weighs
-// the room by the count of the rendering before it. One count costs less than one render at every
-// size measured - a fifth to a third of it: 1.0 ms against 5.4 ms at 16 KiB, 39 ms against 143
-// ms at 524 KiB and 89 ms against 289 ms at 1 MiB of the shape a room holds, and 58 ms against
-// 209 ms at 524 KiB of the keystroke benchmark's document, on this pod's 2 CPUs
-// (BenchmarkElementCountAgainstRender) - so a rendering's count ends before the observer can render
-// the next one, and in a run of keystrokes into one room the count is at most one update behind
-// the bytes. With other rooms waiting too, a room's count also waits for one count of each room
-// queued ahead of it. A rendering past the gate after one the room could not read reads
-// sizeUnmeasured elements, under every bound, until its count lands, as the room's measurement
-// before it did. A caller reading across a publication sees one rendering's bytes beside the
-// elements of the rendering before it too, which is within that same staleness. Neither half makes
-// the bound a ceiling (peer_update.go:29-31).
+// is as recent as the room's last update observer, and it is the half the peer update hook weighs.
+// The element half is the room budget's (roomCharge), and as recent as the measurer's last count
+// of the room (elementMeasurer): after the load's own count, a room's rendering is counted at most
+// once each roomCountInterval and after its observer has returned, and behind the counts of the
+// rooms queued ahead of it, so the element half can be that interval and one count older than the
+// bytes. A rendering after one the room could not read reads sizeUnmeasured elements until its
+// count lands, which the budget does not re-base on (storeCounted). A caller reading across a
+// publication sees one rendering's bytes beside the elements of the rendering before it too, which
+// is within that same staleness. Neither half makes the document bound a ceiling
+// (peer_update.go:40-42).
 func (r *renderedReplica) size() (bytes, elements int64, measured bool) {
 	bytes, elements = r.bytes.Load(), r.elements.Load()
 	return bytes, elements, bytes != sizeUnmeasured
@@ -616,9 +622,10 @@ func (r *renderedReplica) updateChangesMarkdown(room string, onChanged func(tree
 	r.markdown = &markdown
 	// The rendering the hook weighs is published with the rendering itself, and an update that
 	// left the rendering as it was leaves the measurement as it was too, so no unchanged
-	// keystroke makes a count for the element gate's parse (elementGateBytes). A changed one past
-	// the gate hands the parse to the service's measurer rather than running it here, where every
-	// browser in the room waits for this observer to return (elementMeasurer).
+	// keystroke makes a count of its elements. A changed one hands the parse to the service's
+	// measurer rather than running it here, where every browser in the room waits for this
+	// observer to return, and the measurer runs it at most once each roomCountInterval
+	// (elementMeasurer).
 	r.publishSize(r.markdown)
 	if onChanged != nil {
 		onChanged(tree)

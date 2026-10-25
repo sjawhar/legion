@@ -21,6 +21,7 @@ type API interface {
 	IndexDocumentReferences(ctx context.Context, artifactID string, version int, markdown string) (model.ReferenceChanges, error)
 	RebuildDocument(ctx context.Context, artifactID string, markdown *string, actor model.Actor) (RebuildReport, VersionResult, error)
 	InjectSchemaInvalidForTest(ctx context.Context, artifactID string) error
+	SetRoomBudgetForTest(bytes int64) int64
 	Text(ctx context.Context, artifactID string) (string, error)
 	TextWithToken(ctx context.Context, artifactID string) (string, string, error)
 	Blocks(ctx context.Context, artifactID string) ([]model.ArtifactBlock, error)

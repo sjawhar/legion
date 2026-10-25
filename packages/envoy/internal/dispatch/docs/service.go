@@ -173,8 +173,8 @@ type Service struct {
 	// now is the clock the unrecorded-mark sweep ages marks by (sweepUnrecordedMarks).
 	now      func() time.Time
 	settleWG sync.WaitGroup
-	// evictWG counts the forced evictions failRoomLocked spawns. They flush the room through
-	// the store, so shutdown joins them before it closes.
+	// evictWG counts the forced evictions failRoomLocked spawns and the room budget's sweeps
+	// (sweepRooms). They flush rooms through the store, so shutdown joins them before it closes.
 	evictWG sync.WaitGroup
 	// gateMu makes "is the service stopping?" and the Add that follows it one step, against
 	// Shutdown's store. sync.WaitGroup panics if an Add from zero lands while a Wait is
@@ -209,9 +209,12 @@ type Service struct {
 	// keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
 	// measurer counts, one at a time for the whole service, the elements of the renderings rooms
-	// publish past the element gate, off their update observers (elementMeasurer). Its zero value
-	// is ready, and Shutdown stops it.
+	// publish, off their update observers, for the room budget (elementMeasurer). Its zero value is
+	// ready, and Shutdown stops it.
 	measurer elementMeasurer
+	// budget charges every open room the heap it holds and refuses a browser one more room past
+	// roomBudgetBytes (roomBudget). New readies it; Shutdown joins its sweeps (evictWG).
+	budget roomBudget
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to
@@ -548,7 +551,9 @@ func New(deps Deps) *Service {
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 		reads:             newDocumentReads(documentReadBudget),
+		budget:            roomBudget{limit: roomBudgetBytes, weighing: make(chan struct{}, 1)},
 	}
+	service.budget.sweep = service.sweepRooms
 	adapter := &servicePersistenceAdapter{store: persist, service: service}
 	srv := websocket.NewServerWithPersistence(adapter)
 	srv.HocuspocusFraming = true

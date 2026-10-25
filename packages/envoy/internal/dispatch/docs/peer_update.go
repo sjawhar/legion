@@ -22,30 +22,42 @@ import (
 // alone at 1 MiB, with the render about 160 ms (AGENTS.md:531-568, :681-693) - against a keystroke
 // on such a document that already takes between half a second and a second. The rule it keeps
 // instead weighs the room's last published rendering (renderedReplica.publishSize) against the
-// arriving update's own bytes, which is two atomic loads and an addition, and only once that
-// measurement is at or over a bound does it decode the update, work proportional to the update
+// arriving update's own bytes, which is an atomic load and an addition, and only once that
+// measurement is at or over the bound does it decode the update, work proportional to the update
 // rather than to the document.
+//
+// The hook weighs bytes and not elements. Counting a rendering's elements is a whole goldmark
+// parse, 58 to 89 ms at 524 KiB (BenchmarkElementCountAgainstRender), which no keystroke can pay on
+// a one-processor pod: weighed in the hook, it took the keystroke benchmark's p50 up by 23 per cent
+// against a stop condition of ten. No cheap exact count exists either: a render that counts what
+// it writes agreed with the server's count over 1,127 documents, but took 1,404 lines emulating
+// goldmark and still disagreed for a live tree whose rendering reads back as something else, which
+// is what a browser holds. So the element bound is kept where it already is: every server write
+// keeps its own refusal of a document past pmdoc.MaxDocumentElements (growth.go:139-150), so
+// nothing Dispatch stores passes it. What a browser can leave live past it - about 64 KiB of
+// headings - the server then refuses to write or rebuild until someone shortens it.
 //
 // The bound is not a ceiling the document cannot pass: the rendering the hook compares against is
 // as recent as the room's last update observer, so a document passes it by the updates in flight
-// when it crosses, and this is all that is claimed here. A third state belongs beside these two,
-// refusing an update that would grow a document while the room-memory budget is full and nothing
-// can be closed, with the transient DocumentBusyCloseCode; the budget that publishes that signal is
-// not written yet, and nothing here stands in for it.
+// when it crosses, and this is all that is claimed here.
+//
+// The hook has a third state, which is the room budget's rather than the document's: while the
+// open rooms are past their budget and nothing can be closed (roomBudget.full), an update that
+// would grow its document is refused in every room with the transient DocumentBusyCloseCode, so
+// the rooms already open cannot swell past what the budget admitted them at. That refusal is not
+// the document's own bound and is not folded into it: 4413 is permanent and the editor drops the
+// refused edit, where 4503 is transient and the editor keeps it, to send once the pressure passes.
 
 // maxPeerInsertAtTheBound is the most new content one update may carry into a document already at
-// or over a bound: enough for the editor's own derived writes - heading ids, list labels, anchor
+// or over the bound: enough for the editor's own derived writes - heading ids, list labels, anchor
 // marks - and for ordinary typing and deleting to carry on, and not enough for a paste. A document
-// can therefore creep above the bound, and maxPeerByteCreep and maxPeerElementCreep cap how far.
+// can therefore creep above the bound, and maxPeerByteCreep caps how far.
 const maxPeerInsertAtTheBound = 8 << 10
 
-// maxPeerByteCreep and maxPeerElementCreep are how far past each half of the bound a room's
-// measurement may creep before only an update that inserts nothing at all is admitted, so a
-// document that has crossed can still be trimmed or split and nothing can grow it further.
-const (
-	maxPeerByteCreep    = 64 << 10
-	maxPeerElementCreep = 4_096
-)
+// maxPeerByteCreep is how far past the bound a room's measurement may creep before only an update
+// that inserts nothing at all is admitted, so a document that has crossed can still be trimmed or
+// split and nothing can grow it further.
+const maxPeerByteCreep = 64 << 10
 
 // maxMessageBytes is the most one websocket message a browser sends may carry, ygo's
 // Server.MaxMessageBytes, whose own default is 64 MiB (sjawhar/ygo v1.51.3-sami.2,
@@ -72,25 +84,32 @@ const maxMessageBytes = 24 << 20
 // An update it does not apply is neither stored nor relayed to the room's other browsers, and the
 // *websocket.PeerClose it refuses with closes that one browser with that code and reason.
 //
-// While the room's last measured rendering plus the update's own bytes stay under both halves of
-// the bound, the update is admitted on that comparison alone, which is what typing and deleting
-// pay and which turns away a single huge frame before anything decodes it. At or over either half,
+// While the room's last measured rendering plus the update's own bytes stay under
+// pmdoc.MaxDocumentBytes, the update is admitted on that comparison alone, which is what typing and
+// deleting pay and which turns away a single huge frame before anything decodes it. At or over it,
 // the update is decoded and admitted only when what it carries that the room does not already hold
-// is under maxPeerInsertAtTheBound, or, past the creep caps, only when it carries nothing new at
-// all.
+// is under maxPeerInsertAtTheBound, or, past the creep cap, only when it carries nothing new at
+// all; either refusal is the document's own, DocumentTooLargeCloseCode.
+//
+// While the room budget is full (roomBudget.full), the update is decoded in every room, and one
+// that carries anything the room does not already hold is refused with DocumentBusyCloseCode: that
+// is an update that would grow the document, and one that inserts nothing can only shrink it or
+// leave it as it is. An update does not say what it deletes without the document to measure it
+// against, so an edit that replaces text with less of it is refused too, as the creep cap refuses
+// it. The signal is one atomic load, so the peer's read loop takes neither the budget's lock nor a
+// room's state lock for it.
 //
 // A room with no measurement at all is a document that left the Proof schema while it was live,
-// which the socket path refuses to open in the first place (refuseOutsideSchema, websocket.go:176):
-// its updates are admitted, and the room's next render settles what it holds. An error the apply
-// returns - an update whose bytes do not decode, or one that overflows the room's parked-item queue
-// (MaxPendingItems) - is returned as it is, so ygo answers that browser SyncStatus(0) and leaves it
-// connected, exactly as a room without this hook does.
+// which the socket path refuses to open in the first place (refuseOutsideSchema, websocket.go:175):
+// the document's bound admits its updates, and the room's next render settles what it holds. An
+// error the apply returns - an update whose bytes do not decode, or one that overflows the room's
+// parked-item queue (MaxPendingItems) - is returned as it is, so ygo answers that browser
+// SyncStatus(0) and leaves it connected, exactly as a room without this hook does.
 func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() error) error {
-	bytes, elements, measured := s.roomSize(info.Doc)
-	if !measured {
-		return apply()
-	}
-	if bytes+int64(len(info.Update)) < pmdoc.MaxDocumentBytes && elements < pmdoc.MaxDocumentElements {
+	busy := s.budget.full.Load()
+	bytes, measured := s.roomBytes(info.Doc)
+	atTheBound := measured && bytes+int64(len(info.Update)) >= pmdoc.MaxDocumentBytes
+	if !atTheBound && !busy {
 		return apply()
 	}
 	inserted, err := insertedBeyond(info.Update, info.Doc.StateVector())
@@ -99,31 +118,37 @@ func (s *Service) weighPeerUpdate(info websocket.PeerUpdateInfo, apply func() er
 		// what answers it: it fails the same way, and the browser stays connected.
 		return apply()
 	}
-	crept := bytes >= pmdoc.MaxDocumentBytes+maxPeerByteCreep ||
-		elements >= pmdoc.MaxDocumentElements+maxPeerElementCreep
-	if inserted >= maxPeerInsertAtTheBound || (crept && inserted > 0) {
+	crept := bytes >= pmdoc.MaxDocumentBytes+maxPeerByteCreep
+	if atTheBound && (inserted >= maxPeerInsertAtTheBound || (crept && inserted > 0)) {
 		return &websocket.PeerClose{
 			Code:   contracts.DocumentTooLargeCloseCode,
 			Reason: contracts.DocumentTooLargeCloseReason,
 		}
 	}
+	if busy && inserted > 0 {
+		return &websocket.PeerClose{
+			Code:   contracts.DocumentBusyCloseCode,
+			Reason: contracts.DocumentBusyCloseReason,
+		}
+	}
 	return apply()
 }
 
-// roomSize is the last measurement the room holding live published beside its rendering
-// (renderedReplica.publishSize), and whether it has one. It is two atomic loads off the listing the
+// roomBytes is the bytes of the rendering the room holding live last published
+// (renderedReplica.publishSize), and whether it has one. It is an atomic load off the listing the
 // room's reads already go through (holdLive), so the peer's read loop takes neither the replica's
 // lock, which every browser in the room waits behind (AGENTS.md:527-530), nor the room's state lock.
-func (s *Service) roomSize(live *crdt.Doc) (bytes, elements int64, measured bool) {
+func (s *Service) roomBytes(live *crdt.Doc) (int64, bool) {
 	listed, ok := s.replicas.Load(weak.Make(live))
 	if !ok {
-		return 0, 0, false
+		return 0, false
 	}
 	replica := listed.(weak.Pointer[renderedReplica]).Value()
 	if replica == nil {
-		return 0, 0, false
+		return 0, false
 	}
-	return replica.size()
+	bytes := replica.bytes.Load()
+	return bytes, bytes != sizeUnmeasured
 }
 
 // insertedBeyond is how much content update carries that a room at held does not already hold,

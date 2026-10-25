@@ -1369,3 +1369,25 @@ func (s *server) quiesceDocuments(w http.ResponseWriter, r *http.Request) {
 	}
 	WriteJSON(w, http.StatusOK, map[string]bool{"ok": true})
 }
+
+// setRoomBudget sets the open documents' memory budget to the request's bytes, or restores the real
+// one for zero, and answers the budget it set. Test-only: mounted by routes() only when
+// Deps.TestHooksEnabled is set, so a browser test can fill the budget with a few small documents
+// and drive the editor's handling of DOC_BUSY; the real-process drives use the real budget.
+func (s *server) setRoomBudget(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	var input struct {
+		Bytes int64 `json:"bytes"`
+	}
+	if err := decodeJSON(r, &input); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if input.Bytes < 0 {
+		writeError(w, "INVALID_JSON", http.StatusBadRequest, "bytes is the budget in bytes, or 0 to restore the real one")
+		return
+	}
+	WriteJSON(w, http.StatusOK, map[string]int64{"bytes": s.deps.Docs.SetRoomBudgetForTest(input.Bytes)})
+}

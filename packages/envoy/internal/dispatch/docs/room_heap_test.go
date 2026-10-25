@@ -12,48 +12,55 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// What one open document costs the pod is the figure a budget over the rooms rests on, and it was
-// read off a benchmark of a read's second replica rather than measured of a room: about 120 bytes
-// of heap for every byte of markdown for one copy, and two copies for a room under edit
-// (AGENTS.md:556-557). This measures the room itself: the live document alone, which is all a room
-// that is only read holds, and the live document beside the rendered replica the update observer
-// takes on the room's first update and keeps while the room is resident (keepReplica,
-// renderedReplica.observe), which is what a room under edit holds. A room under edit measures
-// about twice a room that is only read, which is the two copies, and the second is the whole of
-// the difference.
+// What one open document costs the pod is the figure the room budget charges a room by
+// (bytesOfHeapAnElement), and it was first read off a benchmark of a read's second replica rather
+// than measured of a room: about 120 bytes of heap for every byte of markdown for one copy, and
+// two copies for a room under edit (AGENTS.md:556-557). This measures the room itself: the live
+// document alone, which is all a room that is only read holds, and the live document beside the
+// rendered replica the update observer takes on the room's first update and keeps while the room
+// is resident (keepReplica, renderedReplica.observe), which is what a room under edit holds. A room
+// under edit measures about twice a room that is only read, which is the two copies, and the
+// second is the whole of the difference.
 //
-// Both are weighed against the room's rendering, the markdown its stored version holds, since the
-// stored size is the only measure of a document a budget has before it loads one. A byte of
+// Both are weighed against the room's rendering, the markdown its stored version holds. A byte of
 // markdown is not what the heap follows, though: what it follows is the elements that markdown
-// makes, about 470 bytes of heap for each one at 524 KiB and at 1 MiB, and 578 at 51 KiB, where
-// what a document holds whatever its size is a larger share of the whole. So the same bytes in a
-// denser shape cost more, and the 120 bytes a byte the figure above states were measured on a
-// shape four times denser than this one: the live benchmarks' own document
+// makes, about 470 bytes of heap for each one for each copy at 524 KiB and at 1 MiB, and 578 at 51
+// KiB, where what a document holds whatever its size is a larger share of the whole. So the same
+// bytes in a denser shape cost more, and the 120 bytes a byte the figure above states were measured
+// on a shape four times denser than this one: the live benchmarks' own document
 // (benchmarkLiveDocument), 0.28 elements a byte, which weighs 130 bytes of heap a byte at 51 KiB
 // - the figure reproduced - and which no room could hold at 524 KiB or at 1 MiB, since a
 // document may hold pmdoc.MaxDocumentElements and that shape passes them at about 490 KiB. The
 // shape here (residentRoomMarkdown) is that one with longer paragraphs, 0.055 elements a byte,
-// which a room holds at every size weighed; the bounds are wide enough for that spread and are
-// not a number to the byte.
+// which a room holds at every size weighed. The per-byte bounds are wide enough for that spread and
+// are not a number to the byte; the per-element bound is the budget's own, and fails once a copy's
+// heap an element leaves leastPerElement to mostPerElement of bytesOfHeapAnElement.
 func TestAResidentRoomsHeapPerByteOfItsMarkdown(t *testing.T) {
+	const leastPerElement, mostPerElement = 0.85, 1.3
 	for _, size := range []int{51 << 10, 524 << 10, 1 << 20} {
 		state, rendering := residentRoomState(t, size)
 		for _, room := range []struct {
 			name                      string
 			edited                    bool
+			copies                    int
 			leastPerByte, mostPerByte float64
 		}{
-			{"read", false, 15, 60},
-			{"edited", true, 30, 120},
+			{"read", false, 1, 15, 60},
+			{"edited", true, 2, 30, 120},
 		} {
 			t.Run(fmt.Sprintf("%dKiB/%s", size>>10, room.name), func(t *testing.T) {
 				held := heldByResidentRoom(t, state, room.edited)
 				perByte := float64(held) / float64(rendering.Bytes)
-				t.Logf("%d B of markdown making %d elements, heap held %d B (%.1f B of heap a byte, %.0f B an element)",
-					rendering.Bytes, rendering.Elements, held, perByte, float64(held)/float64(rendering.Elements))
+				perElement := float64(held) / float64(rendering.Elements*room.copies)
+				t.Logf("%d B of markdown making %d elements, heap held %d B (%.1f B of heap a byte, %.0f B an element for each of %d copies)",
+					rendering.Bytes, rendering.Elements, held, perByte, perElement, room.copies)
 				if perByte < room.leastPerByte || perByte > room.mostPerByte {
 					t.Errorf("the room holds %d B of heap for %d B of markdown, %.1f B a byte, want %.0f to %.0f a byte",
 						held, rendering.Bytes, perByte, room.leastPerByte, room.mostPerByte)
+				}
+				if ratio := perElement / bytesOfHeapAnElement; ratio < leastPerElement || ratio > mostPerElement {
+					t.Errorf("the room holds %.0f B of heap an element for each copy, %.2fx the %d B the room budget charges, want %.2fx to %.2fx",
+						perElement, ratio, bytesOfHeapAnElement, leastPerElement, mostPerElement)
 				}
 			})
 		}

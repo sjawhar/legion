@@ -2030,6 +2030,23 @@ func TestQuiesceDocumentsHookIsGatedByTestHooksEnabled(t *testing.T) {
 	}
 }
 
+// The room-budget hook is a browser test's alone: unmounted without DISPATCH_TEST_HOOKS, and with
+// them it sets the budget it answers, restoring the real one for zero.
+func TestRoomBudgetHookIsGatedByTestHooksEnabled(t *testing.T) {
+	handler := newTestHandler(t)
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/_test/room-budget", map[string]int64{"bytes": 1 << 20}, "alice")
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("room-budget hook without TestHooksEnabled: status=%d, want %d", response.Code, http.StatusNotFound)
+	}
+	hooked, _ := newTestHandlerWithTestHooks(t)
+	for _, row := range []struct{ bytes, want int64 }{{1 << 20, 1 << 20}, {0, 2 << 30}} {
+		response := dispatchRequest(t, hooked, http.MethodPost, "/api/v1/artifacts/_test/room-budget", map[string]int64{"bytes": row.bytes}, "alice")
+		if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), fmt.Sprintf(`"bytes":%d`, row.want)) {
+			t.Fatalf("room-budget hook with %d bytes: status=%d body=%s, want 200 naming %d", row.bytes, response.Code, response.Body.String(), row.want)
+		}
+	}
+}
+
 // TestDisconnectAllStreamsClosesOpenConnections proves the test-only hook drives a
 // client through its reconnect-from-lastId path without seeding thousands of events
 // to trip the replay cap: the same recovery path useEventStream exercises after any

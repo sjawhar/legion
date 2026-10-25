@@ -145,10 +145,17 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 }
 
 // unlockState unlocks state, room's, forgetting it first when it holds nothing
-// (releaseIfUnusedLocked).
+// (releaseIfUnusedLocked). While the room budget is full, a state that holds nothing may be a room
+// the last sweep could not close, and that has just become closable, so it starts a sweep, which
+// closes the room and lowers the signal (sweepRooms); the sweep takes the state again itself, so
+// it starts once the lock is released.
 func (s *Service) unlockState(room string, state *roomState) {
 	s.releaseIfUnusedLocked(room, state)
+	closable := s.budget.full.Load() && !state.released && s.unusedLocked(state)
 	state.mu.Unlock()
+	if closable {
+		s.budget.kick()
+	}
 }
 
 // releaseIfUnused forgets room's state when it holds nothing (releaseIfUnusedLocked).
@@ -158,9 +165,11 @@ func (s *Service) releaseIfUnused(room string) {
 	}
 }
 
-// releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so its state goes too unless
-// something still holds it, whose end releases it instead.
+// releaseUnloadedRoom is ygo's OnUnloadDocument: the room has gone, so its charge in the room
+// budget goes, whether or not its state goes with it, since the memory went with the room; and its
+// state goes too unless something still holds it, whose end releases it instead.
 func (s *Service) releaseUnloadedRoom(_ context.Context, room string) {
+	s.budget.retire(room)
 	s.releaseIfUnused(room)
 }
 

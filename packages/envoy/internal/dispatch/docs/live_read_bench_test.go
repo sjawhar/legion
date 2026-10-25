@@ -199,13 +199,14 @@ func BenchmarkKeystrokeBesideReads(b *testing.B) {
 // BenchmarkPeerUpdateWeighing measures what the peer update hook costs the browser whose keystroke
 // it weighs (Service.weighPeerUpdate), with an update of the size a keystroke sends against a 524
 // KiB room, the size BenchmarkKeystrokeBesideReads types into. It is weighed twice: against a room
-// whose published measurement is under the bound, which is the two atomic loads and the addition
-// every keystroke pays, and against a room whose measurement is at pmdoc.MaxDocumentBytes, where
-// the hook decodes that one update and nets what it inserts against the room's state vector
-// (insertedBeyond). The apply the hook is handed does nothing: what is timed is the weighing this
-// change adds to the peer's read loop, where the room's own apply runs with the hook or without
-// it. The percentiles are reported in milliseconds, as BenchmarkKeystrokeBesideReads reports a
-// keystroke's, so the hook's cost can be read against the keystroke it rides on.
+// whose published measurement is under the bound, which is the room budget's signal and the
+// rendering's bytes, two atomic loads, and the addition every keystroke pays, and against a room
+// whose measurement is at pmdoc.MaxDocumentBytes, where the hook decodes that one update and nets
+// what it inserts against the room's state vector (insertedBeyond). The apply the hook is handed
+// does nothing: what is timed is the weighing this change adds to the peer's read loop, where the
+// room's own apply runs with the hook or without it. The percentiles are reported in
+// milliseconds, as BenchmarkKeystrokeBesideReads reports a keystroke's, so the hook's cost can be
+// read against the keystroke it rides on.
 //
 // The room is residentRoomDocument's rather than benchmarkLiveDocument's, which is the same shape
 // and the same size but makes more elements than a document may hold at 524 KiB, so no room
@@ -222,9 +223,9 @@ func BenchmarkPeerUpdateWeighing(b *testing.B) {
 	service := &Service{}
 	replica := service.keepReplica(live, &rendering)
 	update := benchmarkKeystrokeUpdate(b, live)
-	published, elements, measured := replica.size()
-	if !measured || published+int64(len(update)) >= pmdoc.MaxDocumentBytes || elements >= pmdoc.MaxDocumentElements {
-		b.Fatalf("the room published %d bytes and %d elements, want a measurement under the bound", published, elements)
+	published, _, measured := replica.size()
+	if !measured || published+int64(len(update)) >= pmdoc.MaxDocumentBytes {
+		b.Fatalf("the room published %d bytes, want a measurement under the bound", published)
 	}
 	for _, room := range []struct {
 		name  string

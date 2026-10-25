@@ -16,31 +16,43 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
 
-// waitIdle blocks until the measurer has no worker running, so a test reads what the measurer
-// stored once it has stored it, rather than sleeping past a count it cannot see.
+// noInterval is the least interval a test can give the measurer (elementMeasurer.interval): a
+// rendering published after its room's last count joins the queue at once, so a test of what the
+// measurer counts does not wait out roomCountInterval for it.
+const noInterval = time.Nanosecond
+
+// waitIdle blocks until the measurer has no worker running and no room waiting out the interval, so
+// a test reads what the measurer stored once it has stored it, rather than sleeping past a count it
+// cannot see.
 func (m *elementMeasurer) waitIdle() {
 	for {
 		m.mu.Lock()
-		idle := m.idle
+		idle, delayed := m.idle, m.delayed
 		m.mu.Unlock()
-		if idle == nil {
+		switch {
+		case idle != nil:
+			<-idle
+		case delayed > 0:
+			time.Sleep(time.Millisecond)
+		default:
 			return
 		}
-		<-idle
 	}
 }
 
-// headingsPastTheGate is a rendering past the element gate, a different one for each n, each making
-// a different count.
-func headingsPastTheGate(n int) string {
-	return strings.Repeat("# a\n", elementGateBytes/4+n)
+// headings is a rendering of a few thousand headings, a different one for each n, each making a
+// different count.
+func headings(n int) string {
+	return strings.Repeat("# a\n", 4_096+n)
 }
 
-// countRecorder records the renderings a measurer parses, and holds the first parse until release
-// is closed, once started has been closed, so a test can publish renderings while a count runs.
+// countRecorder records the renderings a measurer parses and when, and holds the first parse until
+// release is closed, once started has been closed, so a test can publish renderings while a count
+// runs.
 type countRecorder struct {
 	mu       sync.Mutex
 	counted  []string
+	at       []time.Time
 	started  chan struct{}
 	release  chan struct{}
 	holdOnce sync.Once
@@ -51,6 +63,7 @@ func recordCounts(measurer *elementMeasurer) *countRecorder {
 	measurer.beforeCount = func(markdown string) {
 		recorder.mu.Lock()
 		recorder.counted = append(recorder.counted, markdown)
+		recorder.at = append(recorder.at, time.Now())
 		recorder.mu.Unlock()
 		recorder.holdOnce.Do(func() {
 			close(recorder.started)
@@ -66,15 +79,22 @@ func (c *countRecorder) parses() []string {
 	return slices.Clone(c.counted)
 }
 
-// A rendering an update publishes past the element gate is counted off the update observer, and
-// the count reaches the atomic the peer update hook loads, while the bytes are there at once.
-func TestTheMeasurerCountsARenderingPublishedPastTheGate(t *testing.T) {
+func (c *countRecorder) times() []time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return slices.Clone(c.at)
+}
+
+// A rendering an update publishes is counted off the update observer, and the count reaches the
+// atomic the room budget reads, while the bytes the peer update hook weighs are there at once.
+func TestTheMeasurerCountsARenderingAnUpdatePublishes(t *testing.T) {
 	service := &Service{}
+	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
 	loaded := "# Title\n"
 	replica := service.keepReplica(newDocumentCopy(), &loaded)
-	rendering := headingsPastTheGate(1)
+	rendering := headings(1)
 	replica.publishSize(&rendering)
 	if bytes, _, measured := replica.size(); !measured || bytes != int64(len(rendering)) {
 		t.Fatalf("the room published %d bytes (measured %t) at once, want %d", bytes, measured, len(rendering))
@@ -98,7 +118,7 @@ func TestARoomsLoadMeasuresItsRenderingAtOnce(t *testing.T) {
 	service := &Service{}
 	recorder := recordCounts(&service.measurer)
 	close(recorder.release)
-	rendering := headingsPastTheGate(1)
+	rendering := headings(1)
 	replica := service.keepReplica(newDocumentCopy(), &rendering)
 	if _, elements, measured := replica.size(); !measured || elements != countElements(rendering) {
 		t.Fatalf("the loaded room published %d elements (measured %t), want %d", elements, measured, countElements(rendering))
@@ -109,14 +129,38 @@ func TestARoomsLoadMeasuresItsRenderingAtOnce(t *testing.T) {
 	}
 }
 
+// A small rendering is counted as a large one is: the room budget charges every room by its
+// elements, and a small document can make tens of thousands of them, so none is published as zero.
+func TestASmallRenderingIsCountedToo(t *testing.T) {
+	service := &Service{}
+	service.measurer.interval = noInterval
+	recorder := recordCounts(&service.measurer)
+	close(recorder.release)
+	loaded := "# Title\n"
+	replica := service.keepReplica(newDocumentCopy(), &loaded)
+	if _, elements, _ := replica.size(); elements != countElements(loaded) || elements == 0 {
+		t.Fatalf("the loaded room published %d elements, want its count %d", elements, countElements(loaded))
+	}
+	small := "# Title\n\nOne paragraph.\n"
+	replica.publishSize(&small)
+	service.measurer.waitIdle()
+	if bytes, elements, _ := replica.size(); bytes != int64(len(small)) || elements != countElements(small) {
+		t.Fatalf("the room published %d bytes and %d elements, want %d and %d", bytes, elements, len(small), countElements(small))
+	}
+	if parses := recorder.parses(); !slices.Equal(parses, []string{small}) {
+		t.Fatalf("the measurer parsed %d renderings, want the small one", len(parses))
+	}
+}
+
 // A room typed into faster than it is counted is counted at its latest rendering: renderings
 // published while a count runs replace each other, and only the last is parsed after it.
 func TestTheMeasurerCountsARoomsLatestRenderingRatherThanEach(t *testing.T) {
 	service := &Service{}
+	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
 	replica := service.keepReplica(newDocumentCopy(), &loaded)
-	first, second, third := headingsPastTheGate(1), headingsPastTheGate(2), headingsPastTheGate(3)
+	first, second, third := headings(1), headings(2), headings(3)
 	replica.publishSize(&first)
 	<-recorder.started
 	replica.publishSize(&second)
@@ -134,31 +178,41 @@ func TestTheMeasurerCountsARoomsLatestRenderingRatherThanEach(t *testing.T) {
 	}
 }
 
-// A rendering under the gate publishes a count of zero at once and parses nothing, and a count of
-// an older rendering still running when it lands does not put that rendering's weight back.
-func TestARenderingUnderTheGateMeasuresZeroWithoutAParse(t *testing.T) {
+// After its load's count, a room is counted at most once each interval: a rendering published
+// sooner waits out the rest of it, renderings published meanwhile replace it, and the bytes the
+// hook weighs are published at once all the same.
+func TestTheMeasurerCountsARoomAtMostOncePerInterval(t *testing.T) {
+	const interval = 300 * time.Millisecond
 	service := &Service{}
+	service.measurer.interval = interval
 	recorder := recordCounts(&service.measurer)
-	loaded := headingsPastTheGate(1)
-	replica := service.keepReplica(newDocumentCopy(), &loaded)
-	small := "# Title\n\nOne paragraph.\n"
-	replica.publishSize(&small)
-	if bytes, elements, _ := replica.size(); bytes != int64(len(small)) || elements != 0 {
-		t.Fatalf("the room published %d bytes and %d elements, want %d and zero", bytes, elements, len(small))
-	}
-	service.measurer.waitIdle()
-	if parses := recorder.parses(); len(parses) != 0 {
-		t.Fatalf("the measurer parsed %d renderings under the gate, want none", len(parses))
-	}
-
-	big := headingsPastTheGate(2)
-	replica.publishSize(&big)
-	<-recorder.started
-	replica.publishSize(&small)
 	close(recorder.release)
+	loaded := "# Title\n"
+	start := time.Now()
+	replica := service.keepReplica(newDocumentCopy(), &loaded)
+	first, second, third := headings(1), headings(2), headings(3)
+	replica.publishSize(&first)
+	if bytes, _, _ := replica.size(); bytes != int64(len(first)) {
+		t.Fatalf("the room published %d bytes, want the rendering's %d at once", bytes, len(first))
+	}
+	waitFor(t, 10*time.Second, "the first rendering's count", func() bool { return len(recorder.parses()) == 1 })
+	replica.publishSize(&second)
+	replica.publishSize(&third)
 	service.measurer.waitIdle()
-	if bytes, elements, _ := replica.size(); bytes != int64(len(small)) || elements != 0 {
-		t.Fatalf("the room published %d bytes and %d elements once the older count landed, want %d and zero", bytes, elements, len(small))
+	if parses := recorder.parses(); !slices.Equal(parses, []string{first, third}) {
+		t.Fatalf("the measurer parsed %d renderings, want the first and the latest", len(parses))
+	}
+	times := recorder.times()
+	if waited := times[0].Sub(start); waited < interval {
+		t.Fatalf("the first count came %s after the room's load, want at least %s", waited, interval)
+	}
+	// The interval runs from when the count took its rendering, a moment before the recorder's
+	// own clock reads.
+	if waited := times[1].Sub(times[0]); waited < interval-20*time.Millisecond {
+		t.Fatalf("the second count came %s after the first, want about %s at least", waited, interval)
+	}
+	if _, elements, _ := replica.size(); elements != countElements(third) {
+		t.Fatalf("the room published %d elements, want the latest rendering's %d", elements, countElements(third))
 	}
 }
 
@@ -166,11 +220,12 @@ func TestARenderingUnderTheGateMeasuresZeroWithoutAParse(t *testing.T) {
 // of an earlier rendering lands, and a rendering it withdrew from the queue is never parsed.
 func TestAnUnreadableRenderingPublishesNoMeasurement(t *testing.T) {
 	service := &Service{}
+	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
 	counting := service.keepReplica(newDocumentCopy(), &loaded)
 	waiting := service.keepReplica(newDocumentCopy(), &loaded)
-	first, second := headingsPastTheGate(1), headingsPastTheGate(2)
+	first, second := headings(1), headings(2)
 	counting.publishSize(&first)
 	<-recorder.started
 	waiting.publishSize(&second)
@@ -197,13 +252,14 @@ func TestAnUnreadableRenderingPublishesNoMeasurement(t *testing.T) {
 // while the room waits its turn behind another room's count.
 func TestTheMeasurerKeepsNoRetiredRoomsReplica(t *testing.T) {
 	service := &Service{}
+	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
 	counting := service.keepReplica(newDocumentCopy(), &loaded)
-	first := headingsPastTheGate(1)
+	first := headings(1)
 	counting.publishSize(&first)
 	<-recorder.started
-	retired := queueRetiredRoom(service, headingsPastTheGate(2))
+	retired := queueRetiredRoom(service, headings(2))
 	waitFor(t, 30*time.Second, "the retired room's replica to be collected", func() bool {
 		runtime.GC()
 		return retired.Value() == nil
@@ -216,8 +272,26 @@ func TestTheMeasurerKeepsNoRetiredRoomsReplica(t *testing.T) {
 	runtime.KeepAlive(counting)
 }
 
-// queueRetiredRoom loads a room, publishes rendering past the gate so the room waits in the
-// measurer's queue, and drops every reference to the room but a weak one to its replica.
+// Nor is it kept alive while it waits out the interval since its last count: the timer it waits on
+// holds it weakly too, and the count it was waiting for never runs.
+func TestTheMeasurerKeepsNoRetiredRoomsReplicaWaitingOutTheInterval(t *testing.T) {
+	service := &Service{}
+	service.measurer.interval = 2 * time.Second
+	recorder := recordCounts(&service.measurer)
+	close(recorder.release)
+	retired := queueRetiredRoom(service, headings(2))
+	waitFor(t, 30*time.Second, "the retired room's replica to be collected", func() bool {
+		runtime.GC()
+		return retired.Value() == nil
+	})
+	service.measurer.waitIdle()
+	if parses := recorder.parses(); len(parses) != 0 {
+		t.Fatalf("the measurer parsed %d renderings, want none of the retired room's", len(parses))
+	}
+}
+
+// queueRetiredRoom loads a room, publishes rendering so the room waits for the measurer, and drops
+// every reference to the room but a weak one to its replica.
 func queueRetiredRoom(service *Service, rendering string) weak.Pointer[renderedReplica] {
 	loaded := "# Title\n"
 	replica := service.keepReplica(newDocumentCopy(), &loaded)
@@ -229,10 +303,11 @@ func queueRetiredRoom(service *Service, rendering string) weak.Pointer[renderedR
 // rendering published after it is counted.
 func TestTheMeasurerStopsWithTheService(t *testing.T) {
 	service := &Service{}
+	service.measurer.interval = noInterval
 	recorder := recordCounts(&service.measurer)
 	loaded := "# Title\n"
 	replica := service.keepReplica(newDocumentCopy(), &loaded)
-	first := headingsPastTheGate(1)
+	first := headings(1)
 	replica.publishSize(&first)
 	<-recorder.started
 	stopped := make(chan struct{})
@@ -245,7 +320,7 @@ func TestTheMeasurerStopsWithTheService(t *testing.T) {
 	if _, elements, _ := replica.size(); elements != countElements(first) {
 		t.Fatalf("the room published %d elements, want the count in flight at the stop, %d", elements, countElements(first))
 	}
-	later := headingsPastTheGate(2)
+	later := headings(2)
 	replica.publishSize(&later)
 	service.measurer.waitIdle()
 	if parses := recorder.parses(); !slices.Equal(parses, []string{first}) {
@@ -259,9 +334,9 @@ func TestTheMeasurerStopsWithTheService(t *testing.T) {
 // BenchmarkElementCountAgainstRender weighs the measurer's count of a rendering
 // (pmdoc.MeasureDocument) against the update observer's render that made it
 // (renderDocumentForUpdate), on the live benchmarks' own document (benchmarkLiveDocument) and on
-// the shape a room holds up to a mebibyte of (residentRoomDocument). The count costing less than
-// the render at every size is what keeps a room typed into alone at most one update behind
-// (renderedReplica.size): the count of one rendering ends before the next rendering is published.
+// the shape a room holds up to a mebibyte of (residentRoomDocument). The count's cost is what the
+// measurer's interval is set against (roomCountInterval), and what keeps it out of the hook
+// (peer_update.go:29-38).
 func BenchmarkElementCountAgainstRender(b *testing.B) {
 	for _, shape := range []struct {
 		name  string
@@ -269,7 +344,7 @@ func BenchmarkElementCountAgainstRender(b *testing.B) {
 		sizes []int
 	}{
 		{"live", benchmarkLiveDocument, []int{51 << 10, 524 << 10}},
-		{"resident", residentRoomDocument, []int{elementGateBytes, 51 << 10, 524 << 10, pmdoc.MaxDocumentBytes}},
+		{"resident", residentRoomDocument, []int{16 << 10, 51 << 10, 524 << 10, pmdoc.MaxDocumentBytes}},
 	} {
 		for _, size := range shape.sizes {
 			live := shape.build(b, size)

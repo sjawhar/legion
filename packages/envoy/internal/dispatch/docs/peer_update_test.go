@@ -22,24 +22,27 @@ import (
 func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 	atTheBound := proseAtLeast(pmdoc.MaxDocumentBytes)
 	pastTheCreepCap := proseAtLeast(pmdoc.MaxDocumentBytes + maxPeerByteCreep)
-	atTheElementBound := strings.Repeat("# a\n", pmdoc.MaxDocumentElements/4)
+	ordinary := "# Title\n\nOne paragraph of ordinary prose.\n"
 	for _, row := range []struct {
 		name string
 		// markdown is the document the room loaded with, and leastBytes what its rendering must
 		// measure for the row to drive the state it is written for.
 		markdown   string
 		leastBytes int
+		// busy is the room budget's signal that it is full and nothing can be closed.
+		busy bool
 		// update is the one update the room is handed, built against the room's own document.
 		update func(t *testing.T, room *crdt.Doc) []byte
-		// refused is a close with the document's own code; applied is whether the room took the
-		// update; failed is whether the hook returned the apply's own error instead; changes is
-		// whether the room's document is any different for it, which a whole-state message of
-		// what the room already holds is not.
-		refused, applied, failed, changes bool
+		// refused is the code of the close the hook answers, zero for none; applied is whether the
+		// room took the update; failed is whether the hook returned the apply's own error instead;
+		// changes is whether the room's document is any different for it, which a whole-state
+		// message of what the room already holds is not.
+		refused                  int
+		applied, failed, changes bool
 	}{
 		{
-			name:     "a keystroke under both halves of the bound applies",
-			markdown: "# Title\n\nOne paragraph of ordinary prose.\n",
+			name:     "a keystroke under the bound applies",
+			markdown: ordinary,
 			update:   func(t *testing.T, room *crdt.Doc) []byte { return peerTyping(t, room, "y") },
 			applied:  true,
 			changes:  true,
@@ -51,7 +54,7 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 			update: func(t *testing.T, room *crdt.Doc) []byte {
 				return peerTyping(t, room, strings.Repeat("p", 9<<10))
 			},
-			refused: true,
+			refused: contracts.DocumentTooLargeCloseCode,
 		},
 		{
 			name:       "a 7 KiB insert at the byte bound applies",
@@ -64,20 +67,11 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 			changes: true,
 		},
 		{
-			name:       "a 9 KiB paste at the element bound is refused",
-			markdown:   atTheElementBound,
-			leastBytes: elementGateBytes,
-			update: func(t *testing.T, room *crdt.Doc) []byte {
-				return peerTyping(t, room, strings.Repeat("p", 9<<10))
-			},
-			refused: true,
-		},
-		{
 			name:       "one byte past the creep cap is refused",
 			markdown:   pastTheCreepCap,
 			leastBytes: pmdoc.MaxDocumentBytes + maxPeerByteCreep,
 			update:     func(t *testing.T, room *crdt.Doc) []byte { return peerTyping(t, room, "y") },
-			refused:    true,
+			refused:    contracts.DocumentTooLargeCloseCode,
 		},
 		{
 			name:       "a delete past the creep cap applies",
@@ -103,9 +97,44 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 			update:     func(*testing.T, *crdt.Doc) []byte { return []byte{0x01, 0xff, 0xff, 0xff} },
 			failed:     true,
 		},
+		{
+			name:     "a keystroke while the room budget is full is refused as transient",
+			markdown: ordinary,
+			busy:     true,
+			update:   func(t *testing.T, room *crdt.Doc) []byte { return peerTyping(t, room, "y") },
+			refused:  contracts.DocumentBusyCloseCode,
+		},
+		{
+			name:     "a delete while the room budget is full applies",
+			markdown: ordinary,
+			busy:     true,
+			update:   func(t *testing.T, room *crdt.Doc) []byte { return peerDeleting(t, room, 3) },
+			applied:  true,
+			changes:  true,
+		},
+		{
+			name:     "the whole live state the room already holds applies while the room budget is full",
+			markdown: ordinary,
+			busy:     true,
+			update: func(t *testing.T, room *crdt.Doc) []byte {
+				return crdt.EncodeStateAsUpdateV1(room, nil)
+			},
+			applied: true,
+		},
+		{
+			name:       "a 9 KiB paste at the byte bound while the room budget is full is the document's own refusal",
+			markdown:   atTheBound,
+			leastBytes: pmdoc.MaxDocumentBytes,
+			busy:       true,
+			update: func(t *testing.T, room *crdt.Doc) []byte {
+				return peerTyping(t, room, strings.Repeat("p", 9<<10))
+			},
+			refused: contracts.DocumentTooLargeCloseCode,
+		},
 	} {
 		t.Run(row.name, func(t *testing.T) {
 			service, room, replica := peerUpdateRoom(t, row.markdown, row.leastBytes)
+			service.budget.full.Store(row.busy)
 			update := row.update(t, room)
 			before := crdt.EncodeStateAsUpdateV1(room, nil)
 			applied := false
@@ -125,13 +154,16 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 			runtime.KeepAlive(replica)
 			var refusal *websocket.PeerClose
 			switch {
-			case row.refused:
+			case row.refused != 0:
 				if !errors.As(err, &refusal) {
 					t.Fatalf("the hook answered %v, want a close refusing the update", err)
 				}
-				if refusal.Code != contracts.DocumentTooLargeCloseCode || refusal.Reason != contracts.DocumentTooLargeCloseReason {
-					t.Fatalf("the hook closed with %d %q, want %d %q", refusal.Code, refusal.Reason,
-						contracts.DocumentTooLargeCloseCode, contracts.DocumentTooLargeCloseReason)
+				reason := contracts.DocumentTooLargeCloseReason
+				if row.refused == contracts.DocumentBusyCloseCode {
+					reason = contracts.DocumentBusyCloseReason
+				}
+				if refusal.Code != row.refused || refusal.Reason != reason {
+					t.Fatalf("the hook closed with %d %q, want %d %q", refusal.Code, refusal.Reason, row.refused, reason)
 				}
 			case row.failed:
 				if err == nil || errors.As(err, &refusal) {
