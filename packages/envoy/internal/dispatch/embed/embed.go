@@ -38,7 +38,10 @@ const (
 // text.HeadRunes truncates) and the same rough characters-per-token ratio the original "Bedrock
 // capacity" measurement used (4 characters/token, a standard order-of-magnitude estimate for
 // English prose - not Cohere's own tokenizer, which only the model service itself has). Good
-// enough to pace a shared token-rate budget (embedqueue's reserveTokens); never exact.
+// enough to pace a shared token-rate budget (embedqueue's reserveTokens); never exact. Dense text
+// costs more tokens a character than English prose: by Azure's count, hex about 0.88 tokens a
+// character and dense CJK bodies about 0.82 a rune, about 3.5x this estimate, and random CJK
+// about 1.6 a rune, more still.
 func EstimateTokens(texts []string) int {
 	const charsPerToken = 4
 	total := 0
@@ -50,6 +53,24 @@ func EstimateTokens(texts []string) int {
 		total += n
 	}
 	return total / charsPerToken
+}
+
+// BoundedBytes is the UTF-8 byte length of t at the truncation this package applies before sending
+// (maxInputChars runes, the cut text.HeadRunes makes), counted without copying t. A Cohere token
+// is at least one byte, so this bounds the tokens t costs from above, which EstimateTokens does
+// not.
+func BoundedBytes(t string) int {
+	if len(t) <= maxInputChars {
+		return len(t) // no more runes than bytes, so nothing is cut
+	}
+	runes := 0
+	for i := range t {
+		if runes == maxInputChars {
+			return i
+		}
+		runes++
+	}
+	return len(t)
 }
 
 // boundBatch checks one Embed call's texts against a place's batch limit and returns them each
@@ -81,10 +102,15 @@ const (
 )
 
 // Limits are one place's own numbers: no place borrows another's, because each has its own
-// batch limit and quota.
+// batch limit, request timeout and quota.
 type Limits struct {
 	// MaxBatchTexts is the most texts one Embed call accepts.
 	MaxBatchTexts int
+	// MaxBatchBytes is the most UTF-8 bytes of text (BoundedBytes, summed over the call's texts)
+	// one background Embed call carries, so the call finishes inside the place's request
+	// timeout; 0 means no budget, and only MaxBatchTexts bounds a call. The client does not
+	// enforce it: embedqueue's chunkForBudget sizes every call it makes to fit.
+	MaxBatchBytes int
 	// BackgroundTokensPerMinute is the most estimated tokens (EstimateTokens) a minute
 	// background work may spend, leaving the rest of the place's quota to live search queries.
 	BackgroundTokensPerMinute int
@@ -102,7 +128,7 @@ type Embedder interface {
 	// records, and the one search compares a stored vector against, so a vector from another
 	// model or place is never ranked against this embedder's query vector.
 	Identity() string
-	// Limits reports this embedder's own batch limit and background token budget.
+	// Limits reports this embedder's own batch limits and background token budget.
 	Limits() Limits
 }
 

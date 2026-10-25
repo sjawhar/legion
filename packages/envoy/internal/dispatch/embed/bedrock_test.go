@@ -231,7 +231,7 @@ func TestBedrockIdentityFollowsWithModel(t *testing.T) {
 
 func TestBedrockLimitsAreBedrocksOwn(t *testing.T) {
 	got := NewBedrockWithConfig(aws.Config{Region: "us-west-2"}).Limits()
-	if want := (Limits{MaxBatchTexts: 96, BackgroundTokensPerMinute: 200_000}); got != want {
+	if want := (Limits{MaxBatchTexts: 96, MaxBatchBytes: 0, BackgroundTokensPerMinute: 200_000}); got != want {
 		t.Errorf("Limits() = %+v, want %+v", got, want)
 	}
 }

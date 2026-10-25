@@ -340,7 +340,7 @@ func TestAzureIdentityAndLimitsAreAzuresOwn(t *testing.T) {
 	if got, want := client.Identity(), "azure:example-resource.services.ai.azure.com/embed-v-4-0"; got != want {
 		t.Errorf("Identity() = %q, want %q", got, want)
 	}
-	if got, want := client.Limits(), (Limits{MaxBatchTexts: 96, BackgroundTokensPerMinute: 200_000}); got != want {
+	if got, want := client.Limits(), (Limits{MaxBatchTexts: 96, MaxBatchBytes: 320_000, BackgroundTokensPerMinute: 200_000}); got != want {
 		t.Errorf("Limits() = %+v, want %+v", got, want)
 	}
 	if got, want := client.url, "https://Example-Resource.services.ai.azure.com/models/embeddings?api-version=2024-05-01-preview"; got != want {

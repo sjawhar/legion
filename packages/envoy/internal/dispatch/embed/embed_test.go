@@ -84,6 +84,37 @@ func TestEstimateTokensTruncatesAndDividesByFourCharsPerToken(t *testing.T) {
 	}
 }
 
+// BoundedBytes counts the bytes a text is sent as: every byte up to maxInputChars runes, the cut
+// boundBatch makes, never more and never a rune split.
+func TestBoundedBytesCountsTheBytesOfTheTruncatedText(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		text string
+	}{
+		{"empty", ""},
+		{"short ASCII", "hello"},
+		{"short CJK, more bytes than maxInputChars runes", strings.Repeat("漢", maxInputChars/2)},
+		{"exactly maxInputChars mixed runes", longText()},
+		{"overlong CJK", strings.Repeat("漢", maxInputChars+100)},
+		{"overlong mixed", longText() + "🙂é"},
+	} {
+		bounded, err := boundBatch([]string{tc.text}, 1)
+		if err != nil {
+			t.Fatalf("%s: boundBatch: %v", tc.name, err)
+		}
+		want := 0
+		if bounded != nil {
+			want = len(bounded[0])
+		}
+		if got := BoundedBytes(tc.text); got != want {
+			t.Errorf("%s: BoundedBytes = %d, want %d (the bytes boundBatch sends)", tc.name, got, want)
+		}
+	}
+	if got, want := BoundedBytes(strings.Repeat("漢", maxInputChars+100)), 3*maxInputChars; got != want {
+		t.Errorf("BoundedBytes(overlong CJK) = %d, want %d", got, want)
+	}
+}
+
 func TestIdentityPlace(t *testing.T) {
 	for identity, want := range map[string][2]string{
 		"azure:example.services.ai.azure.com/embed-v-4-0":        {"azure", "embed-v-4-0"},

@@ -96,7 +96,8 @@ func NewBedrockWithConfig(cfg aws.Config, opts ...BedrockOption) *BedrockClient 
 // Identity is the Bedrock model id this client calls: BedrockModel unless WithModel overrode it.
 func (c *BedrockClient) Identity() string { return c.model }
 
-// Limits reports Bedrock's batch limit and the background share of the account's quota.
+// Limits reports Bedrock's batch limit and the background share of the account's quota, and no
+// byte budget (MaxBatchBytes 0): a Bedrock batch is bounded by its text count and token ceiling.
 func (c *BedrockClient) Limits() Limits {
 	return Limits{MaxBatchTexts: BedrockMaxBatchTexts, BackgroundTokensPerMinute: bedrockBackgroundTokensPerMinute}
 }

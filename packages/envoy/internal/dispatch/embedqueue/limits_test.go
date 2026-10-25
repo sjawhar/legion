@@ -174,6 +174,143 @@ func TestBatchSizeAndTokenCeilingFollowTheEmbeddersLimits(t *testing.T) {
 	}
 }
 
+// denseCJK is n runes of CJK ideographs (3 UTF-8 bytes each, 96,000 bytes at maxInputChars),
+// varied by seed: text Azure counts at well over EstimateTokens' 4 characters a token, the kind
+// that timed out a 40-text call.
+func denseCJK(n, seed int) string {
+	var b strings.Builder
+	b.Grow(3 * n)
+	for i := range n {
+		b.WriteRune(rune(0x4E00 + (i*7919+seed*104729)%0x5000))
+	}
+	return b.String()
+}
+
+// azureLimits are the real AzureClient's limits at a 300,000 tokens-a-minute quota.
+func azureLimits(t *testing.T) embed.Limits {
+	t.Helper()
+	client, err := embed.NewAzure(embed.AzureConfig{
+		Endpoint:        "https://example.services.ai.azure.com/models",
+		Deployment:      "embed-v-4-0",
+		TokensPerMinute: 300_000,
+		APIKey:          "k",
+	})
+	if err != nil {
+		t.Fatalf("NewAzure: %v", err)
+	}
+	return client.Limits()
+}
+
+func batchBytes(texts []string) int {
+	total := 0
+	for _, text := range texts {
+		total += embed.BoundedBytes(text)
+	}
+	return total
+}
+
+// With Azure's limits, a full batch of 96 maxInputChars CJK texts (96,000 bytes each) splits into
+// groups of three, each at most Azure's 320,000-byte budget, every row in exactly one group and in
+// order; the token ceiling alone (MaxBatchBytes 0) groups the same rows 25 at a time, as before.
+func TestChunkForBudgetKeepsEachCallWithinTheByteBudget(t *testing.T) {
+	limits := azureLimits(t)
+	if limits.MaxBatchBytes != 320_000 || limits.MaxBatchTexts != 96 {
+		t.Fatalf("Azure limits = %+v, want 96 texts and 320,000 bytes", limits)
+	}
+	rows := make([]pendingRow, limits.MaxBatchTexts)
+	for i := range rows {
+		rows[i] = pendingRow{kind: "comment", id: fmt.Sprint(i), text: denseCJK(32_000, i)}
+	}
+	check := func(limits embed.Limits, wantSizes []int) {
+		t.Helper()
+		groups := chunkForBudget(rows, limits)
+		sizes := make([]int, len(groups))
+		next := 0
+		for g, group := range groups {
+			sizes[g] = len(group.rows)
+			texts := make([]string, len(group.rows))
+			for i, row := range group.rows {
+				if row.id != rows[next].id {
+					t.Fatalf("group %d row %d is %s, want %s: every row once, in order", g, i, row.id, rows[next].id)
+				}
+				texts[i] = row.text
+				next++
+			}
+			if limits.MaxBatchBytes > 0 && batchBytes(texts) > limits.MaxBatchBytes {
+				t.Errorf("group %d carries %d bytes, over the %d budget", g, batchBytes(texts), limits.MaxBatchBytes)
+			}
+			if group.tokens != embed.EstimateTokens(texts) || group.tokens > limits.BackgroundTokensPerMinute {
+				t.Errorf("group %d tokens = %d, want its texts' estimate %d, at most %d", g, group.tokens, embed.EstimateTokens(texts), limits.BackgroundTokensPerMinute)
+			}
+		}
+		if next != len(rows) {
+			t.Fatalf("groups hold %d rows, want all %d", next, len(rows))
+		}
+		if fmt.Sprint(sizes) != fmt.Sprint(wantSizes) {
+			t.Errorf("group sizes = %v, want %v", sizes, wantSizes)
+		}
+	}
+	threes := make([]int, 32)
+	for i := range threes {
+		threes[i] = 3
+	}
+	check(limits, threes)
+	limits.MaxBatchBytes = 0
+	check(limits, []int{25, 25, 25, 21})
+}
+
+// timeoutEmbedder answers like a place whose request timeout a call over its byte budget passes:
+// such a call fails, not throttled, as Azure's client does when the 60 s run out; any other call
+// embeds. It records every call.
+type timeoutEmbedder struct {
+	placeEmbedder
+}
+
+func (e *timeoutEmbedder) Embed(ctx context.Context, texts []string, inputType embed.InputType) ([][]float32, error) {
+	if size := batchBytes(texts); size > e.limits.MaxBatchBytes {
+		e.calls = append(e.calls, append([]string(nil), texts...))
+		return nil, fmt.Errorf("embed: azure call: %d bytes: %w", size, context.DeadlineExceeded)
+	}
+	return e.placeEmbedder.Embed(ctx, texts, inputType)
+}
+
+// A full batch of 96 pending maxInputChars CJK rows, through ProcessBatch, under an embedder whose
+// call over its byte budget would time out: every call stays within the budget and succeeds the
+// first time, so nothing is bisected or sent twice, and every row is current.
+func TestAFullBatchOfDenseTextIsEmbeddedWithinTheByteBudgetWithoutBisection(t *testing.T) {
+	database := storetest.Open(t)
+	limits := azureLimits(t)
+	// The token pace is not under test: a ceiling this high never waits.
+	limits.BackgroundTokensPerMinute = 100_000_000
+	for i := range limits.MaxBatchTexts {
+		seedIssue(t, database, "DENS", fmt.Sprintf("DENS-%d", i+1), denseCJK(32_000, i))
+	}
+	embedder := &timeoutEmbedder{placeEmbedder{identity: configuredIdentity, limits: limits}}
+
+	succeeded, failed, blocked, throttled, err := ProcessBatch(context.Background(), Deps{Store: database, Embedder: embedder})
+	if err != nil || succeeded != 96 || failed != 0 || blocked || throttled {
+		t.Fatalf("ProcessBatch = %d, %d, %v, %v, %v; want all 96 committed", succeeded, failed, blocked, throttled, err)
+	}
+	seen := map[string]bool{}
+	for i, call := range embedder.calls {
+		if size := batchBytes(call); size > limits.MaxBatchBytes {
+			t.Errorf("call %d carried %d bytes, over the %d budget", i, size, limits.MaxBatchBytes)
+		}
+		for _, text := range call {
+			if seen[text] {
+				t.Errorf("call %d sent a text a second time: a call failed and was bisected", i)
+			}
+			seen[text] = true
+		}
+	}
+	if len(embedder.calls) != 32 || len(seen) != 96 {
+		t.Errorf("%d calls carrying %d distinct texts, want 32 calls of three: the fewest the budget allows", len(embedder.calls), len(seen))
+	}
+	if got := pendingCount(t, database); got != 0 {
+		t.Errorf("pending after the batch = %d, want 0", got)
+	}
+}
+
 func callSizes(calls [][]string) []int {
 	sizes := make([]int, len(calls))
 	for i, call := range calls {

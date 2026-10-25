@@ -13,7 +13,11 @@
   `DISPATCH_AZURE_CLIENT_ID`, `DISPATCH_AZURE_FEDERATED_TOKEN_FILE`). Boot refuses, naming the
   setting, an unknown place, an Azure setting under Bedrock, and an Azure configuration missing its
   endpoint or quota or holding both credentials, neither or part of the keyless one; a model
-  service or Entra that is down refuses no boot (INFRA-393).
+  service or Entra that is down refuses no boot. Background embedding sends Azure at most 320,000
+  bytes of text a call, so a call of dense text (CJK, hex) finishes well inside the 60-second
+  request timeout instead of timing out and being split; Bedrock's batches are unchanged. Pacing
+  estimates 4 characters a token, which under-counts such text, so a backlog of it can meet
+  Azure's 429s, which the queue retries as throttles (INFRA-393).
 - The Dispatch server keeps meaning search's coverage itself: a coverage pass at boot and every 10
   minutes embeds items written before the embedding triggers existed or with them off, repairs a
   row whose text changed with the triggers off, drops every vector another embedder made and

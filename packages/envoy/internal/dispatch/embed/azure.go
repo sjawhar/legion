@@ -27,6 +27,13 @@ const (
 	// azureMaxBatchTexts is Cohere Embed v4's own batch limit, the same 96 texts Bedrock
 	// accepts; INFRA-399's probe confirms or corrects it for the Azure deployment.
 	azureMaxBatchTexts = 96
+	// azureMaxBatchBytes is Limits().MaxBatchBytes: the most bytes of text (BoundedBytes) one
+	// background call carries, so it finishes well inside azureRequestTimeout. A Cohere token is
+	// at least one byte, so 320,000 bytes is at most 320,000 tokens; at the slowest rate the
+	// deployment was measured embedding (40 dense CJK bodies, 1,049,910 tokens in 65 s, about
+	// 16,000 tokens/s) that is about 20 s, a third of the timeout. Measured: 320,000 bytes of hex
+	// (281,740 tokens, the densest text measured) took 8.6 s, and 288,000 of random CJK 5.8 s.
+	azureMaxBatchBytes = 320_000
 	// azureRequestTimeout bounds one Embed call, sign-in included, below embedqueue's claimWindow
 	// (2 minutes), so a hung call never outlives the claim on the rows it carries.
 	azureRequestTimeout = 60 * time.Second
@@ -102,8 +109,12 @@ func NewAzure(cfg AzureConfig) (*AzureClient, error) {
 		deployment: cfg.Deployment,
 		limits: Limits{
 			MaxBatchTexts: azureMaxBatchTexts,
+			MaxBatchBytes: azureMaxBatchBytes,
 			// Two thirds of the quota, the ratio Bedrock's budget keeps, floored at one token so
-			// a tiny quota still paces background work instead of stopping it.
+			// a tiny quota still paces background work instead of stopping it. The queue paces in
+			// EstimateTokens' tokens, which under-count dense text (hex, CJK) about 3.5x and more,
+			// so background work on such text can pass the deployment's quota; Azure then answers
+			// 429, which the queue treats as a throttle and retries. That is accepted.
 			BackgroundTokensPerMinute: max(cfg.TokensPerMinute*2/3, 1),
 		},
 		apiKey: cfg.APIKey,
@@ -116,7 +127,7 @@ func NewAzure(cfg AzureConfig) (*AzureClient, error) {
 // vector embedded by another resource or deployment is never compared with this one's queries.
 func (c *AzureClient) Identity() string { return c.identity }
 
-// Limits reports Azure's batch limit and two thirds of the configured quota.
+// Limits reports Azure's batch limits and two thirds of the configured quota.
 func (c *AzureClient) Limits() Limits { return c.limits }
 
 type azureEmbedRequest struct {
@@ -153,9 +164,11 @@ func azureInputType(inputType InputType) (string, error) {
 }
 
 // Embed calls Azure once for up to azureMaxBatchTexts texts and places each vector by the index
-// Azure answers with, not by its position in the response. A 429 or 503 comes back marked for
-// IsThrottled; any other failure names the HTTP status and Azure's error code, never the texts
-// or the credential.
+// Azure answers with, not by its position in the response. It sends whatever bytes it is given:
+// embedqueue keeps each background call within Limits().MaxBatchBytes, which is what lets the call
+// finish inside azureRequestTimeout, and a search query is one short text. A 429 or 503 comes back
+// marked for IsThrottled; any other failure names the HTTP status and Azure's error code, never
+// the texts or the credential.
 func (c *AzureClient) Embed(ctx context.Context, texts []string, inputType InputType) ([][]float32, error) {
 	bounded, err := boundBatch(texts, azureMaxBatchTexts)
 	if err != nil || bounded == nil {

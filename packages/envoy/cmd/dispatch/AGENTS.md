@@ -80,10 +80,12 @@ Meaning search embeds through `embed.Embedder`, which `newEmbedder` (`cmd/dispat
 builds from `DISPATCH_EMBEDDER`: `embed.NewBedrock` (the default; no AWS region is a warning and
 keyword-only search) or `embed.NewAzure` (the `DISPATCH_AZURE_*` rows, which `resolveEmbedder`
 checks and refuses by name before anything is called, so a model service or Entra that is down
-never refuses boot). Each client owns its own numbers (`Limits`: batch size and the background
-token pace) and its identity (`Identity`): `us.cohere.embed-v4:0` on Bedrock,
-`azure:<endpoint host>/<deployment>` on Azure. `embeddings.model` records the identity of the
-client that made each vector, `api/search.go` compares a query vector only with stored vectors of
+never refuses boot). Each client owns its own numbers (`Limits`: batch size, the most bytes of
+text one background call carries so it fits the place's request timeout (320,000 on Azure, none on
+Bedrock; `embedqueue`'s `chunkForBudget` sizes each call to it), and the background token pace)
+and its identity (`Identity`): `us.cohere.embed-v4:0` on Bedrock, `azure:<endpoint
+host>/<deployment>` on Azure. `embeddings.model` records the identity of the client that made
+each vector, `api/search.go` compares a query vector only with stored vectors of
 its own identity, and `embedqueue.Run` runs the coverage pass (`embedqueue/coverage.go`, `Cover`)
 at start and every 10 minutes: it embeds what no trigger enqueued, repairs a row whose text changed
 with the triggers off, settles a dead row with nothing to embed, and, once the configured embedder

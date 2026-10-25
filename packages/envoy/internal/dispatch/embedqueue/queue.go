@@ -263,19 +263,20 @@ type bisectResult struct {
 }
 
 // embedRows embeds and commits rows group by group (chunkForBudget splits rows so no single
-// reservation ever exceeds the embedder's BackgroundTokensPerMinute), committing each group's
-// vectors to the database as soon as that group's own Embed call succeeds: a later group's
-// failure never re-embeds an earlier group's already-committed rows, and a group that itself
-// fails non-throttled is handed to handleGroupFailure, which isolates it without ever
-// re-embedding that exact group again. The returned bisectResult accumulates every group's own
-// outcome across the whole call. A genuine infrastructure error (commitEmbeddings' own) stops the
-// loop immediately and propagates as-is, abandoning whatever groups were not yet attempted -
-// ProcessBatch and bisectSplit both treat it as a hard failure, never a reason to retry row by
-// row.
+// reservation ever exceeds the embedder's BackgroundTokensPerMinute and no Embed call carries
+// more than its MaxBatchBytes, so a call of dense text finishes inside the place's request
+// timeout instead of timing out and being bisected), committing each group's vectors to the
+// database as soon as that group's own Embed call succeeds: a later group's failure never
+// re-embeds an earlier group's already-committed rows, and a group that itself fails
+// non-throttled is handed to handleGroupFailure, which isolates it without ever re-embedding that
+// exact group again. The returned bisectResult accumulates every group's own outcome across the
+// whole call. A genuine infrastructure error (commitEmbeddings' own) stops the loop immediately
+// and propagates as-is, abandoning whatever groups were not yet attempted - ProcessBatch and
+// bisectSplit both treat it as a hard failure, never a reason to retry row by row.
 func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claimRenewal) bisectResult {
 	var result bisectResult
-	ceiling := deps.Embedder.Limits().BackgroundTokensPerMinute
-	for _, group := range chunkForBudget(rows, ceiling) {
+	limits := deps.Embedder.Limits()
+	for _, group := range chunkForBudget(rows, limits) {
 		if ctx.Err() != nil {
 			result.retry = append(result.retry, group.rows...)
 			continue
@@ -285,7 +286,7 @@ func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claim
 			texts[i] = row.text
 		}
 		renewal.renew(ctx)
-		reserveTokens(ctx, deps, group.tokens, ceiling, renewal)
+		reserveTokens(ctx, deps, group.tokens, limits.BackgroundTokensPerMinute, renewal)
 		vectors, err := deps.embedDocuments(ctx, texts)
 		if err != nil {
 			groupResult := handleGroupFailure(ctx, deps, group.rows, err, renewal)
@@ -390,29 +391,35 @@ type budgetedGroup struct {
 	tokens int
 }
 
-// chunkForBudget splits rows into the fewest groups whose own estimated tokens
-// (embed.EstimateTokens) each stay at or under ceiling, the embedder's own
-// BackgroundTokensPerMinute, in original order, so reserveTokens never has to reserve more than
-// one minute's worth of budget for a single group. A row whose own estimate alone meets or
-// exceeds the ceiling - an unusually dense maxInputChars-length document, or any long text under
-// a small quota - still gets a group of its own rather than being split further: EstimateTokens
-// already truncates at maxInputChars, so even that worst case is a known, bounded size, and one
-// such row is the smallest unit this package ever embeds. Each group's tokens field is the sum of
-// its own rows' estimates, computed here once and carried forward rather than re-estimated from
-// the group's joined texts later.
-func chunkForBudget(rows []pendingRow, ceiling int) []budgetedGroup {
+// chunkForBudget splits rows, in original order, into groups each of which is one Embed call,
+// closing a group before the row that would take it past either of the embedder's limits: its
+// estimated tokens (embed.EstimateTokens) past BackgroundTokensPerMinute, so reserveTokens never
+// has to reserve more than one minute's worth of budget for a single group, or its bytes
+// (embed.BoundedBytes) past MaxBatchBytes when that is set, so every background call fits the
+// place's request timeout (Azure's, azureMaxBatchBytes' comment). Each row is in exactly one
+// group. A row that alone meets or passes either limit - a maxInputChars-length document under
+// a small quota, say - still gets a group of its own rather than being split further: both counts
+// already truncate at maxInputChars, so even that worst case is a known, bounded size (at most
+// 128,000 bytes, under Azure's 320,000), and one row is the smallest unit this package ever
+// embeds. Each group's tokens field is the sum of its own rows' estimates, computed here once and
+// carried forward rather than re-estimated from the group's joined texts later.
+func chunkForBudget(rows []pendingRow, limits embed.Limits) []budgetedGroup {
 	if len(rows) == 0 {
 		return nil
 	}
 	groups := make([]budgetedGroup, 0, 1)
-	start, tokens := 0, 0
+	start, tokens, size := 0, 0, 0
 	for i, row := range rows {
 		rowTokens := embed.EstimateTokens([]string{row.text})
-		if i > start && tokens+rowTokens > ceiling {
+		rowBytes := embed.BoundedBytes(row.text)
+		overTokens := tokens+rowTokens > limits.BackgroundTokensPerMinute
+		overBytes := limits.MaxBatchBytes > 0 && size+rowBytes > limits.MaxBatchBytes
+		if i > start && (overTokens || overBytes) {
 			groups = append(groups, budgetedGroup{rows: rows[start:i], tokens: tokens})
-			start, tokens = i, 0
+			start, tokens, size = i, 0, 0
 		}
 		tokens += rowTokens
+		size += rowBytes
 	}
 	return append(groups, budgetedGroup{rows: rows[start:], tokens: tokens})
 }
@@ -525,7 +532,10 @@ func reserveBackgroundTokens(ctx context.Context, deps Deps, texts []string, ren
 // release about twice the ceiling in one minute, so a minute can pass the quota even when the
 // estimate is exact: through LEGION-549's Bedrock backfill (2026-10-11, 72 minutes, 15,117 rows)
 // Bedrock counted about 7% more input tokens than the estimate, about 220,600 a minute against
-// a 300,000 quota with 8 minutes above it (peak 431,590), and throttled none of it.
+// a 300,000 quota with 8 minutes above it (peak 431,590), and throttled none of it. Dense text
+// (hex, CJK) costs about 3.5x the estimate and more on Azure (EstimateTokens' comment), so
+// background work on it can pass the deployment's quota; the 429s that follow are throttles,
+// which the queue retries without counting them against any row. That is accepted.
 //
 // chunkForBudget already keeps one reservation's own tokens at or under ceilingPerMinute, but the
 // wait can still run past renewClaimInterval when other debt was already on the row (another
