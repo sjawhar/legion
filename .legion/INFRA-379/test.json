@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-379",
+  "completed": "2026-10-25T12:59:30Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's commands (gofmt, go vet ./..., go vet -tags multiprocess, the two named tests, the full cmd/broker package plain and multiprocess) on an independent embedded Postgres 16.4 cluster I initialised (127.0.0.1:54339); every result matched, and main's two files reproduced the four build errors through go -overlay."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "packages/envoy passes go vet ./... (and the multiprocess build) on a branch cut from main; failing output quoted beside the passing one",
+      "surface": "go toolchain in the worker pod, packages/envoy",
+      "command": "cd packages/envoy && gofmt -l cmd/broker; go vet ./...; go vet -tags multiprocess ./cmd/broker",
+      "observed": "gofmt -l empty; go vet ./... exit=0; go vet -tags multiprocess ./cmd/broker exit=0. main@origin b95eba2806b7 differs from base 3ca092a69891 only in three package.json version bumps, so the result holds against current main.",
+      "headSha": "5097afb974af908e17390b95c4b3fba81d741d1b",
+      "negativeControl": "main 3ca092a69891's service_account_scope_test.go and service_accounts_test.go swapped in with go -overlay: go vet ./cmd/broker exit 1 'service_account_scope_test.go:50:3: too many arguments in call to startBroker'; go test ./cmd/broker '[build failed]' with the four errors (scope :48:13, :50:3; accounts :46:16, :48:3)"
+    },
+    {
+      "criterion": "The two repaired tests run and pass against a real Postgres, and the whole cmd/broker package (plain and multiprocess) passes with nothing skipped",
+      "surface": "broker real-process test harness (real cmd/broker binary started by startBroker) on a tester-owned embedded Postgres 16.4 cluster (fresh initdb, 127.0.0.1:54339, under $TMPDIR)",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:54339/postgres?sslmode=disable' go test -count=1 -v -run 'TestAnAccountProvesOnlyTheServiceItIsListedFor|TestOneServicesTwoAccountsEachGetItsSecret' ./cmd/broker && go test -count=1 -v ./cmd/broker && go test -tags multiprocess -count=1 -timeout 20m ./cmd/broker",
+      "observed": "--- PASS TestAnAccountProvesOnlyTheServiceItIsListedFor (11.26s), --- PASS TestOneServicesTwoAccountsEachGetItsSecret (11.86s); full ./cmd/broker ok 84.180s, 18 PASS, 0 SKIP; multiprocess ok 110.121s",
+      "headSha": "5097afb974af908e17390b95c4b3fba81d741d1b",
+      "negativeControl": "Mutation of the migrated call via go -overlay, dropping accountB from BROKER_SERVICES in service_accounts_test.go: '--- FAIL: TestOneServicesTwoAccountsEachGetItsSecret' at service_accounts_test.go:77 \"pod B's request = {State:denied ...}, want granted\", so the options-form Env reaches the broker and the repaired test catches its loss"
+    }
+  ],
+  "breakAttempts": [
+    "Env-loss mutation in the migrated call: caught by TestOneServicesTwoAccountsEachGetItsSecret (above), so no red test is needed.",
+    "Other callers and build tags: every startBroker call in cmd/broker (main_test.go, multiprocess_test.go, service_login_test.go, the two repaired files) uses brokerOptions; go vet covers the default build and -tags multiprocess, the only build tag in cmd/broker."
+  ],
+  "ci": "At code head 29460122b2ef when read: Legion Envoy and Contracts run 40194998717 in progress (broker-multiprocess success, envoy-e2e-local success, envoy-go in progress); Tests run 40194998650 queued; PR Title 40194998764 success; Docs 40194998749 success; Worker Image 40194998729 in progress. Not waited on."
+}
