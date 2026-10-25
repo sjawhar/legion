@@ -24,9 +24,12 @@ import (
 // the production store rather than a statement of the test's making.
 //
 // The expectation is single-digit milliseconds of contention against a ten-second bound
-// (oauthSecretTimeout's own comment carries that measured range), with a few milliseconds more
-// here, since each goroutine's first call also opens its pooled connection:
-// 14.7 ms and 6.3 ms in this sandbox. So a quarter of the bound is a margin no scheduling hiccup
+// (oauthSecretTimeout's own comment carries that measured range). What this row measures is
+// larger and mostly not the contention: each goroutine's first call also opens its pooled
+// connection, so it reads 14.7 ms and 6.3 ms in this sandbox where the contention alone, with
+// both connections already open, is 0.7-1.6 ms. Either figure is three orders of magnitude
+// inside the bound, and the larger one is the honest thing to compare against, since a cold
+// boot pays the connection too. So a quarter of the bound is a margin no scheduling hiccup
 // or loaded runner closes: this row goes red when the margin collapses by two orders of
 // magnitude, and for nothing else.
 func TestOAuthProviderSecretUnderATwoPodBootIsFarInsideItsTimeout(t *testing.T) {

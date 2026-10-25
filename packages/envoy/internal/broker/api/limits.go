@@ -194,8 +194,11 @@ var DefaultRereadOverallLimit = ratelimit.Limit{Every: time.Second, Burst: 10}
 // request"), the whole project shares them, and one reread spends two of them (the secret and
 // its version). The budget divided here is a fifth of that quota - 120 metadata reads a minute,
 // one reread a second - which is what one pod alone was allowed; the other four fifths are what
-// every pod's five-minute namespace reload, its miss-path rereads and its releases spend, and
-// the fan-out multiplies those too, so this route's share is not the place to find more room.
+// every pod's five-minute namespace reload, its miss-path rereads and its releases spend. Those
+// are multiplied by running more pods, not by the fan-out: each pod spends its own, and none of
+// them notifies - only this route's reread does, while a miss-path reread, a reload and a release
+// send nothing - so they too grow with the replica count, and this route's share is not the place
+// to find more room.
 // Its rate is divided by the replica count squared for the same reason as the default bucket's
 // - each accepted reread costs a store read on every pod, so the fleet spends replicas² × this
 // rate - which for two pods is 2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads =

@@ -111,34 +111,29 @@ func main() {
 	again := make(chan os.Signal, 2)
 	signal.Notify(again, os.Interrupt, syscall.SIGTERM)
 	defer signal.Stop(again)
-	// serveStarted is closed once the socket is bound and srv.Serve is about to take it. It is
-	// the one piece of shared state that decides which of again's two readers a second signal
-	// belongs to, so that they cannot both fire: before it closes there is no server and nothing
-	// to drain, and the goroutine below ends the process; after it, the drain's own select reads
-	// that signal and ends the drain early instead.
+	// serveStarted is closed once the socket is bound and srv.Serve is about to take it, and
+	// drainNow is how the watchdog below hands a second signal to the drain. The watchdog is
+	// again's only reader, and it decides once, from serveStarted's state, who a second signal
+	// belongs to (secondSignalFindsServing): the drain, through drainNow, or the watchdog's own
+	// exit. Room for one, so that handing it over never blocks on a drain that is not reading
+	// yet - there is never a second hand-over to make room for.
 	serveStarted := make(chan struct{})
+	drainNow := make(chan struct{}, 1)
 	go func() {
-		// The first signal is the one signal.NotifyContext has already turned into ctx's
-		// cancellation; this channel is sent it too. Taking it off here is what leaves the next
-		// signal to mean "now" for exactly one reader: this goroutine is parked on the receive
-		// before any signal can arrive, so that first delivery is handed straight to it and
-		// never sits in the buffer for the drain's select - which the same cancellation is what
-		// unblocks.
-		<-again
-		select {
-		case <-serveStarted:
-			// Serving: a second signal is the drain's to read, and ending the drain rather than
-			// the process is right once there are in-flight requests for srv.Shutdown to finish.
-		case <-again:
-			// A second signal with nothing serving yet. Some of the boot runs on a context no
-			// signal cancels, and all of it runs with no health endpoint answering, so an
-			// operator who has asked twice is owed an exit rather than a process that runs on to
-			// bind a socket and drain a server that never served. The lines logged above this
-			// one say how far the boot had got; the status is non-zero because this is a boot
-			// that did not finish, not a clean stop.
-			slog.Error("broker: a second signal arrived while the broker was still starting up, so it is stopping without a drain: it has served nothing")
-			os.Exit(1)
+		if secondSignalFindsServing(again, serveStarted) {
+			// Serving: ending the drain rather than the process is right once there are
+			// in-flight requests for srv.Shutdown to finish.
+			drainNow <- struct{}{}
+			return
 		}
+		// A second signal with nothing serving yet. Some of the boot runs on a context no
+		// signal cancels, and all of it runs with no health endpoint answering, so an operator
+		// who has asked twice is owed an exit rather than a process that runs on to bind a
+		// socket and drain a server that never served. The lines logged above this one say how
+		// far the boot had got; the status is non-zero because this is a boot that did not
+		// finish, not a clean stop.
+		slog.Error("broker: a second signal arrived while the broker was still starting up, so it is stopping without a drain: it has served nothing")
+		os.Exit(1)
 	}()
 
 	cfg, err := config.Load(os.Getenv)
@@ -283,11 +278,14 @@ func main() {
 	// waits for it: a pod the load balancer can reach is a pod a retag has to reach, so a process
 	// that bound before its own LISTEN was in place would spend those milliseconds serving
 	// traffic while a peer's reread of a secret it holds goes to a channel nobody on this pod is
-	// on yet - the one hole the fan-out exists to close, and one nothing but the five-minute
-	// reload would close again. OnConnected is what makes the wait mean that rather than nearly
-	// that: pglisten runs it after the LISTEN statement has succeeded, where a hook on the dial
-	// would fire with the LISTEN still in flight. The token is sent without blocking and the
-	// channel is never drained again, so every redial behind the boot costs the listener nothing.
+	// on yet. That wait orders net.Listen against the LISTEN and nothing else. It does nothing for
+	// a notification committed before the LISTEN, while the first policy load above was reading
+	// the namespace - the load was taken before the subscription existed - and the catch-up load
+	// after the wait is what covers that one. OnConnected is what makes the wait mean "listening"
+	// rather than nearly that: pglisten runs it after the LISTEN statement has succeeded, where a
+	// hook on the dial would fire with the LISTEN still in flight. The token is sent without
+	// blocking and the channel is never drained again, so every redial behind the boot costs the
+	// listener nothing.
 	//
 	// The receiving half of the reread fan-out, started after the first policy load (it rereads
 	// into that policy) and before net.Listen, so a pod that cannot hold a LISTEN connection still
@@ -314,13 +312,52 @@ func main() {
 		},
 	}).Run(serving)
 	// The wait that pairs with it, and the whole of what it promises: either this pod is listening
-	// on the channel before it takes its first request, or rereadListenWait has run out. A pod
-	// whose dial or whose LISTEN failed waits the bound out and then serves anyway, the listener
-	// redialing behind it, so nothing here can refuse a boot; the bound is what keeps a Postgres
-	// that takes the connection and never answers from holding one.
+	// on the channel before net.Listen binds the socket callers reach it on, or rereadListenWait
+	// has run out. A pod whose dial or whose LISTEN failed waits the bound out and then serves
+	// anyway, the listener redialing behind it, so nothing here can refuse a boot; the bound is
+	// what keeps a Postgres that takes the connection and never answers from holding one.
 	select {
 	case <-firstListen:
+		// The catch-up: one more whole-namespace load into the live policy, taken now that the
+		// LISTEN is in place, so that the subscription exists before the read whose result it is
+		// meant to invalidate. Postgres delivers nothing to a session for a NOTIFY committed before
+		// that session's LISTEN, and the listener's onConnected deliberately catches nothing up, so
+		// without this load the following is lost on this pod until its five-minute reload, with
+		// nothing logged: B starts and begins its first load; A serves a reread of a narrowing
+		// retag and commits its notification, which no session of B's is listening for; B's
+		// LISTEN succeeds. With this load, B then reads the namespace again here and binds with
+		// the retag in force. A notification committed after the LISTEN is delivered instead; the
+		// RefreshOne it drives and this Refresh take the policy's one writer lock, and Refresh
+		// re-describes every name a reread changed within the store's ListLag (Current's recent
+		// anchors), so a reread that lands first is not undone by this load's listing. What this
+		// load reads is the store's listing, as every whole-namespace load does, so a store whose
+		// listing lags a write by up to its ListLag (Store.ListLag) can still show it the tags
+		// from before the retag.
+		//
+		// It costs one extra namespace read per boot, and nothing after: the whole listing - on
+		// Secrets Manager its ListSecrets pages and at most one KMS alias lookup, on Secret
+		// Manager those pages and one GetSecretVersion per secret.
+		//
+		// A failed load does not refuse the boot. The first load succeeded, so the policy is
+		// live and this is a catch-up; the line says what failing it loses, and it is named
+		// apart from the "broker: <operation> failed" lines, which stand for a request answered
+		// 500 or 503. It runs on serving, as the first load does and for the same reasons, so
+		// what the first load's comment writes down about one signal holds here too: a store
+		// that never answers holds the boot until a second signal or the kubelet's SIGKILL.
+		if err := current.Refresh(serving); err != nil {
+			slog.Warn("broker: serving without the boot's catch-up policy load, so a retag another pod served while this one was starting may not be in force here until its five-minute reload", "error", err)
+		}
+		// The same check as the one after the first load, for the same reason: a process
+		// signalled before it has bound anything has nothing to drain.
+		if ctx.Err() != nil {
+			slog.Info("broker: signalled while starting up, before it had bound anything", "stage", "the catch-up policy load")
+			return
+		}
 	case <-time.After(rereadListenWait):
+		// No catch-up here. With no LISTEN in place there is no subscription to order a read
+		// after, so a second namespace read would not close the window, only move where it
+		// starts: a notification sent before the listener connects is lost on this pod whatever
+		// is read now, as this warning says, and its five-minute reload is what catches it up.
 		slog.Warn("broker: binding before the reread listener has had an answer", "waited", rereadListenWait)
 	}
 
@@ -436,9 +473,11 @@ func main() {
 		WriteTimeout:      writeTimeout,
 		IdleTimeout:       2 * time.Minute,
 	}
-	// From here a second signal belongs to the drain below rather than to the watchdog at the top
-	// of main: the socket is bound and srv.Serve is about to take it, so there are requests to
-	// finish and a drain whose job is finishing them.
+	// From here a second signal belongs to the drain below rather than to the watchdog's exit:
+	// the socket is bound and srv.Serve is about to take it, so there are requests to finish and
+	// a drain whose job is finishing them. Closing serveStarted before srv.Serve starts is what
+	// makes the watchdog's exit line true: a decision that finds it open is one taken before
+	// srv.Serve could have answered a single request.
 	close(serveStarted)
 	go func() {
 		if err := srv.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -460,15 +499,14 @@ func main() {
 		// A second signal ends the drain at once: an operator, or a kubelet that has decided this
 		// pod has to be gone now, must not have to wait out a drain whose whole purpose has
 		// already been served. ctx is no help here — signal.NotifyContext cancelled it with the
-		// first signal — so the second one is read from again, the channel registered at the top
-		// of main, whose watchdog goroutine has stood aside now that serveStarted is closed. A
-		// zero drain takes neither this select nor a timer, which would be a wait on something
-		// that never fires.
+		// first signal — so the second one arrives on drainNow, handed over by the watchdog at the
+		// top of main once it has found serveStarted closed. A zero drain takes neither this
+		// select nor a timer, which would be a wait on something that never fires.
 		timer := time.NewTimer(drain)
 		defer timer.Stop()
 		select {
 		case <-timer.C:
-		case <-again:
+		case <-drainNow:
 			slog.Info("broker: a second signal ended the drain early")
 		}
 	}
@@ -487,6 +525,39 @@ func main() {
 	// and the two pools behind it, each of whose health checks is a goroutine of its own.
 	endServing()
 	st.Close()
+}
+
+// secondSignalFindsServing takes the first two signals off again and then answers whether
+// serveStarted was closed: true when the second signal belongs to the drain, false when it
+// belongs to the watchdog's exit. It is the watchdog's whole decision, kept out of main so a test
+// drives it with no process to kill.
+//
+// The order is the point. It takes both signals before it looks at serveStarted, and then looks
+// once without waiting. Waiting on serveStarted and the second signal in one select instead would
+// be a select over two ready channels whenever a second signal reached a broker already serving,
+// and Go picks among ready cases uniformly at random: some of those stops would os.Exit(1) a
+// serving broker, skipping the drain and srv.Shutdown and logging that it had served nothing.
+// Read this way, serveStarted's state is the only input, and it only ever moves one way, so once
+// it is closed every second signal answers drain.
+//
+// The first signal is the one signal.NotifyContext has already turned into ctx's cancellation;
+// again is sent it too, and taking it off here is what leaves the next one to mean "now". Nothing
+// else reads again, so no other reader can take either signal first.
+//
+// One ambiguity remains: a second signal taken just as serveStarted closes is answered by
+// whichever side of the close the look lands on. Both answers stop the process. Found open,
+// srv.Serve has not started, since main closes serveStarted first, so the exit drops no request;
+// found closed, a server exists or is one statement from existing, and the drain is the right
+// owner for it - it ends at once on the hand-over and runs srv.Shutdown.
+func secondSignalFindsServing(again <-chan os.Signal, serveStarted <-chan struct{}) bool {
+	<-again
+	<-again
+	select {
+	case <-serveStarted:
+		return true
+	default:
+		return false
+	}
 }
 
 // requestDeadline bounds every request's own context, so no handler outlives its caller by more

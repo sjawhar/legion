@@ -306,6 +306,19 @@ whose reread answers another kind than the one it wrote exits 1: the broker stil
 tags; run the retag again, and store no value until it exits 0. A release that finds the secret
 retagged while it reads the store releases nothing and ends that grant.
 
+Exit 0 is the answer of the one broker process that served the reread, not of every process. That
+process tells the others over Postgres, and they reread within seconds, but three things leave one
+behind: a failed notification, which that process logs as `broker: the other pods were not told to
+reread a secret` and which does not change its own 200; a process whose listener is redialing,
+which logs `a Postgres listener has no connection; redialing` and catches nothing up when it
+reconnects; and a process still booting, which reads the namespace again once it is listening but
+would not see a retag served in the gap if that catch-up read failed. A process left behind serves
+the secret as stored for up to five minutes, until its own reload, and a grant of it there
+releases the stored value raw. So, before you store an App key or a Google login: read the broker's
+log for those lines since the retag, and if any names your secret, or if you cannot read the log,
+wait five minutes after the retag's exit 0 before `secret set`. Waiting costs nothing; storing
+early can hand the raw key to an agent through a process that still serves the secret as stored.
+
 A retag checks the tags it read. On GCP it writes against that read, so a retag another person
 wrote in between refuses it, with `another write changed the secret after this retag read it`,
 and nothing is written. AWS has no such check, so retag secrets there one writer at a time: a retag

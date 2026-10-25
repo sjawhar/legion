@@ -2453,8 +2453,16 @@ written, since `pglisten` splices a channel into its listen statement as written
 secret's name and this process's own boot-minted sender id, under `notifyRereadTimeout` (5 s) on a
 context of its own, so a caller that hangs up cannot stop the other pods from learning of a reread
 that already happened. Every process runs `reread.Listener` for its whole life (started after the
-first policy load, and the bind then waits up to `rereadListenWait` (5 s) for its first dial,
-successful or not, so an address the load balancer can reach is an address a retag can reach). It
+first policy load, and the bind then waits up to `rereadListenWait` (5 s) for its `OnConnected`,
+which `pglisten` runs only once the `LISTEN` statement itself has returned, so an address the load
+balancer can reach is an address a retag can reach; a pod whose dial or `LISTEN` failed waits the
+bound out, warns and serves anyway. Once that `LISTEN` is in place the boot takes **one more
+whole-namespace load** before `net.Listen`, so the subscription exists before the read whose
+result it is meant to invalidate: Postgres delivers nothing to a session for a `NOTIFY` committed
+before that session's `LISTEN`, so without it a retag a peer served while this pod was reading the
+namespace would be lost here until the five-minute reload. A failed catch-up warns and the boot
+carries on, and the timeout branch takes none, there being no subscription to order a read
+against). It
 runs on a context derived with `context.WithoutCancel` from the signal's, not on the signal's own,
 and so does the five-minute policy reload: a pod is sent requests for the whole of its drain, so a
 listener and a reload stopped at `SIGTERM` would leave the one pod the load balancer is still
@@ -3019,8 +3027,11 @@ before, because a pod is removed from its Service's EndpointSlice concurrently w
 beginning termination, so new connections still arrive after the signal — which is why
 `GET /healthz` is a readiness probe and must never be a liveness probe, one being enough to have
 the kubelet kill the container mid-drain. It waits `BROKER_DRAIN_SECONDS` (a second signal ends
-the wait at once, through a `signal.Notify` channel of its own, since `signal.NotifyContext`'s
-context is already cancelled; a zero drain registers neither) and only then closes the listener
+the wait at once: that channel is registered unconditionally before any boot work, since
+`signal.NotifyContext`'s context is already cancelled by the first signal, and one watchdog
+goroutine is its only reader, deciding from `serveStarted`'s state — never from a `select` over
+both — whether the second signal is the drain's, handed over on `drainNow`, or an exit that
+skips it. A zero drain takes neither the timer nor that select) and only then closes the listener
 and calls `srv.Shutdown` under `shutdownTimeout`, which is `writeTimeout` (`requestDeadline` 45 s
 plus 15 s) rather than a figure of its own: the longest exchange the server itself allows, so a
 request admitted in the drain's last instant still gets its whole handler deadline. A deployment's
