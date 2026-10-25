@@ -6311,6 +6311,71 @@ describe("envoy OMP extension", () => {
     expect(holders.has(role)).toBe(false);
   });
 
+  // A hold is its role and the session it was made under, so every hold of one role this process
+  // abandons to the listener's reaping is waited out while the listener names it, whichever
+  // session that is. One forgotten because another of the same role was abandoned after it reads
+  // as a newer live holder: the pane records a refusal for the session whose records name the
+  // role, never claims it once the listener reaps the hold, and the role sits unheld — for a
+  // controller pane, its work goes undispatched while the pane meant to hold it runs on.
+  test("holds of one role abandoned under two sessions are each waited out, neither read as a newer holder", async () => {
+    // The waits are real: the role move is abandoned on a real timer, read as the move starts,
+    // and the deadline is long enough for a hand-back to fail twice — the client retries a
+    // failure once, 250 ms later — so only the move this case wedges is ever abandoned.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 600 }, async () => {
+      const role = "legion-controller";
+      const topic = `notifications.role.${role}`;
+      const { fixture, live, context, holders, roleTool, failHandBacks, gateHandBack, tick } =
+        await gatedRoleFixture("abandoned-holds-two-sessions", "ses_tw");
+      const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+
+      // A /new gives up ses_tw's hold; its pass hands it back, and is abandoned at its deadline
+      // while the listener still holds that call.
+      const handingBack = gateHandBack(topic, "ses_tw");
+      await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+      const switched = fixture.handlers.get("session_switch")?.(
+        { reason: "new" },
+        live("ses_tw_n", { fresh: true })
+      );
+      await handingBack.reached;
+      await new Promise((resolve) => setTimeout(resolve, 700));
+
+      // The model claims the role in ses_tw_n, which the listener names from then on.
+      expect((await roleTool.execute("", { role })).isError).not.toBe(true);
+      expect(holders.get(role)).toBe("ses_tw_n");
+
+      // A /new gives up ses_tw_n's hold too, and the listener fails its hand-back: that hold is
+      // abandoned to the listener's reaping, under ses_tw_n.
+      failHandBacks(2);
+      await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+      await fixture.handlers.get("session_switch")?.(
+        { reason: "new" },
+        live("ses_tw_m", { fresh: true })
+      );
+      expect(holders.get(role)).toBe("ses_tw_n");
+
+      // The first hand-back fails at last: ses_tw's hold is abandoned too, after ses_tw_n's.
+      failHandBacks(2);
+      handingBack.release();
+      await switched;
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      for (let step = 0; step < 10; step += 1) await drain();
+
+      // A resume opens a session whose records name the role. Its soft claim is refused with
+      // ses_tw_n as the holder: this process's own abandoned hold, so the claim waits on it.
+      await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+      const resumed = live("ses_tw_c", { fresh: true });
+      fixture.pi.appendEntry("envoy-role-claim", { role });
+      await fixture.handlers.get("session_switch")?.({ reason: "resume" }, resumed);
+      expect(holders.get(role)).toBe("ses_tw_n");
+
+      // The listener reaps that hold; the next tick claims the role.
+      holders.delete(role);
+      tick();
+      for (let step = 0; step < 10; step += 1) await drain();
+      expect(holders.get(role)).toBe("ses_tw_c");
+    });
+  });
+
   // A refusal a soft claim records (`refusedRoles`) outlives every later pass for that session:
   // `desiredRole` answers undefined for the role from then on, the next pass sees a role held
   // that nothing wants, and `endRole` hands it back and closes every notice subscription a plugin
@@ -6700,6 +6765,62 @@ describe("envoy OMP extension", () => {
       ]);
       expect(holders.has("reviewer")).toBe(false);
       expect(holders.get("release-captain")).toBe("ses_rf_ab");
+    });
+  });
+
+  // A soft claim takes a live session's role only when it names that session as the one it
+  // continues, so this process may name only a hold it still has a right to: once another
+  // process has resumed a session this one left and holds a role under it, that session is the
+  // live holder, and no claim from this pane may take the role from it. Taken, a live pane loses
+  // its role to another pane without a word, and that role's tasks follow the wrong process.
+  test("a role another process holds under a session this process left stays with that live session when this pane wants the role", async () => {
+    // The waits are real: the role move is abandoned on a real timer, read as the move starts,
+    // and the deadline is long enough that only the move this case wedges is ever abandoned.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 600 }, async () => {
+      const role = "legion-controller";
+      const topic = `notifications.role.${role}`;
+      const { fixture, live, context, holders, roleTool, failHandBacks, gateHandBack, tick } =
+        await gatedRoleFixture("left-session-live-holder-kept", "ses_lk");
+      const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+      expect(holders.get(role)).toBe("ses_lk");
+
+      // A tree navigation in ses_lk to records that release the role ends it; its pass hands it
+      // back, and is abandoned at its deadline while the listener still holds that call.
+      fixture.pi.appendEntry("envoy-role-claim", { role: null });
+      const handingBack = gateHandBack(topic, "ses_lk");
+      const navigated = fixture.handlers.get("session_tree")?.(
+        { newLeafId: "leaf-lk" },
+        live("ses_lk")
+      );
+      await handingBack.reached;
+      await new Promise((resolve) => setTimeout(resolve, 700));
+
+      // The host resumes ses_lk_b, and the model claims the role there.
+      await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+      await fixture.handlers.get("session_switch")?.(
+        { reason: "resume" },
+        live("ses_lk_b", { fresh: true })
+      );
+      expect((await roleTool.execute("", { role })).isError).not.toBe(true);
+      expect(holders.get(role)).toBe("ses_lk_b");
+
+      // Another process resumes ses_lk and claims the role: ses_lk is its live holder now.
+      holders.set(role, "ses_lk");
+
+      // The abandoned hand-back finally fails (the client retries a failure once, 250 ms later),
+      // and its loop ends past its deadline.
+      failHandBacks(2);
+      handingBack.release();
+      await navigated;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      for (let step = 0; step < 10; step += 1) await drain();
+
+      // The passes that follow in ses_lk_b leave the role with the live session that holds it.
+      for (let each = 0; each < 3; each += 1) {
+        tick();
+        for (let step = 0; step < 10; step += 1) await drain();
+      }
+      expect(holders.get(role)).toBe("ses_lk");
     });
   });
 
