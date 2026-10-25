@@ -131,9 +131,11 @@ func (s *server) computeWriteAdvice(
 // failure is not fatal to the advice: the two before it are what a session asked for, while this
 // one decides a single line, and every issue is created in triage, so returning an
 // adviceQueryError here would put a third failure mode on the path that runs for every
-// session-authored `dispatch issue` - one that drops the suggestions that creation already
-// computed and persisted (issue_create.go) along with the rest of the advice. Nothing runs after
-// it, so the advice already assembled is complete without it.
+// session-authored `dispatch issue`. What that costs a creation is not a copy of something
+// already stored: issue_create.go computes and persists LEGION-550's suggestions only once the
+// advice survives (`if advice != nil`), after it, so a fatal advice failure there means the
+// suggestions are never computed and no row is ever written. Nothing runs after this step, so
+// the advice already assembled is complete without it.
 //
 // The walk takes a savepoint of its own inside the advice savepoint, because a failed statement
 // aborts the transaction it ran in: run directly on the advice savepoint, its failure would also

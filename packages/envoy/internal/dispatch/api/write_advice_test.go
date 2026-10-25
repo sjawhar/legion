@@ -576,8 +576,9 @@ func TestWriteAdviceLeavesWhoOwnsTheStatusUnaskedPastTriage(t *testing.T) {
 // The walk is the last advice query and the only one whose failure the advice survives: every
 // issue is created in triage, so it runs for every session-authored `dispatch issue`, and
 // dropping the whole advice for it would drop the two queries already answered - and, on a
-// creation, the suggestions that creation computed and persisted before the advice ran
-// (issue_create.go). A failed walk costs its own field alone.
+// creation, every suggestion that creation would have offered, since issue_create.go computes
+// and persists them only once the advice survives, after it. A failed walk costs its own field
+// alone.
 func TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails(t *testing.T) {
 	handler, _ := newFailingAdviceHandler(t, "legion_managed_status", 0)
 	createAdviceProject(t, handler, "WALK")

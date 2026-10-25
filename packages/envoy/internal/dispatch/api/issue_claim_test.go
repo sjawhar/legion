@@ -507,11 +507,7 @@ func TestClaimSurvivesAFailingLegionLabelWalk(t *testing.T) {
 	if answer := decodeBody[claimedIssue](t, claimed); answer.Claim == nil || answer.Claim.Actor.ID != "session-one" {
 		t.Fatalf("the claim was discarded by the failed walk: %s", claimed.Body.String())
 	}
-	var body map[string]json.RawMessage
-	if err := json.Unmarshal(claimed.Body.Bytes(), &body); err != nil {
-		t.Fatalf("decode claim answer: %v body=%s", err, claimed.Body.String())
-	}
-	if _, answered := body["legion_managed_status"]; answered {
+	if _, answered := rawClaimFields(t, claimed)["legion_managed_status"]; answered {
 		t.Fatalf("a failed walk must omit legion_managed_status rather than answer it: %s", claimed.Body.String())
 	}
 	// The claim is the issue's, not the response's: a reader sees the same holder.

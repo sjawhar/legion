@@ -407,8 +407,13 @@ behind a savepoint with a 500 ms
 timeout that is restored before the savepoint is released: a failure of either session-scoped
 query is logged and omits `advice` without preventing the write from committing, while the
 `legion_managed_status` walk, which takes a savepoint of its own inside that one, is logged and
-omits that field alone, keeping the advice already assembled (and, on an issue creation, the
-suggestions it already persisted). The consecutive-write query counts only the
+omits that field alone, keeping the advice already assembled. That matters most on an issue
+creation, where `computeAndPersistSuggestions` runs only once the advice survives (`if advice
+!= nil`, `issue_create.go`), after it: a fatal advice failure there means LEGION-550's
+suggestions are never computed and no row is ever written, so what the walk's tolerance saves is
+the whole of that offer rather than a copy of something already stored. An ask is the other way
+round - `asks.go` computes its suggestions first and falls back to a suggestions-only advice, so
+they survive a fatal advice failure there. The consecutive-write query counts only the
 calling actor's own events (it runs for a session caller alone; any other actor reports zero with no
 query) and materializes the last-human fence so its `max(id)` runs once, and relies on the
 `events (issue_key, seq)` unique index's issue prefix and commit-ordered event ids; the open-ask
