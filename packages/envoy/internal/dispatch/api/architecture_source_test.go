@@ -23,6 +23,16 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
+// The fixture repositories' commits: full 40-hex SHAs, the only answer Ref accepts.
+const (
+	shaOne    = "1111111111111111111111111111111111111111"
+	shaTwo    = "2222222222222222222222222222222222222222"
+	shaBroken = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	shaNul    = "0000000000000000000000000000000000000000"
+	shaNulKey = "0000000000000000000000000000000000000001"
+	shaFork   = "ffffffffffffffffffffffffffffffffffffffff"
+)
+
 // fakeGitHubApp is the GitHub App API surface the access check walks:
 // installation lookup, token mint, and the repository read that proves the
 // minted token works, plus the commit/tree/blob reads the architecture
@@ -74,9 +84,15 @@ func (f *fakeGitHubApp) handler(t *testing.T) http.Handler {
 		}
 		fmt.Fprint(w, `{}`)
 	})
-	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
 		if f.branchMissing {
 			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		// As GitHub does: the bare sha for Accept: application/vnd.github.sha, JSON otherwise.
+		if r.Header.Get("Accept") == "application/vnd.github.sha" {
+			w.Header().Set("Content-Type", "application/vnd.github.sha")
+			fmt.Fprint(w, f.commit)
 			return
 		}
 		fmt.Fprintf(w, `{"sha":%q}`, f.commit)
@@ -205,7 +221,7 @@ func TestArchitectureSourcePutGetListAndDelete(t *testing.T) {
 
 	// Project a model first: deleting the source retires it (components and
 	// their edges), while the snapshot stays as history.
-	fake.commit = "sha-one"
+	fake.commit = shaOne
 	fake.files = map[string]string{
 		"api.md":   "---\ntitle: HTTP API\ndepends_on: [store]\n---\nThe API.\n",
 		"store.md": "---\ntitle: Store\n---\nThe store.\n",
@@ -462,7 +478,7 @@ func TestArchitectureSourceRePutRevalidatesBeforeWriting(t *testing.T) {
 func TestArchitectureSourceSyncRoute(t *testing.T) {
 	fake := &fakeGitHubApp{
 		installations: map[string]string{"legion/arch": "read"},
-		commit:        "sha-one",
+		commit:        shaOne,
 		files: map[string]string{
 			"api.md":   "---\ntitle: HTTP API\ndepends_on: [store]\n---\nThe API.\n",
 			"store.md": "---\ntitle: Store\n---\nThe store.\n",
@@ -495,7 +511,7 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 	if err := json.NewDecoder(synced.Body).Decode(&body); err != nil {
 		t.Fatalf("decode sync response: %v", err)
 	}
-	if body.LastCommit == nil || *body.LastCommit != "sha-one" || body.LastError != nil || body.LastSyncAt == nil {
+	if body.LastCommit == nil || *body.LastCommit != shaOne || body.LastError != nil || body.LastSyncAt == nil {
 		t.Fatalf("sync response: %+v", body)
 	}
 	var components string
@@ -506,7 +522,7 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 	}
 
 	// A rejected model: 200, the reason on the row, the projection intact.
-	fake.commit = "sha-broken"
+	fake.commit = shaBroken
 	fake.files = map[string]string{"api.md": "x\n", "API.md": "duplicate\n"}
 	rejected := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/CORE/architecture-source/sync", nil, "alice")
 	if rejected.Code != http.StatusOK {
@@ -518,7 +534,7 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 	if body.LastError == nil || !strings.Contains(*body.LastError, "duplicate component id") {
 		t.Fatalf("rejected response last_error: %+v", body)
 	}
-	if body.LastCommit == nil || *body.LastCommit != "sha-one" {
+	if body.LastCommit == nil || *body.LastCommit != shaOne {
 		t.Fatalf("rejected import moved last_commit: %+v", body)
 	}
 	if err := database.Pool.QueryRow(context.Background(), `
@@ -529,7 +545,7 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 
 	// Front matter that spells U+0000 as a YAML escape is a rejected model too, not a 500 that
 	// records nothing (LEGION-527).
-	fake.commit = "sha-nul"
+	fake.commit = shaNul
 	fake.files = map[string]string{"api.md": "---\ntitle: \"HTTP\\0API\"\n---\nThe API.\n", "store.md": "---\ntitle: Store\n---\nThe store.\n"}
 	escaped := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/CORE/architecture-source/sync", nil, "alice")
 	if escaped.Code != http.StatusOK {
@@ -538,14 +554,14 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 	if err := json.NewDecoder(escaped.Body).Decode(&body); err != nil {
 		t.Fatalf("decode front matter NUL response: %v", err)
 	}
-	if body.LastError == nil || !strings.Contains(*body.LastError, "api.md: front matter title") || body.LastCommit == nil || *body.LastCommit != "sha-one" {
+	if body.LastError == nil || !strings.Contains(*body.LastError, "api.md: front matter title") || body.LastCommit == nil || *body.LastCommit != shaOne {
 		t.Fatalf("front matter NUL response: %+v", body)
 	}
 
 	// An unknown front-matter key that YAML decodes to U+0000 reaches KnownFields before Parse can
 	// name a decoded value. The recorded failure is made storable before it reaches the row/event,
 	// so this route is still the same 200 with last_error (LEGION-527).
-	fake.commit = "sha-nul-key"
+	fake.commit = shaNulKey
 	fake.files = map[string]string{"api.md": "---\n\"\\0\": value\n---\nThe API.\n", "store.md": "---\ntitle: Store\n---\nThe store.\n"}
 	key := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/CORE/architecture-source/sync", nil, "alice")
 	if key.Code != http.StatusOK {
@@ -554,7 +570,7 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 	if err := json.NewDecoder(key.Body).Decode(&body); err != nil {
 		t.Fatalf("decode front matter NUL key response: %v", err)
 	}
-	if body.LastError == nil || !strings.Contains(*body.LastError, "api.md: front matter") || strings.IndexByte(*body.LastError, 0) >= 0 || body.LastCommit == nil || *body.LastCommit != "sha-one" {
+	if body.LastError == nil || !strings.Contains(*body.LastError, "api.md: front matter") || strings.IndexByte(*body.LastError, 0) >= 0 || body.LastCommit == nil || *body.LastCommit != shaOne {
 		t.Fatalf("front matter NUL key response: %+v", body)
 	}
 
@@ -578,7 +594,7 @@ func TestArchitectureSourceRePutReprojectsAnIdenticalTree(t *testing.T) {
 	}
 	fake := &fakeGitHubApp{
 		installations: map[string]string{"legion/arch": "read", "legion/fork": "read"},
-		commit:        "sha-one",
+		commit:        shaOne,
 		files:         files,
 	}
 	handler, database := newArchitectureSourceServer(t, fake)
@@ -592,7 +608,7 @@ func TestArchitectureSourceRePutReprojectsAnIdenticalTree(t *testing.T) {
 		t.Fatalf("first sync: status=%d body=%s", synced.Code, synced.Body.String())
 	}
 
-	fake.commit = "sha-fork"
+	fake.commit = shaFork
 	if moved := dispatchRequest(t, handler, http.MethodPut, "/api/v1/projects/CORE/architecture-source", map[string]string{
 		"repo": "legion/fork", "branch": "main",
 	}, "alice"); moved.Code != http.StatusOK {
@@ -610,14 +626,14 @@ func TestArchitectureSourceRePutReprojectsAnIdenticalTree(t *testing.T) {
 	`).Scan(&snapshots, &snapshotCommit); err != nil {
 		t.Fatalf("snapshots: %v", err)
 	}
-	if snapshots != 2 || snapshotCommit != "sha-fork" {
-		t.Fatalf("snapshots = %d newest %q, want 2 with sha-fork (the re-pointed source must re-project)", snapshots, snapshotCommit)
+	if snapshots != 2 || snapshotCommit != shaFork {
+		t.Fatalf("snapshots = %d newest %q, want 2 with %s (the re-pointed source must re-project)", snapshots, snapshotCommit, shaFork)
 	}
 	var owned string
 	if err := database.Pool.QueryRow(context.Background(), `
 		select string_agg(distinct s.commit, ',') from components c
 		join architecture_snapshots s on s.id = c.snapshot_id where c.project_key = 'CORE'
-	`).Scan(&owned); err != nil || owned != "sha-fork" {
-		t.Fatalf("components owned by snapshot %q err %v, want sha-fork", owned, err)
+	`).Scan(&owned); err != nil || owned != shaFork {
+		t.Fatalf("components owned by snapshot %q err %v, want %s", owned, err, shaFork)
 	}
 }

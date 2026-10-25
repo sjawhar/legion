@@ -30,6 +30,25 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
+// The fixture repository's commits: full 40-hex SHAs, the only answer Ref accepts.
+const (
+	commitOne    = "1111111111111111111111111111111111111111"
+	commitTwo    = "2222222222222222222222222222222222222222"
+	commitThree  = "3333333333333333333333333333333333333333"
+	commitBroken = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+)
+
+// writeCommit answers the commits route as GitHub does: the bare sha for Accept:
+// application/vnd.github.sha, the commit's JSON otherwise.
+func writeCommit(w http.ResponseWriter, r *http.Request, sha string) {
+	if r.Header.Get("Accept") == "application/vnd.github.sha" {
+		w.Header().Set("Content-Type", "application/vnd.github.sha")
+		fmt.Fprint(w, sha)
+		return
+	}
+	fmt.Fprintf(w, `{"sha":%q}`, sha)
+}
+
 // fakeSource is the GitHub App surface a sync walks: installation lookup,
 // token mint, branch commit, the architecture directory's subtree, and blob
 // reads. files is keyed by the file name inside SourceDir; the subtree sha is
@@ -83,12 +102,12 @@ func (f *fakeSource) handler() http.Handler {
 			f.t.Errorf("encode token: %v", err)
 		}
 	})
-	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
 		if f.branchMissing {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		fmt.Fprintf(w, `{"sha":%q}`, f.commit)
+		writeCommit(w, r, f.commit)
 	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{ref}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -175,7 +194,7 @@ func newImporterFixture(t *testing.T, fake *fakeSource) (*Importer, *store.Store
 		fake.installationID = 11
 	}
 	if fake.commit == "" {
-		fake.commit = "commit-one"
+		fake.commit = commitOne
 	}
 	client := newGitHubClient(t, fake.handler())
 
@@ -265,7 +284,7 @@ func TestSyncProjectsComponentsDependenciesAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if source.LastCommit == nil || *source.LastCommit != "commit-one" || source.LastError != nil || source.LastSyncAt == nil {
+	if source.LastCommit == nil || *source.LastCommit != commitOne || source.LastError != nil || source.LastSyncAt == nil {
 		t.Fatalf("source after sync: %+v", source)
 	}
 	want := []string{
@@ -290,11 +309,11 @@ func TestSyncProjectsComponentsDependenciesAndSnapshot(t *testing.T) {
 		`select commit, files from architecture_snapshots where project_key = 'CORE'`).Scan(&commit, &files); err != nil {
 		t.Fatalf("read snapshot: %v", err)
 	}
-	if commit != "commit-one" || files["api.md"] != validAPI {
+	if commit != commitOne || files["api.md"] != validAPI {
 		t.Fatalf("snapshot: commit=%q files=%#v", commit, files)
 	}
 
-	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced commit-one"}) {
+	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced " + commitOne}) {
 		t.Fatalf("events = %#v", got)
 	}
 }
@@ -337,7 +356,7 @@ func TestSyncSameCommitIsIdempotentEventlessAndFetchesNothing(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, `select count(*) from architecture_snapshots`).Scan(&snapshots); err != nil || snapshots != 1 {
 		t.Fatalf("snapshots = %d err %v, want 1", snapshots, err)
 	}
-	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced commit-one"}) {
+	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced " + commitOne}) {
 		t.Fatalf("same-commit re-import emitted an event: %#v", got)
 	}
 }
@@ -355,12 +374,12 @@ func TestSyncMovedHeadWithUnchangedTreeRecordsTheCommitOnly(t *testing.T) {
 	before := componentRows(t, database)
 	_, blobsBefore := fake.reads()
 
-	fake.commit = "commit-two"
+	fake.commit = commitTwo
 	source, err := importer.Sync(ctx, "CORE")
 	if err != nil {
 		t.Fatalf("moved-head sync: %v", err)
 	}
-	if source.LastCommit == nil || *source.LastCommit != "commit-two" || source.LastError != nil {
+	if source.LastCommit == nil || *source.LastCommit != commitTwo || source.LastError != nil {
 		t.Fatalf("source after moved head: %+v", source)
 	}
 	if _, blobs := fake.reads(); blobs != blobsBefore {
@@ -373,12 +392,12 @@ func TestSyncMovedHeadWithUnchangedTreeRecordsTheCommitOnly(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, `select count(*) from architecture_snapshots`).Scan(&snapshots); err != nil || snapshots != 1 {
 		t.Fatalf("snapshots = %d err %v, want 1 (the model did not change)", snapshots, err)
 	}
-	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced commit-one"}) {
+	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced " + commitOne}) {
 		t.Fatalf("unchanged tree emitted an event: %#v", got)
 	}
 
 	// A real model change under the next head goes the whole way again.
-	fake.commit = "commit-three"
+	fake.commit = commitThree
 	fake.files = map[string]string{"server.md": "---\ntitle: Server\n---\nThe server.\n"}
 	if _, err := importer.Sync(ctx, "CORE"); err != nil {
 		t.Fatalf("changed-tree sync: %v", err)
@@ -387,7 +406,7 @@ func TestSyncMovedHeadWithUnchangedTreeRecordsTheCommitOnly(t *testing.T) {
 		t.Fatalf("components after the tree changed = %#v", got)
 	}
 	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{
-		"architecture.synced commit-one", "architecture.synced commit-three",
+		"architecture.synced " + commitOne, "architecture.synced " + commitThree,
 	}) {
 		t.Fatalf("events = %#v", got)
 	}
@@ -402,7 +421,7 @@ func TestSyncInvalidSetKeepsThePreviousProjection(t *testing.T) {
 	}
 	before := componentRows(t, database)
 
-	fake.commit = "commit-broken"
+	fake.commit = commitBroken
 	fake.files = map[string]string{"api.md": "x\n", "API.md": "duplicate\n"}
 	source, err := importer.Sync(ctx, "CORE")
 	if err == nil {
@@ -411,7 +430,7 @@ func TestSyncInvalidSetKeepsThePreviousProjection(t *testing.T) {
 	if source.LastError == nil || !strings.Contains(*source.LastError, "duplicate component id") {
 		t.Fatalf("last_error = %v", source.LastError)
 	}
-	if source.LastCommit == nil || *source.LastCommit != "commit-one" {
+	if source.LastCommit == nil || *source.LastCommit != commitOne {
 		t.Fatalf("last_commit moved to the rejected commit: %v", source.LastCommit)
 	}
 	if got := componentRows(t, database); !reflect.DeepEqual(got, before) {
@@ -443,7 +462,7 @@ func TestSyncRepeatedIdenticalFailureEmitsOneEventAndRecoveryEmitsSynced(t *test
 	if _, err := importer.Sync(ctx, "CORE"); err != nil {
 		t.Fatalf("recovery sync: %v", err)
 	}
-	if got := projectEvents(t, database); len(got) != 2 || got[1] != "architecture.synced commit-one" {
+	if got := projectEvents(t, database); len(got) != 2 || got[1] != "architecture.synced "+commitOne {
 		t.Fatalf("recovery events = %#v", got)
 	}
 
@@ -464,7 +483,7 @@ func TestSyncRemovedFileRetiresItsComponent(t *testing.T) {
 		t.Fatalf("first sync: %v", err)
 	}
 
-	fake.commit = "commit-two"
+	fake.commit = commitTwo
 	fake.files = map[string]string{"server.md": "---\ntitle: Server\n---\nThe server.\n"}
 	if _, err := importer.Sync(ctx, "CORE"); err != nil {
 		t.Fatalf("second sync: %v", err)
@@ -477,7 +496,7 @@ func TestSyncRemovedFileRetiresItsComponent(t *testing.T) {
 		t.Fatalf("dependency rows = %d err %v, want 0", dependencies, err)
 	}
 	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{
-		"architecture.synced commit-one", "architecture.synced commit-two",
+		"architecture.synced " + commitOne, "architecture.synced " + commitTwo,
 	}) {
 		t.Fatalf("events = %#v", got)
 	}
@@ -509,7 +528,7 @@ func TestSyncOfOneProjectIsSerialized(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, `select count(*) from architecture_snapshots`).Scan(&snapshots); err != nil || snapshots != 1 {
 		t.Fatalf("snapshots = %d err %v, want 1", snapshots, err)
 	}
-	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced commit-one"}) {
+	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced " + commitOne}) {
 		t.Fatalf("concurrent syncs emitted %#v", got)
 	}
 }
@@ -528,9 +547,9 @@ func TestSyncAcrossProcessesSerializesOnTheSourceRow(t *testing.T) {
 	fake := &fakeSource{t: t, files: files, treeShaFollowsCommit: true}
 	var heads atomic.Int64
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
 		// A push lands between the two processes' head lookups.
-		fmt.Fprintf(w, `{"sha":"commit-%d"}`, heads.Add(1))
+		writeCommit(w, r, fmt.Sprintf("%040x", heads.Add(1)))
 	})
 	mux.Handle("/", fake.handler())
 	client := newGitHubClient(t, mux)
@@ -587,7 +606,7 @@ func TestSyncAcrossProcessesSerializesOnTheSourceRow(t *testing.T) {
 // nothing — no old-repo commit on the new row, no error recorded against it.
 func TestSyncAbortsWhenTheSourceMovedMidFetch(t *testing.T) {
 	ctx := context.Background()
-	fake := &fakeSource{t: t, files: validFiles(), commit: "commit-one", installationID: 11}
+	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne, installationID: 11}
 	var moved atomic.Bool
 	var database *store.Store
 	mux := http.NewServeMux()
@@ -715,7 +734,7 @@ func TestAProjectionFailureIsRecordedOnTheRow(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `alter table components add constraint test_refuses_boom check (title <> 'Boom')`); err != nil {
 		t.Fatalf("add the refusing constraint: %v", err)
 	}
-	fake.commit = "commit-two"
+	fake.commit = commitTwo
 	fake.files = validFiles()
 	fake.files["server.md"] = "---\ntitle: Boom\n---\nThe server.\n"
 	source, err := importer.Sync(ctx, "CORE")
@@ -782,8 +801,8 @@ func TestSyncReusesAnExistingSnapshotForTheSameCommit(t *testing.T) {
 	var seeded int64
 	if err := database.Pool.QueryRow(ctx, `
 		insert into architecture_snapshots (project_key, commit, files)
-		values ('CORE', 'commit-one', '{"seeded": "by another process"}') returning id
-	`).Scan(&seeded); err != nil {
+		values ('CORE', $1, '{"seeded": "by another process"}') returning id
+	`, commitOne).Scan(&seeded); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 
@@ -974,7 +993,7 @@ func TestSyncDeadlineIsRecordedOnTheRow(t *testing.T) {
 // each process loaded before its fetch.
 func TestSyncAcrossProcessesEmitsOneEventForOneHead(t *testing.T) {
 	ctx := context.Background()
-	fake := &fakeSource{t: t, files: validFiles(), commit: "commit-one"}
+	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne}
 	// Gate the head lookups so both processes are mid-fetch at once: neither may
 	// project until both have loaded their (identical, pre-sync) source rows.
 	var arrived sync.WaitGroup
