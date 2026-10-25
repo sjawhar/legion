@@ -2,95 +2,110 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-92",
-  "completed": "2026-10-25T09:55:00Z",
-  "round": 3,
+  "completed": "2026-10-25T11:35:00Z",
+  "round": 4,
   "verdict": "pass",
-  "runNote": "The first attempt at this round's browser projects started at 07:16 and was lost when the issue's pod was replaced at about 08:05 (new pod uid c6aa38ab, generation 2); the container's own /tmp went with it, including this rig's Postgres data directory. The issue volume survived, so the rig's program files at /legion/scratch/dispatch-e2e-rig/pg17 and the Playwright browsers at /legion/scratch/cache/ms-playwright needed neither reinstall nor download. The projects were re-run whole from 08:07, and the plugin measurements below, taken before the replacement at this same code head, stand as they were taken. That is the gap in this round's timeline.",
+  "headsInThisRound": {
+    "why": "This round's code was written at 39175757c326, which carried the review App as its author. I found that while checking the delta, the architect ruled it a record defect worth a round, and the implementer rewrote the commit as d4de531733a9 with its own identity. Every measurement below says which head it was taken at; the two heads are the same content, proved under identityCheck.",
+    "codeBeforeRewrite": "39175757c326",
+    "codeAfterRewrite": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
+    "handoffHead": "0a85301698574bee5a34c15a60420688bbd4f311"
+  },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Every claim of implement.json at 80d324defedc was re-run here at code head 6d42d4911eaf. Its page claim: rather than its filtered agents.e2e.ts run, the whole chromium project (720 passed, 2 failed, 22 skipped, 53.2 minutes), the whole iphone project (617 passed, 1 failed, 126 skipped, 45.9 minutes) and chromium-plain-http (4 passed); the three failures are classified below and none is this change's. Its floor claim: measured again at 768, 1024, 1280 and 1440 — the ordinary row's directory is 192 x 16 px at every one of them, its text whole under assertWhole, its title the full path. Its role-guard claim: re-run against a real listener on four shapes rather than its one, with main@origin as the control. Its smoke: PASS with its main@origin control. Its restated hook timing I did not re-measure: the quantity moves with pod load, the interleaved n=12 sample is the honest form of it, and nothing of this round changed that bundle.",
-    "beyondIt": "The two rows that pin the page are green in both profiles in the whole-project runs: agents.e2e.ts:1717 with its new visible-plus-assertWhole laptop branch, and my round-two red row at agents.e2e.ts:1807, which passes unmodified. The implementer did not touch :1807."
+    "how": "Every claim of the two handoffs this round covers was re-run here. The role work at 39175757c326 and again, unchanged, at the rewritten d4de531733a9: the refused startup claim and its retry, both sweep rules kept apart with their controls, the unparseable record, and the touch. The media-query claim I drove myself with a Chromium launch flag rather than reading its number. The page claim I checked by its delta first, as the architect asked: this round's own commit touches nothing under packages/dispatch, so the Agents spec in both profiles is the scope and round three's whole-project evidence stands for the markup. The rewrite round's own proof — that it changed identity and nothing else — I did not take from its handoff: I read it from the repository myself, under identityCheck."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Both sentences the spec promises at a laptop's width hold at once: the whole 64-character name, and a directory that is painted, readable and hoverable — the round-two failure, fixed.",
-      "surface": "Dispatch's own browser suite in a real Chromium in this pod, the whole projects rather than a filter, against PostgreSQL 17.11 with pgvector at /legion/scratch/dispatch-e2e-rig/pg17 and the Playwright cache at /legion/scratch/cache/ms-playwright.",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e_c ./node_modules/.bin/playwright test --config e2e/playwright.config.ts --project chromium, then the same for --project iphone and --project chromium-plain-http",
-      "observed": "chromium 720 passed / 2 failed / 22 skipped (53.2m, 08:07:04-09:00:16 UTC); iphone 617 passed / 1 failed / 126 skipped (45.9m); chromium-plain-http 4 passed. agents.e2e.ts:1717 and agents.e2e.ts:1807 both green in chromium and in iphone. The three failures are the flakes and the known row recorded in notThisChange; each was re-run three times alone at this head to classify it.",
-      "headSha": "80d324defedc9db4cdee90809f0f440d7922745a",
-      "negativeControl": "My round-two measurement at the previous head is the control the defect supplied: the same row's directory was 0 x 16 px and not visible at 1280 and 158 px at 1440. It is 192 px at both now, and the red row that measured it passes unmodified."
+      "criterion": "Finding 1: a soft role claim refused at startup is retried on the heartbeat, and a refusal that repeats is retried again.",
+      "surface": "The committed dist/envoy-channel.js run as Claude Code runs it, against a real nats-server with JetStream and an Envoy listener built from this tree, behind a proxy of my own that answers 503 to the first two POSTs of /v1/roles/set and forwards everything else.",
+      "command": "a tester probe (/tmp/r4-role.sh with /tmp/r4-proxy.ts, deleted after the round), case A; the holder read from the listener's own GET /v1/roles/planner",
+      "observed": "The session alive, the proxy recording refusals=2, one stderr line — 'envoy-channel: could not restore the role from <…>/roles/a-0001.json (POST …/v1/roles/set failed with 503: injected listener outage); the next heartbeat retries' — and the listener answering holder=a-0001 after the retries. Two refusals, so a one-shot retry would not have reached the holder.",
+      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
+      "negativeControl": "The same probe's later cases run the same path with the proxy refusing nothing: the claim lands at startup, no retry line is written, and the holder is named without any heartbeat."
     },
     {
-      "criterion": "The floor holds across widths, and the directory cannot take the row away from the name — the mirror of the defect, which the architect asked to have attacked because dropping md:truncate was a behaviour nobody specified.",
-      "surface": "A throwaway spec in the same rig, run in the chromium project at 768, 1024, 1280 and 1440 and in the iphone project at 390, seeding rows the committed suite does not: a 204-character last segment, a 59-character machine name, both at once beside a 2,000-character name, a 2,000-character name alone, dir '/' and dir ''.",
-      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/zz-floor-probe.e2e.ts --project chromium --project iphone (deleted after the run; not in the tree)",
-      "observed": "The ordinary row's directory is exactly 192 x 16 px at 768, 1024, 1280 and 1440, reads 'build-host · features' whole under assertWhole and carries the full path in its title. A 204-character last segment grows the directory past its floor to 253 px at 768, 451 at 1280 and 611 at 1440 and wraps it to two or three lines (48-96 px tall) while the short name beside it keeps its 112 px, the row staying 98-158 px tall. A 59-character machine name: 253-508 px, one or two lines, row 46-106 px. Both long at once: the directory holds its 192 px floor and wraps to 688 px tall, beside a heading of 800-2,680 px — so the wall is the name's and not the directory's. dir '/' and dir '' are kept as they are rather than shown empty. assertPageFits held at all four laptop widths, and assertWhole over the shortened directory and over both monstrous directories found nothing clipped.",
-      "headSha": "80d324defedc9db4cdee90809f0f440d7922745a",
-      "negativeControl": "1440 against 1280 in the same run: at the previous head those read 158 px and 0 px, so a fix that only worked at the wider width would show as an unequal pair. Both read 192."
+      "criterion": "The architect's rule — the sweep must never delete the record of the session running it — holds, and the sweep still deletes an abandoned record in the same run.",
+      "surface": "The same live rig, one roles directory holding two records of identical age, swept by the session that owns one of them.",
+      "command": "the same probe, case B1: a 31-day-old record of the starting session whose claim the proxy refuses once, an identically aged abandoned record beside it, then the startup sweep and the heartbeats",
+      "observed": "Before: own=31.0 days, abandoned=31.0 days. After the refused claim, the startup sweep that follows it and the heartbeats: the own record kept and refreshed to 0.0, the abandoned record gone, holder=b1-0001 — so the role was recovered from the record the sweep would have deleted.",
+      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
+      "negativeControl": "The abandoned record itself: identical age, identical shape, same directory, same sweep, deleted. What kept the other one is the condition on the session id and not a sweep that stopped deleting."
     },
     {
-      "criterion": "An unreadable or unusable role file costs the session its role and nothing else: the channel server stays up, registered, and still beating (the architect's queued item, and the crash I reproduced in round two on this head and on main@origin alike).",
-      "surface": "The committed dist/envoy-channel.js run as Claude Code runs it, against a real nats-server with JetStream and an Envoy listener built from this tree.",
-      "command": "a throwaway probe over four shapes — the role file at mode 000, the roles directory at mode 000, a role file holding text that is not JSON, and a directory standing where the role file should be — each run against this head and the first two also against main@origin's bundle in the same run",
-      "observed": "On this head, all four: the process alive after 8 s, the listener holding the session's chosen name, and a rename recorded afterwards reaching the listener within the heartbeat, so the timer is armed. Exactly one stderr line each, naming the file and the reason — 'envoy-channel: could not restore the role from <…>/roles/<id>.json (EACCES: permission denied, open …); the session starts without one', and the same line with 'JSON Parse error: Unexpected identifier \"this\"' and with 'EISDIR: illegal operation on a directory, read'. No delete, no rename, no retry.",
-      "headSha": "80d324defedc9db4cdee90809f0f440d7922745a",
-      "negativeControl": "main@origin's dist/envoy-channel.js in the same run, both permission cases: the process dead with 'Claude Envoy channel server failed: EACCES: permission denied, open …/roles/<id>.json', the listener still listing the session — the row on the Agents page that never beats again, which this guard removes.",
-      "note": "The garbage-JSON and directory-in-place shapes are beyond the implementer's own probe, which ran the permission case alone; the guard holds for the class, not just for EACCES."
+      "criterion": "Finding 2, kept apart from the rule above: a long-held record survives a sweep run by a different session only because the heartbeat refreshes it.",
+      "surface": "The same rig: a session holding its role against the real listener, its record and an abandoned one both aged to 31 days while it runs, then a second session whose startup sweep runs as someone else.",
+      "command": "the same probe, case B2",
+      "observed": "Aged under the live holder: live=31.0, abandoned=31.0, holder=b2-0001. After two heartbeats: live=0.0, abandoned=31.0 — only the live holder's record was touched. After the second session's startup sweep: live kept, abandoned gone.",
+      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
+      "negativeControl": "The abandoned record, identically aged at the start and swept by that same foreign sweep, deleted. The two rules therefore pass for their own reasons: B1's record is saved by the session-id condition with no heartbeat in it, B2's by the refresh with no condition in it, and neither case could have passed on the other's mechanism."
     },
     {
-      "criterion": "The chosen name still registers, a rename still replaces it, an unnamed session keeps the fallback, and the dispatch command carries the same name — after the row's floor change and the role guard.",
-      "surface": "The committed bundles, dist/session-title-hook.js included, against a real nats-server with JetStream and an Envoy listener built from this tree, read back through GET /v1/sessions.",
-      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh",
-      "observed": "PASS, all four cases: 'eeny meeny', then 'miny moe' after the UserPromptSubmit payload, then 'probe-project smoke-ti' with the name taken away, and the dispatch stamp holding 'miny moe'.",
-      "headSha": "80d324defedc9db4cdee90809f0f440d7922745a",
-      "negativeControl": "The script's last case: main@origin's dist/envoy-channel.js registered the folder-and-short-id fallback and not the chosen name."
+      "criterion": "The kept record is a record a live session keeps, not a record nothing can ever remove (the architect's resume case).",
+      "surface": "The same rig, with a record carrying the running session's id but written by an earlier process and never touched by this one.",
+      "command": "the same probe, case B3: the record aged to 31 days before the session starts, then the session stopped, the record aged again, and another session's startup sweep run over it",
+      "observed": "While that session ran: resume=0.0 (kept, then refreshed), the abandoned control gone, holder=b3-0001. With that session gone and the record aged again to 31.0: a sweep by another session deleted it. So the record is unsweepable only while its own session runs, which is the whole of the rule and none of a leak.",
+      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
+      "negativeControl": "The same record before that second sweep, at 31.0 days and present: the deletion is the sweep's doing and not the session's exit."
+    },
+    {
+      "criterion": "The failure shapes around the role record cost the session its role and nothing else, and the heartbeat's touch leaves nothing beside the record.",
+      "surface": "The same rig: an unparseable record, a record at mode 000, the roles directory at mode 000, a directory standing where the record should be, and fifteen seconds of listings of roles/ during heartbeats.",
+      "command": "the same probe, cases C and D, and a second tester probe (/tmp/r4-guard.sh, deleted after the round) for the three permission shapes",
+      "observed": "The unparseable record: alive, exactly one stderr line over twelve seconds — so it is not queued and does not spin — and the record untouched. Mode 000 on the record, mode 000 on the directory, and a directory in its place: each alive, registered under its chosen name, and taking a later rename within the heartbeat, with one stderr line naming the file and the reason (EACCES, EACCES, EISDIR). Sixty listings of roles/ over fifteen seconds of one-second heartbeats showed one name and only one, the record itself: the touch drops no temporary file for a directory listing to catch.",
+      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
+      "negativeControl": "The same bundle with a well-formed readable record in the same probe: no stderr line at all and the role claimed at startup, so the single line is the failure being reported once and not noise the server always writes."
+    },
+    {
+      "criterion": "Finding 3: the row's media query and its md: classes answer alike at a root font size other than 16 px.",
+      "surface": "Dispatch's own browser suite in a real Chromium launched twice with --blink-settings=defaultFontSize=16 and =20, at an 800 px viewport — between 768 px as an absolute number and 48rem, which is 960 px at the larger root.",
+      "command": "a throwaway spec of mine (packages/dispatch/e2e/zz-rem-probe.e2e.ts, run in the chromium project and deleted) that reads both media queries, the computed root font size, and the row's rendered directory",
+      "observed": "root 16px: computed root=16px, (min-width:768px)=true, (min-width:48rem)=true, directory 192x16 reading 'build-host · features' — the laptop layout, agreed by both. root 20px: computed root=20px, (min-width:768px)=true, (min-width:48rem)=false, directory 708x20 reading the whole path — the below-md layout, which is where the md: classes are at that width too. The predicate and the classes now answer alike where they used to disagree.",
+      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
+      "negativeControl": "The old constant measured in the same run: (min-width: 768px) answers true at root 20px, which is the divergence — the shortened directory inside the layout meant to keep the whole path — that the rem value removes."
+    },
+    {
+      "criterion": "Nothing on the Agents page moved, and the plugin still registers the name a person gave the session.",
+      "surface": "Dispatch's browser suite in a real Chromium, the Agents spec in the chromium and iphone projects; and the committed bundles against a real nats-server and Envoy listener.",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e_c ./node_modules/.bin/playwright test --config e2e/playwright.config.ts e2e/agents.e2e.ts --project chromium --project iphone; then bash packages/claude-envoy/scripts/smoke-session-title.sh",
+      "observed": "34 passed, 0 failed (3.4 minutes), the row at :1717 and my round-two red row at :1807 green in both profiles. The smoke PASS, all four cases: 'eeny meeny', then 'miny moe', then 'probe-project smoke-ti', with the dispatch stamp holding 'miny moe'.",
+      "headSha": "0a85301698574bee5a34c15a60420688bbd4f311",
+      "negativeControl": "The smoke's own last case: main@origin's dist/envoy-channel.js registered the folder-and-short-id fallback and not the chosen name.",
+      "scopeNote": "The Agents spec rather than the whole chromium and iphone projects, on the architect's instruction and my own check of the delta: this round's commit touches nothing under packages/dispatch, and the only page change since round three's whole-project runs is the one media-query constant over markup those runs proved. Round three's 720/617/4 project runs are the evidence for the markup; they are not re-run here."
     }
   ],
-  "acceptedTrade": {
-    "what": "A name far longer than any in use makes a very tall row: a 2,000-character name gives a heading 720 to 2,680 px tall depending on the width, and the row with it.",
-    "why": "The architect settled this and asked that the reasoning be recorded rather than left as his say-so. The longest name in use anywhere today is 64 characters, which is the size the spec names and the size the row is built for; at that size the heading takes two lines. The alternative is a clamp, and a clamp reintroduces exactly what this issue removes — text cut off where a person cannot read it — and would fail the unclipped guarantee the acceptance rests on. So an absurd name buys an absurd row and no name a person would type does. Measured here: 64 characters gives a heading of 370 x 40 at 1280 and 530 x 40 at 1440, two lines, with the directory at its 192 px floor beside it."
-  },
-  "notThisChange": [
-    "e2e/board.e2e.ts:780, 'one URL-backed filter strip drives List and Board alike and survives a reload', failed once in the chromium project with a strict-mode violation: getByText('Labelled card') matched two elements at board.e2e.ts:798. Re-run three times alone at this head: pass, pass, pass. A locator race under full-suite load; it passed in the round-two whole-project run, and nothing of this change touches the Board.",
-    "e2e/hover-preview.e2e.ts:40 failed once in the chromium project on the 30-second test timeout, with no assertion failing. Re-run three times alone at this head: pass, pass, pass. Load, not behaviour.",
-    "e2e/phone.e2e.ts:393, 'an inline link keeps its line and grows its hit box without covering its neighbours', failed once in the iphone project and three times out of three when re-run alone on this pod, always on the same assertion, phone.e2e.ts:545, expect(line.onUpperTextBottom).toBe('Upper line') receiving 'not-a-link'. It is dispatch://INFRA-95's row and it is not this change's: it failed in CI's before-leg run 40143159250 at head 4a134cac6ddb, which carried none of this change, and it passed in my round-two re-runs at a head that carried all of it. What is new is only that it is red every time on this pod generation rather than one time in two, which is worth INFRA-95 knowing.",
-    "packages/claude-envoy's 'queryTmux is bounded even by a tmux that ignores SIGTERM' is the gVisor spawn-timeout host behaviour the stream lead settled as a retro learning. I did not re-run the package's unit suite: it is CI's, and CI is green at this head."
-  ],
-  "findingOutsideTheIssue": {
-    "what": "On a 390 px phone, one live session with a 59-character machine id zooms the Agents page out to 615 px. The element responsible is the page's own 'Agent filters' fieldset and its select of machine names, measured at 591 px wide; the agent rows themselves fit at 390 px with every monstrous fixture I gave them.",
-    "notOurs": "This pull request touches no part of that filter — the only line of AgentsPage.tsx it changes anywhere near it is the row's own '{machineAndDir}' — so the behaviour is pre-existing and a long machine name triggers it.",
-    "where": "Published to the project controller, notifications.role.legion-infra-controller, on the architect's instruction (Envoy, 2026-10-25T07:17:06Z): no ask, no issue filed by me; the controller decides what becomes of it."
+  "identityCheck": {
+    "why": "I raised the record defect, so the architect asked that I verify its fix myself rather than cite the implementer's: a record defect verified only by the role that made it is the same shape of mistake as a guard that covers one of two commits.",
+    "rewriteChangedIdentityAlone": "git rev-parse 39175757c326^{tree} and d4de531733a9^{tree} both read ba5069e1951b10ae229b293162c0b8e79fb85ab1; both have parent 898037479328; their messages are byte-identical including the Omp-Session trailer; and git diff 39175757c326 d4de531733a9 is empty. So the plugin numbers measured at the old commit are numbers at the new one.",
+    "branchAudit": "git log --format='%h A=%ae C=%ce' main..0a853016 over every commit of the branch: each code commit and each implement handoff is legion-implementer[bot] in both columns; each plan, test and review handoff is legion-reviewer[bot] in both columns, which is right, since the planner, tester and reviewer all carry the review App. No commit mixes the two, and the one that did (39175757c326, author legion-reviewer[bot], committer legion-implementer[bot]) is gone from the branch.",
+    "cause": "My own round-three push left an empty working-copy commit authored by the review App; the implementer split that commit rather than starting a new one, which keeps the author and takes the splitter as committer. skill://legion-worker warns against exactly that, and handoff_complete refuses a handoff carried by another App's commit — but nothing checks a code commit, which is why the defect showed on one of the two. That asymmetry belongs in the retro learning.",
+    "readAt": "the pushed head 0a85301698574bee5a34c15a60420688bbd4f311; saved to /legion/scratch/infra92-identity-check.txt"
   },
   "ciRead": {
-    "head": "6d42d4911eaf67c527648979375ea87f3471ee14",
-    "readAt": "2026-10-25T09:52:00Z",
+    "head": "0a85301698574bee5a34c15a60420688bbd4f311",
+    "readAt": "2026-10-25T11:33:00Z",
     "runs": [
-      "Tests run 40171411290 — success",
-      "Legion Envoy and Contracts run 40171411249 — success, its dispatch browser job included, which is my round-two red row passing there too",
-      "Docs run 40171411278 — success",
-      "PR Title run 40171411323 — success"
+      "Docs run 40188548432 — success",
+      "PR Title run 40188628373 — success",
+      "Tests run 40188548433 — in progress when read, cited as running and not waited for",
+      "Legion Envoy and Contracts run 40188548396 — in progress when read, cited as running and not waited for"
     ],
-    "note": "The static work — lint, types and the unit and integration suites — is CI's and was not re-run here."
+    "note": "The force-push is why these runs are at the handoff head rather than at the code commit: GitHub started them for the rewritten branch, and the pre-rewrite commits 39175757c326 and 4a642826c038 carry no runs at all. The static work — lint, types and the unit and integration suites — is CI's and was not re-run here."
   },
   "notProven": [
     "That Claude Code itself sends session_title, and that the daemon's seeded '/rename Legion <role> · <KEY>' (packages/daemon/internal/claudebridge/bridge.go:196-198) makes a pane read as its role and issue. Claude Code cannot run in a Legion issue pod, so every hook payload in every run here is JSON the harness writes in the documented shape.",
-    "The webkit, webkit-iphone, firefox and firefox-download-navigation projects. Playwright's host validation refuses to start those engines in this pod for want of system libraries no agent can install without root; CI covers them and is green at this head.",
+    "The webkit, webkit-iphone, firefox and firefox-download-navigation projects: Playwright's host validation refuses to start those engines in this pod for want of system libraries no agent can install without root. CI carries them.",
     "A session whose Envoy or inbound messages are off stamps its title once at startup, so a later rename does not reach its Dispatch attribution. Unchanged behaviour for every title, not this change's."
   ],
+  "knownNotThisChange": [
+    "packages/dispatch/e2e/phone.e2e.ts:393, dispatch://INFRA-95's row, which was red three times of three in round three. Its fix, sjawhar/legion#2156, merged to main at 09:26Z after this branch's base; I re-ran that row six times on a throwaway clone of main at 14571f6f4aea and it passed six times of six, so the fix holds in a pod and this branch's red will go when the base comes in at the merge. Nothing of it is this change's.",
+    "packages/claude-envoy's 'queryTmux is bounded even by a tmux that ignores SIGTERM': the gVisor spawn-timeout host behaviour the stream lead settled as a retro learning."
+  ],
   "previousRounds": [
-    {
-      "round": 1,
-      "verdict": "pass",
-      "head": "485db1c056d83304336ec530bb092124a6250751",
-      "summary": "The plugin half driven on a real listener and attacked with hostile names and payloads; the page half driven in a real Chromium here, green at that head and red with AgentsPage.tsx restored to main@origin. Its page proof ran the new row alone under -g, which is how the ten keyboard rows the reviewer found were missed."
-    },
-    {
-      "round": 2,
-      "verdict": "fail",
-      "head": "398af3d484a287556c025836b1bdc8b20744ff5b",
-      "summary": "The whole chromium project reproduced the implementer's 721/0, but the directory beside the 64-character name measured 0 x 16 px and not visible at 1280, against 397 px in the same row with a short name, so neither the shortened segment nor its hover reached the person. Pinned by the red row at agents.e2e.ts:1807, which this round's floor makes pass unmodified. The sweep attack found the sessions directory fixed and the roles directory still fatal, which became this round's role guard."
-    }
+    { "round": 1, "verdict": "pass", "head": "485db1c056d83304336ec530bb092124a6250751", "summary": "Plugin half driven and attacked; page half driven in a real Chromium, green at that head and red with AgentsPage.tsx restored to main@origin. Its page proof ran one row under -g, which is how ten keyboard rows were missed." },
+    { "round": 2, "verdict": "fail", "head": "398af3d484a287556c025836b1bdc8b20744ff5b", "summary": "Whole chromium project reproduced 721/0, but the directory beside the 64-character name measured 0 x 16 px and not visible at 1280. Pinned by the red row at agents.e2e.ts:1807." },
+    { "round": 3, "verdict": "pass", "head": "80d324defedc9db4cdee90809f0f440d7922745a", "summary": "The floor fixed it: 192 x 16 px at 768, 1024, 1280 and 1440, the red row passing unmodified. Whole projects run here (chromium 720/2, iphone 617/1, plain-http 4/0) with every failure classified by three isolated re-runs. The machine-filter finding went to the controller." }
   ]
 }
