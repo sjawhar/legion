@@ -2,82 +2,52 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T14:20:00Z",
-  "round": "the third implementing round, answering the reviewer's four findings and its missing contract census at 772b9b0fd1ab (code e55e76f6e6fa)",
+  "completed": "2026-10-25T15:15:00Z",
+  "round": "the fourth implementing round, answering the tester's two failures at 962f924510f4",
   "proof": [
     {
-      "criterion": "A session name cannot be taken by another principal, and a name an entry fixes works for every instance of that entry (the reviewer's findings 1 and 2, both reproduced on Postgres).",
-      "surface": "The real provider on a real Postgres, through the exchange's own HTTP grant.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 ./internal/broker/oauth/ ./internal/broker/exchange/ ./internal/broker/oauthstore/",
-      "observed": "ok, with the reviewer's two reproductions now tests. TestEveryPodOfAFixedSessionAccountWritesUnderItsName alternates an old and a new pod uid under a fixed name and both are accepted; TestEveryRunOfAFixedSessionWorkflowWritesUnderItsName accepts runs 4242, 4243 and 4244. A name is keyed to the principal -- the listed account, the listed workflow entry, or the person a machine credential acts for -- so a replacement pod, a rolling update and a resumed Legion session all keep their name, and the claim is made from the issued token's own expiry inside the transaction that stores it rather than from a lifetime guessed before it.",
-      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
-      "negativeControl": "TestAnotherPrincipalIsRefusedANameAfterItsHoldersTokenLapses is the reviewer's own reproduction with a one-second access lifetime: a pod of another account, in another project, is refused the name after its holder's token has lapsed, and the holder then renews. TestANameAnEntryFixesIsRefusedToEveryOtherCaller refuses a dev box a name the configuration fixes, which is reserved before that entry's own caller has ever exchanged."
+      "criterion": "An introspection the broker cannot stand behind says what failed, in the error it returns and in the one line the route logs (the tester's failure 1, and the architect's 'carry the cause into the error text and the log line').",
+      "surface": "The introspection route itself, with its store closed under it, as the api package drives it.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -v -run TestIntrospectionAnswersAStorageOutage503 ./internal/broker/api/",
+      "observed": "PASS, and the line the broker logged while it ran is now `ERROR broker: introspect token failed error=\"read token session: closed pool\"`. Before this change the same run logged `error=\"request_unauthorized\"`, the library's own code and nothing else, which told the operator an authorization failure when the store was down. The 503 and its DATABASE_UNAVAILABLE code are unchanged; only what the error says changed.",
+      "headSha": "f4f64586fbab8b5952fe77ab58df206f057c3961",
+      "negativeControl": "TestIntrospectionAnswersARevokedTokenAsNotLive in the same package: a genuine negative still answers 200 {\"active\":false} and logs nothing, so naming the cause did not turn a refusal into an error."
     },
     {
-      "criterion": "An introspection never answers a storage outage as a confident negative (the reviewer's finding 3).",
-      "surface": "The introspection route itself, against a store that has been closed under it.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -run TestIntrospectionAnswersAStorageOutage503 ./internal/broker/api/",
-      "observed": "PASS. The route answers 200 active for a live token, and 503 DATABASE_UNAVAILABLE once the store is closed, where before the change the library's 401-coded wrapper made every storage failure come back as 200 {\"active\":false}. Introspect classifies by cause now: only the library's own not-found, inactive, expired, malformed and signature-mismatch sentinels, and a bare unauthorized with no cause beneath it, are not live; every other error is returned.",
-      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
-      "negativeControl": "TestIntrospectionAnswersARevokedTokenAsNotLive in the same file: a token revoked through the route answers 200 with nothing but active false, so the fix did not turn a genuine negative into an error."
+      "criterion": "The tester's red test passes unmodified.",
+      "surface": "The tester's own test, run by name, with its file untouched.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -v -run TestAnIntrospectionFailureNamesItsCause ./internal/broker/oauth/",
+      "observed": "--- PASS, both subtests: 'a stored row naming a client the provider does not register' and 'a store that has gone away'. The whole working copy for this round is one file, packages/envoy/internal/broker/oauth/introspect.go, so the tester's test file is not in the diff at all.",
+      "headSha": "f4f64586fbab8b5952fe77ab58df206f057c3961",
+      "negativeControl": "Both of its subtests failed at the previous head with 'Introspect's error reads \"request_unauthorized\"', which is why the tester wrote it."
     },
     {
-      "criterion": "A machine-token exchange cannot step over a revoke (the reviewer's finding 4).",
-      "surface": "The real provider on Postgres, with a concurrent revoke and a held row lock.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -run 'TestAMachineExchange' ./internal/broker/oauth/",
-      "observed": "PASS. TestAMachineExchangeHoldsItsCredentialAgainstARevoke blocks an exchange at its insert, runs enroll's revoke in another transaction, and checks that the revoke is waiting on the launcher credential row the exchange holds `for no key update` rather than passing it; once released, the exchange's token introspects not live and both access-token rows naming the credential are inactive. The lock is oauthstore.LockCredential, which machine.Service.Live now calls too, so the device grant and the exchange cannot drift on what a live credential is.",
-      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
-      "negativeControl": "TestAMachineExchangeOfAnEndedCredentialIsRefused: a lapsed credential with an active token row is refused 400 invalid_grant and nothing is stored; TestLockCredentialHoldsOnlyALiveCredential proves the lock is really held, another connection's `for no key update nowait` getting 55P03."
+      "criterion": "Every sentence of the pull request body is true of the code (the tester's failure 2, and the architect's standard: no sentence claiming more than the code).",
+      "surface": "The two sentences the tester caught, against the code they describe.",
+      "command": "the body's Change bullet 3 and its Look-at-first line, read against oauthstore/exchange.go's BindSession and ReserveSessions",
+      "observed": "Both now say what the code does. The bullet said 'no lapse hands it across principals'; a lapse does, once the holder's last token is ninety days past expiry, which is BindSession's own `or oauth_session_bindings.expires_at <= now()`. The Look-at-first line called that retention 'the only way one ever moves'; a configuration change moves a name too, which is ReserveSessions taking a fixed name from its holder, and the tester watched the real binary do it and log both principals. The body now names exactly those two ways, says both are deliberate, and quotes the WARN the second one writes.",
+      "headSha": "f4f64586fbab8b5952fe77ab58df206f057c3961",
+      "negativeControl": "The migration's own comment already carried the qualifier the bullet dropped ('while its holder has used it within the retention'), so the code and its schema agreed with each other and only the body did not; that is the disagreement the correction removes."
     },
     {
       "criterion": "The change the earlier rounds proved still holds at this head.",
-      "surface": "The real compiled cmd/broker binary on a real Postgres, as the package's own live-binary test.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -run TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt ./cmd/broker/",
-      "observed": "ok github.com/sjawhar/envoy/cmd/broker 25.439s. Its second-pod subtest changed with the binding model: a second pod of the same listed account now writes under the name, and a pod of a second listed account is refused it, which is the behaviour the reviewer asked for.",
-      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
-      "negativeControl": "Eight of its subtests are refusals, among them the pod of another account asking for a held name and the exchange request carrying a client secret."
-    },
-    {
-      "criterion": "The body carries the contract change census the reviewer required, with every hit disposed of and a rollout line (the reviewer's finding 5).",
-      "surface": "The searches themselves, in this repository and in the deployment repository.",
-      "command": "grep -rn 'BROKER_UI_TOKEN' . ; grep -rn 'DISPATCH_AGENT_SECRETS_TOKEN' . ; grep -rn 'agentSecretsTokenSecret|AgentSecretsTokenSecret' . ; grep -rn 'UI_INVALID' . ; and gh api -X GET search/code -f q='<each> repo:theorem-labs/agent-infra'",
-      "observed": "Four boundary contracts, each a refusal rather than a deprecation, are in the body as a table of hits with dispositions: the two boot refusals, the removed envoy-infra component input (which the deployment repository's dispatch/main.go sets today, so its next preview fails until it moves to agentSecretsAudience and its vendored SDK is regenerated), and the nine routes that moved off the bearer with UI_INVALID gone. The rollout line names the order, and says plainly that approvals are down between the broker's deploy and Dispatch's, that the two deploys are separate and Dispatch's is by hand (dispatch://INFRA-64), and why no overlap window is engineered: a dual-accept broker would keep the shared bearer alive for the length of a rollout, which is the thing being removed. The Deployment section no longer calls BROKER_API_ACCOUNTS required for boot: config.Load treats it as optional and a broker without it answers every approval route 403 ACCOUNT_NOT_LISTED.",
-      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
-      "negativeControl": "The search for UI_INVALID finds no hit outside this pull request's own handoffs, so the removed code has no caller left; and `check-private-names.sh` passes over the whole tree (4985 files), so the census names nothing it must not."
-    },
-    {
-      "criterion": "The repository's own gates are green for the paths this round changed.",
-      "surface": "The repository's fast local checks.",
-      "command": "cd packages/envoy && gofmt -l . ; go vet ./... ; BROKER_TEST_DATABASE_URL=... go test -count=1 ./internal/broker/... ./cmd/broker/... ; cd ../.. && bunx biome check . ; bash .github/scripts/check-private-names.sh",
-      "observed": "gofmt silent, vet clean, biome clean, private names clean. Every broker and cmd/broker package green except internal/broker/helper, which fails only with this pod's SO_PEERPIDFD errors.",
-      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
-      "negativeControl": "The same helper failure is present on the base and in every earlier round of this branch, and the tests that fail name the kernel call they cannot make rather than anything this change touches."
+      "surface": "The real compiled cmd/broker binary on a real Postgres, as the package's own live-binary test, and the broker suites.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 ./internal/broker/... ./cmd/broker/...",
+      "observed": "Every package green except internal/broker/helper, which fails only with this pod's SO_PEERPIDFD errors; cmd/broker, which carries the live-binary test, ok 107.786s.",
+      "headSha": "f4f64586fbab8b5952fe77ab58df206f057c3961",
+      "negativeControl": "gofmt -l prints nothing and go vet ./... is clean at the same head."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/broker/exchange/exchange.go and its test: Claims.Binding becomes Claims.Principal; the three constructors resolve the listed account, the listed workflow entry or the person; NewSet refuses two entries that fix one name and two workflow entries whose principals would read the same; Set.Reservations names what the configuration fixes.",
-    "packages/envoy/internal/broker/oauthstore/exchange.go and its test: BindSession is keyed by principal; ReserveSessions holds every fixed name with no expiry in one statement; SessionRetention is ninety days past a token's expiry, documented.",
-    "packages/envoy/internal/broker/oauth/{exchange.go,provider.go} and their tests: the reservation runs once per process on the first exchange; the claim is made after the token is issued, from its own expiry, in the same transaction; the machine path locks its launcher credential before the token is issued.",
-    "packages/envoy/internal/broker/oauthstore/store.go and its test: LockCredential and ErrCredentialEnded, the one statement that decides what a live credential is; hydrate no longer wraps GetClient's not-found, which the library would have read as 'no such token'.",
-    "packages/envoy/internal/broker/machine/machine.go: Service.Live calls LockCredential rather than keeping a second copy of its statement.",
-    "packages/envoy/internal/broker/oauth/introspect.go: classify a failure by cause, so an outage is an outage.",
-    "packages/envoy/internal/broker/api/introspect_test.go: the route's 503 on a closed store, and a revoked token still answering not live.",
-    "packages/envoy/internal/broker/store/migrations/0018_oauth_token_exchange.up.sql: the binding column is principal, changed in place because 0018 is introduced by this same unmerged pull request.",
-    "packages/envoy/cmd/broker/token_exchange_test.go: the live-binary test's second-pod subtest follows the new model."
+    "packages/envoy/internal/broker/oauth/introspect.go: brokerFailure returns the store's own error from beneath the library's wrapper, whose text is only its error code, so the route's 503 is logged with the cause rather than with 'request_unauthorized'. Nothing else in the tree changed this round."
   ],
   "trickyParts": [
-    "Keying the reservation tighter is what the reviewer proved breaks relaunch, so the fix is not 'bind tighter': it is to key by principal and keep the uid only as proof the token came from a pod. The architect ruled this and named the limit it leaves (two pods of one project are one principal) as dispatch://INFRA-382.",
-    "A name the configuration fixes has to be refused to strangers before that entry's own caller has ever exchanged, or a dev box could take 'legion-daemon:<PROJECT>' before the daemon first runs. The reservation is written through the same table and the same check, once per process at the first exchange, with no expiry, so every refusal still comes from one statement rather than a second mechanism.",
-    "The library wraps a failed token read as unauthorized, not as a server error, so a status test could never see a storage outage. Classifying by cause means listing the sentinels that genuinely mean 'not live' and returning everything else, which also surfaced a second bug: a stored row naming an unregistered client decoded to the library's not-found and would have answered not live."
+    "The cause was never lost: the store's error is kept beneath the library's wrapper the whole way. What hid it is that the wrapper's Error() prints its code alone, so returning the wrapper returned a sentence that was true of nothing. Unwrapping it at the one place the broker owns was the whole fix; no store or route change was needed, and the path was checked for a second place a cause is dropped rather than only the last one."
   ],
-  "deviations": [
-    "The architect asked to be told before a schema change was written for the binding. The change is a column rename (identity to principal) inside migration 0018, which this same unmerged pull request introduces, so it is an edit in place and costs no migration on any deployed database; reported to the architect with this round's completion."
-  ],
+  "deviations": [],
   "openQuestions": [
-    "dispatch://INFRA-382 owns the limit this round deliberately leaves: inside one project, two pods are the same principal, so one could still name another issue's session. The body says so in plain words.",
-    "The approval gap between the broker's deploy and Dispatch's is accepted and announced rather than engineered away; the census says why and in what order the two deploys run."
+    "dispatch://INFRA-382 still owns the limit this slice leaves: inside one project, two pods are the same principal.",
+    "The architect has said that a genuinely new finding after this round goes to a child issue of this tree with its acceptance written, rather than to another round here."
   ],
-  "discoveredComplexity": [
-    "The reviewer's envoy-go failure is a timing test in scripts/listener-deploy-probe.test.sh, a file this diff does not touch, and envoy-go is not required on main; not chased, as the architect directed."
-  ]
+  "discoveredComplexity": []
 }
