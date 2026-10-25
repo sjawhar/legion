@@ -281,7 +281,10 @@ Deployments that read it so their pods boot on the new value:
   value too. The broker token has a second holder outside this component: the secrets broker
   reads the same value as its `BROKER_UI_TOKEN` (or `BROKER_UI_TOKEN_FILE`) once, at boot, and
   refuses every other value (`401 UI_INVALID`), so restart the broker with the app, or every
-  approval, denial, revoke and list Dispatch relays to it is refused until the two agree;
+  approval, denial, revoke and list Dispatch relays to it is refused until the two agree. The
+  database password is the one key whose rotation also changes the Cloud SQL user, at the `up`
+  itself, so every new connection the running app opens fails from then until it restarts:
+  restart it right after that `up`;
 - the NATS seed: the app's `envoy-dispatch` and the listener's `envoy-listener` each read it once,
   at start;
 - the listener's bearer, the `<hostname>-listener` Secret's `ENVOY_API_TOKEN`: the listener

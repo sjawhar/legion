@@ -824,6 +824,21 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: "nats_urls nats://0x7f000001:4222 names a numeric host that is not an IP address in its standard form, which an HTTP client reads as an IPv4 address (127.1 is 127.0.0.1); write the address in full; name the host pods reach it at when runtime is kubernetes",
 		},
 		{
+			name: "envoy_url on an IPv4-mapped unspecified address",
+			body: kubernetesWith("envoy_url: http://envoy-listener.internal.example:9020", "envoy_url: \"http://[::ffff:0.0.0.0]:9020\""),
+			want: "envoy_url http://[::ffff:0.0.0.0]:9020 names the unspecified address, which is no host a pod can dial; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "daemon_url on an IPv4-mapped loopback",
+			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: \"http://[::ffff:127.0.0.1]:13370\""),
+			want: "daemon_url http://[::ffff:127.0.0.1]:13370 names a loopback host, which in a pod is the pod itself; name the host pods reach it at when runtime is kubernetes",
+		},
+		{
+			name: "bind on an IPv4-mapped unspecified address",
+			body: kubernetesWith("bind: 10.0.0.5", "bind: \"::ffff:0.0.0.0\""),
+			want: "bind ::ffff:0.0.0.0 is not an address a pod can reach, and every pod's shim dials the worker stream at tcp://[::ffff:0.0.0.0]:13371; bind the daemon host's own address when runtime is kubernetes",
+		},
+		{
 			name: "daemon_url unspecified",
 			body: kubernetesWith("daemon_url: http://10.0.0.5:13370", "daemon_url: http://0.0.0.0:13370"),
 			want: "daemon_url http://0.0.0.0:13370 names the unspecified address, which is no host a pod can dial; name the host pods reach it at when runtime is kubernetes",
@@ -1090,6 +1105,21 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "an NFS server as an IPv4-mapped IPv6 address",
 			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: '::ffff:10.0.0.2', path: /share}}]\n",
 			want: `runtime.kubernetes.pod.volumes[0].nfs.server "::ffff:10.0.0.2" is an IPv4 address in IPv6 form, which the kubelet mounts unbracketed and mount.nfs cannot parse: write 10.0.0.2`,
+		},
+		{
+			name: "an NFS server named for the hosts file's loopback",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: localhost.localdomain, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server localhost.localdomain is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
+		},
+		{
+			name: "an NFS server under localhost",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: nas.localhost, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server nas.localhost is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
+		},
+		{
+			name: "an NFS server named ip6-localhost",
+			body: kubernetesFile + "    pod:\n      volumes: [{name: nas, nfs: {server: ip6-localhost, path: /share}}]\n",
+			want: "runtime.kubernetes.pod.volumes[0].nfs.server ip6-localhost is the node itself or no address: the node's kubelet mounts the share, so name the server's own address",
 		},
 		{
 			name: "an NFS export with no path",

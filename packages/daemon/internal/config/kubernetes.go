@@ -378,21 +378,30 @@ func readPluginSource(value *yaml.Node, key string) (string, error) {
 	return source, nil
 }
 
-// hostAddr is host as an IP address with any zone removed (`::1%lo` is `::1`), or false when host
-// is no IP address in Go's strict form. net.ParseIP reads a zoned address as no address at all, so
-// a check built on it lets `[::1%25lo]` past, which Go's HTTP client dials as loopback.
+// hostAddr is host as an IP address with any zone removed (`::1%lo` is `::1`) and an IPv4-mapped
+// address unmapped (`::ffff:0.0.0.0` is `0.0.0.0`), or false when host is no IP address in Go's
+// strict form. net.ParseIP reads a zoned address as no address at all, so a check built on it lets
+// `[::1%25lo]` past, which Go's HTTP client dials as loopback; and netip.Addr.IsUnspecified, unlike
+// net.IP's, does not unmap, so without Unmap `[::ffff:0.0.0.0]` would pass as a reachable host.
 func hostAddr(host string) (netip.Addr, bool) {
 	addr, err := netip.ParseAddr(host)
 	if err != nil {
 		return netip.Addr{}, false
 	}
-	return addr.WithZone(""), true
+	return addr.WithZone("").Unmap(), true
 }
 
-// isLoopbackHost is localhost, with or without trailing dots (`localhost.`, `localhost..`), or a
-// loopback IP address, zoned or not.
+// loopbackNames are the names every pod and node resolves to loopback without asking DNS: the
+// hosts file Kubernetes writes into every pod (`localhost`, `ip6-localhost`, `ip6-loopback`) and the
+// one glibc distributions write (`localhost.localdomain`). Any name under `localhost.` is loopback
+// too (RFC 6761, section 6.3).
+var loopbackNames = []string{"localhost", "localhost.localdomain", "ip6-localhost", "ip6-loopback"}
+
+// isLoopbackHost is a loopback name (loopbackNames, or one under `localhost.`), with or without
+// trailing dots (`localhost.`, `localhost..`), or a loopback IP address, zoned or IPv4-mapped.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(strings.TrimRight(host, "."), "localhost") {
+	name := strings.ToLower(strings.TrimRight(host, "."))
+	if slices.Contains(loopbackNames, name) || strings.HasSuffix(name, ".localhost") {
 		return true
 	}
 	addr, ok := hostAddr(host)
@@ -874,14 +883,16 @@ func readNFSSource(value *yaml.Node, key string) (*corev1.NFSVolumeSource, error
 }
 
 // numericLastLabel reports whether host, not an IP address in Go's strict form, still ends in an
-// all-digit label or a 0x one: glibc's resolver reads `010.0.0.2`, `1.2.3` and `0x0a000002` as IPv4
-// addresses (inet_aton's octal, short and hexadecimal forms), so the node would mount another
-// address than the one written. No DNS name a server is reached by ends so.
+// all-digit label or a 0x one followed by hex digits alone: glibc's resolver reads `010.0.0.2`,
+// `1.2.3` and `0x0a000002` as IPv4 addresses (inet_aton's octal, short and hexadecimal forms), as
+// the WHATWG URL parser an HTTP client follows does, so the node would mount, or a pod dial, another
+// address than the one written. A label such as `0xcache`, which neither reads as a number, is a
+// name. No DNS name a server is reached by ends in a numeric label.
 func numericLastLabel(host string) bool {
 	labels := strings.Split(strings.TrimSuffix(host, "."), ".")
 	last := strings.ToLower(labels[len(labels)-1])
-	if strings.HasPrefix(last, "0x") {
-		return true
+	if hex, ok := strings.CutPrefix(last, "0x"); ok {
+		return strings.Trim(hex, "0123456789abcdef") == ""
 	}
 	return last != "" && strings.Trim(last, "0123456789") == ""
 }

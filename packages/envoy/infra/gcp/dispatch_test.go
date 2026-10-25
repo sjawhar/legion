@@ -480,12 +480,15 @@ func TestDispatchTailscaleStateBindingWaitsForItsRoleOnPreview(t *testing.T) {
 		binding := m.Named(t, "kubernetes:rbac.authorization.k8s.io/v1:RoleBinding", "example-dispatch-tailscale-state")
 		ref := binding.Inputs["roleRef"].ObjectValue()
 		name := ref["name"]
+		require.Equal(t, "Role", ref["kind"].StringValue())
+		require.Equal(t, "rbac.authorization.k8s.io", ref["apiGroup"].StringValue())
 		if preview {
+			// The mock engine unmarshals inputs without keeping unknowns, so an unknown arrives as
+			// null; the apply arm below holds that the name is not simply dropped.
 			require.True(t, name.IsNull() || name.ContainsUnknowns(), "roleRef name on a preview = %v, want unknown until the Role exists", name)
 			continue
 		}
 		require.Equal(t, "example-dispatch-tailscale-state", name.StringValue())
-		require.Equal(t, "Role", ref["kind"].StringValue())
 	}
 }
 

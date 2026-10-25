@@ -1485,8 +1485,10 @@ Code (`worker_backends.<role> is claude, which runs only under runtime: tmux`). 
 address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
 and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
 worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise.
-Loopback is `localhost` with any number of trailing dots and a loopback address with or without an
-IPv6 zone (`[::1%25lo]`), and a URL's host may not be a numeric name that is no IP address in its
+Loopback is `localhost` with any number of trailing dots, the hosts file's other loopback names
+(`localhost.localdomain`, `ip6-localhost`, `ip6-loopback`), any name under `localhost.`, and a
+loopback address zoned (`[::1%25lo]`) or IPv4-mapped (`::ffff:127.0.0.1`, as `::ffff:0.0.0.0` is the
+unspecified address); and a URL's host may not be a numeric name that is no IP address in its
 standard form (`127.1`, `2130706433`, `0x7f000001`), which an HTTP client reads as an IPv4
 address; write the address in full. An http(s) URL in `runtime.kubernetes.plugins`, which `bun add`
 fetches inside the pod, is held to the same rules. `bind` and the host of each of those URLs and of

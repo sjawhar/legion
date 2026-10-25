@@ -15,6 +15,30 @@ import (
 	"github.com/sjawhar/envoy/internal/testsocks5"
 )
 
+// LocalNATSURL vouches for loopback however it is spelled - localhost with any number of root dots,
+// a zoned or IPv4-mapped loopback address - and for nothing else, a numeric name among them.
+func TestLocalNATSURLReadsEveryLoopbackSpelling(t *testing.T) {
+	for raw, want := range map[string]bool{
+		"nats://localhost:4222":             true,
+		"nats://LOCALHOST.:4222":            true,
+		"nats://localhost..:4222":           true,
+		"nats://127.0.0.2:4222":             true,
+		"nats://[::1]:4222":                 true,
+		"nats://[::1%25lo]:4222":            true,
+		"nats://[::ffff:127.0.0.1]:4222":    true,
+		"localhost:4222":                    true,
+		"nats://nats.internal.example:4222": false,
+		"nats://10.0.0.5:4222":              false,
+		"nats://127.1:4222":                 false,
+		"nats://[::ffff:10.0.0.5]:4222":     false,
+		"nats://%zz":                        false,
+	} {
+		if got := bus.LocalNATSURL(raw); got != want {
+			t.Errorf("LocalNATSURL(%q) = %v, want %v", raw, got, want)
+		}
+	}
+}
+
 // A deployment of the stream still creates it and reconciles what it finds on the NATS it names.
 func TestConnectOwningStreamStillReconcilesTheDeployedStream(t *testing.T) {
 	uri := testnats.URL(t)
