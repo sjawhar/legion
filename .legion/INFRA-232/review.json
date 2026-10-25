@@ -2,26 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-232",
-  "completed": "2026-10-25T14:15:00Z",
-  "decision": "changes_requested",
-  "reviewedCodeHead": "81e2fa83374f515a0badcbbc5f6133ac22129e40",
-  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. Newest pull_request runs are at 81e2fa83374f515a0badcbbc5f6133ac22129e40: Tests 40198850552, Legion Envoy and Contracts 40198850664, PR Title 40198850653, all completed success. Every required check-run is completed success there. The compare 81e2fa83...b7670ac9 is ahead and touches only .legion/.",
+  "completed": "2026-10-25T14:45:00Z",
+  "decision": "approved",
+  "reviewedCodeHead": "4a9715060e1bbafef8754032794ef742fa421217",
+  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. The newest pull_request runs are at 4a9715060e1bbafef8754032794ef742fa421217: Tests 40202202027 (lint, typecheck, test; test was in_progress at the tester's read and completed success at 14:44Z), Legion Envoy and Contracts 40202202033 success, PR Title 40202202114 and 40202301315 success. The compare 4a971506...a05978c6 is ahead and touches only .legion/.",
   "thermo": "Not run: the diff is docs/kubernetes.md alone (docs-only).",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 1,
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "docs/kubernetes.md:3078",
-      "description": "generateName opens a window the client-named sequence did not have: a stop that lands while the create is in flight, or before workload= is read, leaves a running four-processor Job that the trap cannot find (tester measured at 0.23 s and 0.24 s). The architect's standing instruction on the pull request (comments 6398643702 and 6398666814) asks for a per-run label on the Job's own metadata, written before the create, with which the trap removes that Job, or for a measured residual that names which measurement failed. The head does neither. The reviewer's server dry run on 2026-10-25 admitted a Job with an extra metadata label (sequence-run) under a generated name, and kubectl delete job -l <that label> --dry-run=server ran (list jobs and delete jobs answer yes; deletecollection jobs answers no, which kubectl delete -l does not use). The real delete and the concurrent-run proof are the implementer's to measure."
-    },
-    {
       "severity": "minor",
-      "file": "docs/kubernetes.md:3268",
-      "description": "The architect's lean, now that the round opens: name dispatch://INFRA-383 where the evidence bullet says the namespace's admission did not require a generated name on that date. The sentence stays true before and after that issue's apply."
+      "file": "PR body, E2E (tester)",
+      "description": "The tester's E2E line still carries no link to its run record (requested in round 1). Its command, observations, head and negative control are present, and test.json at a05978c6 records the runs, so this does not block."
     }
   ],
-  "elisionSweep": "Patterns from the projected namespace file, the deployment repository's owner and its name, over the added lines of e922ac4c..b7670ac9, the commit messages and the live PR body: 0 hits each; a scratch string with the owner's name gives 1 hit; check-private-names.sh exit 0. The admission policies' names were not readable by this identity, so they were not in the patterns.",
-  "prBody": "Look at first and Not proven / risk written in the live body."
+  "rounds": [
+    {"round": 1, "head": "578393930bc282f5dd5faa768e3c8a0406c6c24a", "decision": "changes_requested", "findings": "The stop-during-create window was neither closed nor stated as a measured residual; name dispatch://INFRA-383 in the evidence bullet."},
+    {"round": 2, "decision": "approved", "findings": "Both fixed in 349b12b327c6f92bfee714bd8ed3be7a242833dc: a per-run sequence-run label on the Job's metadata, deleted by the trap's no-name branch; the bullet names dispatch://INFRA-383. Threads PRRT_kwDORFy7ds6wB-AX and PRRT_kwDORFy7ds6wB-Ab answered and accepted; the implementer resolved both."}
+  ],
+  "residualRisk": "A create request that the server finishes after the trap's kubectl delete -l has listed the Jobs would leave a Job until its 3600 s deadline; not measured; recovered by the printed run label. Recorded in the PR body's Not proven / risk.",
+  "elisionSweep": "Patterns from the projected namespace file, the deployment repository's owner and its name, over the added lines of 57839393..a05978c6, the commit messages and the live PR body: 0 hits each; check-private-names.sh exit 0.",
+  "prBody": "Look at first and Not proven / risk updated in the live body."
 }
