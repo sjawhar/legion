@@ -1,0 +1,54 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-391",
+  "completed": "2026-10-25T20:42:30Z",
+  "headSha": "74795be3c132b0bb7371c571c44b4e8a1a637cca",
+  "codeHeadSha": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
+  "evidence": "https://github.com/sjawhar/legion/pull/2209#issuecomment-6402976199",
+  "ci": "At 97ddf0a48fc4 (read 2026-10-25T20:41Z): Tests 40230403139 in progress, Legion Envoy and Contracts 40230403058 queued, Docs 40230403152 success, Worker Image 40230403197 in progress, PR Title 40230637803 success. Not waited for; not re-run.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's /legion/scratch/tmp/infra391/a2/real.sh against a fresh branch server (database dispatch_a2_tester, port 18720) with the shim forwarding reads through the tester's own gh (review App): same heads (0af6288a7a9f, cc50e1512a12), same 36+3 components, same attachment, collision and negative-control output. Re-ran the A6 browser specs at the head (57 passed, 1 skipped) and the new spec alone on the base export 83f6320140ec (1 failed at architecture-sources.e2e.ts:89), each with its own database and ports."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Root A2: with two repositories saved as one project's sources, two imports in a row record each head and no error; one --components-json update with an id from each succeeds and reads back; one source's failed import leaves the other's components and attachments",
+      "surface": "The branch's real Dispatch server (packages/dispatch/e2e/run-server.sh, rootless Postgres 17 in the issue pod) reading real GitHub (sjawhar/legion@main, sjawhar/legion-smoke@infra-391/architecture and @infra-391/architecture-collision) through the tester pane's gh behind the throwaway shim that answers only the two App-key calls; the branch's dispatch CLI",
+      "command": "source /legion/harness/env.sh && bash /legion/scratch/tmp/infra391/a2/real.sh (log /legion/scratch/tmp/infra391/tester/real.log)",
+      "observed": "Both PUT .../architecture-sources/{owner}/{repo} 200; two architecture-sync runs each print Synced for sjawhar/legion@main (0af6288a7a9f...) and sjawhar/legion-smoke@infra-391/architecture (cc50e1512a12...), equal to gh api commits; list 36 + 3 components, last_error null; issue-update explicit [daemon-api, smoke-worker] reads back `Components: daemon-api, smoke-worker`; after re-saving legion-smoke on the collision branch: `component id \"daemon\" is already a component of CORE from sjawhar/legion`, `The previous model of sjawhar/legion-smoke stays up (3 components)`, tree still 36 + 3 with daemon from sjawhar/legion, issue still `daemon-api, smoke-worker`",
+      "headSha": "74795be3c132b0bb7371c571c44b4e8a1a637cca",
+      "negativeControl": "ids [daemon-api, not-a-component] -> `COMPONENTS_INPUT: CORE has no component not-a-component in its current architecture model`, exit 1"
+    },
+    {
+      "criterion": "Root A6: a browser-suite test proves Settings, the project page, the architecture page and an issue's components line show components from both sources; fails on the base build, passes at the head",
+      "surface": "Dispatch's browser suite (Playwright chromium, real Go server, production SPA bundle, rootless Postgres) in the issue pod, tester ports 18725/19026-19029",
+      "command": "cd packages/dispatch && DATABASE_URL=.../dispatch_e2e_tester bun run e2e -- e2e/architecture-sources.e2e.ts e2e/architecture.e2e.ts e2e/settings.e2e.ts e2e/live.e2e.ts e2e/keyboard-palette.e2e.ts --project=chromium --reporter=line",
+      "observed": "57 passed, 1 skipped at the head (log /legion/scratch/tmp/infra391/tester/a6-head.log)",
+      "headSha": "74795be3c132b0bb7371c571c44b4e8a1a637cca",
+      "negativeControl": "The same spec copied alone into the base export 83f6320140ec (database dispatch_e2e_tester_base): 1 failed at architecture-sources.e2e.ts:89 `legion/arch is still a CORE source`, element not found (log a6-base.log)"
+    },
+    {
+      "criterion": "Existing single-source projects keep working unchanged (migration keeps their row and model)",
+      "surface": "Base server 83f6320140ec then the head server, real processes on one Postgres database (dispatch_upgrade_tester), fake GitHub, both CLIs",
+      "command": "/legion/scratch/tmp/infra391/tester/upgrade1.sh on the base server (singular PUT, sync, issue with web+api), stop it, start the head server on the same database, /legion/scratch/tmp/infra391/tester/upgrade2.sh",
+      "observed": "Schema 116 -> 117; source id 0 with last_commit/last_tree_sha/last_sync_at unchanged; components source_id 0, depends_on edge and OLD-1 `Components: api, web` unchanged; list shows components 3; re-sync silent (1 architecture.synced event total); second source acme/infra gets id 1 and imports beside it; OLD-1 takes [infra-dns, web]",
+      "headSha": "74795be3c132b0bb7371c571c44b4e8a1a637cca",
+      "negativeControl": "A component with no source in a 116 database (dispatch_census_tester): `envoy-dispatch census` -> `REFUSED 0117_architecture_sources_per_repo.up.sql: its census counts 1`, exit 1; the head server's boot -> `apply migration 117 ... components_source_fkey`, exit 1, schema stays 116"
+    },
+    {
+      "criterion": "One source's import replaces only its own components, with a named failure for an id another source holds, also when two server processes race",
+      "surface": "Two head server processes (ports 18725, 18726) on one database (dispatch_probe_tester), fake GitHub; Chromium on the architecture page and Settings",
+      "command": "/legion/scratch/tmp/infra391/tester/probe.sh and race.sh (logs probe.log, race.log); concurrent PUT and sync-all loops; Chromium driving Refresh, component details, Settings Delete",
+      "observed": "20/20 race rounds: both 200, exactly one source holds `shared`, the other's last_error names the holder (both winners seen), no 500 or primary-key error; 10 concurrent PUTs -> one row; 8 concurrent sync-alls -> identical 200s; delete retires the holder's ids on the issue and the other source then takes them; recovery without a head move; per-source access failure isolated; only the failed source's rows dashed; leased 5-minute tick synced all 7 sources",
+      "headSha": "74795be3c132b0bb7371c571c44b4e8a1a637cca",
+      "negativeControl": "acme/...git and ac_me/alpha -> 400 SOURCE_INPUT; bearer without actor -> 400 ACTOR_KIND; no auth -> 401; removed singular route -> 404; uninstalled repo -> 409 SOURCE_ACCESS; --repo acme/notasource -> exit 1"
+    }
+  ],
+  "notes": [
+    "No defect found, so no red test: every way I tried to break it (collision in both orders, cross-process race, delete and revival, recovery without a head move, access failure in sync-all, input canonicalization, legacy upgrade, census) is already locked by the importer, API, store and browser tests the PR adds.",
+    "Observed, not a defect: after the source holding a contested id is deleted, the other source's row keeps its old last_error (naming the deleted repository) until its next import, at most one five-minute pass later."
+  ]
+}
