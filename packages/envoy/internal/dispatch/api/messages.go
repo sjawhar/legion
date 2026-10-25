@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -69,7 +70,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 }
 
 // createAgentMessage is POST /api/v1/agents/{session_id}/messages: a person's send to one session,
-// named by its idempotency key (agent_message_keys.go).
+// named by its idempotency key (agent_message_keys.go) when it carries one.
 func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -95,21 +96,31 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	if err := validateIdempotencyKey(input.IdempotencyKey, "MESSAGE_INPUT", agentMessageKeyRequired); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	// A send with no key is accepted as before the key existed: it comes from a tab opened before
+	// the deploy, which refusing would leave holding the only copy of its message.
+	var key *idempotencyKey
+	if input.IdempotencyKey == "" {
+		slog.Warn("dispatch: a single-session send carried no idempotency key",
+			"login", actor.ID, "session_id", sessionID)
+	} else {
+		if err := validateIdempotencyKey(input.IdempotencyKey, "MESSAGE_INPUT"); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		held := newAgentMessageKey(actor, input.IdempotencyKey, sessionID, input.Body, delivery, input.InReplyTo)
+		// A key this person has already used answers its message before anything is written or
+		// the listener is read: a retry of a send that landed must not fail because the listener
+		// is down.
+		if s.answerHeldAgentMessageKey(r.Context(), w, held, delivery, actor) {
+			return
+		}
+		key = &held
 	}
-	key := newAgentMessageKey(actor, input.IdempotencyKey, sessionID, input.Body, delivery, input.InReplyTo)
-	// A key this person has already used answers its message before anything is written or the
-	// listener is read: a retry of a send that landed must not fail because the listener is down.
-	if s.answerHeldAgentMessageKey(r.Context(), w, key, delivery, actor) {
-		return
-	}
-	message, _, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor, &key)
+	message, _, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor, key)
 	if errors.Is(err, errAgentMessageKeyHeld) {
 		// Two requests with one key reached the write together; the other committed first, and
 		// this one's transaction rolled back - message, key and event with it.
-		if !s.answerHeldAgentMessageKey(r.Context(), w, key, delivery, actor) {
+		if !s.answerHeldAgentMessageKey(r.Context(), w, *key, delivery, actor) {
 			s.writeHandlerError(w, fmt.Errorf("message key %q was held and then not found", key.key))
 		}
 		return

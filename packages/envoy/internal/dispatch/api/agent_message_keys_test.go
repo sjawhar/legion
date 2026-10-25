@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
 // agentSessions is the registry the keyed-send tests' fake listener answers: two sessions that
@@ -112,25 +114,58 @@ func keysOf(l *broadcastListener) []string {
 	return keys
 }
 
-// INFRA-258. A single-session send names itself with an idempotency key, so its retry can be told
-// from a second send. A send without one - a page loaded before the key was required, or any other
-// keyless caller - is refused, saying what that page's person does, and writes and sends nothing.
-func TestASingleSessionSendWithoutAKeyIsRefused(t *testing.T) {
+// INFRA-258. The page names every single-session send with an idempotency key, so its retry can be
+// told from a second send. A send without one - a tab opened before the deploy, still running the
+// page that sent none - is accepted and delivered as it was before the key existed, with no
+// guarantee against a second send, and logged at WARN with the caller and the session, never the
+// body: refusing it would strand that tab's message.
+func TestASingleSessionSendWithoutAKeyIsAcceptedAndLogged(t *testing.T) {
+	logs := &storetest.LockedLog{}
+	previous := slog.Default()
+	slog.SetDefault(slog.New(slog.NewTextHandler(logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+	listener, sends := newBroadcastListener(t, agentSessions)
+	handler, database := newTargetedMessageHandler(t, listener.URL)
+	const body = "Status of the keyless page?"
+
+	keyless := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
+		"body": body, "delivery": "btw",
+	}, "alice")
+	if keyless.Code != http.StatusCreated {
+		t.Fatalf("a keyless send: status=%d body=%s, want 201", keyless.Code, keyless.Body.String())
+	}
+	message := decodeBody[model.Message](t, keyless)
+	if len(message.Deliveries) != 1 || message.Deliveries[0].State != "sent" {
+		t.Fatalf("the keyless send's deliveries = %#v, want one sent attempt", message.Deliveries)
+	}
+	if got := sends.targets(); !equalStrings(got, []string{"s1"}) {
+		t.Fatalf("listener sends = %v, want one frame", got)
+	}
+	var keys int
+	if err := database.Pool.QueryRow(context.Background(),
+		`select count(*) from agent_message_idempotency_keys`,
+	).Scan(&keys); err != nil {
+		t.Fatalf("count the stored keys: %v", err)
+	}
+	if keys != 0 {
+		t.Fatalf("stored keys = %d, want none for a keyless send", keys)
+	}
+	warned := logs.Lines("dispatch: a single-session send carried no idempotency key")
+	if strings.Count(warned, "\n") != 1 || !strings.Contains(warned, "level=WARN") ||
+		!strings.Contains(warned, "login=alice") || !strings.Contains(warned, "session_id=s1") {
+		t.Fatalf("logged %q, want one WARN line naming login alice and session s1", warned)
+	}
+	if strings.Contains(logs.String(), body) {
+		t.Fatalf("the logs carry the message body:\n%s", logs.String())
+	}
+}
+
+// A key the send does carry is held to the rule: letters, digits, '.', '_', ':' and '-', at most
+// 128 of them. One outside it is refused, and writes and sends nothing.
+func TestAMalformedKeyIsRefused(t *testing.T) {
 	listener, sends := newBroadcastListener(t, agentSessions)
 	handler, database := newTargetedMessageHandler(t, listener.URL)
 	before := databaseFingerprint(t, database)
-
-	keyless := dispatchRequest(t, handler, http.MethodPost, "/api/v1/agents/s1/messages", map[string]any{
-		"body": "Status?", "delivery": "btw",
-	}, "alice")
-	refusal := decodeBody[struct {
-		Code  string `json:"code"`
-		Error string `json:"error"`
-	}](t, keyless)
-	if keyless.Code != http.StatusBadRequest || refusal.Code != "MESSAGE_INPUT" ||
-		refusal.Error != "idempotency_key is required, one per send. On a page loaded before it was required: copy the message, reload the page and send it again" {
-		t.Fatalf("a keyless send = %d %#v, want 400 MESSAGE_INPUT saying the key is required", keyless.Code, refusal)
-	}
 
 	for name, test := range map[string]struct {
 		key, code, says string

@@ -208,9 +208,11 @@ func validateBroadcastInput(body, delivery, key string, sessionIDs []string) ([]
 	// The rule comes first, since it is the answer for every keyless caller; the second sentence is
 	// for a page loaded before the field shipped, whose failed row is the only copy of the message
 	// and which a reload drops, so it says what to do, in order.
-	if err := validateIdempotencyKey(key, "BROADCAST_INPUT",
-		"idempotency_key is required, one per send. On a page loaded before it was required: press Restore draft and copy the message, then reload the page and send it again",
-	); err != nil {
+	if key == "" {
+		return nil, errorf(http.StatusBadRequest, "BROADCAST_INPUT", "%s",
+			"idempotency_key is required, one per send. On a page loaded before it was required: press Restore draft and copy the message, then reload the page and send it again")
+	}
+	if err := validateIdempotencyKey(key, "BROADCAST_INPUT"); err != nil {
 		return nil, err
 	}
 	seen := make(map[string]struct{}, len(sessionIDs))
