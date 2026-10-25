@@ -98,9 +98,9 @@ func TestHeadVerdictJudgesOnlyTheChecksTheBaseBranchRequires(t *testing.T) {
 	}
 }
 
-// READY and the workflow share one rule: a required check still running is not red, only not
-// passed yet, and neither is one the head reports nothing for, which READY refuses on its own and
-// leaves the workflow's verdict undecided; one that ended anything but a pass is red.
+// The workflow's rule: a required check still running is not red, only not passed yet, and neither
+// is one the head reports nothing for, which leaves the verdict undecided until a later settlement
+// decides it; one that ended anything but a pass is red.
 func TestJudgeReadsAPendingRequiredCheckAsNotRedYet(t *testing.T) {
 	standing := Judge([]string{"lint", "test", "typecheck"}, map[string]string{"lint": Pending, "test": "cancelled", "unrelated": "failure"})
 	want := []Standing{{"lint", Pending}, {"test", "cancelled"}, {"typecheck", Missing}}

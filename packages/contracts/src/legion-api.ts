@@ -556,9 +556,10 @@ export type LegionGrant = z.output<typeof LegionGrantResponse>;
 
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
 export const LegionEmptyResponse = z.strictObject({});
-/** `api.HandoffCompleteResponse`: `note` is what READY's checks say when READY was published
- * without reading the head's checks (the pull request already merged, or its base requiring none);
- * every other completion answers none. */
+/** `api.HandoffCompleteResponse`: `note` is what READY answers when it has something to say about
+ * the merge it publishes - the pull request was already merged, so its head's handoffs went
+ * unread, or a person merges this one (`MANUAL_MERGE_REQUIRED:`); every other completion answers
+ * none. */
 export const LegionHandoffCompleteResponse = z.strictObject({
   note: nonEmptyString.optional(),
 });

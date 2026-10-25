@@ -285,13 +285,17 @@ func RedSendsBack(pr record.PullRequest) bool {
 // RedWithdrawsReady says whether the verdict that stands for the pull request's head is red against
 // a READY, in awaiting_merge: the pull request is open, and CI is red at the head by its own
 // settlement and its own workflow runs (HeadVerdict, with the settlement of the head itself). The
-// merger's READY found the head's own checks and runs green on GitHub, which is what GitHub merges
-// by, so a red carried to it from the head a .legion/-only push replaced (SettlementFor) contradicts
-// that and sends nothing back; the head's own red - a required check failing on a rerun, a newly
-// required one, a required workflow re-run red - keeps GitHub from merging it. As with RedSendsBack
+// daemon has submitted the merge of that head, so what takes the submission back is a red of the
+// head's own - a required check failing on a rerun, a newly required one, a required workflow
+// re-run red - which the implementer's next push replaces, and the submission names the commit
+// about to be replaced: Legion withdraws its own request, rather than refusing a merge the
+// repository's rules allow. A red carried to the head from the one a .legion/-only push replaced
+// (SettlementFor) stood before the READY and says nothing new about that commit, so it sends
+// nothing back. As with RedSendsBack
 // before READY, a head a .legion/-only push reached is no exception: every worker is suspended in
 // awaiting_merge, and only the implementer can change the red. PlannedRed is a red the tester's own
-// tests planned for the review round, and READY found the head green since, so it is not read. The
+// tests planned for a review round the approval and the acceptance have ended since, so it is not
+// read here. The
 // caller decides when such a red is read: a red only required workflows make (RedOnlyByWorkflows)
 // withdraws the READY on a read of their runs, never on a CI settlement, which reads no run and
 // would judge them by a read up to one pass old (workflow's decideChecks).
