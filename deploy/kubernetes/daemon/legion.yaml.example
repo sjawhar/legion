@@ -45,6 +45,10 @@ projects:
   #   slack_channels: [C00000000]      # optional: Slack channels whose @Legion mentions reach this
   #                                    # project's controller, which answers in the thread; needs
   #                                    # controller: daemon and runtime.kubernetes.agent_secrets
+  #   deploys:                         # optional: each run of this workflow on the repository's
+  #     - { repo: acme/widgets, workflow: .github/workflows/deploy.yaml, step: Apply } # default branch
+  #                                    # whose Apply step succeeds after a merge wakes that pull
+  #                                    # request's open production check
 gates:
   design: root-issues                  # a person approves each root's spec (the default); or off
 github_apps:

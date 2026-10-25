@@ -84,7 +84,8 @@ type RuntimeSettings struct {
 }
 
 // KubernetesSettings is the settled `runtime.kubernetes` block without its credential file
-// (`kubeconfig`, `context`), its credential source (`session_dsn_secret`) and the operator's `pod`
+// (`kubeconfig`, `context`), the session store's own fields (`session_dsn_secret`, the credential
+// source, and `session_database`, the instance and login behind it) and the operator's `pod`
 // pieces, which every pod reads from its own spec.
 type KubernetesSettings struct {
 	Namespace    string                           `json:"namespace"`
@@ -93,7 +94,8 @@ type KubernetesSettings struct {
 	IssueVolume  string                           `json:"issue_volume"`
 	Scheduling   SchedulingSettings               `json:"scheduling"`
 	Resources    map[string]RoleResourcesSettings `json:"resources"`
-	// SessionStore is "postgres" when the file names a session DSN secret, else "pvc".
+	// SessionStore is the settled store's kind — "pvc", "postgres" or "cloudsql-iam" — and nothing
+	// else of it.
 	SessionStore string                `json:"session_store"`
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty"`
 	// Plugins is the settled pair, whatever its source, absent while the daemon knows none.
@@ -157,9 +159,18 @@ type PluginsSettings struct {
 // ProjectSettings is one `projects.<KEY>` entry; its repositories are Dispatch's mapping, which
 // the state's `repositories` shows, never this file's.
 type ProjectSettings struct {
-	MergeQueueRole string        `json:"merge_queue_role,omitempty"`
-	Merge          MergeSettings `json:"merge"`
-	SlackChannels  []string      `json:"slack_channels"`
+	MergeQueueRole string           `json:"merge_queue_role,omitempty"`
+	Merge          MergeSettings    `json:"merge"`
+	SlackChannels  []string         `json:"slack_channels"`
+	Deploys        []DeploySettings `json:"deploys"`
+}
+
+// DeploySettings is one `projects.<KEY>.deploys` entry as the file writes it: the repository as
+// `<owner>/<name>`, the workflow's path and the step whose success is a deploy.
+type DeploySettings struct {
+	Repo     string `json:"repo"`
+	Workflow string `json:"workflow"`
+	Step     string `json:"step"`
 }
 
 // MergeSettings is a project's `merge` policy: the by-hand expressions as written, never compiled.
@@ -248,9 +259,13 @@ func SettingsOf(cfg config.Config) Settings {
 			MergeQueueRole: project.MergeQueueRole,
 			Merge:          MergeSettings{ByHand: make([]string, len(project.Merge.ByHand))},
 			SlackChannels:  stringsOf(project.SlackChannels),
+			Deploys:        make([]DeploySettings, len(project.Deploys)),
 		}
 		for i, pattern := range project.Merge.ByHand {
 			entry.Merge.ByHand[i] = pattern.Expression
+		}
+		for i, deploy := range project.Deploys {
+			entry.Deploys[i] = DeploySettings{Repo: deploy.Repo.String(), Workflow: deploy.Workflow, Step: deploy.Step}
 		}
 		settings.Projects[key] = entry
 	}
@@ -282,7 +297,7 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			PriorityClass: block.Scheduling.PriorityClass,
 		},
 		Resources:    make(map[string]RoleResourcesSettings, len(block.Resources)),
-		SessionStore: "pvc",
+		SessionStore: string(block.SessionStore.Kind),
 		Setup:        stringsOf(block.Setup),
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,
@@ -297,9 +312,6 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 	}
 	for role, reservation := range block.Resources {
 		settings.Resources[string(role)] = roleResourcesSettingsOf(reservation)
-	}
-	if block.SessionDSNSecret != "" {
-		settings.SessionStore = "postgres"
 	}
 	if broker := block.AgentSecrets; broker != nil {
 		settings.AgentSecrets = &AgentSecretsSettings{URL: broker.URL, Audience: broker.Audience, TokenExpirySeconds: broker.TokenExpirySeconds}

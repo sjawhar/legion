@@ -294,6 +294,67 @@ func (c *Client) Role(ctx context.Context, role string) (Session, error) {
 	return responseBody.Session, nil
 }
 
+// Session returns one live session's listener metadata, or ErrNotFound if the listener holds no
+// record of it: a 404, or a session id the listener refuses as a KV key (a 400 for one outside
+// nats.go's key alphabet or holding an empty token, a 413 for one too long), under which no
+// session can have registered. Those three are "no record" rather than a failure because a key
+// the bucket cannot hold names nothing a read could ever find, so a caller waiting on that
+// session may stop waiting.
+//
+// A caller asks about the one session it holds an id for rather than scanning Sessions, because
+// that list is answered from the listener's in-memory cache alone: a session whose cache entry is
+// still being refilled is absent from the list while its record is there to be read, and a
+// missing row cannot tell the two apart. Every other status, a body that does not decode and a
+// transport failure alike are ErrUnavailable carrying the listener's own reason, so a read the
+// message bus did not answer reads as "ask again", never as "that session is gone".
+func (c *Client) Session(ctx context.Context, sessionID string) (Session, error) {
+	request, err := http.NewRequestWithContext(
+		ctx, http.MethodGet, c.baseURL+"/v1/registry/"+url.PathEscape(sessionID), nil,
+	)
+	if err != nil {
+		return Session{}, fmt.Errorf("%w: build GET /v1/registry/%s request: %v", ErrUnavailable, sessionID, err)
+	}
+	c.authorize(request)
+	response, err := c.httpClient.Do(request)
+	if err != nil {
+		return Session{}, fmt.Errorf("%w: GET /v1/registry/%s: %v", ErrUnavailable, sessionID, err)
+	}
+	defer response.Body.Close()
+	switch response.StatusCode {
+	case http.StatusNotFound, http.StatusBadRequest, http.StatusRequestEntityTooLarge:
+		return Session{}, ErrNotFound
+	}
+	if response.StatusCode != http.StatusOK {
+		var failure struct {
+			Error string `json:"error"`
+		}
+		if err := json.NewDecoder(response.Body).Decode(&failure); err == nil && failure.Error != "" {
+			return Session{}, fmt.Errorf(
+				"%w: GET /v1/registry/%s returned %d: %s",
+				ErrUnavailable, sessionID, response.StatusCode, failure.Error,
+			)
+		}
+		return Session{}, fmt.Errorf(
+			"%w: GET /v1/registry/%s returned %d", ErrUnavailable, sessionID, response.StatusCode,
+		)
+	}
+
+	var session Session
+	if err := json.NewDecoder(response.Body).Decode(&session); err != nil {
+		return Session{}, fmt.Errorf("%w: decode GET /v1/registry/%s response: %v", ErrUnavailable, sessionID, err)
+	}
+	if session.SessionID == "" {
+		session.SessionID = sessionID
+	}
+	if session.Capabilities == nil {
+		session.Capabilities = []string{}
+	}
+	if session.Roles == nil {
+		session.Roles = []string{}
+	}
+	return session, nil
+}
+
 // Send delivers a Dispatch frame to an already-resolved live session.
 func (c *Client) Send(ctx context.Context, input SendInput) (SendResult, error) {
 	body, err := json.Marshal(struct {

@@ -352,11 +352,15 @@ type PhaseView struct {
 // decided it until the next round opens or a new generation clears it, so a request for changes
 // stays through implementing and testing, and an approval through retro and every phase after
 // it; absent until a review in a round decides.
+// State is whether the pull request is open, merged, or closed unmerged, always one of the three:
+// a merged root waits in awaiting_merge for the rest of its tree, so an operator reads the merge
+// here rather than guessing at it.
 type PullRequestView struct {
 	// Repo is the repository (owner/name) the pull request is in, its issue's.
 	Repo           string `json:"repo"`
 	Number         int    `json:"number"`
 	Head           string `json:"head"`
+	State          string `json:"state"`
 	ChecksVerdict  string `json:"checksVerdict,omitempty"`
 	ReviewDecision string `json:"reviewDecision,omitempty"`
 	FixAttempts    int    `json:"fixAttempts"`
@@ -397,8 +401,9 @@ type CheckView struct {
 }
 
 // CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge`,
-// `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`), Detail the
-// cause's own detail (the run and its completion, or the build's commit), and At when.
+// `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
+// Detail the cause's own detail (the run and its completion, the deploy workflow's run, attempt,
+// job and step success, or the build's commit), and At when.
 type CheckWakeView struct {
 	Kind   string    `json:"kind"`
 	Detail string    `json:"detail"`

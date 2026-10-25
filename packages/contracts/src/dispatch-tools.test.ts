@@ -118,7 +118,7 @@ function schemaFor(name: keyof typeof validCalls) {
 }
 
 const ISSUE_UPDATE_FIELDS_RULE =
-  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo.";
+  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.";
 const ISSUE_UPDATE_DONE_RULE =
   "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts.";
 const reasonOnlyWithDone = (status: string): string =>
@@ -468,6 +468,11 @@ describe("dispatchToolSpecs", () => {
       { issue: "DSP-1", components: { mode: "none", reason: "hiring" } },
       { issue: "DSP-1", repo: "acme/widgets" },
       { issue: "DSP-1", repo: "" },
+      { issue: "DSP-1", before: "DSP-2" },
+      { issue: "DSP-1", after: "DSP-2" },
+      { issue: "DSP-1", before: "DSP-2", after: "DSP-3" },
+      // An empty value is still a field: the server, not the tool, refuses the neighbour.
+      { issue: "DSP-1", before: "" },
     ]) {
       expect(schema.safeParse(args).success, JSON.stringify(args)).toBe(true);
     }
@@ -484,6 +489,7 @@ describe("dispatchToolSpecs", () => {
       ).toBe(false);
     }
     expect(schema.safeParse({ issue: "DSP-1", repo: 42 }).success).toBe(false);
+    expect(schema.safeParse({ issue: "DSP-1", before: 42 }).success).toBe(false);
   });
 
   test("dispatch_issue_update accepts only Legion lifecycle statuses", () => {
@@ -541,8 +547,10 @@ describe("dispatchToolSpecs", () => {
   });
 
   // Agents may set an issue's priority (dispatch://LEGION/artifact/issue-status-conventions-md);
-  // rank stays the board's and is refused.
-  test("dispatch_issue_update takes the four priority buckets and null, but never rank", () => {
+  // the board's order moves by neighbour, through before and after, never through a rank field.
+  // The refusal of { issue, rank } below is the guard for that: under `strict: true` the tool
+  // takes two flat arguments and no nested rank object.
+  test("dispatch_issue_update takes the four priority buckets and null, and refuses a rank field", () => {
     const schema = schemaFor("dispatch_issue_update");
 
     for (const priority of [0, 1, 2, 3, null]) {
@@ -896,7 +904,7 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  test("rejects dispatch_suggest and dispatch_doc_edit when neither artifact nor ref names the document", () => {
+  test("rejects dispatch_suggest without a document, and dispatch_doc_edit only on a project", () => {
     expect(
       schemaFor("dispatch_suggest").safeParse({
         issue: "CORE-1",
@@ -904,9 +912,16 @@ describe("dispatchToolSpecs", () => {
         replace_with: "final",
       }).success
     ).toBe(false);
+    // An issue's primary document is what doc-edit edits when no artifact names another.
     expect(
       schemaFor("dispatch_doc_edit").safeParse({
         issue: "CORE-1",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      }).success
+    ).toBe(true);
+    expect(
+      schemaFor("dispatch_doc_edit").safeParse({
+        project: "CORE",
         ops: [{ op: "replace", find: "draft", with: "final" }],
       }).success
     ).toBe(false);

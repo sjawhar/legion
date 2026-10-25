@@ -1,5 +1,6 @@
 import {
   DEFAULT_ISSUE_PAGE_LIMIT,
+  DEFAULT_ISSUE_READ_EVENTS,
   ISSUE_TITLE_MAX,
   MAX_ISSUE_BLOCKERS,
   MAX_ISSUE_PAGE_LIMIT,
@@ -47,6 +48,9 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
 const ISSUE_REFERENCE =
   "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 
+const BOARD_NEIGHBOUR_REFUSAL =
+  "The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.";
+
 const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 
@@ -89,9 +93,10 @@ function documentOwnerValidation(
   };
 }
 
+const documentEditOwner = documentOwnerValidation(true);
 const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
   check: (value) => {
-    if (!documentOwnerValidation(true, true).check(value)) return false;
+    if (!documentEditOwner.check(value)) return false;
     const input = value as { readonly precondition?: unknown };
     if (input.precondition === undefined) return true;
     if (typeof input.precondition !== "object" || input.precondition === null) return false;
@@ -101,8 +106,7 @@ const documentEditValidation: NonNullable<DispatchToolSpec["validation"]> = {
     };
     return (typeof precondition.document === "string") !== Array.isArray(precondition.blocks);
   },
-  message:
-    "Exactly one of issue and project is required; artifact or ref must name the document. A precondition selects exactly one of document or blocks.",
+  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`,
 };
 
 /** dispatch_comment: the document-owner rule plus `turn` only alongside `reply_to_ask`. */
@@ -119,7 +123,7 @@ const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
 };
 
 const ISSUE_UPDATE_FIELDS_RULE =
-  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo.";
+  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.";
 const ISSUE_UPDATE_DONE_RULE =
   "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts";
 const ISSUE_UPDATE_REASON_RULE = "reason goes only with status done";
@@ -142,6 +146,8 @@ function issueUpdateProblem(value: unknown): string | undefined {
     readonly blocked_by?: unknown;
     readonly components?: unknown;
     readonly repo?: unknown;
+    readonly before?: unknown;
+    readonly after?: unknown;
   };
   if (input.status === "done") {
     if (typeof input.reason !== "string" || input.reason.trim() === "") {
@@ -163,7 +169,9 @@ function issueUpdateProblem(value: unknown): string | undefined {
     typeof input.parent === "string" ||
     Array.isArray(input.blocked_by) ||
     (typeof input.components === "object" && input.components !== null) ||
-    typeof input.repo === "string";
+    typeof input.repo === "string" ||
+    typeof input.before === "string" ||
+    typeof input.after === "string";
   return changesAField ? undefined : ISSUE_UPDATE_FIELDS_RULE;
 }
 
@@ -375,7 +383,7 @@ export const dispatchToolSpecs = [
       assignee: z
         .string()
         .describe(
-          "Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else unassigned."
+          "Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else the project's default assignee when it still names a person who has signed in, else unassigned."
         )
         .optional(),
       components: componentsArgument(z).optional(),
@@ -391,14 +399,15 @@ export const dispatchToolSpecs = [
     name: "dispatch_issue_update",
     example: {
       issue: "DSP-1",
-      status: "done",
-      reason: "Shipped in owner/repo#7; verified on the production dashboard.",
+      priority: 1,
+      before: "DSP-2",
     },
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " +
       "its priority, link a URL (the pull request that delivers it, a run, a document), set its " +
       "route, set or clear its parent, replace the issues it is blocked by, attach it to " +
-      "architecture components, or set the repository it targets. Status is one of " +
+      "architecture components, set the repository it targets, or move it on its project's " +
+      "board. Status is one of " +
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. A non-empty external_links is " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
@@ -406,12 +415,15 @@ export const dispatchToolSpecs = [
       "replaces the issue's own attachment. Closing an issue " +
       "(status done) requires reason, the note that says why: it is posted on the issue as a " +
       "message, then the issue closes, because a closed issue refuses messages, comments, and " +
-      "artifacts; reason goes only with status done. A closed issue takes only rank, components, " +
+      "artifacts; reason goes only with status done. A closed issue takes only a board move " +
+      "(before, after), components, " +
       "a reopening status (any status but done), and an external_links write that adds no new " +
       "link (so a link can move to the issue that replaced it); everything else, priority " +
       "included, waits for the reopen. " +
-      "priority is yours to set and a human overrides it; rank, the board's own order, is not " +
-      "settable here. At least one " +
+      "priority is yours to set and a human overrides it. before and after move the issue on " +
+      "its project's board: before puts it above that issue, after below, and both together " +
+      "land it between them. A project's board order is one agent's to keep; in a Legion " +
+      "deployment that is the controller. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
@@ -468,6 +480,18 @@ export const dispatchToolSpecs = [
           "The repository the issue targets, owner/name, mapped to the issue's project in Settings; an empty string clears it, so the issue inherits its parent's or the project's default again."
         )
         .optional(),
+      before: z
+        .string()
+        .describe(
+          `Move the issue above this issue on its project's board: an issue key in the same project. With after, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`
+        )
+        .optional(),
+      after: z
+        .string()
+        .describe(
+          `Move the issue below this issue on its project's board: an issue key in the same project. With before, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`
+        )
+        .optional(),
     }),
     validation: {
       check: (value) => issueUpdateProblem(value) === undefined,
@@ -491,8 +515,9 @@ export const dispatchToolSpecs = [
       "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " +
       "the issue and decide again. A claim whose session is no longer running may be " +
       "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " +
-      "issue's status — claiming moves nothing, so also move the issue to in_progress with " +
-      "dispatch issue-update when you start. A claim is released by its holder or any human, and by " +
+      "issue's status — claiming moves nothing, and the result names who moves the status: you, with " +
+      "dispatch issue-update, or Legion's daemon on an issue it runs, where a status written by anyone " +
+      "else is undone. A claim is released by its holder or any human, and by " +
       "any agent once the holder's session is no longer running. " +
       ISSUE_REFERENCE,
     arguments: (z) => ({
@@ -879,7 +904,9 @@ export const dispatchToolSpecs = [
       project: z.string().describe("Project key owning the document.").optional(),
       artifact: z
         .string()
-        .describe("Project document artifact id, slug, or filename; optional when ref names it.")
+        .describe(
+          "Optional project document artifact id, slug, or filename; primary document by default for an issue."
+        )
         .optional(),
       ref: z.string().describe("Optional dispatch:// issue or document reference.").optional(),
       ops: z
@@ -1118,6 +1145,8 @@ export const dispatchToolSpecs = [
       "An issue read carries a `Progress:` line, `tasks 3/7, children 2/5`: its spec's task-list items " +
       "(`- [ ]` / `- [x]`, nested lists included) and its direct children, each done of total and each only " +
       "when it has any (`Progress: none` otherwise). " +
+      `An issue read, and its dispatch://KEY/log, lists the issue's last ${DEFAULT_ISSUE_READ_EVENTS} events, oldest first; ` +
+      "--events N lists the last N, and --all-events every one. " +
       "Every read ends with `Referenced by:` (what cites or hangs off this node, each with its dispatch:// address, " +
       "an excerpt, and when) and `Links:` (what it cites), so tracing provenance is one call. " +
       "The pictures the shown messages, asks and comments embed come back as images you see, newest first, at most 8 " +
@@ -1140,6 +1169,18 @@ export const dispatchToolSpecs = [
         .describe(
           "A message id (uuid): reads the conversation it belongs to, the root message and every " +
             "reply. Name nothing else with it."
+        )
+        .optional(),
+      events: z
+        .number({ int: true, min: 1 })
+        .describe(
+          `How many of the issue's newest events an issue read or its dispatch://KEY/log lists, oldest first; default ${DEFAULT_ISSUE_READ_EVENTS}. Name no --all-events with it.`
+        )
+        .optional(),
+      all_events: z
+        .boolean()
+        .describe(
+          `List every one of the issue's events, oldest first, on an issue read or its dispatch://KEY/log, in place of the last ${DEFAULT_ISSUE_READ_EVENTS}. Name no --events with it.`
         )
         .optional(),
     }),
@@ -1306,7 +1347,7 @@ export const dispatchToolSpecs = [
     name: "dispatch_whoami",
     example: {},
     description:
-      "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
+      "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
     arguments: () => ({}),
     strict: true,
   },

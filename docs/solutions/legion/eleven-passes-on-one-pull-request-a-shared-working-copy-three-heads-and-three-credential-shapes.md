@@ -151,6 +151,19 @@ pull request body's CI line**, and if the re-run is red on the same test, report
 daemon counts a red verdict on a code head as a fix attempt (LEGION-33) and published `pr-blocked`
 for it; the record in the body is what lets the reviewer and the merger read that count correctly.
 
+**Superseded 2026-10-23 (dispatch://INFRA-83):** only the clause that records both run ids and the
+`main` evidence in the pull request body's CI line is gone, and with it the sentence that the
+record in the body is what lets the reviewer and the merger read that fix-attempt count correctly:
+the body carries no `CI:` line (`skills/legion-worker/references/pr-body.md`), and no role records
+a check result for a later step to trust — the tester and the reviewer each read CI on GitHub at
+the head they are judging and record none of it (the reviewer's own four GitHub reads are in
+`skills/legion-worker/references/merge-gate.md`), where the re-run sits beside the first run at the
+same head and `main`'s own run is one more read. The rest of the rule stands: re-run the failed job
+at the same head, once; do not push over a flake; if the re-run is red on the same test, report and
+stop; and the daemon still counts a red verdict on a code head as a fix attempt (LEGION-33). A
+flake worth remembering is still filed as its own issue, which is the record that outlives the
+round.
+
 ## 7. One coordination pattern worth copying
 
 The Envoy role-claim bridge (`packages/pi-envoy/extensions/envoy.ts`) used to be a single
