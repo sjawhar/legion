@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T19:40:00Z",
+  "completed": "2026-10-25T20:41:23Z (date -u, read at the moment of writing; every value in this file is now either a clock read or a named GitHub field)",
   "evidenceLinks": [
     "Rounds 1-3: https://github.com/sjawhar/legion/pull/2173#issuecomment-6399449475",
     "Round 4: https://github.com/sjawhar/legion/pull/2173#issuecomment-6397391272",
@@ -61,34 +61,41 @@
       "round": 9,
       "codeHead": "afba47fdc3c9",
       "verdict": "pass",
-      "completed": "2026-10-25T17:35:00Z",
+      "completed": "2026-10-25T17:25:13Z (commit.committer.date of 725d6fbd, read from GitHub; the value here before round 13 was 17:35:00Z, typed and never read)",
       "what": "The round's own observation from round 8 became code: an option-shaped stem is refused. Two texts the change had made false were corrected, and the class search behind them was re-derived and its fourth hit confirmed against the repository's own standard for marking a retired section."
     },
     {
       "round": 10,
       "codeHead": "0d503c1f1b7b",
       "verdict": "pass",
-      "completed": "2026-10-25T17:55:00Z",
+      "completed": "2026-10-25T17:49:47Z (commit.committer.date of cfca8499, read from GitHub; the value here before round 13 was 17:55:00Z, typed and never read)",
       "what": "Four checks: the skill sentence against the daemon's own branch, the generated mirror compared rather than rebuilt, the swept texts, and a refusal message that changed a string main owns."
     },
     {
       "round": 11,
       "codeHead": "569486518494",
       "verdict": "pass",
-      "completed": "2026-10-25T19:10:00Z",
+      "completed": "2026-10-25T19:08:27Z (commit.committer.date of f813db1c, read from GitHub; the value here before round 13 was 19:10:00Z, typed and never read)",
       "what": "The rig run against both halves, three sentences read against their paths rather than their predecessors, the fixture inversion stated at its real strength, and the daemon package's gap closed rather than stated: it runs here against a Postgres on this issue's own volume."
     },
     {
       "round": 12,
       "codeHead": "d8efa0ba2fb0",
       "verdict": "pass",
-      "completed": "2026-10-25T19:40:00Z",
+      "completed": "2026-10-25T19:36:47Z (commit.committer.date of d33d3a2a, read from GitHub; the value here before round 13 was 19:40:00Z, typed and never read)",
       "what": "The enumeration read as three functions rather than as a sentence, SuspendIssue's contract checked against the test that pins it, both skill mirrors compared, and the handoff's own limit claim disproved by execution at this head."
+    },
+    {
+      "round": 13,
+      "codeHead": "b247931acbca (the forward merge; handoff head 7bcfab60)",
+      "verdict": "pass",
+      "completed": "2026-10-25T20:41:23Z (date -u, read at the moment of writing)",
+      "what": "A merge round: the five resolutions read member by member against both parents and against the code, the one-contract refactor checked owner-first, the convergence check re-run and found no longer converged, and the timestamp repair applied."
     }
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 12, with one carve-out stated rather than smoothed. The change's own proof is verified: I read the close enumeration as the three functions it is made of (checkLookEnded \u2192 endLook \u2192 endLookPending) rather than as the sentence describing them, checked SuspendIssue's corrected contract against the test that pins it and then neutered deleteStoredSandbox to see that test go red, and compared both skill mirrors rather than trusting a build. The carve-out: the handoff's own limit claim \u2014 that `./internal/daemon` still cannot run in this pod and that last round's fixture inversion therefore has compile and reading evidence only \u2014 is false at this head, by execution. That is recorded as a finding to fix rather than as a failure, since it is a statement about evidence rather than a defect in the change. Rounds 1 to 11 were each verified as those rounds record."
+    "how": "Round 13, a merge round, so the question is what the merge took rather than what the change says. I read each of the five resolutions against both parents by name and against the code the prose describes \u2014 and the first reading was my own error, caught: the conflict marker names the branch's fork point (371d6c87) as its 'diff from' side, not main's merged head, which is decf80f922a1, and reading the wrong one made it look as though the merge had invented a whole feature. Against the right parent every member is accounted for. The round-12 limit claim is corrected in the implementer's handoff as it asked. Rounds 1 to 12 were each verified as those rounds record."
   },
   "failed": 0,
   "failures": [],
@@ -191,14 +198,41 @@
       "observed": "All three tests PASS in 3.3 s. The author's three instruments are each correct \u2014 no docker on PATH, DOCKER_HOST unset, no socket \u2014 and each is an independent reading of 'this pod has no container runtime', which was never in dispute. The claim drawn from them, that the package cannot run here and that the fixture inversion has compile and reading evidence only, is false at this head. The step skipped is the skip's own text, which names LEGION_TEST_PG_DSN: a database, not a runtime.",
       "headSha": "d8efa0ba2fb0",
       "negativeControl": "Re-running the author's own three instruments is the control, and it is what makes this a finding about the question asked rather than about the sources: all three are sound, and all three are about a different proposition."
+    },
+    {
+      "round": 13,
+      "criterion": "The merge carried both sides of every enumeration it resolved, and each member is true of the code.",
+      "surface": "The resolved files, read against both merge parents by name and against the daemon.",
+      "command": "`jj file show -r <parent> <file>` for decf80f922a1 (main's merged head) and 0b8ae3d228a6 (the branch), against the merge b247931acbca; then `workflow/check.go:155-175` for the wake causes",
+      "observed": "The wake enumeration in merge-gate.md carries five members and all five exist in check.go's own switch, string for string: `Dispatch's issue.deployed: `, `the deploy workflow's run: `, `the Legion daemon's boot on build `, `Dispatch's start on build `, `Dispatch's build `. The deploy-workflow member and its `projects.<KEY>.deploys` key come from main (`wakeDeployRun`, `config/stage3.go`, `check_deploy_test.go`, none of them in the branch parent); the pod-and-disk rewording is the branch's. Neither makes the other false: a deploy run is a cause kind like the rest, and the resolved text states the suspension's consequence for it (a new pod on a fresh disk). The outbox resolution takes the branch's side, and its claim checks out: migration 0051 strips the `release` key from queued rows, and `DecodeOutboxPayload` does set `DisallowUnknownFields`, so a row carrying it would otherwise stall its lane.",
+      "headSha": "b247931acbca",
+      "negativeControl": "My own first reading is the control: I took the conflict marker's `diff from` commit (371d6c87) for main's parent, found `wakeDeployRun` in neither 'parent', and was one step from reporting that a merge commit had invented a feature. The marker names the branch's fork point, not main's head. An extraordinary result is the signal to re-check the instrument, not to report faster."
+    },
+    {
+      "round": 13,
+      "criterion": "The one-contract refactor's owning statement is true, and nothing points at a false sentence.",
+      "surface": "`docs/kubernetes.md` and the code it cites.",
+      "command": "Read the owning section at `:3811` and each of the four references at `:754`, `:1403`, `:2998`, `:3723` in context",
+      "observed": "The owner states the pod-owned ephemeral volume, the `<pod>-issue` name, the pod as owner, garbage collection with the pod, and that no selector answers \u2014 each of which `podkind.go` carries (`claimTemplates` none, `diskSource` the pod's) and `TestManifestMatchesTheSandboxCRD` holds to the pinned CRD. Of the four references, three restate nothing. The fourth, `:1403`, says 'the claim it owned is reaped with it', which reads false against the owner until its own heading is read: it is the cutover section, about Sandboxes of the release before this one, which did own a claim. True in context.",
+      "headSha": "b247931acbca",
+      "negativeControl": "`:1403` is the control the architect asked for \u2014 a pointer that would have been a correct reference to a false sentence. Reading the owner first and then each site in its own context is what distinguishes it from one."
+    },
+    {
+      "round": 13,
+      "criterion": "The file-list convergence the merge produced still holds at the head I am testing.",
+      "surface": "The forge's three-dot list and jj's two-dot diff, compared.",
+      "command": "`gh pr view 2173 --json changedFiles`; `gh api --paginate .../pulls/2173/files`; `jj diff --from main@origin --to 7bcfab60 --summary`",
+      "observed": "Three-dot 141 and `changedFiles` 141, agreeing. Two-dot is **154**, not 141: 13 extra paths, zero missing. Every one of the 13 is accounted for by main's own five commits since the merge took `decf80f922a1` \u2014 the set difference against those commits' footprint is empty. So the convergence was real when it was measured and is already gone, because main moves.",
+      "headSha": "7bcfab60",
+      "negativeControl": "The zero-missing half is the control: a two-dot list that was short rather than long would mean the merge lost paths, which is the failure this check exists to catch. It is long, and long by exactly main's churn."
     }
   ],
   "ciAtCodeHead": {
-    "head": "d8efa0ba2fb0",
-    "read": "2026-10-25T19:35:00Z",
-    "state": "typecheck and pr-title success; lint and test in progress; the rest queued \u2014 cited as running, not green",
-    "previousHead": "At 569486518494 all four required lanes read success at 19:05Z, which is a statement about that head and nothing else.",
-    "note": "Read, not re-run; no lane waited for beyond one settling interval."
+    "head": "b247931acbca",
+    "read": "2026-10-25T20:40:46Z (date -u at the read)",
+    "state": "queued \u2014 a full rerun at a new head over main's 71 commits; `pr-title` shows one cancelled and one queued run. Nothing is concluded from it.",
+    "previousHead": "At d8efa0ba2fb0 all four required lanes read success at 19:46Z by GitHub's completed_at (lint 19:41:07Z), which is a statement about that head and nothing else.",
+    "note": "The settled read belongs to whoever takes it after the switchover park, from GitHub's `completed_at` per lane and not from anyone's recollection. I did not wait for it and I conclude nothing from a queued lane."
   },
   "observations": [
     "The previous round's binary still prints the pre-change refusal, and I ran it before noticing. Rebuilding from the head under test is the fourth instance today of the same discipline \u2014 verify the instrument is the one the question is about before reading what it says.",
@@ -227,3 +261,4 @@
     }
   ]
 }
+
