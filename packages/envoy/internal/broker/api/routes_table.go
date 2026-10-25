@@ -167,7 +167,12 @@ func routes() []apiRoute {
 		// and rate-limited both per source address and over every caller at once, since each reread holds
 		// the policy's writer lock while it reads; a reread only moves the broker toward AWS's own truth.
 		{http.MethodPost, "/v1/secrets/{name}/reread", public((*server).rereadSecret)},
-		// Report whether the broker can reach its database.
+		// Report whether the broker can reach its database. From SIGTERM onward it answers 503
+		// SHUTTING_DOWN instead (Deps.Draining) while the process goes on serving every other route,
+		// which is what takes a stopping pod out of its Service's endpoints before it stops
+		// accepting connections. So this is a readiness probe and must never be used as a liveness
+		// probe: a liveness probe on it would have the kubelet kill the container in the middle of
+		// the drain, dropping the requests the pod was draining.
 		{http.MethodGet, "/healthz", public((*server).healthz)},
 	}
 }

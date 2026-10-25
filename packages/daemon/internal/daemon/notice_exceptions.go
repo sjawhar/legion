@@ -29,13 +29,14 @@ const noticeExceptionSubjects = "notifications.envoy.exceptions." + notify.RoleT
 // The listener's liveness windows for a role holder (packages/envoy/internal/session): a session's
 // registration lives for listenerSessionTTL after its last heartbeat (registry.go), delivery drops
 // a holder whose claim went unrefreshed for listenerClaimStale (claim.go, ClaimStaleAfter), and the
-// plugin heartbeats every pluginHeartbeat. A session that stops running can therefore stay a
+// plugin heartbeats every pluginHeartbeat (DEFAULT_HEARTBEAT_MS,
+// packages/envoy-client/src/envoy-settings.ts). A session that stops running can therefore stay a
 // registered holder for up to the longer of the two windows, and until then the listener accepts a
 // publish for it, forwards it, and reports it undelivered.
 const (
 	listenerSessionTTL = 5 * time.Minute
 	listenerClaimStale = 5 * time.Minute
-	pluginHeartbeat    = 2 * time.Minute
+	pluginHeartbeat    = 90 * time.Second
 )
 
 // noticeReholdDelays is how long each copy of a notice whose forward failed waits: the nth copy

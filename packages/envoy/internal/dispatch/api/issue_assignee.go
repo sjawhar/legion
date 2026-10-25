@@ -49,17 +49,29 @@ func (s *server) allowedLogin(ctx context.Context, login string) (string, error)
 	return canonical, nil
 }
 
-// defaultAssignee is who a new issue goes to when the creator names nobody: the human who
-// created it, the owner of the personal token that created it, or the parent's assignee.
-// The shared token creating a root issue leaves it unassigned.
-func defaultAssignee(actor model.Actor, parent *string) *string {
+// defaultAssignee is who a new issue goes to when the create names nobody, in order: the human
+// who created it, the owner of the personal token that created it, the parent's assignee, and
+// the project's default assignee (projectDefault, the column a human sets through PUT
+// /api/v1/projects/{key}/default-assignee). An explicit assignee on the create, a JSON null
+// among them, never reaches here: parseIssueAssignee decides both. The shared token creating a
+// root issue in a project with no default leaves it unassigned.
+//
+// The project's default is used only when it still names a person who has signed in: the create's
+// own update of the project row returns the stored default only in that case (see the `returning`
+// in createIssue), so a create in a project with no default costs nothing new and no extra round
+// trip runs under the project row lock. That check is deliberately not allowedLogin: a default
+// left stale by a restore or a direct write must fall through to nobody, not refuse the create.
+func defaultAssignee(actor model.Actor, parent, projectDefault *string) *string {
 	if actor.Kind == "user" {
 		return new(model.CanonicalLogin(actor.ID))
 	}
 	if actor.Owner != nil {
 		return new(model.CanonicalLogin(*actor.Owner))
 	}
-	return parent
+	if parent != nil {
+		return parent
+	}
+	return projectDefault
 }
 
 type dispatchUser struct {
