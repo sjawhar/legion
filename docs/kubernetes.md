@@ -5,7 +5,7 @@ operator-launched controller, and the one thing in it a role does for itself: ru
 in the cluster from a role container ([Running a workload in the cluster from a
 role](#running-a-workload-in-the-cluster-from-a-role)).
 
-The Go coordinator (`packages/daemon`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon (`packages/daemon`) no longer runs on Kubernetes: it refuses `runtime: kubernetes` at config load and names the Go daemon (LEGION-286). Its runtime's section below is kept for reference and goes with `packages/daemon` at Stage 7 (LEGION-223).
+The Go coordinator (`packages/daemon`, LEGION-208) runs each process as an Agent Sandbox; its live proof is `scripts/e2e/stage4b-sandbox-tree.sh` on the production cluster. The TypeScript daemon no longer runs on Kubernetes: it refuses `runtime: kubernetes` at config load and names the Go daemon (LEGION-286), and its sources were deleted on 2026-10-03. Its runtime's section below is kept for reference until someone removes it (LEGION-223).
 
 ## Worker image
 
@@ -103,6 +103,25 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   `/usr/lib/openssh/ssh-keysign` and setgid `/usr/bin/ssh-agent` lose those bits in the runtime stage,
   and the build's final step refuses an image where any file under `/usr/lib/openssh` or
   `/usr/bin/ssh-agent` carries one),
+  `psql` (from `postgresql-client`: the Dispatch browser suite `bun run e2e`, which a
+  reader-facing Dispatch change must pass before it merges, reaches `psql` through
+  `packages/dispatch/e2e/psql.ts` — `packages/dispatch/e2e/seed.ts` calls it for every spec's
+  database reset — and the local stack `bun run dispatch:local`
+  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without it on `PATH`, so a role
+  whose image lacks `psql` cannot run the suite its own change owes — Debian's `psql` is a Perl
+  wrapper around the versioned client, and it resolves because `perl-base` is in the image),
+  `redis-cli` (from `redis-tools`: no
+  repository of the project speaks Redis today, and it is carried anyway, at about a megabyte,
+  because a second image roll costs more than a megabyte), `sqlite3` (a repository's own SQLite
+  fixture or database has no other way to open from a shell, and Oh My Pi's own profile databases
+  under `~/.omp/profiles/legion` are SQLite as well; a role's session is not one of them — it is
+  `results.jsonl`, `state.json` and `title` under `XDG_STATE_HOME`, and the session store these
+  pods otherwise use is Postgres), `nc` (from `netcat-openbsd`, for the reachability check a role would
+  otherwise write as an inline Python loop: the package ships `/usr/bin/nc.openbsd` and the `nc`
+  name comes from the alternatives system rather than being a file of the package, so every gate
+  asks for `nc` and never `nc.openbsd`), `dig` (from `bind9-dnsutils`, the package trixie's virtual
+  `dnsutils` resolves to: how a role whose connection to a service name fails tells "the name does
+  not resolve" from "the packets are dropped"),
   and `chromium` for the browser tools, installed without its Recommends (no
   setuid sandbox: Oh My Pi launches it with `--no-sandbox --disable-setuid-sandbox`). Oh My Pi picks
   its browser from `PUPPETEER_EXECUTABLE_PATH` first, else the first Chrome or Chromium it finds on
@@ -136,6 +155,59 @@ kept pod loads the release's published pair, installed from npm under the genera
 CLI, TypeScript and the two npm language servers) is pinned by the `ARG`s at the top of
 `worker.Dockerfile`.
 
+### The tools a role's own work needs
+
+The image carries the five clients above — `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` — and for
+everything else the one documented step is the pinned form of the three package runners the image
+already has: `uvx`, `bunx` and `go run`, plus `uv run --with` where what a role needs is a library
+rather than a command. The two answer different halves of the question. The image
+answers the tools a role may not arrange for itself — `apt` cannot write a system prefix in an
+unprivileged container, unpacking a package by hand works for some tools and not for others, and a
+client a role unpacks onto its own `PATH` is the withheld `operator-setup` capability — while the
+runners answer the tools no image can anticipate.
+
+What decided it is the container, not the cost. Measured in a role container of a deployment: the
+role is an unprivileged user, `/usr/local/bin` and `/opt` are read-only, `/home` is read-only while
+`$HOME` (`/home/legion`) under it is writable, and `apt-get` cannot take dpkg's lock even to
+download.
+
+```text
+$ id
+uid=1000(legion) gid=1000(legion) groups=1000(legion)
+$ apt-get install -d -y postgresql-client
+E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission denied)
+E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are you root?
+```
+
+So `apt` cannot write a system prefix in an unprivileged container. Unpacking a package's files by
+hand is a separate question — it works for some tools and not for others (the extraction row below)
+— and what rules it out is not the unpacking but the test the role's own skill states, in
+`skills/legion-worker/references/tools.md` under "What the withheld capability is, and what it is
+not": an extraction under that writable `$HOME` is outside the sanctioned form whatever a role
+scopes it to, and so is a client left where the role's later commands and its subagents resolve it,
+which is the withheld `operator-setup` capability
+(`packages/daemon/internal/capabilities/capabilities.go`). A test harness's own prefix on the
+issue's disk, reached by an absolute path or through a `PATH` its own script exports around its own
+commands, passes that test and is the role's own business — which is how the Dispatch browser
+suite's rootless Postgres with pgvector is stood up in a pod today. So a role wanting a client of
+its own on its `PATH` has the image, a pinned runner, or `uv run --with` for a library. The five
+priced options and their verdicts:
+
+| option | the measurement | verdict |
+| :--- | :--- | :--- |
+| the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment. In the unit a cold launch pays — compressed image size, each read from that image's own manifest in the registry, and each image's `org.opencontainers.image.revision` read from its config blob — this branch's head, `ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision `afa29128061fc10dd6c6aa3755ba051b98b84e02`), is 24 layers and 1026.9 MiB (1,076,764,060 bytes) against the 24 layers and 1019.0 MiB (1,068,477,764 bytes) of the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`): 8,286,296 bytes, 7.9 MiB on an image of a gigabyte, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 → 335,441,703), the other 23 layers carrying 1,105 bytes between them and none of them differing by more than 3,164 bytes | **chosen** |
+| a per-issue install onto the issue's disk | the issue's disk is 49 GiB, and every cache already sits on it (`TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE`), so disk is not what rules it out | **rejected for a compiled client on a role's `PATH`**: `apt` refuses above, and leaving one unpacked where a role's later commands resolve it is the withheld `operator-setup` capability (ruling dispatch://LEGION-200), the extraction row below. Still right for a language's own package set — which is the runner row — and for a test harness's own prefix, which only its own commands resolve through |
+| a runner the image already provides, pinned and failing closed | `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one | **chosen, as documentation rather than new code**: the image already carries all three |
+| extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected as the way to get these five clients onto a role's `PATH`**: that is the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200) under the test in `skills/legion-worker/references/tools.md`, "What the withheld capability is, and what it is not", and it is fragile for exactly the client this change exists for. The same unpacking inside a test harness's own environment passes that test and is a different verdict — and it would not have got a role `psql` either way |
+| `runtime.kubernetes.setup`, the operator-set command every role container runs before its agent starts | it runs on every start of every role, six times per issue | **rejected**: it buys nothing the image does not, since it is still an unprivileged container |
+
+The forms a role types, the rule that a pin names a coordinate as well as a version, and the line
+between a sanctioned pinned run and the withheld `operator-setup` capability are a role's own
+documentation rather than an operator's, and they live in one place:
+`skills/legion-worker/references/tools.md`. The worker image ships that skill, so a role reads it
+where it works, and a tool no runner reaches is the image change that reference spells out, with
+the grep that finds its sites.
+
 ### Image size and pull time
 
 A node that has never run the image pulls it whole before the pod's init containers start, so the
@@ -144,10 +216,24 @@ image's compressed size is a cold launch's first cost. Before the capability too
 them it is 22 layers and 1007 MiB compressed (1,056,280,622 bytes, the `sha-ff33c8c9fb1b` build of the
 pull request that added them): the Debian layer grows from about 30 MiB to 307 MiB, almost all of it
 Chromium and the library closure it depends on; the Go toolchain is 64 MiB and `gopls` 20 MiB; Node's
-tree with the two npm language servers is 66 MiB. On EKS, how long a node takes to pull that is not
-recorded here: the stage 4a launch below is where it is measured. The pull must fit the launch's
-wait for the role's launcher before any init container runs: `worker_boot_timeout_seconds`
-(`packages/daemon/internal/config/config.go`; 120 s by default), which the wait extends only once
+tree with the two npm language servers is 66 MiB. The five client tools
+([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)) cost 7.9 MiB — not a slice
+of that 22-layer figure, but a difference measured like for like between a later pair of builds,
+this branch's head and the base it forks from: the head
+`ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision
+`afa29128061fc10dd6c6aa3755ba051b98b84e02`) is 24 layers and 1026.9 MiB (1,076,764,060 bytes)
+where the base it forks from, `:sha-92dbeea3d391` (revision
+`92dbeea3d3911b5fb08e279fb201634a84ffe72e`), is 24 layers and 1019.0 MiB (1,068,477,764 bytes) —
+8,286,296 bytes, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 →
+335,441,703); the other 23 layers carry the remaining 1,105 bytes between them, no single one of
+them differing by more than 3,164 bytes in either direction. Each size is read from that image's
+own manifest in the registry and each revision from its config blob; a layer rebuilt from the same
+content still compresses to a slightly different size, so read the figure as 7.9 MiB rather
+than as its last digits. On EKS, how long a node takes
+to pull that is not recorded here: the stage 4a launch below is where it is measured. The pull
+must fit the launch's wait for the role's launcher before any init container runs:
+`worker_boot_timeout_seconds` (`packages/daemon/internal/config/config.go`; 120 s by default),
+which the wait extends only once
 an init container is running (`awaitRoleLauncher`, `packages/daemon/internal/runtime/sandbox/relaunch.go`;
 "Liveness rules" below); a launch whose launcher has not connected by then fails and is counted. On
 GKE Autopilot (measured 2026-10-16), an issue or controller pod usually waits for a node of its own
@@ -189,7 +275,8 @@ leaves those agents' models unresolved (`--skip-agent-models`). It then checks e
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
 would find each — `omp setup python --check`, the `chromium` on `PATH` (or the browser a
 `PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
-profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq`, `ssh-keygen` and `flock` on `PATH` with `go version`
+profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq`,
+`ssh-keygen`, `flock`, `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` on `PATH` with `go version`
 running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
@@ -279,13 +366,18 @@ A step of its own, before that final one, runs every toolchain command listed ab
 the image `PATH` — the language servers (`gopls version`, `typescript-language-server --version`,
 `tsc --version`, and `pyright --version` for `pyright-langserver`, which takes no `--version`), `go
 version` with `go env GOROOT` required to be `/opt/go`, `gofmt`, `kubectl version --client`, and trixie's
-`python3`, `curl`, `wget`, `jq --version`, `flock --version`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
+`python3`, `curl`, `wget`, `jq --version`, `flock --version`, `psql --version`, `redis-cli --version`,
+`sqlite3 --version`, `nc -h`, `dig -v`, `chromium --version` and `socat -V` included — the corepack shims fetching their shipped default pnpm and yarn
 into a scratch directory the step removes. `ssh-keygen` takes no `--version`, so the step generates a
-throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. It reruns only
+throwaway ed25519 key in that scratch directory and fingerprints it with `ssh-keygen -l`. Two of the
+five clients are odd the same way: `nc` takes no `--version` either, so the step runs `nc -h`, which
+prints its usage and exits 0, under the `nc` name the alternatives system installs and never
+`nc.openbsd`; and `dig -v` prints its version on stdout, measured in a pod of the image (`dig -v
+2>/dev/null` prints `DiG 9.20.30-1~deb13u1-Debian`, `dig -v 2>&1 >/dev/null` prints nothing). It reruns only
 when the toolchain or an earlier layer changes, so a commit that only rebuilds `legion` needs no package
 registry.
 To check a published image's toolchain end to end, a project Python install included:
-`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && jq --version && flock --version && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
+`docker run --rm --entrypoint sh ghcr.io/sjawhar/legion-worker@sha256:… -c 'uv --version && node --version && npm --version && aws --version && kubectl version --client && go version && gopls version && python3 --version && jq --version && flock --version && psql --version && redis-cli --version && sqlite3 --version && nc -h && dig -v && ssh-keygen -t ed25519 -N "" -f /tmp/k && chromium --version && uv python install 3.13 && uv run --python 3.13 python -c "print(1)"'`.
 
 ### Pin by digest, never by tag
 
@@ -390,9 +482,10 @@ running the published image locally is fine. A failed build is retried with `gh 
 whole-run rerun of a `release.yaml` call, or a `workflow_dispatch` of it while main's tip still carries a
 `legion-v` tag, re-executes `legion_build` and `legion_publish`, which release that tag again: the image is
 rebuilt, the `<legion version>` tag moves to the rebuild's digest, and the release body's "Worker image" names
-that digest. `release-envoy-listener.yaml` is the exception to `--failed`: when its `release_publish` fails at
-"Confirm the version" because another run took the tag first, only a whole-run re-run (`gh run rerun <run-id>`
-without `--failed`) heals it, since `release_build` must compute the version again and re-stamp the binaries.
+that digest. `release-envoy-listener.yaml` needs no re-run when its `release_publish` finds, at "Confirm the
+version", that another run took the tag first: it publishes nothing and, when its commit still needs a release
+and no later run on main still running holds it, starts a new run on main itself, which decides the version again
+and re-stamps the binaries.
 
 The build has no prerequisites outside this repository. After the first push there is one human action: if
 the `legion-worker` GHCR package came out private, an anonymous `docker pull` fails until its visibility is
@@ -1953,8 +2046,51 @@ the default reservations every request equals its limit and the pod is `Guarante
 bounded on the node's disk, and Legion sets no affinity on the pod (GKE Autopilot adds its own,
 below; [Issue sizing](#issue-sizing-one-reservation-per-pod)).
 
+The variables below are the ones a role's agent process carries, not the ones its container's pod
+spec lists: a role container's own spec carries a single variable, `POD_UID` from the downward API
+(`packages/daemon/internal/runtime/sandbox/testdata/golden/worker.json` gives each of the six role
+containers an `env` of `POD_UID` alone). `launchEnvironment` (`manifest.go`) splits the rendered
+environment in two — the kubelet-resolved entries go on the container, and the plain `NAME=value`
+pairs travel in the daemon's start command to `legion launcher`, which hands them to
+`legion worker-shim` and so to the agent (`launcherCommand`, `launcher.go`). So a `printenv` run
+by `kubectl exec` into the container finds none of them but `PATH`, which the worker image's own
+`ENV` sets (`packages/daemon/docker/worker.Dockerfile`) to the value the row below documents, so
+every process of the container carries it however it was started; one the role's own agent runs
+prints each of them the runtime sets, and exits 1 for the four it does not. They are an issue
+pod's role container's; `<generation>` is the role's own generation counter, which differs
+between the role containers of one pod and rises on each relaunch of that role in it.
+`DISPATCH_TOKEN_FILE` and `ENVOY_TOKEN_FILE` are stated without
+condition because configuration load refuses a `runtime: kubernetes` daemon that sets no
+`envoy_token_file` and one that sets no `dispatch_url`
+(`packages/daemon/internal/config/kubernetes.go`), and refuses a configured `dispatch_url` with no
+`dispatch_token_file` (`missingDispatchTokenFile`, `packages/daemon/internal/config/stage3.go`),
+so every pod carries both.
+
+| variable | value | renderer |
+| :--- | :--- | :--- |
+| `PATH` | `/opt/legion/bin` first, then the image's own | `podPath`, `manifest.go` |
+| `GH_CONFIG_DIR` | `/var/run/legion/gh/<owner>`, the issue's repository's owner's directory in the role's gh bundle | `ghAgentEnv`, `podkind.go` |
+| `LEGION_GRANT_FILE` | the runtime sets it in no container: the `legion` tool mints the grants for its own daemon calls in-process | — |
+| `LEGION_STATE_DIR` | `/var/run/legion/state` | `StateDir`, `names.go`; `manifest.go` |
+| `LEGION_CREDENTIAL_HELPER` | the runtime sets it in no container | — |
+| `DISPATCH_TOKEN_FILE` | `/var/run/legion/private/g<generation>/DISPATCH_TOKEN` | `manifest.go`, over `generationDir`, `names.go` |
+| `LEGION_ROOT_WORKSPACE` | the runtime sets it in no container | — |
+| `LEGION_WORKSPACE` | `/legion/workspaces/<owner>/<repo>/<key-lower>` | `podkind.go`, over `workspace.Location`, `internal/workspace/provision.go` |
+| `LEGION_BOOT_TOKEN_FILE` | `/var/run/legion/private/g<generation>/LEGION_BOOT_TOKEN` | `launcherCommand`, `launcher.go` |
+| `LEGION_TERMINATION_GRACE_SECONDS` | the runtime sets it in no container; the pod's grace reaches the shim as its `--stop-grace` argument | `launcherCommand`, `launcher.go` |
+| `ENVOY_TOKEN_FILE` | `/var/run/legion/private/g<generation>/ENVOY_TOKEN` | `manifest.go` |
+
+`<owner>`, `<repo>`, `<key-lower>` and `<generation>` are the pod's own: the owner and repository
+of the issue's repository, the issue key in lower case, and the role's generation counter. The
+daemon-launched controller's container differs: of these eleven names its agent carries no
+`LEGION_WORKSPACE`, because it is told no tree, issue or checkout (`controllerPod.agentEnv`,
+`podkind.go`), and its `GH_CONFIG_DIR` is its bundle's first owner's directory, because its launch
+names no repository and the default is then the project's owners sorted and the first taken
+(`appauth.GitHubCredential`, `credential.go`);
+[Daemon-launched controller](#daemon-launched-controller) has the rest of it.
+
 Every role container is told `LEGION_GH_OWNERS_DIR=/var/run/legion/gh`, the bundle's root,
-`GH_CONFIG_DIR=/var/run/legion/gh/<owner>`, the issue's repository's owner's directory, and
+`GH_CONFIG_DIR` at the issue's repository's owner's directory under it (the table above), and
 `LEGION_GH_PATH=/usr/local/bin/gh`, the image's real gh. The `gh` first on its PATH is
 `/opt/legion/bin/gh`, which runs `legion gh`: it runs the real gh with `GH_CONFIG_DIR` at the
 directory of the owner the command targets, read as gh reads it from the real gh's own help (see
@@ -1977,11 +2113,10 @@ that repository; git in the shared clone asks the same helper it asked before, a
 host is left to the configuration files. The `legion` in the helper resolves on the PATH of
 whichever process runs git. `GH_TOKEN`, `GITHUB_TOKEN` and
 `GH_HOST` are set to the empty string, which gh ignores, so no value the image or an operator's rc
-file leaves in the environment outranks the files. No container is told `LEGION_GIT_PATH`,
-`LEGION_JJ_PATH`, `LEGION_CREDENTIAL_HELPER` or a grant file (the `legion` tool mints the grants for
-its own daemon calls in-process), and nothing is installed under the issue's volume for a pod to
-run: a pod's `git` and `jj` are the image's,
-resolved on its PATH, which puts only the `legion` directory first. The daemon renders the gh keys
+file leaves in the environment outranks the files. No container is told `LEGION_GIT_PATH` or
+`LEGION_JJ_PATH` (for the credential helper and the grant file, see the table above), and nothing
+is installed under the issue's volume for a pod to run: a pod's `git` and `jj` are the image's,
+resolved on its PATH. The daemon renders the gh keys
 when it writes the role Secret at the pod's start, logging `sandbox runtime: github credential
 written` with the sandbox, role, App, `expiresAt` and owners, and a refresher walks every live role
 each minute, re-rendering its bundle for the owner `github-default` names from the daemon's cached
@@ -2659,7 +2794,13 @@ spec:
 The name on the network is a Service, held to a cluster-internal address: no node port, no load
 balancer, no external address and no external name. It is admitted only while the Job it fronts
 owns it, so removing the Job removes it too and leaves nothing for a person to sweep — which is
-why its `ownerReferences` carries the Job's own uid, read back after the Job is created:
+why its `ownerReferences` carries the Job's own uid, read back after the Job is created. It
+selects its pods by that same uid and by nothing else: the namespace's admission requires a
+Service's selector to be exactly `batch.kubernetes.io/controller-uid` at the uid of the Job that
+owns it, because a rule checking a submission sees only the object submitted and cannot look a
+Job up, so a selector by name would let a Service owned by one Job front another's pods. A
+`job-name` selector, though the Job puts that label on its pods too, is refused at submission,
+naming that rule:
 
 ```yaml
 apiVersion: v1
@@ -2670,7 +2811,7 @@ metadata:
     - { apiVersion: batch/v1, kind: Job, name: <workload>, uid: <the Job's uid> }
 spec:
   type: ClusterIP                         # the only kind this namespace admits
-  selector: { job-name: <workload> }      # the label the Job puts on its own pods
+  selector: { batch.kubernetes.io/controller-uid: <the Job's uid> }   # its owner's pods, no one else's
   ports: [{ port: 5432, targetPort: 5432 }]
 ```
 
@@ -2684,7 +2825,7 @@ cd "${TMPDIR:-/tmp}"                                               # not the che
 workload="<issue key lowercased>-postgres-$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
 sed "s|<workload>|$workload|g" workload.yaml | kubectl apply -f -  # the Job, under this run's name
 uid=$(kubectl get job "$workload" -o jsonpath='{.metadata.uid}')   # what the Service must name
-sed -e "s|<workload>|$workload|g" -e "s|<the Job's uid>|$uid|" service.yaml | kubectl apply -f -
+sed -e "s|<workload>|$workload|g" -e "s|<the Job's uid>|$uid|g" service.yaml | kubectl apply -f -
 kubectl wait --for=create pod -l job-name="$workload" --timeout=120s   # it does not exist yet
 kubectl wait --for=condition=Ready pod -l job-name="$workload" --timeout=300s
 ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
@@ -2705,7 +2846,7 @@ while True:
 PY
 kubectl logs -l job-name="$workload" --tail=5                      # and what it says it is doing
 kubectl delete job "$workload"                                     # takes its pod and its Service
-kubectl get jobs,pods                                              # nothing of it is left
+kubectl get jobs,pods,svc                                          # its Job and Service gone, its pod soon after
 ```
 
 That check is `python3`, which the image carries, because **the role container has no client for
@@ -2726,45 +2867,51 @@ Read the first as starting up and the second as the label.
 
 Speaking the protocol is a client library onto the issue's own disk, the way every other tool
 that works from the checkout arrives (below), run from the checkout against that same address —
-never a binary installed into the pod. The last line asks for Jobs and pods and not Services, and
-it runs: as published it exits 0 here. Add Services to it and it is refused — `kubectl get
-jobs,pods,svc` exits 1 with `services is forbidden: … cannot list resource "services"` — because
-this identity may no more list a Service than create one.
+never a binary installed into the pod. The last line asks for the Service as well as the Job and
+its pod, because the grant that admits a Service also lets this identity get, list and watch
+one, so the listing is what shows the Service went with its Job. The Service's endpoints are
+still out of reach (`kubectl auth can-i get endpoints` answers `no`, and so does the same
+question of `endpointslices`), which is why the bullet above compares the workload pod's labels
+rather than the Service's endpoints.
 
-**What of this has been run, and where.** This section is written partly from commands executed
-in the deployment it describes and partly from the declarations dispatch://INFRA-206 carries,
-and a reader is owed the boundary rather than a uniform voice:
+**What of this has been run, where, and when.** This section is written from commands executed in
+the deployment it describes, and that deployment's grants change under it: the apply of
+dispatch://INFRA-206's declarations on 2026-10-25 turned two of the gate's three answers from `no`
+to `yes`. So each bullet below carries the date of the run behind it, and a reader runs the three
+gate commands itself rather than trusting the answers recorded here:
 
-- *Executed from a role container here, at this change's head*: the three gate commands and the
-  whole grant matrix behind them (`create`/`delete jobs`, `list`/`get pods`, `pods/log` `yes`;
-  `patch`/`update jobs`, `get`/`list endpoints`, `get`/`list`/`create services`, `create pods`
-  `no`); the credential-less gate, with the in-cluster environment removed; the Job manifest
-  above through the namespace's own admission, server-side with nothing created, together with
-  one deliberate breakage of each **enforced** rule, each refused naming the rule — the
-  reachability label has no breakage to record, since admission does not check it, which is the
-  whole of why that bullet is marked; the reachability block, run as published against a
-  listener, against a port that refuses and then listens, and against an address whose packets
-  are dropped; and **the sequence's Job half for real** — applied and created, the uid read, the
-  pod waited for into existence and then to Ready (87 s on a cold machine, 10 s on a warm one),
-  its own log line read, the Job deleted and the last line showing nothing of it left. Those are
-  the lines as they now stand: the single `wait` this section published before exited 1 at once
-  with `error: no matching resources found`, because the Job's pod does not exist the instant
-  the apply returns, which is why there are two waits above.
-- *Submitted deliberately against the gate's own rule*, and said rather than left to be noticed:
-  two of this deployment's three gate answers are `no`, so a role following this section submits
-  nothing — the run above was made anyway, to measure the half that does not depend on a
-  Service. What made it safe is what a reader can check: a fifteen-minute deadline and a
-  five-minute cleanup window rather than the twelve and twenty-four hours admission allows, a
-  name of its own, a `kubectl delete job` by hand at the end, and `kubectl get jobs,pods`
-  showing nothing of it left. Read the bolded rule as what it says for the sequence as a whole;
-  this was a bounded measurement of one half of it, not an exception anyone inherits.
-- *Not executed*: the Service steps, and they are refused rather than untried — `kubectl apply`
-  of the Service ends `Forbidden` on the read of the live object, before any create is
-  attempted. So nothing has yet given a workload of this namespace a name on the network, which
-  is why the one step that depends on it — the reachability check against a workload reachable
-  **by its Service name** — is written from the declarations rather than from a run. Read that
-  pair as a design until a role has run it end to end and said so; everything above is a
-  transcript of the lines as published here.
+- *Executed from a role container on 2026-10-25, for dispatch://INFRA-234*: the three gate
+  commands, **all three answering `yes`**, and the grant matrix behind them
+  (`create`/`delete`/`get`/`list`/`watch jobs`, `get`/`list pods`, `get pods/log`, `delete pods`
+  and `create`/`get`/`list`/`watch`/`delete services` `yes`; `patch`/`update jobs`, `create pods`
+  and `get`/`list` of `endpoints` and of `endpointslices` `no`); and **the whole sequence for
+  real**, as published above under a fresh suffix — the Job applied and created, its uid read, the
+  Service applied exactly as published and created, the pod waited for into existence (at once)
+  and then to Ready (70 s), the workload pod's labels read and carrying both its Job's
+  `batch.kubernetes.io/controller-uid` and the reachability label, the reachability check
+  answering by the Service name about two seconds after the Ready wait returned — the same block
+  with one print per attempt added saw its first connection refused and the retry answer, the
+  listener opening a second or so after Ready, which is the starting-up case the paragraph under
+  the sequence describes — the Job's log ending `database system is ready to accept connections`,
+  `kubectl delete job` run, and the closing listing showing the Job and its Service gone at once
+  and its pod `Terminating`, then nothing of it twenty seconds later.
+- *Executed from a role container on 2026-10-24, for dispatch://INFRA-71*: the sequence's Job half
+  (87 s to Ready on a cold machine, 10 s on a warm one), which is where the two waits come from:
+  the single `wait` this section published before exited 1 at once with `error: no matching
+  resources found`, because the Job's pod does not exist the instant the apply returns; and the
+  reachability block, run as published against a listener and against a port that refuses and
+  then listens. And, *not run again since*: the credential-less gate, with the in-cluster
+  environment removed; one deliberate breakage of each **enforced** rule of the Job manifest
+  above, put through the namespace's own admission server-side with nothing created, each refused
+  naming the rule — the reachability label has no breakage to record, since admission does not
+  check it, which is the whole of why that bullet is marked; and the reachability block against an
+  address whose packets are dropped.
+- *Refused as published, and corrected on 2026-10-25*: until dispatch://INFRA-234 the Service
+  manifest above selected the Job's pods by `job-name`, and the namespace's admission refuses
+  that, naming the rule that a Service there selects by `batch.kubernetes.io/controller-uid` at
+  its owning Job's uid and by nothing else. Both forms were put through
+  `kubectl create --dry-run=server` with nothing created: the old one refused, the one above
+  admitted.
 
 What a workload there cannot do, so nobody plans around it: it cannot mount the issue's volume,
 which belongs to another namespace and to one node at a time, and a role may not run a command
@@ -3451,8 +3598,12 @@ fails at the restart.
 
 ## Kubernetes runtime (TypeScript daemon)
 
-This section is the TypeScript daemon's runtime, which it no longer runs: it refuses `runtime:
-kubernetes` at config load (LEGION-286), and the section goes with `packages/daemon` at Stage 7. With `runtime: kubernetes`, the daemon runs the tree's root architects and phase workers as one
+This section is the retired TypeScript daemon's runtime, which it no longer runs: it refuses
+`runtime: kubernetes` at config load (LEGION-286); its sources were deleted on 2026-10-03 (commit
+`ed00df8b2`, "Legion runs on the Go daemon alone"), so the section names no live directory of its
+own and is kept for reference until someone removes it — except its "Operator configuration"
+subsection and that subsection's "Network shares", which describe the pods Legion runs today.
+With `runtime: kubernetes`, the daemon runs the tree's root architects and phase workers as one
 Kubernetes pod per process, on one disk volume per issue tree. The controller always remains an
 interactive tmux pane on the daemon host: `runtime: kubernetes` selects where roots and workers run,
 never the controller. Attach with `tmux -L legion-<project> attach -t legion-<project>`. LEGION-25
@@ -3464,8 +3615,10 @@ and resource allowance. Nothing in this mode uses a Job, a StatefulSet, or `acti
 
 ### Configuration
 
-This section is the TypeScript daemon's, which now refuses `runtime: kubernetes` outright, naming the
-Go daemon (LEGION-286); what follows is the block it read before. The Go coordinator (`packages/daemon`, LEGION-208)
+This section is the retired TypeScript daemon's, which now refuses `runtime: kubernetes` outright,
+naming the Go daemon (LEGION-286); what follows is the block it read before — for the pods Legion
+runs today see [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod), and for the live settings
+[Configuration](#configuration), the Go daemon's. The Go coordinator (`packages/daemon`, LEGION-208)
 reads the same `runtime.kubernetes` key with different rules, and refuses the examples below as
 written: its runtime selects the Legion pool itself, so `scheduling.node_selector` may not set
 `legion.dev/pool`; `resources` is keyed by role, with no `role_profiles`; `storage_class` is
@@ -3529,11 +3682,17 @@ for Legion's pool, provisioned by your infrastructure-as-code.
 The block is file-only: there are no `LEGION_KUBERNETES_*` environment keys, and `LEGION_RUNTIME`
 never outranks the file (a disagreement is logged once and ignored). Defaults (root spec §3):
 
+This table is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
+
 | profile | requests (cpu / memory / ephemeral-storage) | limits (cpu / memory / ephemeral-storage) |
 | :--- | :--- | :--- |
 | `small` | 500m / 1Gi / 2Gi | 2 / 3Gi / 8Gi |
 | `medium` | 1 / 2Gi / 10Gi | 4 / 6Gi / 30Gi |
 | `large` | 2 / 4Gi / 20Gi | 6 / 12Gi / 60Gi |
+
+This table is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
 
 | role | profile |
 | :--- | :--- |
@@ -3901,12 +4060,15 @@ PersistentVolume instead.
 
 ### Cutting over an instance from tmux to pods
 
+This subsection is the retired TypeScript daemon's, its configuration block included; for the pods
+Legion runs today see [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
+
 Drain every tree while it is still on tmux, stop the daemon, choose a new `state_dir`, and start
 with `runtime: kubernetes`. The state file intentionally holds the controller's tmux locator beside
 root and worker pod locators; the daemon routes them by process kind.
 
-The block below is the TypeScript daemon's. The Go daemon's cutover is the same drain and fresh
-`state_dir`; its [Configuration](#configuration) says where its rules differ, and its
+The Go daemon's cutover is the same drain and fresh `state_dir`; its
+[Configuration](#configuration) says where its rules differ, and its
 [live proof](#the-live-proof) is what to run at the head you deploy.
 
 ```yaml
@@ -3956,6 +4118,9 @@ pull for that digest with `image "docker.io/library/import-…@sha256:…": not 
 
 ### Anatomy of a pod
 
+This subsection is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
+
 One bare Pod per process generation, named `legion-<issue-slug>-<role>-g<generation>` (issue keys are
 lowercased; an over-long key is truncated with an 8-hex hash so the name fits 63 characters),
 labelled `legion.dev/project`, `legion.dev/tree`, `legion.dev/issue`, `legion.dev/role`, and
@@ -4002,6 +4167,9 @@ Containers, in order:
 
 Volumes and mounts:
 
+This table is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
+
 | volume | source | mounted at | in |
 | :--- | :--- | :--- | :--- |
 | `tree` | the tree PVC `legion-<tree-slug>` | `/legion` | both containers |
@@ -4013,6 +4181,9 @@ Volumes and mounts:
 
 The main container's environment is the same set of variables a tmux pane carries, with every value
 that was a daemon-machine path re-pointed at its pod location:
+
+This table is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
 
 | variable | pod value | read by |
 | :--- | :--- | :--- |
@@ -4043,6 +4214,10 @@ its own (`/proc/1/environ` inside the pod carries no key; the OMP child's does, 
 
 ### The providers Secret
 
+This subsection is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod), and for what an operator gives the live
+runtime [Operator configuration](#operator-configuration).
+
 `legion-<project>-providers` (where `<project>` is `legion.yaml`'s `project` lowercased with
 non-alphanumerics removed) is created per deployment, never by the daemon, with one key per variable
 OMP or the extension reads: `ANTHROPIC_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `DISPATCH_TOKEN`,
@@ -4065,6 +4240,10 @@ through a `<NAME>_FILE` pointer (`DISPATCH_TOKEN`, `ENVOY_TOKEN`) is skipped, no
 
 ### Contract discipline
 
+This subsection is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod), and for the live rules
+[Contract discipline](#contract-discipline), the Go daemon's.
+
 For a daemon contract change, first merge the worker image and the two plugin releases, then set
 `runtime.kubernetes.image` to its digest, install both plugin releases (`@sjawhar/pi-envoy`,
 `@sjawhar/pi-legion`) in the Legion profile, and restart the daemon. The Go daemon's own contract
@@ -4074,7 +4253,14 @@ none of it.
 
 ### RBAC the daemon needs
 
+This subsection is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod), and for the live Role
+[RBAC the Go daemon needs](#rbac-the-go-daemon-needs).
+
 For the daemon's Role (LEGION-25), the verbs this runtime uses on core/v1 in its namespace:
+
+This table is the retired TypeScript daemon's; for the pods Legion runs today see
+[Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod).
 
 | resource | verbs |
 | :--- | :--- |

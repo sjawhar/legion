@@ -1,4 +1,4 @@
--- packages/envoy/internal/broker/store/migrations/0017_oauth_token_exchange.up.sql
+-- packages/envoy/internal/broker/store/migrations/0018_oauth_token_exchange.up.sql
 -- The token exchange's OAuth 2.0 state (authelia.com/provider/oauth2): which identity holds a
 -- session name, and the replay store the exchange's subject tokens are kept out of a second use
 -- by.

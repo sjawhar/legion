@@ -55,7 +55,7 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 		t.Fatalf("Create(fresh) = %+v, %v, want state pending", fresh, err)
 	}
 
-	// An overdue pending machine login, inserted directly (machine.Service's own Login flow is
+	// An overdue pending machine login, inserted directly (machine.Service's own login flow is
 	// exercised by the machine package's own tests; this only needs a row ExpirePending sweeps).
 	loginRecordID := "login-" + t.Name()
 	if _, err := m.Store.Pool.Exec(ctx, `insert into credential_requests (id, body, kind, approver, expires_at) values ($1,'body','launcher_credential',$2,$3)`,

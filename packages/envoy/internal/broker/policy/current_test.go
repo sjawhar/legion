@@ -295,6 +295,34 @@ func TestARereadThatConfirmsTheLiveAnswerCostsNoReload(t *testing.T) {
 	}
 }
 
+// TestARereadThatConfirmsAMaxGrantSecretCostsNoReload is the same for a secret with a max-grant
+// tag: a Secret compares equal to itself by value, so a reread that finds it unchanged anchors
+// nothing and the next reload describes nothing.
+func TestARereadThatConfirmsAMaxGrantSecretCostsNoReload(t *testing.T) {
+	limited := policytest.KindSecret("LIMITED_KEY", "ada@example.com", policy.TierAgent, policy.KindGoogleLogin, "v1")
+	limited.Tags[policy.TagMaxGrant] = "1h"
+	store := secrets.NewLocal(limited)
+	count := &policytest.CountingDescriber{SecretsManagerAPI: store}
+	loader := policytest.Loader(store)
+	loader.Store = policytest.StoreThrough(store, count)
+	cur, err := policy.NewCurrent(t.Context(), loader, time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for range 3 {
+		if lk, err := cur.RefreshOne(context.Background(), "LIMITED_KEY"); err != nil || !lk.Served {
+			t.Fatalf("RefreshOne(LIMITED_KEY) = %+v, %v; want served", lk, err)
+		}
+	}
+	before := count.Calls.Load()
+	if err := cur.Refresh(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if got := count.Calls.Load() - before; got != 0 {
+		t.Fatalf("the reload after rereads that confirmed a max-grant secret made %d DescribeSecret calls; want 0", got)
+	}
+}
+
 // heldCurrent loads an empty namespace's policy and starts a reload whose listing waits until the
 // test ends, returning once that reload holds the writer lock: a reload stuck on a slow Secrets
 // Manager.

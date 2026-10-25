@@ -16,8 +16,7 @@ import (
 const userCodeAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 
 // NewUserCode is the code a person types to approve a machine login: eight random symbols from
-// userCodeAlphabet as XXXX-XXXX. Both the device grant and the older pending-id login mint theirs
-// with it.
+// userCodeAlphabet as XXXX-XXXX. The device grant mints its user code with it.
 func NewUserCode() (string, error) {
 	raw := make([]byte, 8)
 	if _, err := rand.Read(raw); err != nil {

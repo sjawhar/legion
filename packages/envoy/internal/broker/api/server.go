@@ -54,7 +54,8 @@ type Deps struct {
 	// (BROKER_SECRETS_KMS_KEY_ARN), with its region and account, or the GCP store's Cloud KMS key
 	// name (BROKER_SECRETS_KMS_KEY_NAME).
 	SecretsKMSKey string
-	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
+	// LauncherLimits bounds POST /v1/oauth/device_authorization and POST
+	// /v1/launcher-credentials/token; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
 	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
 	// DefaultRereadLimit.

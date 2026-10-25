@@ -124,13 +124,6 @@ type Config struct {
 	// authenticating once its entry is gone. Needs BROKER_K8S_OIDC_ISSUER, whose tokens it trusts.
 	// Unset, no service logs in with a token.
 	ServiceLogins map[string]string
-	// BROKER_MINT_TARGETS: the minted secrets the broker serves, whitespace-separated
-	// <NAME>=<service account email>=<owner email> entries. A minted secret is served only when
-	// its name is listed here, its mint-service-account tag is the listed account, its owner tag
-	// the listed owner and its tier human, so only that person approves a token, under that name,
-	// for the account. Keyed by name. Needs BROKER_SECRETS_STORE gcp-secret-manager, the only
-	// store that mints. Unset, no minted secret is served.
-	MintTargets map[string]policy.MintTarget
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
 	K8sOIDCIssuer string
@@ -193,8 +186,6 @@ type Config struct {
 	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login lasts without a refresh. An
 	// approval mints its credential for this long, and each refresh moves its expiry to this long
 	// from then; past it the machine logs in again, with a new key, a new code and a new approval.
-	// A login through the earlier route (POST /v1/launcher-credentials), which cannot refresh,
-	// lasts seven days or this, whichever is shorter.
 	LauncherCredentialSeconds int
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
 	// the pending requests and machine logins nobody decided in time.
@@ -227,6 +218,9 @@ const noRulesFile = "the broker reads each secret's owner and tier from the secr
 // its grant lasts until the requesting session ends.
 const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts until the requesting session ends"
 
+// noMintTargets is why BROKER_MINT_TARGETS is gone: each secret's kind tag names its minter.
+const noMintTargets = "the broker no longer mints service account tokens; a secret's kind tag selects what it mints"
+
 // removedVars are environment variables the broker no longer reads. A stale deployment still
 // setting one must fail loudly rather than silently running on configuration that means nothing
 // any more.
@@ -244,6 +238,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_RULES_S3_URI", noRulesFile},
 	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
 	{"BROKER_MAX_GRANT_SECONDS", noGrantCap},
+	{"BROKER_MINT_TARGETS", noMintTargets},
 }
 
 // serviceAccountPattern is a Kubernetes service account's subject, the one a pod's projected token
@@ -594,22 +589,6 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if len(cfg.ExchangeWorkflows) > 0 && cfg.ExchangeGitHubIssuer == "" {
 		return Config{}, fmt.Errorf("BROKER_EXCHANGE_WORKFLOWS needs BROKER_EXCHANGE_GITHUB_ISSUER and BROKER_EXCHANGE_GITHUB_AUDIENCE, whose tokens its runs present")
-	}
-	for _, text := range strings.Fields(getenv("BROKER_MINT_TARGETS")) {
-		parts := strings.Split(text, "=")
-		if len(parts) != 3 || !policy.ValidName(parts[0]) || !policy.ValidMintTarget(parts[1]) || !policy.ValidPersonOwner(parts[2]) {
-			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS entry %q is not <NAME>=<service account email>=<owner email>", text)
-		}
-		if _, dup := cfg.MintTargets[parts[0]]; dup {
-			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS names %s twice", parts[0])
-		}
-		if cfg.MintTargets == nil {
-			cfg.MintTargets = map[string]policy.MintTarget{}
-		}
-		cfg.MintTargets[parts[0]] = policy.MintTarget{Account: parts[1], Owner: parts[2]}
-	}
-	if len(cfg.MintTargets) > 0 && cfg.SecretsStore != secrets.StoreGCP {
-		return Config{}, fmt.Errorf("BROKER_MINT_TARGETS needs BROKER_SECRETS_STORE=%s, the only store that mints", secrets.StoreGCP)
 	}
 	if cfg.EnvoyURL != "" {
 		if cfg.EnvoyToken, err = secretValue(getenv, "BROKER_ENVOY_TOKEN"); err != nil {

@@ -4,7 +4,7 @@
 // minting Dispatch access tokens. It keeps the device codes, the access and refresh token
 // sessions, DPoP proof replay records and nonces, the provider's HMAC secret, which identity
 // holds a session name, and the exchange's replay records, in the tables migrations 0016 and
-// 0017 create.
+// 0018 create.
 //
 // A stored request is the JSON of its oauth2.Request fields plus its client's id; reading it back
 // re-hydrates the client with GetClient and the session into the kind the caller hands it, an
@@ -65,7 +65,7 @@ var sweepBatch = 1000
 var sweepMaxBatches = 10
 
 // sweepStatements are Sweep's statements for state deleted row by row, $1 the batch. Each
-// selects its batch by primary key through 0016's or 0017's *_expires index on the predicate it
+// selects its batch by primary key through 0016's or 0018's *_expires index on the predicate it
 // sweeps by, oldest first, so a table of mostly live rows is never read whole.
 var sweepStatements = []struct{ what, sql string }{
 	{"device codes", `delete from oauth_device_codes where signature in (select signature from oauth_device_codes

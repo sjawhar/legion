@@ -17,12 +17,16 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
@@ -65,11 +69,6 @@ func newDevrelayTestServer(t *testing.T) (brokerURL, callerToken string) {
 		Audience:   srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
-	mach := &machine.Service{
-		Store: st, Enroll: enr, Policy: cur,
-		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
-		Replay: enr.Replay,
-	}
 	// devrelay calls the broker as the listed caller does in production: with its own projected
 	// ServiceAccount token, verified against a local OIDC issuer standing in for the cluster's.
 	issuer := oidctest.New(t)
@@ -78,11 +77,18 @@ func newDevrelayTestServer(t *testing.T) (brokerURL, callerToken string) {
 	if err != nil {
 		t.Fatalf("oidc.New: %v", err)
 	}
+	provider := brokertest.NewOAuthProvider(t, st, issuer)
+	mach := &machine.Service{
+		Store: st, Enroll: enr, Policy: cur,
+		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
+		OAuth: provider, Replay: enr.Replay,
+	}
 	api.Register(mux, api.Deps{
 		PublicURL:     srv.URL,
 		APIAccounts:   map[string]string{dispatchAccount: "dispatch"},
 		AccountTokens: enroll.K8sPodVerifier{Verifier: accountTokens},
 		Enroll:        enr, Machine: reqMachine, MachineLogin: mach,
+		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	})
@@ -168,26 +174,32 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 	if err != nil {
 		t.Fatalf("record.Sign(machine login): %v", err)
 	}
-	status, body := req(t, http.MethodPost, brokerURL+"/v1/launcher-credentials", nil, map[string]any{"request": loginRequest})
-	if status != http.StatusAccepted {
-		t.Fatalf("POST /v1/launcher-credentials = %d: %s", status, body)
+	thumbprint, err := proof.Thumbprint(&machineKey.PublicKey)
+	if err != nil {
+		t.Fatal(err)
 	}
+	form := url.Values{"client_id": {oauthwire.ClientID}, "scope": {oauthwire.Scope}, "request": {loginRequest}, "dpop_jkt": {thumbprint}}
+	resp, err := http.Post(brokerURL+"/v1/oauth/device_authorization", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
 	var login struct {
-		Code string `json:"code"`
+		UserCode string `json:"user_code"`
 	}
-	if err := json.Unmarshal(body, &login); err != nil || login.Code == "" {
-		t.Fatalf("decode machine login: %v (body: %s)", err, body)
+	if err := json.NewDecoder(resp.Body).Decode(&login); err != nil || resp.StatusCode != http.StatusOK || login.UserCode == "" {
+		t.Fatalf("POST /v1/oauth/device_authorization = %d, %+v (%v), want a user code", resp.StatusCode, login, err)
 	}
 	issued := devrelay[struct {
 		State        string  `json:"state"`
 		CredentialID *string `json:"credential_id"`
-	}](t, brokerURL, callerToken, "machine-approve", "--code", login.Code)
+	}](t, brokerURL, callerToken, "machine-approve", "--code", login.UserCode)
 	if issued.State != "approved" || issued.CredentialID == nil {
 		t.Fatalf("machine-approve output = %+v, want state=approved with a credential_id", issued)
 	}
 
 	sessionKey := newKey(t)
-	thumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
+	thumbprint, err = proof.Thumbprint(&sessionKey.PublicKey)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -195,7 +207,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, body = req(t, http.MethodPost, brokerURL+"/v1/enrollments", map[string]string{"Proof": launcherProof},
+	status, body := req(t, http.MethodPost, brokerURL+"/v1/enrollments", map[string]string{"Proof": launcherProof},
 		map[string]any{"kind": "session", "runtime_id": "session-devrelay-test", "operator": testApprover, "thumbprint": thumbprint})
 	if status != http.StatusCreated {
 		t.Fatalf("POST /v1/enrollments = %d: %s", status, body)

@@ -91,7 +91,13 @@ a {
      line pitches: a body's links sit on 24px lines, where 3px is the most that does not reach
      the text of a link on the line above, and Dispatch's own inline links (`view`, a
      components line, a backlink) sit on their own row at 12px, where 6px is what reaches the
-     24px of WCAG 2.5.8. Both 2.5.8 and 2.5.5 exempt a link inside a sentence in any case. */
+     24px of WCAG 2.5.8. Both 2.5.8 and 2.5.5 exempt a link inside a sentence in any case.
+     A `.dispatch-markdown` inherits its pitch from its call site, so "24px lines" is the
+     message turn's, not every body's. Measured in the iPhone profile at 390px (INFRA-95):
+     a message turn is 16px on 24px lines and the 3px clears the line above by 2px; an Inbox
+     ask card (`AskCard.tsx`) is 15px on 24.375px lines and clears it by about 3.4px; an
+     agent turn's reasoning (`AgentThread.tsx`, `text-xs`) is 12px on 16px lines, where the
+     3px reaches 1px into the text of the line above. */
   .prose a {
     padding-block: 3px;
   }
