@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T17:35:00Z",
+  "completed": "2026-10-25T17:55:00Z",
   "evidenceLinks": [
     "Rounds 1-3: https://github.com/sjawhar/legion/pull/2173#issuecomment-6399449475",
     "Round 4: https://github.com/sjawhar/legion/pull/2173#issuecomment-6397391272",
@@ -10,81 +10,133 @@
     "Round 6: https://github.com/sjawhar/legion/pull/2173#issuecomment-6399442439",
     "Round 7: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400027590",
     "Round 8: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400527686",
-    "Round 9: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400760136"
+    "Round 9: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400760136",
+    "Round 10: https://github.com/sjawhar/legion/pull/2173#issuecomment-6401036185"
   ],
   "rounds": [
-    { "round": 1, "codeHead": "a5e26319624da4107d61115c7058270a0dceb383", "verdict": "pass" },
-    { "round": 2, "codeHead": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1", "verdict": "pass" },
-    { "round": 3, "codeHead": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c", "verdict": "pass", "testCommit": "eb61c1a2d8b1, the tester's regression lock" },
-    { "round": 4, "codeHead": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1", "verdict": "pass" },
-    { "round": 5, "codeHead": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37", "verdict": "pass" },
-    { "round": 6, "codeHead": "2056d96c3f48", "verdict": "pass" },
-    { "round": 7, "codeHead": "054d4e014cf7", "verdict": "pass" },
-    { "round": 8, "codeHead": "00516adc6b34", "verdict": "pass" },
-    { "round": 9, "codeHead": "afba47fdc3c9", "verdict": "pass", "completed": "2026-10-25T17:35:00Z", "what": "The round's own observation from round 8 became code: an option-shaped stem is refused. Two texts the change had made false were corrected, and the class search behind them was re-derived and its fourth hit confirmed against the repository's own standard for marking a retired section." }
+    {
+      "round": 1,
+      "codeHead": "a5e26319624da4107d61115c7058270a0dceb383",
+      "verdict": "pass"
+    },
+    {
+      "round": 2,
+      "codeHead": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1",
+      "verdict": "pass"
+    },
+    {
+      "round": 3,
+      "codeHead": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c",
+      "verdict": "pass",
+      "testCommit": "eb61c1a2d8b1, the tester's regression lock"
+    },
+    {
+      "round": 4,
+      "codeHead": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
+      "verdict": "pass"
+    },
+    {
+      "round": 5,
+      "codeHead": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+      "verdict": "pass"
+    },
+    {
+      "round": 6,
+      "codeHead": "2056d96c3f48",
+      "verdict": "pass"
+    },
+    {
+      "round": 7,
+      "codeHead": "054d4e014cf7",
+      "verdict": "pass"
+    },
+    {
+      "round": 8,
+      "codeHead": "00516adc6b34",
+      "verdict": "pass"
+    },
+    {
+      "round": 9,
+      "codeHead": "afba47fdc3c9",
+      "verdict": "pass",
+      "completed": "2026-10-25T17:35:00Z",
+      "what": "The round's own observation from round 8 became code: an option-shaped stem is refused. Two texts the change had made false were corrected, and the class search behind them was re-derived and its fourth hit confirmed against the repository's own standard for marking a retired section."
+    },
+    {
+      "round": 10,
+      "codeHead": "0d503c1f1b7b",
+      "verdict": "pass",
+      "completed": "2026-10-25T17:55:00Z",
+      "what": "Four checks: the skill sentence against the daemon's own branch, the generated mirror compared rather than rebuilt, the swept texts, and a refusal message that changed a string main owns."
+    }
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 9: I drove the dash refusal and its discrimination rather than reading the rule, ran both halves of the suite and found the comparison weaker than its count suggests, checked both corrected texts against the mechanism and one of them against the helper it cites, and confirmed the class search's fourth hit against INFRA-212's standard by measuring the distances rather than accepting that the marker exists. Where I could not identify a line its handoff named, I asked rather than guessed, and the implementer corrected its own wording in the answer. Rounds 1 to 8 were each verified as those rounds record."
+    "how": "Round 10: I read `linger.go` and `check.go` myself rather than the review's account of them, compared the generated mirror with its source instead of trusting that a build ran, and drove the changed refusal with a binary built from this head \u2014 the previous round's binary still prints the old string, which is how the check could have gone wrong. Rounds 1 to 9 were each verified as those rounds record."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "round": 9,
-      "criterion": "A directory name that looks like a command option is refused, without refusing the names actually in use.",
-      "surface": "The real `session_copy` at this head, and the 51-case suite run at this head and against the script as it was at the previous head.",
-      "command": "Drive stems `-rf`, `-`, `--`, `-n`, `--force`, then `a-b`, `legion-infra-infra-80`, `_x`, `.hidden`; then `bun test scripts/e2e/lib/stage4b-session-text.test.ts` here and against `jj file show -r 00516adc6b34`'s script",
-      "observed": "Every option-shaped stem is refused by name with nothing written; every plain name is accepted and copied, including the real pod-name shape, which contains `-` in a non-leading position — a blunt rule would have refused every stem in use. The suite is 51 pass / 0 fail here and 43 pass / 8 fail against the previous head's script.",
-      "headSha": "afba47fdc3c9",
-      "negativeControl": "The accepted row is the control on the refusal: `legion-infra-infra-80` and `a-b` are copied normally, so the refusals are the leading-dash rule firing and not the function failing.",
-      "doesNotSettle": "The eight-against-forty-three is a true count and a weaker claim than it looks: only one of the eight is a behaviour difference. The other seven — `..`, `.`, empty, a `/`, a `/` that climbs, a byte outside the class, and a stem from a session file ending `/..` — fail because the refusal's wording changed; I drove those same shapes against that same script in round 8 and each was already refused with nothing written. The implementer's own negative control says 'that one case', which agrees. The leading-dash case is the evidence; the count is not."
+      "round": 10,
+      "criterion": "A merged close keeps the implementer's pod for the production check's first look, and the skill that teaches an architect so is true of the daemon.",
+      "surface": "The daemon's own workflow code, read against the sentence the change wrote.",
+      "command": "Read `packages/daemon/internal/workflow/linger.go:78-101` and `check.go` around its IssueSuspend enqueues; read `skills/legion-architect/SKILL.md:416-420`",
+      "observed": "`linger.go` sets `except = claim.RoleImplementer` when `merged` and enqueues the `IssueSuspend` only inside `if !merged`, so a merged close takes five of six claims and queues no suspension; `check.go:261` and `:293` are where a pending look enqueues it. The skill says the implementer is left running, its pod stays for the first look, and the Sandbox goes only when a look reports pending. Sentence and code agree.",
+      "headSha": "0d503c1f1b7b",
+      "negativeControl": "The `!merged` branch is the control in the code itself: a close that is not a merge still queues the suspension, so the exception is the merged path's and not a removal of the behaviour."
     },
     {
-      "round": 9,
-      "criterion": "The two texts this change had made false are now true of the mechanism.",
-      "surface": "The manual's node-packing paragraph against the two pod kinds' volume sources, and the issue-independence comment against the helper it names.",
-      "command": "Read the paragraph against `issuePod.diskSource` and `controllerPod.diskSource`; read the comment against `pod_disk` in the same script",
-      "observed": "The node-packing distinction holds: the controller's pod mounts the claim its Sandbox owns, so a relaunch onto another node waits for a `ReadWriteOnce` detach and shows `FailedAttachVolume`/`Multi-Attach`; an issue pod mounts a generic ephemeral claim created with it, takes no predecessor's claim, and waits on nothing detaching. What it may wait on — the predecessor's claim being reaped — is the mechanism I measured on a real cluster in round 1, about a second after the pod was deleted. The issue-independence comment agrees with `pod_disk`, which runs `op get pvc \"$1-issue\" --ignore-not-found` and reports the claim's name, phase and controller owner, with no label selector anywhere in it.",
-      "headSha": "afba47fdc3c9",
-      "negativeControl": "The paragraph is a distinction rather than a deletion: the controller half must stay true, and it does — its Sandbox still owns its claim (`controllerPod.claimTemplates`), so the detach wait it describes is still that pod's behaviour."
+      "round": 10,
+      "criterion": "The generated copy of the skill matches its source.",
+      "surface": "The two files, compared.",
+      "command": "`diff skills/legion-architect/SKILL.md packages/claude-envoy/legion/skills/legion-architect/SKILL.md`, and the same for the worker skill",
+      "observed": "Identical, and the worker skill's mirror identical too.",
+      "headSha": "0d503c1f1b7b",
+      "negativeControl": "The worker skill is the control: a comparison that reports identical for a file nobody regenerated this round shows the method can distinguish, since both mirrors are kept by the same build and either could have drifted."
     },
     {
-      "round": 9,
-      "criterion": "The class search's fourth hit is correct, and its retirement is marked where a reader meets it.",
-      "surface": "`docs/kubernetes.md` at this head, measured against the standard `docs/solutions/legion/…-INFRA-212.md` sets.",
-      "command": "Locate the sentence, the nearest heading above it and the marker; count the file's markers of that shape; count what points into the heading by anchor",
-      "observed": "The hit is `:4853` — a tree's pods required onto one node by `podAffinity` because the tree's volume is one `ReadWriteOnce` PVC — false of this release in every clause and true of the subsection's. My own class search missed it because it keyed on `detach` and `outlives` where this reaches by `ReadWriteOnce`. INFRA-212 requires the retirement marked where a reader enters, who 'reads upward only to the nearest `###`': the sentence is at `:4853`, the heading `### Anatomy of a pod` at `:4840`, and the marker at `:4842` — two lines under the heading, eleven above the sentence. A reader who looks up meets it. Twelve markers of that shape are in the file.",
-      "headSha": "afba47fdc3c9",
-      "negativeControl": "The measurement is the control: had the marker been under the `##` rather than the `###`, a reader reading upward to the nearest heading would never reach it, which is the defect INFRA-212 was filed for. The distances are what decide it, not the marker's existence.",
-      "doesNotSettle": "A reader who looks up not at all is unreached, which is true of all twelve markers. The stronger fix — the word in the heading — is counter-indicated by INFRA-212's own cost analysis, except for this heading: `](#anatomy-of-a-pod)` is referenced nowhere in the repository outside the learning that names it, so this is the cheap case. An option for the reviewer rather than a finding."
+      "round": 10,
+      "criterion": "A refusal message that stopped naming `pvc` must not have stopped refusing it.",
+      "surface": "The real `legion start --check-config` CLI built from this head.",
+      "command": "Five files: an unknown kind, `pvc`, the key omitted, `cloudsql-iam`, and the example",
+      "observed": "The unknown kind is told `must be 'postgres' or 'cloudsql-iam'` \u2014 the set a deployment may actually use. `pvc` and the omitted key still take their own rule, with the INFRA-80 reason naming `pvc` and the omitted key together. `cloudsql-iam` and the example load. Nothing in source asserts the old wording; the one grep hit is `docs/site/.bin/legion`, a committed compiled binary carrying it as build output.",
+      "headSha": "0d503c1f1b7b",
+      "negativeControl": "The previous round's binary, run first, still prints the old three-kind string \u2014 which is both the control that the message really changed and the reason the check is only valid from a binary built at this head."
     },
     {
-      "round": 9,
-      "criterion": "The standing acceptance surfaces, re-run at this head.",
-      "surface": "The real `workspace-init` and `legion start --check-config` CLIs built from this head, and the sandbox package's rig.",
-      "command": "provision with the branch deleted from the feed; the configuration rule over four files; the five gap tests",
-      "observed": "Provision exit 0, `a.txt` alone, the root holding `repos` and `workspaces` and nothing else; the example 0, `pvc` 1, the key omitted 1, `cloudsql-iam` 0; all five gap tests pass, the round-3 lock among them.",
-      "headSha": "afba47fdc3c9",
-      "negativeControl": "Round 5's run of the same configuration files against a `legion` built from `main@origin`, which answers `Config OK` to all three, establishes the refusal as this change's own."
+      "round": 10,
+      "criterion": "The stale-prose class, re-derived with a union of search terms rather than my own.",
+      "surface": "The tree at this head.",
+      "command": "grep the union `with its volume|transcript on the volume|sessions on the volume|two containers` beside the earlier `detach|outlives|ReadWriteOnce`, and read every hit",
+      "observed": "Two sites survive in files this change owns: `workflow/merge_close_test.go:215` and `daemon/outbox_issue_suspend_test.go:657`, each saying a Sandbox is released 'with its volume'. Both are a comment and a failure message rather than behaviour. Every other hit is correct: the repository cache and the controller do own volumes, and `docs/kubernetes.md:5183` names the file store in the past tense.",
+      "headSha": "0d503c1f1b7b",
+      "negativeControl": "The correct hits are the control on the search: a union that returned only false positives, or only the sites already fixed, would say nothing about coverage."
     }
   ],
   "ciAtCodeHead": {
-    "head": "afba47fdc3c9",
-    "read": "2026-10-25T17:22:00Z",
-    "state": "pr-title success; lint, typecheck and test queued; build in progress — too early to be a read of anything, and cited as queued rather than green",
-    "previousHead": "At 00516adc6b34, read in this round after they settled: lint, typecheck, test and pr-title all success, and envoy-go success — which leaves envoy-go's earlier red intermittent and with the person's ask rather than with this change.",
-    "note": "Read, not re-run; no lane waited for. The remedy established in round 8 applies: a lane's conclusion is durable, so the head being accepted should be read for its required four after they settle rather than watched while they run."
+    "head": "0d503c1f1b7b",
+    "read": "2026-10-25T17:47:00Z",
+    "state": "typecheck and pr-title success; lint and test in progress; most others queued \u2014 cited as running, not green",
+    "previousHead": "At 00516adc6b34 all four required lanes and envoy-go read success, which is a statement about that head and nothing else.",
+    "note": "Read, not re-run; no lane waited for."
   },
   "observations": [
-    "The body reached 60,344 characters this round and I moved rounds 4 and 5 to pointers at their own comments, returning it to 53,142. The threshold I set in round 6 — move the oldest round out when an edit would pass about 56,000 — is what triggered it, and it cost nothing because every round from 4 on already keeps its evidence in a comment."
+    "The previous round's binary still prints the pre-change refusal, and I ran it before noticing. Rebuilding from the head under test is the fourth instance today of the same discipline \u2014 verify the instrument is the one the question is about before reading what it says."
   ],
   "notReachedHere": [
-    "The seven inverted Stage 4a per-check assertions are unrun, not passing, and Stage 4b has run at no head — eight readings of that harness have now found eight defects in it and nothing of it has been executed.",
+    "The seven inverted Stage 4a per-check assertions are unrun, not passing, and Stage 4b has run at no head \u2014 eight readings of that harness have now found eight defects in it and nothing of it has been executed.",
     "Nothing this round ran against the cluster namespace."
   ],
   "residualRisks": [
     "Unchanged from round 5: the single generation counter behind the gap record; a daemon restarting inside the replacement's gap; the stable claim name meaning a replacement pod waits on its predecessor's claim being reaped.",
     "Unchanged from round 7: `production_audit`'s unguarded evidence write at `:2669`, pre-existing and left to the reviewer."
+  ],
+  "findingsNotFailures": [
+    {
+      "what": "Two more sites of the swept prose class, and the fixture asymmetry behind one of them.",
+      "evidence": "`workflow/merge_close_test.go:215` and `daemon/outbox_issue_suspend_test.go:657` still say a Sandbox is released 'with its volume'. The second sits on `internal/daemon`'s `issueSandbox` helper, which builds `volumeClaimTemplates: [{name: issue}]` for every fixture Sandbox at six sites, where `internal/runtime/sandbox` inverted its own fixture this change: `sandboxObject` owns no template and three sites opt into the old shape with `withSupersededDisk`.",
+      "verdict": "A finding to fix in this pull request, not a round failure: both are prose, and the fixture is bounded today because those daemon tests suspend and delete rather than launch, so nothing branches on the template. It is worth fixing rather than noting because `supersededDisk()` is true for any issue Sandbox carrying a template \u2014 so a daemon test that ever launches into one of these fixtures takes the migration path silently, passes, and proves the wrong thing. One package's fixtures model the world this change makes and the other's model the world it replaces."
+    }
   ]
 }
