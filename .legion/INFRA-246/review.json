@@ -2,67 +2,66 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-246",
-  "completed": "2026-10-25T04:30:00Z",
+  "completed": "2026-10-25T07:20:00Z",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 4,
+  "important": 1,
   "minor": 4,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/pi-envoy/extensions/envoy.ts:2218-2243",
-      "description": "settleEndedHolds reads its fence only after the hand-back loop, so an abandoned role move still writes shared state. Sequence: move A awaits client.unsubscribe at :2227; A's deadline fires and roleMoves starts the next task; a session event lands and rebind (:2536) runs endUnwantedRoleNow, which inserts a hand-back at :2017; a JS Map iterator visits entries added during iteration, so A's loop visits the new entry, deletes it at :2219 and - when A's `wanted` is that role, the ordinary heartbeat case - takes the restore branch at :2220-2225, overwriting claimedRoleTopic/claimedRoleSessionID/holdUnconfirmed that the replacing move settled. The next pass then sees held !== desired and hands the role back through endRole(), closing every subject a plugin opened whileHolding, which the code itself (:2358-2361) says only that plugin reopens. A second loss on the same path: an entry A deleted whose unsubscribe failed goes into `failed`, and the post-loop `if (!live()) return false` at :2240 drops it from both pendingHandBacks and abandonedHolds, so the hold is leaked with nothing left to settle it. This contradicts the PR body's claim that an abandoned task 'cannot record a role claim the listener has since given elsewhere'. Fix: read live() at the top of each iteration, before the delete at :2219."
-    },
-    {
-      "severity": "important",
-      "file": "packages/pi-envoy/extensions/envoy.ts:1884-1894",
-      "description": "setEnvoyRole checks its fence after client.setRole resolves and then throws AbandonedTaskError saying 'nothing was recorded', while the listener has accepted the claim. The adjacent !sessionOpen(id) branch (:1905-1921) handles the same situation correctly by keeping the hold under the id the listener named so the next pass converges it; the abandoned branch keeps nothing. Result: the listener names a live, heartbeating session as the holder of a role that session's heldRole() does not know about, so no pass ever hands it back and the listener never reaps it (the session keeps heartbeating). A later claim of another role does not end it either, since previousTopic is undefined at :1939. Messages published to that role topic go to a session that refuses them (subscribeLegionNotice 'does not hold role'), for the life of the process. envoy.test.ts 'a task that answers after its deadline writes nothing over what a newer one settled' pins the leak as correct behaviour ('The listener did hear the abandoned claim; this process recorded nothing of it'). Fix: record the landed claim as a hand-back (pendingHandBacks, as :2017 does) before throwing, and change that test to assert the hand-back."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy-client/src/envoy-settings.ts:244-258",
-      "description": "An explicit ENVOY_PASS_DEADLINE_MS is used as given (floored only at MIN_INTERVAL_MS); only the fallback is max(heartbeatMs, 30 s). With a value below heartbeatMs - envoy-settings.test.ts:103 pins ENVOY_PASS_DEADLINE_MS=7500 against a 100 s heartbeat as valid - every pass is abandoned before the next tick, so healing is false at every tick and the heartbeat backstop at envoy.ts:1729-1742, which lives inside the `if (healing)` branch, never fires. A pass that wedges in its inbound-open section (ensureConnection/subscribe/watchAgentStream/recoverRegisteredInterests, envoy.ts:2145-2169, all awaited before registerSession) then never reaches a registration, nothing else posts one, and the record lapses - the behaviour this change exists to stop. The pane is meanwhile told 'the session registration is being refreshed on its own, and recovers once the pass settles' (:1720-1723), which is false in that configuration. Fix: floor the resolved passDeadlineMs at heartbeatMs (one line), which also makes DEFAULT_PASS_DEADLINE_MS a true floor."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy-client/src/envoy-settings.ts:22-27",
-      "description": "The stated guarantee 'two whole refreshes may fail before a live pane is dropped' is not delivered at the shipped numbers, and it is repeated in packages/envoy-client/CHANGELOG.md, the PR body's Change list and .github/scripts/check-heartbeat-margin.sh:14-17 (whose rule 1 is `3 x heartbeat <= lifetime`, today 300000 == 300000 exactly). The record expires 300 s after the listener accepted a write; the third refresh after two failures is only attempted 3 x 100 s after the first was attempted and still needs its round trip, and setInterval never fires early. The tester's own measured healthy gaps between accepted registrations (100.4, 99.9, 99.8, 100.3, 99.7, 99.8 s) give consecutive triples of 300.1, 300.0, 299.8, 299.8 s, straddling the lifetime. What the numbers deliver is one failed refresh, as 120 s did. Fix: state one failed refresh everywhere, or give the rule real slack (a lower DEFAULT_HEARTBEAT_MS, or a strict `<` with a round-trip allowance)."
+      "file": "packages/pi-envoy/extensions/envoy.ts:1942-1955",
+      "description": "setEnvoyRole's refusal branch is the fourth site of the fence convention, and it was not fixed with the other three. `const waitingOnReap = await observeAbandonedHold(topic, role, result.holder)` (:1947) is an await, and `if (!waitingOnReap) refusedRoles.set(id, role)` (:1948) writes shared state after it with no live() re-read; observeAbandonedHold itself writes abandonedHolds.delete(topic) (:1859) and abandonedHolds.set(topic, ...) (:1862) after its own await of client.getRole, and takes no Fence at all. reassertRoleNow is the fenced sibling doing the identical endRole()/refusedRoles.set pair behind `if (!live() || claimedRoleTopic !== topic || !sessionOpen(id)) return false` at :1671-1674. Sequence (defaults: heartbeatMs 90000, passDeadlineMs 90000, a failing listener call costing the full 10250 ms budget): a degraded listener makes a move's hand-backs fail into abandonedHolds, the move burns ~82 s, setRole answers claimed:false, observeAbandonedHold makes a real getRole call, the 90 s deadline fires while it is in flight, the next move (or envoy_role_set, or the Legion bridge's claim at :2419) claims the role and does refusedRoles.delete(id) at :1915, and then the abandoned move's getRole answers and refusedRoles.set(id, role) at :1948 lands over it. desiredRole's want() at :2004 then answers undefined for that session, the next pass sees held !== desired and calls handBackRole() (:2295-2296), endRole() closes every whileHolding notice subscription and client.unsubscribe releases the role at the listener. Nothing re-claims it: refusedRoles is cleared only by a successful claim (:1915) or a session event (:2559). For a controller pane the daemon then reads no live holder (packages/daemon/internal/controller/liveness.go:125-127) and takes the role from a pane that is still running - the failure this issue exists to stop. It also falsifies the PR body's claim that an abandoned task writes nothing when it wakes. Fix: thread the Fence into observeAbandonedHold and re-read it before both abandonedHolds writes, and re-read live() between :1947 and :1948, mirroring :1671. Do it by naming one predicate per scope rather than adding a fourth hand-written guard."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/daemon/notice_exceptions.go:32-39",
-      "description": "The plugin heartbeat moved to 100 s in liveness.go but three sibling copies of the old number were left: pluginHeartbeat = 2 * time.Minute with the comment 'the plugin heartbeats every pluginHeartbeat' (notice_exceptions.go:32,37, used as the second re-hold delay at :51), 'The plugin heartbeats every 2 minutes, so this allows two missed heartbeats' (packages/envoy/internal/session/claim.go:10-11; at 100 s the 5-minute window allows three), and the same sentence in packages/envoy/cmd/listener/delivery.go:301. Behaviour is unchanged, the statements are now false, and the new required check reads only liveness.go, so the drift it advertises catching is already in the tree at merge."
+      "file": "packages/pi-envoy/extensions/envoy.ts:1580,1751",
+      "description": "registeredAt is process-global ('this process last had a registration accepted'), not per session, so the backstop's age test at :1751 measures from the old session's acceptance after a switch. Sequence: a pass is wedged (healing true); the backstop posts at tick T and sets registeredAt = T; the user runs /new, rebind sets sessionID synchronously (:2560) and queues a reconcile that cannot run behind the wedged pass; every tick until T+90 s then returns at :1751, so the new session is absent from GET /v1/sessions for up to one refresh interval while its pane runs. Strictly better than before this change, but it is a residual case of the symptom the backstop is advertised to close, and the comment at :1745-1746 ('a session that never had one accepted counts as older') is true only for the first session of a process. Fix: key registeredAt by the session the registration was accepted for and compare against the live sessionID at :1751, or reset it when the id moves."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-envoy/extensions/envoy.ts:879-893",
-      "description": "ensureConnection assigns the shared `connection` at :882 with no fence; reconcileNow reads live() only after it returns (:2147-2150). A pass abandoned during its dial whose dial later resolves overwrites the connection a newer pass established; the newer object is then unreferenced and never drained by cleanup (:2602 drains only `connection`), and maxReconnectAttempts: -1 keeps it alive. Narrow - nats.js bounds the dial at its 20 s default, well inside the 100 s deadline - but it is the one shared-state write the fence docblock's 'every continuation that could write shared state checks it' (:167-170) misses."
+      "file": "packages/envoy-client/src/session-settings.ts:74,107-108",
+      "description": "startNotice takes an env parameter whose only use is to re-derive the resolver's own decision from the raw environment: `Number(env.ENVOY_PASS_DEADLINE_MS)` and `named > 0 && named < envoy.heartbeatMs` are a hand-copy of the usability test at envoy-settings.ts:257-260 plus the floor at :278, one module away from where that decision is made. Every other adjusted-setting line in this function reads a resolved, typed field (envoy.inbound.off at :101). The two copies can desynchronise on any future change to parsing. Fix: have envoySettings report the adjustment it made as a resolved field and let startNotice print it; the predicate then exists once and startNotice keeps its four parameters. NOT part of this finding, and not re-raised: that the MIN_INTERVAL_MS floor and MAX_INTERVAL_MS cap are applied in silence. The architect declined that this round and the PR body records the decline."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-heartbeat-margin.sh:214-215",
-      "description": "The worst case is computed as heartbeat + max(heartbeat, pass_deadline) + call_budget and attributed to 'a refresh held behind a serial-queue task abandoned at its deadline', but the backstop at envoy.ts:1729-1742 posts the refresh at the first tick where healing and the registration is a whole interval old, whatever passDeadlineMs is, so the real bound is 2 x heartbeat + call_budget. The two coincide only because max(100000, 30000) happens to equal the heartbeat. Raising DEFAULT_PASS_DEADLINE_MS to 200000 would fail CI (310250 > 300000) and tell the author to raise the registry TTL, while production stays bounded at 210250 ms."
+      "file": ".github/scripts/check-heartbeat-margin.test.sh:140-143",
+      "description": "Two assertions can never fail: they assert that the check's output does not contain 'Equality is the rule met exactly' and 'do not .fix. it by widening', strings that exist nowhere in the tree - they were removed from the check by 783b97bd11b3 in this same pull request (grep over the workspace finds them only in these two assertions). They are vacuous forever and tell a future reader that some live path might still emit them. Delete both. The sibling at :131-132 earns its keep only while the fixture at :54 writes a MIN_PASS_DEADLINE_MS line into every generated tree, which is worth one comment."
     },
     {
       "severity": "minor",
-      "file": "packages/pi-envoy/scripts/smoke-registration-stall.sh:17-18",
-      "description": "The smoke hardcodes record_lifetime_s=300 and default_heartbeat_ms=100000, the two numbers the new check exists to de-duplicate ('It keeps no copy of any of these numbers', check-heartbeat-margin.sh:43-45), and the check does not parse the smoke. When DEFAULT_HEARTBEAT_MS next moves, CI stays green and the smoke measures against the old budget."
+      "file": ".github/scripts/check-heartbeat-margin.sh:12,37",
+      "description": "The header says 'Three things must hold, and this check fails unless all three do:' and then lists four numbered rules (:14, :22, :30, :37); round 3 added rule 4, the pluginHeartbeat equality, without moving the sentence. This header is what a developer reads when the gate trips. One word. Related, and worth either a rule or a line of header: notice_exceptions.go:37-38 keeps listenerSessionTTL and listenerClaimStale as hand-copies of registry.go:116 and claim.go:14, and rule 1's own remedy text tells a maintainer to raise the registry ttl - the change that desynchronises them. The check already loads both files."
     }
   ],
+  "roundOneFindingsVerified": [
+    "envoy.ts:2243 reads live() at the top of each hand-back iteration and breaks before the delete; the failed-hand-back restore runs past the fence deliberately and cannot overwrite a newer move's entry.",
+    "envoy.ts:1904-1913 records an accepted-but-abandoned claim as a pending hand-back before throwing, and settleEndedHolds settles it on the next pass; the unit case now asserts the hand-back instead of the leak.",
+    "envoy-settings.ts:276-280 floors the resolved passDeadlineMs at heartbeatMs, so no configured value can put the backstop out of reach; session-settings.ts says at start when a deadline was raised.",
+    "DEFAULT_HEARTBEAT_MS is 90_000 and the check's rule 1 is three intervals plus one listener call's budget (280250 ms against 300000 ms), with the daemon's window at 4 x Heartbeat = 360000 ms, which covers the lifetime and still holds a pane on the old 120 s interval.",
+    "pluginHeartbeat is 90 * time.Second, the two 'every 2 minutes' sentences in claim.go and delivery.go are gone, the daemon test derives its schedule from noticeReholdDelays, and the constant is rule 4 of the check.",
+    "ensureConnection(live) dials into a local and re-reads the fence, shuttingDown and a connection another pass established in one synchronous block, closing the loser.",
+    "The check's worst case is 2 * heartbeat + call_budget, attributed to the backstop in the header and the failure text, and says the pass deadline is not read there.",
+    "The smoke reads both numbers from the two files that define them at run time (smoke-registration-stall.sh:70,75)."
+  ],
   "ciRead": {
-    "codeHead": "6ebea43a493d0697860a623e8c4ba73f5a927e01",
+    "codeHead": "261f8f0f25e646c29304f33e894a50e5d4a6059e",
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "verdict": "every required check completed success at the code head; compare 6ebea43a...27f5c00f shows only .legion/ above it",
+    "verdict": "all four completed success at the code head; compare 261f8f0f...de1df478 is ahead with only .legion/INFRA-246/implement.json and test.json above it. Worker Image is success at this head, so the body's round-2 risk bullet calling it red was stale and the reviewer removed it.",
     "reviewedHead": "the head this round's handoff push makes"
   },
   "threads": {
-    "beforeThisRound": 0,
-    "botThreadsAccepted": []
+    "openedByReviewerInRoundOne": 8,
+    "answeredByImplementer": 8,
+    "reviewerRepliesPosted": 8,
+    "botThreadsAccepted": [],
+    "note": "All eight round-1 fixes verified in the code by the reviewer before replying; each thread carries the reviewer's own answer."
   },
   "thermonuclear": {
-    "head": "27f5c00f",
-    "deepReview": "CHANGES - 3 medium, 3 low, 2 hardening",
-    "codeQuality": "CHANGES - 4 blocker, 2 major, 4 minor",
-    "adjudication": "Four findings carried (the two fence holes, the pass-deadline floor, the margin claim). Rejected: the quality pair's remedy of deleting Fence/AbandonedTaskError/the deadline entirely - spec acceptance 1 asks for the stall to be bounded, the architect accepted that design, and the deadline is what keeps a wedged task from holding session events and Legion claim calls behind it. Deferred to the fast-follow: the serialQueue extraction and the smoke's copied constants. Not carried: DEFAULT_PASS_DEADLINE_MS naming (folded into the floor fix)."
+    "head": "de1df478",
+    "scope": "the whole pull request, since there is no prior approval",
+    "deepReview": "CHANGES - 1 medium, 2 low, 2 hardening",
+    "codeQuality": "CHANGES - 4 blocking, 6 lesser",
+    "adjudication": "Carried: the unfenced refusal branch (blocking), the process-global registeredAt, the startNotice predicate duplication, the two vacuous test assertions, the header's rule count. Declined: the quality pass's MAX_INTERVAL_MS 'provable no-op' (deliberate and documented at envoy-settings.ts:269-271, kept so the ceiling holds by every route) and the silent-clamp half of its startNotice finding (the architect declined that this round; the PR body records it). Sent to the fast-follow: the serialQueue extraction to packages/pi-envoy/src/ with a unit test, and the smoke's second regex parser for the two constants the check already parses."
   }
 }
