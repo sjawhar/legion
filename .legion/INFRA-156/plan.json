@@ -1,0 +1,91 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-156",
+  "completed": "2026-10-25T16:26:30Z",
+  "planDocument": "dispatch://INFRA-156/artifact/pr3-plan-md",
+  "scope": "INFRA-156's own pull request carries root spec v16 R3 and A3 only: a typed block attribute of kind block[] that points at blocks, makes graph links named by the attribute, and limits the block types it points at. Every other requirement belongs to the children INFRA-364, 366, 367, 368, 369, 370, 371. The plan replaces the section 'PR3: a block attribute that points at blocks' of dispatch://INFRA-156/artifact/plan-md.",
+  "gate": "The implementer starts coding only after dispatch://INFRA-366 (block references and block graph nodes) has merged to main. Until then it tells the architect (notifications.role.legion-infra-infra-156-architect) that the surface it needs is not on main yet and waits; the architect says when to continue. Then it brings main into the issue branch (no code or PR exists yet), reads INFRA-366's merged code, and records each name mapping from the plan's INFRA-366 names to the merged ones in the PR body.",
+  "decisions": [
+    "D1: the edge kind is the attribute's own name (serves -> serves); a block[] attribute name matches ^[a-z][a-z0-9_]*$ and is not an existing edge kind (mentions, child_of, blocked_by, attached_to, anchored_to, owned_by, replies_to, followed_by, part_of, depends_on, affects).",
+    "D2: the limit is a targets list of block type names (a typed type of the same schema, or a built-in type GET /blocks lists); absent means any.",
+    "D3: an agent/API write is refused (400 INVALID_MARKDOWN, or INVALID_OP field attributes on the edits route) when a pointer it introduces names an existing block of a disallowed type, resolved against the tree the write leaves for the same document and document_blocks otherwise; an absent target is accepted; a browser write and the reconciliation are never refused; the graph lists a pointer edge only while its target is absent or has an allowed type (block_refs.to_types plus SQL function block_ref_listed in the graph_edges arm and every block_refs listing read).",
+    "D4: a pinned pointer is limited by its target's current type.",
+    "D5: a pointer and a prose citation of one target are separate edges; block_refs key gains kind.",
+    "D6: ?kind= accepts schema-declared block[] names; the structural list moves from refs.Kinds to model.GraphEdgeKinds.",
+    "D7: the older /artifacts/{id}/references stays mentions-only; no dashboard page changes.",
+    "D8: the editor's typed-block commands refuse non-canonical values and a same-document target of a disallowed type, given a new documentRef option that ProofDocument sets; markdown and HTML loading check canonical form only.",
+    "D9: block[] values are space-separated canonical dispatch:// block references (pinned or not), no repeats, decided by one shared corpus pmdoc/testdata/block-pointer-values.json in Go and the editor."
+  ],
+  "tasks": [
+    "Task 1: block[] kind in the Go schema (model.GraphEdgeKinds, pmdoc schema targets/validation/parse/render, LinkKinds, UseBlockSchemaForTest, shared corpus, ?kind= acceptance) with schema tests.",
+    "Task 2: pmdoc.BlockPointers and CheckBlockPointers; refuse disallowed targets in applyLive, SeedText and RebuildDocument with 400s; pure and HTTP tests.",
+    "Task 3: migration (block_refs.to_types, kind in the key, block_ref_listed function, restated graph_edges arm); IndexBlocks writes pointer edges of the attribute's kind; listing reads apply the function; HTTP and settlement tests.",
+    "Task 4: contracts types (block[], targets, open GraphEdgeKind); proof-editor block-pointers.ts, block-schema.ts, typed-block-commands.ts, lib.ts documentRef; ProofDocument passes documentRef; proof-editor AGENTS.md sixteenth kind of edit; editor schema tests.",
+    "Task 5: docs (packages/envoy/AGENTS.md typed-block and edge-kind paragraphs, cmd/dispatch README and AGENTS, contracts AGENTS) and changelogs (envoy, contracts)."
+  ],
+  "proof": {
+    "implementer": "Throwaway $TMPDIR/a3-e2e.sh at the head: a scratch blocks.json adding requirement and claim (serves: block[], targets [requirement]) copied in only while bun run dispatch:local builds the server, then restored with jj restore; drive the real server over HTTP and with bun packages/envoy-client/bin/dispatch.ts (DISPATCH_URL=http://127.0.0.1:8777, DISPATCH_TOKEN=e2e-token): a claim pointing at requirement r1 saves and dispatch read of r1 shows a serves edge; ?kind=serves lists it; negative controls: a pointer to a paragraph or a callout is 400 naming the types, a malformed or over-encoded value is 400 INVALID_MARKDOWN, ?kind=nope is 400 INVALID_KIND, serves=\"\" removes the edge.",
+    "tester": "Re-run the script at the head under test and try to break it: pointer added by edit op, target added in the same upload, retype of the target to callout and back (edge hidden then shown), pinned pointer, doubled space or tab in a value; read CI for static lanes.",
+    "production": "No shipped type declares block[] (R3), so production cannot exercise the new path. The check records that the running build carries the merge (dispatch-production-check.sh --commit <merge sha> --page /issues --route /api/v1/references --route /api/v1/schema/blocks), that the served schema has no block[] attribute, that a callout document uploads and a block reference to it reads as before on a LEGSMOKE scratch issue, and that ?kind=mentions answers and ?kind=nope is still 400; the Production: line says the new path is unreachable in production until INFRA-173 ships a type that declares one."
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, push procedure, PR body template and proof rules (references/pr-body.md), review-thread handling, and the production check after the merge closes the issue.",
+      "ce-simplify-code: the simplify pass the PR-body reference requires on the settled diff before completion."
+    ],
+    "test": [
+      "legion-worker: the tester's charter in references/pr-body.md (drive the real surface and try to break it, verify the implementer's proof, read CI rather than rerun it) and the test handoff fields."
+    ],
+    "review": [
+      "legion-worker: review order, approval of the head by SHA and review threads (references/merge-gate.md, references/review-threads.md).",
+      "thermonuclear-deep-review: diff-scoped correctness and security audit, for the migration, the listing predicate on every block_refs read, and the 400 mapping of a pointer refusal.",
+      "thermonuclear-code-quality: diff-scoped maintainability audit of the schema, index and editor changes and the proof-editor copied-file accounting."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: 'pointers the write adds', 'missing target accepted' and 'disallowed gets no row' are policies R3/A3 do not settle; additions-only checking leaves an unchanged pointer valid after its target or source is retyped.",
+        "answer": "D3 makes the limit continuous at read time (block_refs.to_types and block_ref_listed hide an edge while its target exists with a disallowed type), so write refusal only has to cover pointers a write introduces (including a source retype) and never blocks unrelated edits; an absent target is accepted and INFRA-173's stricter serves rules stay INFRA-173's; browser-written pointers are stored and hidden while disallowed. Tests: TestCheckBlockPointersRefusesATargetOfADisallowedType, TestAnUnchangedPointerIsNotRefusedWhenItsTargetIsRetyped, TestABlockPointerIsListedOnlyWhileItsTargetHasAnAllowedType, TestABrowserWrittenPointerToADisallowedTypeIsStoredAndNotListed."
+      },
+      {
+        "finding": "F2: no source of truth for same-document targets added or retyped by the write, for pinned target types, or for which built-in types are valid targets.",
+        "answer": "D3 resolves same-document targets against the tree the write leaves and other documents against document_blocks; D4 limits pinned pointers by the current type; D2 limits built-in targets to types GET /blocks lists, tested against the renderer's rule. Seed, applyLive and RebuildDocument all call CheckBlockPointers. Tests cover a target added in the same upload, allowed and disallowed."
+      },
+      {
+        "finding": "F3: replacing the mentions pair by the pointer pair loses genuine mentions; omitting disallowed pointer rows lets the document-level mention leak through heldByABlock's fallback; kind must reach dedupe, delete and conflict identity.",
+        "answer": "D5 keeps a mentions edge from the typed block when extraction finds more references than its block[] values hold, prose in children stays separate, and kind joins the key, dedupe, delete and conflict target; disallowed pointers are stored (hidden by the listing function), so heldByABlock still hides the document-level row. TestAPointerAndAProseCitationOfOneTargetAreTwoEdges and the listing test check both."
+      },
+      {
+        "finding": "F4: indexing-time type checks do not follow a cross-document target that is later retyped, deleted, restored or created.",
+        "answer": "The listing function reads the target's current document_blocks row on every read, so retypes converge with no reconciliation of other documents; an absent target falls to INFRA-366's absent-block rule. A change of an attribute's targets in the shipped schema reaches a document at its next indexing, stated in D3."
+      },
+      {
+        "finding": "F5: an optional command-level resolver is not an end-to-end editor implementation; the real editor passes none, and markdown, HTML and collaboration paths do not go through commands.",
+        "answer": "D8: commands refuse a same-document target of a disallowed type using a new documentRef option of createProofEditor that ProofDocument sets; without it, or for another document, the server decides; markdown and HTML loading check canonical form only, because refusing a stored document after a target retype would make it unloadable. The editor test drives createTypedBlockCommands on a real state and checks the document is unchanged after a refusal."
+      },
+      {
+        "finding": "F6: 'named by the attribute' may mean the attribute key is the edge kind; a separate link field and the reserved-name rule are unstated choices.",
+        "answer": "D1 takes the literal reading: the attribute's own name is the edge kind, with no link field; two types declaring the same name share the kind (INFRA-173's serves); the name pattern and the refusal of existing edge kinds are recorded as this plan's interface decisions, tested in TestABlockPointerSchemaDeclaresANameAndTargets."
+      },
+      {
+        "finding": "F7: the old Go parser and editor regex are not equivalent canonical validators and do not handle pinned references.",
+        "answer": "D9 bases both on INFRA-366's merged pin-aware grammar (parse, then rewrite must equal the value) and one shared corpus covering pinned and unpinned refs, Unicode ids, lower-case escapes, over-encoded ASCII, invalid UTF-8, controls, trailing junk, comma-joined and repeated refs; the editor's encodeBlockId twin is tested against INFRA-366's encodings table."
+      },
+      {
+        "finding": "F8: a new owned editor file does not authorize edits to proof-editor's copied files, limited to fifteen kinds.",
+        "answer": "Task 4 step 6 records the edits to block-schema.ts, typed-block-commands.ts, lib.ts and the suite as a sixteenth allowed kind in packages/proof-editor/AGENTS.md and lists block-pointers.ts among the package's own files, so the copied-file audit accounts for them; the architect is told."
+      },
+      {
+        "finding": "F9: the proof was not reproducible: a scratch schema is not read at runtime, a parsed-schema-only swap leaves served JSON stale, and merge presence is not behavioral proof.",
+        "answer": "UseBlockSchemaForTest swaps the parsed schema, its type map and the served JSON together; the E2E builds the real server from a scratch blocks.json so parser, served schema and editor agree, with exact steps and controls; the production check is described honestly as revision plus regression, with the new path unreachable in production by R3, and the architect is told."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": []
+}
