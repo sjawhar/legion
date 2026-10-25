@@ -702,7 +702,14 @@ A failure in any of the first three refuses the generation. The start answers wi
 which names the generation and the instance; no child is started; the proxy, if it had started,
 is closed and the generation's directory removed, so nothing is left bound and nothing is left on
 disk (`endSession`). An agent never runs against a proxy that cannot reach the database, because
-the proof dial happens before the proxy's start returns.
+the proof dial happens before the proxy's start returns. That dial is bounded at half the
+launcher's `--stop-grace` (5 s at the default `worker_stop_timeout_seconds` of 10), so an instance
+that never answers — an unreachable private address, a handshake that stalls — is refused, as
+`no answer within <bound>`, while the daemon still waits for the start's answer: the daemon waits
+on a start until the launcher's connection deadline plus that same grace, so at least the whole
+grace remains however late the launcher connected (`proofTimeout`, `launcher.go`). The launcher
+reads one command at a time, so the bound also keeps it free to read the stop the daemon sends
+after a start it gave up on.
 
 The connection belongs to the generation, not to the pod. The proxy keeps serving through the
 child's stop grace however the stop arrives — the daemon's stop or the container's own SIGTERM — so
@@ -712,8 +719,26 @@ the proxy with bounds only its start, and once started the proxy ends only when 
 processes (`cleanExitedGeneration`), have exited, and before the generation's directory goes, so
 the launcher exits with nothing bound, nothing is left listening over a socket that has been
 removed, and between generations nothing is bound and no connection file exists (`manager.wait`).
-The child's stop grace bounds how long that takes: a child that ignores SIGTERM is killed at it.
 The next generation binds a socket and writes a file of its own.
+
+How long the proxy outlives the moment the generation is told to end, in a pod, where the launcher
+is PID 1 of its role's PID namespace (`signalGeneration`, `process.go`):
+
+- **A stop** — the daemon's stop, with its grace, or the container's SIGTERM, with `--stop-grace`
+  (`worker_stop_timeout_seconds`, which is also the pod's `terminationGracePeriodSeconds`): at most
+  that one grace. The stop's SIGTERM and, at the grace, its SIGKILL reach every process in the
+  namespace, the child and whatever it left behind alike, so the leftovers' cleanup ends inside the
+  same grace, and no process is left to hold a connection open.
+- **A child that exits on its own** and leaves processes behind: the leftovers get up to
+  `--stop-grace` more, SIGTERM then SIGKILL (`cleanExitedGeneration`), with the proxy still serving
+  them, so at most one grace after the child's exit.
+
+When the proxy is closed, it lets connections still open finish for up to one second
+(`sessionDrain`, `launcher.go`; `Config.Drain`, `sessionproxy.go`), then closes both ends of those
+left. In a pod that drain costs nothing, since every process that could hold a connection is gone
+by then; it bounds the case where the launcher is not PID 1, where signals reach only the child's
+process group and a holder outside it could otherwise keep the stop, the next generation and the
+launcher's exit waiting.
 
 That URL carries a login and no password, because the credential is the pod's own cloud identity:
 the Cloud SQL Go connector puts it in the instance's ephemeral-certificate exchange (automatic IAM
