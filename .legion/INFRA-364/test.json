@@ -2,16 +2,26 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-364",
-  "completed": "2026-10-25T17:13:30Z",
-  "headSha": "28dcd7a1b4e9e05828bfd8abc5c517064725ef5c",
-  "evidence": "https://github.com/sjawhar/legion/pull/2201#issuecomment-6400646872",
+  "completed": "2026-10-25T17:35:00Z",
+  "round": 1,
+  "headSha": "f12514e89234f30662b332eaf0222338e1f41b67",
+  "evidence": "https://github.com/sjawhar/legion/pull/2201#issuecomment-6400875751",
+  "evidenceRound0": "https://github.com/sjawhar/legion/pull/2201#issuecomment-6400646872",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently: the tester built its own head server from the workspace and its own pre-fix server (packages/envoy copy with refs/graph.go and refs/refs.go from test commit 79a4d10bda98), ran them on its own harness lane (port 18877, database dispatch_test_e2e) with its own fixture and two unknown kinds (block, future) instead of one. Every C1-C5 observation and negative control in implement.json reproduced: head 200 with the known edges and matching counts; pre-fix 500 'graph node kind ... is not addressable', count one per unknown row higher, outgoing leaking the unknown target, CLI 'unavailable: internal server error', Playwright failing on 'Referenced by (3)'."
+    "how": "Round 0 (head 28dcd7a1): drove the same surface independently with tester-built head and pre-fix servers (packages/envoy copy with refs/graph.go and refs/refs.go from test commit 79a4d10bda98), own harness lane (port 18877, database dispatch_test_e2e), own fixture and two unknown kinds (block, future); every C1-C5 observation and negative control reproduced. Round 1 (head f12514e8, refs_test.go +8 only): re-ran the new test at head (PASS) and the implementer's mutation (node-kind filter only when no exclusion is passed) in a scratch copy, which failed refs_test.go:386 with map[CORE-1:2 OPS-1:1] exactly as its round-1 proof says; real-surface probes on a fresh head build were identical to round 0."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Review round 1: every ask read, which counts with AskBacklinkExclusions, leaves an unknown-kind source out of referenced_by_count, and a test fails if it does not",
+      "surface": "Go test on the Postgres 17 harness against head and two BacklinkCounts mutations in a scratch copy of packages/envoy; real surface: fresh head server build on the tester lane with the round-0 fixture (block->ask row present)",
+      "command": "go test ./internal/dispatch/refs/ ./internal/dispatch/api/ -run 'TestGraphReadsSkipANodeKindThisBuildCannotAddress|TestReferencesAnswerAroundAnEdgeOfAKindThisBuildCannotAddress|TestArtifactReferencesSkipANodeKindThisBuildCannotAddress|TestAskListsCarryBatchedBacklinkCounts' -count=1 (head, M1, M2); bash /legion/scratch/tmp/tester364/probe.sh; dispatch read --issue CORE-1",
+      "observed": "Head: PASS; real surface byte-identical to round 0 (issue count 4 = 4 listed, ask count 1 on list and single read, reply excluded, every reference read 200 with no unknown node), CLI lists the 4 known citers, server log 0 ERROR lines",
+      "headSha": "f12514e89234f30662b332eaf0222338e1f41b67",
+      "negativeControl": "M1 (node-kind filter only when no exclusion is passed): FAIL refs_test.go:386 'issue backlink counts with the ask exclusions = map[CORE-1:2 OPS-1:1]; want map[CORE-1:1]' (the API tests still pass under M1, so refs_test is the one lock); M2 (exclusion dropped): FAIL refs_test.go:392 'excluding mentions = map[CORE-1:1]; want none'"
+    },
     {
       "criterion": "C1: GET /api/v1/references stays 200 and lists every known edge, ?to= and ?from=, while graph_edges holds an edge whose other end is an unknown kind",
       "surface": "Local Dispatch harness, tester lane: tester-built head server (serve.sh = the e2e run-server environment), Postgres 17 + pgvector, agent bearer e2e-token; 8 refs rows of kinds block and future inserted by psql on every side (issue in, comment out, document in/out, ask in, unknown->unknown)",
@@ -55,8 +65,9 @@
   ],
   "notes": [
     "C6 (production) is the implementer's production check after the close; not reachable before the merge.",
-    "CI at 28dcd7a1b4e9 when written: Tests run 40214137601 typecheck success, lint and test in progress; Legion Envoy and Contracts run 40214137452 queued; Docs run 40214137670 success; Worker Image run 40214137425 in progress; PR Title run 40214137427 success. Not waited on.",
-    "Test coverage read against what was tried: refs_test's excludeKinds assertion ('excluding mentions -> none') holds with or without the from_kind filter, so an ask count that counted an unknown source only in the exclusion branch is caught by no Go test; the tester's real-surface probe shows head does not do that (ask count 1 with a block->ask row present). No defect, so no red test.",
+    "C1-C5 entries below the round-1 entry ran at round-0 head 28dcd7a1; round 1 changes only refs_test.go, and their API/CLI probes re-ran at f12514e8 with identical output. The dashboard and Playwright runs were not repeated because no server or web code changed.",
+    "CI at f12514e89234 when written: Tests run 40216568667 typecheck success, lint and test in progress; Legion Envoy and Contracts run 40216568676 queued; Docs run 40216568537 in progress; Worker Image run 40216568483 in progress; PR Title run 40216568472 success. Not waited on.",
+    "Round 0's coverage note (no Go test caught an ask count that counted unknown sources) is closed: refs_test.go:386 now fails under that mutation.",
     "Harness hazard, outside the repository: /legion/harness/setup.sh run from another role's container cannot see the running postmaster's pid, overwrites postmaster.pid, fails to bind, and the running server then shuts down. The tester's first setup.sh run stopped the implementer's idle server that way; the tester stops its own server before completing so the reviewer's setup.sh starts cleanly."
   ]
 }
