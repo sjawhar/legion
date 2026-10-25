@@ -2,67 +2,69 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T19:40:00Z",
-  "round": "12 (corrected in round 13) — review round 11's two Minors, and the false limit claim this handoff carried",
+  "completed": "2026-10-25T20:40:00Z",
+  "round": "13 — the forward merge GitHub's conflict report required, and one contract four places stated wrongly and separately",
   "citations": [
-    "packages/daemon/internal/workflow/check.go:472-483 — `checkLookEnded` calls `endLook(ctx, tx, check, fact.Cause)` for a look nobody reported.",
-    "packages/daemon/internal/workflow/check.go:220-231 — `endLook` clears `LookOpen`, logs, and returns `e.endLookPending(ctx, tx, check)`: it ends the look as a report of `pending` would.",
-    "packages/daemon/internal/workflow/check.go:250-262 — inside `endLookPending`: `if check.PendingCauseKind != \"\" { return e.startLook(...) }` comes **before** the `e.suspend(...)` and the `record.IssueSuspend` enqueue. So a wake already recorded starts the next look on the same pod, whether the look ended with a `pending` report or with no report at all; the condition is the queued wake, not how the look ended.",
-    "packages/daemon/internal/workflow/check.go:285-296 — `closeCheck` enqueues the implementer's `issue_close` and the `IssueSuspend` together, which is why a `pass` or `fail` takes the pod.",
-    "packages/daemon/internal/runtime/sandbox/issue_suspend.go:55-62 — the Sandbox is deleted unconditionally once the pod is gone (`deleteStoredSandbox`), so nothing is left to resume.",
-    "packages/daemon/internal/runtime/sandbox/issue_suspend_test.go:131-140 — the package's own test requires a re-admission to come back on a Sandbox and pod of its own, at a different uid."
+    "packages/daemon/internal/runtime/sandbox/relaunch.go:123-128 — a live, undrifted pod whose addresses have not moved is kept.",
+    "packages/daemon/internal/runtime/sandbox/relaunch.go:166 — `l.kind.provision` runs only inside the `if replace` branch.",
+    "packages/daemon/internal/runtime/sandbox/relaunch.go:213-218 — a launch into a kept pod goes straight to `recordAddresses` and `launchers.start`.",
+    "packages/daemon/internal/runtime/sandbox/relaunch_test.go:147-160 — pins that a role start does not reinitialise the issue.",
+    "packages/daemon/internal/runtime/sandbox/podkind.go:83-89 — the corrected comment, which cites the two above rather than restating the contract."
   ],
   "proof": [
     {
-      "criterion": "The architect skill and the worker reference both state the condition the daemon holds to: a queued wake keeps the pod, whichever way the look ended.",
-      "surface": "The daemon's own source, read before either sentence was rewritten — the citations above are the lines read, in the order the call takes them.",
-      "command": "read workflow/check.go:472-483, :220-231, :250-262",
-      "observed": "`skills/legion-architect/SKILL.md:419-423` now says the Sandbox goes when the check pauses with nothing waiting to wake it, or closes: a `pass` or `fail` takes the pod, and so does a look that ends with no wake queued, whether the implementer reported `pending` or the look ended with no report; a wake already queued starts the next look on the same pod, again whichever way the look ended.",
-      "headSha": "d8efa0ba2fb00423d368022e477312d84948ec21",
-      "negativeControl": "The citation is the control: `:255-256` returns through `startLook` before `:257-262`'s suspend, so any sentence that makes an unreported look take the pod unconditionally is refuted by reading those seven lines in order. That is the check a reviewer can run against this sentence without trusting me."
+      "criterion": "The branch merges main and is no longer CONFLICTING, so GitHub computes a merge ref and runs its workflows at all.",
+      "surface": "jj's own conflict list and the two file-list instruments, read after the merge.",
+      "command": "jj resolve --list; jj diff --from 'main@origin' --to @ --name-only | wc -l; jj diff --from 'fork_point(main@origin | @)' --to @ --name-only | wc -l; gh pr view 2173 --json changedFiles",
+      "observed": "`No conflicts found at this revision`. The convergence check the architect asked for: before the merge the two-dot list was **328** and the three-dot list **141**; after it both are **141**, and GitHub's `changedFiles` is 141. A merge that did what it looks like collapses the two-dot excess — main's 71 commits of churn — to nothing.",
+      "headSha": "b247931acbcace344f90e6645e7a12d4dbc5e248",
+      "negativeControl": "The two-dot/three-dot pair is its own control: had the merge not taken main, the two-dot list would still hold main's churn. Before the merge the gap was 187 paths; after it, zero."
     },
     {
-      "criterion": "The same claim one file over is corrected with it, so the two agent-read texts do not disagree.",
-      "surface": "The worker reference the architect skill points at for this very mechanism.",
-      "command": "grep -n 'pending' skills/legion-worker/references/merge-gate.md | grep -iE 'suspend|pod|sandbox|wake'",
-      "observed": "`merge-gate.md:254-258` said flatly that a `pending` ends the look and the pod goes. It now distinguishes: where no wake is queued the claim is suspended and the pod and disk go; where a wake arrived while the look was open the next look starts at once on the same pod. The review named only the skill; fixing one and leaving the other would have left the implementer's own reference contradicting the architect's.",
-      "headSha": "d8efa0ba2fb00423d368022e477312d84948ec21",
-      "negativeControl": "Same citation. Both files now make the queued wake the condition, and `grep -rn 'ends with no report|no report at all'` over skills/, the generated plugin and docs/ returns only the two corrected sentences."
+      "criterion": "The five conflicts carry both changes rather than one of them.",
+      "surface": "The Go toolchain, the daemon's record package, and the generated-plugin build.",
+      "command": "cd packages/daemon && gofmt -l . && go build ./... && go vet ./... && go vet -tags e2e ./... && CGO_ENABLED=0 go test ./internal/record ./internal/runtime/sandbox ./internal/workflow ./internal/config ./internal/supervise ./internal/podsafety ./internal/api ./internal/launcher ./internal/runtime ./cmd/legion; cd packages/claude-envoy && bun run check-dist",
+      "observed": "All green, and `dist/ and legion/ match a fresh build`. Every conflict was main's `#2203` (a deploy-workflow wake for the production check) extending an enumeration this change had reworded for the pod-owned disk: `AGENTS.md`, `skills/legion-worker/references/merge-gate.md` with its generated mirror, `internal/prompts/go/implementer.md`, and `internal/record/outbox_test.go`, where the two sides add different tests and all of them are kept.",
+      "headSha": "b247931acbcace344f90e6645e7a12d4dbc5e248",
+      "negativeControl": "`internal/record` is the control for the test file: it holds both main's new deploy-run cases and this branch's renamed `TestAnIssueSuspensionCarriesNoReleaseField`, and a resolution that dropped either side would fail to compile or lose a test."
     },
     {
-      "criterion": "`SuspendIssue`'s contract says what the function does.",
-      "surface": "The function's own body and the package's test.",
-      "command": "cd packages/daemon && CGO_ENABLED=0 go test ./internal/runtime/sandbox; gofmt -l .; go build ./... && go vet ./... && go vet -tags e2e ./...",
-      "observed": "Green. The comment no longer promises a re-admission resumes the Sandbox: it says the re-admission makes a Sandbox of its own, which is what `:60`'s unconditional delete leaves and what `issue_suspend_test.go:135` requires.",
-      "headSha": "d8efa0ba2fb00423d368022e477312d84948ec21",
-      "negativeControl": "`grep -rn 'resumes the Sandbox|resume the Sandbox' packages/ docs/ skills/` is empty, so no other text carries the promise."
+      "criterion": "An ordinary role start does not provision the workspace afresh, and the text says so in one place rather than four.",
+      "surface": "The daemon's own source, read before the sentence was written — the citations above are the lines, in the order the launch takes them.",
+      "command": "read relaunch.go:110-220 and relaunch_test.go:140-170; then jj diff --git packages/daemon/internal/runtime/sandbox/podkind.go",
+      "observed": "A live, undrifted pod is kept; `provision` runs only inside the replace branch; a launch into a kept pod goes to `recordAddresses` and `launchers.start`. So five of an issue's six roles start into the pod the first launch created and find the workspace as the roles before them left it, unpushed work included. `docs/kubernetes.md`'s \"The disk dies with its pod\" now owns the contract and states it once — pod lifetime against role lifetime, which launch provisions and which does not; the other three sites say the short true thing and point there. The Go diff is comments only: every changed line begins with a comment marker.",
+      "headSha": "b247931acbcace344f90e6645e7a12d4dbc5e248",
+      "negativeControl": "`relaunch_test.go:147-160` is the standing control — it pins that a role start does not reinitialise the issue, so the sentence the four sites carried was contradicted by a test in the same package."
     },
     {
-      "criterion": "The generated plugin carries both corrections, and the repository's own gates are clean.",
-      "surface": "The build that produces the Claude Code plugin, and the lint lanes.",
-      "command": "cd packages/claude-envoy && bun run build && bun run check-dist; bun test packages/pi-legion/src/skills-guard.test.ts; bunx biome check .; bash .github/scripts/check-private-names.sh",
-      "observed": "`dist/ and legion/ match a fresh build`; the mirror at `packages/claude-envoy/legion/skills/legion-architect/SKILL.md:421` carries the corrected sentence; the skills guard passes 11; Biome reports no error; the private-names check reads 5,002 files.",
-      "headSha": "d8efa0ba2fb00423d368022e477312d84948ec21",
-      "negativeControl": "`check-dist` is the control for the mirror: it fails when the generated copy does not match a fresh build of the source skills, which is how a corrected skill with a stale mirror would be caught."
+      "criterion": "My own file-list instrument was not the truncating one.",
+      "surface": "The three instruments, compared against each other at the branch head.",
+      "command": "gh pr view 2173 --json changedFiles; gh api --paginate repos/sjawhar/legion/pulls/2173/files --jq '.[].filename' | wc -l; jj diff --from <fork point> --to legion/INFRA-80@origin --name-only | wc -l; diff <(sorted jj list) <(sorted gh list)",
+      "observed": "`changedFiles` 141, `gh api --paginate` 141, the fork-point (three-dot) jj list 141, and the two sorted lists are **identical** — no path in one and not the other. Every scoping I did used either the fork-point diff or `gh api --paginate`; I never used `gh pr view --json files`, which returns 100 of 141 and says nothing about the other 41.",
+      "headSha": "b247931acbcace344f90e6645e7a12d4dbc5e248",
+      "negativeControl": "The truncating instrument is the control: `gh pr view --json files` returns 100 here against a `changedFiles` of 141, with no error, which is what a conclusion drawn from it would have silently rested on."
     }
   ],
   "filesChanged": [
-    "skills/legion-architect/SKILL.md and skills/legion-worker/references/merge-gate.md, with their generated copies under packages/claude-envoy/legion/: the queued wake is the condition, not how the look ended.",
-    "packages/daemon/internal/runtime/sandbox/issue_suspend.go: SuspendIssue's contract line."
+    "The merge commit `b247931a`: the five conflicted files resolved to carry both changes.",
+    "packages/daemon/internal/runtime/sandbox/podkind.go, docs/kubernetes.md (three sites and the owning paragraph): the pod-versus-role contract stated once and referred to.",
+    "The pull request body: the superseded generation of the E2E block replaced by a pointer, the Chain line carrying the eighth merge and the convergence check, the CI line saying this head has had no lane read."
   ],
   "trickyParts": [
-    "The defect came out of the correction the previous round asked for. An enumeration is only as good as its least-read member, and the member nobody had read is the one that was wrong — which is the argument for reading the path rather than writing more precisely, made by the correction itself."
+    "The merge commit carries this round's prose as well as the conflict resolutions: the subagent resolved the conflicts and wrote the contract in one working copy, and I pushed before separating them. The content is the same either way, and I say it here rather than leave a reviewer to notice a merge commit that is not empty of its own changes.",
+    "The contract's owner is `docs/kubernetes.md`'s \"The disk dies with its pod\", because it already lists every way an issue pod ends and the other two doc sites already linked to it. The Go comment points at the mechanism and at that section, so code and prose lead to each other without a second full statement."
   ],
   "deviations": [
-    "The review named only the architect skill. I corrected `merge-gate.md` with it, which is the same sentence one file over and in the same agent-read class; fixing one and leaving the other would have left the implementer's reference contradicting the architect's. That is the same item, not a new one, and no sweep was started."
+    "While writing the owning paragraph the subagent avoided one further false claim and reported it: \"only an agent resumed into a new pod is told its workspace was recreated\" is wrong, because a replacement made by one role's launch is a kept pod for the next role, which is told too. The text says \"a pod created after the one it last worked in\".",
+    "`./internal/daemon` ran here for the three fixture tests (4.3 s) with the Postgres on the issue's volume; the package's one container-runtime test stays filtered out by name."
   ],
   "openQuestions": [
     "Stage 4b is repaired and has run at no head at all.",
     "Stage 4a's inverted checks are still unrun; the runner's revised list is a comment on the pull request.",
-    "CORRECTION, made in round 13 after the tester disproved it: the claim that `./internal/daemon` cannot run in this pod was **false**. With a Postgres on the issue's own volume at `LEGION_TEST_PG_DSN`, the three fixture tests this change touches (TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns, TestIssueCloseDeletesTheSandboxAfterARestart, TestAnOldTreesCleanupBeforeTheNewTreesStartDeletesTheCarriedChildsSandbox) pass here in 4.1 s, so the fixture inversion has a run. One test needs a container runtime — TestABootWaitsOutAGitHubRequestThatNeverAnswers, `panic: rootless Docker not found` — and it takes an unfiltered package run with it. A test, not the package. The three sources I gathered under the second-source rule (no docker on PATH, DOCKER_HOST unset, no socket) were each a correct reading of 'this pod has no container runtime', a proposition nobody disputed; the skip's own text named LEGION_TEST_PG_DSN, a database. Three sources about the wrong subject look like diligence and are worse than none, because they make an unchecked claim look checked.",
-    "The envoy-go hang is now dispatch://INFRA-407, filed by the controller after the person answered the ask; this change files nothing for it."
+    "This head has had **no** lane read: GitHub started its runs when the merge was pushed, and none of the earlier reads carries to it. No number is given for it because no clock was read."
   ],
   "discoveredComplexity": [
-    "Replacing an exclusive condition with an enumeration moves the risk rather than removing it: the condition was wrong about one case, and the enumeration asserts every case, so it is wrong about any member whose branch was not read. The remedy is the same either way — read the branch, cite the line."
+    "One contract expanded independently in four places is a machine for producing a fifth: the four sites disagreed with the code in the same way because each expansion was written on its own, and the fix that matters is the single owner, not the four edits.",
+    "An instrument can fail safe by direction rather than by design. A two-dot diff is long by the base's churn and a `gh pr view --json files` list is short by its cap; the same wrong shape produces a noisy superset or a silent blind spot depending on which way the comparison runs, and only the three-dot list checked against `changedFiles` is the forge's own answer."
   ]
 }
