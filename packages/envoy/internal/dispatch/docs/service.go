@@ -208,6 +208,10 @@ type Service struct {
 	// observer keeps (weak.Pointer[renderedReplica]), which the document's reads walk (readLive),
 	// keyed by a weak pointer to that document (keepReplica).
 	replicas sync.Map
+	// measurer counts, one at a time for the whole service, the elements of the renderings rooms
+	// publish past the element gate, off their update observers (elementMeasurer). Its zero value
+	// is ready, and Shutdown stops it.
+	measurer elementMeasurer
 	// instances lists, for each resident room document, what that instance records about the
 	// durable history behind it (*roomInstance): the updates whose writes can have recorded a
 	// pending author, and the durable version the instance stands at, keyed by a weak pointer to
@@ -634,6 +638,9 @@ const ShutdownDrainBudget = 9 * time.Second
 // whether it settled or was left to resume; once the caller's deadline has passed it cannot read
 // that back, and its error names those documents.
 func (s *Service) Shutdown(ctx context.Context) error {
+	// The measurer runs until the rooms are gone, so a room still taking updates while it drains
+	// keeps its element count current; whichever way Shutdown returns, nothing is counted after.
+	defer s.measurer.stop(ctx)
 	// loadedRoom is a room as Shutdown found it: the generation its settlement runs at, and
 	// whether an editor was connected.
 	type loadedRoom struct {
