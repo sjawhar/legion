@@ -313,6 +313,12 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			want:     runtime.Gone, detail: []string{"reports generation 1 exited (code 143, signal terminated)"},
 		},
 		{
+			row:      "8 the launcher reports the recorded generation failed before its shim started",
+			objects:  withPod(modeRunning, nil, recorded, sandboxUID, running),
+			launcher: &shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: shimwire.LauncherExitSetupFailed}},
+			want:     runtime.Gone, detail: []string{"reports generation 1 failed setting up its namespaces before its shim started; last lines of tester:"},
+		},
+		{
 			row:     "8 the pod's one container terminated with no launcher connected",
 			objects: withPod(modeRunning, nil, recorded, sandboxUID, withStatus(workerContainer, corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}})),
 			want:    runtime.Gone, detail: []string{"container roles terminated (OOMKilled, exit code 137)"},

@@ -16,6 +16,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
+	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
 // logTailLines is how much of a failed container's log a Gone quotes (runtime-kubernetes.ts:678-689).
@@ -250,6 +251,9 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) runt
 	case state.Child != nil:
 		return observe(runtime.NotRecordedProcess, "pod %s (uid %s) role %s runs generation %d, not the recorded %d",
 			name, pod.UID, role, state.Child.Generation, loc.Sandbox.Generation)
+	case state.LastExit != nil && state.LastExit.Generation == loc.Sandbox.Generation && state.LastExit.Code == shimwire.LauncherExitSetupFailed:
+		return observe(runtime.Gone, "pod %s (uid %s) role %s reports generation %d failed setting up its namespaces before its shim started; last lines of %s:\n%s",
+			name, pod.UID, role, state.LastExit.Generation, role, r.roleLog(ctx, name, container, role))
 	case state.LastExit != nil && state.LastExit.Generation == loc.Sandbox.Generation:
 		return observe(runtime.Gone, "pod %s (uid %s) role %s reports generation %d exited (code %d, signal %s)",
 			name, pod.UID, role, state.LastExit.Generation, state.LastExit.Code, state.LastExit.Signal)
@@ -407,7 +411,8 @@ const (
 // no role wrote (containerLines).
 const containerLinesHeader = "the container's own last lines, no role's:"
 
-// roleLog is role's last lines of container's log, quoted when that container has ended. The
+// roleLog is role's last lines of container's log, quoted when that container has ended or role's
+// generation failed setting up its namespaces (shimwire.LauncherExitSetupFailed). The
 // controller's container runs its role alone, so its log is the role's whole. An issue pod's one
 // container interleaves every role's lines, each prefixed `<role>: ` by the launcher, so its quote
 // is role's own (roleLines), never a sibling's: a sibling's agent may have written anything there.

@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"os"
 	"os/exec"
@@ -874,6 +875,51 @@ func TestTheContainersLogKeepsEveryLineWholeAcrossGenerations(t *testing.T) {
 		"launcher: reap orphans: list role namespace processes: permission denied\n"
 	if got := out.String(); got != want {
 		t.Fatalf("the container's log is\n%q\nwant\n%q", got, want)
+	}
+}
+
+// An issue pod role's generation whose role-init exits without reporting a shim status failed
+// before its shim ran, and is reported as shimwire.LauncherExitSetupFailed, never as a code the
+// shim itself could have exited with; one whose role-init reported the shim's status is reported
+// with that status, its exit code 1 included. Either way the last line the generation left
+// unfinished reaches the log once it is gone.
+func TestARoleInitThatFailsBeforeItsShimIsReportedAsASetupFailure(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		report string
+		want   shimwire.LauncherExit
+	}{
+		{"role-init failed setting up", "", shimwire.LauncherExit{Generation: 4, Code: shimwire.LauncherExitSetupFailed}},
+		{"the shim exited 1", strconv.Itoa(1 << 8), shimwire.LauncherExit{Generation: 4, Code: 1}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			out := &lockedBuffer{}
+			m := &manager{role: "tester", namespaced: true, log: &roleLog{stdout: out, stderr: out}, requests: map[string]request{}}
+			_, m.stderr = m.log.writers("tester")
+			stdout, stderr := m.log.writers("tester")
+			cmd := exec.Command("/bin/sh", "-c", "printf 'role-init: the role'\"'\"'s gh directory: no such file'; exit 1")
+			cmd.Stdout, cmd.Stderr = stdout, stderr
+			read, write, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := cmd.Start(); err != nil {
+				t.Fatal(err)
+			}
+			if tc.report != "" {
+				_, _ = write.WriteString(tc.report)
+			}
+			_ = write.Close()
+			active := &child{generation: 4, pid: cmd.Process.Pid, dir: t.TempDir(), status: read, output: []io.Writer{stdout, stderr}, done: make(chan struct{})}
+			m.child = active
+			m.wait(cmd, active)
+			if m.lastExit == nil || *m.lastExit != tc.want {
+				t.Fatalf("the generation's exit = %+v, want %+v; the log: %s", m.lastExit, tc.want, out.String())
+			}
+			if !strings.Contains(out.String(), "tester: role-init: the role's gh directory: no such file\n") {
+				t.Fatalf("the generation's unfinished last line never reached the log whole: %q", out.String())
+			}
+		})
 	}
 }
 

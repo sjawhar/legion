@@ -157,11 +157,20 @@ type LauncherChild struct {
 
 // LauncherExit is the last child exit the launcher observed. A launcher reports it after a
 // reconnect before it accepts another start, so the daemon never invents Gone from a lost reply.
+// Code is the process's exit status, or one of two values no process exits with: -1 when the
+// launcher has no status for it (killed by a signal, which Signal then names, or never waited on),
+// and LauncherExitSetupFailed.
 type LauncherExit struct {
 	Generation uint64 `json:"generation"`
 	Code       int    `json:"code"`
 	Signal     string `json:"signal,omitempty"`
 }
+
+// LauncherExitSetupFailed is the Code of an issue pod role's generation whose role-init failed
+// before it started the shim: setting up the role's namespaces, or starting the shim itself. Its
+// reason is role-init's own line in the role's log. It is apart from every code a shim exits
+// with, so the daemon never reads a setup failure as the agent's own exit.
+const LauncherExitSetupFailed = -2
 
 // LauncherState is the launcher's actual child state at hello and after every child transition.
 type LauncherState struct {

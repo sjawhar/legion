@@ -1953,7 +1953,10 @@ workflow role (`claim.Roles`: architect, planner, implementer, tester, reviewer,
    no prefix, and when the container ends the daemon quotes those lines after each role's own in
    that role's detail. As the container's PID 1 the launcher reaps every orphan its PID namespace
    adopts (what a `kubectl exec` leaves behind), never a role's own generation, whose exit its role
-   reads.
+   reads. A generation whose role-init fails before it starts the shim, setting up the role's
+   namespaces, is reported with the exit code `-2` (`shimwire.LauncherExitSetupFailed`), which no
+   shim exits with, and the daemon's detail for it quotes the role's last lines, role-init's reason
+   among them.
 
 The issue's volume is its Sandbox's one `volumeClaimTemplates` entry, `issue`: `ReadWriteOnce`, of
 `runtime.kubernetes.issue_volume` (50Gi by default) and `storage_class`, labelled

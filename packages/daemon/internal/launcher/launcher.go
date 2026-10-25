@@ -459,7 +459,10 @@ func (m *manager) command(start shimwire.LauncherStart, env []string) (*roleProc
 
 // wait reports the generation's exit once its process is gone. A role's exit is the shim's own:
 // its namespace init reports the status it waited on, and only an init killed before the shim
-// ended — or one that never started it — reports its own. Once the process and its output copies are done, the last line the generation left
+// ended — or one that never started it — reports its own. An init that exited on its own having
+// reported nothing failed before it started the shim (setting up the role's namespaces), which is
+// reported as shimwire.LauncherExitSetupFailed rather than as an exit code a shim could have
+// exited with. Once the process and its output copies are done, the last line the generation left
 // unfinished is written out, so it is neither lost nor joined to the next generation's first.
 func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	var reported *syscall.WaitStatus
@@ -480,8 +483,13 @@ func (m *manager) wait(cmd *exec.Cmd, active *child) {
 		m.cleanExitedGeneration()
 	}
 	exit := exitOf(cmd.ProcessState, active.generation)
-	if reported != nil {
+	switch {
+	case reported != nil:
 		exit = exitOfStatus(*reported, active.generation)
+	case m.namespaced && cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() != 0:
+		exit = shimwire.LauncherExit{Generation: active.generation, Code: shimwire.LauncherExitSetupFailed}
+		m.logf("launcher: generation %d of role %s: role-init exited %d before it started the shim; its own lines above say why",
+			active.generation, m.role, cmd.ProcessState.ExitCode())
 	}
 	m.mu.Lock()
 	if m.child == active {
