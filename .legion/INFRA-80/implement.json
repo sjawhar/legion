@@ -2,67 +2,69 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T12:35:00Z",
-  "round": "4 — answering review 5642791870 (REQUEST_CHANGES at e1bc9cb0, 4 open threads), plus the architect's two body items",
+  "completed": "2026-10-25T13:45:00Z",
+  "round": "5 — the structural forward merge of #2179, review round 4's two findings (one a path traversal), and the architect's three items",
   "proof": [
     {
-      "criterion": "The e2e harness's SQL-backed session reader, which is the round's blocking fix and the one piece of it that reading cannot settle.",
-      "surface": "A real PostgreSQL 16, brought up as a Job in the cluster from this pod on the pgvector/pgvector image the harness itself pins, seeded with the daemon's own schema (omp_session_files and omp_session_files_parts exactly as internal/ompsessions/ompsessions.go:42-45 declares them), with one row and two parts inserted at start_offset 200 then 100.",
-      "command": "kubectl apply -f <job>; the job runs the exact statement scripts/e2e/stage4b-sandbox-tree.sh's session_text runs — SELECT f.content || coalesce((SELECT string_agg(p.content, '' ORDER BY p.start_offset) FROM omp_session_files_parts p WHERE p.path = f.path), '') FROM omp_session_files f WHERE f.path = :'path' — under psql -X -q -A -t, and prints od -c of the result",
-      "observed": "The row's content, then the part at offset 100, then the one at offset 200 — offset order and not insert order. Embedded single quotes, escaped double quotes, \\t and \\n survive byte for byte, and exactly one trailing newline remains, which is -A -t's plus the reader's own strip. The three lines read back as the three JSON objects seeded.",
-      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
-      "negativeControl": "Two, both run in the same job. A path the table does not hold answers empty, which is what makes the reader fail naming the path as the old `cat` of a missing file did. A path of `x'; DROP TABLE omp_session_files; --` matched 0 rows and left the table standing with its row, because the path is passed as a psql variable (-v path=…, :'path') and never spliced into the SQL."
+      "criterion": "The merged store rule: a session store that keeps sessions in a database is required, and `pvc` is refused — not `postgres` demanded, since #2179's `cloudsql-iam` keeps sessions off the disk exactly as `postgres` does.",
+      "surface": "The real CLI surface, `legion start --check-config`, over five configurations built from the shipped `deploy/kubernetes/daemon/legion.yaml.example`.",
+      "command": "cd packages/daemon && go build -o /legion/scratch/tmp/legion-head ./cmd/legion; then legion start --check-config --config {postgres,cloudsql,pvc,omitted,unknown}.yaml",
+      "observed": "postgres → `Config OK: project=WIDGETS`; cloudsql-iam → `Config OK`; pvc → `legion start: runtime.kubernetes.session_store must name a store that keeps sessions in a database, and is required (INFRA-80): an issue pod's disk is the pod's own ephemeral volume, deleted with the pod, so a session kept as a file on it ('pvc', also what an omitted session_store means) dies with it, the next launch's resume fails on the missing file (internal/launcher's sessionWritten), and three such failures retire the claim`; an omitted session_store → the same refusal; `mysql` → main's own unchanged error, `must be 'pvc', 'postgres' or 'cloudsql-iam'`.",
+      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+      "negativeControl": "A `legion` built from `main@origin` (0306bcbe16df), run against the same two files, answers `Config OK: project=WIDGETS` for both `pvc` and the omitted store. The refusal is this change's, measured rather than asserted."
     },
     {
-      "criterion": "A confirming read the replacement's delete overtakes is Uncertain, not a final Gone that charges a death the daemon itself made.",
-      "surface": "The sandbox package's own rig, driving the fake dynamic client so the delete lands while the confirming GET is out — the mirror of round 3's test, which probes from inside the gap.",
-      "command": "cd packages/daemon && CGO_ENABLED=0 go test ./internal/runtime/sandbox -count=1 -run 'TestAConfirmingReadTheReplacementsDeleteOvertakesIsUncertain|TestASiblingReadBetweenAMigratingLaunchsDeleteAndCreateIsDisplaced'",
-      "observed": "Both pass: the read the delete overtakes answers Uncertain and the claim stays watched, and a second probe once the store has settled answers Gone with Displaced true.",
-      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
-      "negativeControl": "With the generation comparison disabled the new test fails: `the reviewer recorded in the replaced pod, read by a confirming GET the replacement's delete overtook: gone, Displaced false (no pod of sandbox legion-legion-legion-208 (operatingMode Suspended)); want Uncertain — the record taken before the read is not the one its absence belongs to, and a final verdict would charge a death the daemon made`."
+      "criterion": "The e2e session exporter cannot write a host file outside the evidence directory, whatever key the session database holds — review round 4's security finding.",
+      "surface": "The real `session_copy` taken from `scripts/e2e/stage4b-sandbox-tree.sh` by name, driven into a destination nested inside a fresh temporary root with a sentinel file beside it, with the filesystem walked afterwards.",
+      "command": "bun test scripts/e2e/lib/stage4b-session-text.test.ts",
+      "observed": "22 pass. Crafted keys: `../`, absolute after the prefix, an embedded newline, bytes past ASCII, and the `.`/`..`/empty/collision refusals, plus a symlink planted in the destination. Nothing appeared outside the destination in any case; the sentinel's bytes are unchanged; each refusal names the key and not the session's bytes.",
+      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+      "negativeControl": "Against the unfixed function in a scratch copy of the script, `12 fail, 10 pass`, the four traversal cases among the failures. That control was run twice: the first run passed 22/22 because a failed `cp` had left the fixed script in place, so it had proved nothing. The second was run with the unfixed function confirmed in place by grep first."
     },
     {
-      "criterion": "The inherited red lane is green at this head, read here rather than inferred from main.",
-      "surface": "The repository's own guard at the branch's head after the forward merge that imported main's fix.",
-      "command": "bun test packages/pi-legion/src/skills-guard.test.ts",
-      "observed": "10 pass, 0 fail. skills/legion-architect/SKILL.md is 33,757 bytes against the guard's 51,200, after INFRA-376 (merge 56ba79b8cf6d) moved its Wake routing section into skills/legion-architect/references/wake-routing.md.",
-      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
-      "negativeControl": "The same command at every earlier head of this pull request fails with `[{ \"bytes\": 51256, \"file\": \"legion-architect/SKILL.md\" }]`, which is why the merge was taken."
+      "criterion": "The test fixture builds the architecture this change makes, and the migration tests still exercise the superseded one.",
+      "surface": "The sandbox package's own suite, and a grep over the daemon module.",
+      "command": "cd packages/daemon && CGO_ENABLED=0 go test ./internal/runtime/sandbox; grep -rn 'withoutVolume' packages/daemon/",
+      "observed": "The suite passes and the grep is empty. `sandboxObject` builds an issue Sandbox with no claim template; `withSupersededDisk` is the named opt-in at three call sites; `cleanup_test` models each issue's disk through its pod, as the runtime does.",
+      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+      "negativeControl": "`TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape` requires a delete of the superseded Sandbox followed by a create, which never happens for a Sandbox owning no claim template — so a migration test that lost its opt-in fails rather than passing quietly. That was the one failure mode of the inversion."
     },
     {
-      "criterion": "The branch's own diff is unchanged across the round's forward merge.",
-      "surface": "jj over the pushed commits, as skill://legion-worker/references/conflicts-and-rewrites.md defines the fingerprint, with GitHub's own conflict read beside it.",
-      "command": "git merge-tree --write-tree --name-only c03eee9a 862a809d, then the fingerprint at 862a809d and at 4c9bf0e6",
-      "observed": "merge-tree named no conflicting file, and the fingerprint is 7062196879022e75272447d84a252f45cea4435c9bc3efacebf4ff913054d12f on both sides — unchanged. Only the bare gates were re-run at the merge head.",
-      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
-      "negativeControl": "The two earlier forward merges of this branch: the first unchanged with one conflicting file, the second legitimately changed by the contract collision and reported as changed."
+      "criterion": "The merge carries both changes rather than one of them.",
+      "surface": "The Go toolchain over the merged tree, including #2179's own new package.",
+      "command": "cd packages/daemon && gofmt -l . && go build ./... && go vet ./... && go vet -tags e2e ./... && CGO_ENABLED=0 go test ./internal/config ./internal/launcher ./internal/runtime/sandbox ./internal/runtime ./internal/api ./internal/ompsessions ./internal/sessionproxy ./internal/record ./internal/workflow ./internal/store ./internal/supervise ./internal/podsafety ./internal/workspace ./cmd/legion",
+      "observed": "All green, `#2179`'s `./internal/sessionproxy` suite passing unmodified. 14 conflicts across the two changes' shared core were resolved to main's `ompsessions.Store` API with this branch's invariant re-imposed on top of it.",
+      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+      "negativeControl": "The same tree before the resolution does not compile, and `jj resolve --list` named all 14 files."
     }
   ],
   "filesChanged": [
-    "scripts/e2e/stage4b-sandbox-tree.sh: one SQL-backed session reader (session_psql, session_text, session_copy) that every pod-session consumer goes through, in place of a pod_exec cat per call site; claim_session_text and pair_text keep their names (thread 4370611493).",
-    "scripts/e2e/lib/stage4b-session-text.test.ts: the reader's own unit test, beside the four suites that pin the script's produced shape.",
-    "packages/daemon/internal/runtime/sandbox/{sandbox,relaunch,observe}.go and relaunch_test.go: a generation counter beside the gap record, and an Uncertain verdict when a confirming read is overtaken by the replacement's delete (thread 4370611498).",
-    "packages/daemon/internal/runtime/sandbox/podkind.go: the controllerPod type comment no longer describes the deleted init container (thread 4370611503).",
-    "docs/kubernetes.md: the cutover's step 9 drops a label selector that cannot answer its question in either direction, and says why; the jq audit that follows is the instrument (the architect's item).",
-    "The pull request body: the contract number is 37 in the Change bullets and the census, the deleted-world sweep is published with its command, and the body is trimmed (thread 4370611500 and the architect's item)."
+    "The merge `eceefebffe3f`: 14 conflicted files resolved — `config/kubernetes.go` and its test, `sandbox/{manifest,addresses,operatorpod,types}.go` and their tests, `launcher/launcher.go` and its test, `sandbox/{live_test,live_sessions_test,session_store_test}.go`, `api/settings.go`, `docs/kubernetes.md` — plus six files outside the conflict set that would not compile against the removed `SessionDSNKey`.",
+    "`scripts/e2e/stage4b-sandbox-tree.sh` (`5beb72e619e9`): `session_copy` derives each file's name from the key instead of using it, refuses rather than sanitises, asserts the resolved destination before any write, and lists keys as hex so a newline cannot split one key into two.",
+    "`scripts/e2e/lib/stage4b-session-text.test.ts`: the crafted-key tests and their filesystem walk.",
+    "`packages/daemon/internal/runtime/sandbox/{rig_test,layout_test,relaunch_test,lifecycle_test,cleanup_test,live_test}.go` (`98bd4a90f4b7`): the fixture default inverted, `withoutVolume` removed, `withSupersededDisk` added, `issueDiskName` moved out of the e2e-tagged file.",
+    "`scripts/e2e/README.md`: the `pod-baseline` row says `OMP_SESSION_STORAGE=sql`, and `setup-negative` that the pod's own disk goes with its pod.",
+    "The delta merge `ace35f9ce9f3`: one conflict in `docs/kubernetes.md`, taken immediately before the push because `main` moved again mid-round.",
+    "The pull request body: `CI`, `Threads`, `E2E (implementer)`, `Chain`, `Size`, the census's store sentence, and a compressed sweep section. Plus a comment carrying the Stage 4a runner's revised check list."
   ],
   "trickyParts": [
-    "The session reader's output handling is where a transcript is easiest to corrupt: psql's aligned and quoted formats would mangle JSONL, so it runs -A -t; the capture is $(psql … && printf x) so the session's own trailing newlines survive the substitution, with psql's one closing newline then taken off; and an empty answer is what distinguishes a session the table does not hold from a short one, which is what lets the reader fail naming the path as the old cat did.",
-    "One generation counter for every name, not one per name: a per-name counter deleted with its record would read the same before a strand as after its unstrand, which is exactly the window it exists to catch. A bump for another issue costs one Uncertain and a re-evaluation a tick later.",
-    "The forward merge is an exception to 'reintegrate the base only on a real conflict' — merge-tree named no conflict — and was taken on the architect's ruling for a different reason: the red lane was inherited and unfixable on this branch, and main had the fix."
+    "The merge's one decision was not a conflict-resolution detail: this branch's refusal was spelled `session_store must be 'postgres'`, which after #2179 would refuse `cloudsql-iam` — a store whose sessions survive the pod exactly as `postgres`'s do. The rule is 'not pvc', and the message states the mechanism and names no permitted spelling, so a fourth store kind needs no edit here.",
+    "A key holding a newline could not be fixed by checking keys: psql prints one row a line, so such a key arrived as two keys before any check could see it. The listing returns `encode(convert_to(path,'UTF8'),'hex')` and the reader decodes byte for byte under `LC_ALL=C`.",
+    "The fixture inversion's one failure mode is a migration test that silently stops exercising the superseded shape. It is checked rather than asserted: the replacement test requires a delete-then-create that a Sandbox owning no claim template never produces."
   ],
   "deviations": [
-    "The sweep found four session reads the enumeration had missed (pair_settled's grep, record_pair's and collect_transcripts' tars, and the daemon-launched controller's tar); they were fixed with the named ones rather than left for a later round.",
-    "Two pod_exec cat calls were deliberately left and said so in the code: the recovery marker's absence assertion, and the operator token, which is not a session.",
-    "The body trim stopped at 48,378 characters. Everything cut was mine — the per-thread ledger for rounds 1 and 2, whose content lives in the thread replies GitHub keeps, and my own E2E block, which now points at this handoff and those replies. The remaining long passages are the tester's E2E evidence, which is not mine to shorten."
+    "The first negative control for the traversal fix was invalid and passed 22/22: a failed `cp` in its setup had left the fixed script in place. It is recorded here and in the thread reply because an invalid control that passes is indistinguishable from a valid one, and because it is the near miss that makes the real control meaningful.",
+    "I published a pull request body built on a copy fetched two minutes earlier, and the live body had shrunk by 279 characters in between, so an edit by another role may have been overwritten. GitHub exposes no body history; I have told the reviewer exactly what I published and asked it to name anything of its own that is missing.",
+    "Every proof of the earlier rounds was re-run rather than carried: they were taken against a `legion` built from heads that no longer exist."
   ],
   "openQuestions": [
-    "Stage 4b is repaired and has run at no head, here or anywhere. The proof above covers the reader's SQL and nothing else; the bun suites that pin the script's shape were written by the same reading that wrote the repair. shellcheck is not installed in this pod (`command -v shellcheck` returns nothing), so the scripts have `bash -n` and `bunx biome check scripts/e2e/lib` only.",
-    "The seven inverted Stage 4a per-check assertions have still not run. The live run answered the design's open assumption — the Agent Sandbox controller passes the ephemeral pod volume through untouched — and died at root-ready before them. The cause was fixed in round 2 and the rerun is arranged.",
-    "Two documentation residues the reviewer found while enumerating, both in scripts/e2e/README.md and both already carried as review findings rather than fixed here: the pod-baseline row promising OMP_SESSION_STORAGE=file, and the setup-negative row describing a Sandbox-owned PVC deleted by hand."
+    "Stage 4b is repaired and has run at no head, here or anywhere. `shellcheck` is not installed in this pod (`command -v shellcheck` returns nothing), so the scripts have `bash -n` and `bunx biome check scripts/e2e/lib` only.",
+    "Stage 4a's seven inverted checks are still unrun; the one live attempt died at `root-ready` before reaching them. The revised check list for the runner is a comment on the pull request, marking each of the 65 rows changed or unchanged, measured by command rather than by reading: 13 changed, one renamed, one new.",
+    "The reviewer's round-4 review body had not been submitted when this round completed; only its two inline threads were visible, and both are answered and resolved."
   ],
   "discoveredComplexity": [
-    "The deleted-world sweep's honest result is that two of its four categories were already clean, and clean for a reason: the recovery vocabulary survives only as negative assertions — the lost-volume line must never appear, the recovery marker must never exist — and Stage 4a reads a marker rather than transcripts, which is why the marker path was its only tie to the old world. A category checked and found clean, with its command, is reported as clean rather than padded to look like a wider fix.",
-    "A build Job in this namespace is admitted only with activeDeadlineSeconds and ttlSecondsAfterFinished on both the Job and its pod template, automountServiceAccountToken false, runtimeClassName gvisor, the build compute class, and at least 4 CPU; ConfigMaps are forbidden, so a script reaches the pod base64-encoded in its command. That is what it took to exercise the reader's SQL against a real Postgres from a worker pod, and it is worth knowing for the next role that needs a database."
+    "A repair is new code and gets the scrutiny new code gets — which is exactly the scrutiny a repair tends not to get, because everyone reads it as a fix to something already reviewed. The session exporter was written last round to repair a broken proof and shipped a path traversal, found by review rather than by the person who wrote it. This belongs in the issue's retro note as its own entry.",
+    "An invalid negative control that passes is indistinguishable from a valid one, and it is the only check whose failure mode is silence in both directions. Both halves of the near miss belong in the note: the control that passed because the setup had failed, and the real one that gave 12 fail, 10 pass.",
+    "Two changes rewriting the same mechanism in parallel resolve cleanly and can still mean something neither author intended. Here they met over how a store is named and projected and nowhere over who owns the disk, which was read in the other change's source rather than inferred from its title — but the one place they did meet carried a rule that would have refused a store the deployment intends to use."
   ]
 }
