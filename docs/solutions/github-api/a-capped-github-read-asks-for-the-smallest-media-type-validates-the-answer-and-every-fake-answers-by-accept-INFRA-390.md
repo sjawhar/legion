@@ -50,9 +50,11 @@ related_issues:
   `commit for sjawhar/legion@main: GitHub answered no commit SHA (31100 bytes)` and kept
   `last_commit` and all 36 components.
 - A missing branch answered 422 under the SHA media type (the tester's run, and the planner's
-  probe under JSON). Every Go fake in the pull request still answers 404 for a missing branch, so
-  no test covers 422 → `ErrNoBranch` (`client.go`, `Ref`). The status mapping was kept unchanged
-  and the live run covers it.
+  probe under JSON). Every Go fake answered 404 for a missing branch, so no test covered
+  422 → `ErrNoBranch` (`client.go`, `Ref`), and `Ref`'s doc comment said 422 meant only an empty
+  repository or a malformed ref. The retro's fresh-eyes review found it after approval, and it
+  cost a round: the fake gained `missingBranchStatus`, `TestRefMissingBranchIsErrNoBranch` holds
+  both statuses, and with the 422 mapping removed its 422 row fails.
 - Six fakes needed the `Accept` branch: `client_test.go`, three handlers in
   `architecture/importer_test.go`, `api/architecture_source_test.go` (with
   `issue_components_test.go` using it), and `e2e/fake-github.ts`.
