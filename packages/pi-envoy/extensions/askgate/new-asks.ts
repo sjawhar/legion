@@ -9,17 +9,18 @@
 // parsers of github.com/yuin/goldmark v1.8.6, with the tab and list fixes of
 // packages/envoy/internal/dispatch/pmdoc/lines.go) and Dispatch's typed blocks
 // (packages/envoy/internal/dispatch/pmdoc/directive.go). A `>` prefix, a list item's content
-// column and a footnote definition's four columns are taken off a line before an opener, a closer
-// or a fence is matched; a fence closes at the end of its container; an opener four columns past
-// its container's lines is code or paragraph text; a typed block that opened with N colons closes
-// only at a line of N colons or more, which closes it whatever block inside it the line would
-// continue; and an opener's attributes are read as the server reads them, so a `#` inside a quoted
-// value is no id and an opener whose attributes the server refuses opens nothing. A document's
-// front matter is no markdown, and an empty list item or one numbered other than 1 opens no list
-// where the browser editor's parser would not let it interrupt the block before it. HTML blocks,
-// which the server refuses in a write, are not read. The server's table of inserts and the ask
-// blocks it adds (packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json) holds
-// this reading to the server's.
+// column, and a footnote definition's four columns or the space and tab after its label, are taken
+// off a line before an opener, a closer or a fence is matched; a fence closes at the end of its
+// container; an opener four columns past its container's lines is code or paragraph text; a typed
+// block that opened with N colons closes only at a line of N colons or more, which closes it
+// whatever block inside it the line would continue; and an opener's attributes are read as the
+// server reads them, so a `#` inside a quoted value is no id and an opener whose attributes the
+// server refuses opens nothing. A document's front matter is no markdown, and an empty list item
+// or one numbered other than 1 opens no list where the browser editor's parser would not let it
+// interrupt the block before it. HTML blocks, which the server refuses in a write, are not read.
+// The server's table of inserts and the ask blocks it adds
+// (packages/envoy/internal/dispatch/api/testdata/decision-block-inserts.json) holds this reading
+// to the server's.
 
 /** A new ask a call opens for a person. */
 export interface NewAsk {
@@ -537,7 +538,15 @@ const BLOCK_PARSERS: readonly BlockParser[] = [
       const definition = /^\[\^([^\]]*)\]:/.exec(line.text.slice(at));
       if (definition === null || /^\s*$/.test(definition[1] ?? "")) return undefined;
       if (frontMatterHolds(scan, parent)) return undefined;
-      line.advanceTo(at + definition[0].length);
+      const label = at + definition[0].length;
+      // Every space and tab after the label's `]:` belongs to the definition's prefix, so a block
+      // written on the same line starts at column zero inside it. goldmark leaves that whitespace
+      // to the block it opens (extension/footnote.go, footnoteBlockParser.Open advances to the
+      // byte after the `:` alone), which makes `[^x]:    :::ask{#a}` indented code; pmdoc's
+      // footnoteDefinitionParser.Open skips it, as the browser editor's parser does, and leaves a
+      // line holding nothing but whitespace after the label alone (pmdoc/footnotes.go).
+      const content = line.text.slice(label).search(/[^ \t]/);
+      line.advanceTo(content < 0 ? label : label + content);
       return { block: { kind: "footnote", ...under(parent) }, children: true };
     },
   },

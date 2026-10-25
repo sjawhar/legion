@@ -15,6 +15,31 @@
     "asks": ["window"]
   },
   {
+    "name": "a block after a footnote label and one space",
+    "markdown": "[^note]: :::ask{#window}\n    Which deployment window?\n    :::",
+    "asks": ["window"]
+  },
+  {
+    "name": "a block after a footnote label and a tab",
+    "markdown": "[^note]:\t:::ask{#window}\n    Which deployment window?\n    :::",
+    "asks": ["window"]
+  },
+  {
+    "name": "a block after a footnote label and four spaces",
+    "markdown": "[^note]:    :::ask{#window}\n    Which deployment window?\n    :::",
+    "asks": ["window"]
+  },
+  {
+    "name": "a block after a footnote label and six spaces",
+    "markdown": "[^note]:      :::ask{#window}\n    Which deployment window?\n    :::",
+    "asks": ["window"]
+  },
+  {
+    "name": "a block on the line after a footnote label",
+    "markdown": "[^note]:\n    :::ask{#window}\n    Which deployment window?\n    :::",
+    "asks": ["window"]
+  },
+  {
     "name": "a block opened with four colons",
     "markdown": "::::ask{#window}\nWhich deployment window?\n::::",
     "asks": ["window"]

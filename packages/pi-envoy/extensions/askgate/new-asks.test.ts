@@ -123,6 +123,24 @@ describe("an ask block's text is its body, read past its containers", () => {
     ).toEqual(["window"]);
   });
 
+  // A footnote definition takes every space and tab after its label as part of its prefix, so an
+  // opener on the label's line stands at column zero inside the definition however far along the
+  // line it is written (pmdoc's footnoteDefinitionParser.Open).
+  test.each([
+    ["one space", "[^x]: :::ask{#window}\n    Which?\n    :::"],
+    ["a tab", "[^x]:\t:::ask{#window}\n    Which?\n    :::"],
+    ["four spaces", "[^x]:    :::ask{#window}\n    Which?\n    :::"],
+    ["six spaces", "[^x]:      :::ask{#window}\n    Which?\n    :::"],
+    ["two tabs", "[^x]:\t\t:::ask{#window}\n    Which?\n    :::"],
+    ["four spaces and a closer alone", "[^x]:    :::ask{#window}\n    :::"],
+    [
+      "nothing, the block opening on the next line",
+      "[^x]:\n    :::ask{#window}\n    Which?\n    :::",
+    ],
+  ])("a block after a footnote label and %s opens", (_name, markdown) => {
+    expect(ids(askBlocks(markdown))).toEqual(["window"]);
+  });
+
   test("a CR LF line break reads as a line feed", () => {
     expect(askBlocks(":::ask{#window}\r\nWhich deployment window?\r\n:::\r\n")).toEqual([
       {
