@@ -2,56 +2,65 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-92",
-  "completed": "2026-10-25T11:55:00Z",
-  "decision": "changes_requested",
-  "round": 3,
+  "completed": "2026-10-25T12:55:00Z",
+  "decision": "approved",
+  "round": 4,
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 0,
-  "reviewedHead": "4943aaa535316f7e60efea4657c30d254e9ce12f",
-  "codeHead": "d4de531733a9",
-  "ciHead": "0a8530169857",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/claude-envoy/src/envoy-channel-server.ts:852-854",
-      "description": "The SyntaxError/z.ZodError test is applied around the whole of restoreRole(), which is not only a file read: restoreRole calls client.setRole (:558-563), and the real client parses the listener's answer — InterestWireSchema.parse(JSON.parse(raw)) at packages/envoy-client/src/transport.ts:395, and an unguarded JSON.parse(error.details.responseBody) at :390 on a 409. A listener answering with something that is not JSON (a proxy's HTML 502, a truncated body) throws SyntaxError, and one whose JSON misses the schema throws ZodError; both are classified as a permanently unparseable role file, so nothing is queued, heldRole stays unset, no heartbeat retries, and the stderr line says 'the session starts without one' about a role file that was good. That is round two's finding still open for the most ordinary transient listener failure there is. Remedy: decide 'these bytes will never parse' inside readPersistedRole (session-identity.ts:61-69), the only place that knows the error came from the file, and return it as an outcome rather than letting the exception type stand in for its origin."
-    },
-    {
-      "severity": "important",
-      "file": "packages/claude-envoy/src/envoy-channel-server.ts:852-854 with :795-797",
-      "description": "The inverse, and new in this delta: a role file failing with EACCES, EISDIR or ENOTDIR is now queued, and restoreRole throws on it every tick. transferRole sits before syncRegisteredInterests() in the heartbeat's serialized block, so that reconciliation never runs again — what a resumed session whose startup interests read failed depends on to adopt its subscriptions (tests/envoy-channel-registry.test.ts:328-365), and what clears a registry-side unsubscribe that failed (envoy-channel-server.ts:473-480, registry test :215-277). Before this delta those errors were logged and not queued, so the heartbeat still reached the reconciliation. The heartbeat does not hot-loop and recovers if the file is repaired or removed. One remedy serves both findings: classify at the parsing boundary, queue every other failure, and keep a queued role retry from skipping syncRegisteredInterests."
-    }
+  "reviewedHead": "e8ea12636a4c3fa9329daa4ebc8a0275c1299245",
+  "codeHead": "301288e631cbbbd02f3fb22673bf42d00c658d55",
+  "keyFindings": [],
+  "remedyVerified": [
+    "The discriminator now has provenance. readPersistedRole (session-identity.ts:79-93) reads in one try and parses in another, and UnparseableRoleRecordError is constructed only in the parse block, over the fixed two-string schema at :7 — no transform, no callback, nothing that could reach the listener. client.setRole runs afterwards, outside that block (envoy-channel-server.ts:558-565), so neither face of a listener answer can wear the terminal error: transport.ts:390,395 throw SyntaxError and ZodError and both now queue a retry.",
+    "Errno behaviour is unchanged: ENOENT still returns undefined, every other read error propagates raw, and only a parse failure changes type, keeping the original as cause.",
+    "A queued retry can no longer starve the interests. transferRole (envoy-channel-server.ts:662-677) keeps its queue on failure and resolves, so both callers — the /clear handoff at :719-722 and the heartbeat at :820-822 — reach syncRegisteredInterests. Registration and interest failures still reach the heartbeat's own report.",
+    "The two latches report the first failure of each run and go quiet until a success clears them; the startup catch setting roleTransferFailureReported is the first report of that run, not a suppressed one. roleRefreshFailureReported is independent and describes a different operation.",
+    "A successful retry leaves heldRole, the role record and the listener consistent: the soft claim sets heldRole and writes the current record before the queue clears, and a refused claim removes the obsolete record instead.",
+    "The three new rows are behaviour. The non-JSON row's stub runs a real JSON.parse so the exception category matches the transport's; the corrupt-bytes row watches five heartbeats and the one diagnostic; the unreadable-record row puts a real directory where the record belongs and proves the heartbeat still adopts a drifted topic and leaves the registry's interests right."
   ],
-  "fixesVerified": [
-    "Fix 1, the queued retry itself: a failed or refused listener request is queued as a transfer from the session's own id, transferRole clears the queue only once restoreRole resolves, so a repeated failure stays queued. Correct as far as it goes — the two findings above are its classification, not its retry.",
-    "Fix 2, refreshRoleRecord: the touch sits at the confirmed-holder return of reassertRole (:628), where 'still holding' is known, and touchStateFile is an utimes rather than a rewrite, so roles/ gains no temporary file every heartbeat. The failure latch reports once per failure run and retries every tick.",
-    "Fix 3, MD_VIEWPORT_QUERY is (min-width: 48rem) against Tailwind's --breakpoint-md: 48rem; COMPACT_ and PHONE_ left alone as asked.",
-    "Fix 4, the sweep's self-exclusion: roleStateFile(stateDirectory, currentSessionId) and pruneStateDirectory's join(directory, entry) build the same string, so the comparison holds; a record keyed by the running session survives its own startup sweep and is swept by the next session once that one is gone.",
-    "z.ZodError discrimination does work where the error really is the role file: zod 4.3.6 is pinned, classic .parse throws ZodRealError but both constructors carry the ZodError trait and zod's Symbol.hasInstance checks the trait, so instanceof holds. The defect is the origin of the exception, not the test itself.",
-    "The rewrite d4de531733a9 of 39175757c326: same parent 898037479328, byte-identical message, empty diff between the two, and the author corrected from the review App to the implement App. Every commit above main now carries its own role's App in both columns, checked with the default-branch read."
+  "notNewInThisDelta": [
+    "A corrupt role record reached through transferRole rather than through startup keeps roleTransferFrom set for ever, so a later /clear handoff's `roleTransferFrom ??= previous` is a no-op and that handoff's role is never taken back. Verified against a89f88d315cd: its transferRole also cleared the queue only after the awaited restore returned, and the handoff already used the same ??=, so a thrown parse error pinned the predecessor there too. This delta changes whether such a failure ends the tick, not whether the queue pins. Pre-existing, out of this round's scope, and recorded here so the next reader does not take it for new."
   ],
-  "threads": {
-    "answered": 4,
-    "acceptedAndResolved": [
-      "PRRT_kwDORFy7ds6v9duc",
-      "PRRT_kwDORFy7ds6wAVT6",
-      "PRRT_kwDORFy7ds6wAVT8"
-    ],
-    "unresolvedByReviewer": ["PRRT_kwDORFy7ds6wAVT4"],
-    "botThreads": 0,
-    "note": "Round one's five accepted threads stay resolved; PRRT_kwDORFy7ds6wAVT4 was resolved by the implementer and the reviewer unresolved it, since half of it stands."
-  },
+  "fastFollow": [
+    "tests/envoy-channel-handoff.test.ts:767-771 proves continued registration, no claim and one diagnostic, but not that the corrupt record is unqueued — a silent retry against the same bytes looks the same. Replacing the record with a valid one after startup and asserting no claim follows would separate the terminal decision from a silent retry.",
+    "transferRole could treat UnparseableRoleRecordError as the startup path does and clear its queue, which would also free a later handoff's ??=. Consistency, and it narrows the pre-existing pin above.",
+    "COMPACT_VIEWPORT_QUERY and PHONE_VIEWPORT_QUERY carry the px-against-rem mismatch MD_VIEWPORT_QUERY had; already on the body's Fast-follow line, for a pull request of their own."
+  ],
   "ciRead": {
-    "ciHead": "0a8530169857",
-    "readAt": "2026-10-25T11:50:00Z",
+    "codeHead": "301288e631cbbbd02f3fb22673bf42d00c658d55",
+    "readAt": "2026-10-25T12:52:00Z",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "requiredResult": "all four completed success at 0a8530169857; the compare 0a8530169857...4943aaa53531 lists only .legion/INFRA-92/test.json.",
-    "nonRequired": "claude-envoy, envoy-smoke, changes, build success at the same commit; the dispatch browser job was still in_progress when this round was decided, which a request for changes does not wait on."
+    "requiredResult": "all four completed success at the code head, read as that commit's check-runs with its full forty-character sha; claude-envoy, envoy-smoke, changes and build success beside them.",
+    "compare": "301288e631cb...e8ea12636a4c: status ahead, files key present, 2 files, both under .legion/, no renames — read with the count and the names printed, not a bare all(startswith()) over a list that may be absent or capped at 300.",
+    "dispatchJob": "The dispatch browser job was still in progress at the code head. packages/dispatch is byte-identical between 0a8530169857, where that job settled success, and this code head (jj diff --stat over packages/dispatch: 0 files changed), so the page half's browser evidence carries to this head; this delta touches packages/claude-envoy alone."
+  },
+  "threads": {
+    "answered": 3,
+    "allResolved": true,
+    "note": "Eleven threads, all mine, all resolved. PRRT_kwDORFy7ds6wAVT4 (unresolved by the reviewer in round three) and the two round-three threads PRRT_kwDORFy7ds6wA9_u and PRRT_kwDORFy7ds6wA9_v are answered and confirmed closed in round four. No bot outside Legion's role Apps has opened a thread.",
+    "botThreads": 0
   },
   "thermo": {
-    "head": "4943aaa535316f7e60efea4657c30d254e9ce12f",
-    "deepReview": "CHANGES — one Medium, the filesystem-error starvation of syncRegisteredInterests, plus the observation that the exception type does not identify its origin.",
-    "codeQuality": "CHANGES — one P2, the same boundary error, marked by the pass itself as a correctness fix for the next head and not Fast-follow; everything else of the delta judged structurally sound, with no cleanup finding raised."
+    "head": "e8ea12636a4c3fa9329daa4ebc8a0275c1299245",
+    "deepReview": "APPROVE — no correctness or security defect in the delta; it verified the pre-existing corrupt-transfer pin against a89f88d315cd independently.",
+    "codeQuality": "APPROVE — no correctness finding; one Fast-follow, the test-strengthening above."
+  },
+  "roleWorkCut": {
+    "why": "The role-file work entered this change after the spec was approved, on the stream lead's instruction. The architect's standing decision is that another correctness defect in it takes it out of this pull request rather than opening a round. Recorded here because the branch is the copy a later reader finds without being told it exists; the other two copies are dispatch://INFRA-92/artifact/role-work-cut-md and /legion/scratch/infra92-role-work-cut.md, which dies with the issue's volume.",
+    "leaves": [
+      "packages/claude-envoy/src/session-identity.ts — pruneStaleSessionRoles and its currentSessionId parameter, and UnparseableRoleRecordError with the read/parse split in readPersistedRole. ROLES_DIRECTORY stays: roleStateFile uses it.",
+      "packages/claude-envoy/src/envoy-channel-server.ts — refreshRoleRecord and its latch with its call in reassertRole; transferRole's try/catch and roleTransferFailureReported; the restoreRole().catch; the touchStateFile and pruneStaleSessionRoles imports; the third sweep thunk.",
+      "packages/claude-envoy/src/session-state.ts — touchStateFile, which has no other caller.",
+      "packages/claude-envoy/tests/envoy-channel-handoff.test.ts — the six role rows added in rounds three and four; and the role-sweep row in tests/session-identity.test.ts."
+    ],
+    "stays": [
+      "src/session-state.ts and its split from session-identity.ts: the split exists so the prompt hook's import graph never reaches zod — round one, finding two.",
+      "pruneStateDirectory, writtenLongAgo, STATE_FILE_MAX_AGE_MS, writeAtomicStateFile: the handoff sweep and the title sweep remain two callers.",
+      "The best-effort sweep loop in envoy-channel-server.ts — round one, finding three. With two thunks and neither taking a second argument it returns to a plain await prune(options.stateDirectory).",
+      "roleStateFile's .json suffix and its dotted-id test — round one's hardening, applied to both directories."
+    ],
+    "handsBack": "At the branch's base 14571f6f4aea, envoy-channel-server.ts:804 is a bare `await restoreRole()`: a role record that cannot be parsed throws out of session start and the session does not start. The cut restores exactly that, so it is a true revert to the status quo and not a regression the change would ship — but the hazard is real and this work is what found it. Once it leaves the change it is a finding outside the issue and goes to the project controller with its evidence, not to a person and not as an issue this tree files.",
+    "recommendation": "Do not cut unless the stop condition fires. Through round four the remedy has been smaller than the removal and its re-verification each time."
   }
 }
