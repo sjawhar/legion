@@ -1141,6 +1141,63 @@ export const DELIVERY_CAPABILITIES = ["aside", "btw", "steer"] as const;
  */
 export const MAX_BROADCAST_RECIPIENTS = 100;
 
+/**
+ * The request header that names one write's intent: the same on every retry of that write, and
+ * different for every new press. Dispatch accepts it, optionally, on every `POST` and `PATCH`
+ * route (`PUT` and `DELETE` are idempotent already): a repeat with the same key and the same
+ * request, once the first has finished, is answered with the first's stored status and body and
+ * `IDEMPOTENCY_REPLAYED_HEADER`, and runs nothing again; the same key with a different request is
+ * `422 IDEMPOTENCY_KEY_REUSED`; the same key while the first is still running (within
+ * `IDEMPOTENCY_LEASE_MS`) is `409 IDEMPOTENCY_KEY_IN_FLIGHT` with `Retry-After: 1`, which a client
+ * asks again after. A 5xx, 401, 408 or 429 is not stored, so the next attempt runs the request
+ * again. Keys belong to the signed-in login that sent them and are kept `IDEMPOTENCY_KEY_TTL_MS`.
+ * Two routes answer a repeat from the delivery they record rather than the stored body:
+ * `POST /api/v1/agents/{session_id}/messages` and `POST /api/v1/broadcasts` resume any delivery
+ * still owed and answer the message or broadcast read afresh (`201`, a broadcast with the first
+ * answer's `excluded`), so a recipient whose attempt a live sender holds can still read
+ * `pending`. A write without the header is run as it always was, with no replay (the IETF
+ * `Idempotency-Key` draft; Google AIP-155).
+ */
+export const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+
+/** The response header (`?1`, a structured-field boolean) on an answer Dispatch replayed from
+ *  the first request under the key rather than ran again. */
+export const IDEMPOTENCY_REPLAYED_HEADER = "Idempotency-Replayed";
+
+/** The longest `IDEMPOTENCY_KEY_HEADER` value, in characters. */
+export const IDEMPOTENCY_KEY_MAX = 128;
+
+/** A whole `IDEMPOTENCY_KEY_HEADER` value: letters, digits, `.`, `_`, `:` and `-`, from one to
+ *  `IDEMPOTENCY_KEY_MAX` characters. Any other is `400 IDEMPOTENCY_KEY_INVALID`. */
+export const IDEMPOTENCY_KEY_PATTERN = /^[A-Za-z0-9._:-]{1,128}$/;
+
+/** The code of the `422` for a key already used for a different request (another method,
+ *  route, path value or body); that request was not run. */
+export const IDEMPOTENCY_KEY_REUSED = "KEY_REUSED";
+
+/** The code of the `409` (with `Retry-After: 1`) for a key whose first request is still running;
+ *  nothing was run, and the client asks again under the same key. */
+export const IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
+
+/** The code of the `400` for an `IDEMPOTENCY_KEY_HEADER` that does not match
+ *  `IDEMPOTENCY_KEY_PATTERN`. */
+export const IDEMPOTENCY_KEY_INVALID = "IDEMPOTENCY_KEY_INVALID";
+
+/** The code a replay's body carries when the first answer was larger than Dispatch keeps (1 MiB):
+ *  the replay has the first answer's status and this body instead of the first's. A 2xx with it
+ *  means the write ran; the client reads the resource again rather than this body. */
+export const IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+
+/** How long Dispatch keeps a key's answer: 24 hours. */
+export const IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+
+/** How long a key's first request holds the key: a repeat within this is
+ *  `409 IDEMPOTENCY_KEY_IN_FLIGHT`, and one after it takes the key over and runs the request
+ *  again, the first one's process presumed dead - except on the two routes that record their
+ *  delivery (`IDEMPOTENCY_KEY_HEADER`), which answer from what that first run recorded. 60
+ *  seconds. */
+export const IDEMPOTENCY_LEASE_MS = 60 * 1000;
+
 export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
 
 /**
@@ -1190,11 +1247,9 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
  * window shorter than that lets a GitHub redelivery be stored, and handed to a host, twice.
  *
- * This window bounds a *delivery* retry, not a keyed *create*:
- * `CreateBroadcastInput.idempotency_key` and `CreateAgentMessageInput.idempotency_key` are kept as
- * long as the broadcast or message they made, so a repeated `POST /api/v1/broadcasts` or
- * `POST /api/v1/agents/{session_id}/messages` is recognised with no window, however late it
- * arrives.
+ * This window bounds a *delivery* retry, not a repeated *write*: a write's `Idempotency-Key`
+ * (`IDEMPOTENCY_KEY_HEADER`) is recognised for `IDEMPOTENCY_KEY_TTL_MS`, however late within
+ * that the repeat arrives.
  */
 export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -2172,16 +2227,6 @@ export interface CreateAgentMessageInput {
   readonly body: string;
   readonly delivery: MessageDeliveryMode;
   readonly in_reply_to?: string;
-  /** Names this one send, the same on every retry of it: letters, digits, `.`, `_`, `:` and `-`,
-   *  at most 128 characters; a missing or malformed key is 400 MESSAGE_INPUT and a longer one
-   *  400 CAP_EXCEEDED. A key belongs to the person who sent it. The server answers a repeat (same
-   *  person, same key, and the same session, body, delivery and in_reply_to) with the message the
-   *  first request made, its deliveries with it, 200 instead of 201, and sends nothing again; it
-   *  refuses a reuse of the key for a different request with 409 MESSAGE_KEY_REUSED, whose body
-   *  names the message that already used the key as `message_id`; that request is not sent.
-   *  Recognised for as long as the message exists: there is no window (see
-   *  DELIVERY_DUPLICATE_WINDOW_MS). */
-  readonly idempotency_key: string;
 }
 
 /** The targeted session's answer to one delivery attempt of a message
@@ -2322,15 +2367,6 @@ export interface CreateBroadcastInput {
   /** The sessions the human selected. A session named twice is one recipient; one that is no
    *  longer live, or that does not advertise `delivery`, comes back under `excluded`. */
   readonly session_ids: readonly string[];
-  /** Names this one send, the same on every retry of it: letters, digits, `.`, `_`, `:` and `-`,
-   *  at most 128 characters. The server answers a repeat (same human, same key, same body, mode
-   *  and session_ids) with the broadcast the first request made, 200 instead of 201, and refuses
-   *  a reuse of the key for a different request with 409 BROADCAST_KEY_REUSED, whose body names
-   *  the broadcast that already used the key as `broadcast_id`; that request is not sent.
-   *  Recognised for as long as the broadcast exists: there is no window (see
-   *  DELIVERY_DUPLICATE_WINDOW_MS). The dashboard sends a UUID per composed send; a script mints
-   *  its own. Required. */
-  readonly idempotency_key: string;
 }
 
 export interface IssueRead {

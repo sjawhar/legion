@@ -27,6 +27,8 @@ import {
   DispatchTargetedCommentPayloadSchema,
   DispatchTargetedMessagePayloadSchema,
   type EditCommentInput,
+  IDEMPOTENCY_KEY_MAX,
+  IDEMPOTENCY_KEY_PATTERN,
   IssueDeployedEventPayloadSchema,
   IssueEventPayloadSchema,
   MessageDeliveryEventPayloadSchema,
@@ -49,6 +51,18 @@ test("delivery modes are exactly the closed capability list", () => {
   const asCapability: DeliveryCapability = "steer" satisfies MessageDeliveryMode;
   const asMode: MessageDeliveryMode = asCapability satisfies DeliveryCapability;
   expect(asMode).toBe("steer");
+});
+
+// A page mints a v4 UUID per press; a script may mint its own key in the same alphabet. The
+// pattern is the whole header value, so a key with another character or one too long is refused
+// before Dispatch looks it up.
+test("an idempotency key is letters, digits, '.', '_', ':' and '-', at most 128 of them", () => {
+  for (const key of ["0b9c1e7a-55f4-4d2e-9a6b-3c2f1d0e8a71", "cli:run-7.a_b", "k".repeat(128)]) {
+    expect(IDEMPOTENCY_KEY_PATTERN.test(key)).toBe(true);
+  }
+  for (const key of ["", "k".repeat(IDEMPOTENCY_KEY_MAX + 1), "with space", "slash/key", "é"]) {
+    expect(IDEMPOTENCY_KEY_PATTERN.test(key)).toBe(false);
+  }
 });
 
 test("models Agent activity and open-ask aggregates", () => {
