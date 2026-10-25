@@ -100,9 +100,9 @@ func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room
 	if a.service.roomFailed(room) {
 		return nil
 	}
-	class, found := a.service.consumeUpdateClass(room, update)
+	class, counted, found := a.service.consumeUpdateClass(room, update)
 	if found && class.durable {
-		defer a.service.finishDurableAppend(room)
+		defer a.service.finishDurableAppend(room, counted)
 	}
 	defer class.credit.landed()
 	if a.service.consumeSuppressedPersistence(room, update) || a.service.roomFailed(room) {

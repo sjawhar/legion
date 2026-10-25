@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"maps"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -117,6 +118,18 @@ func (s *Service) lockExistingState(room string) *roomState {
 	return s.lookUpState(room, false)
 }
 
+// newRoomState is a document's record with nothing of a room on it yet.
+func newRoomState() *roomState {
+	return &roomState{
+		connected:         make(map[uint64]model.Actor),
+		inflight:          make(map[uint64]*inflightCredit),
+		askBlocks:         make(map[string]struct{}),
+		askAuthors:        make(map[string]model.Actor),
+		pendingAskAuthors: make(map[string]model.Actor),
+		unrecorded:        make(map[pmdoc.MarkRef]time.Time),
+	}
+}
+
 // lookUpState is lockState and lockExistingState. A state released after the map handed it out
 // and before its lock was taken is skipped for the document's current one.
 func (s *Service) lookUpState(room string, create bool) *roomState {
@@ -126,15 +139,7 @@ func (s *Service) lookUpState(room string, create bool) *roomState {
 			if !create {
 				return nil
 			}
-			fresh := &roomState{
-				connected:         make(map[uint64]model.Actor),
-				inflight:          make(map[uint64]*inflightCredit),
-				askBlocks:         make(map[string]struct{}),
-				askAuthors:        make(map[string]model.Actor),
-				pendingAskAuthors: make(map[string]model.Actor),
-				unrecorded:        make(map[pmdoc.MarkRef]time.Time),
-			}
-			value, _ = s.rooms.LoadOrStore(room, fresh)
+			value, _ = s.rooms.LoadOrStore(room, newRoomState())
 		}
 		state := value.(*roomState)
 		if s.afterStateLookup != nil {
@@ -191,6 +196,30 @@ func (s *Service) forgetLocked(room string, state *roomState) {
 	s.rooms.CompareAndDelete(room, state)
 }
 
+// handOverFailedRoomLocked takes state, room's, out of the service once the eviction of the room
+// it failed has closed that room, and hands the browsers that joined it meanwhile to the record
+// registered in its place. The record has to go: it carries the failure, which every holder of it
+// still reads (failure) and no later access may (roomFailure, which refuses a load and a connect).
+//
+// ygo takes the closed room out of its map before CloseRoom returns (sjawhar/ygo v1.51.3-sami.1,
+// provider/websocket/inject.go), and a browser registers as it is authorized, before its room is
+// loaded or joined (authorize), so a browser that opened the document while the eviction ran is on
+// this record. Dropping it outright loses that browser, and with it the credit for the person's
+// next keystroke. Nothing else of this record is handed over: a load refuses a failed room, so no
+// room of its own attached to it, and what the failed room left is the failed room's. A browser
+// the close disconnects is forgotten by its own removeConnection, which finds it under the
+// connection id the service gave it. Its caller holds state.mu.
+func (s *Service) handOverFailedRoomLocked(room string, state *roomState) {
+	state.released = true
+	if len(state.connected) == 0 {
+		s.rooms.CompareAndDelete(room, state)
+		return
+	}
+	successor := newRoomState()
+	maps.Copy(successor.connected, state.connected)
+	s.rooms.CompareAndSwap(room, state, successor)
+}
+
 // unusedLocked is whether state holds nothing that outlasts its room. These are every holder: an
 // open writer, a running or armed settlement, a latest edit source no settlement has read, a
 // failure being recovered from (whose eviction forgets the state itself, evictRoom), a connected
@@ -218,13 +247,14 @@ func (s *Service) recordUpdateClass(room string, update []byte, class documentUp
 }
 
 // consumeUpdateClass takes the class the room's update observer recorded for update, wherever it
-// stands among the room's recorded updates. ygo fires a transaction's observers after the
-// transaction has released the document's lock, so two peers' updates reach persistence in the
-// order their read loops hand them on, which need not be the order the room recorded them in.
-func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdateClass, bool) {
+// stands among the room's recorded updates, and the record it took it from. ygo fires a
+// transaction's observers after the transaction has released the document's lock, so two peers'
+// updates reach persistence in the order their read loops hand them on, which need not be the
+// order the room recorded them in.
+func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdateClass, *roomState, bool) {
 	state := s.lockExistingState(room)
 	if state == nil {
-		return documentUpdateClass{contentChanged: true}, false
+		return documentUpdateClass{contentChanged: true}, nil, false
 	}
 	defer s.unlockState(room, state)
 	for index, class := range state.updateClasses {
@@ -235,9 +265,9 @@ func (s *Service) consumeUpdateClass(room string, update []byte) (documentUpdate
 		if class.durable {
 			state.pendingUpdates--
 		}
-		return class, true
+		return class, state, true
 	}
-	return documentUpdateClass{contentChanged: true}, false
+	return documentUpdateClass{contentChanged: true}, nil, false
 }
 
 func (s *Service) hasPendingUpdates(room string) bool {
@@ -249,13 +279,14 @@ func (s *Service) hasPendingUpdates(room string) bool {
 	return state.pendingUpdates > 0
 }
 
-// finishDurableAppend ends a durable append recordUpdateClass counted. The state that counted it
-// holds it until then (unusedLocked), so it is the state found here.
-func (s *Service) finishDurableAppend(room string) {
-	if state := s.lockExistingState(room); state != nil {
-		state.durableAppends.Add(-1)
-		s.unlockState(room, state)
-	}
+// finishDurableAppend ends a durable append recordUpdateClass counted on state, the record that
+// counted it (consumeUpdateClass answers it). A forced close that hands its room's record over
+// leaves that count on the record it dropped (handOverClosedRoomLocked), so a late append of the
+// closed room's never takes the replacement's count below zero.
+func (s *Service) finishDurableAppend(room string, state *roomState) {
+	state.mu.Lock()
+	state.durableAppends.Add(-1)
+	s.unlockState(room, state)
 }
 
 func (s *Service) hasDurableAppend(room string) bool {

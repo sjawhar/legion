@@ -1143,6 +1143,20 @@
   write that changed nothing no longer leaves the document's settlement to the one-minute
   resumption.
 
+- A person who opens a Dispatch document while the service is force-closing that document's room
+  keeps the credit for what they type (INFRA-352). The service forces such a close when the room
+  fails, when another process's write leaves it behind the stored document, and when a test or the
+  browser-test harness asks, and it threw the room's in-memory record away once the close
+  returned. The browser registers before its room is loaded, the room that replaces the closed one
+  loads, and an edit typed in that room is credited, all while that record is still the one the
+  service holds, so the throw-away took the person's credit with it: the next version left them
+  off its author list. It also lost the issue's closed flag, credited the document's existing
+  decision blocks to whoever edited next, and left the settlement the new room had armed to run a
+  settle delay late. The close now keeps the record while anything holds it and forgets it when
+  nothing does, as every other end of a room does. Only a failed room's record still goes, since
+  it carries the failure, and the browsers that joined while it was evicted are handed to the
+  record registered in its place.
+
 - A burst of device logins no longer stalls the secrets broker's database pool. Each
   `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while
   it recorded its request object's `jti` on a second one, so as many concurrent logins as the

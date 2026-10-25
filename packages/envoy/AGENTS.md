@@ -646,9 +646,23 @@ that gets the document lock next cannot restore an author the version listed. A 
 task sees and removes R but never that task's F. Thus a room can disappear or the process can
 restart after every pending author has reached R, without losing or duplicating a later version's
 authors; a service repair is credited to no one. An in-flight credit holds its state until its
-append lands (`unusedLocked`). A forced eviction (`evictRoom`) forgets the state anyway, and the
-append still reaches the credit through its `UpdateCredit`, so it writes or skips the author all
-the same.
+append lands (`unusedLocked`). A close the service forces - a failed room's eviction, `Evict`,
+`Quiesce`, and the close of a room behind the durable head (`closeReservedRoom`) - settles that
+state itself rather than leaving it to `OnUnloadDocument`, and ygo takes the closed room out of
+its map before the close returns, so a browser that opens the document meanwhile (`authorize`
+registers it before its room is loaded or joined), the room that browser's connect loads, and an
+edit typed in that room all reach the state the close has yet to settle. The close therefore keeps
+that state while anything holds it and forgets it when nothing does, as every other end of a room
+does (`releaseIfUnusedLocked`), so the browser, what the new room's load read - its issue's closed
+flag, its ask blocks, its latest edit source and the settlement it armed - and the new room's own
+credits and unstored updates stay where they were recorded, and so does what the closed room left
+for its own late callbacks to come back for (INFRA-352). Only a failed room's state has to go,
+since it carries the failure that its holders still read and no later access may
+(`handOverFailedRoomLocked`); a load refuses a failed room, so only a browser's connect can have
+reached it, and that browser is handed to the state registered in its place. A durable append of
+the state that went finishes on the state that counted it (`finishDurableAppend` takes the state
+`consumeUpdateClass` found the class on), so no count of it reaches that successor, where one
+below zero would hold it for good.
 
 Two `envoy-dispatch` processes do not share a live document session, and durable convergence does
 not depend on one: every edit is appended under the document's advisory lock, Yjs updates commute,

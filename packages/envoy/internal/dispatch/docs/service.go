@@ -181,6 +181,10 @@ type Service struct {
 	// afterRoomClosePinned runs once that close holds the room it checked in a Server.Apply, before
 	// it closes it (closeRoomInstance). Nil outside tests.
 	afterRoomClosePinned func(room string)
+	// afterRoomClosed runs once a forced close has closed the room and before the service drops
+	// the room's record (closeReservedRoom, evictRoom): the window in which a browser's connect,
+	// and the room that connect loads, reach the record that is about to go. Nil outside tests.
+	afterRoomClosed func(room string)
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
@@ -1803,27 +1807,40 @@ func (s *Service) reserveRoomCloseLocked(room string, state *roomState, live *cr
 	}
 	state.reloading = true
 	state.roomGeneration++
-	return roomCloseReservation{room: room, state: state, live: live, owesSettlement: s.takeOverSettlementLocked(state)}, true
+	return roomCloseReservation{
+		room:           room,
+		state:          state,
+		live:           live,
+		owesSettlement: s.takeOverSettlementLocked(state),
+	}, true
 }
 
-// closeReservedRoom makes reservation's close and forgets its state once the close has closed the
-// room it checked. When the room no longer holds that instance by the time the close reaches it -
-// the idle sweep or another close retired it, and a load may have replaced it - or the close is
-// refused, nothing is closed and the reservation is lifted, so a write on the room that holds the
-// document now is not refused. Either way a settlement the reservation owes is armed again: on the
-// reloaded room, which its timer loads at the head, or on the room that holds the document now.
+// closeReservedRoom makes reservation's close and lifts the reservation once the close has
+// returned. When the room no longer holds the instance the reservation named by the time the close
+// reaches it - the idle sweep or another close retired it, and a load may have replaced it - or
+// the close is refused, nothing is closed, so a write on the room that holds the document now is
+// not refused either. A settlement the reservation owes is armed again: on the reloaded room,
+// which its timer loads at the head, or on the room that holds the document now.
+//
+// The room's record stays registered while anything holds it (unlockState): the browser that
+// opened the document while the close ran, the room that replaced the closed one and what its load
+// read, and the closed room's own unfinished work, which its late callbacks come back for. A
+// record nothing holds, whose room has gone, is forgotten there as any other is.
 func (s *Service) closeReservedRoom(ctx context.Context, reservation roomCloseReservation) (closed bool, err error) {
 	if s.afterRoomCloseReserved != nil {
 		s.afterRoomCloseReserved(reservation.room)
 	}
 	closed, err = s.closeRoomInstance(ctx, reservation.room, reservation.live)
+	if s.afterRoomClosed != nil {
+		s.afterRoomClosed(reservation.room)
+	}
 	state := reservation.state
 	state.mu.Lock()
 	if !state.released {
+		state.reloading = false
 		if closed {
-			s.forgetLocked(reservation.room, state)
-		} else {
-			state.reloading = false
+			// The closed room's failures are not the next room's: its settlement starts over.
+			state.settleFailures = 0
 		}
 	}
 	s.unlockState(reservation.room, state)
@@ -2173,11 +2190,11 @@ func (s *Service) lastActorPersisted(room string, creditSeq uint64) {
 	s.unlockState(room, state)
 }
 
-// Evict closes a live room and discards its resident state so the next access reloads the
-// durable document without treating the room as failed. Tests, including those in package api,
-// call it to force a room to reload. It checks nothing about the room: the service's own closes of
-// a room behind the durable head go through closeRoomBehindHead and reloadRoomBehindHead, which
-// reserve the room first (reserveRoomCloseLocked).
+// Evict closes a live room so the next access reloads the durable document without treating the
+// room as failed. Tests, including those in package api, call it to force a room to reload. It
+// checks nothing about the room: the service's own closes of a room behind the durable head go
+// through closeRoomBehindHead and reloadRoomBehindHead, which reserve the room first
+// (reserveRoomCloseLocked).
 func (s *Service) Evict(_ context.Context, artifactID string) error {
 	state := s.lockExistingState(artifactID)
 	if state != nil {
@@ -2188,16 +2205,34 @@ func (s *Service) Evict(_ context.Context, artifactID string) error {
 	return s.evictRoom(artifactID, state)
 }
 
+// evictRoom closes room and then settles what becomes of its record. A failed room's record has to
+// go, since it carries the failure (handOverFailedRoomLocked); any other is kept while anything
+// holds it and forgotten when nothing does, as any record whose room has gone is (unlockState).
+//
+// ygo takes the closed room out of its map before CloseRoom returns, so a browser that opens the
+// document while the close runs registers on this record (authorize registers it before its room
+// is loaded or joined), the room that replaces the closed one loads onto it, and an edit made in
+// that room is credited and recorded on it. Dropping the record outright lost all of that: the
+// person's keystrokes were credited to nobody, the document forgot its issue was closed, and the
+// settlement the new load armed was left to a timer that found its record gone (INFRA-352).
 func (s *Service) evictRoom(room string, state *roomState) error {
-	// Close first, then remove the state: the close's flush-before-evict consults the state's
+	// Close first, then settle the state: the close's flush-before-evict consults the state's
 	// persistence-suppression slot, so a state removed before the close would let a failed
-	// settlement's discarded identity update reach the store. A settlement armed on this
-	// state during the close is re-armed by its own timer (see scheduleSettleAfterLocked).
+	// settlement's discarded identity update reach the store.
 	err := s.srv.CloseRoom(room, true)
+	if s.afterRoomClosed != nil {
+		s.afterRoomClosed(room)
+	}
 	if state != nil {
 		state.mu.Lock()
 		if !state.released {
-			s.forgetLocked(room, state)
+			if state.failed != nil {
+				s.handOverFailedRoomLocked(room, state)
+			} else {
+				// The closed room's failures are not the next room's: its settlement starts over.
+				state.settleFailures = 0
+				s.releaseIfUnusedLocked(room, state)
+			}
 		}
 		state.mu.Unlock()
 	}
