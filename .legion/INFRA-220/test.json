@@ -2,65 +2,86 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-25T10:22:00Z",
-  "round": 2,
-  "testedHead": "f22898635c734a7d7d52dddff5952c4815b04606 (code head, the forward merge with main at 14571f6f; bdc14a62 is its handoff-only child)",
+  "completed": "2026-10-25T13:15:00Z",
+  "round": 3,
+  "testedHead": "2fc4b487c8fa (code head: review round 1's fixes 0d606e3b, 551d496d, fb3bc446, then forward merges against main 56ba79b8 and 3ca092a6; 023bd98d is its handoff-only child)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran both real-binary commands at f2289863: `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts` -> 9 pass, 0 fail, 66 expect() calls in 156.21s (the ninth is this tester's red case, unmodified); `cd packages/claude-envoy && LEGION_TEST_CLAUDE=$TMPDIR/cc/node_modules/@anthropic-ai/claude-code-linux-x64/claude bun test tests/legion-phase-hook-claude.test.ts` -> 2 pass, 0 fail. Both match what implement.json records at this head."
+    "how": "Re-ran both real-binary commands at 2fc4b487: `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts` -> 9 pass, 0 fail, 66 expect() calls in 164.43s; `cd packages/claude-envoy && LEGION_TEST_CLAUDE=$TMPDIR/cc/node_modules/@anthropic-ai/claude-code-linux-x64/claude bun test tests/legion-phase-hook-claude.test.ts` -> 2 pass, 0 fail, 21 expect() calls in 7.91s."
   },
-  "roundOneFailures": [
-    "1 (Oh My Pi tool call never reset the count): fixed. `assistantRanTool` accepts `toolCall` and `tool_use` (packages/pi-shared/src/phase-stall.ts); the red case `a real tool call between reminders puts the count back to zero, so the architect of a working worker is not told` passes on the real Oh My Pi 18.8.9, unmodified.",
-    "2 (a workspace recreated again not told on Claude Code): fixed. A launch with LEGION_WORKSPACE_RECREATED not true clears recreatedNoticeSent (packages/claude-envoy/src/legion-phase-hook.ts). Red case passes, and through the real legion claude-bridge and real Claude Code: relaunch 1 (true) notice turns=1, relaunch 2 (false) 0 and the key gone from the state file, relaunch 3 (true again) notice turns=1.",
-    "3 (architect notice after a relaunch named no last words): fixed. The record carries `lastMessage` (head 500 chars). Red case passes, and through the real bridge: killed at count 2, relaunched with --resume, the resume reminder's publish at count 3 carried lastMessage \"Thinking (reply 2).\", the worker's last words before the kill.",
-    "4-6 (scripts/e2e/claude-backend-sandbox.sh could not pass as written): fixed as written, read against the code. The reminder step now runs as Check 3 (`begin stop-hook-reminds-the-open-phase` at :887) before the handoff (:902), while the phase is still open, as the tmux proof orders it; generation comes from `legion claims list` through the new claim_generation (`.claims[]|select(.token==$token)|.generation`, which api/operator.go carries), read again just before the pod deletion together with its uid; CLAUDE_CONFIG_DIR is read from the agent's own /proc environment (pod_env), where launchEnvironment puts it. `bash -n` passes. Not run: it needs the cluster.",
-    "7 (CI test job red on stage1-skeleton.sh's 20-row count): fixed in the script (`(.capabilities | length) == 21`, naming claude-code); Tests run 40183997284 at f2289863 was in progress at 10:20Z."
+  "reviewFindings": [
+    "I1 (late acknowledgement marked the next run reported): fixed, driven on the real worker (proof 2).",
+    "I2 (a failed inbox write stopped the reminding): fixed, driven on the real worker by renaming the bridge's inbox socket away (proof 3).",
+    "I3 (the pod's expected-volume flag decided by whichever role made the pod): fixed. Under postgres and cloudsql-iam, a pod made by an Oh My Pi tester (fresh or resuming) or a fresh Claude implementer, with the implementer's Claude transcript recorded for the issue, renders workspace-init with LEGION_EXPECT_ISSUE_VOLUME=true; with only Oh My Pi sessions or nothing recorded it is unset. Throwaway in-package test over the runtime's spawn path (newRig, fake store).",
+    "I4 (a Claude WorkspaceLost dropped intact Oh My Pi sessions): fixed (proof 4).",
+    "M1: not aligned to the spec's \"logged and dropped\"; recorded as a departure in implement.json `deviations`. On the real worker a 500 and a 404 with another reason are logged at warn and published again under the same idempotency key at each later reminder until accepted (the listener dedupes by that key). The approved spec says such a failure is logged and dropped: this is the architect's decision to accept or send back.",
+    "M2: legacy `text-call` and `quiet` records both resume as open with the count from 0 on the real Claude worker; both hosts' tests now loop over the two states.",
+    "M3: under postgres a Claude role gets OMP_SESSION_SQL_DSN_FILE (a mounted file) and no OMP_SESSION_STORAGE; the shim exports no URL into Claude Code's environment (shim export list empty). Under main's cloudsql-iam the pointer is the per-generation file the role's launcher writes. No plain environment value of a Claude process holds a session-database URL in either store.",
+    "M4, M5: read; transcript recognition lives in claudelaunch, the stall-limits header names specs.go."
   ],
-  "forwardMerge": "The branch's own diff before the merge (fork point..918580af) and after it (main 14571f6f..f2289863) touch the same file list. Interdiffing their changed lines shows only merge-resolution changes: the daemon API contract 36 -> 37 in packages/daemon/internal/api/version.go, packages/pi-legion/package.json, packages/claude-envoy/package.json and packages/contracts/fixtures/daemon-api/version.json (main landed INFRA-229 at 36 first), and the worker image's check list and notices text carrying main's new psql, redis-cli, sqlite3, nc and dig beside this branch's claude. Nothing else rode in.",
-  "notThisChange": "skills/legion-architect/SKILL.md is 51256 bytes on main itself (14571f6f) and at this head, against the 51200-byte spill threshold that packages/pi-shared/test/skills-guard.ts enforces through packages/pi-legion/src/skills-guard.test.ts (`every staged file is under Oh My Pi's spill threshold`). This branch never touches that file; dispatch://INFRA-225 is fixing it. A red from that test in Tests run 40183997284 is main's, not this change's.",
+  "forwardMerge": "Interdiffing the branch's own changes before the second merge (56ba79b8..6bae3e0e) and after it (3ca092a6..2fc4b487) over packages/daemon and docs/kubernetes.md: same 65 files, 5 differ, all following main's #2179 replacement of SessionDSNSecret by SessionStore (InDatabase()) and its per-generation DSN file. Of the conflicts (manifest.go 5 hunks, operatorpod.go 2, AGENTS.md, docs/kubernetes.md, session_store_test.go), every one keeps main's identity-based database access for Oh My Pi roles and this branch's Claude rules. The implementer's claim that daemon/kubernetes.go and kubernetes_test.go merged cleanly yet still named the removed field holds; both now use SessionStore.InDatabase(). docs/kubernetes.md's corrected Claude paragraph matches the rendered pods and the launcher. The contract stays 37.",
+  "deletedTests": "None lost: the deleted cases were parametrized (quiet and text-call), renamed to the new store API (IssueHasSessions -> IssueSessionFiles), or replaced by a test of the intended new behaviour (M3, I3).",
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Acceptance 3 and 5 on Oh My Pi: reminded at the end of every turn, and the count resets as soon as a reminded worker runs a tool call, so a working worker's architect is not told",
-      "surface": "The pinned Oh My Pi binary omp/18.8.9 (/opt/omp/bin/omp) with both real plugin entries, a jj workspace with a pushed handoff commit, and stand-ins for the model gateway, the daemon and the Envoy listener",
+      "criterion": "Acceptance 3 and 5 on Oh My Pi: reminded at the end of every turn, the count resets on a real tool call, and the architect is told once at the threshold",
+      "surface": "The pinned Oh My Pi binary omp/18.8.9 (/opt/omp/bin/omp) with both real plugin entries, a jj workspace with a pushed handoff commit, stand-ins for the model gateway, daemon and Envoy listener",
       "command": "cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts",
-      "observed": "9 pass, 0 fail, 66 expect() calls in 156.21s, among them the tester's red case: after two reminders the worker's real `bash` call puts the transcript's count back to 0, the next run counts 1, 2, and no architect publish is made",
-      "headSha": "f22898635c734a7d7d52dddff5952c4815b04606",
-      "negativeControl": "The same red case at round one's head 9c96283b, before the fix, failed with counts [0, 1, 2, 3, 4] for [0, 1, 2, 0, 1, 2]; and the file's own case refuses the first architect publish with 404 unclaimed and asserts it is retried under the same idempotency key"
+      "observed": "9 pass, 0 fail, 66 expect() calls in 164.43s, including the tester's red case (a real bash call resets the count; no publish)",
+      "headSha": "2fc4b487c8fa",
+      "negativeControl": "The file's case that refuses the first architect publish with 404 unclaimed asserts it is not recorded as accepted and is retried under the same idempotency key"
     },
     {
-      "criterion": "Acceptance 3, 5 and 11 on Claude Code: every reminder after the first reaches the worker as a turn of its own over the bridge's inbox, the count climbs, and one architect message names the issue, the phase and the worker's last words",
-      "surface": "A whole Claude Code worker: the real `legion claude-bridge` built from f2289863, the real Claude Code 2.1.310, the committed dist/envoy-channel.js as the legion MCP server and both plugin directories, the tester writing shim frames on the bridge's stdin, stand-ins for the Anthropic API, the daemon, the Envoy listener and NATS; LEGION_STALL_REMINDER_MS=1500, ARCHITECT_AFTER=3",
-      "command": "cd packages/claude-envoy && TMPDIR=$TMPDIR bun tests/zz-tester-s1.ts (throwaway runner, copies kept in $TMPDIR/infra220-tester-harness/, removed from the workspace after the run)",
-      "observed": "agent_start=6 agent_end=6; 5 model requests whose last user text === the reminder exactly, so the reminder's own UserPromptSubmit never reset its count; the state file climbed 0, 1, 2, 3 with lastMessage riding along; exactly one publish, at count 3, to notifications.role.legion-legion-legion-208-architect, message ending `What it last said was: Thinking about it (reply 2).`",
-      "headSha": "f22898635c734a7d7d52dddff5952c4815b04606",
-      "negativeControl": "Run with the record moved: round one's drive of the same harness with state.json switched to phase testing sent no reminder (`this role no longer works this phase`); this round, relaunch 2 below with LEGION_WORKSPACE_RECREATED=false wrote no notice"
+      "criterion": "Acceptance 5 on Claude Code (review I1): an accepted architect notice is not repeated until the count has reset and climbed again, and a late acknowledgement of the old run's notice does not silence the new run's",
+      "surface": "A whole Claude Code worker: real `legion claude-bridge` built from 2fc4b487, real Claude Code 2.1.310, the committed dist/envoy-channel.js and both plugin dirs, the tester writing shim frames; stand-in model, daemon, NATS, and an Envoy listener that holds the first publish",
+      "command": "cd packages/claude-envoy && TMPDIR=$TMPDIR bun tests/zz-tester-i1.ts late (throwaway runner, kept at $TMPDIR/infra220-tester-harness/, removed from the workspace)",
+      "observed": "PUBLISH #0 at count 3 held 3 s; the model's Bash reply reset the state to count 0 with no reportKey; the new run climbed 1, 2; #0's 200 arrived and the state file did not change; PUBLISH #1 at the new run's count 3 under a new key (88a2ca2c…, lastMessage \"Thinking (reply 6).\"), then reported:true under that key",
+      "headSha": "2fc4b487c8fa",
+      "negativeControl": "`early` mode, the acknowledgement arriving before the tool call: reported:true under the first key, no second publish until the reset and a new climb to 3"
     },
     {
-      "criterion": "Acceptance 5 and 6 after a relaunch, and plan D29: a resumed worker keeps its count, the architect message its resume reminder earns names its last words, and a workspace recreated again is told again",
-      "surface": "The same whole Claude Code worker through the real legion claude-bridge, killed with SIGTERM and relaunched with --resume <same uuid>, the tester sending no prompt",
-      "command": "cd packages/claude-envoy && TMPDIR=$TMPDIR bun tests/zz-tester-s3.ts resume; TMPDIR=$TMPDIR bun tests/zz-tester-s4.ts recreated (throwaway runners)",
-      "observed": "resume: count 2 before the kill, the resume reminder took it to 3 and published lastMessage \"Thinking (reply 2).\" (the words before the kill); recreated: relaunch 1 (true) notice turns=1, relaunch 2 (false) notice turns=0 with recreatedNoticeSent gone from the state file, relaunch 3 (true again) notice turns=1",
-      "headSha": "f22898635c734a7d7d52dddff5952c4815b04606",
-      "negativeControl": "Relaunch 2, whose launcher recreated nothing (LEGION_WORKSPACE_RECREATED=false), got no notice; at round one's head the same three relaunches gave relaunch 3 no notice"
+      "criterion": "Acceptance 3 on Claude Code (review I2): the reminding does not stop when the bridge's inbox refuses a reminder",
+      "surface": "The same whole Claude Code worker, with the bridge's inbox socket (LEGION_CLAUDE_INBOX, read from /proc/<claude pid>/environ) renamed away for 5 s before the first timer reminder",
+      "command": "cd packages/claude-envoy && TMPDIR=$TMPDIR bun tests/zz-tester-i2.ts rename (throwaway runner)",
+      "observed": "3 pane warnings `a phase reminder did not reach this worker; it comes again later {connect ENOENT …/inbox.sock}` at the 1.5 s interval, the count held at 1 (each undelivered reminder uncounted) and no turn started; after the socket was restored the next retry was delivered as a reminder turn (count 2), and the next 1.7 s later (count 3)",
+      "headSha": "2fc4b487c8fa",
+      "negativeControl": "`prompt` mode, a daemon task arriving between failed writes: it ran as an assignment with no stray reminder inside it, and exactly one timer existed afterwards (4 turns total, each a reminder or an assignment)"
+    },
+    {
+      "criterion": "Acceptance 1 under a session database (review I4): a Claude worker's lost volume drops only Claude transcripts, never Oh My Pi sessions intact in the session table",
+      "surface": "The real daemon (supervisor, specs, store) on a private embedded PostgreSQL with the fake runtime, claims registered over /legion/v1/claims/register with real transcript or Oh My Pi session paths, WorkspaceLost emitted by the runtime",
+      "command": "LEGION_TEST_PG_DSN=postgres://legion@127.0.0.1:55433/postgres?sslmode=disable go test ./internal/daemon/ -run TestZZTester -count=1 -v (throwaway zz_tester_volume_test.go, removed)",
+      "observed": "Claude implementer resume losing the volume under postgres and cloudsql-iam: implementer relaunched fresh (session and file cleared, workspace lost); Oh My Pi architect (suspended), tester (booting) and reviewer kept their sessions with lost=false; the Claude planner was dropped. Reverse (an Oh My Pi implementer resume losing it): the implementer resumed its own session again; Oh My Pi siblings kept; Claude siblings dropped",
+      "headSha": "2fc4b487c8fa",
+      "negativeControl": "The same cases under the volume store (pvc): every sibling dropped with lost=true, the behaviour the database store must not have"
     },
     {
       "criterion": "Acceptance 11: Claude Code arms the shipped hook entries under Legion's own invocation and acts on a blocked Stop",
-      "surface": "The real Claude Code 2.1.310 binary with the generated packages/claude-envoy/legion/ plugin tree and the built dist/envoy-channel.js, stand-ins for the Anthropic API, daemon, listener and NATS",
+      "surface": "The real Claude Code 2.1.310 binary with the generated packages/claude-envoy/legion/ plugin tree and dist/envoy-channel.js, stand-ins for the Anthropic API, daemon, listener and NATS",
       "command": "cd packages/claude-envoy && LEGION_TEST_CLAUDE=$TMPDIR/cc/node_modules/@anthropic-ai/claude-code-linux-x64/claude bun test tests/legion-phase-hook-claude.test.ts",
-      "observed": "2 pass, 0 fail, 21 expect() calls in 7.59s",
-      "headSha": "f22898635c734a7d7d52dddff5952c4815b04606",
-      "negativeControl": "The file asserts PostToolUse fires for the model's own Bash call and for none of the hook's own legion_phase_hook calls, so the endpoint cannot reset the count it just moved"
+      "observed": "2 pass, 0 fail, 21 expect() calls in 7.91s",
+      "headSha": "2fc4b487c8fa",
+      "negativeControl": "The file asserts PostToolUse fires for the model's own Bash call and for none of the hook's own legion_phase_hook calls"
+    },
+    {
+      "criterion": "Acceptance 1 (a Claude claim's transcript stays on its volume): `legion sessions import` and `mark-lost` leave a Claude claim alone and say why",
+      "surface": "The real `legion` binary built from 2fc4b487 against a real PostgreSQL session database and a stopped daemon's store holding two Claude transcript claims (pod and tmux paths) and three Oh My Pi claims",
+      "command": "legion sessions import --tree-volume … then legion sessions mark-lost … (driven from a throwaway cmd/legion test that execs the built binary)",
+      "observed": "import: both transcripts `failed …: is a Claude Code transcript, not an Oh My Pi session file … it stays on the volume`, neither listed as missing; mark-lost: both `not marked lost: … is a Claude Code transcript`, stored claims keep their session and transcript with workspaceLost=false",
+      "headSha": "2fc4b487c8fa",
+      "negativeControl": "An Oh My Pi claim whose file is gone is reported missing and marked lost (session and file cleared, workspaceLost=true)"
     }
   ],
+  "ci": "Runs of 2fc4b487 at 13:13Z: Tests 40195025978 success, Worker Image 40195025986 success, Docs 40195025982 success, PR Title 40195026011 success, Legion Envoy and Contracts 40195025973 in progress.",
   "notTested": [
-    "scripts/e2e/claude-backend-tmux.sh and scripts/e2e/claude-backend-sandbox.sh were not run: an issue pod has no docker, tmux or cluster. Acceptance line 1's live cluster run and the tmux whole-worker step are therefore unproven; the spec puts that run before acceptance, on a devbox, and the architect has routed it there.",
-    "CI at f2289863 was still running when this was written (10:20Z): PR Title 40183997374 success, Docs 40183997300 success, Tests 40183997284 in progress, Worker Image 40183997293 in progress, Legion Envoy and Contracts 40183997379 queued."
+    "scripts/e2e/claude-backend-tmux.sh and scripts/e2e/claude-backend-sandbox.sh were not run (no docker, tmux or cluster in an issue pod). Acceptance line 1's cluster run is still to happen before acceptance."
   ],
-  "risksStillOpen": [
-    "LEGION_STALL_REMINDER_MS below the Stop-to-result gap (0 is accepted) lands reminders mid-turn; defaults are minutes.",
-    "An operator's runtime.kubernetes.pod.env LEGION_STALL_* is accepted and silently overridden by the daemon's own value.",
-    "claude-backend-sandbox.sh prints PASS before teardown and namespace-clean; its exit status is right."
+  "risks": [
+    "Under a database store, an Oh My Pi resume whose WorkspaceLost is kept off the volume relaunches as an uncharged resume with no bound; while a Claude sibling in a registered state still records a transcript, each new pod's init expects the volume and exits 3 again (4 uncharged resumes g3-g6 observed with a stand-in runtime). In a real pod the Claude sibling dies with the pod and its own failed resume drops the transcript, which should end the loop [INFERENCE]; there is no budget backstop if it does not.",
+    "Under cloudsql-iam every Claude role's launcher starts the session proxy and hands Claude Code a password-less URL file into Oh My Pi's session database, so a Cloud SQL outage fails Claude launches that never use the table; documented.",
+    "`legion sessions import` counts a Claude transcript as `failed` and exits 1 while mark-lost exits 0; not reachable through the v10 runbook.",
+    "A slow Envoy listener (slower than LEGION_STALL_REMINDER_MS plus a turn) gets the same notice once per reminder until it answers; deduplicated by its idempotency key, and unreachable with production intervals.",
+    "The inbox write has no deadline: a bridge that accepts a line and never answers leaves the reminder pending with no re-arm; such a bridge also stalls the worker's own turns."
   ]
 }
