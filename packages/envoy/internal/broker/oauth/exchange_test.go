@@ -14,13 +14,15 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/oidc"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
-// The listed identities every exchange test is written against: one pod of one cluster, and one
-// workflow of one repository, each with the project and person an entry gives it.
+// The listed identities every exchange test is written against: pods of three accounts of one
+// cluster and runs of two workflows of one repository, each with the project and person an entry
+// gives it.
 const (
 	exchangeGrant = "urn:ietf:params:oauth:grant-type:token-exchange"
 	account       = "system:serviceaccount:example-ns:example-worker"
@@ -29,6 +31,17 @@ const (
 	repository    = "example-org/example-repo"
 	workflow      = ".github/workflows/release.yaml"
 	ref           = "refs/heads/main"
+	// daemonAccount is an account whose entry fixes the session daemonSession, as the Legion
+	// daemon's does; deployWorkflow is a workflow whose entry fixes deploySession.
+	daemonAccount  = "system:serviceaccount:example-ns:example-daemon"
+	daemonSession  = "legion-daemon:ACME"
+	deployWorkflow = ".github/workflows/deploy.yaml"
+	deploySession  = "ci-deploy"
+	// otherAccount is listed for another project and another person: a caller who may exchange,
+	// and who must not write under any of the session names above.
+	otherAccount = "system:serviceaccount:other-ns:example-worker"
+	otherProject = "OTHER"
+	otherPerson  = "mallory@example.com"
 	// podAudience and workflowAudience are what each issuer's tokens must be minted for; a token
 	// carrying anything else is not spendable at this broker.
 	podAudience      = "https://broker.example"
@@ -45,8 +58,8 @@ func newPolicy(t *testing.T, accounts []exchange.AccountEntry, workflows []excha
 	return set
 }
 
-// exchangeFixture is a fixture whose token exchange lists the account and workflow above, with a
-// local issuer standing in for the cluster's and another for GitHub's.
+// exchangeFixture is a fixture whose token exchange lists the accounts and workflows above, with
+// a local issuer standing in for the cluster's and another for GitHub's.
 type exchangeFixture struct {
 	*fixture
 	cluster    *oidctest.Issuer
@@ -72,8 +85,15 @@ func newExchangeFixture(t *testing.T, adjust func(*oauth.Config)) *exchangeFixtu
 	inner := newFixtureWith(t, func(c *oauth.Config) {
 		c.Exchange = oauth.ExchangeConfig{
 			Policy: newPolicy(t,
-				[]exchange.AccountEntry{{Account: account, Project: project, Person: person}},
-				[]exchange.WorkflowEntry{{Repository: repository, Workflow: workflow, Ref: ref, Project: project, Person: person}}),
+				[]exchange.AccountEntry{
+					{Account: account, Project: project, Person: person},
+					{Account: daemonAccount, Project: project, Person: person, Session: daemonSession},
+					{Account: otherAccount, Project: otherProject, Person: otherPerson},
+				},
+				[]exchange.WorkflowEntry{
+					{Repository: repository, Workflow: workflow, Ref: ref, Project: project, Person: person},
+					{Repository: repository, Workflow: deployWorkflow, Ref: ref, Project: project, Person: person, Session: deploySession},
+				}),
 			Kubernetes: oauth.IssuerConfig{Issuer: cluster.URL(), Audience: podAudience, Keys: clusterKeys},
 			GitHub:     oauth.IssuerConfig{Issuer: github.URL(), Audience: workflowAudience, Keys: githubKeys},
 		}
@@ -82,8 +102,8 @@ func newExchangeFixture(t *testing.T, adjust func(*oauth.Config)) *exchangeFixtu
 	return &exchangeFixture{fixture: inner, cluster: cluster, clusterKey: clusterKey, github: github, githubKey: githubKey}
 }
 
-// podToken is a pod's projected service-account token, with change applied to its claims so a
-// test can spoil exactly one of them.
+// podToken is a projected service-account token of the account above bound to the pod uid, with
+// change applied to its claims so a test can spoil exactly one of them.
 func (f *exchangeFixture) podToken(t *testing.T, uid string, change func(map[string]any)) string {
 	t.Helper()
 	claims := f.cluster.Claims(account, podAudience)
@@ -92,6 +112,12 @@ func (f *exchangeFixture) podToken(t *testing.T, uid string, change func(map[str
 		change(claims)
 	}
 	return f.cluster.Mint(t, f.clusterKey, claims)
+}
+
+// podTokenOf is a projected service-account token of another listed account, bound to the pod uid.
+func (f *exchangeFixture) podTokenOf(t *testing.T, of, uid string) string {
+	t.Helper()
+	return f.podToken(t, uid, func(claims map[string]any) { claims["sub"] = of })
 }
 
 // workflowToken is a continuous-integration workflow run's GitHub token, with change applied to
@@ -223,9 +249,10 @@ func TestAWorkflowTokenIsRefusedTheSecondTime(t *testing.T) {
 	if status != http.StatusBadRequest || body["error"] != "invalid_request" {
 		t.Fatalf("the second exchange of one workflow token = %d %v, want 400 invalid_request", status, body)
 	}
-	// A fresh run is a fresh identity, so it writes under a session name of its own.
+	// A fresh run presents a fresh token, and is the same workflow, so it writes under the same
+	// session name.
 	fresh := f.workflowToken(t, "4243", nil)
-	f.exchanged(t, exchangeForm(fresh, oauthwire.SubjectTokenTypeGitHub, "ci-release-4243"), key)
+	f.exchanged(t, exchangeForm(fresh, oauthwire.SubjectTokenTypeGitHub, "ci-release"), key)
 }
 
 // TestASubjectTokenMintedForAnotherAudienceIsRefused: the library checks a subject token's issuer
@@ -261,7 +288,7 @@ func TestAnUnlistedAccountIsRefused(t *testing.T) {
 }
 
 // TestAPodTokenBoundToNoPodIsRefused: a token carrying no pod uid proves only that the account
-// exists, and it is the uid the session name is bound to.
+// exists, not that Kubernetes minted it for a pod of this cluster.
 func TestAPodTokenBoundToNoPodIsRefused(t *testing.T) {
 	f := newExchangeFixture(t, func(*oauth.Config) {})
 	key := newKey(t)
@@ -274,21 +301,31 @@ func TestAPodTokenBoundToNoPodIsRefused(t *testing.T) {
 	}
 }
 
-// TestASessionNameAnotherIdentityHoldsIsRefused: two pods of one account are two identities, so
-// the second may not mint a token naming the session the first is writing under, and the refusal
-// names it.
-func TestASessionNameAnotherIdentityHoldsIsRefused(t *testing.T) {
+// TestASessionNameAnotherPrincipalHoldsIsRefused: a pod of another listed account is another
+// principal, so it may not mint a token naming the session a pod of the first is writing under,
+// and the refusal names it; under a name of its own it is answered.
+func TestASessionNameAnotherPrincipalHoldsIsRefused(t *testing.T) {
 	f := newExchangeFixture(t, func(*oauth.Config) {})
 	key := newKey(t)
 	f.exchanged(t, exchangeForm(f.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
-	status, body := f.exchange(t, exchangeForm(f.podToken(t, "pod-uid-2", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
+	status, body := f.exchange(t, exchangeForm(f.podTokenOf(t, otherAccount, "pod-uid-2"), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
+	refusedTheName(t, status, body, "implementer-g1")
+	f.exchanged(t, exchangeForm(f.podTokenOf(t, otherAccount, "pod-uid-2"), oauthwire.SubjectTokenTypeKubernetes, "implementer-g2"), key)
+}
+
+// refusedTheName fails the test unless an exchange was refused invalid_grant for naming session,
+// a name another principal holds, with a refusal that names it.
+func refusedTheName(t *testing.T, status int, body map[string]any, session string) {
+	t.Helper()
 	if status != http.StatusBadRequest || body["error"] != "invalid_grant" {
-		t.Fatalf("an exchange naming another identity's session = %d %v, want 400 invalid_grant", status, body)
+		t.Fatalf("an exchange naming the session %s another principal holds = %d %v, want 400 invalid_grant", session, status, body)
 	}
-	if hint, _ := body["error_description"].(string); !strings.Contains(hint, "implementer-g1") {
-		t.Errorf("the refusal reads %q, which does not name the session that is taken", hint)
+	if hint, _ := body["error_description"].(string); !strings.Contains(hint, "'"+session+"' belongs to another identity") {
+		t.Errorf("the refusal reads %q, which does not name the session %s as another identity's", hint, session)
 	}
-	f.exchanged(t, exchangeForm(f.podToken(t, "pod-uid-2", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g2"), key)
+	if body["access_token"] != nil {
+		t.Errorf("the refusal carries an access token: %v", body)
+	}
 }
 
 // TestAnExchangeAskingForAJSONWebTokenIsRefused: this provider signs no claim set of its own, so
@@ -336,6 +373,19 @@ func TestASubjectTokenSignedWithASharedSecretIsRefused(t *testing.T) {
 	}
 }
 
+// devBoxToken is a dev box's machine access token: a machine login of key approved for person,
+// polled for its token pair.
+func (f *exchangeFixture) devBoxToken(t *testing.T, key *ecdsa.PrivateKey, person string) string {
+	t.Helper()
+	deviceCode, userCode := f.authorize(t, key)
+	if err := f.provider.ApproveDevice(context.Background(), userCode, true,
+		map[string]any{"operator": person, "credential_id": f.newCredential(t)}); err != nil {
+		t.Fatalf("ApproveDevice: %v", err)
+	}
+	status, body := f.poll(t, deviceCode, key)
+	return accessTokenOf(t, status, body)
+}
+
 // TestADevBoxSessionExchangesItsMachineToken: the machine access token's subject type never
 // reaches the library's subject hook, because the library reads the subject off the stored
 // session, so the exchange's own step runs after the request validates. The person is the
@@ -343,13 +393,7 @@ func TestASubjectTokenSignedWithASharedSecretIsRefused(t *testing.T) {
 func TestADevBoxSessionExchangesItsMachineToken(t *testing.T) {
 	f := newExchangeFixture(t, func(*oauth.Config) {})
 	key := newKey(t)
-	deviceCode, userCode := f.authorize(t, key)
-	if err := f.provider.ApproveDevice(context.Background(), userCode, true,
-		map[string]any{"operator": person, "credential_id": f.newCredential(t)}); err != nil {
-		t.Fatalf("ApproveDevice: %v", err)
-	}
-	status, body := f.poll(t, deviceCode, key)
-	machineToken := accessTokenOf(t, status, body)
+	machineToken := f.devBoxToken(t, key, person)
 	exchanged := f.exchanged(t, exchangeForm(machineToken, "urn:ietf:params:oauth:token-type:access_token", "ada-devbox"), key)
 	answer, err := f.provider.Introspect(context.Background(), exchanged)
 	if err != nil {
@@ -363,6 +407,122 @@ func TestADevBoxSessionExchangesItsMachineToken(t *testing.T) {
 	}
 	if answer.Thumbprint != thumbprint(t, key) {
 		t.Errorf("Introspect answered thumbprint %q, want the machine's own key %q", answer.Thumbprint, thumbprint(t, key))
+	}
+}
+
+// introspectsAs fails the test unless token is live and introspects under session, acting for
+// person and writing project.
+func (f *exchangeFixture) introspectsAs(t *testing.T, token, session, person, project string) {
+	t.Helper()
+	answer, err := f.provider.Introspect(context.Background(), token)
+	if err != nil {
+		t.Fatalf("Introspect: %v", err)
+	}
+	if !answer.Active || answer.Session != session || answer.Person != person || answer.Project != project {
+		t.Fatalf("Introspect = %+v, want a live token of %s acting for %s in %s", answer, session, person, project)
+	}
+}
+
+// TestEveryPodOfAFixedSessionAccountWritesUnderItsName: the session name an entry fixes belongs
+// to the account, not to a pod of it, so the replacement pod of a rolling update is answered while
+// the pod it replaces still holds a live token, and the old pod's renewals go on being answered
+// beside it.
+func TestEveryPodOfAFixedSessionAccountWritesUnderItsName(t *testing.T) {
+	f := newExchangeFixture(t, func(*oauth.Config) {})
+	key := newKey(t)
+	for _, uid := range []string{"pod-uid-old", "pod-uid-new", "pod-uid-old", "pod-uid-new"} {
+		token := f.exchanged(t, exchangeForm(f.podTokenOf(t, daemonAccount, uid), oauthwire.SubjectTokenTypeKubernetes, ""), key)
+		f.introspectsAs(t, token, daemonSession, person, project)
+	}
+}
+
+// TestEveryRunOfAFixedSessionWorkflowWritesUnderItsName: the session name an entry fixes belongs
+// to the workflow, not to a run of it, so runs that start within one access lifetime of each
+// other, as two merges in a row do, are each answered under it.
+func TestEveryRunOfAFixedSessionWorkflowWritesUnderItsName(t *testing.T) {
+	f := newExchangeFixture(t, func(*oauth.Config) {})
+	key := newKey(t)
+	deploy := func(claims map[string]any) {
+		claims["workflow_ref"] = repository + "/" + deployWorkflow + "@" + ref
+		claims["job_workflow_ref"] = claims["workflow_ref"]
+	}
+	for _, run := range []string{"4242", "4243", "4244"} {
+		token := f.exchanged(t, exchangeForm(f.workflowToken(t, run, deploy), oauthwire.SubjectTokenTypeGitHub, deploySession), key)
+		f.introspectsAs(t, token, deploySession, person, project)
+	}
+}
+
+// TestAnotherPrincipalIsRefusedANameAfterItsHoldersTokenLapses: the review's reproduction. With
+// an access lifetime of one second, a pod writes under a Legion role's session name and its token
+// lapses; a pod of another account, listed for another project and another person, then names the
+// same session and is refused, because the lapse of a token hands no name over. The first pod's
+// next renewal is answered under its own person and project.
+func TestAnotherPrincipalIsRefusedANameAfterItsHoldersTokenLapses(t *testing.T) {
+	f := newExchangeFixture(t, func(c *oauth.Config) { c.AccessLifetime = time.Second })
+	key := newKey(t)
+	const role = "019a-role-session"
+	first := f.exchanged(t, exchangeForm(f.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, role), key)
+	time.Sleep(time.Second + 500*time.Millisecond)
+	if answer, err := f.provider.Introspect(context.Background(), first); err != nil || answer.Active {
+		t.Fatalf("Introspect of the holder's token past its lifetime = %+v, %v, want it lapsed", answer, err)
+	}
+	status, body := f.exchange(t, exchangeForm(f.podTokenOf(t, otherAccount, "pod-uid-other"), oauthwire.SubjectTokenTypeKubernetes, role), key)
+	refusedTheName(t, status, body, role)
+	renewed := f.exchanged(t, exchangeForm(f.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, role), key)
+	f.introspectsAs(t, renewed, role, person, project)
+}
+
+// TestANameAnEntryFixesIsRefusedToEveryOtherCaller: the names entries fix are held for their
+// entries from the broker's first exchange, so a dev box — even one of the very person the
+// daemon acts for — and a pod of another account are refused them before the entry's own caller
+// has ever exchanged, and still once it has.
+func TestANameAnEntryFixesIsRefusedToEveryOtherCaller(t *testing.T) {
+	f := newExchangeFixture(t, func(*oauth.Config) {})
+	key := newKey(t)
+	machine := f.devBoxToken(t, key, person)
+	for _, session := range []string{daemonSession, deploySession} {
+		status, body := f.exchange(t, exchangeForm(machine, oauthwire.SubjectTokenTypeAccessToken, session), key)
+		refusedTheName(t, status, body, session)
+	}
+	status, body := f.exchange(t, exchangeForm(f.podTokenOf(t, otherAccount, "pod-uid-other"), oauthwire.SubjectTokenTypeKubernetes, daemonSession), key)
+	refusedTheName(t, status, body, daemonSession)
+	token := f.exchanged(t, exchangeForm(f.podTokenOf(t, daemonAccount, "pod-uid-daemon"), oauthwire.SubjectTokenTypeKubernetes, ""), key)
+	f.introspectsAs(t, token, daemonSession, person, project)
+	status, body = f.exchange(t, exchangeForm(machine, oauthwire.SubjectTokenTypeAccessToken, daemonSession), key)
+	refusedTheName(t, status, body, daemonSession)
+}
+
+// TestAPrincipalReclaimsItsOwnNameAsOftenAsItLikes: one account's pods, a pod relaunched under a
+// new uid among them, renew one Legion session's name as often as they like, and so do one
+// person's two machines; each claim runs SessionRetention past the expiry of the token it was
+// made for, which is the issued token's own expiry rather than a moment computed before it.
+func TestAPrincipalReclaimsItsOwnNameAsOftenAsItLikes(t *testing.T) {
+	f := newExchangeFixture(t, func(*oauth.Config) {})
+	key := newKey(t)
+	const role = "019a-role-session"
+	var token string
+	for _, uid := range []string{"pod-uid-1", "pod-uid-1", "pod-uid-relaunched", "pod-uid-1", "pod-uid-relaunched"} {
+		token = f.exchanged(t, exchangeForm(f.podToken(t, uid, nil), oauthwire.SubjectTokenTypeKubernetes, role), key)
+		f.introspectsAs(t, token, role, person, project)
+	}
+	answer, err := f.provider.Introspect(context.Background(), token)
+	if err != nil {
+		t.Fatalf("Introspect: %v", err)
+	}
+	var claimed time.Time
+	if err := f.pool.QueryRow(context.Background(), `select expires_at from oauth_session_bindings where session = $1`, role).Scan(&claimed); err != nil {
+		t.Fatalf("read the claim: %v", err)
+	}
+	// The answer's exp is whole seconds, so the claim lies within a second of it either way.
+	if issued := time.Unix(answer.ExpiresAt, 0).Add(oauthstore.SessionRetention); claimed.Before(issued.Add(-time.Second)) || claimed.After(issued.Add(time.Second)) {
+		t.Errorf("the claim runs out at %s, want SessionRetention past the issued token's expiry, %s", claimed, issued)
+	}
+	for _, machineKey := range []*ecdsa.PrivateKey{newKey(t), newKey(t)} {
+		machine := f.devBoxToken(t, machineKey, person)
+		for range 2 {
+			devBox := f.exchanged(t, exchangeForm(machine, oauthwire.SubjectTokenTypeAccessToken, "ada-devbox"), machineKey)
+			f.introspectsAs(t, devBox, "ada-devbox", person, "")
+		}
 	}
 }
 

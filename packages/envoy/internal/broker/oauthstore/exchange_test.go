@@ -14,11 +14,15 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 )
 
-// The identities a session name is claimed for here: a pod of the cluster and a dev box's machine
-// credential, two of the three kinds the exchange binds a session name to.
+// The principals a session name is claimed for here, spelled as the exchange spells them: a listed
+// service account, a listed workflow and a person, the three kinds the exchange decides, and a
+// second account standing for any other caller.
 const (
-	podIdentity     = "11111111-2222-3333-4444-555555555555"
-	machineIdentity = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+	accountPrincipal  = "account:system:serviceaccount:example-ns:example-worker"
+	daemonPrincipal   = "account:system:serviceaccount:example-ns:example-daemon"
+	otherPrincipal    = "account:system:serviceaccount:other-ns:example-worker"
+	workflowPrincipal = "workflow:example-org/example-repo/.github/workflows/release.yaml@refs/heads/main"
+	personPrincipal   = "person:ada@example.com"
 )
 
 // exchangeRequest is an exchanged token's request: the exchange client, an ExchangeSession
@@ -48,39 +52,41 @@ func exchangeRequest(t *testing.T, s *oauthstore.Store, requestID string) *oauth
 	return request
 }
 
-// TestASessionNameIsHeldByTheIdentityThatClaimedIt: the first identity to claim a session name
-// holds it until its claim lapses, re-claiming extends the claim and never shortens it, and
-// another identity is refused by name meanwhile and takes the name over once the claim has
-// lapsed.
-func TestASessionNameIsHeldByTheIdentityThatClaimedIt(t *testing.T) {
+// TestASessionNameIsHeldByThePrincipalThatClaimedIt: the first principal to claim a session name
+// holds it until SessionRetention past the expiry of the last token it claimed it for: re-claiming
+// extends the claim and never shortens it, and another principal is refused by name meanwhile,
+// even once that token has expired. Only a claim past its retention is taken over.
+func TestASessionNameIsHeldByThePrincipalThatClaimedIt(t *testing.T) {
 	ctx := context.Background()
 	s, pool := newStore(t)
 	hour := time.Now().Add(time.Hour)
 	for _, c := range []struct {
-		name     string
-		session  string
-		identity string
-		expires  time.Time
-		lapse    bool
-		want     error
+		name      string
+		session   string
+		principal string
+		expires   time.Time
+		runOut    bool
+		want      error
 	}{
-		{name: "an unheld name is claimed", session: "implementer-g1", identity: podIdentity, expires: hour},
-		{name: "the same identity re-claims it", session: "implementer-g1", identity: podIdentity, expires: hour.Add(time.Hour)},
-		{name: "a shorter-lived token does not shorten the claim", session: "implementer-g1", identity: podIdentity, expires: time.Now().Add(time.Minute)},
-		{name: "another identity is refused", session: "implementer-g1", identity: machineIdentity, expires: hour, want: oauthstore.ErrSessionHeld},
-		{name: "another name is free", session: "ada-devbox", identity: machineIdentity, expires: hour},
-		{name: "a lapsed claim is taken over", session: "implementer-g1", identity: machineIdentity, expires: hour, lapse: true},
-		{name: "and then holds against the identity that let it lapse", session: "implementer-g1", identity: podIdentity, expires: hour, want: oauthstore.ErrSessionHeld},
+		{name: "an unheld name is claimed", session: "implementer-g1", principal: accountPrincipal, expires: hour},
+		{name: "the same principal re-claims it", session: "implementer-g1", principal: accountPrincipal, expires: hour.Add(time.Hour)},
+		{name: "a shorter-lived token does not shorten the claim", session: "implementer-g1", principal: accountPrincipal, expires: time.Now().Add(time.Minute)},
+		{name: "another principal is refused", session: "implementer-g1", principal: personPrincipal, expires: hour, want: oauthstore.ErrSessionHeld},
+		{name: "another name is free", session: "ada-devbox", principal: personPrincipal, expires: hour},
+		{name: "a name whose token has expired is claimed", session: "reviewer-g1", principal: accountPrincipal, expires: time.Now().Add(-time.Hour)},
+		{name: "and is still refused to another principal", session: "reviewer-g1", principal: otherPrincipal, expires: hour, want: oauthstore.ErrSessionHeld},
+		{name: "a claim past its retention is taken over", session: "implementer-g1", principal: personPrincipal, expires: hour, runOut: true},
+		{name: "and then holds against the principal that let it run out", session: "implementer-g1", principal: accountPrincipal, expires: hour, want: oauthstore.ErrSessionHeld},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			if c.lapse {
+			if c.runOut {
 				if _, err := pool.Exec(ctx, `update oauth_session_bindings set expires_at = now() - interval '1 second' where session = $1`, c.session); err != nil {
-					t.Fatalf("lapse the claim: %v", err)
+					t.Fatalf("run the claim out: %v", err)
 				}
 			}
-			err := s.BindSession(ctx, c.session, c.identity, c.expires)
+			err := s.BindSession(ctx, c.session, c.principal, c.expires)
 			if !errors.Is(err, c.want) {
-				t.Fatalf("BindSession(%q, %q) = %v, want %v", c.session, c.identity, err, c.want)
+				t.Fatalf("BindSession(%q, %q) = %v, want %v", c.session, c.principal, err, c.want)
 			}
 			if c.want != nil && !strings.Contains(err.Error(), c.session) {
 				t.Errorf("BindSession refused with %q, which does not name the session %q", err, c.session)
@@ -91,8 +97,86 @@ func TestASessionNameIsHeldByTheIdentityThatClaimedIt(t *testing.T) {
 	if err := pool.QueryRow(ctx, `select expires_at from oauth_session_bindings where session = 'implementer-g1'`).Scan(&held); err != nil {
 		t.Fatalf("read the claim: %v", err)
 	}
-	if !held.After(time.Now().Add(30 * time.Minute)) {
-		t.Errorf("the claim lapses at %s, want the moment the token it was made for expires", held)
+	if want := hour.Add(oauthstore.SessionRetention); held.Before(want.Add(-time.Second)) {
+		t.Errorf("the claim runs out at %s, want SessionRetention past the expiry of the token it was made for, %s", held, want)
+	}
+}
+
+// TestTheNamesTheConfigurationFixesAreHeldForTheirEntries: ReserveSessions holds every name it is
+// handed for its principal, taking it from whoever held it and saying whom; from then on any
+// other principal is refused it, its own principal claims it as often as it likes, and no claim
+// or sweep lets it run out. A name a later configuration no longer fixes goes back to the ordinary
+// rule: its principal keeps it for SessionRetention from then, and nobody else takes it meanwhile.
+func TestTheNamesTheConfigurationFixesAreHeldForTheirEntries(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newStore(t)
+	hour := time.Now().Add(time.Hour)
+	if err := s.BindSession(ctx, "legion-daemon:ACME", personPrincipal, hour); err != nil {
+		t.Fatalf("a dev box claims the name before the configuration fixes it: %v", err)
+	}
+	taken, err := s.ReserveSessions(ctx, map[string]string{"legion-daemon:ACME": daemonPrincipal, "ci-release": workflowPrincipal})
+	if err != nil {
+		t.Fatalf("ReserveSessions: %v", err)
+	}
+	if want := map[string]string{"legion-daemon:ACME": personPrincipal}; !reflect.DeepEqual(taken, want) {
+		t.Fatalf("ReserveSessions took %v, want %v: the configuration's name is taken from the dev box, and an unheld one from nobody", taken, want)
+	}
+	for _, c := range []struct {
+		name      string
+		session   string
+		principal string
+		want      error
+	}{
+		{name: "the dev box that held it is refused", session: "legion-daemon:ACME", principal: personPrincipal, want: oauthstore.ErrSessionHeld},
+		{name: "another account is refused", session: "legion-daemon:ACME", principal: otherPrincipal, want: oauthstore.ErrSessionHeld},
+		{name: "the entry's account claims it", session: "legion-daemon:ACME", principal: daemonPrincipal},
+		{name: "and claims it again", session: "legion-daemon:ACME", principal: daemonPrincipal},
+		{name: "a dev box is refused the workflow's name", session: "ci-release", principal: personPrincipal, want: oauthstore.ErrSessionHeld},
+		{name: "the workflow claims its name", session: "ci-release", principal: workflowPrincipal},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if err := s.BindSession(ctx, c.session, c.principal, hour); !errors.Is(err, c.want) {
+				t.Fatalf("BindSession(%q, %q) = %v, want %v", c.session, c.principal, err, c.want)
+			}
+		})
+	}
+	if err := s.Sweep(ctx); err != nil {
+		t.Fatalf("Sweep: %v", err)
+	}
+	held := func(session string) (principal string, forever bool) {
+		t.Helper()
+		if err := pool.QueryRow(ctx, `select principal, expires_at = 'infinity' from oauth_session_bindings where session = $1`, session).Scan(&principal, &forever); err != nil {
+			t.Fatalf("read the claim on %s: %v", session, err)
+		}
+		return principal, forever
+	}
+	for session, want := range map[string]string{"legion-daemon:ACME": daemonPrincipal, "ci-release": workflowPrincipal} {
+		if principal, forever := held(session); principal != want || !forever {
+			t.Errorf("after its principal's claims and a sweep, %s is held by %q for ever: %t; want %q with no expiry", session, principal, forever, want)
+		}
+	}
+
+	// The next configuration fixes the daemon's name for another account and no longer fixes the
+	// workflow's.
+	taken, err = s.ReserveSessions(ctx, map[string]string{"legion-daemon:ACME": otherPrincipal})
+	if err != nil {
+		t.Fatalf("ReserveSessions(the next configuration): %v", err)
+	}
+	if want := map[string]string{"legion-daemon:ACME": daemonPrincipal}; !reflect.DeepEqual(taken, want) {
+		t.Fatalf("ReserveSessions(the next configuration) took %v, want %v", taken, want)
+	}
+	if principal, forever := held("ci-release"); principal != workflowPrincipal || forever {
+		t.Errorf("the name the configuration stopped fixing is held by %q for ever: %t; want %q under the ordinary retention", principal, forever, workflowPrincipal)
+	}
+	var runsOut time.Time
+	if err := pool.QueryRow(ctx, `select expires_at from oauth_session_bindings where session = 'ci-release'`).Scan(&runsOut); err != nil {
+		t.Fatalf("read the released claim: %v", err)
+	}
+	if want := time.Now().Add(oauthstore.SessionRetention); runsOut.Before(want.Add(-time.Minute)) || runsOut.After(want.Add(time.Minute)) {
+		t.Errorf("the released claim runs out at %s, want SessionRetention from now, about %s", runsOut, want)
+	}
+	if err := s.BindSession(ctx, "ci-release", personPrincipal, hour); !errors.Is(err, oauthstore.ErrSessionHeld) {
+		t.Errorf("BindSession(the released name, a dev box) = %v, want ErrSessionHeld: the workflow used it within the retention", err)
 	}
 }
 

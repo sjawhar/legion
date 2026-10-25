@@ -2,6 +2,7 @@ package exchange_test
 
 import (
 	"errors"
+	"slices"
 	"strings"
 	"testing"
 
@@ -13,13 +14,26 @@ const (
 	daemonAccount = "system:serviceaccount:example-ns:example-daemon"
 	repository    = "example-org/example-repo"
 	workflow      = ".github/workflows/release.yaml"
+	nightly       = ".github/workflows/nightly.yaml"
 	ref           = "refs/heads/main"
 	project       = "ACME"
 	person        = "ada@example.com"
-	fixedSession  = "legion-daemon:ACME"
-	podUID        = "11111111-2222-3333-4444-555555555555"
-	runID         = "4242"
-	credentialID  = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+	// fixedSession is the session name the daemon account's entry fixes, and nightlySession the
+	// one the nightly workflow's entry fixes: one name belongs to one principal, so two entries
+	// never fix the same one.
+	fixedSession   = "legion-daemon:ACME"
+	nightlySession = "ci-nightly"
+	podUID         = "11111111-2222-3333-4444-555555555555"
+	credentialID   = "66666666-7777-8888-9999-aaaaaaaaaaaa"
+)
+
+// The principals the listed entries' session names belong to, as the exchange spells them.
+const (
+	workerPrincipal  = "account:" + workerAccount
+	daemonPrincipal  = "account:" + daemonAccount
+	releasePrincipal = "workflow:" + repository + "/" + workflow + "@" + ref
+	nightlyPrincipal = "workflow:" + repository + "/" + nightly + "@" + ref
+	personPrincipal  = "person:" + person
 )
 
 // listed is the set every decision test asks: one account whose sessions name themselves, one
@@ -34,7 +48,7 @@ func listed(t *testing.T) *exchange.Set {
 		},
 		[]exchange.WorkflowEntry{
 			{Repository: repository, Workflow: workflow, Ref: ref, Project: project, Person: person},
-			{Repository: repository, Workflow: ".github/workflows/nightly.yaml", Ref: ref, Project: project, Person: person, Session: fixedSession},
+			{Repository: repository, Workflow: nightly, Ref: ref, Project: project, Person: person, Session: nightlySession},
 		},
 	)
 	if err != nil {
@@ -61,18 +75,8 @@ func workflowToken(repo, workflowRef, jobRef, gitRef string) map[string]any {
 		"workflow_ref":     workflowRef,
 		"job_workflow_ref": jobRef,
 		"ref":              gitRef,
-		"run_id":           runID,
+		"run_id":           "4242",
 	}
-}
-
-// runBinding is what a run of the repository's workflows binds its session name to.
-var runBinding = repository + "/actions/runs/" + runID
-
-// withoutClaim is token with the named claim dropped, for a case that must miss exactly one. It
-// changes the map it is handed, which every builder here returns fresh.
-func withoutClaim(token map[string]any, name string) map[string]any {
-	delete(token, name)
-	return token
 }
 
 // runRef is the workflow_ref a run of path in repository on ref carries.
@@ -127,6 +131,19 @@ func TestNewSetRefusesAnEntryItCannotServe(t *testing.T) {
 			workflows: []exchange.WorkflowEntry{withFlow(func(e *exchange.WorkflowEntry) { e.Session = "legion\x00daemon" })}, names: workflow},
 		{name: "the same workflow twice",
 			workflows: []exchange.WorkflowEntry{flow, withFlow(func(e *exchange.WorkflowEntry) { e.Person = "bob@example.com" })}, names: "workflow entry 2"},
+		{name: "two workflows whose principals spell alike",
+			workflows: []exchange.WorkflowEntry{
+				withFlow(func(e *exchange.WorkflowEntry) { e.Workflow, e.Ref = ".github/workflows/a.yaml@refs/heads/b", "c" }),
+				withFlow(func(e *exchange.WorkflowEntry) { e.Workflow, e.Ref = ".github/workflows/a.yaml", "refs/heads/b@c" }),
+			}, names: "workflow entry 1"},
+		{name: "a session name two accounts fix",
+			accounts: []exchange.AccountEntry{
+				with(func(e *exchange.AccountEntry) { e.Session = fixedSession }),
+				{Account: daemonAccount, Project: project, Person: person, Session: fixedSession},
+			}, names: "account entry 1"},
+		{name: "a session name an account and a workflow fix",
+			accounts:  []exchange.AccountEntry{with(func(e *exchange.AccountEntry) { e.Session = fixedSession })},
+			workflows: []exchange.WorkflowEntry{withFlow(func(e *exchange.WorkflowEntry) { e.Session = fixedSession })}, names: workerAccount},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			set, err := exchange.NewSet(c.accounts, c.workflows)
@@ -162,6 +179,25 @@ func TestNewSetTakesTheSameAccountAndWorkflowKeyTwiceApart(t *testing.T) {
 	}
 }
 
+// TestTheReservationsAreTheNamesTheEntriesFix: every session name an entry fixes is reserved for
+// that entry's principal, in the order the entries were listed, and a name no entry fixes is not
+// reserved at all. The answer is the caller's own copy, so the set stays as it was built.
+func TestTheReservationsAreTheNamesTheEntriesFix(t *testing.T) {
+	set := listed(t)
+	want := []exchange.Reservation{
+		{Session: fixedSession, Principal: daemonPrincipal},
+		{Session: nightlySession, Principal: nightlyPrincipal},
+	}
+	got := set.Reservations()
+	if !slices.Equal(got, want) {
+		t.Fatalf("Reservations = %+v, want %+v", got, want)
+	}
+	got[0].Principal = "account:changed"
+	if again := set.Reservations(); !slices.Equal(again, want) {
+		t.Errorf("Reservations after the caller changed its copy = %+v, want %+v", again, want)
+	}
+}
+
 func TestPodAnswersTheListedAccount(t *testing.T) {
 	set := listed(t)
 	for _, c := range []struct {
@@ -171,11 +207,13 @@ func TestPodAnswersTheListedAccount(t *testing.T) {
 		want    exchange.Claims
 	}{
 		{name: "the session the request names", token: podToken(workerAccount, podUID), session: "implementer-g1",
-			want: exchange.Claims{Session: "implementer-g1", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Binding: podUID}},
+			want: exchange.Claims{Session: "implementer-g1", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: workerPrincipal}},
 		{name: "the session the entry fixes, the request naming none", token: podToken(daemonAccount, podUID), session: "",
-			want: exchange.Claims{Session: fixedSession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Binding: podUID}},
+			want: exchange.Claims{Session: fixedSession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: daemonPrincipal}},
 		{name: "the session the entry fixes, the request naming the same", token: podToken(daemonAccount, podUID), session: fixedSession,
-			want: exchange.Claims{Session: fixedSession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Binding: podUID}},
+			want: exchange.Claims{Session: fixedSession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: daemonPrincipal}},
+		{name: "another pod of the account is the same principal", token: podToken(daemonAccount, "another-pod-uid"), session: "",
+			want: exchange.Claims{Session: fixedSession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: daemonPrincipal}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			claims, err := set.Pod(c.token, c.session)
@@ -244,9 +282,11 @@ func TestWorkflowAnswersTheListedRun(t *testing.T) {
 		want    exchange.Claims
 	}{
 		{name: "the session the request names", token: workflowToken(repository, runRef(workflow), runRef(workflow), ref),
-			session: "release-bot", want: exchange.Claims{Session: "release-bot", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Binding: runBinding}},
-		{name: "the session the entry fixes", token: workflowToken(repository, runRef(".github/workflows/nightly.yaml"), runRef(".github/workflows/nightly.yaml"), ref),
-			session: "", want: exchange.Claims{Session: fixedSession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Binding: runBinding}},
+			session: "release-bot", want: exchange.Claims{Session: "release-bot", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: releasePrincipal}},
+		{name: "the session the entry fixes", token: workflowToken(repository, runRef(nightly), runRef(nightly), ref),
+			session: "", want: exchange.Claims{Session: nightlySession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: nightlyPrincipal}},
+		{name: "another run of the workflow is the same principal", token: withRun(workflowToken(repository, runRef(nightly), runRef(nightly), ref), "4243"),
+			session: "", want: exchange.Claims{Session: nightlySession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Principal: nightlyPrincipal}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			claims, err := set.Workflow(c.token, c.session)
@@ -274,8 +314,6 @@ func TestWorkflowRefusesWhatItCannotDecide(t *testing.T) {
 			session: "release-bot", want: exchange.ErrClaimMissing, names: "job_workflow_ref"},
 		{name: "a token with no ref", token: workflowToken(repository, runRef(workflow), runRef(workflow), ""),
 			session: "release-bot", want: exchange.ErrClaimMissing, names: "ref"},
-		{name: "a token with no run id", token: withoutClaim(workflowToken(repository, runRef(workflow), runRef(workflow), ref), "run_id"),
-			session: "release-bot", want: exchange.ErrClaimMissing, names: "run_id"},
 		{name: "a workflow_ref that names no path", token: workflowToken(repository, repository+"/"+workflow, repository+"/"+workflow, ref),
 			session: "release-bot", want: exchange.ErrClaimMissing, names: repository},
 		{name: "a workflow_ref under another repository", token: workflowToken(repository, "example-org/other-repo/"+workflow+"@"+ref, "example-org/other-repo/"+workflow+"@"+ref, ref),
@@ -288,8 +326,8 @@ func TestWorkflowRefusesWhatItCannotDecide(t *testing.T) {
 			session: "release-bot", want: exchange.ErrNoEntry, names: "refs/heads/topic"},
 		{name: "a repository no entry lists", token: workflowToken("example-org/other-repo", "example-org/other-repo/"+workflow+"@"+ref, "example-org/other-repo/"+workflow+"@"+ref, ref),
 			session: "release-bot", want: exchange.ErrNoEntry, names: "example-org/other-repo"},
-		{name: "a session the entry does not fix", token: workflowToken(repository, runRef(".github/workflows/nightly.yaml"), runRef(".github/workflows/nightly.yaml"), ref),
-			session: "release-bot", want: exchange.ErrSessionMismatch, names: fixedSession},
+		{name: "a session the entry does not fix", token: workflowToken(repository, runRef(nightly), runRef(nightly), ref),
+			session: "release-bot", want: exchange.ErrSessionMismatch, names: nightlySession},
 		{name: "no session where the entry fixes none", token: workflowToken(repository, runRef(workflow), runRef(workflow), ref),
 			session: "", want: exchange.ErrSessionRequired, names: workflow},
 		{name: "a session carrying whitespace", token: workflowToken(repository, runRef(workflow), runRef(workflow), ref),
@@ -307,15 +345,26 @@ func TestWorkflowRefusesWhatItCannotDecide(t *testing.T) {
 	}
 }
 
+// withRun is token as another run of the same workflow carries it.
+func withRun(token map[string]any, run string) map[string]any {
+	token["run_id"] = run
+	return token
+}
+
 func TestMachineActsForTheApproverAndWritesEveryProjectThePersonMay(t *testing.T) {
 	set := listed(t)
 	claims, err := set.Machine(credentialID, person, "ada-devbox")
 	if err != nil {
 		t.Fatalf("Machine: %v", err)
 	}
-	want := exchange.Claims{Session: "ada-devbox", Person: person, Scope: exchange.ProjectScopePerson, Binding: credentialID}
+	want := exchange.Claims{Session: "ada-devbox", Person: person, Scope: exchange.ProjectScopePerson, Principal: personPrincipal}
 	if claims != want {
 		t.Fatalf("Machine = %+v, want %+v: a machine credential names no project and says which absence that is", claims, want)
+	}
+	// Another machine of the same person is the same principal: the name belongs to the person.
+	other, err := set.Machine("77777777-8888-9999-aaaa-bbbbbbbbbbbb", person, "ada-devbox")
+	if err != nil || other != want {
+		t.Fatalf("Machine(another credential of %s) = %+v, %v; want %+v", person, other, err, want)
 	}
 }
 

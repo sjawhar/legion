@@ -5,6 +5,7 @@ import (
 	"crypto"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"slices"
 	"time"
@@ -173,9 +174,8 @@ func (c ExchangeConfig) tokenTypes() map[string]oauth2.RFC8693TokenType {
 			JWTValidationConfig: rfc8693.JWTValidationConfig{
 				// A pod's projected token is a standing credential its kubelet refreshes, and a
 				// long-running role exchanges many times with the one it holds, so single use
-				// would refuse every renewal. What keeps one pod's token from being another
-				// pod's is the pod binding the decision requires and the session name bound to
-				// that pod's uid.
+				// would refuse every renewal. What keeps a token from being spendable outside a
+				// pod is the pod binding the decision requires.
 				ValidateJTI:                false,
 				JWTLifetimeToleranceWindow: kubernetesTolerance,
 				ValidateFunc:               keyFunc(c.Kubernetes.Keys),
@@ -234,11 +234,17 @@ func keyFunc(keys KeySource) jwt.Keyfunc {
 //
 // The whole request runs in one transaction (oauthstore.TxFrom carries it), because the broker's
 // own step writes: the session name it claims and the token it is claimed for must land together
-// or not at all. The machine access-token subject type takes its step here, between the library
-// validating the request and the library building the answer; the two JWT types took theirs
-// during validation, through Store.ExchangeSubject.
+// or not at all. The machine access-token subject type takes its decision here, between the
+// library validating the request and the library building the answer; the two JWT types took
+// theirs during validation, through Store.ExchangeSubject. The claim on the session name is made
+// for every type once the library has built the answer, because that is when the issued token's
+// expiry is set, and the claim must not end before the token it is made for.
 func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+	if err := p.reserveSessions(ctx); err != nil {
+		p.writeError(ctx, w, nil, oauth2.ErrServerError.WithWrap(err).WithDebugError(err))
+		return
+	}
 	txCtx, err := p.store.BeginTX(ctx)
 	if err != nil {
 		p.writeError(ctx, w, nil, oauth2.ErrServerError.WithWrap(err).WithDebugError(err))
@@ -255,12 +261,12 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 		p.writeError(ctx, w, request, err)
 		return
 	}
+	session, ok := request.GetSession().(*oauthstore.ExchangeSession)
+	if !ok {
+		p.writeError(ctx, w, request, oauth2.ErrServerError.WithDebugf("the exchange ran on a %T session", request.GetSession()))
+		return
+	}
 	if request.GetRequestForm().Get(FormSubjectTokenType) == tokenTypeAccessToken {
-		session, ok := request.GetSession().(*oauthstore.ExchangeSession)
-		if !ok {
-			p.writeError(ctx, w, request, oauth2.ErrServerError.WithDebugf("the exchange ran on a %T session", request.GetSession()))
-			return
-		}
 		if _, err := p.decide(txCtx, request, session.GetSubjectToken()); err != nil {
 			p.writeError(ctx, w, request, err)
 			return
@@ -268,6 +274,10 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := p.oauth.NewAccessResponse(txCtx, request)
 	if err != nil {
+		p.writeError(ctx, w, request, err)
+		return
+	}
+	if err := p.claimSession(txCtx, session); err != nil {
 		p.writeError(ctx, w, request, err)
 		return
 	}
@@ -279,22 +289,50 @@ func (p *Provider) exchangeGrant(w http.ResponseWriter, r *http.Request) {
 	p.oauth.WriteAccessResponse(ctx, w, request, resp)
 }
 
-// decide is the exchange's own step, and the only one: what the minted token says, and the claim
-// on the session name it says it is writing under. Both paths into the exchange reach it — the
-// two JWT subject types through Store.ExchangeSubject while the library validates the request,
-// the machine access-token type from exchangeGrant once it has — so one function decides for all
+// reserveSessions holds every session name an entry fixes for that entry's principal
+// (oauthstore.Store.ReserveSessions), once for the life of the provider and before its first
+// exchange, so the first caller of another principal to name one is refused by the same claim
+// that refuses any held name. Each replica of the broker reserves for the configuration it was
+// started with. A failure answers that exchange server_error, and the next one tries again.
+//
+// A name taken from another principal is logged, because it is the one way a principal loses a
+// name it used within the retention: the configuration now fixes it for an entry.
+func (p *Provider) reserveSessions(ctx context.Context) error {
+	if p.reserved.Load() {
+		return nil
+	}
+	p.reserving.Lock()
+	defer p.reserving.Unlock()
+	if p.reserved.Load() {
+		return nil
+	}
+	taken, err := p.store.ReserveSessions(ctx, p.reservations)
+	if err != nil {
+		return err
+	}
+	for session, from := range taken {
+		slog.Warn("broker: the token exchange took a session name the configuration fixes from its holder",
+			"session", session, "from", from, "to", p.reservations[session])
+	}
+	p.reserved.Store(true)
+	return nil
+}
+
+// decide is the exchange's own decision, and the only one: what the minted token says, and who
+// the session name it says it is writing under belongs to. Both paths into the exchange reach it
+// — the two JWT subject types through Store.ExchangeSubject while the library validates the
+// request, the machine access-token type from exchangeGrant once it has — so one function decides
+// for all three.
 //
 // In order: the subject token's audience, which the library never checks and which a token minted
-// for another service would fail; the policy's decision, which names the session, the person and
-// the project; the claim on that session name, until the token being minted would expire; and
-// then the claims themselves, onto the session, where the row the token is stored in carries them
-// and an introspection answers from them.
+// for another service would fail; the policy's decision, which names the session, the person, the
+// project and the principal; and then the claims themselves, onto the session, where the row the
+// token is stored in carries them and an introspection answers from them, with the principal
+// beside them for claimSession.
 //
 // Every refusal is an OAuth error the caller can act on and none repeats the subject token:
-// RFC 8693 Section 2.2.2 makes a subject token that is unacceptable on policy invalid_request,
-// and a session name another identity holds is invalid_grant, because the token is sound and it
-// is the broker's state that refuses.
-func (p *Provider) decide(ctx context.Context, request oauth2.Requester, subjectToken map[string]any) (string, error) {
+// RFC 8693 Section 2.2.2 makes a subject token that is unacceptable on policy invalid_request.
+func (p *Provider) decide(_ context.Context, request oauth2.Requester, subjectToken map[string]any) (string, error) {
 	session, ok := request.GetSession().(*oauthstore.ExchangeSession)
 	if !ok {
 		return "", oauth2.ErrServerError.WithDebugf("the exchange ran on a %T session", request.GetSession())
@@ -328,13 +366,8 @@ func (p *Provider) decide(ctx context.Context, request oauth2.Requester, subject
 		// names what to fix, and repeats nothing of the token but the public identity it claimed.
 		return "", oauth2.ErrInvalidRequest.WithHintf("The subject token was refused: %s.", err).WithWrap(err).WithDebugError(err)
 	}
-	if err := p.store.BindSession(ctx, claims.Session, claims.Binding, time.Now().Add(p.access)); err != nil {
-		if errors.Is(err, oauthstore.ErrSessionHeld) {
-			return "", oauth2.ErrInvalidGrant.WithHintf("Another identity is writing under the session name '%s'; ask under a name of your own.", claims.Session).WithWrap(err).WithDebugError(err)
-		}
-		return "", oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
-	}
 	session.Subject, session.Username = claims.Person, claims.Person
+	session.Principal = claims.Principal
 	if session.Extra == nil {
 		// A session read back out of a row that carried no extra claims has none to write on.
 		session.Extra = map[string]any{}
@@ -350,6 +383,30 @@ func (p *Provider) decide(ctx context.Context, request oauth2.Requester, subject
 		delete(session.Extra, ClaimProject)
 	}
 	return claims.Person, nil
+}
+
+// claimSession claims the session name decide wrote onto session for the principal it decided,
+// until oauthstore.SessionRetention past the expiry the library has just set on the issued token,
+// in the transaction that stores that token: the claim can never end before the token it was made
+// for, and a token whose claim is refused is never stored.
+//
+// A name another principal holds is invalid_grant, because the subject token is sound and it is
+// the broker's state that refuses.
+func (p *Provider) claimSession(ctx context.Context, session *oauthstore.ExchangeSession) error {
+	name, _ := session.Extra[ClaimSession].(string)
+	expires := session.GetExpiresAt(oauth2.AccessToken)
+	if name == "" || session.Principal == "" || expires.IsZero() {
+		return oauth2.ErrServerError.WithDebugf("the exchange issued a token without deciding its session name (%t), principal (%t) and expiry (%t)",
+			name != "", session.Principal != "", !expires.IsZero())
+	}
+	if err := p.store.BindSession(ctx, name, session.Principal, expires); err != nil {
+		if errors.Is(err, oauthstore.ErrSessionHeld) {
+			return oauth2.ErrInvalidGrant.WithHintf("The session name '%s' belongs to another identity: one the broker's configuration fixes it for, or one that has written under it within the last %d days. Ask under a name of your own.",
+				name, int(oauthstore.SessionRetention/(24*time.Hour))).WithWrap(err).WithDebugError(err)
+		}
+		return oauth2.ErrServerError.WithWrap(err).WithDebugError(err)
+	}
+	return nil
 }
 
 // audience refuses a subject token whose `aud` does not carry the audience its issuer is
