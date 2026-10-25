@@ -550,7 +550,7 @@ describe("dispatchToolSpecs", () => {
   // the board's order moves by neighbour, through before and after, never through a rank field.
   // The refusal of { issue, rank } below is the guard for that: under `strict: true` the tool
   // takes two flat arguments and no nested rank object.
-  test("dispatch_issue_update takes the four priority buckets and null, and moves by neighbour, never by a rank field", () => {
+  test("dispatch_issue_update takes the four priority buckets and null, and refuses a rank field", () => {
     const schema = schemaFor("dispatch_issue_update");
 
     for (const priority of [0, 1, 2, 3, null]) {
