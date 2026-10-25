@@ -3,6 +3,7 @@ package oauth
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 
 	"authelia.com/provider/oauth2"
@@ -58,14 +59,15 @@ type Introspection struct {
 // when the access lookup misses, so the kind it reports finding is checked here rather than
 // trusted to the hint. An error is returned only where the broker itself failed — a storage
 // outage, or a row it could not decode — because answering that as "not live" would both deny a
-// sound token and hide the outage; notLive is how the two are told apart.
+// sound token and hide the outage; notLive is how the two are told apart, and brokerFailure makes
+// that error say which of the two it was.
 func (p *Provider) Introspect(ctx context.Context, token string) (Introspection, error) {
 	kind, request, err := p.oauth.IntrospectToken(ctx, token, oauth2.AccessToken, oauthstore.NewExchangeSession())
 	if err != nil {
 		if notLive(err) {
 			return Introspection{}, nil
 		}
-		return Introspection{}, err
+		return Introspection{}, brokerFailure(err)
 	}
 	if kind != oauth2.AccessToken {
 		return Introspection{}, nil
@@ -120,4 +122,22 @@ func notLive(err error) bool {
 		}
 	}
 	return errors.Is(err, oauth2.ErrRequestUnauthorized) && errors.Unwrap(oauth2.ErrorToRFC6749Error(err)) == nil
+}
+
+// brokerFailure is err, an IntrospectToken failure notLive does not recognise, as an error that
+// says what failed, for the route to log beside its 503.
+//
+// The library's wrapper cannot say it: its text is only its error code, "request_unauthorized"
+// whatever it wraps, so returned as it is, an outage and a row the store could not decode would
+// both reach the log as an authorization failure naming neither. What failed is the store's own
+// error beneath it — pgx's, or the row's decode error naming the client it found — and that is
+// returned in its place. It names the broker's own state, never the token: the store is handed
+// only the token's signature and puts that in no error it returns. A failure that wraps nothing
+// is named by the library's code and description, which carry no token either.
+func brokerFailure(err error) error {
+	rfc := oauth2.ErrorToRFC6749Error(err)
+	if cause := errors.Unwrap(rfc); cause != nil {
+		return cause
+	}
+	return fmt.Errorf("the provider failed the introspection with %s: %s", rfc.ErrorField, rfc.GetDescription())
 }
