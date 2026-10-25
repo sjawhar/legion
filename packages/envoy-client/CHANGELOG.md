@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Added
+
+- `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
+  the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so
+  the move rides along with any other change in the same call, and the printed result gains
+  `rank -> before KEY`, `rank -> after KEY`, or `rank -> after KEY, before KEY`. It sends a `rank`
+  key only when at least one neighbour is named: a `rank` with neither is not a no-op, since the
+  server ranks the issue last in its project, so an ordinary status update would otherwise drop its
+  issue to the bottom of the board. The flags follow from the tool's schema, so the command itself
+  needed no change (INFRA-188).
+
 ### Fixed
 
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then

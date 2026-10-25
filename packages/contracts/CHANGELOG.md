@@ -8,6 +8,17 @@
   `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
   still names a person who has signed in, and `dispatch_whoami` says a session under the shared
   token creates issues that fall to the parent's assignee and then to that default.
+- Two optional arguments on `dispatch_issue_update`, `before` and `after`, which move an issue on
+  its project's board: `before` puts it above that issue, `after` below, and both together land it
+  between them. Either one is a field, so the rule that requires at least one field besides `issue`
+  now counts them beside `repo`, and a closed issue takes the move. The tool's description teaches
+  the move where it used to say the board's order is not settable there, and names the agent whose
+  order it is: in a Legion deployment, the controller. The tool stays `strict` and takes the two as
+  flat keys, never a nested `rank` object; an empty value is a field like any other, so the server
+  refuses it, as it refuses a key that does not exist, one in another project, the issue itself, and
+  a pair the board does not hold in that order. The spec's `example` is now the move riding along
+  with another change, `{ issue: "DSP-1", priority: 1, before: "DSP-2" }`, so the one call
+  `dispatch issue-update --help` and every refusal print shows the board move (INFRA-188).
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`

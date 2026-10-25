@@ -3471,10 +3471,17 @@ slot to pin before merge, and moves no tag. `release_build` holds no secret: it 
 version with `release-push.sh version` and builds and checks the agent-secrets binaries
 (`agent-secrets --version` on the linux/amd64 binary; `go version -m` on all six for the recorded
 `buildversion.tag`). `release_publish` moves `:latest`, confirms the version against the tags
-inside its concurrency group (`release-push.sh version --expect`, which fails when another run
-took the tag first; the remedy is re-running the whole run, not `--failed`), checks the hand-over
+inside its concurrency group (`release-push.sh version --expect`; `queue: max`, so every run's job
+waits its turn instead of being cancelled when another joins the queue), checks the hand-over
 (`release-push.sh handed`), tags with `release-push.sh push-tag` (the deploy key reaches only that
-step's `env`), attests the `agent-secrets-*.tar.gz` archives and creates the GitHub release.
+step's `env`), attests the `agent-secrets-*.tar.gz` archives and creates the GitHub release. When
+another run took the version first, `release_publish` publishes nothing and stays green: nothing
+more is needed when a release holds the commit or nothing since the newest release bumps the
+version, a later run on `main` that holds the commit and has not finished releases it (or fails
+where a person sees it), and otherwise `release-push.sh restart` starts a new run on `main` (`gh
+workflow run`, with `actions: write`), which decides the version again and releases the commit. A
+chain stops at its third started run: if that run loses too and no later run holds the commit, it
+fails with the command to start one by hand.
 
 The image's attestation is what says which run built a digest: a branch dispatch pushes an
 `envoy:<sha>` tag too, and its certificate names `refs/heads/<branch>`. Accept a digest only when a
