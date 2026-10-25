@@ -16,12 +16,26 @@ import {
 import type { DispatchClient } from "@legion/envoy-client/dispatch-http";
 import { type NewAsk, newAsks, openingOf } from "./new-asks";
 import requestTemplate from "./rule-check-request.md" with { type: "text" };
-import { byteLength, clipBytes, escapeXml, lastLineJson, renderTemplate } from "./text";
+import {
+  byteLength,
+  clipMiddle,
+  escapedHead,
+  escapeXml,
+  lastLineJson,
+  renderTemplate,
+} from "./text";
 
 /** The whole asks list in one request. */
 const ASKS_MAX_BYTES = 32 * 1024;
 /** One ask in that list. */
 const ASK_MAX_BYTES = 8 * 1024;
+/**
+ * The least of its text an ask is given, however much the tags take: a head and a tail of about
+ * 48 bytes each around the clip's marker, enough for a request or a one-line recommendation.
+ */
+const ASK_MIN_BYTES = 128;
+/** An ask's `#id` in its tag, escaped and with its cut's `…`. */
+const ID_MAX_BYTES = 128;
 /** How many matching asks a refusal names before it only counts the rest. */
 const REFUSAL_MATCHES = 5;
 
@@ -222,16 +236,17 @@ const MISSING_TEXT =
 /**
  * How many bytes of each ask's text the list carries, by the order the needs are given in: an
  * equal share of what the tags leave of `ASKS_MAX_BYTES`, except that an ask needing less than its
- * share hands the rest to the asks that need more, and no ask is given more than `ASK_MAX_BYTES`.
+ * share hands the rest to the asks that need more, no ask is given more than `ASK_MAX_BYTES`, and
+ * none less than `ASK_MIN_BYTES` (or its whole text, when that is shorter).
  * Sharing rather than spending first-come is what keeps every ask in the list.
  */
 function textBudgets(needs: readonly number[], budget: number): number[] {
   const budgets = new Array<number>(needs.length).fill(0);
   const smallestFirst = needs.map((_, index) => index).sort((a, b) => needs[a] - needs[b]);
-  let left = Math.max(0, budget);
+  let left = budget;
   for (const [taken, index] of smallestFirst.entries()) {
-    const share = Math.floor(left / (smallestFirst.length - taken));
-    budgets[index] = Math.min(needs[index], ASK_MAX_BYTES, share);
+    const share = Math.floor(Math.max(0, left) / (smallestFirst.length - taken));
+    budgets[index] = Math.min(needs[index], ASK_MAX_BYTES, Math.max(ASK_MIN_BYTES, share));
     left -= budgets[index];
   }
   return budgets;
@@ -239,14 +254,22 @@ function textBudgets(needs: readonly number[], budget: number): number[] {
 
 /**
  * The asks as the request lists them: each in an `<ask>` tag of its own, numbered from 1 and
- * escaped, each clipped to its share of the list's 32 KiB and to 8 KiB of its own. Also how a
- * refusal names each ask, and how many of them the request does not carry whole.
+ * escaped, each clipped in its middle to its share of the list's 32 KiB and to 8 KiB of its own.
+ * Also how a refusal names each ask, and how many of them the request does not carry whole.
  *
  * Every ask of the call is listed, so the rules check judges each one: an ask the request leaves
- * out matches no rule, and the call records `ruleOutcome: "none"` as if a check had read it. A
- * call with so many asks that their tags alone exceed 32 KiB (hundreds in one write, which a
- * session does not make) lists them all with no text of their own, and goes past the bound by
- * those tags: a longer request is better than an ask no check ever saw.
+ * out matches no rule, and the call records `ruleOutcome: "none"` as if a check had read it. For
+ * the same reason a clip keeps both ends of an ask (`clipMiddle`), the two places the rules read.
+ *
+ * An `#id` is in its tag only to name the ask back to the agent, so it is cut to `ID_MAX_BYTES`:
+ * the server stores an id of any length, and an unbounded one would spend the list on its tag and
+ * leave the other asks' text out. The ask's number names it to the rules call and the refusal
+ * names it by the whole id, so the cut loses nothing a rule reads; the text, which a rule does
+ * read, is never given less than `ASK_MIN_BYTES`. With both bounds an ask costs at most 298 bytes
+ * before its share (a tag of 170 up to ask 999, and that floor), so a call needs over a hundred
+ * asks to pass 32 KiB: 111 with every id at the bound, some 180 with ids of a usual length, which
+ * a session does not make. Such a call still lists every ask at the floor and goes past the
+ * bound: a longer request is better than an ask no check ever saw.
  */
 export function describeAsks(asks: readonly NewAsk[]): {
   list: string;
@@ -255,7 +278,15 @@ export function describeAsks(asks: readonly NewAsk[]): {
 } {
   // The bound clips the escaped text, so an ask is cut by what that text measures, not the raw one.
   const entries = asks.map((ask, index) => {
-    const id = ask.id === undefined ? "" : ` id="${attribute(ask.id)}"`;
+    let id = "";
+    if (ask.id !== undefined) {
+      const value = attribute(ask.id);
+      const bounded =
+        byteLength(value) <= ID_MAX_BYTES
+          ? value
+          : `${escapedHead(value, ID_MAX_BYTES - byteLength("…"))}…`;
+      id = ` id="${bounded}"`;
+    }
     const text = ask.textMissing ? MISSING_TEXT : escapeXml(ask.text.trim());
     return { ask, open: `<ask n="${index + 1}" kind="${ask.kind}"${id}>`, text };
   });
@@ -272,7 +303,7 @@ export function describeAsks(asks: readonly NewAsk[]): {
   const listed = entries.map((entry, index) => {
     const whole = byteLength(entry.text) <= budgets[index];
     if (entry.ask.textMissing || !whole) cut++;
-    const body = whole ? entry.text : clipBytes(entry.text, budgets[index]);
+    const body = whole ? entry.text : clipMiddle(entry.text, budgets[index]);
     return `${entry.open}\n${body}\n</ask>`;
   });
   return { list: listed.join("\n"), names: entries.map(({ ask }) => askName(ask)), asksCut: cut };

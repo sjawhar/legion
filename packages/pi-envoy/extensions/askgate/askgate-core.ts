@@ -128,11 +128,12 @@
 //     no stored version can hold, and sets `ruleAsksPartial` for the openers it left out, so a
 //     re-upload of an unchanged document is never refused for an ask block it already held.
 //     The system prompt is rule-check-system.md and rule-check.md, and the request
-//     (rule-check-request.md) carries the same escaped system prompt and transcript, then each ask
-//     in an `<ask>` tag of its own, the list bounded at 32 KiB and each ask at 8 KiB
-//     (`ruleAsksCut`). When the answer names an ask that matches `no_change` or `untried_access`,
-//     AskGate refuses the call in every mode, naming each matching ask and putting the charter's
-//     revise reason after the rules reason. A rules call that fails, times out or gives no verdict
+//     (rule-check-request.md) carries the same escaped system prompt and transcript, then every
+//     new ask in an `<ask>` tag of its own, each given an equal share of a 32 KiB list and at most
+//     8 KiB, a clipped ask keeping its start and its end (`ruleAsksCut`). When the answer names an
+//     ask that matches `no_change` or `untried_access`, AskGate refuses the call in every mode,
+//     naming each matching ask and putting the charter's revise reason after the rules reason. A
+//     rules call that fails, times out or gives no verdict
 //     changes nothing; three of those in a row write one log line, and show one UI notice where
 //     there is a UI. A rules verdict, a session_switch or a session_branch resets that count. The
 //     rules reason never feeds the charter request, and only the charter call moves the halt
@@ -357,7 +358,7 @@ export interface GateEntry {
   charterLatencyMs?: number;
   /** An ask's text could not be read, so the rules call judged that ask without it. */
   ruleTextMissing?: true;
-  /** New asks the rules request left out or cut to its bounds. */
+  /** New asks the rules request clipped to their share of its bounds; it lists every one. */
   ruleAsksCut?: number;
   /**
    * An upload whose stored version the gate could not read: the rules call judged only the

@@ -22,6 +22,68 @@ export function clipBytes(text: string, max: number): string {
   return `${head} … [elided ${size - byteLength(head)} bytes]`;
 }
 
+/** The middle clip's marker; `N` becomes the bytes it stands for. */
+const MIDDLE_MARKER = " … [elided N bytes] … ";
+/** The longest entity escaping writes, `&quot;`: how far back a cut can find the `&` it splits. */
+const ENTITY_MAX_BYTES = 6;
+
+/**
+ * Where the entity a cut before byte `at` of escaped text would split begins, or undefined when
+ * the cut splits none. Escaping turns every `&` of the text into an entity, and every entity it
+ * writes is an `&`, lowercase letters and a `;`, so an `&` followed only by lowercase letters up
+ * to the cut is an entity left open by it.
+ */
+function splitEntity(bytes: Buffer, at: number): number | undefined {
+  for (let index = at - 1; index >= Math.max(0, at - ENTITY_MAX_BYTES); index--) {
+    if (bytes[index] === 0x26) return index;
+    if (bytes[index] < 0x61 || bytes[index] > 0x7a) return undefined;
+  }
+  return undefined;
+}
+
+/** A cut at or before byte `end` of escaped text that splits no character and no entity. */
+function headEnd(bytes: Buffer, end: number): number {
+  let at = end;
+  while (at > 0 && (bytes[at] & 0xc0) === 0x80) at--;
+  return splitEntity(bytes, at) ?? at;
+}
+
+/**
+ * Escaped `text` cut to its first `max` bytes, and back to the start of a character or an entity
+ * the cut would split, so the head ends on neither a U+FFFD nor a bare `&amp`.
+ */
+export const escapedHead = (text: string, max: number) => {
+  const bytes = Buffer.from(text, "utf8");
+  return bytes.subarray(0, headEnd(bytes, Math.min(max, bytes.length))).toString("utf8");
+};
+
+/**
+ * Escaped `text` cut to at most `max` UTF-8 bytes in its middle: a head and a tail of about equal
+ * size around a marker naming the bytes elided. An ask's text is clipped this way, never by
+ * `clipBytes`, because the rules check reads both its ends: `untried_access` reads the start,
+ * where an ask makes its request of the person, and `no_change` the end, where the ask's own
+ * recommendation comes. Neither cut splits a character or an entity: the head ends before one,
+ * the tail starts after it, so a clip of escaped text can never leave a `&lt` a tag could use.
+ */
+export function clipMiddle(text: string, max: number): string {
+  const bytes = Buffer.from(text, "utf8");
+  if (bytes.length <= max) return text;
+  // The marker's room, its count written at the most digits it can take.
+  const marker = byteLength(MIDDLE_MARKER) - 1 + String(bytes.length).length;
+  const keep = Math.max(0, max - marker);
+  const end = headEnd(bytes, Math.floor(keep / 2));
+  let start = bytes.length - Math.ceil(keep / 2);
+  while (start < bytes.length && (bytes[start] & 0xc0) === 0x80) start++;
+  // A tail starting inside an entity starts after its `;` instead.
+  if (splitEntity(bytes, start) !== undefined) {
+    const close = bytes.indexOf(0x3b, start);
+    start = close === -1 ? bytes.length : close + 1;
+  }
+  const head = bytes.subarray(0, end).toString("utf8");
+  const tail = bytes.subarray(start).toString("utf8");
+  return `${head}${MIDDLE_MARKER.replace("N", String(start - end))}${tail}`;
+}
+
 export const escapeXml = (text: string) =>
   text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 

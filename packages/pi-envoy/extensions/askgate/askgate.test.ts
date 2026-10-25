@@ -3547,6 +3547,118 @@ describe("rules check", () => {
     expect(described.list).toContain("elided");
     expect(described.asksCut).toBe(1);
   });
+  /** Each ask's text as the list carries it, in order. */
+  const bodiesOf = (list: string) =>
+    list
+      .split(/<ask n="\d+"[^>]*>\n/)
+      .slice(1)
+      .map((body) => body.replace(/\n<\/ask>\n?$/, ""));
+  test("a clipped ask keeps its start and the recommendation at its end (E6)", () => {
+    // The review's three rows. A clip that kept only an ask's head cut the recommendation
+    // `no_change` reads at the end of every one of them, so the rule could not match and each
+    // call recorded `none` for asks nobody judged.
+    const recommendation = "My recommendation is to keep it as it is.";
+    for (const [count, size] of [
+      [1, 9 * 1024],
+      [2, 9 * 1024],
+      [30, 1100],
+    ]) {
+      const described = describeAsks(
+        Array.from({ length: count }, (_, index) => {
+          const start = `Can you run the migration for item ${index}?`;
+          const filler = "x".repeat(size - bytes(start) - bytes(recommendation) - 2);
+          return {
+            kind: "block" as const,
+            id: `a${index}`,
+            text: `${start} ${filler} ${recommendation}`,
+            opening: start,
+          };
+        })
+      );
+      const bodies = bodiesOf(described.list);
+      expect(bodies).toHaveLength(count);
+      expect(described.asksCut).toBe(count);
+      expect(bytes(described.list)).toBeLessThanOrEqual(32 * 1024);
+      for (const [index, body] of bodies.entries()) {
+        expect(body).toContain("elided");
+        expect(body).toStartWith(`Can you run the migration for item ${index}?`);
+        expect(body).toEndWith(recommendation);
+      }
+    }
+  });
+  test("a 32,000-character id leaves every other ask's recommendation in the list (E6)", () => {
+    // The id entered its tag whole and the tags were paid before any text, so it spent the list
+    // and the other asks were clipped to nothing.
+    const recommendation = "Recommendation: keep it as it is";
+    const pad = "y".repeat(380);
+    const described = describeAsks([
+      {
+        kind: "block",
+        id: "i".repeat(32_000),
+        text: `Which deployment window? ${pad}`,
+        opening: "Which deployment window?",
+      },
+      ...Array.from({ length: 3 }, (_, index) => ({
+        kind: "block" as const,
+        id: `b${index}`,
+        text: `Should we change budget ${index}? ${pad} ${recommendation}`,
+        opening: `Should we change budget ${index}?`,
+      })),
+    ]);
+    const bodies = bodiesOf(described.list);
+    for (const body of bodies.slice(1)) expect(body).toEndWith(recommendation);
+    expect(bodies[0]).toBe(`Which deployment window? ${pad}`);
+    expect(described.asksCut).toBe(0);
+    // The id still names its ask, cut to 128 bytes.
+    const id = described.list.match(/<ask n="1" kind="block" id="([^"]*)">/)?.[1] ?? "";
+    expect(id).toMatch(/^i+…$/);
+    expect(bytes(id)).toBeLessThanOrEqual(128);
+  });
+  test("a 64,000-character id keeps the list inside 32 KiB, cut on an entity's edge (E6)", () => {
+    const described = describeAsks([
+      { kind: "block", id: `"&<>`.repeat(16_000), text: "Which deployment window?", opening: "" },
+      {
+        kind: "block",
+        id: "b",
+        text: "Should we change the retry budget? Recommendation: keep it as it is",
+        opening: "",
+      },
+    ]);
+    expect(bytes(described.list)).toBeLessThanOrEqual(32 * 1024);
+    expect(described.list).toContain("Recommendation: keep it as it is");
+    expect(described.asksCut).toBe(0);
+    const id = described.list.match(/<ask n="1" kind="block" id="([^"]*)">/)?.[1] ?? "";
+    expect(bytes(id)).toBeLessThanOrEqual(128);
+    expect(id).toEndWith("…");
+    expect(id.slice(0, -1).replace(/&(?:quot|amp|lt|gt);/g, "")).toBe("");
+  });
+  test("a clip of escaped text never splits an entity or a character (E6)", () => {
+    // Each unit escapes to 16 bytes (`&lt;€&amp;&gt;`). The short first ask moves the others'
+    // share a byte at a time, so across these lengths both cuts land at every offset within a
+    // unit: inside each entity and inside the three bytes of the `€`.
+    const unit = "<€&>";
+    const escapedBytes = 16 * 1000;
+    for (let short = 1; short <= 64; short++) {
+      const described = describeAsks([
+        { kind: "ask", text: "z".repeat(short), opening: "z" },
+        ...Array.from({ length: 4 }, (_, index) => ({
+          kind: "block" as const,
+          id: `a${index}`,
+          text: unit.repeat(1000),
+          opening: unit,
+        })),
+      ]);
+      expect(described.list).not.toContain("\uFFFD");
+      expect(bytes(described.list)).toBeLessThanOrEqual(32 * 1024);
+      for (const body of bodiesOf(described.list).slice(1)) {
+        const [head, elided, tail] = body.split(/ … \[elided (\d+) bytes\](?: … )?/);
+        // Each side holds whole entities and whole characters and nothing else.
+        expect(head.replace(/&(?:lt|amp|gt);|€/g, "")).toBe("");
+        expect(tail.replace(/&(?:lt|amp|gt);|€/g, "")).toBe("");
+        expect(Number(elided)).toBe(escapedBytes - bytes(head) - bytes(tail));
+      }
+    }
+  });
   /** The document Dispatch holds for the upload below, under the name it trimmed on the way in. */
   const BRIEF = ":::ask{#window}\nWhich deployment window?\n:::\n";
   /** One rules check on its own, driven with the walk and the Dispatch the core lends it. */

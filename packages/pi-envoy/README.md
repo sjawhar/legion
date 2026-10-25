@@ -340,8 +340,9 @@ such target. A call that opens a new ask adds the fields of the rules check:
   loses its own text.
 - `ruleError`: the error text for `error` (the provider's, or the check's own when it fails before
   a model answers), `timeout` for a timeout, and `no-verdict` for an answer that does not parse.
-- `ruleAsksCut`: how many asks the request left out or cut. The gate caps the list of asks at
-  32 KiB, and each ask at 8 KiB.
+- `ruleAsksCut`: how many asks the request cut. The request lists every new ask, and caps the
+  list at 32 KiB: each ask's text gets an equal share of it, at most 8 KiB, and an ask cut to its
+  share keeps its start and its end, where the rules read. An ask's `#id` is cut to 128 bytes.
 - `ruleAsksPartial`: `true` when the call was judged on part of its asks: the gate could not read
   the document an upload replaces, so the ask blocks carrying an `#id` were left out of the check.
 
