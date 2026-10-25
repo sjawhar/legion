@@ -27,6 +27,30 @@ import * as fx from "./askgate-fixtures";
 /** Runs a `dispatch` command's --dry-run as the entry's binding does. */
 type DryRunner = (script: string, opts: DryRunOptions) => Promise<DryRunResult>;
 
+/**
+ * The suite's own TMPDIR, set before any test runs: every snapshot the gate takes (and every scratch
+ * directory a test makes through `tmpdir()`) lands here, and the suite removes it at the end.
+ */
+const CALLER_TMPDIR = process.env.TMPDIR;
+const SUITE_TMP = fs.realpathSync(fs.mkdtempSync(path.join(tmpdir(), "gate-suite-")));
+process.env.TMPDIR = SUITE_TMP;
+afterAll(() => {
+  fs.rmSync(SUITE_TMP, { recursive: true, force: true });
+  if (CALLER_TMPDIR === undefined) delete process.env.TMPDIR;
+  else process.env.TMPDIR = CALLER_TMPDIR;
+});
+/** The snapshot directories the gate made under the suite's TMPDIR (`askgate-` and six characters). */
+const snapshotDirs = () =>
+  fs.readdirSync(SUITE_TMP).filter((name) => /^askgate-[A-Za-z0-9]{6}$/.test(name));
+/**
+ * Ends every call a test's gates were handed, as the runner ends a call's tool, so the gate releases
+ * the snapshot each one took: a test that never ends its call would otherwise leave it behind.
+ */
+const callEnders: Array<() => Promise<void>> = [];
+afterEach(async () => {
+  for (const end of callEnders.splice(0)) await end();
+});
+
 const HOME = "/home/tester";
 /** The session's envoy.json, which the notice for an OMP_ASKGATE the gate does not read names. */
 const CONFIG_FILE = `${HOME}/.config/legion/envoy.json`;
@@ -156,8 +180,18 @@ function bind(
     cwd: opts.cwd ?? "/work",
   };
   const handler = handlers.get("tool_call");
+  /** Every call id this binding was handed, ended after the test (`callEnders`). */
+  const emitted = new Set<string>();
+  callEnders.push(async () => {
+    for (const toolCallId of emitted)
+      await handlers.get("tool_execution_end")?.(
+        { type: "tool_execution_end", toolCallId, toolName: "bash", isError: false },
+        ctx
+      );
+  });
   const emit = (event: Record<string, unknown>) => {
     if (!handler) throw new Error("no tool_call handler registered");
+    if (typeof event.toolCallId === "string") emitted.add(event.toolCallId);
     return handler({ type: "tool_call", ...event }, ctx);
   };
   return {
@@ -2063,7 +2097,7 @@ console.log(JSON.stringify(args, null, 2));
       expect(result?.input?.command).toContain("/askgate-");
       expect(g.calls).toHaveLength(1);
       expect(g.calls[0].user).toContain(`"content": ${JSON.stringify(BRIEF)}`);
-      expect(g.calls[0].user).toContain('"path": "/mnt/nvme/sami/tmp/askgate-');
+      expect(g.calls[0].user).toContain(`"path": "${SUITE_TMP}/askgate-`);
       expect(g.calls[0].user).toContain(uploadRule);
     });
     test("(c) after a leading cd, a relative --path is read from the directory the cd reached, which bash names", async () => {
@@ -2236,6 +2270,18 @@ console.log(JSON.stringify(args, null, 2));
       await g.event("tool_result", { toolCallId: "release-snapshot" });
 
       expect(fs.existsSync(snapshot ?? "")).toBe(false);
+    });
+    test("a gated --question-file call snapshots under the suite's own TMPDIR, and its end event removes the snapshot", async () => {
+      fs.writeFileSync(path.join(work, "ended-question.md"), QUESTION);
+      const g = bind({ env: STUB, cwd: work });
+      const result = await g.bash(
+        "ended",
+        "dispatch ask --issue DSP-1 --question-file ended-question.md"
+      );
+      expect(result?.input?.command).toContain(`${SUITE_TMP}/askgate-`);
+      expect(snapshotDirs()).toHaveLength(1);
+      await g.event("tool_execution_end", { toolCallId: "ended", toolName: "bash" });
+      expect(snapshotDirs()).toEqual([]);
     });
     test("(e) an upload of shot.png never reaches the model", async () => {
       const g = bind({ env: STUB, cwd: work });
@@ -2933,4 +2979,10 @@ describe("askgate.ts, the entry", () => {
     expect(entries).toMatchObject([{ decision: "allow", outcome: "error" }]);
     expect(entries[0].reason).toContain("ELOOP");
   });
+});
+
+// Runs last: every gated call of every earlier test was ended after its test (`bind`'s calls,
+// ended by the suite's afterEach as the runner ends a call's tool), so no snapshot outlived its test.
+test("no gated call of an earlier test left a snapshot directory behind", () => {
+  expect(snapshotDirs()).toEqual([]);
 });
