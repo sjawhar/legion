@@ -1,0 +1,73 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-232",
+  "completed": "2026-10-25T14:05:00Z",
+  "headTested": "ea9496984ee3c7ff5d09f1722e2c944b7902fd4a (docs/kubernetes.md byte-identical to code head 81e2fa83374f515a0badcbbc5f6133ac22129e40, compared with cmp)",
+  "ci": "Tests run 40198850552 (lint, typecheck, test) success, Legion Envoy and Contracts run 40198850664 success, PR Title run 40198850653 success, all at 81e2fa83374f515a0badcbbc5f6133ac22129e40; read on GitHub, not re-run.",
+  "implementerProof": {
+    "verdict": "rejected",
+    "how": "Re-ran P1, P3 and P5 independently at the PR head under new generated names, and P2 and P6; every observation matches the implementer's. The proof is rejected only as recorded: its A1, A6 and A7 entries, the PR body's E2E (implementer) line and that line's [recorded runs] link name head 81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7, which is no commit, so a reviewer cannot check the proof against GitHub. The real code head is 81e2fa83374f515a0badcbbc5f6133ac22129e40. The A2-A5 entries name 91847e71e8a16c9741c6ff057e98c87099e7336d, which is correct."
+  },
+  "failed": 1,
+  "failures": [
+    {
+      "criterion": "A1 (plan section 5: A1's headSha is the head that merges), and the proof rule that every proof records the head SHA it ran at and an E2E line links its run",
+      "evidence": "implement.json proof entries A1, A6 and A7 have headSha 81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7; the PR #2195 body's E2E (implementer) line says 'at head 81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7' and links https://github.com/sjawhar/legion/blob/81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7/docs/kubernetes.md#L3245-L3268. `gh api repos/sjawhar/legion/commits/81e2fa83374f00f9b2fd7d0e1bae39a1f15c50c7` -> HTTP 422 'No commit found for SHA'; curl of the link -> 404; the same URL at 81e2fa83374f515a0badcbbc5f6133ac22129e40 -> 200, and `jj log -r 'main..@-' -T commit_id` shows 81e2fa83374f515a0badcbbc5f6133ac22129e40 as the code head. Only the first 12 hex characters are right. Fix: correct the SHA and the link in the PR body and in implement.json (a handoff-only push). No repository test can pin a record in a PR body or a handoff, so this failure carries no red test; the two commands above show it. The documentation change itself passed every check below."
+    }
+  ],
+  "proof": [
+    {
+      "criterion": "A1 (spec line 1): the published sequence creates its Job with generateName; the Service takes the generated name; every use of the name moves with it; the selector stays the uid",
+      "surface": "this issue's role container, against the applied cluster, through the role's own bash tool",
+      "command": "P1: the sh block after 'The whole sequence' extracted at the head with jj file show, its three bracketed lines filled from the deployment's declaration (read from the deployment repository's origin/main) in $TMPDIR, with one line added after the logs read: echo \"uid: $uid\"; kubectl get pod -l job-name=\"$workload\" -o jsonpath='{.items[0].metadata.labels}'; run as published (flock ... setsid -f, then flock ... cat). Then the same block started twice at once with setsid -f.",
+      "observed": "13:47:00Z: 'workload: infra-232-postgres-kvs7h' after the create; 'service/infra-232-postgres-kvs7h created'; both waits 'condition met'; 'answered'; uid 76cb9761-7725-4535-9c94-6418523d65b2 equal to the pod's batch.kubernetes.io/controller-uid and job-name equal to the workload; trap deleted the Job, 'No resources found', 'sequence: exit 0', 82 s; 0 Jobs, Services or pods of the prefix afterwards. Concurrent pair at 13:58:56Z: infra-232-postgres-7bv6k and infra-232-postgres-nl5sz, each pod's controller-uid equal to its own create's uid, both 'answered' and 'sequence: exit 0', nothing left.",
+      "headSha": "ea9496984ee3c7ff5d09f1722e2c944b7902fd4a",
+      "negativeControl": "P2: the block with its create replaced by the pre-change 'kubectl apply -f \"$dir/job.yaml\"' -> 'error: from infra-232-postgres-: cannot use generate name with apply', 'cleanup: no Job name was read; nothing removed', 'sequence: exit 1', nothing created."
+    },
+    {
+      "criterion": "A2: a refused Job create leaves nothing, and the trap does not fail on an unset name",
+      "surface": "this issue's role container, against the applied cluster, through the role's own bash tool",
+      "command": "P3: the extracted block with one line changed: requests: { cpu: \"1\", memory: 8Gi }",
+      "observed": "13:48:48Z: 'The jobs \"infra-232-postgres-hwhgr\" is invalid: : ValidatingAdmissionPolicy '<policy>' with binding '<policy>' denied request: a build Job's pod template has a container requesting at least 4 CPU; a smaller build runs in its Legion pod'; 'cleanup: no Job name was read; nothing removed'; 'sequence: exit 1'; 0 lines matching 'unbound variable', 'delete failed' or 'still there'; 0 Jobs of the prefix.",
+      "headSha": "ea9496984ee3c7ff5d09f1722e2c944b7902fd4a",
+      "negativeControl": "P1's admitted create of the same block with cpu \"4\": only the request differs."
+    },
+    {
+      "criterion": "A4: recovery works with the generated name",
+      "surface": "this issue's role container, against the applied cluster, through the role's own bash tool",
+      "command": "P5: the extracted block with the work's two comment lines replaced by 'sleep 120', run in a call with a 30 s timeout; a second call polled the log for 'answered', sent kill -KILL -- -<process the first line printed>, listed kubectl get job,service <name> and kubectl get pods -l job-name=<name>, ran the two recovery lines with the printed name, and listed again.",
+      "observed": "13:48:55Z start; the call ended at its 30 s timeout having printed the sequence's file and log. Log: workload infra-232-postgres-l9ln8, Service created, 'answered'. 13:49:32Z after the SIGKILL: job Running 0/1, service ClusterIP 5432/TCP, pod 1/1 Running, 0 'sequence: exit' lines. Recovery lines: 'job.batch ... deleted', Service wait returned, 1 s. Then jobs NotFound, services NotFound, 'No resources found' for pods, the sequence's process gone.",
+      "headSha": "ea9496984ee3c7ff5d09f1722e2c944b7902fd4a",
+      "negativeControl": "The listing right after the kill showed all three present and no 'sequence: exit' line: the SIGKILL ran no trap, so the removal is the recovery lines' alone."
+    },
+    {
+      "criterion": "Trap paragraph: a stop before the name is read removes nothing, and a stop inside the create can leave a Job that the issue-key listing finds",
+      "surface": "this issue's role container, against the applied cluster, through the role's own bash tool",
+      "command": "The block's heredoc body written to a mktemp file and started with flock ... setsid -f bash; kill -TERM -- -<process> sent 0.02, 0.06, 0.10-0.24 (0.01 steps from 0.19), 0.25, 0.45 and 0.70 s after its first line; then kubectl get jobs, and the two recovery lines for any Job listed.",
+      "observed": "0.02 and 0.06 s (before the trap is installed): nothing printed, nothing created. 0.10-0.22 s: 'cleanup: no Job name was read; nothing removed', 'sequence: exit 143', no Job. 0.23 and 0.24 s: the same two lines, and infra-232-postgres-k8w57 and infra-232-postgres-jplpt left Running, both listed by kubectl get jobs under the issue key; the recovery lines removed them in 3 s. 0.25, 0.45 and 0.70 s: 'workload: ...' printed, the trap printed the pod and deleted the generated Job, 'sequence: exit 143'. 0 Jobs, Services or pods of the prefix at the end.",
+      "headSha": "ea9496984ee3c7ff5d09f1722e2c944b7902fd4a",
+      "negativeControl": "The 0.10-0.22 s stops, before the create's request, left no Job: the Jobs left at 0.23-0.24 s came only from a stop landing inside the create, the window the page names."
+    },
+    {
+      "criterion": "A5 (spec line 4, this issue's half): the guidance can be on main without the live cluster refusing anything it publishes",
+      "surface": "this issue's role container, against the applied cluster",
+      "command": "P6: kubectl create --dry-run=server -o jsonpath='{.metadata.name}' of the block's Job manifest (generateName), of the same manifest with 'name: infra-232-postgres', and of one with name infra-232-postgres plus generateName 'i'",
+      "observed": "14:02Z: generateName -> infra-232-postgres-hqrrr; client-named -> infra-232-postgres; name plus one-letter generateName -> infra-232-postgres. 0 Jobs of the prefix created.",
+      "headSha": "ea9496984ee3c7ff5d09f1722e2c944b7902fd4a",
+      "negativeControl": "The {name, generateName: i} squat is admitted too: on this date the cluster does not require a generated name."
+    },
+    {
+      "criterion": "A6 and A7: only docs/kubernetes.md changes, inside the section; none of the elided literals is in the diff, the commits, the branch, the PR body or a handoff",
+      "surface": "the branch's diff, commit messages, the live PR body, this handoff",
+      "command": "jj diff --stat and --git -r 'e922ac4c..81e2fa83'; the plan's section 3 sweep with patterns built in shell variables from the projected namespace file, the deployment's declaration at its origin/main and its remote, over the added lines of e922ac4c..ea949698, those commits' messages, the PR body before and after this round's edit, and this handoff; bash .github/scripts/check-private-names.sh",
+      "observed": "docs/kubernetes.md alone, +79/-33, hunks only between lines 2860 and 3290 of the section. Sweep: 0 hits in each. check-private-names.sh exit 0.",
+      "headSha": "ea9496984ee3c7ff5d09f1722e2c944b7902fd4a",
+      "negativeControl": "A scratch file in $TMPDIR carrying the deployment's owner name -> 1 hit: the sweep fires."
+    }
+  ],
+  "observations": [
+    "A deliberate stop that lands inside the create leaves a running four-processor Job for up to its 3600 s deadline, with the trap saying 'nothing removed'. The page states this and the issue-key listing recovers it (measured above), so it is not a failure; a per-run label on the Job would let the trap find it, which is a design choice for the architect, not a defect of this change.",
+    "A stop before the trap is installed prints nothing and leaves the mktemp directory; the trap's position is unchanged by this pull request."
+  ]
+}
