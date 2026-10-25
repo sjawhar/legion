@@ -6,27 +6,26 @@
 
 - Dispatch now keeps a browser tab's delivery, event-feed, and agent-view subscriptions on one
   `GET /ws/live` socket (INFRA-258). Delivery views retain their snapshots, deltas, freshness, and
-  resume semantics; an `events` view sends `events_start` then event frames; an `agent` view sends
-  responder, replay, and frame events. The server rotates each socket at a random age from 30 to
-  60 minutes with `4001 max age`; a page reconnects and resumes without a gap. Shutdown and
-  `POST /api/v1/live/_test/disconnect` close with `1012`; loss of identity closes with `1008`;
-  a full hub queue closes with `1013`; oversized and unencodable frames close with `1009` and
-  `1011`; and a disappeared peer is the ordinary `1006` connection loss. The page closes a silent
-  socket with `4000`. `POST /api/v1/live/_test/rotate` exercises the age rotation. `GET
-  /api/v1/events`, `POST /api/v1/events/_test/disconnect`, `GET
-  /api/v1/agents/{session_id}/stream`, `GET /ws/delivery`, and `POST
-  /api/v1/delivery/_test/disconnect` are removed; the agent publish hook remains and its
-  `as=drop` result ends agent views as `dropped`.
-- Migration `0116_agent_message_idempotency_keys` makes `idempotency_key` required on
-  `POST /api/v1/agents/{session_id}/messages`. The key belongs to its sender, survives for the
-  message's life, and is stored in the message transaction. A matching retry returns `200` with
-  the first message and its deliveries, ensuring an unattempted or stranded delivery resumes
-  without a second message; a conflicting request is `409 MESSAGE_KEY_REUSED` with `message_id`.
-  The delivery runs after commit on a context detached from the request, so an aborted request
-  cannot cancel it, and a deploy lets it finish: shutdown waits for the request, and the listener
-  client's receipt timeout bounds it. During a rolling deploy, a page loaded before this release
-  reports `Live updates unavailable`; copy an unsent message and reload. Its one-session sends
-  have no required key and are refused until it reloads.
+  resume semantics, and each delivery subscription is sent the freshness verdict Dispatch holds
+  right after its first answer, so a verdict that changed while a socket was down, or while the
+  page held no delivery view, still reaches the page; an `events` view sends `events_start` then
+  event frames; an `agent` view sends responder, replay, and frame events. The server rotates each
+  socket at a random age from 30 to 60 minutes with `4001 max age`; a page reconnects and resumes
+  without a gap. Shutdown and `POST /api/v1/live/_test/disconnect` close with `1012`; loss of
+  identity closes with `1008`; a full hub queue closes with `1013`; oversized and unencodable
+  frames close with `1009` and `1011`; and a disappeared peer is the ordinary `1006` connection
+  loss. The page closes a silent socket with `4000`. `POST /api/v1/live/_test/rotate` exercises the
+  age rotation. The agent publish hook, `POST /api/v1/agents/{session_id}/stream/_test/publish`
+  (human only), remains, and its `as=drop` result ends agent views as `dropped`. The routes this
+  socket replaces are gone: see the Breaking entries under Changed.
+- Migration `0116_agent_message_idempotency_keys` stores the `idempotency_key` of each
+  `POST /api/v1/agents/{session_id}/messages` (required: see the Breaking entry under Changed).
+  The key belongs to its sender, survives for the message's life, and is stored in the message
+  transaction. A matching retry returns `200` with the first message and its deliveries, ensuring
+  an unattempted or stranded delivery resumes without a second message; a conflicting request is
+  `409 MESSAGE_KEY_REUSED` with `message_id`. The delivery runs after commit on a context detached
+  from the request, so an aborted request cannot cancel it, and a deploy lets it finish: shutdown
+  waits for the request, and the listener client's receipt timeout bounds it.
 
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
@@ -559,6 +558,20 @@
 
 ### Changed
 
+- **Breaking:** Dispatch's live routes before `GET /ws/live` are gone (INFRA-258):
+  `GET /api/v1/events`, `GET /api/v1/agents/{session_id}/stream`, `GET /ws/delivery`, and the
+  test hooks `POST /api/v1/events/_test/disconnect` and `POST /api/v1/delivery/_test/disconnect`
+  answer `404`. A tab opened before the deploy reads its event feed from the first, so it shows
+  `Live updates unavailable` until it is reloaded.
+- **Breaking:** `POST /api/v1/agents/{session_id}/messages` requires `idempotency_key`
+  (INFRA-258). A send without one is `400 MESSAGE_INPUT`, `idempotency_key is required, one per
+  send. On a page loaded before it was required: copy the message, reload the page and send it
+  again`. A tab opened before the deploy sends no key, so each of its sends to one session is
+  refused with its draft kept, and the refusal tells the person to reload.
+- **Breaking:** deploy this release with no server of the earlier release running (a Recreate
+  rollout, never a rolling one). A page on this release sends `idempotency_key` on every send to
+  one session, and an earlier process refuses that field as unknown, `400 INVALID_JSON`, so a send
+  that reaches one during a rolling deploy is refused.
 - **Breaking:** once any secret with a `kind` tag holds a value, roll the secrets broker forward,
   never back past this release. A broker before kinds reads no `kind` tag and would serve the
   secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes
