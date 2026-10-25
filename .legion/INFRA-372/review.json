@@ -2,24 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-372",
-  "completed": "2026-10-25T09:18:30Z",
+  "completed": "2026-10-25T09:29:40Z",
+  "round": 2,
   "decision": "changes_requested",
-  "reviewedCodeHead": "fc8dc19f9059f614a60a0e420f6375cfb659f0c0",
+  "reviewedCodeHead": "ce9ec359dbc7c865049b4787eba0f147feddeeb1",
   "critical": 0,
   "important": 1,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "docs/kubernetes.md",
-      "description": "The architect's ruling dispatch://INFRA-372/comment/bc0d7f4a-58b4-4598-b529-9f6e1c86005b (09:02Z, after the plan) widened this issue by one item: the section's three gate commands (`kubectl auth can-i create jobs`, `create services`, `get services`, lines 2670-2674 at the head) carry no namespace flag. The pull request does not carry it: the three commands are unchanged, and the paragraph after them still says `so no command here passes -n` (lines 2699-2701), which the fix must reconcile. Required by the ruling: add `-n` with a placeholder namespace in the page's `<namespace>` register (never the literal), one clause saying why, and the three-way proof (bare, `-n` the workload's namespace, `-n` the role pod's own namespace) quoted. The acceptance check (check_clauses.py) must be widened, since it refuses any third edit."
+      "file": "AGENTS.md",
+      "description": "AGENTS.md:128 (the 'Run a database, broker or server the work needs' row, the row clause 2 already edits) still names the gate as \"`kubectl auth can-i create jobs`, `create services` and `get services` are the gate\": the form without -n that the page now says a role cannot trust. AGENTS.md is auto-loaded into every session in this repository, so it is the copy most agents copy. The architect ruled it in scope (Envoy reply e33544ba, and the pull-request comment of 09:27:48Z): the row's middle sentence becomes \"`kubectl -n <namespace> auth can-i create jobs`, `create services` and `get services` are the gate\", nothing else in the row changes; the check script must allow that one edit; the PR body says the page and the row were corrected together and why the row matters more."
     }
   ],
-  "clausesVerified": [
-    "Clause 1 (docs/kubernetes.md reason paragraph): only the first reason changed and is named, dated to INFRA-221's merge 2026-10-25 (#2149 mergedAt 08:39:30Z), the five clients and python3 are installed at worker.Dockerfile:517 and run by its check step at :646; the other two reasons and 'What it proves...' are word for word; both anchors resolve.",
-    "Clause 2 (AGENTS.md): the 'Run a database' row now points at the tool row and the tool row points back; #2182's middle sentence kept; no other line moved."
-  ],
-  "ci": "At code head fc8dc19f9059 (compare to f4ecdc25 changes only .legion/): required lint, typecheck, test, pr-title all queued at 09:17Z, none red; Release Packages run 40177490116 (main image of 6ede52ccb376) still queued. Not waited on: the request for changes stands whatever CI says.",
+  "roundOneFinding": "Fixed at ce9ec359dbc7: the three gate commands carry -n <namespace> (docs/kubernetes.md:2671-2673), and the paragraph at 2699-2709 replaces 'no command here passes -n' with the measured mechanism (POD_NAMESPACE, else the projected namespace file, else default; client-go's in-cluster Namespace()), consistent with this reviewer's own 09:17Z measurement (bare yes x3, -n legion no x3). The five-sentence paragraph is accepted per the architect's ruling.",
+  "ci": "At code head ce9ec359dbc7 (compare to 5133686b changes only .legion/): required lint, typecheck, test, pr-title queued at 09:28Z, none red. Not waited on: the request for changes stands whatever CI says.",
   "thermonuclear": "not run: docs-only diff",
   "threads": "none on the pull request"
 }
