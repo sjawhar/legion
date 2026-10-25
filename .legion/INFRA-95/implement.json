@@ -2,8 +2,16 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-95",
-  "completed": "2026-10-25T06:33:57Z",
+  "completed": "2026-10-25T07:42:01Z",
   "proof": [
+    {
+      "criterion": "Review round 2's two findings are fixed: the probe's own margin is asserted before the clicks it protects and at the value they need, and the row stops claiming a pitch the stylesheet it ships beside refutes (reviewer's review 5642061586; threads PRRT_kwDORFy7ds6v_Q1x and _Q1y).",
+      "surface": "The real browser suite, iPhone profile, in this issue's pod (the same harness and lane as every other entry).",
+      "command": "cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project iphone -g 'an inline link keeps its line' --repeat-each=30",
+      "observed": "30 passed (5.1m) at cacb8cbde0e350d560c9da95f2f2d0e3169ce119. expect(line.lowerClearance).toBeGreaterThanOrEqual(2) now runs beside the composer guard, before both trial clicks, with a message naming what a smaller margin means; the phrase 'the tightest pitch a body reaches' is gone from the file, replaced by 'a message body' in all three places it occurred (the two the reviewer named and the seeding comment at :432).",
+      "headSha": "cacb8cbde0e350d560c9da95f2f2d0e3169ce119",
+      "negativeControl": "The bound temporarily raised to 3 and nothing else touched: the row fails in 6.8 s at phone.e2e.ts:563 with 'Expected: >= 3 / Received: 2' and the assertion's own message, before either trial click. Restored to 2: 30 of 30."
+    },
     {
       "criterion": "Review round 1's three findings are fixed, and the guard that was unreachable now fires where it is measured (reviewer's review 5641808068; threads PRRT_kwDORFy7ds6v-5NT/5NU/5NV).",
       "surface": "The real browser suite, iPhone profile, in this issue's pod (the same harness and lane as every other entry), over a bundle rebuilt from the changed stylesheet.",
@@ -32,8 +40,8 @@
       "criterion": "The row still measures the hit box after the fix rather than something that cannot fail: with the three pixels of .prose a taken out of packages/dispatch/web/src/styles.css and the bundle rebuilt, the row fails, with the assertion and its line named (spec, Acceptance).",
       "surface": "The same browser suite and pod, over a web/dist built without the rule.",
       "command": "edit packages/dispatch/web/src/styles.css (padding-block: 3px -> 0) && cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts --project iphone -g 'an inline link keeps its line'",
-      "observed": "1 failed: TimeoutError: locator.click: Timeout 5000ms exceeded - locator resolved to <a href=\"https://example.invalid/upper\">Upper line</a>; <p data-block-id=...> intercepts pointer events - at the second trial click, packages/dispatch/e2e/phone.e2e.ts:576 at the round-2 head (:562 at the round-1 head 8bd43a9218fa8f5bc5ba0c15fd733c945fffcd4c, where it was first run). The row at the parent commit could not fail this mutation at all: both of its probes sat inside the anchor's own text or padded border box.",
-      "headSha": "e0aefdca1f423c7a59cf408b86ae84d26a5c3ecb",
+      "observed": "1 failed: TimeoutError: locator.click: Timeout 5000ms exceeded - <p data-block-id=...> intercepts pointer events - at the second trial click, packages/dispatch/e2e/phone.e2e.ts:583 at the round-3 head (:576 at round 2, :562 at round 1, where it was first run). The row at the parent commit could not fail this mutation at all: both of its probes sat inside the anchor's own text or padded border box.",
+      "headSha": "cacb8cbde0e350d560c9da95f2f2d0e3169ce119",
       "negativeControl": "The rule restored and the bundle rebuilt: the row passes again, and 30 of 30 repeats pass at this head, so the red is the rule's absence and not the mutation procedure."
     },
     {
@@ -59,6 +67,8 @@
   ],
   "trickyParts": [
     "This round changed nothing: it exists because CI was red at ca2875394721511568b0f03a1586bfa7adad5e21 on the required check `test`, and the red was not this change's. Attempt 1 of the Tests run (https://github.com/sjawhar/legion/actions/runs/40150732207) failed in the Go daemon's notice lane - TestAReheldNoticeIsPublishedByItsLaneWithoutASweep/a_copy_due_after_the_re-send_delay, packages/daemon/internal/notify/notice_exceptions_test.go:185, 'timed out waiting for the lane armed its wait for the re-send delay', a 60 s timeout in a package this change does not touch. The failed jobs were re-run once (gh run rerun 40150732207 --failed); attempt 2 is green at the same code head 8bd43a9218fa8f5bc5ba0c15fd733c945fffcd4c (test, lint, typecheck all success), and the pull request's checks settled 8 passed, 0 failed, 14 skipped at that head, the dispatch browser job among the passes. No file changed between the two attempts, no commit was pushed to shake the verdict loose, and the code head is still 8bd43a92.",
+    "Round 3 of implementing took review round 2's two findings and nothing else, on the architect's instruction: the expect.poll catch and probeClear's comparison against the composer's top edge (the reviewer's two hardening minors), the wall-clock settle, the three spellings of the seeded-link lookup and the footer checklist all stay fast-follow.",
+    "The mutation probe's margin is the row's one unasserted dependency and is now its own guard: the probe sits at upperText.bottom + 1 and the lower anchor's padded box starts at upperText.bottom + lowerClearance, measured 2 everywhere (the four retained CI artifacts and this pod), so the probe clears its neighbour by one pixel of the font's content-area height against the 24px pitch. Bounded at >= 2 beside the composer guard, chosen over deriving the probe from the middle of the free band because it keeps the probe at the one pixel the stylesheet note is about and makes a tighter pitch red the row naming the pitch, where before it produced a 5 s actionability timeout on the lower anchor that the comment beside the padding check teaches a reader to read as the padding being gone.",
     "Round 2 of implementing answered the reviewer's three findings and nothing else: the wall-clock settle and the three copies of the seeded-link lookup stay as they are, because the reviewer and the architect both put them in a follow-up pull request on packages/dispatch/e2e/.",
     "A markdown body takes its font size and line height from whatever wraps it (.dispatch-markdown sets both to inherit), so any pitch measurement must use the call site's own wrapper classes: AskCard.tsx:522 is text-[15px] leading-relaxed font-medium, not the text-sm its other paragraphs use. Measuring a fixture in the wrong wrapper is what put 14px/20px in the first version of the note, the pull request table and dispatch://INFRA-95's enumeration comment; all three are corrected, and dispatch://INFRA-304 is being corrected at its source by the controller.",
     "WebKit does not run in this pod, correcting an earlier sentence of this handoff: bun run e2e:install downloads the build and bunx playwright screenshot --browser webkit about:blank still refuses with 'Host system is missing dependencies' (libgtk-4.so.1, libgstreamer-1.0.so.0, libflite.so.1 and more) and writes no file, while the same command on firefox writes one. A pod run covers chromium and the iphone profile (and firefox's four specs); WebKit coverage comes from CI's dispatch job.",
@@ -74,7 +84,8 @@
     "The hundred-tap measurement does not merge, as plan Q2 defaults; the architect's amendment to merge one permanent reader-level assertion is kept as the single locator.tap at the padded point inside the row, which costs about 0.1 s.",
     "The two hit tests the plan described as document.elementFromPoint probes are Playwright trial clicks, at the architect's direction after the plan was written (https://playwright.dev/docs/actionability). The claim that nothing sits on the word before a wrapped link stays a hand-made hit test, since a trial click cannot express it.",
     "Plan T3b's instrumentation and T5's measurement rows were a throwaway spec file (e2e/infra95-probe.e2e.ts); it is deleted, and a copy is kept outside the repository at /legion/scratch/infra-95/infra95-probe.e2e.ts.kept for whoever re-measures.",
-    "The reviewer's two Minors (lift the settle onto the suite's frame-based convention in deep-links.e2e.ts:112-163, and build the upperLink locator once instead of writing the lookup three times) are its own Fast-follow item and the architect confirmed they stay out of this round; they are a follow-up pull request on packages/dispatch/e2e/."
+    "The reviewer's two Minors (lift the settle onto the suite's frame-based convention in deep-links.e2e.ts:112-163, and build the upperLink locator once instead of writing the lookup three times) are its own Fast-follow item and the architect confirmed they stay out of this round; they are a follow-up pull request on packages/dispatch/e2e/.",
+    "Review round 2's two hardening minors are not taken here: the reviewer wrote 'nothing to do in this round' on the expect.poll catch and the architect confirmed that nothing but the two findings moves. They are named in the review body and belong to the follow-up pull request with the settle and the lookup."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
