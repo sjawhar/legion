@@ -1105,18 +1105,96 @@ relaunch does.
 `legion.yaml`'s `resources` takes one `issue` entry in place of the per-role entries
 ([Configuration](#configuration)).
 
-To roll this release back, stop its daemon, restore that dump, and re-pin the earlier daemon and
-its worker image together; work done under this release since the upgrade is not in the dump.
-Re-pinning without the restore does not boot. Migration 0051 has no down migration, and the
-earlier release cannot read what it wrote:
+To roll this release back, the database and every issue Sandbox both go back to what the earlier
+release reads. Re-pinning alone boots neither:
 
-- it refuses an issue pod's locator naming the container `roles`
-  (`sandbox container "roles" does not match claim role`, `Locator.Validate` in
-  `internal/runtime/locator.go` before contract 36), which it reads as it loads its claims, so
-  its boot fails at the first issue pod's claim;
-- nothing refuses the newer schema first: its `Migrate` applies the migrations it has not recorded
-  and compares nothing against the version the database is at (`internal/store/store.go`), so it
-  reaches that claim before anything names the schema.
+- Migration 0051 has no down migration, and the earlier release cannot read what it wrote: it
+  refuses an issue pod's locator naming the container `roles` (`sandbox container "roles" does not
+  match claim role`, `Locator.Validate` in `internal/runtime/locator.go` before contract 36), which
+  it reads as it loads its claims. Nothing refuses the newer schema first: its `Migrate` applies
+  the migrations it has not recorded and compares nothing against the version the database is at
+  (`internal/store/store.go`).
+- Before it opens the database at all, its boot census refuses every issue Sandbox whose template
+  is not exactly the six role containers (`legacyIssueSandbox` in
+  `internal/runtime/sandbox/install.go` before contract 36): `legacy issue Sandbox <name> runs
+  containers [roles], not exactly the launchers its labels name [architect implementer merger
+  planner reviewer tester]`. Every Sandbox this release launched a pod into has the one-container
+  template, Suspended or not, and restoring the dump changes no Sandbox.
+
+Deleting such a Sandbox is not the way back: its issue's volume (`issue-<Sandbox name>`) is owned
+by it as controller with `blockOwnerDeletion`, so an ordinary delete takes the volume, and the
+sessions on it, with it. Rewrite each Sandbox's template in place instead, which keeps the Sandbox,
+its uid and so its volume. In this order:
+
+1. **Stop this release's daemon** (scale its Deployment to zero, or `legion stop`), so nothing
+   launches into a Sandbox while it is rewritten.
+2. **Restore the dump** taken before the upgrade.
+3. **Return every one-container issue Sandbox to the earlier layout's template.** With
+   `<namespace>` and `<project>` as in [Upgrading a deployment with running
+   trees](#upgrading-a-deployment-with-running-trees) step 4, each patch suspends the Sandbox, which
+   ends its pod, and replaces its containers with the six role names alone; its fence (`test`) makes
+   a rerun refuse a Sandbox it already rewrote:
+
+   ```sh
+   kubectl -n <namespace> get sandboxes -l 'legion.dev/project=<project>,legion.dev/issue' \
+     -o jsonpath='{range .items[?(@.spec.podTemplate.spec.containers[0].name=="roles")]}{.metadata.name}{"\n"}{end}' |
+   while read -r name; do
+     kubectl -n <namespace> patch sandbox "$name" --type json -p '[
+       {"op": "test", "path": "/spec/podTemplate/spec/containers/0/name", "value": "roles"},
+       {"op": "replace", "path": "/spec/operatingMode", "value": "Suspended"},
+       {"op": "replace", "path": "/spec/podTemplate/spec/containers", "value": [
+         {"name": "architect"}, {"name": "planner"}, {"name": "implementer"},
+         {"name": "tester"}, {"name": "reviewer"}, {"name": "merger"}]}]'
+     kubectl -n <namespace> wait --for=delete "pod/$name" --timeout=5m
+   done
+   ```
+
+   Each prints `sandbox.agents.x-k8s.io/<name> patched` and `pod/<name> condition met`. The
+   template is only what the census reads: the earlier release's next launch into the Sandbox
+   writes its whole pod template before it sets it running (`relaunch` in
+   `internal/runtime/sandbox/relaunch.go`), as for any Suspended Sandbox. The controller's Sandbox
+   (one `controller` container in both releases), a repository cache's and the image probe's carry
+   no `legion.dev/issue` label and are left as they are.
+4. **Keep the volume of an issue the dump does not hold, if it is wanted.** An issue Sandbox made
+   after the dump was taken (`kubectl -n <namespace> get sandboxes -l
+   'legion.dev/project=<project>,legion.dev/issue' --sort-by=.metadata.creationTimestamp`) belongs
+   to a tree the restored database never recorded, so the earlier release's orphan sweep deletes it
+   and its volume (`ReconcileOrphans` in `internal/runtime/sandbox/sandbox.go`). To keep the volume,
+   delete that Sandbox with `kubectl -n <namespace> delete sandbox <name> --cascade=orphan`: the
+   volume stays, with no owner and Agent Sandbox's `agents.x-k8s.io/sandbox-name-hash` label, and
+   when the issue is admitted again the Sandbox the earlier release makes under the same name adopts
+   it, clone and session files as they were.
+5. **Check that nothing is left**: the `get sandboxes` query of step 3, without the loop, prints
+   nothing.
+6. **Re-pin the earlier daemon and its worker image together**, and start the daemon.
+
+The earlier release then boots: its census passes, and it loads the restored claims. Each claim
+the dump records as running names a pod that is gone, so the daemon logs `supervise: process died`
+with `no pod of sandbox <name> (operatingMode Suspended; Suspended=True PodTerminated)` (or `the
+process ended with a pod the daemon replaced; relaunching it uncharged`, for a claim whose old pod
+this release replaced, which the Sandbox's `legion.dev/displaced-pod` still names) and resumes the
+claim's recorded session in a new pod of six containers on the same volume. A Gone charges one
+launch failure, which the agent's becoming ready clears (`ready` in `internal/supervise/table.go`),
+and a death only when the claim had a task outstanding.
+
+What the rollback loses is what the dump does not hold: the workflow's progress since the upgrade
+(phases, deliveries, records), and every claim this release first launched, whose role starts
+fresh when the workflow next needs it, its session file left unused on the volume. Under
+`session_store: pvc` no session file is lost: they live on the issue's volume, which neither the
+restore nor step 3 touches, and a resumed claim continues its file with every turn it took under
+this release. Under `session_store: postgres`, a restore into the database Oh My Pi's two tables
+(`omp_session_files`, `omp_session_files_parts`) live in rewinds those tables to the dump as well,
+so every resumed conversation loses its turns since the upgrade; leave the two tables out of the
+restore to keep them. An issue whose Sandbox this release released, at the issue's close or its
+tree's cleanup, has no volume left to return; the earlier release, which still records it running,
+finds its volume lost and relaunches its roles as fresh sessions ([Volume
+retention](#volume-retention)).
+
+Steps 3 and 4 were run against Agent Sandbox v1.0.3 on a scratch cluster, with the earlier
+release's census itself as the check: before step 3 it refused the one-container Sandbox as
+above; after it, it passed, and the Sandbox kept its uid and its volume, owned by it, with the
+file the `roles` container had written; a Sandbox deleted with `--cascade=orphan` and made again
+under its name adopted the same volume (same uid), file included.
 
 ### Contract discipline
 
