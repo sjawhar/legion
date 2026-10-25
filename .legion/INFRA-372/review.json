@@ -1,0 +1,25 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-372",
+  "completed": "2026-10-25T09:18:30Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "fc8dc19f9059f614a60a0e420f6375cfb659f0c0",
+  "critical": 0,
+  "important": 1,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md",
+      "description": "The architect's ruling dispatch://INFRA-372/comment/bc0d7f4a-58b4-4598-b529-9f6e1c86005b (09:02Z, after the plan) widened this issue by one item: the section's three gate commands (`kubectl auth can-i create jobs`, `create services`, `get services`, lines 2670-2674 at the head) carry no namespace flag. The pull request does not carry it: the three commands are unchanged, and the paragraph after them still says `so no command here passes -n` (lines 2699-2701), which the fix must reconcile. Required by the ruling: add `-n` with a placeholder namespace in the page's `<namespace>` register (never the literal), one clause saying why, and the three-way proof (bare, `-n` the workload's namespace, `-n` the role pod's own namespace) quoted. The acceptance check (check_clauses.py) must be widened, since it refuses any third edit."
+    }
+  ],
+  "clausesVerified": [
+    "Clause 1 (docs/kubernetes.md reason paragraph): only the first reason changed and is named, dated to INFRA-221's merge 2026-10-25 (#2149 mergedAt 08:39:30Z), the five clients and python3 are installed at worker.Dockerfile:517 and run by its check step at :646; the other two reasons and 'What it proves...' are word for word; both anchors resolve.",
+    "Clause 2 (AGENTS.md): the 'Run a database' row now points at the tool row and the tool row points back; #2182's middle sentence kept; no other line moved."
+  ],
+  "ci": "At code head fc8dc19f9059 (compare to f4ecdc25 changes only .legion/): required lint, typecheck, test, pr-title all queued at 09:17Z, none red; Release Packages run 40177490116 (main image of 6ede52ccb376) still queued. Not waited on: the request for changes stands whatever CI says.",
+  "thermonuclear": "not run: docs-only diff",
+  "threads": "none on the pull request"
+}
