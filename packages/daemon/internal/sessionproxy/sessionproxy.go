@@ -50,18 +50,17 @@ type Config struct {
 }
 
 // Proxy is a started session database proxy: a bound socket, a dialer whose credential path has
-// been proven once, and an accept loop that runs until Close or until the context ends.
+// been proven once, and an accept loop that runs until Close and nothing else. The context Start
+// was given bounds only the start; its owner decides when the proxy goes by calling Close.
 type Proxy struct {
 	instance string
 	listener net.Listener
 	dialer   Dialer
 
-	// cancel ends the context every per-connection dial uses, so Close never waits on a dial that
-	// has nobody left to serve.
+	// cancel ends the proxy's own serving context, which the dialer was built with and every
+	// per-connection dial uses, so the dialer's background work lives exactly as long as the proxy
+	// and Close never waits on a dial that has nobody left to serve. Close is its only caller.
 	cancel context.CancelFunc
-	// done is closed when Close begins, which releases the goroutine watching the caller's
-	// context.
-	done chan struct{}
 	// inFlight counts the accept loop and every connection it is still copying for.
 	inFlight sync.WaitGroup
 
@@ -77,6 +76,11 @@ type Proxy struct {
 // anything is dialed, so a start that loses the address to something else costs no credential
 // work, and the proof dial happens before Start returns, so the launcher never starts an agent
 // against a proxy that cannot reach the database.
+//
+// ctx bounds the start alone: a start whose ctx ends before the proof dial succeeds fails and
+// leaves nothing bound. Once Start returns, ctx no longer matters: the proxy serves until Close,
+// so its owner can keep it serving after ctx ends, as the launcher does through a child's stop
+// grace when the container is told to stop.
 func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 	if !filepath.IsAbs(cfg.Socket) {
 		return nil, fmt.Errorf("sessionproxy: Socket %q is not an absolute path", cfg.Socket)
@@ -96,14 +100,16 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 	if newDialer == nil {
 		newDialer = newConnectorDialer
 	}
-	runCtx, cancel := context.WithCancel(ctx)
+	// The serving context outlives ctx: it carries ctx's values and nothing of its cancellation, and
+	// only Close ends it.
+	runCtx, cancel := context.WithCancel(context.WithoutCancel(ctx))
 	dialer, err := newDialer(runCtx)
 	if err != nil {
 		cancel()
 		_ = listener.Close()
 		return nil, fmt.Errorf("sessionproxy: build the dialer for %s: %w", cfg.Instance, err)
 	}
-	proof, err := dialer.Dial(runCtx, cfg.Instance)
+	proof, err := dialer.Dial(ctx, cfg.Instance)
 	if err != nil {
 		cancel()
 		_ = listener.Close()
@@ -117,30 +123,21 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 		listener: listener,
 		dialer:   dialer,
 		cancel:   cancel,
-		done:     make(chan struct{}),
 		log:      cfg.Log,
 	}
 	p.logf("sessionproxy: serving %s on %s", cfg.Instance, cfg.Socket)
 	p.inFlight.Add(1)
 	go p.accept(runCtx)
-	// The launcher's shutdown path is not the only one: a cancelled context stops the proxy too.
-	go func() {
-		select {
-		case <-ctx.Done():
-			_ = p.Close()
-		case <-p.done:
-		}
-	}()
 	return p, nil
 }
 
 // Close stops accepting, releases the dialer and returns once every connection the proxy was
-// copying for has finished. A second call is a no-op that returns nil.
+// copying for has finished. It is the only way a started proxy ends. A second call is a no-op that
+// returns nil.
 func (p *Proxy) Close() error {
 	first := false
 	p.closeOnce.Do(func() {
 		first = true
-		close(p.done)
 		err := p.listener.Close()
 		if dialerErr := p.dialer.Close(); err == nil {
 			err = dialerErr

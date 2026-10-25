@@ -60,7 +60,9 @@ const reconnectDelay = time.Second
 
 // Run serves launcher commands until ctx ends. A stopped child is reported, never restarted by
 // the launcher: the daemon owns generations and decides whether a new generation should start.
-// Only ctx's end (the container's SIGTERM) stops the child the launcher owns.
+// Only ctx's end (the container's SIGTERM) stops the child the launcher owns, and Run returns only
+// once that child's generation has ended (stopActive): its child given its stop grace, and its
+// session database proxy, which served it through that grace, closed.
 func Run(ctx context.Context, cfg Config) error {
 	if cfg.StopGrace == 0 {
 		cfg.StopGrace = 30 * time.Second
@@ -234,7 +236,8 @@ type child struct {
 	pid        int
 	dir        string
 	// proxy is the generation's session database proxy, nil when no session database is
-	// configured. It belongs to the generation and stops with it.
+	// configured. It belongs to the generation: it outlives the child it serves, through the
+	// child's stop grace however the stop arrives, and is closed once the child has exited (wait).
 	proxy *sessionproxy.Proxy
 	done  chan struct{}
 }
@@ -345,12 +348,17 @@ func (m *manager) remember(id string, body []byte, result shimwire.Frame) {
 	m.requests[id] = request{body: body, result: result}
 }
 
+// wait ends a generation once its child has exited. The generation's proxy is closed only then, so
+// the child is served through the whole of its stop grace however the stop arrives, the daemon's
+// stop or the container's own SIGTERM; and only after cleanExitedGeneration, so no process of the
+// generation left behind still holds a connection Close would wait on. It is closed before the
+// generation's directory goes, so nothing is left listening over a socket that has been removed,
+// and between generations nothing is bound at all. active.done is closed last, so endGeneration,
+// and with it Run's stopActive, returns only once the proxy is closed.
 func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	err := cmd.Wait()
 	m.cleanExitedGeneration()
 	exit := exitOf(err, active.generation)
-	// The generation's proxy stops before its directory goes, so nothing is left listening over a
-	// socket that has been removed, and between generations nothing is bound at all.
 	if active.proxy != nil {
 		_ = active.proxy.Close()
 	}
@@ -473,6 +481,10 @@ func writeCredential(path, content string) error {
 // (ompsessions.Endpoint); with no session database it is "", and the launcher looks a resume up
 // through the pointer the child's environment carries instead. A failure leaves nothing bound and
 // names the generation; its caller removes the directory.
+//
+// ctx bounds the proxy's start alone, so a start still in progress when the container is told to
+// stop is abandoned. A started proxy ignores ctx: it serves until the generation's own end closes
+// it (wait), which lets it serve the child through its stop grace after ctx has ended.
 func (m *manager) startSession(ctx context.Context, generation uint64, dir string) (*sessionproxy.Proxy, string, error) {
 	if m.cfg.SessionDatabase == (ompsessions.Database{}) {
 		return nil, "", nil

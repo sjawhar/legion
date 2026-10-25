@@ -749,6 +749,76 @@ func TestASessionDatabaseIsHeldForItsGenerationAndNothingBetween(t *testing.T) {
 	ended(7, second, secondFile)
 }
 
+// On the container's shutdown a generation's session database outlives its child and no longer: a
+// wedged agent that ignores SIGTERM is still served through its stop grace, is killed at the grace,
+// and only then is its proxy closed and its directory removed, before Run returns. The proxy's
+// lifetime is the child's plus the generation's own cleanup, bounded by the grace, never the
+// container's context.
+func TestOnTheContainersShutdownASessionDatabaseEndsOnceItsWedgedChildIsKilled(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	const grace = 500 * time.Millisecond
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build, StopGrace: grace})
+	ready := filepath.Join(t.TempDir(), "ready")
+	// An ignored signal stays ignored across fork and exec, so neither the shell nor its sleeps
+	// answer SIGTERM: only the SIGKILL at the grace ends the generation.
+	start := shimwire.LauncherStart{
+		ID: "start-1", Generation: 1,
+		Argv: []string{"/bin/sh", "-c", `trap '' TERM; printf '%s ' "$$" > "$READY.tmp" && mv "$READY.tmp" "$READY"; while :; do sleep 0.05; done`},
+		Env:  []string{"READY=" + ready},
+	}
+	if got := g.start(start); !got.OK {
+		t.Fatalf("start result = %#v", got)
+	}
+	pid, _ := published(t, ready)
+	dir := g.generationDir(1)
+	socket := filepath.Join(dir, ompsessions.SocketName)
+	upstreamDials := func() int {
+		dialer.mu.Lock()
+		defer dialer.mu.Unlock()
+		return len(dialer.dials)
+	}
+	before := upstreamDials()
+
+	g.cancel()
+	stopped := time.Now()
+	conn, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatalf("the session socket refused a dial during the wedged child's stop grace: %v", err)
+	}
+	_ = conn.Close()
+	deadline := time.Now().Add(5 * time.Second)
+	for upstreamDials() == before {
+		if time.Now().After(deadline) {
+			t.Fatal("the proxy accepted a connection during the stop grace but never dialed the upstream for it")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+
+	select {
+	case err := <-g.result:
+		// The rig's cleanup reads the result too.
+		g.result <- err
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Run = %v, want the container's shutdown", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run did not return after the wedged child's stop grace")
+	}
+	if waited := time.Since(stopped); waited < grace {
+		t.Fatalf("Run returned %s after the shutdown, inside the %s grace a child ignoring SIGTERM is owed", waited, grace)
+	}
+	if !gone(pid) {
+		t.Fatalf("the wedged child %d outlived its stop grace", pid)
+	}
+	if conn, err := net.Dial("unix", socket); err == nil {
+		_ = conn.Close()
+		t.Fatal("the session socket is still served after Run returned")
+	}
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the generation's directory outlived Run: %v", err)
+	}
+}
+
 // The connection file a generation's agent reads is the agent's own spelling of that generation's
 // endpoint — the socket as the URL's path, where the launcher's own client names its directory —
 // and carries no password at all: the login travels in the proxy's certificate exchange.

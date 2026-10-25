@@ -413,7 +413,11 @@ func TestCloseEndsTheProxy(t *testing.T) {
 	}
 }
 
-func TestCancellingTheContextStopsTheProxy(t *testing.T) {
+// The context a proxy was started with bounds its start and nothing after: once Start has returned,
+// cancelling it leaves the proxy serving, with its dialer open and every connection still dialed
+// upstream, and only Close ends it. The launcher relies on this to serve a child through its stop
+// grace when the container is told to stop and the context it started the proxy with is gone.
+func TestCancellingTheContextLeavesAStartedProxyServingUntilClose(t *testing.T) {
 	up := newUpstream(t)
 	dialer := &fakeDialer{addr: up.listener.Addr().String()}
 	socket := socketPath(t)
@@ -421,23 +425,66 @@ func TestCancellingTheContextStopsTheProxy(t *testing.T) {
 	proxy := startProxy(ctx, t, up, dialer, socket)
 
 	cancel()
+	// Long enough for anything that watched the context to have acted on it.
+	time.Sleep(100 * time.Millisecond)
 
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		conn, err := net.Dial("unix", socket)
-		if err != nil {
-			break
-		}
-		_ = conn.Close()
-		if time.Now().After(deadline) {
-			t.Fatal("the proxy still accepts connections after its context ended")
-		}
-		time.Sleep(10 * time.Millisecond)
+	client, err := net.Dial("unix", socket)
+	if err != nil {
+		t.Fatalf("dial the proxy after its start context ended: %v", err)
 	}
+	defer client.Close()
+	writeAll(t, client, "last write")
+	server := up.next(t)
+	if got := readString(t, server, len("last write")); got != "last write" {
+		t.Fatalf("the upstream read %q", got)
+	}
+	writeAll(t, server, "written")
+	if got := readString(t, client, len("written")); got != "written" {
+		t.Fatalf("the client read %q", got)
+	}
+	if got := dialer.closeCount(); got != 0 {
+		t.Fatalf("the dialer was closed %d times while the proxy still served", got)
+	}
+
+	_ = client.Close()
 	if err := proxy.Close(); err != nil {
-		t.Fatalf("Close after the context ended: %v", err)
+		t.Fatalf("Close: %v", err)
+	}
+	if conn, err := net.Dial("unix", socket); err == nil {
+		_ = conn.Close()
+		t.Fatal("the proxy still accepts connections after Close")
 	}
 	if got := dialer.closeCount(); got != 1 {
-		t.Fatalf("the dialer was closed %d times", got)
+		t.Fatalf("Close closed the dialer %d times", got)
 	}
+}
+
+// A start whose context has already ended is refused: its proof dial cannot succeed, so nothing is
+// left bound at the socket path and the dialer it built is closed.
+func TestStartRefusesWhenItsContextHasEnded(t *testing.T) {
+	up := newUpstream(t)
+	dialer := &fakeDialer{addr: up.listener.Addr().String()}
+	socket := socketPath(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	_, err := Start(ctx, Config{
+		Socket:    socket,
+		Instance:  testInstance,
+		NewDialer: dialer.build,
+	})
+	if err == nil {
+		t.Fatal("Start served although its context had ended")
+	}
+	if !strings.Contains(err.Error(), testInstance) {
+		t.Fatalf("the error does not name the instance: %v", err)
+	}
+	if got := dialer.closeCount(); got != 1 {
+		t.Fatalf("a refused Start closed the dialer %d times", got)
+	}
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatalf("the socket path is still held after a refused Start: %v", err)
+	}
+	_ = listener.Close()
 }

@@ -700,9 +700,15 @@ is closed and the generation's directory removed, so nothing is left bound and n
 disk (`endSession`). An agent never runs against a proxy that cannot reach the database, because
 the proof dial happens before the proxy's start returns.
 
-The connection belongs to the generation, not to the pod. When the child exits, the proxy stops
-before the generation's directory goes, so nothing is left listening over a socket that has been
+The connection belongs to the generation, not to the pod. The proxy keeps serving through the
+child's stop grace however the stop arrives — the daemon's stop or the container's own SIGTERM — so
+the session writes the agent makes while it shuts down are served: the context the launcher starts
+the proxy with bounds only its start, and once started the proxy ends only when it is closed
+(`sessionproxy.Start`). It is closed once the child, and in the pod the generation's leftover
+processes (`cleanExitedGeneration`), have exited, and before the generation's directory goes, so
+the launcher exits with nothing bound, nothing is left listening over a socket that has been
 removed, and between generations nothing is bound and no connection file exists (`manager.wait`).
+The child's stop grace bounds how long that takes: a child that ignores SIGTERM is killed at it.
 The next generation binds a socket and writes a file of its own.
 
 That URL carries a login and no password, because the credential is the pod's own cloud identity:
