@@ -316,7 +316,10 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
     }
   }
 
-  const writeToSession = (text: string, what: string): void => {
+  /** Writes `text` into the session over the bridge's inbox, and settles as the inbox does: it
+   * rejects when the bridge did not queue the line. A session with no inbox says so and writes
+   * nothing, and that is no failure: no later attempt could reach the worker either. */
+  const writeToSession = async (text: string, what: string): Promise<void> => {
     const { inbox } = deps
     if (inbox === undefined) {
       deps.log.warn(`legion: ${what} has no way to reach this worker: this session has no inbox`, {
@@ -324,14 +327,14 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
       })
       return
     }
-    void inbox(text).catch((error: unknown) => {
-      deps.log.warn(`legion: ${what} did not reach this worker`, { error: messageFor(error) })
-    })
+    await inbox(text)
   }
 
-  const sendReminder = (text: string): void => {
+  // The inbox's failure goes back to the runner, which logs it, uncounts the reminder and arms
+  // the next one: no turn starts on a line the bridge did not take, so no `Stop` would.
+  const sendReminder = (text: string): Promise<void> => {
     lastReminder = text
-    writeToSession(text, "a phase reminder")
+    return writeToSession(text, "a phase reminder")
   }
 
   const reminder = createPhaseReminder({
@@ -372,7 +375,13 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
     recreatedNoticeSent = true
     saveRecord(entry)
     noteWritten(notice.content)
-    writeToSession(notice.content, "the recreated-workspace notice")
+    void writeToSession(notice.content, "the recreated-workspace notice").catch(
+      (error: unknown) => {
+        deps.log.warn("legion: the recreated-workspace notice did not reach this worker", {
+          error: messageFor(error),
+        })
+      },
+    )
   }
 
   void deps.booted.then(() => {

@@ -1937,18 +1937,26 @@ describe("Legion OMP extension", () => {
       expect(recorded(resumed)).toEqual([]);
     });
 
-    // `quiet` is what the build now in the pods records for an open phase nothing has been
-    // reminded about, so a session resumed on one is reminded rather than left alone.
-    test("a resume on the state the deployed build wrote stands at an open phase with nothing counted", async () => {
-      const branch = branchAt({ state: "quiet" });
-      expect(restorePhaseStallEntry(branch)).toEqual({ state: "open", count: 0, reported: false });
+    // `quiet` and `text-call` are what the build now in the pods records for an open phase nothing
+    // has been reminded about, so a session resumed on either is reminded rather than left alone.
+    for (const deployed of ["quiet", "text-call"]) {
+      test(`a resume on the ${deployed} state the deployed build wrote stands at an open phase with nothing counted`, async () => {
+        const branch = branchAt({ state: deployed });
+        expect(restorePhaseStallEntry(branch)).toEqual({
+          state: "open",
+          count: 0,
+          reported: false,
+        });
 
-      const resumed = await bootStalling({ branch });
+        const resumed = await bootStalling({ branch });
 
-      expect(resumed.timers.map((timer) => timer.delayMs)).toEqual([DEFAULT_STALL_LIMITS.resumeMs]);
-      // The count came back at zero, so the next settle is answered by the run's continuation.
-      expect(await resumed.settles("Picking it up again.")).toEqual(followUp("handoff_complete"));
-    });
+        expect(resumed.timers.map((timer) => timer.delayMs)).toEqual([
+          DEFAULT_STALL_LIMITS.resumeMs,
+        ]);
+        // The count came back at zero, so the next settle is answered by the run's continuation.
+        expect(await resumed.settles("Picking it up again.")).toEqual(followUp("handoff_complete"));
+      });
+    }
 
     test("a record whose phase is no longer this role's silences the reminder", async () => {
       // The shape of a worker that completed its phase from the shell instead of the tool: the

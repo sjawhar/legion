@@ -1,7 +1,8 @@
 /**
  * The four numbers the endless phase reminder runs on (`src/phase-reminder.ts`), read from the
- * worker's own environment. Nothing in the daemon sets them: the defaults below are production's,
- * and a variable is there only so a deployment, or a test, can move one.
+ * worker's own environment. The daemon passes each `LEGION_STALL_*` its own environment holds on
+ * to the worker, and the defaults below, production's, apply to every one it does not hold: a
+ * variable is there only so a deployment, or a test, can move one.
  */
 
 export interface StallLimits {

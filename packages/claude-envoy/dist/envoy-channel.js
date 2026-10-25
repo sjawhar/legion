@@ -48245,6 +48245,7 @@ function createPhaseReminder(deps) {
       return;
     }
     reportKey ??= randomUUID2();
+    const key = reportKey;
     writeEntry();
     const phase = record3?.phase ?? "unknown";
     const reminders = stall.count;
@@ -48261,9 +48262,11 @@ function createPhaseReminder(deps) {
           reminders,
           lastMessage
         }),
-        idempotencyKey: reportKey,
+        idempotencyKey: key,
         sourceSessionID: claim.sessionID
       });
+      if (reportKey !== key)
+        return;
       reported = true;
       writeEntry();
     } catch (error48) {
@@ -48282,9 +48285,25 @@ function createPhaseReminder(deps) {
     }
   };
   const deliver = async (reminder, record3) => {
+    const uncounted = stall;
     advance({ kind: "reminded" });
+    const counted = stall;
     generation += 1;
-    deps.sendReminder(reminder);
+    const sentAt = generation;
+    try {
+      await deps.sendReminder(reminder);
+    } catch (error48) {
+      deps.log.warn("legion: a phase reminder did not reach this worker; it comes again later", {
+        error: messageFor(error48)
+      });
+      if (stall === counted) {
+        stall = uncounted;
+        writeEntry();
+      }
+      if (generation === sentAt)
+        armReminder(reminder, deps.limits.reminderMs);
+      return;
+    }
     if (reported || stall.count < deps.limits.architectAfter)
       return;
     await tellArchitect(record3);
@@ -48532,7 +48551,7 @@ function createPhaseHookEndpoint(deps) {
       written.delete(oldest);
     }
   };
-  const writeToSession = (text, what) => {
+  const writeToSession = async (text, what) => {
     const { inbox } = deps;
     if (inbox === undefined) {
       deps.log.warn(`legion: ${what} has no way to reach this worker: this session has no inbox`, {
@@ -48540,13 +48559,11 @@ function createPhaseHookEndpoint(deps) {
       });
       return;
     }
-    inbox(text).catch((error48) => {
-      deps.log.warn(`legion: ${what} did not reach this worker`, { error: messageFor(error48) });
-    });
+    await inbox(text);
   };
   const sendReminder = (text) => {
     lastReminder = text;
-    writeToSession(text, "a phase reminder");
+    return writeToSession(text, "a phase reminder");
   };
   const reminder = createPhaseReminder({
     sendReminder,
@@ -48569,7 +48586,11 @@ function createPhaseHookEndpoint(deps) {
     recreatedNoticeSent = true;
     saveRecord(entry);
     noteWritten(notice.content);
-    writeToSession(notice.content, "the recreated-workspace notice");
+    writeToSession(notice.content, "the recreated-workspace notice").catch((error48) => {
+      deps.log.warn("legion: the recreated-workspace notice did not reach this worker", {
+        error: messageFor(error48)
+      });
+    });
   };
   deps.booted.then(() => {
     const claim = deps.claim();

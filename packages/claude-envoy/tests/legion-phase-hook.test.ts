@@ -77,6 +77,8 @@ async function harness(
     readonly env?: Record<string, string | undefined>
     /** False for a session outside a Legion pane, which has no inbox at all. */
     readonly inbox?: boolean
+    /** What the bridge answers the `attempt`th inbox write; queued by default. */
+    readonly inboxAnswer?: (attempt: number) => Promise<void>
     /** What the listener answers the `attempt`th publish; accepted by default. */
     readonly publish?: (input: PublishInput, attempt: number) => Promise<unknown>
   } = {},
@@ -114,6 +116,7 @@ async function harness(
         ? undefined
         : async (text) => {
             inbox.push(text)
+            if (options.inboxAnswer !== undefined) await options.inboxAnswer(inbox.length)
           },
     publish: async (input) => {
       published.push(input)
@@ -618,21 +621,25 @@ test("a launcher that recreated nothing sends no notice and records no key", asy
   }
 })
 
-test("a record the deployed build wrote reads as an open phase with no reminders yet", async () => {
-  const { endpoint, record, close } = await harness({
-    record: JSON.stringify({ state: "quiet" }),
-    claim: implementer,
-  })
-  try {
-    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "" })).toEqual({
-      decision: "block",
-      reason: REMINDER,
+// `quiet` and `text-call` are what the build now in the pods records for an open phase nothing has
+// been reminded about, so a session resumed on either is reminded rather than left alone.
+for (const deployed of ["quiet", "text-call"]) {
+  test(`a record the deployed build wrote as ${deployed} reads as an open phase with no reminders yet`, async () => {
+    const { endpoint, record, close } = await harness({
+      record: JSON.stringify({ state: deployed }),
+      claim: implementer,
     })
-    expect(await record()).toEqual({ state: "open", count: 1, reported: false })
-  } finally {
-    await close()
-  }
-})
+    try {
+      expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "" })).toEqual({
+        decision: "block",
+        reason: REMINDER,
+      })
+      expect(await record()).toEqual({ state: "open", count: 1, reported: false })
+    } finally {
+      await close()
+    }
+  })
+}
 
 test("a session holding no claim, as the bridge's seeding /rename turn does, is never reminded", async () => {
   const { endpoint, record, close } = await harness({ record: recorded("open", 0) })
@@ -698,6 +705,37 @@ test("a session outside a Legion pane has no inbox, and says so rather than losi
       async () => lines.some((line) => line.includes("has no way to reach this worker")),
       "the log line naming the missing inbox",
     )
+  } finally {
+    await close()
+  }
+})
+
+// No turn starts on a line the bridge did not queue, so no `Stop` would arm the next reminder: the
+// failed one is not counted, and the reminder is written again from the timer.
+test("an inbox write the bridge refused is not counted, and the reminder comes again", async () => {
+  const { endpoint, record, inbox, lines, close } = await harness({
+    record: recorded("open", 1),
+    claim: implementer,
+    inboxAnswer: async (attempt) => {
+      if (attempt === 1) throw new Error("the bridge did not queue the line")
+    },
+  })
+  try {
+    expect(await endpoint.handle({ event: "Stop", lastAssistantMessage: "Still here." })).toEqual(
+      {},
+    )
+    await waitFor(async () => inbox.length === 2, "the refused reminder to be written again")
+    expect(inbox).toEqual([REMINDER, REMINDER])
+    expect(lines.some((line) => line.includes("a phase reminder did not reach this worker"))).toBe(
+      true,
+    )
+    // One reminder reached the worker, so one is counted on top of the restored count.
+    expect(await record()).toEqual({
+      state: "open",
+      count: 2,
+      reported: false,
+      lastMessage: "Still here.",
+    })
   } finally {
     await close()
   }

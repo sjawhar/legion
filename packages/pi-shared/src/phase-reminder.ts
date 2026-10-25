@@ -40,8 +40,12 @@ export interface PhaseReminderLog {
 
 export interface PhaseReminderDeps {
   /** Puts one reminder in front of the worker and starts a turn on it (`pi.sendMessage` with the
-   * `legion-phase-reminder` custom type, steered, triggering a turn). */
-  readonly sendReminder: (reminder: string) => void;
+   * `legion-phase-reminder` custom type, steered, triggering a turn). A host whose delivery can
+   * fail — the Claude Code host writes the reminder over the bridge's inbox — returns a promise
+   * that rejects when the reminder did not reach the worker: no turn starts on it, so no settle
+   * will arm the next one, and the runner uncounts it and arms the next itself. A host that cannot
+   * fail that way (Oh My Pi's `pi.sendMessage` is synchronous) returns nothing. */
+  readonly sendReminder: (reminder: string) => void | Promise<void>;
   /** The host's managed one-shot timer (`SessionContext.setTimeout`): it cannot be cancelled, so
    * every callback guards itself on the generation it was armed at. */
   readonly armTimer: (callback: () => void | Promise<void>, delayMs: number) => void;
@@ -223,7 +227,9 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
    * D6: one Envoy message to the issue's architect, when a delivered reminder brought the count to
    * the threshold. `reportKey` is minted at the first attempt of a run of reminders and kept until
    * the count resets, so a publish that timed out after the listener accepted it is not delivered
-   * twice, and a refusal leaves `reported` false for the next reminder to try again.
+   * twice, and a failure leaves `reported` false for the next reminder to try again. The key also
+   * names the run an acceptance belongs to: one that lands after the run ended acknowledges
+   * nothing.
    */
   const tellArchitect = async (record: LegionIssue | undefined): Promise<void> => {
     const claim = deps.claim();
@@ -237,6 +243,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       return;
     }
     reportKey ??= randomUUID();
+    const key = reportKey;
     writeEntry();
     const phase = record?.phase ?? "unknown";
     const reminders = stall.count;
@@ -264,9 +271,13 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
           reminders,
           lastMessage,
         }),
-        idempotencyKey: reportKey,
+        idempotencyKey: key,
         sourceSessionID: claim.sessionID,
       });
+      // The publish has no deadline of its own, so the worker's own turn may have reset the count
+      // while it was in flight, and a later run may have begun. That run has a key of its own, or
+      // none yet: this acceptance is not its notice.
+      if (reportKey !== key) return;
       reported = true;
       writeEntry();
     } catch (error) {
@@ -277,6 +288,11 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
         });
         return;
       }
+      // Any other failure — a 5xx, a 400 or 403, a timeout — leaves `reported` false too, and the
+      // next delivered reminder of this run publishes again under the same key. This departs from
+      // the spec's "logged and dropped" on purpose: the one key makes the retry safe against a
+      // publish the listener did accept, and a listener that is failing is exactly when the
+      // architect most needs telling.
       deps.log.warn("legion: the architect was not told its worker is stalled", {
         issue: claim.issue,
         reminders,
@@ -286,9 +302,29 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
   };
 
   const deliver = async (reminder: string, record: LegionIssue | undefined): Promise<void> => {
+    // Counted before it is sent, so a reminder the worker was given is never uncounted: a host
+    // whose turn starts inside `sendReminder` saves the count before the turn can move it.
+    const uncounted = stall;
     advance({ kind: "reminded" });
+    const counted = stall;
     generation += 1;
-    deps.sendReminder(reminder);
+    const sentAt = generation;
+    try {
+      await deps.sendReminder(reminder);
+    } catch (error) {
+      deps.log.warn("legion: a phase reminder did not reach this worker; it comes again later", {
+        error: messageFor(error),
+      });
+      // It reached no one, so it counts for nothing, unless the state has moved on since. No turn
+      // starts on it, so no settle arms the next one: this does, under the usual guard, unless
+      // something has happened since — a turn that started arms its own when it settles.
+      if (stall === counted) {
+        stall = uncounted;
+        writeEntry();
+      }
+      if (generation === sentAt) armReminder(reminder, deps.limits.reminderMs);
+      return;
+    }
     if (reported || stall.count < deps.limits.architectAfter) return;
     await tellArchitect(record);
   };
