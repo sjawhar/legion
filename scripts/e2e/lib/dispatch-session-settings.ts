@@ -781,7 +781,9 @@ class Browser {
         modelOptions: values(model),
         modelPicker: model !== null,
         notice: find("agent-settings-notice")?.textContent?.trim() ?? null,
-        pickersDisabled: model?.disabled === true || thinking?.disabled === true,
+        pickersDisabled: [model, thinking].some(
+          (select) => select?.disabled === true || select?.getAttribute("aria-disabled") === "true"
+        ),
         status: find("agent-switch-status")?.textContent?.trim() ?? null,
         thinking: shownThinking,
         thinkingOptions: values(thinking),

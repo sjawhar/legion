@@ -1,5 +1,12 @@
 import type { AgentStreamSettingsReported } from "@legion/contracts";
-import { type ReactNode, useMemo } from "react";
+import {
+  type ChangeEvent,
+  type KeyboardEvent,
+  type ReactNode,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { pillClassName } from "../../components/Pill";
 import { TruncatedText } from "../../components/TruncatedText";
@@ -9,8 +16,9 @@ import type { SwitchRequest } from "./use-session-switch";
 
 /** A header picker: a native `<select>`, as the composer's "Send as" control is. A long model id
  *  is clipped on screen only (the option's value, which a pick sends, is the whole id), so the
- *  header never runs wider than a phone. */
-const selectClasses = `min-h-8 max-w-56 min-w-0 truncate rounded-lg px-2 py-1 text-xs disabled:opacity-50 ${inputClasses(false)}`;
+ *  header never runs wider than a phone. A held picker (`aria-disabled`, `useKeySteps`) looks
+ *  disabled through the `refused:` variant (`styles.css`). */
+const selectClasses = `min-h-8 max-w-56 min-w-0 truncate rounded-lg px-2 py-1 text-xs refused:opacity-50 ${inputClasses(false)}`;
 
 /** The values a picker offers: the session's list, with the current value added when the list
  *  lacks it (a fallback model can be one the session does not list), so the picker always shows
@@ -53,12 +61,81 @@ function choice(value: string, selected: string | undefined, testId: string): Re
 }
 
 /**
+ * A header picker's choice: its change switches the live session, so the rule is the one the
+ * Agents issue picker keeps (`markKeyStep` in `AgentMessageComposer.tsx`). The select's own keys
+ * only move its choice, so a keyboard reader can pass one model to reach the next; `Enter` picks
+ * the choice reached (and stops there); a pick made with the pointer or in the native popup picks
+ * at once; and leaving the select without picking, or the session reporting a new value, puts it
+ * back on `reported`. Once not being stepped the select shows the reported value alone, a pick
+ * included: the header moves only when the session reports the switch.
+ *
+ * While `held` (a switch is pending) the select is `aria-disabled` rather than `disabled`, so it
+ * keeps focus and its keys still step its choice, but nothing picks: `Enter` and a pointer's or
+ * popup's pick send nothing, and the controlled select snaps back to the value it shows. A step
+ * taken while held survives the switch's end, so `Enter` then picks it.
+ *
+ * Whether a change is a key's step is told by the task it arrives in, not the key: every engine
+ * steps a closed select from the key event's own default action (the arrows, `Home`/`End` and the
+ * page keys from `keydown`, type-ahead from `keypress`) and dispatches `change` in that same task,
+ * while a pick made in a native popup a key opened arrives in a later task, as a pointer's does.
+ * So each key on the select marks the step and the next task clears the mark.
+ */
+function useKeySteps(
+  reported: string,
+  held: boolean,
+  pick: (value: string) => void
+): {
+  "aria-disabled": true | undefined;
+  onBlur: () => void;
+  onChange: (event: ChangeEvent<HTMLSelectElement>) => void;
+  onKeyDown: (event: KeyboardEvent<HTMLSelectElement>) => void;
+  onKeyPress: () => void;
+  value: string;
+} {
+  /** The reader's step, with the reported value it was taken from: a step from an older value is
+   *  dropped, so a new reported value resets the choice. */
+  const [step, setStep] = useState<{ from: string; value: string }>();
+  const movedByKeyboard = useRef(false);
+  const markKeyStep = () => {
+    movedByKeyboard.current = true;
+    setTimeout(() => {
+      movedByKeyboard.current = false;
+    }, 0);
+  };
+  const take = (value: string) => {
+    if (held) return;
+    setStep(undefined);
+    if (value !== reported) pick(value);
+  };
+  return {
+    "aria-disabled": held || undefined,
+    onBlur: () => setStep(undefined),
+    onChange: (event) => {
+      if (movedByKeyboard.current) setStep({ from: reported, value: event.target.value });
+      else take(event.target.value);
+    },
+    onKeyDown: (event) => {
+      if (event.key !== "Enter") {
+        markKeyStep();
+        return;
+      }
+      event.preventDefault();
+      take(event.currentTarget.value);
+    },
+    onKeyPress: markKeyStep,
+    value: step !== undefined && step.from === reported ? step.value : reported,
+  };
+}
+
+/**
  * The session's model and thinking level in the live view's header, and the pickers that switch
  * them (INFRA-195), with the line about the latest switch and the notice that says why a session
  * shows less. `view` is `sessionSettingsView`'s answer; a pick hands `onPick` what was picked, and
- * the page sends it. While a switch is pending the pickers are disabled. The values shown are the
- * session's reported ones alone: a picker snaps back to them, and moves only when the session
- * reports the switch.
+ * the page sends it. While a switch is pending the pickers are held (`aria-disabled`): they keep
+ * focus and their keys still step, but nothing picks until the switch ends. A picker's own keys
+ * only step its choice and `Enter` picks it (`useKeySteps`); the values shown, once not being
+ * stepped, are the session's reported ones alone: a picker snaps back to them, and moves only when
+ * the session reports the switch.
  *
  * The status and the notice sit on lines of their own at the header's end (`order-last`).
  */
@@ -131,17 +208,14 @@ function ModelPicker({
   pending: boolean;
 }): ReactNode {
   const { groups, loose } = useMemo(() => modelOptions(models, current), [models, current]);
+  const keySteps = useKeySteps(current ?? "", pending, (value) => onPick({ kind: "model", value }));
   return (
     <select
       aria-label="Model"
       className={selectClasses}
       data-testid="agent-model-picker"
-      disabled={pending}
-      onChange={(event) => {
-        if (event.target.value !== current) onPick({ kind: "model", value: event.target.value });
-      }}
+      {...keySteps}
       title={current}
-      value={current ?? ""}
     >
       {current === undefined ? (
         <option disabled value="">
@@ -171,6 +245,9 @@ function ThinkingControl({
   pending: boolean;
   thinking: AgentStreamSettingsReported["thinking"];
 }): ReactNode {
+  const keySteps = useKeySteps(thinking?.level ?? "", pending, (value) =>
+    onPick({ kind: "thinking", value })
+  );
   if (thinking === null) {
     return (
       <span className={`text-xs ${textMutedOnCanvas}`} data-testid="agent-session-thinking">
@@ -195,13 +272,7 @@ function ThinkingControl({
       aria-label="Thinking level"
       className={selectClasses}
       data-testid="agent-thinking-picker"
-      disabled={pending}
-      onChange={(event) => {
-        if (event.target.value !== thinking.level) {
-          onPick({ kind: "thinking", value: event.target.value });
-        }
-      }}
-      value={thinking.level ?? ""}
+      {...keySteps}
     >
       {thinking.level === null ? (
         <option data-testid="agent-session-thinking" disabled value="">

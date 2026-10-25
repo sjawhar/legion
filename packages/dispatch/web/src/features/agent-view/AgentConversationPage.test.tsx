@@ -694,6 +694,11 @@ function picker(name: "Model" | "Thinking level"): HTMLSelectElement {
   return screen.getByRole("combobox", { name }) as HTMLSelectElement;
 }
 
+/** Whether a pending switch holds the picker: `aria-disabled`, so it keeps focus and its keys. */
+function held(select: HTMLSelectElement): boolean {
+  return select.getAttribute("aria-disabled") === "true";
+}
+
 /** The composer's Send, which a pending switch holds. */
 function sendButton(): HTMLButtonElement {
   return within(screen.getByTestId("agent-composer")).getByRole("button", {
@@ -851,7 +856,7 @@ test("a pick sends /model or /effort as a Send whatever Send as says, the id unc
       replies: [sessionReply("switch-1", "Model set to custom/model@v2:high.")],
     },
   ]);
-  await waitFor(() => expect(picker("Thinking level").disabled).toBe(false));
+  await waitFor(() => expect(held(picker("Thinking level"))).toBe(false));
 
   fireEvent.change(picker("Thinking level"), { target: { value: "high" } });
   await waitFor(() =>
@@ -863,11 +868,87 @@ test("a pick sends /model or /effort as a Send whatever Send as says, the id unc
   expect(createAgentMessage).toHaveBeenCalledTimes(2);
 });
 
+/** A step from the select's own key: browsers dispatch `change` in the task of the key that
+ *  stepped the closed select, which is what tells it from a pick. */
+function stepWithKey(select: HTMLSelectElement, value: string): void {
+  fireEvent.keyDown(select, { key: "ArrowDown" });
+  fireEvent.change(select, { target: { value } });
+}
+
+// A keyboard reader passes a model to reach the next one: the picker's arrows only move its
+// choice, Enter switches once to the choice reached, and leaving the picker, or the session
+// reporting a new value, drops a choice not taken - the header never shows an unreported value
+// once not being stepped.
+test("a header picker's arrows switch nothing, Enter switches once, and leaving drops the step", async () => {
+  const createAgentMessage = spyOnSwitchSends();
+  const view = await renderWithPickers([settingsFrame(1), commandsFrame(2, SWITCHES)]);
+
+  const model = picker("Model");
+  stepWithKey(model, "openai/model-c");
+  stepWithKey(model, "anthropic/model-b");
+  await waitFor(() => expect(picker("Model").value).toBe("anthropic/model-b"));
+  await Bun.sleep(20);
+  expect(createAgentMessage).not.toHaveBeenCalled();
+  expect(screen.queryByTestId("agent-switch-status")).toBeNull();
+  expect(held(picker("Model"))).toBe(false);
+  // The shown value stays the reported one.
+  expect(screen.getByTestId("agent-session-model").textContent).toBe("anthropic/model-a");
+
+  // Leaving the picker without Enter puts it back on the reported model.
+  fireEvent.blur(picker("Model"));
+  await waitFor(() => expect(picker("Model").value).toBe("anthropic/model-a"));
+  expect(createAgentMessage).not.toHaveBeenCalled();
+
+  // A new reported value drops a step taken from the old one.
+  stepWithKey(picker("Thinking level"), "low");
+  await waitFor(() => expect(picker("Thinking level").value).toBe("low"));
+  view.frame(settingsFrame(3, { thinking: { level: "high", levels: ["auto", "low", "high"] } }));
+  await waitFor(() => expect(picker("Thinking level").value).toBe("high"));
+  expect(createAgentMessage).not.toHaveBeenCalled();
+
+  // Enter switches to the stepped choice, once.
+  stepWithKey(picker("Model"), "custom/model@v2:high");
+  fireEvent.keyDown(picker("Model"), { key: "Enter" });
+  await waitFor(() =>
+    expect(createAgentMessage).toHaveBeenCalledWith(SESSION, {
+      body: "/model custom/model@v2:high",
+      delivery: "steer",
+    })
+  );
+  expect(createAgentMessage).toHaveBeenCalledTimes(1);
+  expect((await screen.findByTestId("agent-switch-status")).textContent).toBe(
+    "Switching model to custom/model@v2:high…"
+  );
+  // The picker shows the reported model again until the session reports the switch.
+  expect(picker("Model").value).toBe("anthropic/model-a");
+});
+
+// A change no key on the select made - the pointer's, or a pick in the native popup - is a pick
+// made, and switches at once.
+test("a header picker's pointer change switches at once", async () => {
+  const createAgentMessage = spyOnSwitchSends();
+  await renderWithPickers([settingsFrame(1), commandsFrame(2, SWITCHES)]);
+
+  fireEvent.change(picker("Thinking level"), { target: { value: "low" } });
+  await waitFor(() =>
+    expect(createAgentMessage).toHaveBeenCalledWith(SESSION, {
+      body: "/effort low",
+      delivery: "steer",
+    })
+  );
+  expect(createAgentMessage).toHaveBeenCalledTimes(1);
+  expect((await screen.findByTestId("agent-switch-status")).textContent).toBe(
+    "Switching thinking level to low…"
+  );
+  expect(picker("Thinking level").value).toBe("auto");
+});
+
 // One switch at a time, and the person's next prompt from this page reaches the session only
 // after the switch answered. The header's values come from the session's frames alone, so the
-// reply and the frame may arrive in either order.
+// reply and the frame may arrive in either order. A held picker keeps focus, but no pick on it
+// switches.
 test("while a switch waits the pickers and Send hold, and its reply and frame land in either order", async () => {
-  spyOnSwitchSends();
+  const createAgentMessage = spyOnSwitchSends();
   const view = await renderWithPickers([settingsFrame(1), commandsFrame(2, SWITCHES)]);
   const input = within(screen.getByTestId("agent-composer")).getByRole(
     "textbox"
@@ -880,9 +961,29 @@ test("while a switch waits the pickers and Send hold, and its reply and frame la
   expect((await screen.findByTestId("agent-switch-status")).textContent).toBe(
     "Switching model to anthropic/model-b…"
   );
-  await waitFor(() => expect(picker("Model").disabled).toBe(true));
-  expect(picker("Thinking level").disabled).toBe(true);
+  await waitFor(() => expect(held(picker("Model"))).toBe(true));
+  expect(held(picker("Thinking level"))).toBe(true);
+  expect(picker("Model").disabled).toBe(false);
+  expect(picker("Thinking level").disabled).toBe(false);
   expect(sendButton().disabled).toBe(true);
+  // A pick on a held picker - the pointer's, or Enter on a step - switches nothing: a pointer's
+  // pick snaps back to the reported value, and a step stays a step until the picker is left.
+  fireEvent.change(picker("Model"), { target: { value: "openai/model-c" } });
+  fireEvent.change(picker("Thinking level"), { target: { value: "low" } });
+  await Bun.sleep(20);
+  expect(picker("Model").value).toBe("anthropic/model-a");
+  expect(picker("Thinking level").value).toBe("auto");
+  stepWithKey(picker("Thinking level"), "low");
+  fireEvent.keyDown(picker("Thinking level"), { key: "Enter" });
+  await Bun.sleep(20);
+  expect(picker("Thinking level").value).toBe("low");
+  expect(createAgentMessage).toHaveBeenCalledTimes(1);
+  fireEvent.blur(picker("Thinking level"));
+  await waitFor(() => expect(picker("Thinking level").value).toBe("auto"));
+  expect(createAgentMessage).toHaveBeenCalledTimes(1);
+  expect(screen.getByTestId("agent-switch-status").textContent).toBe(
+    "Switching model to anthropic/model-b…"
+  );
   expect(input.placeholder).toBe("Waiting for the session to answer the switch…");
   expect(input.value).toBe("and then run the tests");
   // Nothing the session has not reported shows.
@@ -898,7 +999,7 @@ test("while a switch waits the pickers and Send hold, and its reply and frame la
     )
   );
   expect(picker("Model").value).toBe("anthropic/model-a");
-  expect(picker("Model").disabled).toBe(false);
+  expect(held(picker("Model"))).toBe(false);
   expect(sendButton().disabled).toBe(false);
   view.frame(settingsFrame(3, { model: "anthropic/model-b" }));
   await waitFor(() => expect(picker("Model").value).toBe("anthropic/model-b"));
@@ -917,6 +1018,7 @@ test("while a switch waits the pickers and Send hold, and its reply and frame la
     "Switching thinking level to high…"
   );
   expect(sendButton().disabled).toBe(true);
+  expect(held(picker("Thinking level"))).toBe(true);
   await view.storeThread([
     { message: first, replies: [sessionReply("switch-1", "Model set to anthropic/model-b.")] },
     {
@@ -931,6 +1033,51 @@ test("while a switch waits the pickers and Send hold, and its reply and frame la
   );
   expect(sendButton().disabled).toBe(false);
   expect(picker("Thinking level").value).toBe("high");
+});
+
+// A held picker keeps focus and its keys still step, so a keyboard reader can choose while a
+// switch waits; Enter then picks nothing until the switch ends, and after it picks the step once.
+test("a held picker's steps survive the switch, and Enter after it ends switches to the step once", async () => {
+  const createAgentMessage = spyOnSwitchSends();
+  const view = await renderWithPickers([settingsFrame(1), commandsFrame(2, SWITCHES)]);
+
+  fireEvent.change(picker("Model"), { target: { value: "openai/model-c" } });
+  await waitFor(() => expect(held(picker("Thinking level"))).toBe(true));
+  expect(createAgentMessage).toHaveBeenCalledTimes(1);
+
+  stepWithKey(picker("Thinking level"), "low");
+  stepWithKey(picker("Thinking level"), "high");
+  await waitFor(() => expect(picker("Thinking level").value).toBe("high"));
+  fireEvent.keyDown(picker("Thinking level"), { key: "Enter" });
+  await Bun.sleep(20);
+  expect(createAgentMessage).toHaveBeenCalledTimes(1);
+  expect(picker("Thinking level").value).toBe("high");
+  expect(screen.getByTestId("agent-switch-status").textContent).toBe(
+    "Switching model to openai/model-c…"
+  );
+
+  await view.storeThread([
+    {
+      message: message("switch-1", "/model openai/model-c"),
+      replies: [sessionReply("switch-1", "Model set to openai/model-c.")],
+    },
+  ]);
+  await waitFor(() => expect(held(picker("Thinking level"))).toBe(false));
+  expect(picker("Thinking level").value).toBe("high");
+  expect(createAgentMessage).toHaveBeenCalledTimes(1);
+
+  fireEvent.keyDown(picker("Thinking level"), { key: "Enter" });
+  await waitFor(() =>
+    expect(createAgentMessage).toHaveBeenLastCalledWith(SESSION, {
+      body: "/effort high",
+      delivery: "steer",
+    })
+  );
+  expect(createAgentMessage).toHaveBeenCalledTimes(2);
+  expect(createAgentMessage.mock.calls.map(([, input]) => input.body)).toEqual([
+    "/model openai/model-c",
+    "/effort high",
+  ]);
 });
 
 // A switch the session refuses publishes no new frame: the header keeps what the session last
