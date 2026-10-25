@@ -72,7 +72,8 @@ providers:
         contextWindow: 1000000
         maxTokens: 128000
         cost: {input: 2, output: 10, cacheRead: 0.1, cacheWrite: 2.5}
-      # The gateway's -legion aliases of the same five models, which Legion's pods called before
+      # The gateway's -legion aliases of the first five models above (Fable 5, Fable 5.1, Opus 4.8,
+      # Opus 5, Sonnet 5), which Legion's pods called before
       # the standard names. They are catalogue entries only: no role and no enabledModels entry in
       # overlay.yml names them. They stay so that a session started on one before the switch
       # resumes on its own model, since Oh My Pi resumes a session on its model only when it finds
