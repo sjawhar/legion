@@ -507,6 +507,45 @@ test("a record that already says the recreated-workspace notice was sent earns n
   }
 })
 
+test("a workspace recreated again, after a launch that recreated nothing, is told again", async () => {
+  // Three launches of one session, each a server reading the record the one before it left: the
+  // first recreated the workspace, the second did not, and the third recreated it again. The
+  // launcher decides `LEGION_WORKSPACE_RECREATED` afresh for every launch, so the third is a new
+  // recreation the worker has not been told of.
+  const launch = async (record: string, recreated: "true" | "false") => {
+    const {
+      inbox,
+      boot,
+      record: written,
+      close,
+    } = await harness({
+      record,
+      claim: implementer,
+      env: { LEGION_WORKSPACE_RECREATED: recreated, LEGION_STALL_RESUME_MS: "600000" },
+    })
+    try {
+      boot()
+      if (recreated === "true") {
+        await waitFor(async () => inbox.length > 0, "the recreated-workspace notice")
+      } else {
+        // Nothing is to happen, so there is no condition to wait for: the file's own small
+        // multiple of the 20 ms interval, as its other nothing-happens cases use.
+        await Bun.sleep(40)
+      }
+      return { told: inbox.length, record: JSON.stringify(await written()) }
+    } finally {
+      await close()
+    }
+  }
+  const first = await launch(recorded("closed", 0), "true")
+  expect(first.told).toBe(1)
+  const second = await launch(first.record, "false")
+  expect(second.told).toBe(0)
+  const third = await launch(second.record, "true")
+  expect(third.told).toBe(1)
+  // Three launches, each of which may wait out `waitFor`'s own 5 s deadline.
+}, 20_000)
+
 test("a launcher that recreated nothing sends no notice and records no key", async () => {
   const { record, inbox, boot, close } = await harness({
     record: recorded("closed", 0),
