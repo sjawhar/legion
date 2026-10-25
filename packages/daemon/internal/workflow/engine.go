@@ -813,20 +813,14 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	if row.To == phase.AwaitingMerge {
 		// A pull request that merged before the issue reached awaiting_merge leaves nothing to merge:
-		// the merge closes the issue at once (closeMerged), and no READY asks a human to merge it.
-		// The close is closeMerged's rather than a second transition's because a root's waits for the
-		// rest of its tree; nothing else of the two paths differs, since they part only inside a
-		// lingering tree, which no issue reaches awaiting_merge in.
+		// the merge closes the issue at once, and no READY asks a human to merge it. The close is
+		// closeMergedTelling's rather than a second transition's because a root's close waits for the
+		// rest of its tree, and an issue that arrives here and waits must be told why: the notice its
+		// architect got at the merge could not say it, since the issue was elsewhere then. Nothing
+		// else of the two paths differs, since they part only inside a lingering tree, which no issue
+		// reaches awaiting_merge in.
 		if pr != nil && pr.State == record.PullRequestMerged {
-			waiting, err := e.closeMerged(ctx, tx, issue, pr)
-			if err != nil || len(waiting) == 0 {
-				return err
-			}
-			// An issue that arrives here and waits must be told why its close waits: the notice its
-			// architect got at the merge could not say it, since the issue was elsewhere then. This is
-			// the other place a wait is newly entered, and the only other one that tells anyone.
-			return e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
-				Reason: waitingForTree(issue.Key, pr.Number, waiting)})
+			return e.closeMergedTelling(ctx, tx, issue, pr)
 		}
 		return e.ready(ctx, tx, issue, handoff, pr)
 	}
@@ -1023,10 +1017,12 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 	if err != nil {
 		return nil, err
 	}
-	children := map[string][]record.Issue{}
-	for _, member := range members {
+	// The index holds each child's place in members rather than its record: an Issue is a wide
+	// struct, and the walk reads only its key and whether it is in the workflow.
+	children := map[string][]int{}
+	for index, member := range members {
 		if member.Parent != nil && *member.Parent != "" {
-			children[*member.Parent] = append(children[*member.Parent], member)
+			children[*member.Parent] = append(children[*member.Parent], index)
 		}
 	}
 	running := []string{}
@@ -1034,7 +1030,8 @@ func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue)
 	for frontier := []string{issue.Key}; len(frontier) > 0; {
 		current := frontier[len(frontier)-1]
 		frontier = frontier[:len(frontier)-1]
-		for _, child := range children[current] {
+		for _, index := range children[current] {
+			child := members[index]
 			if seen[child.Key] {
 				continue
 			}

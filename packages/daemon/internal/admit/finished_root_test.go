@@ -99,14 +99,20 @@ func TestAMergedRootWaitsForItsChildrenAndClosesWhenTheLastLeaves(t *testing.T) 
 		}
 	}
 
-	// The released child that has not started a phase holds the close up as much as a working one:
-	// it is in the workflow, and it will run.
-	for seq, key := range []string{planning, heldTesting, inRetro, awaiting, inAccepting, unstarted} {
+	// Every member but the last leaves the root waiting. The released child that has not started a
+	// phase holds the close up as much as a working one: it is in the workflow, and it will run, so
+	// it is the one parked last.
+	park := func(seq int, key string) {
+		t.Helper()
 		apply(t, pool, admission, "park-"+key, intake.DispatchIssue{Key: key, ResolvedRepo: "acme/widgets", Seq: int64(seq) + 4, Type: "issue.updated", Status: "backlog", Title: key, Parent: finishedRoot, Rank: "B"}, engine)
-		if got, last := issue(t, pool, finishedRoot), key == unstarted; got.Phase != phase.AwaitingMerge && !last {
+	}
+	for seq, key := range []string{planning, heldTesting, inRetro, awaiting, inAccepting} {
+		park(seq, key)
+		if got := issue(t, pool, finishedRoot); got.Phase != phase.AwaitingMerge {
 			t.Fatalf("the root once %s was parked = %#v, want it still waiting for the rest of its tree", key, got)
 		}
 	}
+	park(5, unstarted)
 	if got := issue(t, pool, finishedRoot); got.Phase != phase.Done || !got.Lingers() {
 		t.Fatalf("the root once its last open child left = %#v, want it done and lingering", got)
 	}

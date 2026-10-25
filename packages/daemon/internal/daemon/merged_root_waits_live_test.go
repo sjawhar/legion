@@ -168,7 +168,7 @@ func newMergedRootWaitsLive(t *testing.T, natsURL string) *mergedRootWaitsLive {
 		t: t, cfg: cfg, rt: fake.NewRuntime(), built: &built{}, board: board, notices: notices,
 		records: record.NewStore(), project: project, parent: cfg.Project + "-1", child: cfg.Project + "-2",
 		parentPR: int(number) + 1, childPR: int(number) + 2,
-		github:   mergedRootWaitsGitHub(t), architectTopic: notify.RoleTopicPrefix + string(architect), seq: 1,
+		github: mergedRootWaitsGitHub(t), architectTopic: notify.RoleTopicPrefix + string(architect), seq: 1,
 	}
 	r.js = mergedRootWaitsStream(t, natsURL)
 	ctx := context.Background()
@@ -538,7 +538,7 @@ func (r *mergedRootWaitsLive) acceptanceRefused() {
 // same sign-off is the acceptance it always was: the root reaches retro.
 func (r *mergedRootWaitsLive) acceptanceAccepted() {
 	t := r.t
-	r.publishDispatchStatus(r.child, "backlog")
+	r.publishChildPark("backlog")
 	r.note("drove the child's park: a notifications.dispatch.issue.%s.issue.updated envelope moving it to backlog", r.child)
 	r.waitFor("the child out of the workflow", r.child, func(got api.Issue) bool { return got.Status == "backlog" })
 	r.note("read back: %s is backlog in GET /legion/v1/state", r.child)
@@ -565,7 +565,7 @@ func (r *mergedRootWaitsLive) rootMergeWaits() {
 	suspendsBefore := len(r.rt.CallsOf("Suspend"))
 	writesBefore := len(r.board.writes())
 
-	r.publishMerge(r.parentPR, mergedRootWaitsParentMerge)
+	r.publishMerge(r.parent, r.parentPR, mergedRootWaitsParentMerge)
 	r.note("drove the root's merge: a notifications.github.%s.pr.%d envelope, merged at %s",
 		strings.ReplaceAll(mergedRootWaitsRepo, "/", "."), r.parentPR, mergedRootWaitsParentMerge)
 	got := r.waitFor("the merge recorded on the root's pull request", r.parent, func(got api.Issue) bool {
@@ -693,7 +693,7 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 		issue.Phase, issue.Status = phase.AwaitingMerge, "retro"
 	})
 	suspendsBefore := len(r.rt.CallsOf("Suspend"))
-	r.publishMerge(r.childPR, mergedRootWaitsChildMerge)
+	r.publishMerge(r.child, r.childPR, mergedRootWaitsChildMerge)
 	r.note("drove the child's merge: a notifications.github.%s.pr.%d envelope, merged at %s",
 		strings.ReplaceAll(mergedRootWaitsRepo, "/", "."), r.childPR, mergedRootWaitsChildMerge)
 
@@ -711,10 +711,11 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 	})
 	r.note("read back: the root's architect is %s with its session %s kept — the linger's own doing",
 		suspended.Architect.State, suspended.Architect.Session)
-	if suspends := r.rt.CallsOf("Suspend"); len(suspends) <= suspendsBefore {
+	suspends := r.rt.CallsOf("Suspend")
+	if len(suspends) <= suspendsBefore {
 		t.Fatalf("the close suspended %d claims, want the tree's", len(suspends)-suspendsBefore)
 	}
-	r.note("read back: the fake runtime was asked to suspend %d of the tree's processes", len(r.rt.CallsOf("Suspend"))-suspendsBefore)
+	r.note("read back: the fake runtime was asked to suspend %d of the tree's processes", len(suspends)-suspendsBefore)
 	if told := r.noticesOfKind("pr-merged"); len(told) != 1 {
 		t.Fatalf("the architect was told %d pr-merged notices over the whole run, want the one the wait began with", len(told))
 	}
@@ -728,13 +729,13 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 // publishMerge publishes GitHub's merge of number on the tree's repository, as Envoy relays a
 // GitHub pull-request event (packages/daemon/internal/intake/decode.go is the only producer of a
 // merge fact from one).
-func (r *mergedRootWaitsLive) publishMerge(number int, mergeSHA string) {
+func (r *mergedRootWaitsLive) publishMerge(issue string, number int, mergeSHA string) {
 	r.t.Helper()
 	payload, err := json.Marshal(map[string]string{
 		"action": "closed", "kind": "pr", "repo": mergedRootWaitsRepo, "number": fmt.Sprint(number),
 		"merged": "true", "merge_commit_sha": mergeSHA, "head_sha": "head-" + fmt.Sprint(number),
-		"base_ref": "main", "head_ref": "legion/" + r.parent, "title": "the merge the proof drives",
-		"url": "https://github.com/" + mergedRootWaitsRepo + "/pull/" + fmt.Sprint(number),
+		"base_ref": "main", "head_ref": "legion/" + issue, "title": "the merge the proof drives",
+		"url":        "https://github.com/" + mergedRootWaitsRepo + "/pull/" + fmt.Sprint(number),
 		"updated_at": time.Now().UTC().Format(time.RFC3339),
 	})
 	if err != nil {
@@ -744,17 +745,16 @@ func (r *mergedRootWaitsLive) publishMerge(number int, mergeSHA string) {
 	r.publish(subject, "github", fmt.Sprintf("pr-%d-merged", number), string(payload))
 }
 
-// publishDispatchStatus publishes Dispatch's own issue.updated event for key at status, as a
+// publishChildPark publishes Dispatch's own issue.updated event moving the child to status, as a
 // person's move from the Dispatch dashboard makes one, on the next sequence the issue has seen.
-func (r *mergedRootWaitsLive) publishDispatchStatus(key, status string) {
+// Only the child is ever moved this way: the root's own moves are the daemon's.
+func (r *mergedRootWaitsLive) publishChildPark(status string) {
 	r.t.Helper()
+	key := r.child
 	// The event stands for a write already on Dispatch's board, so the board shows it first.
 	r.board.show(key, status)
 	r.seq++
-	parent := any(nil)
-	if key != r.parent {
-		parent = r.parent
-	}
+	parent := any(r.parent)
 	payload, err := json.Marshal(map[string]any{
 		"id": r.seq, "issue_key": key, "project": r.cfg.Project, "seq": r.seq, "type": "issue.updated",
 		"actor": map[string]string{"kind": "user", "id": "operator"}, "notify": true,
@@ -901,7 +901,9 @@ func (b *mergedRootWaitsDispatch) writes() []mergedRootWaitsWrite {
 
 // wrote says whether the daemon set issue to status.
 func (b *mergedRootWaitsDispatch) wrote(issue, status string) bool {
-	for _, write := range b.writes() {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for _, write := range b.posted {
 		if write.Issue == issue && write.Status == status {
 			return true
 		}

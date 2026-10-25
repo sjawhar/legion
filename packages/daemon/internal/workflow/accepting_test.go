@@ -258,16 +258,6 @@ func seedAcceptingChild(t *testing.T, pool *pgxpool.Pool, key, parent string, at
 	seedIssue(t, pool, record.Issue{Key: key, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: at, Generation: 1, Status: status, Rank: "U"})
 }
 
-// phaseOf is the recorded phase of key, for a case that moves an issue other than LEGION-208.
-func phaseOf(t *testing.T, pool *pgxpool.Pool, key string) string {
-	t.Helper()
-	var got string
-	if err := pool.QueryRow(t.Context(), "select phase from issues where key = $1", key).Scan(&got); err != nil {
-		t.Fatalf("read the phase of %s: %v", key, err)
-	}
-	return got
-}
-
 // An architect accepts only once the work under it is finished: a sign-off is refused while any
 // issue beneath the signing one is still in the workflow, however deep, and the refusal names each
 // of them so the architect knows what it is waiting for. It is taken before anything is written,
@@ -345,7 +335,7 @@ func TestSignOffOnAChildIsAcceptedWhileItsRootRuns(t *testing.T) {
 
 	applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), intake.SignOff{Issue: "LEGION-209"})
 
-	if got := phaseOf(t, pool, "LEGION-209"); got != string(phase.Retro) {
+	if got := issueAt(t, pool, "LEGION-209"); got != phase.Retro {
 		t.Fatalf("the child is in phase %s, want retro", got)
 	}
 }

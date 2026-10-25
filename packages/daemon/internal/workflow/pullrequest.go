@@ -225,16 +225,7 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 		return intake.Result{}, err
 	}
 	if issue.Phase == phase.AwaitingMerge {
-		waiting, err := e.closeMerged(ctx, tx, *issue, pr)
-		if err != nil || len(waiting) == 0 {
-			return intake.Result{}, err
-		}
-		// This is where a root newly enters the wait on the rest of its tree, so this is where its
-		// architect is told once. Notices never de-duplicate (effects.go's notice writes a row per
-		// call) and closeMerged is re-entered on every child's departure and on every boot, so no
-		// other caller of it writes this notice.
-		return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
-			Reason: waitingForTree(issue.Key, pr.Number, waiting)})
+		return intake.Result{}, e.closeMergedTelling(ctx, tx, *issue, pr)
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
 		Reason: fmt.Sprintf("pull request #%d merged while %s was in %s, not awaiting_merge", pr.Number, issue.Key, issue.Phase)})
@@ -245,6 +236,21 @@ func (e *Engine) merged(ctx context.Context, tx pgx.Tx, fact intake.PullRequestM
 func waitingForTree(issue string, number int, waiting []string) string {
 	return fmt.Sprintf("pull request #%d merged, and %s's close is waiting for %s, still in the workflow; %s closes once the last of them leaves, or take one out of the workflow with park_child",
 		number, issue, strings.Join(waiting, ", "), issue)
+}
+
+// closeMergedTelling closes issue on its merged pull request (closeMerged) and, when the close
+// waited for the rest of the tree instead, tells the root's architect once. It is the two places
+// a wait is newly entered — the merge arriving at an issue in awaiting_merge (merged), and an
+// issue reaching awaiting_merge on a pull request already merged (transition) — and nowhere else:
+// notices never de-duplicate (notice writes a row per call) and closeMerged is re-entered on every
+// child's departure (closeAwaitingRoot) and on every boot (sweepMerged), so those two tell nobody.
+func (e *Engine) closeMergedTelling(ctx context.Context, tx pgx.Tx, issue record.Issue, pr *record.PullRequest) error {
+	waiting, err := e.closeMerged(ctx, tx, issue, pr)
+	if err != nil || len(waiting) == 0 {
+		return err
+	}
+	return e.notice(ctx, tx, issue.Key, record.Notice{Kind: "pr-merged", Role: claim.RoleArchitect,
+		Reason: waitingForTree(issue.Key, pr.Number, waiting)})
 }
 
 // closeMerged closes issue, which awaits its merge (or is held from awaiting_merge, a hold the
