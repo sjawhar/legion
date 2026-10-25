@@ -26,7 +26,7 @@ type testEnv struct {
 	ctx       context.Context
 	client    *bus.Client
 	registry  *store.Registry
-	sessions  session.SessionLookup
+	sessions  *session.SessionRegistry
 	deliverer session.Deliverer
 	dedupe    *dedupe.Cache
 }
@@ -72,7 +72,6 @@ func setupTestEnv(t *testing.T, options ...testEnvOption) *testEnv {
 		MachineID:    "test-machine",
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
 	}
 
 	dc := dedupe.New(5 * time.Minute)
@@ -221,7 +220,14 @@ func (env *testEnv) startConsumer(machineID string) {
 			if item.SourceSession != "" && item.SourceSession == interest.SessionID {
 				continue
 			}
-			if err := env.deliverer.Deliver(item, interest); err != nil {
+			// The listener resolves the subscriber's record and delivers through it
+			// (fanoutDelivery, cmd/listener/delivery.go); the Deliverer reads no registry.
+			targetEntry, targetErr := env.sessions.Get(interest.SessionID)
+			var target *session.SessionEntry
+			if targetErr == nil {
+				target = &targetEntry
+			}
+			if _, err := env.deliverer.DeliverWithResultForEntry(item, interest, target); err != nil {
 				failed = true
 			} else {
 				env.dedupe.Record(item.DedupeKey, interest.SessionID)

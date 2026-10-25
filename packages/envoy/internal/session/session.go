@@ -34,33 +34,20 @@ var ErrNoPushTarget = errors.New("no reachable push target")
 
 var foreignSessionID = regexp.MustCompile(`\b01a0[0-9a-f]{4}-[0-9a-f]{4}-7[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}\b`)
 
+// Deliverer pushes a notification to the session a delivery resolved, over that session's serve
+// port. It holds no session source of its own: every caller resolves the entry it delivers
+// through and hands it over (DeliverWithResultForEntry), so the record delivery acts on is the
+// one that caller read.
 type Deliverer struct {
 	MachineID    string
 	HostBridge   string
 	RequestLimit time.Duration
 	HTTPClient   *http.Client
-	Sessions     SessionLookup
 }
 
 // DeliveryResult describes a completed delivery attempt.
 type DeliveryResult struct {
 	Skipped bool
-}
-
-func (d Deliverer) Deliver(item contracts.Envelope, interest store.Interest) error {
-	_, err := d.DeliverWithResult(item, interest)
-	return err
-}
-
-func (d Deliverer) DeliverWithResult(item contracts.Envelope, interest store.Interest) (DeliveryResult, error) {
-	if d.Sessions == nil {
-		return DeliveryResult{}, fmt.Errorf("no session registry configured")
-	}
-	entry, err := d.Sessions.Get(interest.SessionID)
-	if err != nil {
-		return d.DeliverWithResultForEntry(item, interest, nil)
-	}
-	return d.DeliverWithResultForEntry(item, interest, &entry)
 }
 
 // DeliverWithResultForEntry delivers through the session entry resolved for

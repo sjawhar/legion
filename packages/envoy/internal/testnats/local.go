@@ -8,6 +8,7 @@
 package testnats
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -181,7 +182,9 @@ func (s *localServer) reload(t testing.TB, config string) string {
 // terminate kills the server and removes its directory, which holds its JetStream store.
 func (s *localServer) terminate() error {
 	if s.cmd != nil && s.cmd.Process != nil {
-		if err := s.cmd.Process.Kill(); err != nil && !strings.Contains(err.Error(), "process already finished") {
+		// os.ErrProcessDone is what Kill reports for a server that exited on its own - a crash,
+		// or a test that stopped it already - and is nothing to fail the cleanup over.
+		if err := s.cmd.Process.Kill(); err != nil && !errors.Is(err, os.ErrProcessDone) {
 			return fmt.Errorf("stop the local NATS: %w", err)
 		}
 		_ = s.cmd.Wait()

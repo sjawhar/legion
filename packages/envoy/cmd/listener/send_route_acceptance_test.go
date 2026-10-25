@@ -3,13 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
-	"io"
-	"net"
 	"net/http"
 	"net/http/httptest"
-	"net/url"
 	"strings"
-	"sync"
 	"testing"
 	"time"
 
@@ -75,95 +71,6 @@ func assertRecordFields(t *testing.T, record map[string]any, want map[string]any
 			t.Fatalf("the record's %s = %#v, want %#v: %s", field, record[field], expected, line)
 		}
 	}
-}
-
-// cuttableRelay is a TCP relay between the listener's NATS client and the server, which a test
-// cuts under the running listener: every live link is closed and every new connection refused, as
-// the hub's virtual machine being recreated (2026-10-23) did to the listener's bus connection.
-// internal/bus's relayProxy is the same shape with more seams (a dial delay, a swallowing link);
-// it is in another package and cannot be imported, and this test needs only the cut.
-type cuttableRelay struct {
-	listener net.Listener
-	// target is the real server's host:port, and relayed the URL the client dials: the server's
-	// own URL with its userinfo kept (testnats hands out a per-account user and password) and
-	// only the host swapped for this relay's.
-	target  string
-	relayed string
-
-	mu sync.Mutex
-	// severed refuses every connection accepted from here on; links are the live ones to close.
-	severed bool
-	links   []net.Conn
-}
-
-// startCuttableRelay relays to the server uri names, until the test ends.
-func startCuttableRelay(t *testing.T, uri string) *cuttableRelay {
-	t.Helper()
-	server, err := url.Parse(uri)
-	if err != nil {
-		t.Fatalf("parse the NATS url %q: %v", uri, err)
-	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen for the relay: %v", err)
-	}
-	relayed := *server
-	relayed.Host = listener.Addr().String()
-	relay := &cuttableRelay{listener: listener, target: server.Host, relayed: relayed.String()}
-	t.Cleanup(func() {
-		_ = listener.Close()
-		relay.cut()
-	})
-	go relay.serve()
-	return relay
-}
-
-func (p *cuttableRelay) url() string { return p.relayed }
-
-func (p *cuttableRelay) serve() {
-	for {
-		client, err := p.listener.Accept()
-		if err != nil {
-			return
-		}
-		go p.relay(client)
-	}
-}
-
-func (p *cuttableRelay) relay(client net.Conn) {
-	server, err := net.Dial("tcp", p.target)
-	if err != nil {
-		_ = client.Close()
-		return
-	}
-	p.mu.Lock()
-	if p.severed {
-		p.mu.Unlock()
-		_ = client.Close()
-		_ = server.Close()
-		return
-	}
-	p.links = append(p.links, client, server)
-	p.mu.Unlock()
-	go func() {
-		_, _ = io.Copy(client, server)
-		_ = client.Close()
-	}()
-	_, _ = io.Copy(server, client)
-	_ = server.Close()
-}
-
-// cut closes every link the relay holds and refuses every connection after it, so the client's
-// reconnect (MaxReconnect -1, internal/bus's options) never completes and the bus stays
-// unreachable for the rest of the test.
-func (p *cuttableRelay) cut() {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.severed = true
-	for _, link := range p.links {
-		_ = link.Close()
-	}
-	p.links = nil
 }
 
 // A send reads the target from the session bucket itself when this listener's cache has not seen
@@ -240,8 +147,11 @@ func TestSendReadsTheSessionStoreWhileTheCacheIsCold(t *testing.T) {
 // (a bad body, an unregistered target) would pass this test with a 503 of a different kind.
 func TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable(t *testing.T) {
 	const target = "ses_cut_bus_target"
-	relay := startCuttableRelay(t, testnats.URL(t))
-	client, err := bus.ConnectOwningStream([]string{relay.url()}, bus.WithReplicas(1))
+	// The relay the reconnect test uses (reconnect_shutdown_test.go): cut below closes every live
+	// link and refuses every connection after it, as the hub's virtual machine being recreated
+	// (2026-10-23) did to the listener's bus connection.
+	relay := startListenerRelay(t, testnats.URL(t))
+	client, err := bus.ConnectOwningStream([]string{relay.relayed}, bus.WithReplicas(1))
 	if err != nil {
 		t.Fatalf("connect the listener's bus through the relay: %v", err)
 	}

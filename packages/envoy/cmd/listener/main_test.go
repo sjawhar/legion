@@ -3486,7 +3486,6 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 	deliverer := session.Deliverer{
 		MachineID:    "test-machine",
 		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
 	}
 	if transport != nil {
 		deliverer.HTTPClient = &http.Client{Transport: transport}

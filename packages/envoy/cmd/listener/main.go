@@ -92,6 +92,24 @@ func roleHolderMayBeLive(logger *logging.Logger, sessions *session.SessionRegist
 	return !errors.Is(err, nats.ErrKeyNotFound)
 }
 
+// envDuration reads a duration an operator may override through the environment: an unset or
+// empty value leaves fallback standing, and so does one time.ParseDuration refuses, after a
+// single WARN naming the variable - a listener never refuses to start over a malformed duration.
+// The WARN's message and fields are what an operator's log filter matches, so they name the
+// variable exactly as it is written in the environment.
+func envDuration(logger *logging.Logger, name string, fallback time.Duration) time.Duration {
+	v := os.Getenv(name)
+	if v == "" {
+		return fallback
+	}
+	d, err := time.ParseDuration(v)
+	if err != nil {
+		logger.Warn("invalid "+name+"; using default", slog.String("value", v), slog.String("error", err.Error()))
+		return fallback
+	}
+	return d
+}
+
 // rewatchListenerKVWatchers recreates cache watchers that are not represented
 // by bus.Client subscriptions. It attempts every one so a failed rebuild of one
 // cannot leave the other caches permanently stale too.
@@ -698,7 +716,6 @@ func main() {
 		MachineID:    cfg.MachineID,
 		HostBridge:   os.Getenv("ENVOY_HOST_BRIDGE"),
 		RequestLimit: 30 * time.Second,
-		Sessions:     sessions,
 	}
 
 	dedupeCache := dedupe.New(10 * time.Minute)
@@ -720,17 +737,8 @@ func main() {
 	roleQueue := bus.ListenerQueue(cfg.MachineID)
 
 	// The window an agent delivery this listener cannot place is retried within before it is
-	// given up with a record (delivery.go). Read exactly as ENVOY_CI_DEBOUNCE is below: a value
-	// that does not parse is one WARN naming the variable, and the default stands - a listener
-	// never refuses to start over a malformed duration.
-	unplaceableRetryWindow := defaultUnplaceableRetryWindow
-	if v := os.Getenv("ENVOY_UNPLACEABLE_RETRY_WINDOW"); v != "" {
-		if d, perr := time.ParseDuration(v); perr == nil {
-			unplaceableRetryWindow = d
-		} else {
-			logger.Warn("invalid ENVOY_UNPLACEABLE_RETRY_WINDOW; using default", slog.String("value", v), slog.String("error", perr.Error()))
-		}
-	}
+	// given up with a record (delivery.go).
+	unplaceableRetryWindow := envDuration(logger, "ENVOY_UNPLACEABLE_RETRY_WINDOW", defaultUnplaceableRetryWindow)
 
 	// /healthz handler was registered early (before NATS) — no re-registration needed.
 
@@ -845,14 +853,7 @@ func main() {
 	// 5s).
 	summaryCtx, summaryCancel := context.WithCancel(context.Background())
 	if ciStore != nil {
-		ciDebounce := 5 * time.Second
-		if v := os.Getenv("ENVOY_CI_DEBOUNCE"); v != "" {
-			if d, perr := time.ParseDuration(v); perr == nil {
-				ciDebounce = d
-			} else {
-				logger.Warn("invalid ENVOY_CI_DEBOUNCE; using default", slog.String("value", v), slog.String("error", perr.Error()))
-			}
-		}
+		ciDebounce := envDuration(logger, "ENVOY_CI_DEBOUNCE", 5*time.Second)
 		cistore.StartSummaryLoop(summaryCtx, ciStore, client, ciDebounce, 1*time.Second, ciLegacyHeld, logger)
 	}
 

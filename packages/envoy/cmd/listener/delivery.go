@@ -530,10 +530,11 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 	message.finalize(false)
 }
 
-// deliverySessionReadTimeout bounds the delivery path's read of the target session from the
-// bucket. Delivery answers no HTTP caller of its own, so it carries the role paths' bound rather
-// than the send route's tighter one: the cost of waiting is a message held, not a request kept
-// open, and the alternative - taking the cache's miss for an answer - ACKs the message away.
+// deliverySessionReadTimeout is delivery's own bound on its read of the target session from the
+// bucket. It is the role paths' bound (roleHolderReadTimeout, api.go) today without being tied to
+// it, and it can be looser than the send route's (sendSessionReadTimeout) because no HTTP caller
+// is waiting on this read: the cost of waiting is a message held, not a request kept open, and
+// the alternative - taking the cache's miss for an answer - ACKs the message away.
 const deliverySessionReadTimeout = 2 * time.Second
 
 // unplaceableRetryDelay is the delay an agent delivery this listener could not place asks for
@@ -599,18 +600,18 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	// this listener has not re-read since the reconnect, is in the bucket before it is in the
 	// cache - and a message dropped on that miss is gone, since it is already ACKed away.
 	// nats.ErrKeyNotFound is the bucket's own word that no record exists; any other error is a
-	// read that did not answer. Both leave this delivery with no entry to push through, so
-	// session.HandleAgentMessage reports the same ReasonNoSessionRecord for the two, and only
-	// sessionReadUnanswered tells them apart below: the first is evidence the session is gone,
-	// the second is no evidence at all - the bucket was never consulted, so nothing about this
-	// session was learned, and an attempt that learned nothing can never be the ground for
-	// giving a message up.
+	// read that did not answer, which is no evidence of absence at all - the bucket was never
+	// consulted, so nothing about this session was learned, and an attempt that learned nothing
+	// can never be the ground for giving a message up. Neither needs to be told from the other
+	// below: both leave this delivery with no entry to push through, and an entry-less attempt
+	// reaches the retry decision only as ReasonNoSessionRecord, which already holds the retry
+	// open (session.HandleAgentMessage: the registry path reports that reason, and the interest
+	// path NAKs with an error, which never reaches that branch).
 	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, registered)
 	var entryPtr *session.SessionEntry
 	if entryErr == nil {
 		entryPtr = &entry
 	}
-	sessionReadUnanswered := entryErr != nil && !errors.Is(entryErr, nats.ErrKeyNotFound)
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	deliveryTimer := metrics.NewTimer()
 	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, cfg.deliverer)
@@ -675,14 +676,14 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 				age = time.Since(md.Timestamp)
 			}
 		}
-		// A read that did not answer holds the retry open on its own for whatever is left of
-		// the window: it is no evidence of absence, whatever reason this attempt reports. What
-		// does not hold it open is session.ReasonNone, the one outcome here another delivery
-		// cannot change by itself - a record this listener did resolve, with a serve port,
-		// whose push failed on the wire. The interest path NAKs that failure itself
+		// What does not hold the retry open is session.ReasonNone, the one outcome here another
+		// delivery cannot change by itself - a record this listener did resolve, with a serve
+		// port, whose push failed on the wire. The interest path NAKs that failure itself
 		// (internal/session/handler.go), so repeating it here would only repeat a refused HTTP
-		// request.
-		placementMayChange := sessionReadUnanswered || result.Reason != session.ReasonNone
+		// request. A read that did not answer is no evidence of absence and must not end the
+		// retries, and it does not: it leaves no entry, and an attempt with no entry reports
+		// ReasonNoSessionRecord here, so the reason alone already holds the window open for it.
+		placementMayChange := result.Reason != session.ReasonNone
 		if metadata != nil && placementMayChange && age < cfg.unplaceableRetryWindow &&
 			metadata.NumDelivered < unplaceableMaxDeliveries {
 			// No exception and no delivery counter: the message is not disposed of yet, and

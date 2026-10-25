@@ -629,12 +629,15 @@ func resolveLiveRoleHolder(registry roleClaimResolver, sessions *session.Session
 	return roleHolderResult{}, fmt.Errorf("role holder changed while resolving")
 }
 
-// sendRequestBudget is the whole of a send's or a publish's work, taken from the request's own
-// context: the session read, the role-holder read and the publish share it. The HTTP client gives
-// each attempt 5 s (packages/envoy-client/src/transport.ts) and this listener's HTTP write timeout
-// is 10 s (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling and the body: a
-// sender whose bus cannot be reached reads the 503 that names the reason, in time to act on it,
-// instead of the timeout it would otherwise retry blind.
+// sendRequestBudget is the bus work a send or a publish does under the request's own context: the
+// send route's read of the target session and both routes' publish share it. The publish route's
+// role-holder read does not take it - resolveLiveRoleHolder reads through roleHolderSession, which
+// bounds itself at roleHolderReadTimeout from a context of its own, up to
+// roleHolderResolutionAttempts times. The HTTP client gives each attempt 5 s
+// (packages/envoy-client/src/transport.ts) and this listener's HTTP write timeout is 10 s
+// (main.go), so answering inside 3.5 s leaves the rest for TLS, scheduling and the body: a sender
+// whose bus cannot be reached reads the 503 that names the reason, in time to act on it, instead
+// of the timeout it would otherwise retry blind.
 const sendRequestBudget = 3500 * time.Millisecond
 
 // sendSessionReadTimeout bounds the send route's read of the target session from the bucket, so a

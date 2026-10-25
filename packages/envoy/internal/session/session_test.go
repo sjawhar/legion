@@ -55,8 +55,15 @@ func newKVDeliverer(t *testing.T) (*session.SessionRegistry, session.Deliverer) 
 	return sessions, session.Deliverer{
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
 	}
+}
+
+// deliverThroughEntry delivers the way the listener does: the caller resolves the target's record
+// (resolvedEntry) and hands it to the Deliverer, which reads no registry of its own.
+func deliverThroughEntry(t *testing.T, deliverer session.Deliverer, sessions *session.SessionRegistry, item contracts.Envelope, interest store.Interest) error {
+	t.Helper()
+	_, err := deliverer.DeliverWithResultForEntry(item, interest, resolvedEntry(t, sessions, interest.SessionID))
+	return err
 }
 
 func TestDeliver_ExactlyOnce(t *testing.T) {
@@ -80,7 +87,7 @@ func TestDeliver_ExactlyOnce(t *testing.T) {
 	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
 
-	err := deliverer.Deliver(item, interest)
+	err := deliverThroughEntry(t, deliverer, sessions, item, interest)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
@@ -91,11 +98,11 @@ func TestDeliver_ExactlyOnce(t *testing.T) {
 }
 
 func TestDeliver_NoRegistryEntry(t *testing.T) {
-	_, deliverer := newKVDeliverer(t)
+	sessions, deliverer := newKVDeliverer(t)
 	interest := store.Interest{SessionID: "ses_ghost", Dir: "/test", MachineID: "m"}
 	item := newTestEnvelope("agent", "notifications.agent.ses_ghost", "test message")
 
-	err := deliverer.Deliver(item, interest)
+	err := deliverThroughEntry(t, deliverer, sessions, item, interest)
 	if err == nil {
 		t.Fatal("expected error for missing session, got nil")
 	}
@@ -118,7 +125,7 @@ func TestDeliver_SkipsPush_whenSelfSubscribedSessionHasNoPort(t *testing.T) {
 	}
 
 	// When
-	err := deliverer.Deliver(
+	err := deliverThroughEntry(t, deliverer, sessions,
 		newTestEnvelope("agent", "notifications.agent.ses_omp", "test message"),
 		store.Interest{SessionID: "ses_omp"},
 	)
@@ -140,7 +147,7 @@ func TestDeliver_ReturnsError_whenSessionHasNoPortAndIsNotSelfSubscribed(t *test
 	}
 
 	// When
-	err := deliverer.Deliver(
+	err := deliverThroughEntry(t, deliverer, sessions,
 		newTestEnvelope("agent", "notifications.agent.ses_portless", "test message"),
 		store.Interest{SessionID: "ses_portless"},
 	)
@@ -169,7 +176,7 @@ func TestDeliver_UsesPort_whenSelfSubscribedSessionAlsoHasOne(t *testing.T) {
 	}
 
 	// When
-	err := deliverer.Deliver(
+	err := deliverThroughEntry(t, deliverer, sessions,
 		newTestEnvelope("agent", "notifications.agent.ses_portful", "test message"),
 		store.Interest{SessionID: "ses_portful"},
 	)
@@ -204,7 +211,7 @@ func TestSessionRegistry_PortlessSelfSubscribedClaimPreservesLivePortfulRoute(t 
 			if err := sessions.Put("ses_oc", session.SessionEntry{SelfSubscribed: true}); err != nil {
 				t.Fatalf("register portless self-subscribed session: %v", err)
 			}
-			err := deliverer.Deliver(
+			err := deliverThroughEntry(t, deliverer, sessions,
 				newTestEnvelope("agent", "notifications.agent.ses_oc", "test message"),
 				store.Interest{SessionID: "ses_oc"},
 			)
@@ -254,7 +261,7 @@ func TestDeliver_PromptAsyncBody(t *testing.T) {
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test payload")
 	item.SourceSession = "ses_sender_123"
 
-	err := deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
+	err := deliverThroughEntry(t, deliverer, sessions, item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
 	if err != nil {
 		t.Fatalf("delivery failed: %v", err)
 	}
@@ -498,7 +505,7 @@ func TestDeliver_NoAgentField(t *testing.T) {
 	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test")
 
-	deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
+	deliverThroughEntry(t, deliverer, sessions, item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
 
 	// The prompt body must NOT contain an "agent" field — that would override the session's agent
 	if strings.Contains(string(receivedBody), `"agent"`) {
@@ -519,7 +526,7 @@ func TestDeliver_PromptAsyncFailure(t *testing.T) {
 	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test")
 
-	err := deliverer.Deliver(item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
+	err := deliverThroughEntry(t, deliverer, sessions, item, store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"})
 	if err == nil {
 		t.Fatal("expected error for 500 response, got nil")
 	}
@@ -545,35 +552,16 @@ func TestDeliver_KVRegistryUsed(t *testing.T) {
 		MachineID:    "test",
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
 	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
 	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"}
 
-	err = deliverer.Deliver(item, interest)
+	err = deliverThroughEntry(t, deliverer, sessions, item, interest)
 	if err != nil {
 		t.Fatalf("expected no error, got: %v", err)
 	}
 	if kvDeliveries.Load() != 1 {
 		t.Fatalf("expected 1 delivery to KV port, got %d", kvDeliveries.Load())
-	}
-}
-
-func TestDeliver_NilSessionsReturnsError(t *testing.T) {
-	deliverer := session.Deliverer{
-		HostBridge:   "127.0.0.1",
-		RequestLimit: 5 * time.Second,
-		Sessions:     nil, // no registry configured
-	}
-	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
-	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "m"}
-
-	err := deliverer.Deliver(item, interest)
-	if err == nil {
-		t.Fatal("expected error when Sessions is nil, got nil")
-	}
-	if !strings.Contains(err.Error(), "no session registry configured") {
-		t.Fatalf("expected 'no session registry configured' error, got: %v", err)
 	}
 }
 
@@ -606,12 +594,11 @@ func TestDeliver_CrossMachineUsesRemoteHost(t *testing.T) {
 		MachineID:    "local-machine",
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
 	}
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
 	interest := store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "local-machine"}
 
-	err = deliverer.Deliver(item, interest)
+	err = deliverThroughEntry(t, deliverer, sessions, item, interest)
 	if err != nil {
 		t.Fatalf("expected successful remote delivery, got: %v", err)
 	}
@@ -644,7 +631,7 @@ func TestTsnetAwareDelivery(t *testing.T) {
 	deliverer.MachineID = "local-machine"
 	deliverer.HTTPClient = client
 
-	err := deliverer.Deliver(
+	err := deliverThroughEntry(t, deliverer, sessions,
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test message"),
 		store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "local-machine"},
 	)
@@ -676,7 +663,7 @@ func TestDefaultClientFallback(t *testing.T) {
 	deliverer.HTTPClient = nil
 
 	started := time.Now()
-	err := deliverer.Deliver(
+	err := deliverThroughEntry(t, deliverer, sessions,
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test message"),
 		store.Interest{SessionID: "ses_target", Dir: "/test", MachineID: "local-machine"},
 	)

@@ -186,7 +186,6 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 		MachineID:    "machine-A",
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
 	}
 
 	// No interest — handler falls to registry lookup path
@@ -235,7 +234,6 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 		MachineID:    "machine-A",
 		HostBridge:   "127.0.0.1",
 		RequestLimit: 5 * time.Second,
-		Sessions:     sessions,
 	}
 
 	// Interest says machine-A (stale interest), but KV says machine-B

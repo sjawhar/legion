@@ -20,11 +20,17 @@ import (
 )
 
 // listenerRelay lets this test hold one NATS request from the listener, then drop the live link so
-// nats.go reconnects through the same relay. New connections forward normally.
+// nats.go reconnects through the same relay. New connections forward normally, unless cut has
+// severed the relay: from then on every connection it accepts is refused, which is how a bus that
+// has gone away under the listener looks.
 type listenerRelay struct {
 	listener net.Listener
 	target   string
 	relayed  string
+	// severed is read by relay before it dials the server, so a connection accepted after cut is
+	// closed rather than relayed; it is atomic because relay runs on its own goroutine per
+	// connection.
+	severed atomic.Bool
 
 	mu        sync.Mutex
 	trigger   []byte
@@ -74,6 +80,10 @@ func (r *listenerRelay) serve() {
 }
 
 func (r *listenerRelay) relay(client net.Conn) {
+	if r.severed.Load() {
+		_ = client.Close()
+		return
+	}
 	link := &listenerRelayLink{client: client}
 	r.mu.Lock()
 	r.links = append(r.links, link)
@@ -137,6 +147,15 @@ func (r *listenerRelay) drop() {
 		}
 	}
 	r.links = nil
+}
+
+// cut drops every live link as drop does and refuses every connection accepted after it, so the
+// client's reconnect (MaxReconnect -1, internal/bus's options) never completes and the bus stays
+// unreachable for the rest of the test. drop alone leaves the relay forwarding, which is what a
+// reconnect through the same relay needs.
+func (r *listenerRelay) cut() {
+	r.severed.Store(true)
+	r.drop()
 }
 
 func (r *listenerRelay) close() {
