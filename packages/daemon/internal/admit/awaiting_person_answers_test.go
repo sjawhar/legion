@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -149,9 +150,8 @@ func TestAReviewARegistrationCarriesAnswersTheRootItWaitsFor(t *testing.T) {
 				t.Fatalf("root after the registration carried the person's review = %#v, want it answered", answered)
 			}
 			applyFact(t, pool, admission, "live-review", tc.live)
-			seeded := tc.live
-			seeded.Seed = true
-			applyFact(t, pool, admission, "seeded-review", seeded)
+			// The gate seed's read of the same review follows, under an id of its own.
+			applyFact(t, pool, admission, "seeded-review", tc.live)
 
 			apply(t, pool, admission, "next-finished", intake.DispatchIssue{
 				Key: "LEGION-NEXT", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done",
@@ -173,14 +173,21 @@ func TestAReviewARegistrationCarriesAnswersTheRootItWaitsFor(t *testing.T) {
 // LEGION-NEXT, after its own architect handed the approval request back to the person.
 func handBackOnAClosedGate(t *testing.T, pool *pgxpool.Pool, admission *Admission) {
 	t.Helper()
+	handBackOnAClosedGateAt(t, pool, admission, record.EventMark{})
+}
+
+// handBackOnAClosedGateAt is handBackOnAClosedGate with the hand-back's event at mark, where the
+// wait begins.
+func handBackOnAClosedGateAt(t *testing.T, pool *pgxpool.Pool, admission *Admission, mark record.EventMark) {
+	t.Helper()
 	seedSlotted(t, pool, "LEGION-ROOT", "A")
 	seedWaiting(t, pool, "LEGION-NEXT", "B")
 	seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
 	seedGate(t, pool, record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4})
 	applyFact(t, pool, admission, "hand-back", intake.DispatchAskReply{
-		Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect})
-	if waiting := issue(t, pool, "LEGION-ROOT"); waiting.Phase != phase.AwaitingPerson || waiting.Answered() {
-		t.Fatalf("root after its architect handed the request back = %#v, want it waiting unanswered", waiting)
+		Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: mark})
+	if waiting := issue(t, pool, "LEGION-ROOT"); waiting.Phase != phase.AwaitingPerson || waiting.Answered() || waiting.Awaiting.Since != mark {
+		t.Fatalf("root after its architect handed the request back = %#v, want it waiting unanswered from the hand-back", waiting)
 	}
 }
 
@@ -291,18 +298,23 @@ func TestAnOlderReviewAppliedLateLeavesTheNewerWaitUnanswered(t *testing.T) {
 
 // The architect is told a changes request once, whichever of the live event, the registration's
 // read of Dispatch and the gate seed's read reaches the daemon first, and whichever of the others
-// follows: the gate records the request told, by version and reason, and the other reads find it
-// there. A second review at the same version, with another reason, is a new act of a person and
-// is told.
+// follows: the gate records the review told, by version, reason and place in the issue's Dispatch
+// event log, and the other reads find it there, also a read that shows the review's time and no
+// sequence (a review Dispatch recorded before it kept one). Another review at the same version is a
+// new act of a person and is told, with another reason or with the same one.
 func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
+	reviewed := fixedNow.Add(-time.Hour)
 	changes := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
-		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path"}
+		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 9, At: reviewed}}
 	seeded := changes
-	seeded.Seed = true
 	registration := intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4,
-		ChangesRequestedVersion: 4, ChangesReason: "name the rollback path"}
+		ChangesRequestedVersion: 4, ChangesReason: "name the rollback path", ChangesRequestedMark: changes.Mark}
 	second := changes
-	second.Reason = "and name who runs the restore"
+	second.Reason, second.Mark = "and name who runs the restore", record.EventMark{Seq: 12, At: reviewed.Add(time.Minute)}
+	repeated := changes
+	repeated.Mark = record.EventMark{Seq: 12, At: reviewed.Add(time.Minute)}
+	timeOnly := changes
+	timeOnly.Mark = record.EventMark{At: reviewed}
 
 	for _, tc := range []struct {
 		name    string
@@ -330,26 +342,37 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 			order: []intake.Fact{changes,
 				intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-other", Version: 4},
 				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-other", Kind: intake.DispatchArtifactChangesRequested,
-					Version: 4, Reason: "name the rollback path", Seed: true}},
+					Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 14, At: reviewed.Add(2 * time.Minute)}}},
 			reasons: []string{"name the rollback path", "name the rollback path"}},
 		// A registration whose read saw v4 commits after a live v5 changes request was told: it
 		// rolls nothing back, so the seed's read of the v5 review tells nothing again.
 		{name: "a registration of an older version after a newer review was told", busy: true,
 			order: []intake.Fact{
-				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path"},
+				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark},
 				intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4},
-				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Seed: true}},
+				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark}},
 			reasons: []string{"name the rollback path"}},
 		// The caller registers v4 while Dispatch already shows v5, whose changes request the live
 		// event told first: the gate is registered at v5, keeping the told record.
 		{name: "a caller's older version with Dispatch at the newer one", busy: true,
 			order: []intake.Fact{
-				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path"},
+				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark},
 				intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 5},
-				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Seed: true}},
+				intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested, Version: 5, Reason: "name the rollback path", Mark: changes.Mark}},
 			reasons: []string{"name the rollback path"}},
 		{name: "a second review at the same version", order: []intake.Fact{changes, second},
 			reasons: []string{"name the rollback path", "and name who runs the restore"}},
+		// The live event carries the review's sequence; the seed reads it from a Dispatch that shows
+		// its time alone. The time is the event's own, so the seed's read is the same review.
+		{name: "the live event with its sequence, then the seed's read with its time alone", order: []intake.Fact{changes, timeOnly},
+			reasons: []string{"name the rollback path"}},
+		{name: "the seed's read with its time alone, then the live event with its sequence", order: []intake.Fact{timeOnly, changes},
+			reasons: []string{"name the rollback path"}},
+		// A person who repeats a review's version and wording later has written another review,
+		// with its own event, and it is told once; the seed's read of that later review is the same
+		// review again.
+		{name: "the same reason again at the same version, a later review", order: []intake.Fact{changes, repeated, repeated},
+			reasons: []string{"name the rollback path", "name the rollback path"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			pool := migratedPool(t)
@@ -387,12 +410,12 @@ func TestAChangesRequestIsToldOnceWhicheverReadCarriesIt(t *testing.T) {
 	}
 }
 
-// The gate seed's own read of a changes request (Seed) answers a wait a registration started
-// before the request reached the root, without telling the architect a second time; on a gate a
-// racing registration opened, it closes the gate again and tells the architect.
+// The gate seed's own read of a changes request answers a wait a registration started before the
+// request reached the root, without telling the architect a second time; on a gate a racing
+// registration opened, it closes the gate again and tells the architect.
 func TestASeededChangesRequestAnswersAWaitAndClosesAGateARaceOpened(t *testing.T) {
 	seeded := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
-		Version: 4, Reason: "name the rollback path", Seed: true}
+		Version: 4, Reason: "name the rollback path"}
 
 	t.Run("a root waiting on the gate", func(t *testing.T) {
 		pool := migratedPool(t)
@@ -428,6 +451,169 @@ func TestASeededChangesRequestAnswersAWaitAndClosesAGateARaceOpened(t *testing.T
 			t.Fatalf("design-changes-requested notices = %#v, want one with the reason", told)
 		}
 	})
+}
+
+// handBack is the architect's hand-back of the approval request whose event Dispatch appended at
+// seq, its transaction begun at handedBackAt: the wait it starts begins there.
+var (
+	handedBackAt = fixedNow.Add(-time.Hour)
+	handBack     = record.EventMark{Seq: 10, At: handedBackAt}
+)
+
+// A changes request Dispatch recorded before the root's wait began answers nothing: the person gave
+// it before the request was handed back to them. One recorded after it answers the wait, also when
+// its transaction began before the hand-back's and committed after it, so that its time is the
+// earlier one: the issue's event sequence, not Dispatch's time, orders the two. Where the review
+// carries no sequence (a review Dispatch recorded before it kept one), its time places it.
+func TestAChangesRequestGivenBeforeTheWaitBeganAnswersNothingOnTheLivePath(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mark     record.EventMark
+		answered bool
+	}{
+		{name: "a review whose event precedes the hand-back's", mark: record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)}},
+		{name: "a review after the hand-back", mark: record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}, answered: true},
+		{name: "a review whose transaction began before the hand-back's and committed after it",
+			mark: record.EventMark{Seq: 11, At: handedBackAt.Add(-time.Millisecond)}, answered: true},
+		{name: "a review with no sequence, given before the hand-back", mark: record.EventMark{At: handedBackAt.Add(-time.Minute)}},
+		{name: "a review with no sequence, given after the hand-back", mark: record.EventMark{At: handedBackAt.Add(time.Minute)}, answered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			handBackOnAClosedGateAt(t, pool, admission, handBack)
+			applyFact(t, pool, admission, "changes-v4", intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root",
+				Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: tc.mark})
+			if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.AwaitingPerson || got.Answered() != tc.answered {
+				t.Fatalf("root after %s = %#v, want awaiting_person answered %t", tc.name, got, tc.answered)
+			}
+		})
+	}
+}
+
+// A registration's read of a changes request Dispatch recorded before the root's wait began
+// answers nothing either, while one recorded after it answers the wait.
+func TestAChangesRequestARegistrationCarriesAnswersOnlyAWaitItFollows(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		mark     record.EventMark
+		answered bool
+	}{
+		{name: "a review whose event precedes the hand-back's", mark: record.EventMark{Seq: 9, At: handedBackAt.Add(-time.Minute)}},
+		{name: "a review after the hand-back", mark: record.EventMark{Seq: 11, At: handedBackAt.Add(-time.Millisecond)}, answered: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			handBackOnAClosedGateAt(t, pool, admission, handBack)
+			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
+				Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+				ChangesRequestedVersion: 4, ChangesReason: "name the rollback path", ChangesRequestedMark: tc.mark,
+			}, admission.engine, admission); err != nil {
+				t.Fatalf("register gate v4: %v", err)
+			}
+			if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.AwaitingPerson || got.Answered() != tc.answered {
+				t.Fatalf("root after %s = %#v, want awaiting_person answered %t", tc.name, got, tc.answered)
+			}
+		})
+	}
+}
+
+// register_gate reads the issue's event sequence, then the approval, then applies the fact: a
+// person who requests changes between that read and the apply has written a review the read did
+// not show, whose transaction may even have begun before the read. The wait the registration starts
+// begins at the sequence its read began at, so that review's own event, or the gate seed's read of
+// it, answers the wait; begun at the daemon's clock when the fact applies, it would have answered
+// nothing, and the root would wait on with nobody to wake it.
+func TestAChangesRequestBetweenARegistrationsReadAndItsApplyAnswersTheWait(t *testing.T) {
+	registered := intake.GateRegistered{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4,
+		Since: record.EventMark{Seq: 10}}
+	// Dispatch's time of the review is before the daemon's clock reads the registration.
+	review := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+		Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11, At: fixedNow.Add(-time.Second)}}
+	for _, source := range []string{"the live event", "the gate seed"} {
+		t.Run(source, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedWaiting(t, pool, "LEGION-NEXT", "B")
+			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", registered, admission.engine, admission); err != nil {
+				t.Fatalf("register gate v4: %v", err)
+			}
+			waiting := issue(t, pool, "LEGION-ROOT")
+			if waiting.Phase != phase.AwaitingPerson || waiting.Awaiting.Since != registered.Since || waiting.Answered() {
+				t.Fatalf("root after the registration = %#v, want it waiting unanswered from the read's sequence", waiting)
+			}
+			applyFact(t, pool, admission, source, review)
+			if got := issue(t, pool, "LEGION-ROOT"); !got.Answered() {
+				t.Fatalf("root after %s of a review the registration's read missed = %#v, want it answered", source, got)
+			}
+		})
+	}
+}
+
+// An approval answers a wait whenever it opens the gate, given before the wait began or not: a root
+// can wait on a gate the record still shows closed after an approval whose own event was lost, and
+// were that approval skipped when the gate seed or the boot catch-up applies it, the root would stay
+// suspended with its gate open and nothing left to answer it. Applied again, it answers nothing
+// more, and the root resumes once. An approval that opens nothing (the gate already open, or an
+// older version approved) answers nothing.
+func TestAnApprovalThatOpensTheGateAnswersAWaitWhateverItsTime(t *testing.T) {
+	approval := intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved,
+		Version: 4, Mark: record.EventMark{Seq: 8, At: handedBackAt.Add(-time.Minute)}}
+
+	t.Run("an approval before the wait, applied by the seed and the catch-up", func(t *testing.T) {
+		pool := migratedPool(t)
+		admission := newAdmission(t, 1, nil)
+		handBackOnAClosedGateAt(t, pool, admission, handBack)
+		applyFact(t, pool, admission, "seed-approved-v4", approval)
+		answered := issue(t, pool, "LEGION-ROOT")
+		if !answered.Answered() {
+			t.Fatalf("root after the seed applied an approval given before its wait = %#v, want it answered", answered)
+		}
+		applyFact(t, pool, admission, "catch-up-approved-v4", approval)
+		if again := issue(t, pool, "LEGION-ROOT"); !again.Answered() || !again.Awaiting.AnsweredAt.Equal(*answered.Awaiting.AnsweredAt) {
+			t.Fatalf("root after the approval applied again = %#v, want its first answer kept", again)
+		}
+		apply(t, pool, admission, "next-finished", intake.DispatchIssue{
+			Key: "LEGION-NEXT", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done",
+			Title: "LEGION-NEXT", Rank: "B", HandedOver: true,
+		}, admission.engine)
+		if resumed := issue(t, pool, "LEGION-ROOT"); resumed.Phase != phase.Planning || resumed.Awaiting != nil {
+			t.Fatalf("root once a slot freed = %#v, want planning with no wait", resumed)
+		}
+		starts := 0
+		for _, effect := range effects(t, pool) {
+			if start, ok := effect.payload.(record.SuperviseRequest); ok && effect.issue == "LEGION-ROOT" && start.Op == "start" && start.Role == "architect" {
+				starts++
+			}
+		}
+		if starts != 1 {
+			t.Fatalf("architect starts = %d, want the root resumed once", starts)
+		}
+	})
+
+	for _, tc := range []struct {
+		name string
+		gate record.DesignGate
+		fact intake.DispatchArtifact
+	}{
+		{name: "an approval of a gate already open", gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4, ApprovedVersion: new(4)},
+			fact: approval},
+		{name: "an approval of an older version", gate: record.DesignGate{Issue: "LEGION-ROOT", ArtifactID: "artifact-root", LatestVersion: 4},
+			fact: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactApproved, Version: 3, Mark: record.EventMark{Seq: 11}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			awaitingRoot(t, pool, record.Awaiting{GateVersion: 4, Since: handBack})
+			seedGate(t, pool, tc.gate)
+			applyFact(t, pool, admission, "approval", tc.fact)
+			if got := issue(t, pool, "LEGION-ROOT"); got.Phase != phase.AwaitingPerson || got.Answered() {
+				t.Fatalf("root after %s = %#v, want it still waiting unanswered", tc.name, got)
+			}
+		})
+	}
 }
 
 // A registration Dispatch shows approved at a later version than the one registered (a person's

@@ -20,13 +20,13 @@ const (
 )
 
 // ReviewColumns selects one artifact_reviews row in the order ScanReview reads it.
-const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reason, ask_id::text, created_at`
+const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reason, ask_id::text, created_at, event_seq`
 
 // ScanReview decodes one ReviewColumns row.
 func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 	var review model.ArtifactReview
 	var actor []byte
-	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &actor, &review.Reason, &review.AskID, &review.CreatedAt); err != nil {
+	if err := row.Scan(&review.ID, &review.ArtifactID, &review.Version, &review.State, &actor, &review.Reason, &review.AskID, &review.CreatedAt, &review.EventSeq); err != nil {
 		return model.ArtifactReview{}, err
 	}
 	if err := json.Unmarshal(actor, &review.Actor); err != nil {
@@ -38,8 +38,12 @@ func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 // WriteReview records a review of artifact pinned to version and appends its event,
 // artifact.approved or artifact.changes_requested, on the document's owner: its issue when it
 // belongs to one, else the document itself. askID is the approval ask the review answers, nil
-// when it was given from the document header with no request open. The caller owns the
-// transaction and publishes the event.
+// when it was given from the document header with no request open. The review row keeps the
+// event's sequence on that owner (event_seq), written in the same transaction, which places a read
+// of the review among the owner's events. The row is inserted before the event is appended and
+// its sequence written after, so the review's foreign-key locks are still taken before the owner's
+// row lock and the commit-order lock, as they were before the sequence was kept. The caller owns
+// the transaction and publishes the event.
 func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact model.Artifact, version int, state string, actor model.Actor, reason *string, askID *string) (model.ArtifactReview, model.Event, error) {
 	actorJSON, err := json.Marshal(actor)
 	if err != nil {
@@ -70,6 +74,11 @@ func WriteReview(ctx context.Context, tx pgx.Tx, broker *events.Broker, artifact
 	if err != nil {
 		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("append %s: %w", eventType, err)
 	}
+	seq := int64(event.Seq)
+	if _, err := tx.Exec(ctx, `update artifact_reviews set event_seq = $2 where id = $1`, review.ID, seq); err != nil {
+		return model.ArtifactReview{}, model.Event{}, fmt.Errorf("record the sequence of %s: %w", eventType, err)
+	}
+	review.EventSeq = &seq
 	return review, event, nil
 }
 

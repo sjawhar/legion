@@ -150,6 +150,7 @@ func (s *server) attachApprovals(ctx context.Context, q queryer, artifacts []*mo
 			approval.Version = &version
 			approval.By = &actor
 			approval.At = &at
+			approval.Seq = review.EventSeq
 			approval.Reason = review.Reason
 			approval.AskID = review.AskID
 			switch {

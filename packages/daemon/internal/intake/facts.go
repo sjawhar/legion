@@ -123,29 +123,33 @@ const (
 	DispatchArtifactVersion          DispatchArtifactKind = "version"
 )
 
-// DispatchArtifact records one review or version event for a registered design document. Seed is
-// set on the gate seed's own read of Dispatch's approval (the daemon's seedGate) rather than on an
-// event: a changes request it reads closes the gate and answers a wait the registration started,
-// and tells the architect only when it closes a gate that was open, since otherwise the
-// registration, the event itself or the resume task already told it.
+// DispatchArtifact records one review or version event for a registered design document, from a
+// live event or from the daemon's own read of Dispatch's approval (the gate seed, the boot
+// catch-up). Every source applies alike: the gate's told record, not the source, keeps the
+// architect from hearing one changes request twice. Mark places a review in the issue's Dispatch
+// event log: the event's sequence and Dispatch's time of it, from the event itself, or from the
+// read's latest review (dispatch.Approval's Seq and At), whichever of them that read gave. A
+// version event carries none.
 type DispatchArtifact struct {
 	Key        string
 	ArtifactID string
 	Kind       DispatchArtifactKind
 	Version    int
 	Reason     string
-	Seed       bool
+	Mark       record.EventMark
 }
 
 func (DispatchArtifact) isFact() {}
 
-// DispatchAskOpened is an ordinary question a session opened on an issue. Approval asks belong to
+// DispatchAskOpened is an ordinary question a session opened on an issue, with its event's place
+// in the issue's Dispatch event log (Mark), where the wait it starts begins. Approval asks belong to
 // the design gate and are distinguished by Kind.
 type DispatchAskOpened struct {
 	Key           string
 	Ask           string
 	Kind          string
 	AuthorSession string
+	Mark          record.EventMark
 }
 
 func (DispatchAskOpened) isFact() {}
@@ -165,15 +169,18 @@ type DispatchAskClosed struct {
 func (DispatchAskClosed) isFact() {}
 
 // DispatchAskReply is a comment on an ask, or Dispatch's ask.handed_back, with whose turn it
-// leaves and the actor who made it. WaitingOn is `agent` or `human` on an open ask (a hand-back
-// is `human`), and empty on a closed one. A person's reply that does not hand the ask back wakes a
-// root waiting on that ask, or an agent-turn one a root waiting on its design gate; a session of
-// the root's own tree handing an ask on an admitted root to the person starts a wait.
+// leaves, the actor who made it, and its event's place in the issue's Dispatch event log (Mark,
+// zero when the boot catch-up read the reply rather than its event). WaitingOn is `agent` or
+// `human` on an open ask (a hand-back is `human`), and empty on a closed one. A person's reply that
+// does not hand the ask back wakes a root waiting on that ask, or an agent-turn one a root waiting
+// on its design gate; a session of the root's own tree handing an ask on an admitted root to the
+// person starts a wait, which begins at Mark.
 type DispatchAskReply struct {
 	Key       string
 	Ask       string
 	WaitingOn string
 	Actor     dispatch.Actor
+	Mark      record.EventMark
 }
 
 func (DispatchAskReply) isFact() {}
@@ -506,12 +513,16 @@ func (SignOff) isFact() {}
 // waited on. ApprovedVersion is the version Dispatch showed approved, set only when that approval is
 // of Dispatch's latest version (the read the gate seed makes), and 0 otherwise: the gate opens at
 // registration. ChangesRequestedVersion is the version of a changes request Dispatch showed on its
-// latest version, with its reason, and 0 otherwise: the root keeps its slot with its architect told.
+// latest version, with its reason and the review's place in the issue's Dispatch event log
+// (ChangesRequestedMark), and 0 otherwise: the root keeps its slot with its architect told.
 // RequestWaitsOnAgent says Dispatch showed the open approval request waiting on the agent (a reply
 // or a newer version since it was handed to the person): no wait starts, since the person is not
 // asked to act, and the architect's hand-back of the request starts it. DispatchVersion is the
 // document's latest version as that read found it: Version is the caller's, so only
-// DispatchVersion proves the document moved past the version a root waits on.
+// DispatchVersion proves the document moved past the version a root waits on. Since is where a wait
+// this registration starts begins: the issue's event sequence read before the approval, so every
+// review the read did not show comes after it, and the time of the latest review it showed (zero
+// for none), for a review Dispatch gives no sequence for.
 type GateRegistered struct {
 	Issue                   string
 	ArtifactID              string
@@ -519,8 +530,10 @@ type GateRegistered struct {
 	ApprovedVersion         int
 	ChangesRequestedVersion int
 	ChangesReason           string
+	ChangesRequestedMark    record.EventMark
 	RequestWaitsOnAgent     bool
 	DispatchVersion         int
+	Since                   record.EventMark
 }
 
 func (GateRegistered) isFact() {}

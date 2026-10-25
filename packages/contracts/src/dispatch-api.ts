@@ -530,7 +530,11 @@ export interface ArtifactApproval {
   readonly latest_version: number;
   readonly version?: number;
   readonly by?: Actor;
+  /** The latest review's `created_at`, which its `artifact.*` event shares. */
   readonly at?: string;
+  /** The latest review's event sequence on the document's owner, which orders the review among
+   *  the owner's events as they commit; absent for a review recorded before Dispatch kept it. */
+  readonly seq?: number;
   readonly reason?: string | null;
   readonly ask_id?: string | null;
   readonly requested_by?: Actor;

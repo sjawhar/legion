@@ -151,6 +151,11 @@ type Ask struct {
 // Approval is the current approval state Dispatch derives for a document, and the issue carrying
 // the document (empty for a project document). While an approval request is open (State
 // `awaiting`), AskID names it and WaitingOn is whose reply it needs next, `human` or `agent`.
+// At and Seq identify the document's latest review, whatever State shows: At is Dispatch's time of
+// it (its `created_at`, which its artifact.* event shares, since one transaction writes both), and
+// Seq that event's sequence on the issue. Each is zero when Dispatch gave none: At when the
+// document has no review, Seq also for a review Dispatch recorded before it kept the sequence, and
+// from a Dispatch that predates it.
 type Approval struct {
 	IssueKey      string
 	State         string
@@ -159,6 +164,8 @@ type Approval struct {
 	Reason        *string
 	AskID         string
 	WaitingOn     string
+	At            time.Time
+	Seq           int64
 }
 
 // ApprovedLatest is the version Dispatch shows approved when that approval is of its latest

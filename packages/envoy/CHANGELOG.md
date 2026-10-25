@@ -4,6 +4,13 @@
 
 ### Added
 
+- Dispatch's approval read (`approval` on every document read) names the latest review's event
+  sequence, `seq`, beside its `at`: each review keeps the sequence of the `artifact.approved` or
+  `artifact.changes_requested` event it appended on its document's owner
+  (`artifact_reviews.event_seq`, migration 0116, written in the same transaction). The owner's row
+  lock orders those events as they commit, so `seq` places a review among them where `at`, its
+  transaction's start, cannot; the Legion daemon orders a review against the start of a root's wait
+  by it. A review recorded before the migration reads with its `at` and no `seq`.
 - A person's machine login is an OAuth 2.0 device authorization grant (RFC 8628) on the secrets
   broker's own `POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`, and it refreshes
   itself. `agent-secrets machine login` prints the same code, which the person the login names

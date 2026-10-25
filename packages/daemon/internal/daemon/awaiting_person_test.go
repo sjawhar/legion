@@ -134,10 +134,13 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 
 // What no person did leaves the root waiting at boot: an ask still waiting on the person, a
 // session's or settlement's resolution with no person's reply after it, a session's progress note
-// handing the turn to the agent, and an approval request a session's reply moved to the agent.
+// handing the turn to the agent, an approval request a session's reply moved to the agent, the
+// changes request that answered an earlier wait, and a changes request Dispatch recorded before the
+// wait began.
 func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3}
 	told := 3
+	reviewed := time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)
 	for _, tc := range []struct {
 		name     string
 		awaiting record.Awaiting
@@ -156,8 +159,11 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
 				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyID: "reply-1", LastReplyBy: architectSession}}}},
 		{name: "the changes request that answered an earlier wait", awaiting: record.Awaiting{GateVersion: 3},
-			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path"},
-			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("name the rollback path")}}},
+			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path",
+				ToldChangesMark: record.EventMark{Seq: 5, At: reviewed}},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("name the rollback path"), Seq: 5, At: reviewed}}},
+		{name: "a changes request recorded before the wait began", awaiting: record.Awaiting{GateVersion: 3, Since: record.EventMark{Seq: 10, At: reviewed.Add(time.Minute)}},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("name the rollback path"), Seq: 8, At: reviewed}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			waitGate := tc.gate
@@ -231,70 +237,93 @@ func TestCatchUpAwaitingSkipsARootItCannotReadAndStillFailsWhenDispatchIsDown(t 
 	}
 }
 
-// Three waits at one version in one generation, each answered only by a changes request whose
-// live event was lost, recover one after another at boot, also when the third repeats the first's
-// wording: each is a new act of a person. Re-reading the review that answered the last wait, with
-// no new act since, answers nothing.
+// Successive waits at one version in one generation, each answered only by a changes request whose
+// live event was lost and which Dispatch recorded after that wait began, recover one after another
+// at boot: each review is a new act of a person, whether it repeats the previous review's wording
+// (A, A) or an earlier one's (A, B, A). Re-reading the review that answered the last wait, with no
+// new act since, answers nothing.
 func TestCatchUpAwaitingRecoversSuccessiveReviewsAtOneVersion(t *testing.T) {
-	pool := isolatedOutboxPool(t)
-	records := record.NewStore()
-	ctx := context.Background()
-	root := record.Issue{Key: "CAPTURE-ROOT", Tree: "CAPTURE-ROOT", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
-		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
-		Awaiting: &record.Awaiting{GateVersion: 4}}
-	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-		if err := records.PutIssue(ctx, tx, root); err != nil {
-			return err
-		}
-		return records.PutGate(ctx, tx, record.DesignGate{Issue: root.Key, ArtifactID: "artifact-root", LatestVersion: 4})
-	}); err != nil {
-		t.Fatalf("seed awaiting root: %v", err)
-	}
-	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 10, 23, 18, 0, 0, 0, time.UTC) }}, quietLogger())
-	client := &awaitingDispatch{issue: dispatch.Issue{Key: root.Key, LastSeq: 7}}
-	w := &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", handlers: []intake.Handler{engine}}
-	read := func() record.Issue {
-		t.Helper()
-		var got *record.Issue
-		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
-			var err error
-			got, err = records.Issue(ctx, tx, root.Key)
-			return err
-		}); err != nil || got == nil {
-			t.Fatalf("read root: %v", err)
-		}
-		return *got
-	}
-	// waitAgain stands for the root's resume and its architect's hand-back: a fresh, unanswered
-	// wait on the same version.
-	waitAgain := func() {
-		t.Helper()
-		again := read()
-		again.Awaiting = &record.Awaiting{GateVersion: 4}
-		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return records.PutIssue(ctx, tx, again) }); err != nil {
-			t.Fatalf("start the next wait: %v", err)
-		}
-	}
-	review := func(reason string) {
-		client.approval = dispatch.Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason}
-	}
-	catchUp := func() {
-		t.Helper()
-		if err := w.catchUpAwaiting(ctx); err != nil {
-			t.Fatalf("catch up: %v", err)
-		}
-	}
+	for _, tc := range []struct {
+		name    string
+		reasons []string
+	}{
+		{name: "A, B, A", reasons: []string{"name the rollback path", "name the operator", "name the rollback path"}},
+		{name: "A, A", reasons: []string{"name the rollback path", "name the rollback path"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := isolatedOutboxPool(t)
+			records := record.NewStore()
+			ctx := context.Background()
+			// Dispatch's event log of the root: the hand-back that starts each wait, then the
+			// person's review that answers it, each event one sequence and a minute after the last.
+			start := time.Date(2026, 10, 23, 17, 0, 0, 0, time.UTC)
+			seq := int64(10)
+			next := func() record.EventMark {
+				seq++
+				return record.EventMark{Seq: seq, At: start.Add(time.Duration(seq) * time.Minute)}
+			}
+			root := record.Issue{Key: "CAPTURE-ROOT", Tree: "CAPTURE-ROOT", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
+				Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+				Awaiting: &record.Awaiting{GateVersion: 4, Since: next()}}
+			if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+				if err := records.PutIssue(ctx, tx, root); err != nil {
+					return err
+				}
+				return records.PutGate(ctx, tx, record.DesignGate{Issue: root.Key, ArtifactID: "artifact-root", LatestVersion: 4})
+			}); err != nil {
+				t.Fatalf("seed awaiting root: %v", err)
+			}
+			engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 10, 23, 18, 0, 0, 0, time.UTC) }}, quietLogger())
+			client := &awaitingDispatch{issue: dispatch.Issue{Key: root.Key, LastSeq: 7}}
+			w := &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", handlers: []intake.Handler{engine}}
+			read := func() record.Issue {
+				t.Helper()
+				var got *record.Issue
+				if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+					var err error
+					got, err = records.Issue(ctx, tx, root.Key)
+					return err
+				}); err != nil || got == nil {
+					t.Fatalf("read root: %v", err)
+				}
+				return *got
+			}
+			// waitAgain stands for the root's resume and its architect's hand-back, an event after
+			// the review that answered the previous wait: a fresh, unanswered wait on the same
+			// version that begins there.
+			waitAgain := func() {
+				t.Helper()
+				again := read()
+				again.Awaiting = &record.Awaiting{GateVersion: 4, Since: next()}
+				if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return records.PutIssue(ctx, tx, again) }); err != nil {
+					t.Fatalf("start the next wait: %v", err)
+				}
+			}
+			// review is the person's changes request, after the wait began, whose live event is lost:
+			// only Dispatch's read of the document's latest review shows it.
+			review := func(reason string) {
+				mark := next()
+				client.approval = dispatch.Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, Seq: mark.Seq, At: mark.At}
+			}
+			catchUp := func() {
+				t.Helper()
+				if err := w.catchUpAwaiting(ctx); err != nil {
+					t.Fatalf("catch up: %v", err)
+				}
+			}
 
-	for i, reason := range []string{"name the rollback path", "name the operator", "name the rollback path"} {
-		review(reason)
-		catchUp()
-		if got := read(); !got.Answered() {
-			t.Fatalf("wait %d, answered only by %q, = %#v after the catch-up, want it answered", i+1, reason, got)
-		}
-		waitAgain()
-	}
-	catchUp()
-	if got := read(); got.Answered() {
-		t.Fatalf("a wait no new review answered = %#v after the catch-up, want it still unanswered", got)
+			for i, reason := range tc.reasons {
+				review(reason)
+				catchUp()
+				if got := read(); !got.Answered() {
+					t.Fatalf("wait %d, answered only by %q, = %#v after the catch-up, want it answered", i+1, reason, got)
+				}
+				waitAgain()
+			}
+			catchUp()
+			if got := read(); got.Answered() {
+				t.Fatalf("a wait no new review answered = %#v after the catch-up, want it still unanswered", got)
+			}
+		})
 	}
 }

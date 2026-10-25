@@ -482,3 +482,67 @@ func TestApprovedSpecStaysApprovedThroughItsAskBlockSettlement(t *testing.T) {
 		t.Fatalf("approval after the settlement that indexed the block = %#v, want it still approved at version 1", got.Approval)
 	}
 }
+
+// Each review keeps the sequence of the artifact.* event it appended on its issue, and the
+// approval read returns the latest review's as `seq` beside its `at`, which equals the event's own
+// created_at: one transaction writes both. A person who requests changes twice with the same
+// reason at one version writes two reviews the read tells apart by their sequences. A review
+// recorded before Dispatch kept the sequence reads with its `at` and no `seq`.
+func TestTheApprovalReadNamesTheLatestReviewsEventSequence(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Review twice", "A spec")
+	type sequencedRead struct {
+		Approval struct {
+			State string  `json:"state"`
+			At    *string `json:"at"`
+			Seq   *int64  `json:"seq"`
+		} `json:"approval"`
+	}
+	type reviewEvent struct {
+		Seq       int64     `json:"seq"`
+		Type      string    `json:"type"`
+		CreatedAt time.Time `json:"created_at"`
+	}
+	latestReviewEvent := func() reviewEvent {
+		t.Helper()
+		response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+issue.Key+"/events?order=desc&limit=1", nil, "alice")
+		if response.Code != http.StatusOK {
+			t.Fatalf("read events: status=%d body=%s", response.Code, response.Body.String())
+		}
+		events := decodeBody[[]reviewEvent](t, response)
+		if len(events) != 1 || events[0].Type != "artifact.changes_requested" {
+			t.Fatalf("newest event = %#v, want the review's artifact.changes_requested", events)
+		}
+		return events[0]
+	}
+	var seqs []int64
+	for range 2 {
+		review := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews",
+			map[string]any{"state": "changes_requested", "reason": "Name the rollback path."}, "alice")
+		if review.Code != http.StatusCreated {
+			t.Fatalf("request changes: status=%d body=%s", review.Code, review.Body.String())
+		}
+		event := latestReviewEvent()
+		read := decodeBody[sequencedRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+		if read.Approval.State != "changes_requested" || read.Approval.Seq == nil || *read.Approval.Seq != event.Seq {
+			t.Fatalf("approval = %#v, want changes_requested naming its event's sequence %d", read.Approval, event.Seq)
+		}
+		at, err := time.Parse(time.RFC3339Nano, *read.Approval.At)
+		if err != nil || !at.Equal(event.CreatedAt) {
+			t.Fatalf("approval at = %v (%v), want its event's created_at %s", read.Approval.At, err, event.CreatedAt)
+		}
+		seqs = append(seqs, event.Seq)
+	}
+	if seqs[1] <= seqs[0] {
+		t.Fatalf("review sequences = %v, want the second review's later than the first's", seqs)
+	}
+
+	// A review recorded before the column (event_seq null) reads with its time and no sequence.
+	if _, err := database.Pool.Exec(context.Background(), `update artifact_reviews set event_seq = null where artifact_id = $1`, issue.PrimaryArtifactID); err != nil {
+		t.Fatalf("clear the reviews' sequences: %v", err)
+	}
+	read := decodeBody[sequencedRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+	if read.Approval.Seq != nil || read.Approval.At == nil {
+		t.Fatalf("approval of a review with no recorded sequence = %#v, want its at and no seq", read.Approval)
+	}
+}

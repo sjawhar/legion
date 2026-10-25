@@ -47,7 +47,8 @@ func Unresumable(ctx context.Context, store record.Store, tx pgx.Tx, issue recor
 }
 
 // dispatchAskOpened releases a quiet admitted root only for a question its own tree session
-// opened. Approval asks are represented by the design gate instead.
+// opened. Approval asks are represented by the design gate instead. The wait begins at the
+// question's own event.
 func (e *Engine) dispatchAskOpened(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskOpened) (intake.Result, error) {
 	if fact.Kind != "question" || fact.AuthorSession == "" {
 		return intake.Result{}, nil
@@ -60,7 +61,7 @@ func (e *Engine) dispatchAskOpened(ctx context.Context, tx pgx.Tx, fact intake.D
 	if err != nil || !ownsTree {
 		return intake.Result{}, err
 	}
-	return intake.Result{}, e.awaitPerson(ctx, tx, *issue, record.Awaiting{Ask: fact.Ask}, fmt.Sprintf("question %s is awaiting an answer", fact.Ask))
+	return intake.Result{}, e.awaitPerson(ctx, tx, *issue, record.Awaiting{Ask: fact.Ask, Since: fact.Mark}, fmt.Sprintf("question %s is awaiting an answer", fact.Ask))
 }
 
 // dispatchAskClosed answers a root waiting on a person when a person answered or resolved an ask
@@ -120,8 +121,10 @@ func (e *Engine) answeredByPerson(ctx context.Context, tx pgx.Tx, key, ask strin
 // back to the person: a reply leaving the turn with them, or Dispatch's ask.handed_back of an
 // approval request. With its design gate registered and closed, the root waits on that gate at its
 // latest version, which the person's approval, changes request or reply answers; otherwise it waits
-// on the ask. awaitPerson's guards hold: a tree member mid-phase, or a root that could not resume,
-// keeps the slot.
+// on the ask. The wait begins at the hand-back's own event, so a hand-back the daemon applies late
+// (replayed at boot) still begins where Dispatch put it, and a changes request Dispatch recorded
+// before it answers nothing. awaitPerson's guards hold: a tree member mid-phase, or a root that
+// could not resume, keeps the slot.
 func (e *Engine) handedBack(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) error {
 	issue, err := e.store.Issue(ctx, tx, fact.Key)
 	if err != nil || issue == nil || issue.Phase != phase.Admitted {
@@ -136,10 +139,10 @@ func (e *Engine) handedBack(ctx context.Context, tx pgx.Tx, fact intake.Dispatch
 		return err
 	}
 	if gate != nil && !classify.DesignGateOpen(*gate) {
-		return e.awaitPerson(ctx, tx, *issue, record.Awaiting{GateVersion: gate.LatestVersion},
+		return e.awaitPerson(ctx, tx, *issue, record.Awaiting{GateVersion: gate.LatestVersion, Since: fact.Mark},
 			fmt.Sprintf("spec version %d is awaiting a person's review", gate.LatestVersion))
 	}
-	return e.awaitPerson(ctx, tx, *issue, record.Awaiting{Ask: fact.Ask}, fmt.Sprintf("ask %s was handed back to a person", fact.Ask))
+	return e.awaitPerson(ctx, tx, *issue, record.Awaiting{Ask: fact.Ask, Since: fact.Mark}, fmt.Sprintf("ask %s was handed back to a person", fact.Ask))
 }
 
 // dispatchClaim keeps the newest Dispatch claim separate from LastDispatchSeq: claim events do

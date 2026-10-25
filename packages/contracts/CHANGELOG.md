@@ -4,6 +4,10 @@
 
 ### Added
 
+- `ArtifactApproval.seq`, the latest review's event sequence on the document's owner, beside its
+  `at`: the owner's row lock orders its events as they commit, so `seq` places the review among them
+  where `at`, its transaction's start, cannot. Absent for a review recorded before Dispatch kept
+  it.
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`

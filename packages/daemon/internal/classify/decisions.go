@@ -356,31 +356,51 @@ const (
 func ApplyDesignGateEvent(gate record.DesignGate, kind DesignGateEventKind, version int) record.DesignGate {
 	if version > gate.LatestVersion {
 		gate.LatestVersion = version
-		gate.ToldChangesVersion, gate.ToldChangesReason = nil, ""
+		gate = clearChangesTold(gate)
 	}
 	switch kind {
 	case DesignGateApproved:
 		approved := version
 		gate.ApprovedVersion = &approved
-		gate.ToldChangesVersion, gate.ToldChangesReason = nil, ""
+		gate = clearChangesTold(gate)
 	case DesignGateChangesRequested:
 		gate.ApprovedVersion = nil
 	}
 	return gate
 }
 
+func clearChangesTold(gate record.DesignGate) record.DesignGate {
+	gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = nil, "", record.EventMark{}
+	return gate
+}
+
 // DesignGateChangesTold reports whether the gate already records this changes request as one the
-// architect was told of: the same document version and the same reason. A second review at that
-// version with another reason is a new act of a person, and is not this one.
-func DesignGateChangesTold(gate record.DesignGate, version int, reason string) bool {
-	return gate.ToldChangesVersion != nil && *gate.ToldChangesVersion == version && gate.ToldChangesReason == reason
+// architect was told of: the same document version, the same reason, and the same review in the
+// issue's Dispatch event log (mark, record.EventMark.Same: its event's sequence, else Dispatch's
+// time of it). A person who repeats a review's version and wording later has made a new review,
+// with an event of its own, and is not this one. A read that carries neither the sequence nor the
+// time is matched on version and reason alone.
+func DesignGateChangesTold(gate record.DesignGate, version int, reason string, mark record.EventMark) bool {
+	return gate.ToldChangesVersion != nil && *gate.ToldChangesVersion == version && gate.ToldChangesReason == reason &&
+		gate.ToldChangesMark.Same(mark)
 }
 
 // RecordChangesTold records on the gate the changes request the architect is being told of, so a
-// later read of the same request (a registration's, the gate seed's) tells it nothing again.
-func RecordChangesTold(gate record.DesignGate, version int, reason string) record.DesignGate {
+// later read of the same review (a registration's, the gate seed's, the boot catch-up's) tells it
+// nothing again. A review the gate already records keeps its record, completed with what this read
+// adds of its mark, so the review's live event and a read that showed only its time are one review.
+func RecordChangesTold(gate record.DesignGate, version int, reason string, mark record.EventMark) record.DesignGate {
+	if DesignGateChangesTold(gate, version, reason, mark) {
+		if gate.ToldChangesMark.Seq == 0 {
+			gate.ToldChangesMark.Seq = mark.Seq
+		}
+		if gate.ToldChangesMark.At.IsZero() {
+			gate.ToldChangesMark.At = mark.At
+		}
+		return gate
+	}
 	told := version
-	gate.ToldChangesVersion, gate.ToldChangesReason = &told, reason
+	gate.ToldChangesVersion, gate.ToldChangesReason, gate.ToldChangesMark = &told, reason, mark
 	return gate
 }
 

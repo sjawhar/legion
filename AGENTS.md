@@ -255,10 +255,18 @@ is already waiting is answered by the person's review the registration carries, 
 its changes request, since that review reaches the daemon with the registration and the event
 that follows finds the gate as the registration left it; a request Dispatch merely shows waiting
 on the architect answers nothing, because the turn may have reached the agent through a session's
-note, and only a person's own act answers a wait. A changes request the gate records as told, or
-one whose answer resumes the root with a task naming it, is not told again. Approval and
-`changes_requested` both answer that wait, and so does a person's reply on an ask of the root; a
-newer version also answers it because Dispatch then waits on the architect. Once a slot is free the architect resumes its own
+note, and only a person's own act answers a wait. The daemon identifies a review by its version,
+its reason and where Dispatch recorded it: the sequence of its `artifact.*` event on the issue
+(Dispatch's approval read gives it as `seq`), or, for a review Dispatch recorded before it kept
+that sequence, Dispatch's time of it (`at`). A changes request the gate records as told, or one
+whose answer resumes the root with a task naming it, is not told again, while a later review that
+repeats an earlier one's version and wording is a new act and is. Each wait begins where Dispatch
+recorded the act that started it (the hand-back's or the question's own event, or, for a
+registration, the issue's sequence its read of Dispatch began at), and a changes request Dispatch
+recorded before the wait began does not answer it; an approval that opens the gate answers it
+whenever it was given. Approval and `changes_requested` both answer that wait, and so does a
+person's reply on an ask of the root; a newer version also answers it because Dispatch then waits
+on the architect. Once a slot is free the architect resumes its own
 session with a task naming the answer; an open gate advances the root and its admitted children
 together. A gate still closed sends the architect to revise the spec and hand the request back to
 the person. A session of the tree handing an ask on the admitted root back to the person — a reply

@@ -81,6 +81,8 @@ type statusRecorder struct {
 	// approved.
 	approvals map[string]dispatch.Approval
 	issues    map[string]dispatch.Issue
+	// reads is every issue and document read, in order: `issue:<key>` and `approval:<id>`.
+	reads []string
 }
 
 func (r *statusRecorder) ListIssues(context.Context, string, []string) ([]dispatch.IssueSummary, error) {
@@ -88,6 +90,7 @@ func (r *statusRecorder) ListIssues(context.Context, string, []string) ([]dispat
 }
 
 func (r *statusRecorder) GetIssue(_ context.Context, key string) (dispatch.Issue, error) {
+	r.reads = append(r.reads, "issue:"+key)
 	issue, ok := r.issues[key]
 	if !ok {
 		return dispatch.Issue{}, &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "issue not found"}
@@ -117,6 +120,7 @@ func (r *statusRecorder) MessageBodiesSince(context.Context, string, time.Time) 
 }
 
 func (r *statusRecorder) Approval(_ context.Context, artifactID string) (dispatch.Approval, error) {
+	r.reads = append(r.reads, "approval:"+artifactID)
 	issue, ok := r.documents[artifactID]
 	if !ok {
 		return dispatch.Approval{}, &dispatch.Error{Status: http.StatusNotFound, Code: "NOT_FOUND", Message: "artifact not found"}
@@ -145,7 +149,9 @@ func newArchitectHarness(t *testing.T, grants *credential.Grants, refusal *intak
 	if grants == nil {
 		grants = credential.New(nil)
 	}
-	facts, statuses := &factRecorder{refusal: refusal}, &statusRecorder{}
+	// Dispatch shows the tree root LEGION-208 at event sequence 7, which register_gate reads before
+	// the approval; a test that reads other issues replaces the map.
+	facts, statuses := &factRecorder{refusal: refusal}, &statusRecorder{issues: map[string]dispatch.Issue{"LEGION-208": {Key: "LEGION-208", LastSeq: 7}}}
 	h.handler = NewServer("127.0.0.1", 8437, Options{
 		Supervisor:    h.supervisor,
 		BootTokens:    h.tokens,
@@ -856,8 +862,8 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 		}
 	}
 	want := []intake.Fact{
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3, DispatchVersion: 3},
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3, DispatchVersion: 3},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", Version: 3, ApprovedVersion: 3, DispatchVersion: 3, Since: record.EventMark{Seq: 7}},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", Version: 3, DispatchVersion: 3, Since: record.EventMark{Seq: 7}},
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("gate facts = %#v, want the approved document to carry its approval and the other none", got)
@@ -865,19 +871,22 @@ func TestGateRegistrationCarriesAnApprovalDispatchAlreadyShows(t *testing.T) {
 }
 
 // register_gate carries a changes request Dispatch shows on the document's latest version, with its
-// reason, so a request given between the architect's approval request and its registration keeps
-// the root in its slot with the architect told; and it carries an open request Dispatch shows
-// waiting on the agent, which starts no wait. A changes request a newer version superseded carries
-// nothing.
+// reason and the review's place in the issue's event log, so a request given between the
+// architect's approval request and its registration keeps the root in its slot with the architect
+// told; and it carries an open request Dispatch shows waiting on the agent, which starts no wait. A
+// changes request a newer version superseded carries nothing. Each registration reads the issue's
+// event sequence before the approval, and a wait it starts begins there, with the time of the
+// latest review that read showed.
 func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) {
 	h, facts, statuses := newArchitectHarness(t, nil, nil)
 	const changed, moved, superseded = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093", "4a6b8c0d-2e4f-4a6b-8c0d-2e4f6a8b0c1d", "7c1e3a5b-9d2f-4b6a-8e0c-1d3f5a7b9c2e"
 	statuses.documents = map[string]string{changed: "LEGION-208", moved: "LEGION-208", superseded: "LEGION-208"}
 	reason := "name the rollback path"
+	reviewed := time.Date(2026, 10, 23, 17, 0, 0, 123456000, time.UTC)
 	statuses.approvals = map[string]dispatch.Approval{
-		changed:    {State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason},
-		moved:      {State: "awaiting", LatestVersion: 4, Version: new(3), AskID: "ask-approval", WaitingOn: "agent"},
-		superseded: {State: "changes_requested", LatestVersion: 5, Version: new(4), Reason: &reason},
+		changed:    {State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason, At: reviewed, Seq: 6},
+		moved:      {State: "awaiting", LatestVersion: 4, Version: new(3), AskID: "ask-approval", WaitingOn: "agent", At: reviewed},
+		superseded: {State: "changes_requested", LatestVersion: 5, Version: new(4), Reason: &reason, At: reviewed, Seq: 5},
 	}
 	seedTree(t, h, "LEGION-208")
 	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
@@ -888,13 +897,19 @@ func TestGateRegistrationCarriesAChangesRequestAndTheRequestsTurn(t *testing.T) 
 			t.Fatalf("gate register %s = %d: %s", artifact, recorder.Code, recorder.Body)
 		}
 	}
+	since := record.EventMark{Seq: 7, At: reviewed}
 	want := []intake.Fact{
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason, DispatchVersion: 4},
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: moved, Version: 4, RequestWaitsOnAgent: true, DispatchVersion: 4},
-		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4, DispatchVersion: 5},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: changed, Version: 4, ChangesRequestedVersion: 4, ChangesReason: reason,
+			ChangesRequestedMark: record.EventMark{Seq: 6, At: reviewed}, DispatchVersion: 4, Since: since},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: moved, Version: 4, RequestWaitsOnAgent: true, DispatchVersion: 4, Since: since},
+		intake.GateRegistered{Issue: "LEGION-208", ArtifactID: superseded, Version: 4, DispatchVersion: 5, Since: since},
 	}
 	if got := facts.recorded(); !reflect.DeepEqual(got, want) {
 		t.Fatalf("gate facts = %#v, want %#v", got, want)
+	}
+	wantReads := []string{"issue:LEGION-208", "approval:" + changed, "issue:LEGION-208", "approval:" + moved, "issue:LEGION-208", "approval:" + superseded}
+	if !reflect.DeepEqual(statuses.reads, wantReads) {
+		t.Fatalf("Dispatch reads = %q, want the issue's sequence read before each approval: %q", statuses.reads, wantReads)
 	}
 }
 

@@ -470,8 +470,12 @@ type awaitingRoot struct {
 
 // catchUpAwaiting reads the person-owned state a root may have missed while this daemon was down.
 // It runs after Reconcile committed its durable-consumer holds, so a synthetic answer observes the
-// same admission fences as a live event. Each fact has a deterministic id and is therefore safe
-// beside a later JetStream redelivery of the original event. A root it cannot read is logged and
+// same admission fences as a live event. Each fact's id names what it read (a review's place in
+// the issue's Dispatch event log, a reply's id), so a second catch-up of the same state is dropped
+// as processed; what keeps one act from answering twice, beside a later JetStream redelivery of the
+// original event whose id differs, is the record: a root already answered is skipped, a changes
+// request the gate records as told answers nothing, and one Dispatch recorded before the wait began
+// answers nothing either (workflow's answerAwaitedGate). A root it cannot read is logged and
 // skipped: it waits for its live event, as before this daemon booted, and blocks no other root's
 // catch-up nor the boot. Dispatch being unreachable is returned, since the boot's readiness retry
 // waits that out (dispatch.Unreachable).
@@ -558,7 +562,9 @@ func (w *workflowRuntime) catchUpAwaitingRoot(ctx context.Context, root awaiting
 // whoever wrote it, moves the approval request to the agent and answers it; an approval or changes
 // request of the version it waits on answers it; and an open request a person's reply handed to the
 // agent answers it. The last is read from the request's thread, since a newer version leaves the
-// request waiting on the agent too, and only a person's reply answers.
+// request waiting on the agent too, and only a person's reply answers. A review carries its place
+// in the issue's Dispatch event log (dispatch.Approval's Seq and At), which identifies it in the
+// gate's told record, places it against the wait's start, and names it in the fact's id.
 func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaitingRoot) error {
 	if root.gate == nil {
 		return fmt.Errorf("awaiting root %s has no design gate", root.issue.Key)
@@ -567,6 +573,7 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 	if err != nil {
 		return fmt.Errorf("read approval of %s for %s: %w", root.gate.ArtifactID, root.issue.Key, err)
 	}
+	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	// The awaited version, not the gate's: a registration may have recorded a newer version on the
 	// gate whose own event never arrived, and that version is the answer.
 	if approval.LatestVersion > root.issue.Awaiting.GateVersion {
@@ -574,19 +581,16 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion})
 	}
 	if approved := approval.ApprovedLatest(); approved >= root.issue.Awaiting.GateVersion {
-		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-approved:%s:%d:%d", root.issue.Key, root.issue.Generation, approved),
-			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactApproved, Version: approved})
+		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-approved:%s:%d:%d:%d", root.issue.Key, root.issue.Generation, approved, review.ID()),
+			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactApproved, Version: approved, Mark: review})
 	}
 	if changes, reason := approval.ChangesRequestedLatest(); changes >= root.issue.Awaiting.GateVersion &&
-		!classify.DesignGateChangesTold(*root.gate, changes, reason) {
-		// Dispatch's read names no review id, so the event id cannot name the review: a person may
-		// repeat an earlier review's version and wording in a later wait of the same generation,
-		// and an id built from those would drop that new act as already processed. The id is this
-		// catch-up's own instead, and what keeps a review from answering twice is the record: a
-		// changes request the gate records as told (the one that answered an earlier wait, whose
-		// application records it) answers nothing, and a root already answered is skipped above.
-		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-changes:%s:%d:%d:%d", root.issue.Key, root.issue.Generation, changes, time.Now().UnixNano()),
-			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactChangesRequested, Version: changes, Reason: reason})
+		!classify.DesignGateChangesTold(*root.gate, changes, reason, review) {
+		// The id names the review by its place in the event log, so a person who repeats an earlier
+		// review's version and wording in a later wait of the same generation has made another
+		// review, with another id, and that new act is not dropped as processed.
+		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-changes:%s:%d:%d:%d", root.issue.Key, root.issue.Generation, changes, review.ID()),
+			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactChangesRequested, Version: changes, Reason: reason, Mark: review})
 	}
 	if approval.State != "awaiting" || approval.WaitingOn != "agent" || approval.AskID == "" {
 		return nil

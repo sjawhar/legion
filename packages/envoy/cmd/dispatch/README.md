@@ -663,6 +663,14 @@ image and confirms the stop before it reads the schema, and when the schema has 
 the previous image runs against, it refuses to start that image again and exits `1` for a forward
 recovery.
 
+Migration `0116_artifact_reviews_event_seq` adds `artifact_reviews.event_seq`, the sequence of the
+`artifact.*` event each review appended on its document's owner, which `docs.WriteReview` writes in
+the transaction that appends the event and the approval read returns as `seq`
+(`packages/envoy/AGENTS.md`). It is nullable, so a review recorded before it reads with no `seq`,
+and the release before it, which names no `event_seq` in its insert, rolls beside it. Adding a
+nullable column with no default writes the catalog alone, under `artifact_reviews`'
+`ACCESS EXCLUSIVE` lock for milliseconds; it refuses and rewrites no row, and its census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

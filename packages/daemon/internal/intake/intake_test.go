@@ -205,6 +205,14 @@ func TestCommitScopedIsTrueOnlyWithinWithCommitHooks(t *testing.T) {
 
 func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 	updatedAt := time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)
+	// mark is a captured Dispatch event's place in its issue's log: its seq and created_at.
+	mark := func(seq int64, at string) record.EventMark {
+		created, err := time.Parse(time.RFC3339Nano, at)
+		if err != nil {
+			t.Fatalf("parse captured created_at %q: %v", at, err)
+		}
+		return record.EventMark{Seq: seq, At: created}
+	}
 	cases := []struct {
 		name    string
 		subject string
@@ -239,19 +247,20 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch artifact approved",
 			subject: "notifications.dispatch.issue.CAPTURE-4.artifact.approved",
 			file:    "dispatch/artifact-approved.json",
-			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2},
+			want:    DispatchArtifact{Key: "CAPTURE-4", ArtifactID: "0544d460-0931-4374-b20b-790408519edd", Kind: DispatchArtifactApproved, Version: 2, Mark: mark(5, "2026-09-23T00:46:26.997872Z")},
 		},
 		{
 			name:    "Dispatch artifact changes requested",
 			subject: "notifications.dispatch.issue.CAPTURE-3.artifact.changes_requested",
 			file:    "dispatch/artifact-changes-requested.json",
-			want:    DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason"},
+			want: DispatchArtifact{Key: "CAPTURE-3", ArtifactID: "e7860036-ca1a-4ec6-8bd0-51d5f1b6fbd8", Kind: DispatchArtifactChangesRequested, Version: 2, Reason: "Captured reviewer reason",
+				Mark: mark(7, "2026-09-23T00:45:50.37209Z")},
 		},
 		{
 			name:    "Dispatch ask opened",
 			subject: "notifications.dispatch.issue.CAPTURE-4.ask.opened",
 			file:    "dispatch/ask-opened.json",
-			want:    DispatchAskOpened{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", Kind: "question", AuthorSession: "session-architect"},
+			want:    DispatchAskOpened{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", Kind: "question", AuthorSession: "session-architect", Mark: mark(6, "2026-09-23T00:46:31Z")},
 		},
 		{
 			name:    "Dispatch ask answered",
@@ -269,13 +278,15 @@ func TestDecodeCapturedProducerEnvelopes(t *testing.T) {
 			name:    "Dispatch ask reply returning the turn to the agent",
 			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
 			file:    "dispatch/comment-ask-agent.json",
-			want:    DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "agent", Actor: dispatch.Actor{Kind: "user", ID: "human"}},
+			want: DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "agent", Actor: dispatch.Actor{Kind: "user", ID: "human"},
+				Mark: mark(7, "2026-09-23T00:46:32Z")},
 		},
 		{
 			name:    "Dispatch ask reply leaving the turn with the human",
 			subject: "notifications.dispatch.issue.CAPTURE-4.comment.created",
 			file:    "dispatch/comment-ask-human.json",
-			want:    DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}},
+			want: DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"},
+				Mark: mark(8, "2026-09-23T00:46:33Z")},
 		},
 		{
 			name:    "Dispatch issue claimed",
@@ -453,16 +464,18 @@ func TestADispatchIssueEventCarriesItsClaimHolder(t *testing.T) {
 
 // An approval request its asker hands back to the person is Dispatch's ask.handed_back, whose
 // payload is the ask: decoded as a reply that leaves the turn with the human, from the actor who
-// handed it back, which is what starts a root's wait on it.
+// handed it back, at the event's place in the issue's log, which is what starts a root's wait on
+// it and where that wait begins.
 func TestADispatchAskHandedBackIsAHumanTurnReplyFromItsActor(t *testing.T) {
 	payload := `{"id":36,"issue_key":"CAPTURE-4","seq":11,"type":"ask.handed_back","actor":{"kind":"session","id":"session-architect"},"notify":true,` +
-		`"payload":{"id":"6c83cb7f-8f4e-4820-9e05-7c94fa725007","kind":"approval","state":"open"}}`
+		`"created_at":"2026-10-23T18:00:00.123456Z","payload":{"id":"6c83cb7f-8f4e-4820-9e05-7c94fa725007","kind":"approval","state":"open"}}`
 	decoded, err := decodeMessage("notifications.dispatch.issue.CAPTURE-4.ask.handed_back", "CAPTURE", capturedRepositories, envelopeJSON(t, "dispatch-36", "dispatch", payload))
 	if err != nil {
 		t.Fatalf("decode ask.handed_back: %v", err)
 	}
-	want := DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"}}
-	if decoded.Fact != want {
+	want := DispatchAskReply{Key: "CAPTURE-4", Ask: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", WaitingOn: "human", Actor: dispatch.Actor{Kind: "session", ID: "session-architect"},
+		Mark: record.EventMark{Seq: 11, At: time.Date(2026, 10, 23, 18, 0, 0, 123456000, time.UTC)}}
+	if !reflect.DeepEqual(decoded.Fact, want) {
 		t.Fatalf("decoded ask.handed_back = %#v, want %#v", decoded.Fact, want)
 	}
 }

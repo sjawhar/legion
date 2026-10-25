@@ -491,7 +491,10 @@ type Artifact struct {
 }
 
 // ArtifactReview is one human review of a document, pinned to the version it was
-// given on: an approval, or a request for changes with a reason.
+// given on: an approval, or a request for changes with a reason. EventSeq is the
+// sequence of the artifact.* event the review appended on its document's owner, nil
+// for a review recorded before Dispatch kept it; the approval read returns it as
+// ArtifactApproval.Seq, and the review list does not carry it.
 type ArtifactReview struct {
 	ID         string    `json:"id"`
 	ArtifactID string    `json:"artifact_id"`
@@ -501,6 +504,7 @@ type ArtifactReview struct {
 	Reason     *string   `json:"reason"`
 	AskID      *string   `json:"ask_id"`
 	CreatedAt  time.Time `json:"created_at"`
+	EventSeq   *int64    `json:"-"`
 }
 
 // ArtifactApproval is a document's approval state as of its latest version:
@@ -509,13 +513,17 @@ type ArtifactReview struct {
 // version), or changes_requested (the latest review asks for changes). An
 // awaiting approval carries its request's WaitingOn: agent once a version moved
 // the request past the one its agent handed to the human, or a reply left it with
-// the agent; human otherwise (the ask reads' waiting_on).
+// the agent; human otherwise (the ask reads' waiting_on). Seq is the latest
+// review's event sequence on the document's owner, absent for a review recorded
+// before Dispatch kept it: the owner's row lock orders its events as they commit,
+// so Seq places the review among them where At, its transaction's start, cannot.
 type ArtifactApproval struct {
 	State         string  `json:"state"`
 	LatestVersion int     `json:"latest_version"`
 	Version       *int    `json:"version,omitempty"`
 	By            *Actor  `json:"by,omitempty"`
 	At            *string `json:"at,omitempty"`
+	Seq           *int64  `json:"seq,omitempty"`
 	Reason        *string `json:"reason,omitempty"`
 	AskID         *string `json:"ask_id,omitempty"`
 	RequestedBy   *Actor  `json:"requested_by,omitempty"`

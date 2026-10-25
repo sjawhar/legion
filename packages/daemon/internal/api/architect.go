@@ -219,6 +219,13 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	if !ok || !s.rootArchitectOf(w, r, grant, recorded, gateRoute) {
 		return
 	}
+	// The issue's event sequence is read before the approval, so every review that read does not
+	// show has a later sequence: a wait this registration starts begins there, and the review whose
+	// own event is still to come answers it.
+	since, ok := s.issueSequence(w, r, req.Issue)
+	if !ok {
+		return
+	}
 	approval, ok := s.documentOfIssue(w, r, artifactID, req.Issue)
 	if !ok {
 		return
@@ -233,13 +240,32 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	// A re-admitted root's architect registers its spec again, often at the same version: each
 	// generation's registration is its own fact. What this read found of the person's review travels
 	// with it, so a spec a person approved or asked changes of before the architect registered is
-	// never waited on: the root keeps its admission slot, planning or revising.
+	// never waited on: the root keeps its admission slot, planning or revising. The wait's start
+	// also carries the time of the latest review the read showed, which places a review Dispatch
+	// gives no sequence for: every review it did not show is later.
 	changes, reason := approval.ChangesRequestedLatest()
-	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d", req.Issue, recorded.Generation, artifactID, req.Version),
-		intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
-			ChangesRequestedVersion: changes, ChangesReason: reason, RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent",
-			DispatchVersion: approval.LatestVersion},
-		GateRegisterResponse{})
+	fact := intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
+		ChangesRequestedVersion: changes, ChangesReason: reason, RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent",
+		DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since, At: approval.At}}
+	if changes != 0 {
+		fact.ChangesRequestedMark = record.EventMark{Seq: approval.Seq, At: approval.At}
+	}
+	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d", req.Issue, recorded.Generation, artifactID, req.Version), fact, GateRegisterResponse{})
+}
+
+// issueSequence reads the issue's latest Dispatch event sequence. A failed read records nothing,
+// so the architect's register_gate retries.
+func (s *server) issueSequence(w http.ResponseWriter, r *http.Request, issue string) (int64, bool) {
+	if s.dispatch == nil {
+		writeFailure(w, http.StatusInternalServerError, "DISPATCH_UNAVAILABLE", "Dispatch is unavailable")
+		return 0, false
+	}
+	current, err := s.dispatch.GetIssue(r.Context(), issue)
+	if err != nil {
+		writeFailure(w, http.StatusBadGateway, "DISPATCH_FAILED", fmt.Sprintf("Dispatch read of %s failed; retry register_gate", issue))
+		return 0, false
+	}
+	return current.LastSeq, true
 }
 
 // documentOfIssue refuses a gate document the issue does not carry, as the shipped daemon does: an
