@@ -330,12 +330,26 @@ func reloadOutcomes(t testing.TB, ctr *tcnats.NATSContainer) []string {
 }
 
 func publishGrantConfig(user string, allow []string) string {
+	return grantConfig(user, "publish", allow)
+}
+
+// SubscribeGrantConfig is the configuration of a server with JetStream whose one user, the nkey user
+// whose public key is user, may subscribe only to the subjects allow names, in any queue group, and
+// publish to anything: a subscription to any other subject is the server's permissions violation,
+// as a per-client grant makes it. StartRestartableConfig takes it, and Restart a changed one.
+func SubscribeGrantConfig(user string, allow ...string) string {
+	return grantConfig(user, "subscribe", allow)
+}
+
+// grantConfig is the configuration of a server with JetStream whose one nkey user may use direction
+// (publish or subscribe) only on the subjects allow names.
+func grantConfig(user, direction string, allow []string) string {
 	quoted := make([]string, len(allow))
 	for index, subject := range allow {
 		quoted[index] = fmt.Sprintf("%q", subject)
 	}
-	return nkeyConfig(fmt.Sprintf("{ nkey: %q, permissions: { publish: { allow: [%s] } } }",
-		user, strings.Join(quoted, ", ")))
+	return nkeyConfig(fmt.Sprintf("{ nkey: %q, permissions: { %s: { allow: [%s] } } }",
+		user, direction, strings.Join(quoted, ", ")))
 }
 
 func nkeyConfig(entry string) string {
@@ -467,6 +481,50 @@ func StartRestartable(t testing.TB) (*tcnats.NATSContainer, string) {
 	uri := "nats://" + listener.Addr().String()
 	Connect(t, uri).Close()
 	return ctr, uri
+}
+
+// ConfiguredServer is a NATS test server, started by StartRestartableConfig, that a test can
+// restart with another configuration under one URL, as an operator restarts a server after changing
+// a user's grant: unlike a reload (NkeyGrant.Grant), the restart drops every connection, and each
+// client sends its subscriptions again to the server the new configuration governs.
+type ConfiguredServer struct {
+	URL string
+	ctr *tcnats.NATSContainer
+}
+
+// StartRestartableConfig runs a NATS test container on Image, with JetStream, whose whole
+// configuration is config (StartImageConfig with the argument -js), and returns it once it
+// refuses a client with no credential (awaitAuth), so config must declare the users it enforces.
+// Its URL is a listener this process holds for the test's life and relays to the container, as
+// StartRestartable's is, so it stays the server's across every Restart.
+func StartRestartableConfig(t testing.TB, config string) *ConfiguredServer {
+	t.Helper()
+	ctr, _ := StartImageConfig(t, Image, config, []string{"-js"}, false)
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("hold the server's port: %v", err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go relay(listener, func(ctx context.Context) (string, error) {
+		return ctr.PortEndpoint(ctx, "4222/tcp", "")
+	})
+	return &ConfiguredServer{URL: "nats://" + listener.Addr().String(), ctr: ctr}
+}
+
+// Restart stops the server, replaces its configuration with config, and starts it again, returning
+// once it refuses a client with no credential, as config's users make it. Docker writes a stopped
+// container's files as a running one's, and the restart keeps the container's JetStream store.
+func (s *ConfiguredServer) Restart(t testing.TB, config string) {
+	t.Helper()
+	ctx := context.Background()
+	Stop(t, s.ctr)
+	if err := s.ctr.CopyToContainer(ctx, []byte(config), imageConfigPath, 0o644); err != nil {
+		t.Fatalf("write the new configuration: %v", err)
+	}
+	if err := s.ctr.Start(ctx); err != nil {
+		t.Fatalf("start NATS again: %v", err)
+	}
+	awaitAuth(t, s.URL, false)
 }
 
 // Gate is one TCP address a test holds for its whole life, which relays to a container's client

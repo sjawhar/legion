@@ -104,23 +104,6 @@ func coreNATSDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler 
 	}
 }
 
-// liveDeliveryHandler is the live lane's handler, over every notification topic (main's
-// openLiveTopics). It leaves alone a subject another lane owns, read before anything is decoded
-// and with no line logged, since the live lane receives each of those messages too: a role lane
-// (the role lane arbitrates it) and a subject the stream stores (the durable delivers it, and a
-// role forward travels on its holder's agent subject, which the stream stores, while keeping its
-// role topic). Every other message goes through the delivery handler, whose fanout delivers it to
-// every session on this machine subscribed to its topic.
-func liveDeliveryHandler(cfg listenerDeliveryHandlerConfig) nats.MsgHandler {
-	handler := listenerDeliveryHandler(cfg)
-	return func(msg *nats.Msg) {
-		if strings.HasPrefix(msg.Subject, contracts.RoleTopicPrefix) || bus.StreamCaptures(msg.Subject) {
-			return
-		}
-		handler(deliveryMessage{data: msg.Data, mode: liveDelivery, msg: msg})
-	}
-}
-
 type deliveryExceptionPayload struct {
 	OriginalTopic    string `json:"original_topic"`
 	EventID          string `json:"event_id"`

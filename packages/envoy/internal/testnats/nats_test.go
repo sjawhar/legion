@@ -299,6 +299,35 @@ func TestARestartKeepsItsURLWhenThePortIsContendedWhileStopped(t *testing.T) {
 	Connect(t, uri).Close()
 }
 
+// A Restart serves its new configuration under the same URL: the user the first configuration
+// lets subscribe to a subject is refused it once the server restarts on one that does not.
+func TestARestartServesItsNewConfiguration(t *testing.T) {
+	seed, public := User(t)
+	server := StartRestartableConfig(t, SubscribeGrantConfig(public, "granted.>"))
+	subscribe := func() error {
+		t.Helper()
+		conn, err := ConnectSeed(t, server.URL, seed)
+		if err != nil {
+			t.Fatalf("connect as the user: %v", err)
+		}
+		defer conn.Close()
+		if _, err := conn.SubscribeSync("granted.subject"); err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		if err := conn.Flush(); err != nil {
+			t.Fatalf("flush the subscription: %v", err)
+		}
+		return conn.LastError()
+	}
+	if err := subscribe(); err != nil {
+		t.Fatalf("the first configuration refused the subscription it grants: %v", err)
+	}
+	server.Restart(t, SubscribeGrantConfig(public, "other.>"))
+	if err := subscribe(); !errors.Is(err, natsgo.ErrPermissionViolation) {
+		t.Fatalf("after a restart on a configuration that does not grant it, the subscription got %v, want the server's permissions violation", err)
+	}
+}
+
 // A second Grant on one server judges the outcome of its own reload, not the first Grant's, which
 // the server's log still holds: a second grant the server refuses fails the test with the server's
 // reason instead of passing on the first reload's line.

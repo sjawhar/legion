@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"log/slog"
 	"os"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -115,6 +116,12 @@ type recoverableSubscription struct {
 	// registration has one bind at a time: a restore leaves one that has a bind in flight, and a
 	// registration that replaces it waits for that bind first.
 	binding chan struct{}
+	// refused is set when the server refused the subscription the client last sent for this
+	// registration on its current connection (onAsyncError), and cleared each time it is sent
+	// again: by a bind, and by nats.go itself on a reconnect in place (onReconnect). nats.go keeps
+	// a refused subscription valid, so without it a lane the server will not deliver to would read
+	// as subscribed. Only the core registration is ever marked.
+	refused bool
 }
 
 // Client is a NATS connection that publishes notifications and holds at most one JetStream
@@ -189,7 +196,7 @@ func Dial(name string, urls []string, environment func(string) (string, bool)) (
 	if err != nil {
 		return nil, err
 	}
-	return connect(name, urls, credential, dialer, nil, nil, nil)
+	return connect(name, urls, credential, dialer, nil, nil, nil, nil)
 }
 
 // Connect opens a client that publishes and subscribes without touching the shared
@@ -240,7 +247,7 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		reconnectErrClock:           opts.reconnectErrClock,
 		stopCh:                      make(chan struct{}),
 	}
-	nc, err := connect(c.name, urls, credential, dialer, c.onReconnect, c.onClosed, c.reconnectErrClock)
+	nc, err := connect(c.name, urls, credential, dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 	if err != nil {
 		return nil, err
 	}
@@ -349,6 +356,8 @@ func (c *Client) registerSubscription(next recoverableSubscription, conn *nats.C
 	// it always does. It runs before the bind, which a durable still bound to the old handle would
 	// refuse.
 	replaced := subscription.active
+	// next is unrefused: the bind below sends its subscription anew, and a refusal of it arrives
+	// only after the send.
 	*subscription = next
 	subscription.binding = make(chan struct{})
 	c.subscriptionsMu.Unlock()
@@ -415,10 +424,13 @@ func (c *Client) SubOK() bool {
 	return c.subscriptionOK(jetStreamSubscription)
 }
 
-// CoreSubOK reports whether the client's core subscription is active on a live connection. It reads
-// the subscription the client holds now, not the handle SubscribeCore returned: a recovery onto a
-// connection dialed to replace a closed one binds a replacement, and the returned handle stays
-// invalid for good.
+// CoreSubOK reports whether the client's core subscription is active on a live connection and the
+// server has not refused it. It reads the subscription the client holds now, not the handle
+// SubscribeCore returned: a recovery onto a connection dialed to replace a closed one binds a
+// replacement, and the returned handle stays invalid for good. A subscription the server refused
+// stays valid in nats.go, which only records the refusal, and one it re-sends on a reconnect in
+// place is refused again by a server that took the grant away during the outage, so the refusal
+// is read from the server's own report of it (onAsyncError) until the subscription is sent again.
 func (c *Client) CoreSubOK() bool {
 	return c.subscriptionOK(coreSubscription)
 }
@@ -428,10 +440,55 @@ func (c *Client) subscriptionOK(transport subscriptionTransport) bool {
 	connOK := c.Conn != nil && c.Conn.Status() != nats.CLOSED
 	c.mu.Unlock()
 	c.subscriptionsMu.Lock()
-	active := c.subscriptions[transport].active
-	subOK := active != nil && active.IsValid()
+	subscription := &c.subscriptions[transport]
+	subOK := subscription.active != nil && subscription.active.IsValid() && !subscription.refused
 	c.subscriptionsMu.Unlock()
 	return connOK && subOK
+}
+
+// subscriptionRefusal and subscriptionRefusalQueue read the subject, and the queue group when there
+// is one, of the server's refusal of a subscription (`Permissions Violation for Subscription to
+// "<subject>" using queue "<queue>"`), as nats.go reads them to record the refusal on its
+// subscription (permissionsRe and permissionsQueueRe, nats.go v1.50.0 nats.go:3795-3833).
+var (
+	subscriptionRefusal      = regexp.MustCompile(`Subscription to "(\S+)"`)
+	subscriptionRefusalQueue = regexp.MustCompile(`using queue "(\S+)"`)
+)
+
+// onAsyncError is wired as the connection's async error callback, after the error is logged. A
+// server's refusal of the client's core subscription marks it refused for CoreSubOK. Any other
+// error, a refusal of a publish or of another subscription among them, changes nothing, and so
+// does one a connection the client has since replaced reports late.
+//
+// The mark cannot outlive the refusal: nats.go queues the reconnect callback, which clears it
+// (onReconnect), before any refusal of the subscriptions it re-sent, since it holds the
+// connection's lock from the re-send until that callback is queued and reads the server's -ERR
+// only under that lock, and both callbacks run in order on one goroutine. c.mu is held across the
+// mark so a replacement connection cannot be installed between the check and the mark.
+func (c *Client) onAsyncError(nc *nats.Conn, err error) {
+	if !errors.Is(err, nats.ErrPermissionViolation) {
+		return
+	}
+	text := err.Error()
+	subject := subscriptionRefusal.FindStringSubmatch(text)
+	if subject == nil {
+		return
+	}
+	queue := ""
+	if match := subscriptionRefusalQueue.FindStringSubmatch(text); match != nil {
+		queue = match[1]
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if nc != c.Conn {
+		return
+	}
+	c.subscriptionsMu.Lock()
+	defer c.subscriptionsMu.Unlock()
+	core := &c.subscriptions[coreSubscription]
+	if core.handler != nil && core.subject == subject[1] && core.queue == queue {
+		core.refused = true
+	}
 }
 
 // SubSubject is the subject the subscription this client holds on the JetStream transport actually
@@ -660,7 +717,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.dialer, c.onReconnect, c.onClosed, c.reconnectErrClock)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.dialer, c.onReconnect, c.onClosed, c.onAsyncError, c.reconnectErrClock)
 		if err != nil {
 			return err
 		}
