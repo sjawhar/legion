@@ -1,0 +1,108 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-266",
+  "completed": "2026-10-25T03:00:12Z",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the implementer's whole contract here — the workspace binding, the one push procedure, the pull request it opens with the `Dispatch: INFRA-266` line, and the completion gate.",
+      "skill://legion-worker/references/pr-body.md: this change's proof lines are two browser runs (red at the base commit, green at the head) plus the implementer's own `E2E (implementer)` line and `proof` array, and that reference is the only definition of what a proof is and what the CI line says.",
+      "skill://dispatch-first and skill://dispatch: the implementer writes to Dispatch only to report or to ask, and a finding outside this issue is a `dispatch ask`, never a new issue.",
+      "skill://ce-simplify-code: the simplify pass pr-body.md requires over the settled change before the phase completes, since this slice touches a Go handler, a React section and a prose sweep in one head."
+    ],
+    "test": [
+      "skill://legion-worker: the tester's assignment, its handoff fields (`implementerProof`, `failures`, its own `proof`) and the rule that static checks are CI's work, not the tester's.",
+      "skill://legion-worker/references/pr-body.md: it defines what the tester verifies in the implementer's proof and how the tester records its own, which here means re-running the two browser rows and driving the Settings control and the agent-create path by hand rather than rerunning the unit suites.",
+      "skill://dispatch: the tester reads the issue and its plan document (dispatch://INFRA-266/artifact/plan-md) and writes nothing to Dispatch but a report or an ask."
+    ],
+    "review": [
+      "skill://legion-worker/references/merge-gate.md: the review round's order (the code head's checks on GitHub, then the handoff push, then the review of the head that push made), the approval by SHA, and what READY may carry above it.",
+      "skill://legion-worker/references/review-threads.md: one disposition reply per thread, resolved one by one, which this change will need because the prose sweep draws line-level comments.",
+      "skill://legion-worker: the reviewer's handoff fields (`decision`, counts, `keyFindings`) and the rule that a finding which changes behaviour is fixed in this pull request, not deferred."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: the spec asks for a route 'of the shape the architecture-source routes already use' and for a default 'set and changed by a person', but that family is all authAny (routes_table.go:61-66), so copying the shape would let an agent session set a project's default; and it leaves unsaid whether an agent may read the default at all.",
+        "answer": "Plan D2: both new routes are human-only (`requireHuman`, the gate GET /api/v1/users uses at routes_table.go:79), because a project's default is one person's email address and GET /api/v1/users already refuses every agent session. Recorded as a departure from the shape the spec cites. The auth cell is probed by TestRoutesTableAuthCellsMatchHandlers (routes_table_test.go:197), named in Task 3."
+      },
+      {
+        "finding": "F2: 'read through a per-project route' does not serve the Settings page, which shows every project at once; the architecture-source shape is really a pair whose list route is what the page reads (ArchitectureSourcesSection.tsx reads architectureSourcesQuery, not the per-project GET).",
+        "answer": "Plan D3: a human-only list route GET /api/v1/settings/project-default-assignees plus the per-project PUT; no per-project GET, which would have no reader, and no DELETE, since null on the PUT clears the default. Recorded as the second departure."
+      },
+      {
+        "finding": "F3: 'an event that wakes nobody' is five edits, not one, and reusing project.updated would wake people.",
+        "answer": "Plan D8 and Task 3: a new type settings.project_default_assignee.updated, owned by the project, named in the quiet case at events/broker.go:262-267 (without it Notify returns true at :280-286, since the write is a person's), plus the event-kind enumeration in api/events_test.go:66-94, the Notify table in api/server_test.go:576-607, the contracts payload and union arm, and the web SSE invalidation."
+      },
+      {
+        "finding": "F4: acceptance line 6 ('a question an agent opens on an issue it created appears in that person's own Inbox') is already green on today's build for an agent on a personal token, because actor.Owner is consulted before the new step.",
+        "answer": "Task 1 pins the identity: the browser row uses a shared-token session with no owner, no parent and no assignee — the identity this deployment's agents run under, measured with `dispatch whoami` in this pod on 2026-10-25 — and its negative control is the same sequence in a project with no default."
+      },
+      {
+        "finding": "F5: 'a control on the Settings page beside the repository mapping' reads two ways: a column of the Projects table, or a column of the Repositories to Projects table, whose own 'Default' column already means the project's default repository.",
+        "answer": "Plan D7: a Default assignee column of the Projects table (ProjectsSection.tsx), which sits immediately above the repository mapping on the same page, because the default belongs to a project and a project with no repository mapping has no row in the other table. Its accessible name is `Default assignee of <KEY>`, which is what the browser row selects."
+      },
+      {
+        "finding": "F6: 'the five places that state the old chain in prose' undercounts; a full-tree search finds fourteen source sites plus the generated claude-envoy bundle, and three of them state the chain's consequence ('an unassigned issue reaches nobody's Inbox') rather than the chain itself.",
+        "answer": "Task 6 enumerates all fourteen with their lines and corrects every sentence that becomes false, consequence sentences included, under the parent plan's rule that the whole sentence must be true the moment the slice lands; Task 7 regenerates the claude-envoy bundle. Recorded as the first departure, and raised to the architect in the completion summary."
+      },
+      {
+        "finding": "F7: the parent plan's D11 fall-through describes a state the schema cannot reach, since no code deletes a people row; and the issue does not say whether a foreign key exists or whether an issue already created is re-assigned when a default changes.",
+        "answer": "Plan D1: a nullable column with no foreign key, matching issues.assignee, so the fall-through stays live for a restore or a direct write; it is checked at read time with one `exists` query, never through allowedLogin, which would refuse the create. Section 2 states that the chain runs only at create (defaultAssignee has one call site, issue_create.go:239-241), so nothing is re-assigned later. Task 9's stale case proves the fall-through by setting the column by direct SQL."
+      },
+      {
+        "finding": "F8: the issue never says whether an issue created from a GitHub reference takes its resolved project's default, including the catch-all DISPATCH_DEFAULT_PROJECT.",
+        "answer": "Plan D5: it does, with no carve-out, because the project is resolved before the chain runs (issue_create.go:75-108) and one rule — an issue created in a project takes that project's default — is what a reader can hold. The consequence for the catch-all project is raised to the architect in the completion summary, since the only way to avoid it is to leave that project's default empty."
+      },
+      {
+        "finding": "F9: 'an explicit nobody' has no acceptance criterion and the dispatch issue tool cannot express it (assignee is an optional string with no null).",
+        "answer": "Plan D6: explicit nobody stays an API capability; no contract change. The Go case for `{\"assignee\": null}` beating a configured default is named in the proof table so the behaviour is pinned even though no acceptance line asks for it."
+      },
+      {
+        "finding": "F10: the acceptance names a failing-before browser test for one criterion only, names no negative control and names no production check, where the repository's worker rules require a proof with a negative control and a production record after the merge.",
+        "answer": "Section 5 gives every acceptance line a surface, a command and a negative control, and names the production command (dispatch-production-check.sh with --page /settings --route /api/v1/settings/project-default-assignees; a human-only route answers 403, which that script records as the route being there)."
+      },
+      {
+        "finding": "F11: four pins the issue does not mention — the route count in routes_table_test.go:108, the migration naming and census rules, the optionality of any new contract field, and the hand-written route tables in cmd/dispatch.",
+        "answer": "Task 3 raises the pin from 132 to 134; Task 2 names 0116 with its census answering 0; Task 5 leaves the Project contract alone (the new type is its own), which is what keeps every web fixture valid; Task 6 item 7 edits both hand-written route tables."
+      },
+      {
+        "finding": "F12: 'a project with no default behaves exactly as Dispatch does today' is also a statement about the create path's locks and round trips, which a separate select would break.",
+        "answer": "Plan D4: the stored default comes back from the existing `returning` of the next_number update (issue_create.go:243-252), the chain's decision moves below it, and the people check runs only when the four earlier steps yielded nobody — so a create in a project with no default costs no new round trip and takes no new lock."
+      },
+      {
+        "finding": "F13: whether a child uses its own project's default is already settled by the code.",
+        "answer": "Section 2 states it: a parent in another project is refused (issue_create.go:230-233), so a child's project is always its parent's and step 5 never has two projects to choose between."
+      },
+      {
+        "finding": "F14: 'this is the slice that closes the thing INFRA-228 was filed for' holds only if this deployment's agents run under a token with no owner.",
+        "answer": "Section 1 records the measurement: `dispatch whoami` in this worker pod on 2026-10-25 answered that the session runs under the shared token with no owner, so the new step is exactly the identity Legion's own agents have."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "\"The five places that state the old chain in prose, including the text an agent reads about who it acts for, are corrected in the same change.\"",
+      "plan": "Fourteen source sites are corrected, plus the generated packages/claude-envoy/legion/ bundle: the route index, the Go doc comment, two contracts strings, two AGENTS.md files, the two hand-written route tables, the dispatch whoami output and its tool description, two skills files and a skills reference, two docs/site pages. Three of them state the chain's consequence (\"an unassigned issue reaches nobody's Inbox\") rather than the chain, and become conditionally false once a project names a default, so they are reworded too.",
+      "evidence": "A full-tree search on 2026-10-25 of every sentence naming the chain, --assignee, whoami, 'acts for' or 'unassigned', each line read: routes_table.go:82; issue_assignee.go:52-54; contracts/src/dispatch-tools.ts:378 and :1309; contracts/src/dispatch-api.ts:2040-2042; contracts/AGENTS.md:63; envoy/AGENTS.md:1815; cmd/dispatch/AGENTS.md:426-430 and cmd/dispatch/README.md:984-999; envoy-client/src/dispatch-execute.ts:2665,:2669,:2791-2792; skills/dispatch/references/asks.md:7-8; skills/legion-architect/SKILL.md:78-81; skills/legion-controller/SKILL.md:310-312,:437-446; skills/legion-controller/references/slack-mentions.md:83-85; docs/site/.../dispatch/for-agents.md:55-57; docs/site/.../legion/using-legion.md:16-20.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The prose sweep is three times the size the spec states and reaches packages/contracts, packages/envoy, packages/envoy-client, skills/, docs/site/ and the regenerated claude-envoy bundle, not five places."
+      }
+    },
+    {
+      "spec": "\"a person who has signed in, set and changed by a person, read and written through a per-project route of the shape the architecture-source routes already use\"",
+      "plan": "The default is written through a per-project human-only route (PUT /api/v1/projects/{key}/default-assignee) and read through a human-only list route (GET /api/v1/settings/project-default-assignees). There is no per-project read route and no DELETE: null on the PUT clears the default.",
+      "evidence": "The architecture-source family is all authAny (routes_table.go:61-66; putArchitectureSource calls requireActor at architecture_source.go:88-93), so its shape would let any agent session set a project's default, against the same sentence's 'set and changed by a person'; GET /api/v1/users, the one route that hands out people's addresses, is human-only (routes_table.go:79). The Settings page reads the family's list route, not its per-project GET (ArchitectureSourcesSection.tsx reads architectureSourcesQuery; queries.ts and client.ts:339-341), and shows every project at once, so a per-project read would be one request per project and would have no caller.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Two routes rather than the architecture-source family's four, both human-only rather than authAny, and the read is a list route rather than a per-project one."
+      }
+    }
+  ]
+}
