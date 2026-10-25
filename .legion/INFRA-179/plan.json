@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-179",
-  "completed": "2026-10-25T03:12:00Z",
+  "completed": "2026-10-25T19:58:00Z",
   "plan": "dispatch://INFRA-179/artifact/plan-md",
   "requiredSkills": {
     "implement": [
@@ -130,12 +130,12 @@
     },
     {
       "spec": "All three check the cap before they write and leave the document as it is when the write would fail, each in the way its caller can survive.",
-      "plan": "Each of the three asks the cheap question before its transaction — the live document's state vector already sums past maxUpdateItems — rather than calling refuseUndecodable on a fork.",
-      "evidence": "refuseUndecodable (growth.go:337-351) judges a post-write fork; unmarkExpired (marks.go:836) mutates the live document inside one Yjs transaction, which cannot be rolled back, so a check part-way through leaves a half-unmarked document rather than the document as it was.",
+      "plan": "Each of the three asks against the live document before its transaction: the cheap clock sum first, and, when that trips, the authoritative encode-and-decode refuseUndecodable already makes, refusing only when that fails. The confirmation is paid at most once per room while its state lasts and re-asked when the sum has grown by another eighth of the cap. The confirmation runs through the service's one measurer (Service.measurer, docs/measure.go), which already serialises the element count so one whole-document copy is paid for the pod rather than one per room, and the copy it makes is transient and charged to no room's budget entry.",
+      "evidence": "refuseUndecodable (growth.go:337-351) judges a post-write fork; unmarkExpired (marks.go:836) mutates the live document inside one Yjs transaction, which cannot be rolled back. The clock sum alone is not the question: ygo's state vector is the last item's clock plus its content length (crdt/store.go:190-200) and ContentString.Len() is the UTF-16 length (crdt/content.go:109), so it counts characters; persistence.go:831-834 records the heaviest admitted document at about 131,000 items, an eighth of the cap. Measured 2026-10-25 against ygo v1.51.3-sami.2 with a throwaway program: a 256 KiB document after 1 MiB of typing and deleting sums to 1,310,720 clocks, past the 1,048,576 cap, and its whole state still decodes.",
       "outcome": {
         "kind": "changed",
         "acceptance": [
-          "A6 proves that a write against a document already at the decode cap is not made and the document is left as it was; it does not prove that a write crossing the cap mid-transaction is stopped."
+          "A6 proves that a document whose live state really cannot be decoded is left alone, and gains a case that a document which only looks past the cap by its clock sum is still written to."
         ]
       }
     },
