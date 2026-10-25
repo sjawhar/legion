@@ -86,37 +86,61 @@ func TestTheNativesCacheRunsOmpOnceAndEveryHomeLinksTheOneCopy(t *testing.T) {
 	}
 }
 
-// A fill whose extraction lacks a file the binary embeds is refused and caches nothing, as when a
-// full disk fails omp's second write and omp still exits 0; the next fill, whose extraction holds
-// both files, is cached. The stand-in embeds two files, writes one on its first run and both after.
-func TestANativesFillMissingAnEmbeddedFileCachesNothing(t *testing.T) {
+// A fill whose extraction is short of a file's embedded size is refused and caches nothing, as when
+// a full disk truncates omp's write and omp still exits 0; the next fill, whose extraction is
+// whole, is cached. A binary that writes only one of the variants it embeds, which the pin does, is
+// a whole fill rather than a partial one. The stand-in writes its one native short on the first run
+// and whole after.
+func TestANativesFillShortOfAnEmbeddedSizeCachesNothing(t *testing.T) {
 	dir := t.TempDir()
 	runs := filepath.Join(dir, "runs")
 	omp := standIn(t, dir, []string{
 		`{ variant: "modern", filename: "pi_natives.test-modern.node", size: 6 },`,
 		`{ variant: "baseline", filename: "pi_natives.test-baseline.node", size: 8 },`,
-	}, "natives=\"$HOME/.omp/natives/9.9.9\"\nmkdir -p \"$natives\"\nprintf modern >\"$natives/pi_natives.test-modern.node\"\n"+
-		"[ -e "+runs+" ] && printf baseline >\"$natives/pi_natives.test-baseline.node\"\necho run >>"+runs+"\n")
+	}, "natives=\"$HOME/.omp/natives/9.9.9\"\nmkdir -p \"$natives\"\n"+
+		"if [ -e "+runs+" ]; then printf modern >\"$natives/pi_natives.test-modern.node\"; "+
+		"else printf mod >\"$natives/pi_natives.test-modern.node\"; fi\necho run >>"+runs+"\n")
 	root := filepath.Join(dir, "cache")
 	digest, _, err := readBinary(omp)
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if _, err := fillNativesCache(root, omp); err == nil || !strings.Contains(err.Error(), "embeds pi_natives.test-baseline.node, but its extraction") {
-		t.Fatalf("the fill whose extraction lacks the baseline file = %v, want it refused naming that file", err)
+	if _, err := fillNativesCache(root, omp); err == nil || !strings.Contains(err.Error(), "embeds pi_natives.test-modern.node at 6 bytes, but extracted it at 3") {
+		t.Fatalf("the fill whose extraction is short of the modern file's size = %v, want it refused naming that file and both sizes", err)
 	}
 	if _, err := os.Stat(filepath.Join(root, digest)); !errors.Is(err, fs.ErrNotExist) {
 		t.Fatalf("after the refused fill the cache stats %v, want no cache", err)
 	}
 	cache, err := fillNativesCache(root, omp)
 	if err != nil {
-		t.Fatalf("the fill whose extraction holds both files = %v, want it cached", err)
+		t.Fatalf("the fill whose extraction holds the modern file whole = %v, want it cached", err)
 	}
-	for _, name := range []string{"pi_natives.test-modern.node", "pi_natives.test-baseline.node"} {
-		if _, err := os.Stat(filepath.Join(cache, "9.9.9", name)); err != nil {
-			t.Errorf("the cache lacks %s: %v", name, err)
-		}
+	if _, err := os.Stat(filepath.Join(cache, "9.9.9", "pi_natives.test-modern.node")); err != nil {
+		t.Errorf("the cache lacks the variant the binary extracted: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(cache, "9.9.9", "pi_natives.test-baseline.node")); !errors.Is(err, fs.ErrNotExist) {
+		t.Errorf("the cache holds the variant the binary never extracted, stat = %v", err)
+	}
+}
+
+// A fill that writes no native at all, as a full disk leaves it, is the other partial one.
+func TestANativesFillThatExtractsNothingCachesNothing(t *testing.T) {
+	dir := t.TempDir()
+	omp := standIn(t, dir, []string{
+		`{ variant: "default", filename: "pi_natives.test.node", size: 6 },`,
+	}, "mkdir -p \"$HOME/.omp/natives/9.9.9\"\n")
+	root := filepath.Join(dir, "cache")
+	digest, _, err := readBinary(omp)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fillNativesCache(root, omp); err == nil || !strings.Contains(err.Error(), "extracted no native under") {
+		t.Fatalf("the fill whose extraction wrote nothing = %v, want it refused", err)
+	}
+	if _, err := os.Stat(filepath.Join(root, digest)); !errors.Is(err, fs.ErrNotExist) {
+		t.Fatalf("after the refused fill the cache stats %v, want no cache", err)
 	}
 }
 

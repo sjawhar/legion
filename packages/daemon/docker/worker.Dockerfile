@@ -575,9 +575,10 @@ WORKDIR /home/legion
 #    from the profile instead, as a pane does, would stop the image probe certifying the two roots by
 #    path (bootgate.go's pod lane reads the explicit root's manifest for the contract and holds
 #    pi-envoy to its root): explicit roots and an unlinked profile are one decision. This is OMP's
-#    first run in the image, so the CodeGraph install also downloads OMP's native modules (~345 MB)
+#    first run in the image, so the CodeGraph install also downloads OMP's native module — the one
+#    variant this image's CPUs run, ~112 MB measured in a pod of the image at the pin —
 #    into /home/legion/.omp/natives/<version>/ — the build's success is the check; this layer ships
-#    them, a pod never fetches them, and the probes in the final step never wait on the download.
+#    it, a pod never fetches it, and the probes in the final step never wait on the download.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \
