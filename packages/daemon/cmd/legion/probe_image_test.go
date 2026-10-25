@@ -95,6 +95,14 @@ func (i image) without(t *testing.T, name string) {
 	}
 }
 
+// install writes an executable stub over one of the image's stubbed binaries.
+func (i image) install(t *testing.T, name, script string) {
+	t.Helper()
+	if err := os.WriteFile(filepath.Join(i.bin, name), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+}
+
 // inImage sets this process's environment to the worker image's: a HOME whose `legion` profile
 // links neither plugin (a pod names both as explicit extensions, and a linked one would load
 // twice) and whose plugin lock enables the CodeGraph plugin, the Legion manifest declaring
@@ -596,5 +604,105 @@ func TestProbeImageRefusesWithoutAnOmpOrAContract(t *testing.T) {
 		if code != 1 || stdout != "" || !strings.Contains(stderr, `--daemon-api-version must be a positive integer (got "`+value+`")`) {
 			t.Errorf("probe-image --daemon-api-version %q = %d %q %q, want exit 1 refusing the value", value, code, stdout, stderr)
 		}
+	}
+}
+
+// claudeStub is a `claude` that answers --version as Claude Code does and records every run in
+// $LEGION_TEST_CLAUDE_SEEN, so a test can tell the Claude lane ran the binary rather than merely
+// finding it.
+const claudeStub = `#!/bin/sh
+[ -z "${LEGION_TEST_CLAUDE_SEEN:-}" ] || printf '%s\n' "$*" >>"$LEGION_TEST_CLAUDE_SEEN"
+case "$1" in
+--version) echo "2.1.310 (Claude Code)" ;;
+esac
+`
+
+// claudeRoot is the claude-envoy root the worker image carries, as the Claude lane reads it: the
+// manifest declaring contract, the built channel server a worker runs as its MCP server, and the
+// generated Legion plugin's manifest.
+func claudeRoot(t *testing.T, contract string) string {
+	t.Helper()
+	root := t.TempDir()
+	for _, file := range []struct{ path, content string }{
+		{"package.json", `{"name":"@sjawhar/claude-envoy","version":"1.0.0","legion":{"daemonApiVersion":` + contract + `}}`},
+		{"dist/envoy-channel.js", "// the channel server\n"},
+		{"legion/.claude-plugin/plugin.json", `{"name":"legion"}`},
+	} {
+		path := filepath.Join(root, filepath.FromSlash(file.path))
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(file.content), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	return root
+}
+
+// Given the claude-envoy root the worker image's build passes, the command runs the Claude lane:
+// `claude --version`, the root's built channel server and generated Legion plugin, and the root's
+// manifest held to the same contract the Legion plugin is. A complete root and a Claude Code that
+// runs pass, and the table and the OK line follow as they do without the flag.
+func TestProbeImageRunsTheClaudeLaneForTheRootItIsGiven(t *testing.T) {
+	omp := imageOmp(t)
+	img := inImage(t, thisBinarysContract, omp)
+	img.install(t, "claude", claudeStub)
+	seen := filepath.Join(t.TempDir(), "claude-seen")
+	t.Setenv("LEGION_TEST_CLAUDE_SEEN", seen)
+
+	code, stdout, stderr := probeImage(img.flags("--claude-root", claudeRoot(t, thisBinarysContract))...)
+
+	okLine := "probe-image: OK (" + omp + ") session-storage=probed extensions=discovered agent-models=resolved" + capabilityMarks + thisBinarysContract + "\n"
+	if code != 0 || !strings.HasSuffix(stdout, okLine) {
+		t.Fatalf("probe-image --claude-root = %d %q %q, want exit 0 and the OK line %q", code, stdout, stderr, okLine)
+	}
+	ran, err := os.ReadFile(seen)
+	if err != nil || strings.TrimSpace(string(ran)) != "--version" {
+		t.Errorf("claude ran %q (%v), want the lane to have run `claude --version`", ran, err)
+	}
+	row := "probe-image: capability claude-code: " + capabilities.StatusPresent + " (on PATH: " + filepath.Join(img.bin, "claude") + ")"
+	if !slices.Contains(tableLines(stdout), row) {
+		t.Errorf("table = %q, want the claude-code row %q", tableLines(stdout), row)
+	}
+}
+
+// Every way the image's Claude Code can be broken is refused before the capability table, naming
+// what to rebuild: a `claude` that does not run, a root missing either file a worker loads, and a
+// root whose manifest speaks another daemon API contract or cannot be read at all — the same
+// contract probe the Legion plugin's manifest gets.
+func TestProbeImageRefusesABrokenClaudeRoot(t *testing.T) {
+	for name, testCase := range map[string]struct {
+		breakIt func(t *testing.T, img image, root string)
+		want    string
+	}{
+		"a claude that does not run": {func(t *testing.T, img image, _ string) {
+			img.install(t, "claude", "#!/bin/sh\necho 'claude: no native binary installed' >&2\nexit 1\n")
+		}, "`claude --version` exited 1: the worker image carries no Claude Code a worker on the `claude` backend could run; build the worker image from this daemon's commit: claude: no native binary installed"},
+		"no built channel server": {func(t *testing.T, _ image, root string) {
+			remove(t, filepath.Join(root, "dist", "envoy-channel.js"))
+		}, "holds no envoy-channel.js"},
+		"no generated Legion plugin": {func(t *testing.T, _ image, root string) {
+			remove(t, filepath.Join(root, "legion", ".claude-plugin", "plugin.json"))
+		}, "holds no plugin.json"},
+		"another daemon API contract": {func(t *testing.T, _ image, root string) {
+			rewrite(t, filepath.Join(root, "package.json"), `"daemonApiVersion":`+thisBinarysContract, `"daemonApiVersion":2`)
+		}, "claude-envoy at " + "{{manifest}}" + " (package 1.0.0) speaks daemon API contract 2; this daemon requires " + thisBinarysContract + ". Build the worker image from this daemon's commit."},
+		"no manifest at all": {func(t *testing.T, _ image, root string) {
+			remove(t, filepath.Join(root, "package.json"))
+		}, "claude-envoy manifest at " + "{{manifest}}" + " could not be read"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			img := inImage(t, thisBinarysContract, imageOmp(t))
+			img.install(t, "claude", claudeStub)
+			root := claudeRoot(t, thisBinarysContract)
+			testCase.breakIt(t, img, root)
+			want := strings.ReplaceAll(testCase.want, "{{manifest}}", filepath.Join(root, "package.json"))
+
+			code, stdout, stderr := probeImage(img.flags("--claude-root", root)...)
+
+			if code != 1 || stdout != "" || !strings.Contains(stderr, want) {
+				t.Fatalf("probe-image --claude-root over %s = %d %q %q, want exit 1 saying %q and no table", name, code, stdout, stderr, want)
+			}
+		})
 	}
 }

@@ -40,6 +40,7 @@ const (
 	Secrets              Name = "secrets"
 	ModelFallback        Name = "model-fallback"
 	Toolchain            Name = "toolchain"
+	ClaudeCode           Name = "claude-code"
 	ResourceLimits       Name = "resource-limits"
 	PoolCapacity         Name = "pool-capacity"
 	Network              Name = "network"
@@ -94,6 +95,7 @@ var Table = []Capability{
 	{Name: Secrets, Site: SiteDeployment, Summary: "reads the secrets the deployment grants its pod generation through the agent-secrets broker"},
 	{Name: ModelFallback, Site: SiteDeployment, Summary: "falls back to another model when its own is unavailable (retry.modelFallback)"},
 	{Name: Toolchain, Site: SiteImage, Summary: "builds and runs with the generic toolchain: go, curl, wget, python3, node, bun, uv, kubectl, jq, ssh-keygen and flock"},
+	{Name: ClaudeCode, Site: SiteImage, Summary: "runs a phase worker on Claude Code: the `claude` the image carries beside Oh My Pi, with the claude-envoy plugin that worker loads"},
 	{Name: ResourceLimits, Site: SiteDeployment, Summary: "runs within the CPU and memory the deployment's pod resources give it"},
 	{Name: PoolCapacity, Site: SiteDeployment, Summary: "starts in a Legion pool with room for the image probe's reservation at boot"},
 	{Name: Network, Site: SiteWithheld, Summary: "reaches beyond the pod's own network: the pod is the boundary, except a workload a role starts where its deployment's cluster admits it, carrying the pod label that deployment's declaration names for a workload asking to be reachable, and the Service fronting that workload", Ruling: "dispatch://LEGION-5"},

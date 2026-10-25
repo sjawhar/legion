@@ -13,7 +13,7 @@ on:
       - "packages/pi-legion/package.json"
       - "packages/pi-shared/package.json"
       - "packages/envoy-plugin/package.json"
-      - "packages/claude-envoy/package.json"
+      - "packages/claude-envoy/**"
       - "packages/proof-editor/package.json"
       - "packages/dispatch/package.json"
       - "packages/envoy/internal/dispatch/pmdoc/gen/package.json"
@@ -39,6 +39,7 @@ on:
       - ".github/go-release-targets.json"
       # The worker image's remaining inputs (worker_image below).
       - ".omp-pin"
+      - ".bun-version"
       - ".dockerignore"
       - ".github/workflows/worker-image.yaml"
   workflow_dispatch:
@@ -194,7 +195,10 @@ jobs:
               - 'scripts/pi-plugin-prepack.sh'
             # The plugin stage's frozen install needs the root manifest, lockfile, patches, and each
             # root-workspace manifest. Keep this explicit because a workspace can affect Bun's
-            # install without its source becoming part of the worker image. The OMP pin, the
+            # install without its source becoming part of the worker image. packages/claude-envoy is
+            # one whose source does: the image carries that plugin's committed build, held at build
+            # time to a fresh one by the Bun .bun-version pins, which is here for the same reason.
+            # The OMP pin, the
             # context's .dockerignore and the called workflow change the image too. With legion
             # (which holds the Dockerfile, packages/daemon/docker, and the notices scripts),
             # pi_envoy and pi_legion this covers every file worker.Dockerfile builds from;
@@ -209,12 +213,13 @@ jobs:
               - 'packages/pi-legion/package.json'
               - 'packages/pi-shared/package.json'
               - 'packages/envoy-plugin/package.json'
-              - 'packages/claude-envoy/package.json'
+              - 'packages/claude-envoy/**'
               - 'packages/proof-editor/package.json'
               - 'packages/dispatch/package.json'
               - 'packages/envoy/internal/dispatch/pmdoc/gen/package.json'
               - 'docs/site/package.json'
               - '.omp-pin'
+              - '.bun-version'
               - '.dockerignore'
               - '.github/workflows/worker-image.yaml'
 

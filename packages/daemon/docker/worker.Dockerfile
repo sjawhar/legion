@@ -17,7 +17,14 @@
 # explicit loads twice; the pod lane's probe refuses an image whose pi-envoy does), and
 # @bopstack/pi-codegraph (from npm, pinned), the one plugin linked into the isolated OMP profile
 # `legion`, where discovery loads it — backed by the CodeGraph CLI (@colbymchenry/codegraph, pinned) at
-# /opt/codegraph/bin; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
+# /opt/codegraph/bin; @sjawhar/claude-envoy from this checkout's packages/claude-envoy at
+# /opt/legion/claude-envoy, the plugin root a phase worker on the `claude` backend loads (its
+# dist/envoy-channel.js is that worker's one MCP server, its legion/ the generated Legion plugin
+# Claude Code loads beside it), shipped as the committed build the plugin stage holds to a fresh
+# one; Claude Code itself (@anthropic-ai/claude-code, pinned by the committed lockfile at
+# packages/daemon/docker/claude-code) at /opt/claude-code, `claude` on PATH — one image serves
+# every backend, so every build of it fetches Claude Code and every probe checks it, whatever a
+# deployment's worker_backends names; jj; git at /usr/bin/git (>= 2.42, from the debian:trixie-slim runtime base — jj's
 # git backend requires it); gh; trixie's socat, which carries a connection over `kubectl exec` to a
 # loopback port inside the pod (the runtime stage says why); what the capability check
 # (packages/daemon/internal/capabilities, which `legion probe-image` runs) requires of the image: the Go
@@ -31,10 +38,13 @@
 # The last three RUNs gate the publish, as the runtime user: the first checks every binary runs on
 # the base, proves jj accepts the image's git with a network-free `jj git clone` of a scratch
 # repository, and links the CodeGraph plugin into the profile, which fetches Oh My Pi's natives; the second
-# runs every toolchain command, the language servers', Python's and the browser's included; the last
+# runs every toolchain command, Claude Code's and the language servers', Python's and the browser's
+# included; the last
 # runs `legion version` and `legion probe-image`, which runs the three launch probes (the daemon's two
 # plus the session-storage probe), holds the Legion plugin to the daemon API contract and proves it
-# loads with the Envoy plugin, checks every image-site row of the capability table against this image,
+# loads with the Envoy plugin, runs Claude Code and holds the claude-envoy root the same way — its
+# built channel server, its generated Legion plugin and the daemon API contract its manifest
+# declares, checks every image-site row of the capability table against this image,
 # and prints the table, then the OK line the daemon's probe Sandbox reads. A broken
 # image never publishes.
 #
@@ -173,6 +183,31 @@ RUN jq '.omp.extensions = ["dist/legion.js"]' package.json > tmp.json \
     && mkdir -p /out/pi-legion \
     && tar xzf ./*.tgz -C /out/pi-legion --strip-components=1
 
+# claude-envoy ships as its committed build rather than a pack: no workflow releases it, its
+# skills/ are relative symlinks into the repository's skills/ that its package.json `files` does
+# not list, and a Claude Code marketplace install takes the git tree itself. `check-dist` is the
+# gate on that tree — it rebuilds dist/ and regenerates legion/ into a scratch directory and
+# refuses a committed copy that differs, and refuses any Bun but the one .bun-version pins, which
+# this stage's base image is (ARG BUN_VERSION; .github/scripts/check-bun-version.sh holds the two
+# equal) — so a pull request that edits the plugin's source without rebuilding fails here rather
+# than publishing an image whose channel server is the old bundle. The tree goes to
+# /out/claude-envoy with its skills symlinks resolved (tar -h), since the image carries no
+# repository root for them to point into, and without the node_modules the workspace install left
+# in it (the .dockerignore keeps the checkout's own out of the context). The tar is written to a
+# file rather than piped into the second one: a pipeline's exit status is its last command's, so a
+# failed pack would unpack nothing and still succeed.
+COPY .bun-version /repo/.bun-version
+COPY packages/claude-envoy /repo/packages/claude-envoy
+WORKDIR /repo/packages/claude-envoy
+RUN set -eu; \
+    bun run check-dist; \
+    mkdir -p /out/claude-envoy; \
+    tar -ch --exclude=./node_modules -f /tmp/claude-envoy.tar .; \
+    tar -xf /tmp/claude-envoy.tar -C /out/claude-envoy; \
+    rm /tmp/claude-envoy.tar; \
+    test -f /out/claude-envoy/dist/envoy-channel.js; \
+    test -f /out/claude-envoy/legion/.claude-plugin/plugin.json
+
 # ------------------------------------------------------------------------------------------------
 # tools: mise resolves the pinned OMP fork build, jj, and gh — the same backend and pin string the
 # daemon hands to `mise where` on a tmux host. mise itself is checked against MISE_SHA256 before
@@ -279,6 +314,17 @@ RUN test -n "$LEGION_REVISION" \
 # server prefers. go finds its GOROOT, /opt/go, by resolving the /usr/local/bin/go
 # symlink (cmd/go's findGOROOT tries the executable's own path, then its symlink target), so the image
 # sets no GOROOT; the toolchain step below checks it.
+# Claude Code (@anthropic-ai/claude-code) installs the same way, from the committed lockfile at
+# packages/daemon/docker/claude-code into /opt/claude-code, with `npm ci --ignore-scripts`: the
+# lockfile's integrity hashes are the verification, and the version moves only by regenerating it.
+# It is in every image, not only one built for a deployment whose worker_backends names the
+# `claude` backend — there is one worker image, and a phase worker on Claude Code runs `claude`
+# and the claude-envoy plugin out of it (packages/daemon/internal/claudelaunch). The npm package's
+# own `bin` is a placeholder shell stub, `bin/claude.exe`, which its postinstall overwrites with
+# the binary of the matching per-platform optional dependency; with scripts off that stub stays a
+# stub, so /out/bin/claude links the platform package's binary itself,
+# node_modules/@anthropic-ai/claude-code-linux-x64/claude — a self-contained ELF that needs no
+# node, the same choice the plugin stage makes for the CodeGraph CLI.
 FROM mirror.gcr.io/library/debian:trixie-slim AS toolchain
 ARG UV_VERSION
 ARG UV_SHA256
@@ -294,6 +340,7 @@ ARG GO_SHA256
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl unzip xz-utils \
     && rm -rf /var/lib/apt/lists/*
 COPY packages/daemon/docker/language-servers/package.json packages/daemon/docker/language-servers/package-lock.json /opt/language-servers/
+COPY packages/daemon/docker/claude-code/package.json packages/daemon/docker/claude-code/package-lock.json /opt/claude-code/
 RUN set -eu; \
     t=/tmp/toolchain; mkdir -p "$t" /out/bin /opt/node; \
     curl -fsSLo "$t/uv.tar.gz" \
@@ -318,6 +365,8 @@ RUN set -eu; \
     for tool in typescript-language-server tsc tsserver pyright pyright-langserver; do \
       ln -s "/opt/language-servers/node_modules/.bin/$tool" "/out/bin/$tool"; \
     done; \
+    (cd /opt/claude-code && PATH="/opt/node/bin:$PATH" npm ci --ignore-scripts --omit=dev --no-audit --no-fund); \
+    ln -s /opt/claude-code/node_modules/@anthropic-ai/claude-code-linux-x64/claude /out/bin/claude; \
     tar -xzf "$t/go.tar.gz" -C /opt --no-same-owner; \
     for tool in go gofmt; do ln -s "/opt/go/bin/$tool" "/out/bin/$tool"; done; \
     unzip -q "$t/awscli.zip" -d "$t"; \
@@ -358,6 +407,7 @@ ARG GO_VERSION
 ARG GOPLS_VERSION
 COPY --from=plugin /out/codegraph-node-version /in/codegraph-node-version
 COPY packages/daemon/docker/language-servers/package.json /in/language-servers/package.json
+COPY packages/daemon/docker/claude-code/package.json /in/claude-code/package.json
 # The seventeen reads below (thirteen LICENSE/NOTICE fetches, four HEAD checks) are independent
 # of each other and left sequential rather than backgrounded: this whole RUN is the cached layer
 # the stage comment above describes (a source change, not a pin bump, reuses it, so it rebuilds
@@ -372,9 +422,11 @@ RUN set -eu; \
     pin() { sed -n "s/^ *\"$1\": \"\([^\"]*\)\".*/\1/p" /in/language-servers/package.json; }; \
     typescript_version=$(pin typescript); tsls_version=$(pin typescript-language-server); pyright_version=$(pin pyright); \
     : "${typescript_version:?typescript pin not read from /in/language-servers/package.json}"; : "${tsls_version:?typescript-language-server pin not read from /in/language-servers/package.json}"; : "${pyright_version:?pyright pin not read from /in/language-servers/package.json}"; \
-    printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\ntypescript_version=%s\ntsls_version=%s\npyright_version=%s\n' \
+    claude_code_version=$(sed -n 's|^ *"@anthropic-ai/claude-code": "\([^"]*\)".*|\1|p' /in/claude-code/package.json); \
+    : "${claude_code_version:?@anthropic-ai/claude-code pin not read from /in/claude-code/package.json}"; \
+    printf 'omp_repo=%s\nomp_tag=%s\njj_repo=%s\njj_tag=%s\ngh_tag=%s\ncodegraph_node_tag=%s\ntypescript_version=%s\ntsls_version=%s\npyright_version=%s\nclaude_code_version=%s\n' \
       "$omp_repo" "$omp_tag" "$jj_repo" "$jj_tag" "$gh_tag" "$codegraph_node_tag" \
-      "$typescript_version" "$tsls_version" "$pyright_version" > /in/tags.env; \
+      "$typescript_version" "$tsls_version" "$pyright_version" "$claude_code_version" > /in/tags.env; \
     gh_raw_url() { printf 'https://raw.githubusercontent.com/%s/%s/%s' "$1" "$2" "$3"; }; \
     fetch() { curl -fsSL "$(gh_raw_url "$1" "$2" "$3")" -o "/in/$4"; }; \
     fetch oven-sh/bun "bun-v${BUN_VERSION}" LICENSE.md bun-LICENSE.md; \
@@ -404,6 +456,7 @@ COPY scripts/assemble-third-party-notices.sh /usr/local/bin/
 COPY --from=go /out/go-notices /in/go-notices
 COPY --from=plugin /out/pi-envoy/dist/THIRD_PARTY_NOTICES /in/pi-envoy-notices
 COPY --from=plugin /out/pi-legion/dist/THIRD_PARTY_NOTICES /in/pi-legion-notices
+COPY --from=plugin /out/claude-envoy/dist/THIRD_PARTY_NOTICES /in/claude-envoy-notices
 COPY --from=toolchain /opt/node/LICENSE /in/node-LICENSE
 COPY --from=toolchain /out/licenses/aws-cli-THIRD_PARTY_LICENSES /in/aws-cli-THIRD_PARTY_LICENSES
 COPY --from=toolchain /opt/language-servers/node_modules/typescript/LICENSE.txt /in/typescript-LICENSE.txt
@@ -411,12 +464,14 @@ COPY --from=toolchain /opt/language-servers/node_modules/typescript/ThirdPartyNo
 COPY --from=toolchain /opt/language-servers/node_modules/typescript-language-server/LICENSE /in/typescript-language-server-LICENSE
 COPY --from=toolchain /opt/language-servers/node_modules/pyright/LICENSE.txt /in/pyright-LICENSE.txt
 COPY --from=toolchain /opt/language-servers/node_modules/pyright/dist/typeshed-fallback/LICENSE /in/pyright-typeshed-LICENSE
+COPY --from=toolchain /opt/claude-code/node_modules/@anthropic-ai/claude-code/LICENSE.md /in/claude-code-license
 RUN set -eu; mkdir -p /out; . /in/tags.env; \
     assemble-third-party-notices.sh /out/THIRD_PARTY_NOTICES \
-      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl, wget, jq, openssh-client and util-linux of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, and the language servers under /opt/language-servers/node_modules (their sections below)." \
+      "Third-party software in the Legion worker image, with the license of each piece. Legion's own code is under the Apache License 2.0. The Debian packages the image installs — git, ca-certificates, socat, and the chromium, python3, curl, wget, jq, openssh-client and util-linux of the capability check, each with the packages it depends on — carry their terms in /usr/share/doc/<package>/copyright. npm packages installed unmodified carry their own license files beside them: the CodeGraph plugin and its dependencies under /home/legion/.omp/profiles/legion/plugins/node_modules, the CodeGraph CLI's dependencies under /opt/codegraph/lib/node_modules, the language servers under /opt/language-servers/node_modules, and Claude Code under /opt/claude-code/node_modules (their sections below)." \
       "Go modules compiled into /opt/legion/bin/legion and /opt/legion/bin/agent-secrets" /in/go-notices \
       "npm packages inlined into the pi-envoy plugin, /opt/legion/pi-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/pi-envoy-notices \
       "npm packages inlined into the pi-legion plugin, /opt/legion/pi-legion (also its dist/THIRD_PARTY_NOTICES)" /in/pi-legion-notices \
+      "npm packages inlined into the claude-envoy plugin, /opt/legion/claude-envoy (also its dist/THIRD_PARTY_NOTICES)" /in/claude-envoy-notices \
       "Bun ${BUN_VERSION}, /usr/local/bin/bun: LICENSE.md of github.com/oven-sh/bun at bun-v${BUN_VERSION}" /in/bun-LICENSE.md \
       "Oh My Pi, /opt/omp and the native modules it fetched into /home/legion/.omp/natives: LICENSE of github.com/${omp_repo} at ${omp_tag}" /in/omp-LICENSE \
       "Oh My Pi: THIRD-PARTY-NOTICES.txt of github.com/${omp_repo} at ${omp_tag}" /in/omp-THIRD-PARTY-NOTICES.txt \
@@ -440,7 +495,8 @@ RUN set -eu; mkdir -p /out; . /in/tags.env; \
       "TypeScript: the ThirdPartyNoticeText.txt its npm package ships" /in/typescript-ThirdPartyNoticeText.txt \
       "typescript-language-server ${tsls_version}, /opt/language-servers/node_modules/typescript-language-server (/usr/local/bin/typescript-language-server): the LICENSE its npm package ships" /in/typescript-language-server-LICENSE \
       "pyright ${pyright_version}, /opt/language-servers/node_modules/pyright (pyright and pyright-langserver at /usr/local/bin): the LICENSE.txt its npm package ships" /in/pyright-LICENSE.txt \
-      "pyright: the LICENSE of the typeshed stubs it bundles, /opt/language-servers/node_modules/pyright/dist/typeshed-fallback" /in/pyright-typeshed-LICENSE
+      "pyright: the LICENSE of the typeshed stubs it bundles, /opt/language-servers/node_modules/pyright/dist/typeshed-fallback" /in/pyright-typeshed-LICENSE \
+      "Claude Code ${claude_code_version}, /opt/claude-code (claude at /usr/local/bin): the LICENSE.md its npm package ships" /in/claude-code-license
 
 # ------------------------------------------------------------------------------------------------
 # runtime: debian:trixie-slim for its git (2.47; jj 0.45's git backend needs >= 2.42 — bookworm and
@@ -503,6 +559,12 @@ COPY --from=tools /opt/tools/jj /usr/local/bin/jj
 COPY --from=tools /opt/tools/gh /usr/local/bin/gh
 COPY --from=plugin --chown=legion:legion /out/pi-envoy /opt/legion/pi-envoy
 COPY --from=plugin --chown=legion:legion /out/pi-legion /opt/legion/pi-legion
+# claude-envoy, the plugin root a phase worker on the `claude` backend loads: its package root
+# beside the two Oh My Pi roots (names.go's claudePluginDir), the runtime user's under the
+# root-owned /opt/legion the final step checks, and holding the committed build the plugin stage
+# held to a fresh one — `dist/envoy-channel.js`, the worker's one MCP server, and `legion/`, the
+# generated Legion plugin Claude Code loads as a second --plugin-dir (claudelaunch).
+COPY --from=plugin --chown=legion:legion /out/claude-envoy /opt/legion/claude-envoy
 # CodeGraph CLI (@colbymchenry/codegraph): the self-contained per-platform bundle alone (bundled
 # Node runtime + app), never the npm package's own launcher shim — see the plugin stage's comment.
 COPY --from=plugin /out/codegraph /opt/codegraph
@@ -565,11 +627,14 @@ RUN set -eu; \
 # natives, and before `legion`, which changes on every commit. It lands outside HOME, in /opt and
 # /usr/local/bin, so no volume a pod mounts under HOME shadows it, and /usr/local/bin is on the image
 # PATH and on every pod's (imagePath, packages/daemon/internal/runtime/sandbox/names.go). /opt/go
-# is the Go toolchain, /opt/language-servers carries the language servers (node_modules), and
+# is the Go toolchain, /opt/language-servers carries the language servers (node_modules),
+# /opt/claude-code carries Claude Code (its /usr/local/bin/claude is a link into it, so the two
+# travel together), and
 # /out/bin holds every launcher's link; gopls comes from the go stage, whose gopls layer precedes any
 # source, so its binary — and this layer — changes only with a pin.
 COPY --from=toolchain /opt/node /opt/node
 COPY --from=toolchain /opt/language-servers /opt/language-servers
+COPY --from=toolchain /opt/claude-code /opt/claude-code
 COPY --from=toolchain /opt/go /opt/go
 COPY --from=toolchain /opt/aws-cli /opt/aws-cli
 COPY --from=toolchain /out/bin/ /usr/local/bin/
@@ -596,7 +661,11 @@ ENV COREPACK_DEFAULT_TO_LATEST=0
 # that line alone. ssh-keygen takes no --version (its -V is the certificate-validity option), so it
 # generates a throwaway ed25519 key in the scratch directory, which -l fingerprints and the step
 # removes. flock answers --version; it is on this line because an installing launch's rendered
-# install serialises on the issue's shared bun install cache with it.
+# install serialises on the issue's shared bun install cache with it. `claude --version` is Claude
+# Code's check, and it is here rather than in the probe step above because Claude Code comes in
+# with the toolchain, which is copied after that step: this is the first gate at which the binary
+# exists, and a stub `claude` — the npm package's placeholder, left behind by an install whose
+# platform package was missing — fails it.
 RUN set -eu; \
     scratch="$(mktemp -d)"; \
     export TMPDIR="$scratch" COREPACK_HOME="$scratch/corepack" XDG_CONFIG_HOME="$scratch/config"; \
@@ -607,6 +676,7 @@ RUN set -eu; \
     go version; goroot="$(go env GOROOT)"; echo "GOROOT: $goroot"; test "$goroot" = /opt/go; \
     printf 'package main\n' | gofmt; gopls version; \
     typescript-language-server --version; tsc --version; pyright --version; \
+    claude --version; \
     python3 --version; curl --version; wget --version; jq --version; chromium --version; \
     socat -V > "$scratch/socat-V"; sed -n '/^socat version/p' "$scratch/socat-V"; \
     ssh-keygen -q -t ed25519 -N '' -f "$scratch/probe-key"; ssh-keygen -l -f "$scratch/probe-key.pub"; \
@@ -644,7 +714,10 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # toolchain check above and the toolchain capability row all ask only that `flock` be on PATH — so
 # a base that kept flock and moved it would pass every one of those and fail every installing
 # launch. The declaration and the use have to agree on the path, and this is where they are held
-# to it. The Envoy plugin's `dispatch` shim runs its bundled CLI under
+# to it. `claude` is pinned at /usr/local/bin/claude for the same reason: a Claude worker's pod
+# names the binary by that absolute path (claudeAgent,
+# packages/daemon/internal/runtime/sandbox/names.go), while the toolchain check above asks only
+# that `claude` be on PATH. The Envoy plugin's `dispatch` shim runs its bundled CLI under
 # the image's bun and prints its help, so a pi-envoy packed without bin/ or dist/dispatch.js, or an
 # image without bun, fails here; that the extension puts bin/ first on an agent's PATH is pi-envoy's
 # own test. Then `legion probe-image` runs the three launch probes through
@@ -656,11 +729,15 @@ COPY --chmod=0755 packages/daemon/docker/gh /opt/legion/bin/gh
 # task agent and skill Legion's prompts name (shipped in the Legion plugin's agents/ and the two
 # plugins' dist/skills directories). It leaves those agents' models unresolved
 # (--skip-agent-models): the build has none of the operator's model configuration, which the pod
-# brings. Then it checks every image-site row of the capability table against this image, as a
+# brings. --claude-root adds the Claude lane: `claude --version`, the claude-envoy root's built
+# channel server (dist/envoy-channel.js) and generated Legion plugin
+# (legion/.claude-plugin/plugin.json), and that root's manifest held to the same daemon API
+# contract the Legion plugin is — so an image whose Claude worker could not start fails here
+# rather than at a pod's first claim. Then it checks every image-site row of the capability table against this image, as a
 # worker's Oh My Pi would find each: `omp setup python --check`, the chromium on PATH (or the browser a
 # PUPPETEER_EXECUTABLE_PATH names) run with --version, gopls, typescript-language-server and pyright-langserver on PATH, the
 # CodeGraph CLI on PATH with its plugin enabled in the profile's lock, and go, curl, wget, python3,
-# node, bun, uv, kubectl, jq, ssh-keygen and flock on PATH with `go version` running (packages/daemon/internal/capabilities/image.go).
+# node, bun, uv, kubectl, jq, ssh-keygen and flock on PATH with `go version` running, and `claude` on PATH (packages/daemon/internal/capabilities/image.go).
 # It prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per row, then
 # `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped
 # capabilities=checked model-fallback=on daemon-api-version=<N>` — `on` here is Oh My Pi's own default for retry.modelFallback,
@@ -685,6 +762,7 @@ RUN set -eu; \
     flock="$(command -v flock)"; echo "flock: $flock"; test "$flock" = /usr/bin/flock; \
     legion="$(command -v legion)"; echo "legion: $legion"; test "$legion" = /opt/legion/bin/legion; \
     gh="$(command -v gh)"; echo "gh: $gh"; test "$gh" = /opt/legion/bin/gh; /usr/local/bin/gh --version; \
+    claude="$(command -v claude)"; echo "claude: $claude"; test "$claude" = /usr/local/bin/claude; \
     DISPATCH_HOST=omp DISPATCH_SESSION_ID=image-check HOME=/tmp \
       /opt/legion/pi-envoy/bin/dispatch --help > /tmp/dispatch-help; \
     echo "dispatch: $(sed -n 1p /tmp/dispatch-help)"; grep -q '^Usage: dispatch ' /tmp/dispatch-help; \
@@ -696,7 +774,7 @@ RUN set -eu; \
       expected="$(printf '%s\nplugins @sjawhar/pi-legion %s @sjawhar/pi-envoy %s' "$expected" "$PI_LEGION_VERSION" "$PI_ENVOY_VERSION")"; \
     fi; \
     test "$version" = "$expected"; \
-    legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --skip-agent-models; \
+    legion probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy --claude-root /opt/legion/claude-envoy --skip-agent-models; \
     agent-secrets --help >/dev/null; \
     rm -rf /home/legion/.omp/profiles/legion/logs /home/legion/.config/go
 # The Kubernetes runtime sets every container's command explicitly
@@ -705,5 +783,5 @@ RUN set -eu; \
 # worker-shim --connect tcp://<daemon>:<worker_stream_port> --boot-token-file … -- omp --mode rpc …`.
 # This ENTRYPOINT therefore only makes `docker run <image> version` and `docker run <image>
 # probe-image --plugin-root /opt/legion/pi-legion --envoy-plugin-root /opt/legion/pi-envoy
-# --skip-agent-models` work.
+# --claude-root /opt/legion/claude-envoy --skip-agent-models` work.
 ENTRYPOINT ["legion"]

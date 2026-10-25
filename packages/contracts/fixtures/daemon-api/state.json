@@ -281,6 +281,11 @@
       "detail": "checked by the daemon's probe of the worker image, which passed"
     },
     {
+      "name": "claude-code",
+      "status": "present",
+      "detail": "checked by the daemon's probe of the worker image, which passed"
+    },
+    {
       "name": "resource-limits",
       "status": "open",
       "detail": "roles without CPU and memory requests and limits under runtime.kubernetes.resources: tester",

@@ -30,7 +30,11 @@ var digits = regexp.MustCompile(`^[0-9]+$`)
 // ProbeImage). Both pass --plugin-root and --envoy-plugin-root, the Legion and Envoy plugin
 // directories a pod loads as its two explicit extensions, and the command refuses a run without
 // either (exit 2): the probe certifies the lane a pod uses, so a build line that lost a flag fails
-// the build instead of probing a lane no pod loads.
+// the build instead of probing a lane no pod loads. The build also passes --claude-root, the
+// claude-envoy package root the image carries, which adds the Claude lane: `claude --version`,
+// that root's built channel server and generated Legion plugin, and its manifest held to the same
+// contract (daemon.ProbeImage). A run without it probes no Claude lane, so a caller with no such
+// root — the daemon's probe Sandbox until it passes one — is unaffected.
 // It runs the image's launch probes under the image's own environment (daemon.ProbeImage), then
 // the capability check (capabilities.CheckImage) under the same environment and launch: every
 // image-site capability of the list every worker is held to (LEGION-578), with the whole table
@@ -68,6 +72,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 		"the daemon API contract the image's pi-legion must declare (the daemon's probe Sandbox passes its own)")
 	pluginRoot := flags.String("plugin-root", "", "the Legion plugin directory a pod loads as an explicit extension, which the load probe loads the same way (required)")
 	envoyPluginRoot := flags.String("envoy-plugin-root", "", "the Envoy plugin directory a pod loads as its other explicit extension, which the load probe loads the same way (required)")
+	claudeRoot := flags.String("claude-root", "", "the claude-envoy package root a worker on the `claude` backend loads, which the Claude lane checks (the image build passes it; with none, no Claude lane runs)")
 	podSafety := flags.Bool("pod-safety", false, "run the probes on a pod's baseline (internal/podsafety), as a pod's shim starts Oh My Pi")
 	providerEnvDir := flags.String("provider-env-dir", "", "a directory whose files NAME=contents the probes' Oh My Pi gets, as a worker's shim exports them")
 	skipAgentModels := flags.Bool("skip-agent-models", false, "leave the prompt-named task agents' models unresolved (the image build's probe)")
@@ -159,6 +164,7 @@ func runProbeImage(ctx context.Context, args []string, stdout, stderr io.Writer)
 	}
 	err = daemon.ProbeImage(ctx, daemon.ImageProbe{
 		Omp: invocation, Contract: expected, Env: env, WorkDir: workDir, PluginRoot: *pluginRoot, EnvoyPluginRoot: *envoyPluginRoot,
+		ClaudeRoot:     *claudeRoot,
 		RoleReferences: references, SkipAgentModels: *skipAgentModels,
 		Log: slog.New(slog.NewTextHandler(stderr, &slog.HandlerOptions{Level: slog.LevelWarn})),
 	})

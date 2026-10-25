@@ -48,7 +48,7 @@ type imageCheck func(ctx context.Context, img Image) (detail string, ok bool)
 // imageChecks are the image rows' checks, by name. TestEveryImageRowHasACheck holds the map to
 // Table's image rows, so a row added to one is added to the other.
 var imageChecks = map[Name]imageCheck{
-	EvalJS: evalJS, EvalPython: evalPython, Browser: browser, LSP: lsp, CodeGraph: codeGraph, Skills: skills, Toolchain: toolchain,
+	EvalJS: evalJS, EvalPython: evalPython, Browser: browser, LSP: lsp, CodeGraph: codeGraph, Skills: skills, Toolchain: toolchain, ClaudeCode: claudeCode,
 }
 
 // CheckImage checks every image-site row under img and renders every row of Table, in its order:
@@ -177,6 +177,18 @@ func browser(ctx context.Context, img Image) (string, bool) {
 // lsp: the language servers Oh My Pi's LSP tools start for Go, TypeScript and Python.
 func lsp(_ context.Context, img Image) (string, bool) {
 	_, detail, ok := onPath(img, "gopls", "typescript-language-server", "pyright-langserver")
+	return detail, ok
+}
+
+// claudeCode: the Claude Code CLI a phase worker on the `claude` backend runs, which the image
+// carries beside Oh My Pi whatever a deployment's worker_backends names — one image serves both
+// harnesses, so every probe of every image checks this row. The plugin that worker loads beside
+// the binary, the claude-envoy root with its channel server and generated Legion plugin, is the
+// Claude lane of the launch probes that ran before this check (`--claude-root`,
+// internal/daemon's bootgate.go), which runs the binary itself; the row reports what it is here,
+// a tool on the image's PATH, as the lsp and toolchain rows do.
+func claudeCode(_ context.Context, img Image) (string, bool) {
+	_, detail, ok := onPath(img, "claude")
 	return detail, ok
 }
 

@@ -15,6 +15,11 @@ docs
 # The documentation site is a root workspace, so every frozen Bun install needs its manifest
 # (.github/scripts/check-bun-workspace-manifests.sh).
 !docs/site/package.json
+# claude-envoy's dist/ is committed source, not a build output: the plugin ships to the worker
+# image as its committed build, and the image's plugin stage runs `bun run check-dist`, which
+# refuses a copy that is not what a fresh build writes. `**/dist` above would keep both the
+# bundles and the thing the check compares them against out of the context.
+!packages/claude-envoy/dist
 # skills/ ships inside the worker image's two plugin tarballs: scripts/pi-plugin-prepack.sh stages
 # each plugin's own skill directories, and nothing else of skills/, so its AGENTS.md is a checkout
 # document the build never reads and no image trigger owes.
