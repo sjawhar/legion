@@ -2,55 +2,37 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-246",
-  "completed": "2026-10-25T13:15:00Z",
-  "round": "review round 7 - three descriptions of the hold model, no code",
+  "completed": "2026-10-25T13:58:00Z",
+  "round": "review round 8 - one word, and a sweep wide enough to find the copy the last sweep could not",
   "proof": [
     {
-      "criterion": "`packages/pi-envoy/AGENTS.md`'s `reconcile` bullet stated the host-dependent branch round 7 deleted as the current rule, and described adoption with no same-session requirement. This file is loaded by every agent working in the package, so it is an instruction to reintroduce the branch whose removal is what closes this issue.",
-      "surface": "The file itself, read against the code it describes.",
-      "command": "jj diff --git packages/pi-envoy/AGENTS.md ; sed -n '2296,2300p;2318p' packages/pi-envoy/extensions/envoy.ts",
-      "observed": "The bullet now reads `unless the hold is under the session open here, read at that moment (sessionOpen), and that session wants its role, whose hold it is again (a resume Oh My Pi rolled back) ... A hold under a session this process has left is never its own again, since another process may run that session now. One the listener does not take back is abandoned (abandonedHolds), whatever session it is under, and waits for the listener's reaping until this process registers that session again`. Each clause was checked against a line: adoption at :2296-2300 (`... && sessionOpen(hold.id)`) with `sessionOpen` at :1559 (`sessionID === id && hostSessionID() === id`); unconditional abandonment at :2318. The sentence further down that the reviewer called accurate - `any registration of that session by this process, in a pass or not and answered or not, first takes the hold back` - is untouched, and the bullet's two halves now agree.",
-      "headSha": "8af013ebda1adbf1073d072e715076fb3e7e7e40",
-      "negativeControl": "The control for a prose round is that nothing else moved: `jj diff --stat` names this file and `envoy.ts` alone; `check-private-names.sh` exits 0 over the changed markdown; the suite is 853 pass / 0 fail, the same as before this round, which a comment edit must leave untouched."
+      "criterion": "`envoy.test.ts:6828` was the fourth copy of the sentence rounds 7 and 8 corrected: it said a pane `takes its holds back at its next accepted registration`, where `registerSession` re-promotes before the request and no response gates it.",
+      "surface": "The comment, read against the function it describes.",
+      "command": "jj diff --git packages/pi-envoy/extensions/envoy.test.ts ; sed -n '1599,1606p' packages/pi-envoy/extensions/envoy.ts",
+      "observed": "It now reads `the session this process still registers takes its holds back at its next registration, answered or not (registerSession)`. The code behind it: `registerSession` moves every `abandonedHolds` entry whose `hold.id === sessionID` into `pendingHandBacks` at :1601-1604, and `requireEnvoy().client.subscribe(...)` is at :1606, so the promotion neither waits for nor depends on an answer. The wording is `AGENTS.md`'s own, which was already correct, so all four copies now say one thing.",
+      "headSha": "cf4599c8d040089f6dedee1585a89d748a15a3a7",
+      "negativeControl": "The product delta is empty and proven so rather than asserted: `jj diff --stat` names `packages/pi-envoy/extensions/envoy.test.ts` alone with 2 insertions and 2 deletions, both comment lines; stripping every `//` line from that file at 8af013eb and at this head leaves byte-identical content, compared programmatically. Suite 853 pass / 0 fail, unchanged, as a comment edit must leave it; `bunx tsc --noEmit` and `bunx biome check packages/pi-envoy/` exit 0."
     },
     {
-      "criterion": "`envoy.ts`'s `abandonedHolds` declaration said the map holds only holds given up under a session the process has left, contradicting `settleEndedHolds`' own comment three screens below (`whatever session it is under`) and the code at `:2318`. The provenance of an entry in that map is what the last three rounds got wrong, so the declaration is the worst place in the file for a wrong description of it.",
-      "surface": "The two comments and the code between them.",
-      "command": "jj diff --git packages/pi-envoy/extensions/envoy.ts",
-      "observed": "The declaration now reads `Holds this process gave up whose hand-back the listener refused, whatever session they are under, keyed by <topic>@<session> as pendingHandBacks is, so holds of one role under two sessions are two entries. Any registration this process makes of a hold's session, in a pass or not and answered or not, first takes it back as a pending hand-back (registerSession); until then it is left for the listener to reap: ...`. The old sentence also said `a pass that registers that session`, which is wrong a second way: `registerSession` has callers that are not a pass.",
-      "headSha": "8af013ebda1adbf1073d072e715076fb3e7e7e40",
-      "negativeControl": "Stripping every `//` line from `envoy.ts` at 1363aa8f and at this head leaves byte-identical files, compared programmatically rather than read off the diff, and every one of the 14 changed lines in that file is a comment. So the reviewer's verification of the code at the previous head carries over unchanged."
-    },
-    {
-      "criterion": "`settleEndedHolds`' doc comment said `the next accepted registration makes it a pending hand-back again`, where `registerSession` re-promotes at `:1601-1604`, before the `subscribe` call at `:1606`. Two documents disagreed and `AGENTS.md`'s `in a pass or not and answered or not` was the accurate one, so the comment had to be corrected up to the code rather than the document harmonised down to the comment.",
-      "surface": "The comment, `registerSession`'s body, and `AGENTS.md`'s sentence on the same mechanism.",
-      "command": "sed -n '1599,1606p' packages/pi-envoy/extensions/envoy.ts ; jj diff --git packages/pi-envoy/extensions/envoy.ts",
-      "observed": "`registerSession` moves every `abandonedHolds` entry whose `hold.id === sessionID` into `pendingHandBacks` at :1601-1604, and the `requireEnvoy().client.subscribe(...)` call is at :1606, so the promotion does not wait for an answer and does not depend on the registration being accepted. The comment now says `any registration this process makes of that session, in a pass or not and answered or not, first makes it a pending hand-back again (registerSession), for the pass after to hand back. Until then it waits for the listener's reaping and is never tried again`, which is the same statement `AGENTS.md` makes, and it adds what the old sentence left out - that an abandoned hold is not retried while it waits.",
-      "headSha": "8af013ebda1adbf1073d072e715076fb3e7e7e40",
-      "negativeControl": "The direction was the thing to get right rather than the wording: the wrong fix here is to edit `AGENTS.md` down to the comment's word, which takes one edit instead of two and removes the signal that something is off. The code line decides, and it is quoted above. The worker also re-read every other description of this model in both files - `abandonedHolds`, `pendingHandBacks`, `settleEndedHolds`, `holdUnconfirmed`, hand-back, reap - against the code; the three the reviewer named were the whole of it."
-    },
-    {
-      "criterion": "A number in this pull request's own record was wrong, found while running this round's checks, and a body that describes a previous head is how a false claim reaches the merge packet.",
-      "surface": "The suite, run whole at this head, against what the body and the round-7 handoff claim.",
-      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts",
-      "observed": "853 pass, 0 fail. The pull request body and `.legion/INFRA-246/implement.json` for round 7 both say 854: that count was taken while the planner's seventh case was still in the working copy, and it was carried into the body after the case was removed as a duplicate. The body is corrected at this head and says so in place rather than quietly. Nothing else in that evidence moves - the twelve-case mutation of the failed loop, the one-case mutation of the adoption gate and the four-case no-adoption mutation were all measured after the removal.",
-      "headSha": "8af013ebda1adbf1073d072e715076fb3e7e7e40",
-      "negativeControl": "The count was re-read from a full unfiltered run at this head rather than inferred from the diff being comments, which is what would have let the stale number stand a second round."
+      "criterion": "Round 8's sweep could not have found this copy, and the sweep that replaces it must be able to. A sweep is only as wide as the phrasings it imagines: round 8 searched the old model's phrases, which match every copy of what was deleted and no copy already phrased in the corrected sentence's own words.",
+      "surface": "The repository's text, searched for both the deleted model's wording and the corrected sentence's own.",
+      "command": "grep -rniE 'accepted registration|next accepted|tried again while it is under|under a session it has left|a pass that registers' --include='*.md' --include='*.ts' --include='*.go' --include='*.sh' . | grep -v node_modules | grep -v '^\\./\\.legion/'",
+      "observed": "Ten hits, one of them this round's and nine of them accurate. Six are the registration backstop's own clock, where an accepted registration is exactly the right term and the text is true: `.github/scripts/check-heartbeat-margin.sh:29,31`, its suite at :204, `envoy.ts:1597,1764,1771` and `packages/pi-envoy/CHANGELOG.md:23`. One is `AGENTS.md:436`, matching on the same backstop sentence rather than on the re-promotion one. One is the smoke's verdict line, about a wedged registration's ordinal. Each was read rather than counted; no fifth stale copy exists.",
+      "headSha": "cf4599c8d040089f6dedee1585a89d748a15a3a7",
+      "negativeControl": "The control is that the sweep finds this round's own target before the edit and nothing else stale after it: the same command over the pre-edit tree returns `envoy.test.ts:6829` among the ten, which is the copy round 8's narrower pattern set could not return at all."
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/AGENTS.md - two sentences of the `reconcile` bullet.",
-    "packages/pi-envoy/extensions/envoy.ts - comments only: the `abandonedHolds` declaration and `settleEndedHolds`' doc comment."
+    "packages/pi-envoy/extensions/envoy.test.ts - one comment sentence, two lines."
   ],
   "trickyParts": [
-    "The re-promotion sentence existed in two documents with different words, and only one was supported by the code. Correcting the wrong one up rather than the right one down is what keeps the disagreement from being resolved in favour of the false statement.",
-    "A prose round's risk is that it quietly moves code. The check is byte equality after stripping comment lines from both heads, not a reading of the diff."
+    "The search set is the whole of this round's content: the word was known, and what was not known was whether a fifth copy existed. Searching only what the text used to say finds copies of the deleted model and misses a copy phrased in the new sentence's words - which is precisely how this one survived."
   ],
   "deviations": [
-    "None. The round is the three text edits the reviewer named and the correction of one number in the body; no code, no test, and the product code is byte-identical to 1363aa8f."
+    "None. One comment, no code, no assertion, and the body updated for the new head."
   ],
   "discoveredComplexity": [
-    "Five rounds in this tree have now ended on a document or a comment asserting behaviour the code does not produce, this round's three included. The code was corrected by measurement every time; the prose describing it was corrected only when somebody read it against the code. That is the retro's instance list rather than the hold key."
+    "Six corrections in this tree have now been to prose asserting behaviour the code does not produce - the three of round 8, this one, a number of my own in the pull request body, and INFRA-141's. Every one was found by a person reading the text against the code; no lane executes a sentence or a count."
   ],
   "openQuestions": []
 }
