@@ -25,6 +25,14 @@ type writeAdvice struct {
 	IssueStatus             string      `json:"issue_status"`
 	SessionWritesSinceHuman int         `json:"session_writes_since_human"`
 	YourOpenAsks            []adviceAsk `json:"your_open_asks"`
+	// LegionManagedStatus is whether the Legion daemon owns the issue's status (the issue, or
+	// an issue above it, carries the legion label). A pointer, omitted when nil, because it is
+	// resolved only where a line depends on it - a session's write on an issue in triage, the
+	// one case where the client has advice to drop - and a plain bool would serialise false
+	// everywhere else and state, wrongly, that Legion does not own the status. Absent means
+	// "not asked", which is what @legion/contracts' optional WriteAdvice.legion_managed_status
+	// already expresses.
+	LegionManagedStatus *bool `json:"legion_managed_status,omitempty"`
 	// documentBlocks is set by a document write whose document reads; nil omits its fields.
 	*documentBlocks
 	// editBlocks is set by a document edit; nil omits its field.
@@ -54,14 +62,24 @@ func (e *adviceQueryError) Unwrap() error {
 	return e.err
 }
 
+// computeWriteAdvice runs the issue-scoped advice queries for a session's write. Two of them are
+// about the calling session itself - its own writes since the last human event, its own open
+// asks - so writeAdvice calls this only for a session actor. The third, whether Legion owns the
+// issue's status, runs only on an issue whose status is triage: that is the only line the answer
+// decides, so an ordinary write on an ordinary issue gains no query at all. status is the
+// issue's status as the write committed it, the same value writeAdvice reports. route names the
+// caller for the one query whose failure is logged rather than returned
+// (legionManagedStatusAdvice).
 func (s *server) computeWriteAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
+	route string,
 	issueKey string,
 	actor model.Actor,
 	excludeAskID string,
+	status string,
 ) (*writeAdvice, error) {
-	advice := &writeAdvice{YourOpenAsks: []adviceAsk{}}
+	advice := &writeAdvice{YourOpenAsks: []adviceAsk{}, IssueStatus: status}
 	if err := s.runAdviceQueryHook(ctx, tx, "session_writes_since_human"); err != nil {
 		return nil, &adviceQueryError{query: "session_writes_since_human", err: err}
 	}
@@ -71,16 +89,12 @@ func (s *server) computeWriteAdvice(
 			where issue_key = $1 and actor->>'kind' = 'user'
 		)
 		select count(*) from events, last_human
-		where issue_key = $1 and actor->>'kind' = 'session'
+		where issue_key = $1 and actor->>'kind' = 'session' and actor->>'id' = $2
 		  and type in ('message.created', 'comment.created', 'ask.opened')
 		  and id > last_human.last_id
-	`, issueKey).Scan(&advice.SessionWritesSinceHuman); err != nil {
+	`, issueKey, actor.ID).Scan(&advice.SessionWritesSinceHuman); err != nil {
 		return nil, &adviceQueryError{query: "session_writes_since_human", err: err}
 	}
-	if actor.Kind != "session" {
-		return advice, nil
-	}
-
 	if err := s.runAdviceQueryHook(ctx, tx, "your_open_asks"); err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
@@ -106,7 +120,51 @@ func (s *server) computeWriteAdvice(
 	if err := rows.Err(); err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
+	if status == model.IssueStatusTriage {
+		advice.LegionManagedStatus = s.legionManagedStatusAdvice(ctx, tx, route, issueKey)
+	}
 	return advice, nil
+}
+
+// legionManagedStatusAdvice answers whether Legion owns the issue's status for a write's advice,
+// or nil when the walk failed. It is the last step of computeWriteAdvice and the only one whose
+// failure is not fatal to the advice: the two before it are what a session asked for, while this
+// one decides a single line, and every issue is created in triage, so returning an
+// adviceQueryError here would put a third failure mode on the path that runs for every
+// session-authored `dispatch issue`. What that costs a creation is not a copy of something
+// already stored: issue_create.go computes and persists LEGION-550's suggestions only once the
+// advice survives (`if advice != nil`), after it, so a fatal advice failure there means the
+// suggestions are never computed and no row is ever written. Nothing runs after this step, so
+// the advice already assembled is complete without it.
+//
+// The walk takes a savepoint of its own inside the advice savepoint, because a failed statement
+// aborts the transaction it ran in: run directly on the advice savepoint, its failure would also
+// take the statement_timeout reset and the release that follow it (writeAdvice), and the advice
+// would be dropped anyway. The failure is logged once, in the shape every omitted advice query
+// takes. The 500 ms bound writeAdvice set still covers it: SET LOCAL holds across a savepoint
+// opened under it.
+func (s *server) legionManagedStatusAdvice(ctx context.Context, tx pgx.Tx, route, issueKey string) *bool {
+	walk, err := tx.Begin(ctx)
+	if err != nil {
+		s.logAdviceError(route, issueKey, "legion_managed_status", err)
+		return nil
+	}
+	if err := s.runAdviceQueryHook(ctx, walk, "legion_managed_status"); err != nil {
+		_ = walk.Rollback(ctx)
+		s.logAdviceError(route, issueKey, "legion_managed_status", err)
+		return nil
+	}
+	managed, err := legionManagedStatus(ctx, walk, issueKey)
+	if err != nil {
+		_ = walk.Rollback(ctx)
+		s.logAdviceError(route, issueKey, "legion_managed_status", err)
+		return nil
+	}
+	if err := walk.Commit(ctx); err != nil {
+		s.logAdviceError(route, issueKey, "legion_managed_status", err)
+		return nil
+	}
+	return &managed
 }
 
 func (s *server) runAdviceQueryHook(ctx context.Context, tx pgx.Tx, query string) error {
@@ -125,6 +183,19 @@ func (s *server) writeAdvice(
 	excludeAskID string,
 	status string,
 ) *writeAdvice {
+	// A human write has no advice query to run - every one of them is about the calling session,
+	// and the triage line this answers is about what a session is told - so it is answered here,
+	// outside the savepoint and the two statement_timeout statements that would otherwise run
+	// inside the write's own transaction while it holds the issue row. Such a write still gets
+	// the triage advice, which is true for a reader who may move the status. A human is the only
+	// non-session actor that reaches a write: optionalActor returns an actor only for the cookie
+	// identity, which is always Kind "user", and every bearer goes through bearerSessionActor,
+	// which refuses an actor that is not a session (server.go). The guard is on the kind rather
+	// than on "is a human" so an actor kind the server does not produce today cannot silently
+	// acquire session-shaped advice.
+	if actor.Kind != "session" {
+		return &writeAdvice{YourOpenAsks: []adviceAsk{}, IssueStatus: status}
+	}
 	adviceTx, err := tx.Begin(ctx)
 	if err != nil {
 		s.logAdviceError(route, issueKey, "savepoint", err)
@@ -137,7 +208,7 @@ func (s *server) writeAdvice(
 		s.logAdviceError(route, issueKey, "statement_timeout", err)
 		return nil
 	}
-	advice, err := s.computeWriteAdvice(ctx, adviceTx, issueKey, actor, excludeAskID)
+	advice, err := s.computeWriteAdvice(ctx, adviceTx, route, issueKey, actor, excludeAskID, status)
 	if err != nil {
 		_ = adviceTx.Rollback(ctx)
 		query := "unknown"
@@ -158,7 +229,6 @@ func (s *server) writeAdvice(
 		s.logAdviceError(route, issueKey, "savepoint", err)
 		return nil
 	}
-	advice.IssueStatus = status
 	return advice
 }
 

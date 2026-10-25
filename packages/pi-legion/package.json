@@ -1,6 +1,6 @@
 {
   "name": "@sjawhar/pi-legion",
-  "version": "10.19.11",
+  "version": "10.21.0",
   "license": "Apache-2.0",
   "type": "module",
   "omp": {
@@ -12,7 +12,7 @@
     ]
   },
   "legion": {
-    "daemonApiVersion": 35
+    "daemonApiVersion": 36
   },
   "repository": {
     "type": "git",

@@ -103,10 +103,10 @@ comes back, with everything it knew, the next time its role is needed.
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
-| `accepting` | the architect | Reads the tester's handoff, the pull request's two `E2E` lines and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
+| `accepting` | the architect | Reads the tester's handoff, the pull request's two `E2E` lines and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. The daemon refuses the acceptance (`SIGNOFF_CHILD_IN_WORKFLOW`) while any issue beneath this one is still in the workflow, naming each of them. No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
 | `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head plus retro's notes, and submits the merge, which GitHub completes under the base branch's own rules. | implement App |
-| `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue. | none |
+| `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue; a root whose tree still runs records the merge and waits here until the last other issue of its tree is done or parked. | none |
 
 A failed test, red CI on the head in testing, review, acceptance, retro or merging (a check or workflow the
 base branch requires), or a review that requests changes sends the issue back to `implementing`,
@@ -311,7 +311,11 @@ and posts on the issue, and tells that role, that the `READY` is withdrawn, nami
 ## The production check
 
 The merge closes the issue: once the pull request merges, the daemon writes `done`, and nothing is
-left of the issue to develop. What is left is to see the change work in production, and that is
+left of the issue to develop. A root whose tree still runs is the one issue the merge does not
+close at once: the daemon records the merge, the root waits in `awaiting_merge` with its workers
+and its admission slot while its children reach their own merges, its architect is told once which
+issues the close waits for, and the close comes when the last of them is done or parked. What is
+left after the close is to see the change work in production, and that is
 work after the close: the implementer — the agent that wrote the change — is handed a production
 check in its live session as the issue closes. Each look of the check reaches the deploy as your
 deployment instructions say (the merge commit published to your deploy role, with no reply
@@ -332,11 +336,13 @@ whole check at `production_check_hours` (336, fourteen days, by default): the wa
 the last look, and a `pending` there closes the check as not run, which the implementer writes on
 the pull request. `legion state` prints how many checks are open and the oldest of them.
 
-A child's close releases its pod at once and its volume when the check closes; a root's close frees
-its admission slot, and the finished tree **lingers** for `linger_hours` (72 by default) with its
-workspace kept, in case work resumes; then its pods and volume are deleted, once no member's check
-is open. Setting a done root back to `todo` runs it again as a new generation, starting from its
-architect.
+A child's close releases its pod at once and its volume when the check closes; a root's close
+frees its admission slot once no other issue of its tree is still in the workflow, and the
+finished tree **lingers** for `linger_hours` (72 by default) with its workspace kept, in case work
+resumes; then its pods and volume are deleted, once no member's check is open. Closing a root
+yourself from the Dispatch dashboard lingers the tree at once, children and all: your decision
+outranks that order. Setting a done root back to `todo` runs it again as a new generation,
+starting from its architect.
 
 ## Supervision
 

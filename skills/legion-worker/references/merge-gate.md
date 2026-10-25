@@ -222,9 +222,12 @@ reviewing until you finish.
 
 - **The merge closes the issue; the production check is the implementer's work after the close.**
   When the pull request merges, the daemon writes `done` and, in the implementer's session, still
-  live, hands it the check task. Its first line is `Production check of <KEY>: <title>.`, and it
-  names the repository, the pull request, the merge commit, the look's number, what woke the look
-  (`the merge`, for the first) and whether it is the last. A resumed session tells the check task
+  live, hands it the check task. On a root whose tree still runs the close, and so the check task,
+  comes later: the merge is recorded, the root waits in `awaiting_merge` until the last other
+  issue of its tree is done or parked, and the check opens with that close. Its first line is
+  `Production check of <KEY>: <title>.`, and it names the repository, the pull request, the merge
+  commit, the look's number, what woke the look (`the merge`, for the first) and whether it is the
+  last. A resumed session tells the check task
   from its last phase task by that first line. The check carries no phase and no handoff: a look
   ends with `handoff_complete` carrying a `verdict` and a `summary`, no commit, and the daemon
   refuses a report on an issue with no open check (`CHECK_NOT_OPEN`), on a look already ended

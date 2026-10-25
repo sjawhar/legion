@@ -2,7 +2,6 @@
 package config
 
 import (
-	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"maps"
 	"os"
@@ -375,24 +374,10 @@ func TestLoadReadsTheSecretStore(t *testing.T) {
 		t.Fatalf("Load(gcp) = %+v, %v", cfg, err)
 	}
 
-	const sa = "agent-admin@example-project.iam.gserviceaccount.com"
-	const entry = "ADMIN_GCP_TOKEN=" + sa + "=sami@example.com"
 	e := gcp()
-	e["BROKER_MINT_TARGETS"] = " " + entry + "\n"
-	if cfg, err = Load(env(e)); err != nil || cfg.MintTargets["ADMIN_GCP_TOKEN"] != (policy.MintTarget{Account: sa, Owner: "sami@example.com"}) || len(cfg.MintTargets) != 1 {
-		t.Fatalf("Load(BROKER_MINT_TARGETS) = %v, %v", cfg.MintTargets, err)
-	}
-	for _, bad := range []string{sa + "=sami@example.com", "admin_gcp_token=" + sa + "=sami@example.com", "ADMIN_GCP_TOKEN=" + sa + "=Sami", "ADMIN_GCP_TOKEN=admin@example-project.iam.gserviceaccount.com=sami@example.com", entry + " " + entry} {
-		e := gcp()
-		e["BROKER_MINT_TARGETS"] = bad
-		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_MINT_TARGETS") {
-			t.Errorf("BROKER_MINT_TARGETS = %q: err = %v, want a refusal naming the setting", bad, err)
-		}
-	}
-	e = validEnv()
-	e["BROKER_MINT_TARGETS"] = entry
-	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), secrets.StoreGCP) {
-		t.Errorf("BROKER_MINT_TARGETS under the AWS store: err = %v, want a refusal naming %s", err, secrets.StoreGCP)
+	e["BROKER_MINT_TARGETS"] = "ANY_OLD_VALUE"
+	if _, err := Load(env(e)); err == nil || !strings.HasPrefix(err.Error(), "BROKER_MINT_TARGETS is removed; ") {
+		t.Fatalf("Load(BROKER_MINT_TARGETS) = %v, want a refusal naming the removed setting", err)
 	}
 
 	for name, tc := range map[string]struct {
