@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-379",
+  "completed": "2026-10-25T12:52:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2194",
+  "proof": [
+    {
+      "criterion": "packages/envoy passes go vet ./... (and the multiprocess build) on a branch cut from main; failing output quoted beside the passing one",
+      "surface": "go toolchain in the worker pod, packages/envoy",
+      "command": "cd packages/envoy && gofmt -l . ; go vet ./... ; go vet -tags multiprocess ./cmd/broker",
+      "observed": "gofmt -l empty; go vet ./... exit=0; go vet -tags multiprocess ./cmd/broker exit=0",
+      "headSha": "29460122b2ef1854a1b17b510a9f86146d4ce4b6",
+      "negativeControl": "main 3ca092a69891's two test files swapped in with go -overlay: go vet ./... prints 'service_account_scope_test.go:50:3: too many arguments in call to startBroker' exit=1; go test ./cmd/broker prints the four errors (scope :48:13 assignment mismatch, :50:3; accounts :46:16, :48:3) and 'FAIL github.com/sjawhar/envoy/cmd/broker [build failed]'"
+    },
+    {
+      "criterion": "The two repaired tests run and pass against a real Postgres, and the whole cmd/broker package (plain and multiprocess) passes with nothing skipped",
+      "surface": "broker real-process test harness (real broker binary started by startBroker) on embedded Postgres 16.4 (zonky) under $TMPDIR, 127.0.0.1:54329",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:54329/postgres?sslmode=disable' go test -count=1 -v -run 'TestAnAccountProvesOnlyTheServiceItIsListedFor|TestOneServicesTwoAccountsEachGetItsSecret' ./cmd/broker && go test -count=1 -v ./cmd/broker && go test -tags multiprocess -count=1 -timeout 20m ./cmd/broker",
+      "observed": "--- PASS TestAnAccountProvesOnlyTheServiceItIsListedFor (11.58s), --- PASS TestOneServicesTwoAccountsEachGetItsSecret (11.04s); full ./cmd/broker ok 84.185s with 18 PASS and 0 SKIP lines; multiprocess ok 113.830s",
+      "headSha": "29460122b2ef1854a1b17b510a9f86146d4ce4b6",
+      "negativeControl": "Same head with BROKER_TEST_DATABASE_URL unset: both tests '--- SKIP ... BROKER_TEST_DATABASE_URL must be set to run Postgres-backed broker tests', so the PASS depends on the database"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/cmd/broker/service_account_scope_test.go",
+    "packages/envoy/cmd/broker/service_accounts_test.go"
+  ],
+  "trickyParts": [
+    "Result named `process`, not `broker`: each file later declares `broker := podBroker{...}`.",
+    "go vet reports only the first type error; go test lists all four. Both are quoted in the PR body.",
+    "Eight env strings per call are value-identical to main; only gofmt spacing around + changed."
+  ],
+  "deviations": [
+    "ce-simplify-code not run: the diff is a test-only mechanical signature migration (skill preflight excludes mechanical churn; pr-body.md requires the pass only when runtime code changes)."
+  ],
+  "openQuestions": [
+    "Another tree's sjawhar/legion#2187 fixes the same two call sites inside its forward merge; whichever merges second meets a trivial conflict on these lines (architect informed us)."
+  ]
+}
