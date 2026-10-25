@@ -125,26 +125,28 @@ test("the controller skill reads pull requests as the review App, and nothing sa
   expect(offending).toEqual([]);
 });
 
-// GitHub honours the `skip-checks: true` trailer only as the last line after two empty lines; the
-// recipe's first live run wrote one and GitHub started every workflow (LEGION-631). The worker
-// skill's trailer reference and the daemon's worker part carry the recipe with two, and no skill
-// or prompt carries one with fewer: a `$'\n…skip-checks: true'` form is the recipe, so it ends
-// with exactly three `\n`.
-test("the skip-checks recipe writes two empty lines before the trailer, everywhere it is written", () => {
-  const recipe = "$'\\n\\n\\nskip-checks: true'";
+// GitHub honours the `skip-checks: true` trailer only in a trailer block at the end of the message,
+// preceded by two empty lines, with `skip-checks` last; the recipe's first live run wrote one empty
+// line and GitHub started every workflow (LEGION-631). The pane's `Omp-Session:` trailer must stay
+// in that block, or git's trailer parser loses it: the recipe that appended
+// `$'\n\n\nskip-checks: true'` after the whole description left it stranded above the block. The
+// worker skill's trailer reference and the daemon's worker part carry the recipe that splits the
+// trailers off and writes them back above `skip-checks: true`, and no skill or prompt still carries
+// a `$'\n…skip-checks: true'` form, which appends the line after whatever trailers stand.
+test("the skip-checks recipe keeps the existing trailers in one block above the line, everywhere it is written", () => {
+  const recipe = `d=$(jj -R "$LEGION_WORKSPACE" log -r @- --no-graph -T description) && t=$(printf '%s\\n' "$d" | git interpret-trailers --parse) && n=$'\\n' && { [ -z "$t" ] || d=\${d%$n$n*}; } && jj -R "$LEGION_WORKSPACE" describe -r @- --config 'templates.commit_trailers=""' -m "$d$n$n$n\${t:+$t$n}skip-checks: true"`;
   expect(
     readFileSync(path.join(staged, "legion-worker/references/skip-checks-trailer.md"), "utf8")
   ).toContain(recipe);
   expect(readFileSync(path.join(promptsRoot, "go/worker-common.md"), "utf8")).toContain(recipe);
-  const short = [staged, promptsRoot]
+  const appending = [staged, promptsRoot]
     .flatMap(files)
-    .filter((file) => {
-      if (!file.endsWith(".md")) return false;
-      const forms = readFileSync(file, "utf8").match(/\$'(\\n)*skip-checks: true'/g) ?? [];
-      return forms.some((form) => form !== recipe);
-    })
+    .filter(
+      (file) =>
+        file.endsWith(".md") && /\$'(\\n)*skip-checks: true'/.test(readFileSync(file, "utf8"))
+    )
     .map((file) => path.relative(REPO_ROOT, file));
-  expect(short).toEqual([]);
+  expect(appending).toEqual([]);
 });
 
 // INFRA-83 took the `CI:` line out of the pull request body, and the forward merge of main put the

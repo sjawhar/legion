@@ -2,6 +2,17 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- The handoff-only push's `skip-checks` recipe keeps the commit's `Omp-Session:` trailer where
+  git's trailer parser still reads it. It appended `skip-checks: true` after two empty lines below
+  the whole description, which pushed the `Omp-Session:` trailer jj had written out of the
+  message's last paragraph, so `git log --format='%(trailers:key=Omp-Session)'` returned nothing on
+  184 handoff commits. The recipe now splits the description's trailer paragraph off with
+  `git interpret-trailers --parse` and writes body, two empty lines, those trailers, then
+  `skip-checks: true` last — GitHub's documented shape
+  (https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs).
+
 ### Added
 
 - The `dispatch` command (`dist/dispatch.js`) moves an issue on its project's board:

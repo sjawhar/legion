@@ -387,7 +387,8 @@ cd -- "$LEGION_WORKSPACE" && jj -R "$LEGION_WORKSPACE" bookmark set legion/<KEY>
 ```
 
 A push whose commits touch only `.legion/` (a handoff-only push) ends its head's commit message
-with `skip-checks: true` as the last line, preceded by two empty lines, so GitHub starts no
+with one trailer block, preceded by two empty lines, whose last line is `skip-checks: true` and
+which keeps the `Omp-Session:` trailer above it, as GitHub's rule asks, so GitHub starts no
 workflow run for it and the daemon carries the code head's verdict to it.
 Retro's push never carries the line, whatever paths it touches, because it is the last push before the merge and a base that requires a check will not merge a head whose checks never ran.
 Every other push —

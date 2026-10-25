@@ -5,6 +5,18 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ## [Unreleased]
 
+### Fixed
+
+- The handoff-only push's `skip-checks` recipe, in the `legion-worker` skill this plugin ships and
+  in the daemon's worker prompt part, keeps the commit's `Omp-Session:` trailer where git's trailer
+  parser still reads it. It appended `skip-checks: true` after two empty lines below the whole
+  description, which pushed the `Omp-Session:` trailer jj had written out of the message's last
+  paragraph, so `git log --format='%(trailers:key=Omp-Session)'` returned nothing on 184 handoff
+  commits. The recipe now splits the description's trailer paragraph off with
+  `git interpret-trailers --parse` and writes body, two empty lines, those trailers, then
+  `skip-checks: true` last — GitHub's documented shape
+  (https://docs.github.com/en/actions/how-tos/manage-workflow-runs/skip-workflow-runs).
+
 ### Added
 
 - Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
