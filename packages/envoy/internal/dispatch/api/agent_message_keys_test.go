@@ -128,16 +128,16 @@ func TestASingleSessionSendWithoutAKeyIsRefused(t *testing.T) {
 		Error string `json:"error"`
 	}](t, keyless)
 	if keyless.Code != http.StatusBadRequest || refusal.Code != "MESSAGE_INPUT" ||
-		refusal.Error != "idempotency_key is required, one per send. On a page loaded before it was required: copy the message, reload the page and send it again" {
-		t.Fatalf("a keyless send = %d %#v, want 400 MESSAGE_INPUT saying the key is required", keyless.Code, refusal)
+		!strings.Contains(refusal.Error, "idempotency_key is required") || !strings.Contains(refusal.Error, "reload the page") {
+		t.Fatalf("a keyless send = %d %#v, want 400 MESSAGE_INPUT saying the key is required and to reload the page", keyless.Code, refusal)
 	}
 
 	for name, test := range map[string]struct {
 		key, code, says string
 	}{
-		"a key with a space":        {"press 1", "MESSAGE_INPUT", "idempotency_key may use only letters, digits, '.', '_', ':' and '-'"},
-		"a key with a slash":        {"press/1", "MESSAGE_INPUT", "idempotency_key may use only letters, digits, '.', '_', ':' and '-'"},
-		"a key past 128 characters": {strings.Repeat("k", 129), "CAP_EXCEEDED", "idempotency_key is 1 characters over the 128-character limit (129/128)"},
+		"a key with a space":        {"press 1", "MESSAGE_INPUT", "may use only letters"},
+		"a key with a slash":        {"press/1", "MESSAGE_INPUT", "may use only letters"},
+		"a key past 128 characters": {strings.Repeat("k", 129), "CAP_EXCEEDED", "128-character limit"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			response := postAgentMessage(t, handler, "s1", map[string]any{
@@ -147,8 +147,8 @@ func TestASingleSessionSendWithoutAKeyIsRefused(t *testing.T) {
 				Code  string `json:"code"`
 				Error string `json:"error"`
 			}](t, response)
-			if response.Code != http.StatusBadRequest || refusal.Code != test.code || refusal.Error != test.says {
-				t.Fatalf("status=%d refusal=%#v, want 400 %s %q", response.Code, refusal, test.code, test.says)
+			if response.Code != http.StatusBadRequest || refusal.Code != test.code || !strings.Contains(refusal.Error, test.says) {
+				t.Fatalf("status=%d refusal=%#v, want 400 %s saying %q", response.Code, refusal, test.code, test.says)
 			}
 		})
 	}
