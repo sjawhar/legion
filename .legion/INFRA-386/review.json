@@ -2,33 +2,39 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T16:26:18Z",
-  "round": 2,
-  "decision": "approved",
+  "completed": "2026-10-25T16:56:34Z",
+  "round": 3,
+  "decision": "changes_requested",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "reviewedCodeHead": "feda29facc745cd103d31bed0fc57979aaf08017",
-  "roundReason": "Sent back from retro by the architect to fix three sentences (docs/kubernetes.md 3171-3173, 3178-3180, 3215-3220); a new round, reviewed in full from the round-1 approval at d3fb2235.",
+  "reviewedCodeHead": "355ffe8e9ae9",
+  "roundReason": "Implementing rounds 3 and 4 after the second retro send-back (closing comment's exceptions, recovery delete 'once stored', every sentence swept against evidence; then the tester's round-3 contradiction with the INFRA-232 bullet). Reviewed the whole diff from main at 748f7a30, with an adversarial sentence sweep by a reviewer subagent, each of its findings checked against the page.",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "ci": "Required set (ruleset; branch protection has none): lint, typecheck, test, pr-title. CI head feda29fa (newest pull_request run): Tests 40210014851 success (lint, typecheck, test), PR Title 40210070247 success (40210014839 cancelled, superseded), Legion Envoy and Contracts 40210014833 success; compare feda29fa...474f4cbc touches only .legion/.",
-  "threads": "0 review threads, 0 conversation comments (gh api graphql).",
-  "thermo": "Not run: docs-only diff (docs/kubernetes.md and .legion/ only).",
-  "verifiedAgainstSource": [
-    "3171-3173: the closing comment at 3131-3132 does name the late-stored create as an exception, so the new sentence is true",
-    "3178-3180: no wait is claimed; consistent with plan Decision 4 (no timing measured)",
-    "3215-3220: the late-stored create's run printed its label before the create (3009-3010) and had no Service (3100 runs only after the name is read); 'as it removed the one a SIGKILL left on 2026-10-25' matches 3296-3299 and claims no measurement of the late case",
-    "No line over 100 characters in 3150-3225; the block is unchanged from round 1",
-    "check-private-names.sh exit 0 (5005 files) at 474f4cbc",
-    "Both E2E lines carry a round-2 proof at feda29fa with negative controls"
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:3131-3134",
+      "description": "Closing comment: (a) 'On the exits measured below, the trap above removed the workload' is false for the measured exits that ran no trap (the SIGKILL runs at 3296-3299 and the tool-timeout kills at 3192-3195 left the workload); (b) its 'It can miss it:' list omits a second stop signal sent to the group while the trap runs. cleanup() restores default dispositions (`trap - EXIT INT TERM HUP`, 3016), so that signal ends the clean-up mid-step with no failure line and no `sequence: exit` line. Measured 2026-10-25 with a stub of the same trap structure (sleep 3 standing in for the delete): two TERMs 0.5 s apart printed 'cleanup: start' and nothing after; the one-TERM control printed 'cleanup: delete done' and 'sequence: exit 143'. The deliberate-stop paragraph (3202-3212) should tell the reader the same: send one stop, and a run whose output has no `sequence: exit` line had its clean-up cut short and is recovered by the printed name, or the label."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:3220-3223",
+      "description": "The recovery paragraph's list of runs that left a Job without printing its name omits a label delete that failed (3020-3021: the trap prints `cleanup: the Job's delete failed`, the Job stays, no name was printed), which the closing comment names, and the second stop during the label-path trap. The list reads as complete; the two lists on the page disagree."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:3166-3171",
+      "description": "'In every run of that kind measured ... it had' classifies the label-path runs that found nothing as runs whose request had not left, which the sentence after it says the output cannot show. State it for the runs that found a Job, plus 'none of the twenty-six left a Job'."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:3306-3307",
+      "description": "'Nothing those runs printed shows when a stop landed relative to the create's request and answer' is false for the later runs, whose printed `workload:` line shows their stop came after the answer. Scope it to the runs that took the label path."
+    }
   ],
-  "scopeNote": "The recovery paragraph change departs from plan Decision 5 (recovery paragraph unchanged); it is the architect's round-2 ruling, recorded in implement.json roundReason and the PR body's Round 2 section.",
-  "notProvenOrRisk": [
-    "A create the API server stores only after the trap's label delete has listed the Jobs is not measured; the page names it as unmeasured and gives the re-list and label delete as the recovery.",
-    "No wait was measured: how long after a stop the API server can still store a create whose client is gone is not known, so no re-list, however late, is proven to rule such a Job out. The page now says so (docs/kubernetes.md:3178-3180)."
-  ],
-  "judgedNotDefects": [
-    "docs/kubernetes.md:3022's code line is 108 characters; the block already holds lines over 100 at base and A8 bounds only the trap paragraph."
-  ]
+  "ci": "Code head 355ffe8e: Tests 40213118224 in progress when read; PR Title and Legion Envoy and Contracts success. Not waited for: a request for changes stands whatever CI says.",
+  "threads": "0 review threads before this review.",
+  "thermo": "Not run: docs-only diff.",
+  "commandChangeOption": "A command change (cleanup() ignoring INT/TERM/HUP instead of restoring defaults) would close the second-signal gap in the block itself, but the architect's ruling holds every non-comment line of the block. So the request asks for a prose fix; changing the command is the architect's call."
 }
