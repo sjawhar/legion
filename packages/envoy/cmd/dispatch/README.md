@@ -63,7 +63,7 @@ carry rules beyond their row:
 
 | Variable | Purpose |
 | --- | --- |
-| `DISPATCH_APP_PEM_B64` | Base64-encoded GitHub App private key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
+| `DISPATCH_APP_PEM_B64` | GitHub App private key, as a PEM or the base64 of a PEM: a value holding `-----BEGIN` is the PEM itself, and any other is base64-decoded. A key that does not parse stops boot with an error naming the variable, never the key. With `DISPATCH_DEV_SIGNIN=1` this is the only source a key may come from (a `pem` in `app.json` is refused), it must be a throwaway, and `DISPATCH_GITHUB_API_BASE` must name a loopback host. |
 | `DISPATCH_GITHUB_API_BASE` | GitHub API origin override for App calls (tests and e2e point it at a fake); empty means `https://api.github.com`. With `DISPATCH_DEV_SIGNIN=1` and an App private key loaded, it must name `127.0.0.1`, `[::1]` or `localhost`. That checks the host, not what listens there: every App call hands a signed App JWT to whatever owns the port, so the key must be a throwaway. |
 
 When no GitHub App credentials are configured, the server still starts, but

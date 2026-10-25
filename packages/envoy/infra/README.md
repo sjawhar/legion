@@ -198,15 +198,15 @@ refusal quotes it.
 
 `appClientId`, `appId` (the App's numeric ID, as a string of digits), `appPrivateKeySecretName`
 and `appPrivateKeySecretKey` (plain: the name and key of an existing Kubernetes Secret in the
-component's namespace holding the base64 of the App's PEM private key) turn on Dispatch's GitHub
-App: `DISPATCH_APP_CLIENT_ID` and `DISPATCH_APP_ID` are plain env vars, and `DISPATCH_APP_PEM_B64`
-is a `secretKeyRef` to that Secret and key. The component never creates that Secret and the
-Deployment does not wait on it: GKE SecretSync creates it at run time from Secret Manager, so the
-pod starts once the Secret exists. The key is never parsed here; Dispatch checks it at boot (an RSA
-private key, PKCS#1 or PKCS#8). Setting the App also starts Dispatch's webhook redelivery sweep,
-which needs the NATS redelivery bucket the hub's Dispatch user is granted
-(`DispatchPermissions`): a pod whose NATS user lacks it exits at boot. With either group unset,
-nothing renders and the app's pod template is unchanged.
+component's namespace holding the App's PEM private key, as GKE SecretSync copies it from Secret
+Manager, or the base64 of that PEM) turn on Dispatch's GitHub App: `DISPATCH_APP_CLIENT_ID` and
+`DISPATCH_APP_ID` are plain env vars, and `DISPATCH_APP_PEM_B64` is a `secretKeyRef` to that Secret
+and key. The component never creates that Secret and the Deployment does not wait on it: GKE
+SecretSync creates it at run time from Secret Manager, so the pod starts once the Secret exists.
+The key is never parsed here; Dispatch checks it at boot (an RSA private key, PKCS#1 or PKCS#8).
+Setting the App also starts Dispatch's webhook redelivery sweep, which needs the NATS redelivery
+bucket the hub's Dispatch user is granted (`DispatchPermissions`): a pod whose NATS user lacks it
+exits at boot. With either group unset, nothing renders and the app's pod template is unchanged.
 
 Every image must be pinned by SHA-256 digest. Verify an `envoyImage` digest from
 `ghcr.io/sjawhar/legion/envoy` before pinning it, with the `gh attestation verify` command

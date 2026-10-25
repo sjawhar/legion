@@ -87,7 +87,7 @@ done
 # against, the only Host the router serves under the flag, and the Playwright
 # config's baseURL. The flag also refuses a DATABASE_URL whose host is not
 # loopback or a unix socket, and any DISPATCH_SIGNIN_* setting.
-app_pem_b64="$(openssl genrsa 2048 2>/dev/null | base64 -w0)"
+app_pem="$(openssl genrsa 2048 2>/dev/null)"
 
 cd "$(dirname "$0")/../../envoy"
 # Build first, in the caller's toolchain environment, and exec the binary itself. A server
@@ -104,7 +104,7 @@ exec env \
   DATABASE_URL="$database_url" \
   DISPATCH_AGENT_TOKEN=e2e-token \
   DISPATCH_APP_CLIENT_ID=Iv1.e2efake \
-  DISPATCH_APP_PEM_B64="$app_pem_b64" \
+  DISPATCH_APP_PEM_B64="$app_pem" \
   DISPATCH_DEV_SIGNIN=1 \
   DISPATCH_GITHUB_API_BASE="http://127.0.0.1:$fake_github_port" \
   DISPATCH_IDENTITY=cookie \

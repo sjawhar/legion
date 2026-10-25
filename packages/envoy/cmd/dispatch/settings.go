@@ -87,7 +87,7 @@ var settings = []setting{
 	{Name: "DISPATCH_APP_CLIENT_ID", Required: "no",
 		Description: "GitHub App client ID, which names the App in the JWT its private key signs. Set, the App comes from the `DISPATCH_APP_*` variables instead of `~/.local/share/dispatch/app.json`."},
 	{Name: "DISPATCH_APP_PEM_B64", Required: "no",
-		Description: "Base64-encoded GitHub App private key, which signs every App call: the web app's GitHub reads, the architecture import and webhook redelivery are off without one."},
+		Description: "GitHub App private key, as a PEM or the base64 of a PEM, which signs every App call: the web app's GitHub reads, the architecture import and webhook redelivery are off without one."},
 	{Name: "DISPATCH_APP_ID", Required: "no",
 		Description: "The GitHub App's numeric ID."},
 	{Name: "DISPATCH_APP_SLUG", Required: "no",
