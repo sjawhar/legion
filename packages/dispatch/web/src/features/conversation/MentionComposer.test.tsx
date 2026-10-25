@@ -9,7 +9,12 @@ import type { Agent, Comment, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import type { ComposerOwner } from "./composer-model";
 import { MentionComposer, reconcileMentions } from "./MentionComposer";
-import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS } from "./send-request";
+import {
+  KEYED_SEND_ATTEMPT_MS,
+  KEYED_SEND_LATE_TEXT,
+  SEND_DEADLINE_MS,
+  SendStoppedError,
+} from "./send-request";
 
 /** What each attempt of a send to one session is held to, beside the message it carries. */
 const keyedAttempt = { deadlineMs: KEYED_SEND_ATTEMPT_MS };
@@ -1818,9 +1823,6 @@ test("an edited draft gets a new key", async () => {
   }
 });
 
-const stillTrying =
-  "Still sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once.";
-
 // Past its deadline a message to one session is still being tried under its key, so the composer
 // says so instead of offering a Retry, and the message lands once when Dispatch answers.
 test("a send to one session past its deadline says it keeps trying, and lands once", async () => {
@@ -1838,7 +1840,7 @@ test("a send to one session past its deadline says it keeps trying, and lands on
     await act(async () => {
       jest.advanceTimersByTime(SEND_DEADLINE_MS);
     });
-    expect(screen.getByText(stillTrying)).toBeTruthy();
+    expect(screen.getByText(KEYED_SEND_LATE_TEXT)).toBeTruthy();
     expect(screen.queryByText(stillSending)).toBeNull();
     expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
     expect(field.value).toBe("Slow but sure");
@@ -1848,7 +1850,7 @@ test("a send to one session past its deadline says it keeps trying, and lands on
     });
     expect(createAgentMessage).toHaveBeenCalledTimes(1);
     expect(field.value).toBe("");
-    expect(screen.queryByText(stillTrying)).toBeNull();
+    expect(screen.queryByText(KEYED_SEND_LATE_TEXT)).toBeNull();
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
@@ -1873,8 +1875,7 @@ async function failToTheDeadline(): Promise<void> {
   await tick(15_000);
 }
 
-const stoppedText =
-  "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once.";
+const stoppedText = new SendStoppedError().message;
 
 // A lasting outage would hold a message to one session, its draft and its Send, for good. Once it
 // is late the composer offers Stop trying: no attempt follows, the draft comes back with what a
@@ -1894,7 +1895,7 @@ test("a send kept failing shows Stop trying once late, which stops it for Retry 
       fireEvent.click(screen.getByRole("button", { name: "Send" }));
     });
     await failToTheDeadline();
-    expect(screen.getByText(stillTrying)).toBeTruthy();
+    expect(screen.getByText(KEYED_SEND_LATE_TEXT)).toBeTruthy();
     expect(createAgentMessage).toHaveBeenCalledTimes(5);
 
     await act(async () => {
@@ -1902,7 +1903,7 @@ test("a send kept failing shows Stop trying once late, which stops it for Retry 
     });
     await tick(0);
     expect(screen.getByText(stoppedText)).toBeTruthy();
-    expect(screen.queryByText(stillTrying)).toBeNull();
+    expect(screen.queryByText(KEYED_SEND_LATE_TEXT)).toBeNull();
     expect(field.value).toBe("Status please");
     expect(holdControls().disabled).toBe(false);
     expect(screen.getByRole("button", { name: "Discard draft" })).toBeTruthy();

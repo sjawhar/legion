@@ -1,4 +1,4 @@
-import { ApiError, api } from "../../api/client";
+import { ApiError, api, type RequestBounds } from "../../api/client";
 import type {
   AskOption,
   AskUrgency,
@@ -143,8 +143,8 @@ export class SendDeadlineError extends Error {
   }
 }
 
-/** How long one attempt of a keyed send to a session may go unanswered before it is given up and
- *  made again under the same key. */
+/** How long one attempt of a keyed send - to one session, or a broadcast - may go unanswered before
+ *  it is given up and made again under the same key. */
 export const KEYED_SEND_ATTEMPT_MS = 15_000;
 
 /** What a keyed send to a session says once it is past `SEND_DEADLINE_MS`: still the server's, as
@@ -251,9 +251,9 @@ function pause(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
   return promise;
 }
 
-/** A keyed send to a session that stopped trying before Dispatch confirmed it: the reader pressed
- *  Stop trying. Not Dispatch's refusal: the message may have reached it, and a Retry under the same
- *  key is answered with that message rather than a second one. */
+/** A keyed send - to one session, or a broadcast - that stopped trying before Dispatch confirmed
+ *  it: the reader pressed Stop trying. Not Dispatch's refusal: the message may have reached it, and
+ *  a Retry under the same key is answered with that message rather than a second one. */
 export class SendStoppedError extends Error {
   constructor() {
     super(
@@ -264,42 +264,54 @@ export class SendStoppedError extends Error {
 }
 
 /**
- * Sends `input` to session `sessionId` under `key` until Dispatch decides it. Each attempt is held
- * to `KEYED_SEND_ATTEMPT_MS`, and one that ends without Dispatch's verdict - the fetch failed, the
- * attempt timed out, a 5xx, a 429, or a 2xx whose message's one attempt is still pending - is made
- * again under the same key after 1 s, 2 s, 4 s … never more than 30 s apart, so however many of
- * them reach Dispatch, it makes the message once and sends it once.
- * Resolves with the message on any other 2xx; rejects with any other 4xx, its refusal. `signal`
- * stops the trying between attempts - a wait ends at once, an attempt in flight is let finish,
- * since it may already have reached Dispatch and its answer is still the send's - and the send then
- * rejects with `SendStoppedError`.
+ * Makes `attempt`, a write that names itself to Dispatch by a key it carries, until Dispatch
+ * decides it. Each attempt is held to `KEYED_SEND_ATTEMPT_MS`, and one that ends without
+ * Dispatch's verdict - the fetch failed, the attempt timed out, a 5xx, a 429, or a 2xx `decided`
+ * says is not yet the outcome - is made again after 1 s, 2 s, 4 s … never more than 30 s apart,
+ * so however many of them reach Dispatch, the key makes it act once. Resolves with any other 2xx;
+ * rejects with any other 4xx, its refusal. `signal` stops the trying between attempts - a wait
+ * ends at once, an attempt in flight is let finish, since it may already have reached Dispatch and
+ * its answer is still the send's - and the send then rejects with `SendStoppedError`.
  */
-export async function sendKeyedAgentMessage(
-  sessionId: string,
-  input: AgentMessage,
-  key: string,
-  signal?: AbortSignal
-): Promise<Message> {
-  const keyed = { ...input, idempotency_key: key };
+export async function sendUnderKey<T>(
+  attempt: (bounds: RequestBounds) => Promise<T>,
+  signal: AbortSignal | undefined,
+  decided: (answer: T) => boolean = () => true
+): Promise<T> {
   let backoff = KEYED_SEND_FIRST_BACKOFF_MS;
   for (;;) {
     try {
-      const message = await api.createAgentMessage(sessionId, keyed, {
-        deadlineMs: KEYED_SEND_ATTEMPT_MS,
-      });
-      // A message whose one attempt is still pending is stored but not yet on its way. Dispatch
-      // answers a repeat so while another request is sending that attempt, or while a sender that
-      // died - a crashed process - still holds its claim, and resumes the attempt for the first
-      // repeat after that claim lapses (a minute). It never resumes an attempt of a message
-      // retried from its card, which has more than one, so that answer lands as it is.
-      const [only, ...more] = message.deliveries;
-      if (only?.state !== "pending" || more.length > 0) return message;
+      const answer = await attempt({ deadlineMs: KEYED_SEND_ATTEMPT_MS });
+      if (decided(answer)) return answer;
     } catch (error) {
       if (error instanceof ApiError && error.status !== 429 && error.status < 500) throw error;
     }
     if (!(await pause(backoff, signal))) throw new SendStoppedError();
     backoff = Math.min(backoff * 2, KEYED_SEND_MAX_BACKOFF_MS);
   }
+}
+
+/**
+ * Sends `input` to session `sessionId` under `key` until Dispatch decides it (`sendUnderKey`), so
+ * Dispatch makes the message once and sends it once. A 2xx whose message's one attempt is still
+ * pending is not yet its outcome: the message is stored but not yet on its way.
+ */
+export function sendKeyedAgentMessage(
+  sessionId: string,
+  input: AgentMessage,
+  key: string,
+  signal?: AbortSignal
+): Promise<Message> {
+  const keyed = { ...input, idempotency_key: key };
+  return sendUnderKey(
+    (bounds) => api.createAgentMessage(sessionId, keyed, bounds),
+    signal,
+    // Dispatch answers a repeat with the attempt pending while another request is sending it, or
+    // while a sender that died - a crashed process - still holds its claim, and resumes the
+    // attempt for the first repeat after that claim lapses (a minute). It never resumes an attempt
+    // of a message retried from its card, which has more than one, so that answer lands as it is.
+    ({ deliveries: [only, ...more] }) => only?.state !== "pending" || more.length > 0
+  );
 }
 
 /** `sendRequest`, answered by the server, or rejected with a `SendDeadlineError` carrying the

@@ -6,6 +6,7 @@ import "fake-indexeddb/auto";
 import { notifyManager } from "@tanstack/react-query";
 import serverBlockSchema from "../../../../envoy/internal/dispatch/pmdoc/schema/blocks.json";
 import type { BlockSchema } from "../api/types";
+import { resetKeyedSendStorage } from "../features/conversation/keyed-send-storage";
 import { blockSchemaCache } from "../features/doc/schema";
 import { resetReplyDrafts } from "../features/inbox/reply-drafts";
 
@@ -62,3 +63,7 @@ notifyManager.setScheduler((callback) => callback());
 // Ask-reply drafts live in a module-level store that outlives every render, so a draft one test
 // leaves behind would pre-fill the next test's composer for the same ask id.
 afterEach(resetReplyDrafts);
+
+// A keyed send a test leaves out keeps writing what it keeps, and the next test's signed-in app
+// would take it up again (`HeldSends.resume`, `BroadcastQueue.resume`): each test's are let go.
+afterEach(resetKeyedSendStorage);

@@ -2,7 +2,7 @@ import { useState } from "react";
 
 import type { CreateBroadcastInput, MessageDeliveryMode } from "../../api/types";
 import { newSendKey } from "../../lib/send-key";
-import type { BroadcastSend } from "./BroadcastSends";
+import type { BroadcastSend } from "./broadcast-queue";
 
 /** The broadcast being composed on the Agents page. */
 export interface BroadcastComposition {

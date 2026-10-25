@@ -2,6 +2,7 @@ import { expect, jest, spyOn, test } from "bun:test";
 import { type MutationKey, QueryClient } from "@tanstack/react-query";
 import { waitFor } from "@testing-library/react";
 
+import { type KeptTab, keptTab, UnloadTarget } from "../../__tests__/kept-sends-harness";
 import { ApiError, api, RequestTimeoutError } from "../../api/client";
 import type { Comment, Message, MessageDelivery } from "../../api/types";
 import { HeldSends, stoppable } from "./held-sends";
@@ -275,9 +276,7 @@ test("a late send to one session can be stopped, and Retry goes under its key", 
       const stopped = store.get(agentKey);
       expect(stopped?.status).toBe("refused");
       expect(stopped?.refusal).toBeInstanceOf(SendStoppedError);
-      expect(stopped?.refusal?.message).toBe(
-        "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once."
-      );
+      expect(stopped?.refusal?.message).toBe(new SendStoppedError().message);
       jest.advanceTimersByTime(30 * 60_000);
       await settle();
       expect(createAgentMessage).toHaveBeenCalledTimes(5);
@@ -337,5 +336,203 @@ test("stopping lets the attempt in flight answer, and makes none after it", asyn
     }
   } finally {
     createAgentMessage.mockRestore();
+  }
+});
+
+/** The kept record of the send under `key` in `tab`, as far as its state and refusal go. */
+function keptState(tab: KeptTab, key: string): unknown {
+  const kept = tab.kept(key) as { refusal: unknown; state: string } | undefined;
+  return kept === undefined ? undefined : { refusal: kept.refusal, state: kept.state };
+}
+
+// W1. A send to one session goes under its key, so a reload that interrupts it loses nothing: the
+// page after it makes the send again under the same key - Dispatch answers that repeat with the
+// message the first request made, if it made one - and holds it as the composer left it. Once it
+// lands, nothing of it is kept.
+test("a send in flight survives a reload and is tried again under the same key", async () => {
+  const tab = keptTab();
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockReturnValueOnce(
+    Promise.withResolvers<Message>().promise
+  );
+  const before = new HeldSends(
+    new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
+    tab.page()
+  );
+
+  try {
+    before.send(agentKey, agentSend);
+    expect(keptState(tab, "send-1")).toEqual({ refusal: null, state: "sending" });
+
+    // The reload: a page of the same tab, which takes up what the one before it kept.
+    createAgentMessage.mockResolvedValueOnce(sentMessage);
+    const after = new HeldSends(
+      new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
+      tab.page()
+    );
+    after.resume();
+    expect(after.get(agentKey)).toMatchObject({
+      draft: { ask: agentSend.ask, draft: agentSend.draft },
+      status: "sending",
+    });
+    expect(after.get(agentKey)?.request).toEqual(agentSend);
+    await waitFor(() => expect(after.get(agentKey)).toBeUndefined());
+
+    expect(createAgentMessage.mock.calls.map(([session, input]) => [session, input])).toEqual([
+      ["planner-session", { body: "Status please", delivery: "steer", idempotency_key: "send-1" }],
+      ["planner-session", { body: "Status please", delivery: "steer", idempotency_key: "send-1" }],
+    ]);
+    expect(tab.kept("send-1")).toBeUndefined();
+    // Taken up once: a second call finds nothing more to send.
+    after.resume();
+    expect(createAgentMessage).toHaveBeenCalledTimes(2);
+  } finally {
+    createAgentMessage.mockRestore();
+    tab.close();
+  }
+});
+
+// A send past its deadline before the reload is past it after: Stop trying is there at once. One
+// the reader was stopping lost its last attempt with the page, so it comes back stopped, its
+// Retry still under the same key.
+test("a late send resumes late, and one being stopped resumes stopped", async () => {
+  const tab = keptTab();
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(refusal);
+  const before = new HeldSends(
+    new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
+    tab.page()
+  );
+
+  try {
+    await onFakeClock(async () => {
+      before.send(agentKey, agentSend);
+      await settle();
+      await failUntilLate();
+      expect(keptState(tab, "send-1")).toEqual({ refusal: null, state: "late" });
+
+      const late = new HeldSends(
+        new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
+        tab.page()
+      );
+      late.resume();
+      expect(late.get(agentKey)?.status).toBe("late");
+      expect(stoppable(late.get(agentKey))).toBe(true);
+      await settle();
+      expect(createAgentMessage.mock.calls.at(-1)?.[1].idempotency_key).toBe("send-1");
+
+      // Stopped while its attempt is out, and the page reloads before that attempt answers.
+      createAgentMessage.mockReturnValueOnce(Promise.withResolvers<Message>().promise);
+      jest.advanceTimersByTime(1_000);
+      await settle();
+      expect(late.stop(agentKey)).toBe(true);
+      expect(keptState(tab, "send-1")).toEqual({ refusal: null, state: "stopping" });
+      const calls = createAgentMessage.mock.calls.length;
+
+      const stopped = new HeldSends(
+        new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
+        tab.page()
+      );
+      stopped.resume();
+      expect(stopped.get(agentKey)?.status).toBe("refused");
+      expect(stopped.get(agentKey)?.refusal).toBeInstanceOf(SendStoppedError);
+      expect(keptState(tab, "send-1")).toEqual({ refusal: { kind: "stopped" }, state: "refused" });
+      jest.advanceTimersByTime(30 * 60_000);
+      await settle();
+      expect(createAgentMessage).toHaveBeenCalledTimes(calls);
+    });
+  } finally {
+    createAgentMessage.mockRestore();
+    tab.close();
+  }
+});
+
+// A refusal is the only copy of what the reader wrote: a reload shows it again, with what they
+// wrote over it since, and sends nothing. Discard drops it from what is kept.
+test("a refusal survives a reload with the draft written over it, until it is discarded", async () => {
+  const tab = keptTab();
+  const verdict = new ApiError(409, {
+    code: "MESSAGE_KEY_REUSED",
+    error: "the key names another message",
+  });
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValueOnce(verdict);
+  const before = new HeldSends(
+    new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
+    tab.page()
+  );
+
+  try {
+    before.send(agentKey, agentSend);
+    await waitFor(() => expect(before.get(agentKey)?.status).toBe("refused"));
+    const rewritten = { ask: agentSend.ask, draft: { ...agentSend.draft, body: "Status, now" } };
+    before.keep(agentKey, rewritten);
+
+    const after = new HeldSends(
+      new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
+      tab.page()
+    );
+    after.resume();
+    const held = after.get(agentKey);
+    expect(held).toMatchObject({ draft: rewritten, status: "refused", stopping: false });
+    expect(held?.request).toEqual(agentSend);
+    expect(held?.refusal).toBeInstanceOf(ApiError);
+    expect(held?.refusal).toMatchObject({
+      code: "MESSAGE_KEY_REUSED",
+      message: "the key names another message",
+      status: 409,
+    });
+    expect(createAgentMessage).toHaveBeenCalledTimes(1);
+
+    expect(after.discard(agentKey)).toBe(true);
+    expect(tab.kept("send-1")).toBeUndefined();
+  } finally {
+    createAgentMessage.mockRestore();
+    tab.close();
+  }
+});
+
+// A closed tab loses what sessionStorage keeps, so while a keyed send has no verdict the page asks
+// to confirm leaving, and only then: a send that landed or was refused has its answer, and a
+// comment carries no key and is not kept at all.
+test("leaving asks for confirmation only while a keyed send is unconfirmed", async () => {
+  const tab = keptTab();
+  const unload = new UnloadTarget();
+  const answer = Promise.withResolvers<Message>();
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockReturnValueOnce(answer.promise);
+  const createComment = spyOn(api, "createComment").mockReturnValueOnce(
+    Promise.withResolvers<Comment>().promise
+  );
+  const store = new HeldSends(
+    new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
+    tab.page(unload)
+  );
+
+  try {
+    store.send(["conversation-composer", "CORE-1"], request);
+    expect(unload.listeners).toBe(0);
+    expect(unload.asks()).toBe(false);
+    expect(tab.storage.length).toBe(0);
+
+    store.send(agentKey, agentSend);
+    expect(unload.listeners).toBe(1);
+    expect(unload.asks()).toBe(true);
+
+    answer.resolve(sentMessage);
+    await waitFor(() => expect(store.get(agentKey)).toBeUndefined());
+    expect(unload.listeners).toBe(0);
+    expect(unload.asks()).toBe(false);
+    expect(tab.storage.length).toBe(0);
+
+    createAgentMessage.mockRejectedValueOnce(
+      new ApiError(400, { code: "MESSAGE_INPUT", error: "delivery must be steer, aside or btw" })
+    );
+    store.send(agentKey, { ...agentSend, sendKey: "send-2" });
+    expect(unload.asks()).toBe(true);
+    await waitFor(() => expect(store.get(agentKey)?.status).toBe("refused"));
+    expect(unload.listeners).toBe(0);
+    expect(unload.asks()).toBe(false);
+    expect(keptState(tab, "send-2")).toMatchObject({ state: "refused" });
+  } finally {
+    createAgentMessage.mockRestore();
+    createComment.mockRestore();
+    tab.close();
   }
 });

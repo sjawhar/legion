@@ -26,7 +26,12 @@ import {
 import { ApiError, api } from "../../api/client";
 import { liveSocketFor } from "../../api/live-socket";
 import type { Agent, Message, MessageRead, UserAgentStates } from "../../api/types";
-import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS } from "../conversation/send-request";
+import {
+  KEYED_SEND_ATTEMPT_MS,
+  KEYED_SEND_LATE_TEXT,
+  SEND_DEADLINE_MS,
+  SendStoppedError,
+} from "../conversation/send-request";
 import { Sidebar } from "../sidebar/Sidebar";
 import { AgentConversationPage } from "./AgentConversationPage";
 
@@ -586,9 +591,6 @@ function sendButton(): HTMLElement {
   return within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" });
 }
 
-const stillTrying =
-  "Still sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once.";
-
 /** The live view for SESSION, its mode settled on Send. */
 async function renderSendingView(): Promise<void> {
   renderLiveView({
@@ -632,7 +634,7 @@ test("the live view holds a pressed message until Dispatch confirms it, and Send
     expect(input.value).toContain("and this");
 
     await tick(SEND_DEADLINE_MS);
-    expect(within(held).getByRole("status").textContent).toBe(stillTrying);
+    expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
     expect(within(held).getByRole("button", { name: "Stop trying" })).toBeTruthy();
 
     await act(async () => {
@@ -695,9 +697,7 @@ test("Stop trying ends a late live view send, and its Retry goes under the same 
       fireEvent.click(screen.getByRole("button", { name: "Stop trying" }));
     });
     await tick(0);
-    expect(screen.getByTestId("agent-send-error").textContent).toBe(
-      "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once."
-    );
+    expect(screen.getByTestId("agent-send-error").textContent).toBe(new SendStoppedError().message);
     await tick(30 * 60_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(5);
 

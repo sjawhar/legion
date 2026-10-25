@@ -1,3 +1,5 @@
+import { DELIVERY_CAPABILITIES } from "@legion/contracts";
+import { ASK_URGENCIES } from "@legion/contracts/dispatch-tools";
 import {
   hashKey,
   type MutationKey,
@@ -17,9 +19,18 @@ import { agentMessagesQuery } from "../../api/queries";
 import { pastDeadlineKey } from "../../hooks/useSending";
 import type { ReplyTarget } from "./composer-model";
 import {
+  type KeyedSendStorage,
+  keptRefusal,
+  keyedSendStorage,
+  refusalFrom,
+  shape,
+} from "./keyed-send-storage";
+import {
   SendDeadlineError,
+  SendStoppedError,
   type SentDraft,
   type SentRequest,
+  sendRequest,
   sendWithinDeadline,
 } from "./send-request";
 
@@ -98,16 +109,78 @@ function refreshAfter(client: QueryClient, { anchor, owner }: SentRequest): void
 
 const NO_HELD_SENDS: readonly HeldSend[] = Object.freeze([]);
 
+/** A send to one session as it is kept across a reload (`keyed-send-storage.ts`): its name, its
+ *  request and the draft its composer holds. */
+interface KeptHeldSend {
+  readonly draft: HeldDraft;
+  readonly mutationKey: readonly string[];
+  readonly request: Omit<SentRequest, "anchor" | "edit">;
+}
+
+const keptAsk = shape.record({
+  multiple: shape.boolean,
+  options: shape.array(
+    shape.record({ description: shape.optional(shape.string), label: shape.string })
+  ),
+  urgency: shape.oneOf(...ASK_URGENCIES),
+});
+
+const keptDraft = shape.record({
+  body: shape.string,
+  mentions: shape.array(
+    shape.record({
+      end: shape.number,
+      start: shape.number,
+      target: shape.string,
+      text: shape.string,
+    })
+  ),
+  replacement: shape.string,
+});
+
+const keptDelivery = shape.oneOf(...DELIVERY_CAPABILITIES);
+
+const keptHeldSend = shape.record({
+  draft: shape.record({ ask: keptAsk, draft: keptDraft }),
+  mutationKey: shape.array(shape.string),
+  request: shape.record({
+    ask: keptAsk,
+    draft: keptDraft,
+    kind: shape.oneOf("ask", "comment", "suggestion"),
+    owner: shape.record({ kind: shape.oneOf("session"), sessionId: shape.string }),
+    pickedDelivery: shape.optional(keptDelivery),
+    plainDelivery: keptDelivery,
+    replyTo: shape.nullable(
+      shape.record({
+        author: shape.string,
+        excerpt: shape.string,
+        id: shape.string,
+        mentions: shape.optional(
+          shape.array(shape.record({ target: shape.string, title: shape.string }))
+        ),
+        parentKind: shape.oneOf("comment", "message"),
+        thread: shape.optional(
+          shape.record({ delivery: keptDelivery, target: shape.string, title: shape.string })
+        ),
+        to: shape.optional(shape.string),
+      })
+    ),
+    sendKey: shape.string,
+  }),
+});
+
 /**
  * The app's held sends, one per send name, beside its `QueryClient` (`heldSends`): above the
  * router, so no route change, collapse or unmount below it drops one. An entry leaves when its
- * send lands or the reader discards its refusal; nothing else removes it, and a reload loses
- * every one, as it loses the page. Each send also runs as a TanStack mutation under its name -
- * and under `pastDeadlineKey` once past its deadline - so a host's hold on the name
- * (`useSending`) counts it as before.
+ * send lands or the reader discards its refusal; nothing else removes it. A reload loses every
+ * one but a send to one session, which goes under its key: that one is kept across a reload
+ * (`keyed-send-storage.ts`), out or refused, and `resume` takes it up again on load. Each send
+ * also runs as a TanStack mutation under its name - and under `pastDeadlineKey` once past its
+ * deadline - so a host's hold on the name (`useSending`) counts it as before.
  */
 export class HeldSends {
   readonly #client: QueryClient;
+  readonly #kept: KeyedSendStorage;
   readonly #entries = new Map<string, HeldSend>();
   /** `under`'s answers that hold a send, by the prefix's hash, each dropped when a send beneath
    *  its prefix changes. */
@@ -119,9 +192,11 @@ export class HeldSends {
   readonly #outcomes = new Set<(outcome: HeldSendOutcome) => void>();
   /** What stops each keyed send still out, by its name's hash (`stop`). */
   readonly #stops = new Map<string, AbortController>();
+  #resumed = false;
 
-  constructor(client: QueryClient) {
+  constructor(client: QueryClient, kept: KeyedSendStorage = keyedSendStorage()) {
     this.#client = client;
+    this.#kept = kept;
   }
 
   get(mutationKey: MutationKey): HeldSend | undefined {
@@ -164,8 +239,51 @@ export class HeldSends {
    *  name is out already, which refuses this one. A refused send's entry gives way to the new
    *  one. */
   send(mutationKey: MutationKey, request: SentRequest): boolean {
-    const id = hashKey(mutationKey);
     if (this.sendingNow(mutationKey)) return false;
+    this.#start(mutationKey, request, false);
+    return true;
+  }
+
+  /**
+   * Takes up, once, the sends to one session a reload interrupted (`keyed-send-storage.ts`). One
+   * still out is made again under its key, past its deadline already if it was then: Dispatch
+   * answers the repeat with the message the first request made, if it made one. A refusal shows
+   * again with the draft written over it, and a send the reader was stopping, whose last attempt
+   * went with the page, shows as stopped. The app calls this once signed in, before any page
+   * reads the store.
+   */
+  resume(): void {
+    if (this.#resumed) return;
+    this.#resumed = true;
+    const kept = this.#kept.load("session", (send, key) =>
+      keptHeldSend(send) && (send as KeptHeldSend).request.sendKey === key
+        ? (send as KeptHeldSend)
+        : undefined
+    );
+    for (const { refusal, send, state } of kept) {
+      const { draft, mutationKey } = send;
+      const request: SentRequest = { ...send.request, anchor: undefined, edit: undefined };
+      const id = hashKey(mutationKey);
+      if (this.#entries.has(id)) continue;
+      if (state === "refused" || state === "stopping") {
+        this.#set(id, {
+          draft,
+          mutationKey,
+          refusal: refusal === null ? new SendStoppedError() : refusalFrom(refusal),
+          request,
+          status: "refused",
+          stopping: false,
+        });
+      } else {
+        this.#start(mutationKey, request, state === "late");
+      }
+    }
+  }
+
+  /** Holds `request` under `mutationKey` as out, and sends it: within its deadline, or, `late`,
+   *  as a send already past it. */
+  #start(mutationKey: MutationKey, request: SentRequest, late: boolean): void {
+    const id = hashKey(mutationKey);
     const stop = new AbortController();
     this.#stops.set(id, stop);
     this.#set(id, {
@@ -173,7 +291,7 @@ export class HeldSends {
       mutationKey,
       refusal: undefined,
       request,
-      status: "sending",
+      status: late ? "late" : "sending",
       stopping: false,
     });
     const landed = () => {
@@ -188,6 +306,13 @@ export class HeldSends {
       const held = this.#update(id, { refusal: error, status: "refused", stopping: false });
       if (held !== undefined) this.#emit({ kind: "refused", send: held });
     };
+    if (late) {
+      this.#run(pastDeadlineKey(mutationKey), () => sendRequest(request, stop.signal), {
+        onError: refused,
+        onSuccess: landed,
+      });
+      return;
+    }
     this.#run(mutationKey, () => sendWithinDeadline(request, stop.signal), {
       onError: (error) => {
         // Past its deadline the request is not refused: it goes on under `pastDeadlineKey`,
@@ -205,7 +330,6 @@ export class HeldSends {
       },
       onSuccess: landed,
     });
-    return true;
   }
 
   /** Stops trying the late send to one session under `mutationKey` (Stop trying): no attempt is
@@ -267,7 +391,8 @@ export class HeldSends {
   }
 
   #set(id: string, held: HeldSend | undefined): void {
-    const changed = held ?? this.#entries.get(id);
+    const before = this.#entries.get(id);
+    const changed = held ?? before;
     if (held === undefined) this.#entries.delete(id);
     else this.#entries.set(id, held);
     if (changed !== undefined) {
@@ -275,7 +400,34 @@ export class HeldSends {
         if (partialMatchKey(changed.mutationKey, prefix)) this.#under.delete(prefixId);
       }
     }
+    this.#remember(before, held);
     for (const listener of this.#listeners) listener();
+  }
+
+  /** Keeps a send to one session across a reload as it changes, and lets it go once it leaves:
+   *  only such a send carries a key, and only a send under a key is safe to make again. */
+  #remember(before: HeldSend | undefined, held: HeldSend | undefined): void {
+    if (
+      before?.request.owner.kind === "session" &&
+      before.request.sendKey !== held?.request.sendKey
+    ) {
+      this.#kept.forget(before.request.sendKey);
+    }
+    if (held?.request.owner.kind !== "session") return;
+    const { ask, draft, kind, owner, pickedDelivery, plainDelivery, replyTo, sendKey } =
+      held.request;
+    this.#kept.keep<KeptHeldSend>({
+      key: sendKey,
+      kind: "session",
+      refusal:
+        held.status === "refused" && held.refusal !== undefined ? keptRefusal(held.refusal) : null,
+      send: {
+        draft: held.draft,
+        mutationKey: held.mutationKey.map(String),
+        request: { ask, draft, kind, owner, pickedDelivery, plainDelivery, replyTo, sendKey },
+      },
+      state: held.status === "refused" ? "refused" : held.stopping ? "stopping" : held.status,
+    });
   }
 
   #emit(outcome: HeldSendOutcome): void {

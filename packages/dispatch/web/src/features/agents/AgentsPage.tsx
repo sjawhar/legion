@@ -90,9 +90,10 @@ import {
   useAgentSearch,
 } from "./agent-search";
 import { deliveryAttempts } from "./attempts";
-import { type BroadcastSend, BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
+import { BroadcastSends, useBroadcastQueue } from "./BroadcastSends";
 import { useBroadcastComposition } from "./broadcast-composition";
 import { broadcastSendState, type ComposedBroadcast, composedBroadcast } from "./broadcast-plan";
+import type { BroadcastSend } from "./broadcast-queue";
 import { EndedAgentsWithReplies } from "./EndedAgentsWithReplies";
 import { AGENT_ROW_SELECTOR, foldToggleOf, leaveAgentComposer, useAgentsKeymap } from "./keyboard";
 import { foldLabel, matchingSelection, selectionSummary, toggleMatching } from "./selection";
@@ -1411,6 +1412,7 @@ export function AgentsPage(): ReactNode {
                 composition.restore(row.send);
               }}
               onRetry={queue.retry}
+              onStop={queue.stop}
               restoreRefusal={restoreRefusal}
               rows={queue.rows}
             />

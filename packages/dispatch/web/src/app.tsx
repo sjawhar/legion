@@ -7,7 +7,9 @@ import { useEventFeed } from "./api/event-feed";
 import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import type { AuthenticatedUser } from "./api/types";
+import { broadcastQueue } from "./features/agents/broadcast-queue";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
+import { heldSends } from "./features/conversation/held-sends";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
@@ -745,6 +747,12 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 }
 
 function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
+  // Signed in, and before any page reads them, the keyed sends a reload interrupted go on under
+  // their keys, and their refusals show again (`keyed-send-storage.ts`). Each store takes them up
+  // once, so every later render calls nothing.
+  const queryClient = useQueryClient();
+  heldSends(queryClient).resume();
+  broadcastQueue(queryClient).resume();
   useEventFeed();
   return (
     <KeymapProvider>
