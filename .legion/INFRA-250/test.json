@@ -2,73 +2,52 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T12:36:19Z",
-  "round": 5,
-  "headSha": "175264c15066e7096e4d79037f0d20589a6c1c18",
-  "base": "56ba79b8cf6d981ce6ba2f588204fd8ff3778d1b",
-  "mergeState": "MERGEABLE (BLOCKED only on review) at 10a16c59b7b7, read before any check. Round 4's empty run list at 529a9c541aef was 'cannot', not 'not yet': GitHub starts no pull_request workflow while it shows the pull request CONFLICTING. The forward merge 638ff279bc9f cured that, and runs exist at this code head.",
-  "previousRounds": [
-    {"round": 1, "headSha": "e8af3445dd29", "verdict": "fail", "failure": "e2e-local.sh tested against a NATS server it did not start"},
-    {"round": 2, "headSha": "fab0d3001b78", "verdict": "fail", "failure": "guard regexp missed an inline-call context argument"},
-    {"round": 3, "headSha": "7d38337be60f", "verdict": "pass"},
-    {"round": 4, "headSha": "529a9c541aef", "verdict": "fail", "failure": "pull request conflicted with main (#2170's container-backed Gate and reconnect_err_test.go); no CI could run"}
-  ],
+  "completed": "2026-10-25T13:14:23Z",
+  "round": 6,
+  "headSha": "c9b95f0c760dd8fd959fc846f531385154577dcf",
+  "mergeState": "MERGEABLE (BLOCKED only on review) at 1cfb6995bc5b, read before any check.",
+  "scope": "Since round 5's head (175264c15066, full round, handoff cb81dabd7aac) the code change is packages/envoy/internal/testnats/nats.go (the gate's port band, relay.Close's comment) and one new test in nats_test.go. The only consumer of Gate is internal/bus/reconnect_err_test.go. A1-A5's round-5 proof stands for everything else; this round re-proves the gate and its band and runs internal/testnats and internal/bus whole.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Full round on the merged head, each claim driven in git archives of 175264c15066 and of its base 56ba79b8cf. The gate mutation reproduces: with Gate.Close dropping its relay without closing it, TestAFailedReconnectAttemptLogsOneWarnAMinute fails 'timed out waiting for: 1 reconnect failures …' after 30.3 s, and passes once restored. The port of #2170's test is a port: `git diff 56ba79b8cf 175264c15066 -- packages/envoy/internal/bus/reconnect_err_test.go` changes only the context import and the three server calls (StartNkeyAuthorizedContainer→StartNkeyAuthorizedServer, testnats.Stop→srv.Stop, ctr.Start→srv.Start), and no assertion, count, timeout or comment. `go vet ./...` over the whole merged module exits 0. The interrupt fix holds when the harness delivers the signal (set -m): SIGINT gives 130 and SIGTERM 143, with the lock free and no natsd or listener left, and the next run passes. CI at this head: pi-legion success (main's fix came in with the merge), and the body's 'cannot, not yet' paragraph is accurate."
+    "how": "This pod's /proc/sys/net/ipv4/ip_local_port_range is '16000 65535'. Three runs of 2000 :0 binds on 127.0.0.1 put 396, 409 and 378 ports in the old band 20000-29999 and 0, 0 and 0 in the new band 15000-15999, against the reviewer's 401 and the implementer's 432/0; the binds ranged 16002-65519. gatePorts on the real file gives 15000-15999, and 20 StartGate calls all picked a port in that band. The table TestTheGateBandLiesBelowTheEphemeralRangeItIsGiven fails when it is attacked: an expected band moved to 15500 fails it; code that puts the band at low-500 fails three cases, including 'gatePorts(\"16000\\t65535\\n\") = 15500-16499, which reaches the range starting at 16000'; and with the floor check removed, 'gatePorts = 1000 ports from 24, want a refusal'. Restored, it passes."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A1 - every package of packages/envoy that fails today only for want of a NATS server passes in a Legion worker pod, with no container runtime and nothing fetched at run time, and no failure or skip whose reason is a NATS server.",
-      "surface": "The whole packages/envoy Go suite in this INFRA-250 worker pod (gVisor, 2 CPUs, go1.27.1, no docker/podman/nerdctl/ctr, no DOCKER_HOST, no socket), on the merged head and on its base.",
-      "command": "cd packages/envoy && go vet ./... ; DISPATCH_TEST_NO_CONTAINERS=1 go list ./... | grep -v /integration | xargs go test -count=1 -json ; go test ./internal/integration/ -timeout 300s -count=1 (same commands on both trees)",
-      "observed": "Head: vet exit 0; 69 ok, 4 FAIL, 'rootless Docker not found' 0; integration ok 97.4 s. All twelve packages the base fails with that panic pass (cmd/listener, cmd/natstail, internal/bus, internal/cistore, internal/dispatch/delivery, outbox, redeliver, startup, internal/kvwatch, internal/session, internal/store, internal/testnats), the ported TestAFailedReconnectAttemptLogsOneWarnAMinute and TestASetProxyIsRemoteReach among the passes; nothing fails on the head that passes on the base. The only skip naming a container is the S3 test under DISPATCH_TEST_NO_CONTAINERS=1. The four residue packages fail on both: cmd/agent-secrets, cmd/agent-secrets-helper and internal/broker/helper on the sandbox kernel, and internal/dispatch/pmdoc on getrusage's 10 ms steps.",
-      "headSha": "175264c15066e7096e4d79037f0d20589a6c1c18",
-      "negativeControl": "The same commands on the base 56ba79b8cf: 57 ok, 16 FAIL, 'rootless Docker not found' 12 times, integration FAIL on the same panic."
+      "criterion": "Review round 1 (important): a gate's port lies outside every :0 bind on the machine running the test, so no server restart or concurrent binary can take it while the gate is closed.",
+      "surface": "This gVisor Legion worker pod's kernel, and the rig's own gatePorts and StartGate.",
+      "command": "cat /proc/sys/net/ipv4/ip_local_port_range ; 3 x 2000 python3 socket.bind(('127.0.0.1', 0)) counting ports in 20000-29999 and 15000-15999 ; a throwaway test calling gatePorts on the real file and StartGate 20 times",
+      "observed": "Range '16000 65535'. Old band hit 396, 409 and 378 times in 2000; new band 0, 0, 0. gatePorts on the real range: 15000-15999. All 20 StartGate ports in 15000-15999.",
+      "headSha": "c9b95f0c760dd8fd959fc846f531385154577dcf",
+      "negativeControl": "The old band, 20000-29999, on the same kernel: about one in five :0 binds lands in it."
     },
     {
-      "criterion": "A2 - the same suite still passes in CI with no change in what it covers, the hub-image coverage included, behind tags the pod run never compiles.",
-      "surface": "The test inventory of packages/envoy and packages/envoy/infra under no tag and each of natslive, smoke, multiprocess, memory, pulumilive, gcplive and race, on the base and the merged head; and CI at the code head.",
-      "command": "static inventory of func Test/Fuzz/Benchmark/Example names from the files go list -tags <tag> selects, compared as sets; gh run view 40190916705 --json jobs",
-      "observed": "4,497 on the base, 4,506 on the head: 0 lost, 9 added (this change's), the three TestStartImageConfig matrix tests moved to natslive only. CI at 175264c15066: envoy-go's untagged unit, natslive and integration steps success; envoy-go-race, envoy-infra-go, envoy-smoke, envoy-e2e-local, dispatch-multiprocess, dispatch-memory, pi-legion success; Tests, Docs, Worker Image, PR Title success; the dispatch job was still running when I read.",
-      "headSha": "175264c15066e7096e4d79037f0d20589a6c1c18",
-      "negativeControl": "The comparison itself: a test lost to the tag move or to the merge would appear in the base-only set, which is empty."
+      "criterion": "The band selection is pinned for every kernel's range, not only the runner's.",
+      "surface": "TestTheGateBandLiesBelowTheEphemeralRangeItIsGiven, mutated three ways.",
+      "command": "cd packages/envoy && go test ./internal/testnats/ -run TestTheGateBandLiesBelow -count=1, at the head and with each mutation",
+      "observed": "Passes at the head. Throwaway edge inputs: '2048 65535' and '3047 65535' are refused with a message naming the range; '3048 3048' gives 2048; an inverted range ('40000 30000'), 0, a high bound over 65535, a single field, three fields and a negative low all give the fallback band 15000-15999, below every range those machines could have.",
+      "headSha": "c9b95f0c760dd8fd959fc846f531385154577dcf",
+      "negativeControl": "The expected gVisor band changed to 15500: fails 'want 1000 from 15500'. Code band moved to low-500: fails 'gatePorts(\"16000\\t65535\\n\") = 15500-16499, which reaches the range starting at 16000'. Floor check removed: fails 'gatePorts = 1000 ports from 24, want a refusal'."
     },
     {
-      "criterion": "A3 - packages/envoy/scripts/e2e-local.sh runs the real listener binary in a worker pod the same way, only against the NATS server it starts, one run per checkout, and an interrupted run never reports success.",
-      "surface": "The script and its refusal test in this pod; and CI's 'Refusal test for e2e-local.sh' step.",
-      "command": "bash scripts/e2e-local.sh ; bash scripts/e2e-local.test.sh ; set -m; bash scripts/e2e-local.sh & … kill -INT|-TERM ; CI run 40190916705 job envoy-e2e-local",
-      "observed": "Plain run exit 0 with PASS and 33 files in out/e2e. e2e-local.test.sh passes every case: --help, unknown option, a foreign NATS on its port, a second run in the same checkout. It also passes the case I added this round (a2fc74eecbec): a run stopped with TERM exits 143 and frees out/e2e. SIGINT gives 130 and SIGTERM 143 with no natsd or listener left. CI's refusal step at this head: success, its log printing the four PASS lines.",
-      "headSha": "175264c15066e7096e4d79037f0d20589a6c1c18",
-      "negativeControl": "The new TERM case against the script before the interrupt fix (638ff279bc9f): 'FAIL: a run stopped with TERM exited 0, want 143'."
-    },
-    {
-      "criterion": "A4 - local.go, ENVOY_TEST_NATS_BIN and the e2e-local.sh docker fallback are gone and nothing names them; one entry point, with no helper able to bypass it, including the gate #2170 brought.",
-      "surface": "The merged checkout, the ported Gate dialled directly, and the guard test broken on purpose.",
-      "command": "grep -rnIE 'ENVOY_TEST_NATS_BIN|internal/testnats/local\\.go|DISPATCH_TEST_NATS_URL|StartNkeyAuthorizedContainer|StartRestartable' outside docs/solutions and .legion ; a throwaway test dialling the gate open, closed, closed twice, reopened, opened twice, with the server stopped and restarted ; probe files in internal/cistore and internal/kvwatch then go test ./internal/testnats/ -run TestNoPackageOutsideTestnatsNeedsAContainerRuntime -v",
-      "observed": "No name left; tcnats is used only by internal/testnats/image.go (natslive) and internal/smoke (smoke). Gate: open accepts and relays the server's INFO; closed and closed twice refuse the dial ('connection refused'); reopened and opened twice accept again; a connection joined before Close keeps answering; with the server stopped the open gate accepts and the connection ends at once (EOF), and after a restart it relays a new server's INFO. Guard: exec.CommandContext(context.Background(), \"docker\", …) in internal/cistore and a modules/nats import in internal/kvwatch each fail it by name; removed, internal/testnats passes.",
-      "headSha": "175264c15066e7096e4d79037f0d20589a6c1c18",
-      "negativeControl": "Gate.Close changed to drop its relay without closing the listener: TestAFailedReconnectAttemptLogsOneWarnAMinute fails 'timed out waiting for: 1 reconnect failures of reconnect-err-test-…'."
-    },
-    {
-      "criterion": "A5 - scripts/go-third-party-notices.sh still exits 0 and its output is byte-identical to main's.",
-      "surface": "The release's notices generator, run as the release workflows run it, on the base and the merged head.",
-      "command": "GOOS=linux GOARCH=amd64 CGO_ENABLED=0 ../../scripts/go-third-party-notices.sh <out> ./cmd/listener in packages/envoy, and ./cmd/pulumi-resource-envoy-infra ./cmd/envoy-infra in packages/envoy/infra; cmp",
-      "observed": "All four exit 0; both pairs byte-identical (84,516 and 1,071,782 bytes).",
-      "headSha": "175264c15066e7096e4d79037f0d20589a6c1c18",
-      "negativeControl": "Round 1: one production import of nats-server/v2/server in cmd/listener grew the listener's notices to 124,042 bytes."
+      "criterion": "The gate's own property is not weakened: open relays, closed has nothing listening, reopened connects, and the reconnect test depends on it.",
+      "surface": "The ported Gate dialled directly at the head, and internal/bus's TestAFailedReconnectAttemptLogsOneWarnAMinute.",
+      "command": "a throwaway test dialling the gate after open, close, close, open, open ; go test ./internal/bus/ -run TestAFailedReconnectAttemptLogsOneWarnAMinute -count=3 ; go test ./internal/bus/ -count=1 ; go test ./internal/testnats/ -count=1",
+      "observed": "Open: accepted, read 'INFO'. Closed, and closed twice: dial refused. Reopened, and opened twice: accepted, 'INFO'. The reconnect test passes 3 of 3 (ok 54.9 s), internal/bus passes whole (ok 218.7 s) and internal/testnats passes (ok 9.6 s).",
+      "headSha": "c9b95f0c760dd8fd959fc846f531385154577dcf",
+      "negativeControl": "Gate.Close changed to drop its relay without closing the listener: TestAFailedReconnectAttemptLogsOneWarnAMinute fails 'timed out waiting for: 1 reconnect failures of reconnect-err-test-…' after 30.2 s."
     }
   ],
-  "regressionLocks": [
-    {
-      "test": "packages/envoy/scripts/e2e-local.test.sh case 'a run stopped with TERM exits 143 and frees out/e2e' (commit a2fc74eecbec)",
-      "why": "Round 5's interrupt fix had no test. Against the script before it, the case fails ('exited 0, want 143'); at this head it passes. CI runs the file in envoy-e2e-local."
-    }
-  ],
+  "residualJudgement": {
+    "residual": "scripts/e2e/lib/free-port.sh picks from 20000 up to the ephemeral low bound, which on a default Linux (32768) covers the gate's band 31768-32767.",
+    "verdict": "agree it is right to record rather than build",
+    "why": "On this pod the script refuses before picking ('the ephemeral range starts at 16000, leaving no room above 20000'), because 16000 is not above 21000, so a worker pod never picks there. On a default Linux devbox, the gate's band is 1000 of the script's 12768 ports, about 7.8% of its picks. A collision needs a stage script and a go test using Gate running at once, and the pick landing on the gate's port in the seconds that gate is closed: ss sees the port free and the stage process binds it for its run. If that happens, Gate.Open fails the test with EADDRINUSE naming the address. It is loud and it never passes falsely. The one Gate test is TestAFailedReconnectAttemptLogsOneWarnAMinute, and the devbox proofs run one at a time. If it ever matters, the same fix fits there: free-port.sh can stop 1000 below the low bound."
+  },
   "observations": [
-    "main now fails go vet in cmd/broker (#2185 and #2162, routed by the controller to INFRA-115). That landed after this head's base 56ba79b8cf: vet over the merged module exits 0 here, and envoy-go is green at 175264c15066. Not this change's.",
-    "A SIGINT sent to a background job of a non-interactive shell is ignored unless job control is on (set -m). Round 4's 'INT rc=0' for the old script was that harness effect; round 4's 'TERM rc=0' was real and is what the new case pins."
+    "CI at c9b95f0c760d: Docs success; Tests and Worker Image in progress; Legion Envoy and Contracts run 40195850135 queued, with only 'changes' done and dispatch-memory started, when this round ended. I did not see envoy-go or broker-multiprocess fail at this head, so I cite them as queued, not red.",
+    "main 95a937abce29 fails `go vet ./cmd/broker/`: 'cmd/broker/service_account_scope_test.go:50:3: too many arguments in call to startBroker … want (*testing.T, brokerOptions)'. At this head, `go vet ./cmd/broker/` exits 0. A pull request run builds the merge with current main, so it inherits the failure. That is dispatch://INFRA-379, not this change.",
+    "The table's refusal case checks that the error text contains the range as %q quotes it (1024\\t65535). It is a wording check on a message, harmless, but it would fail on a rephrase that still names the range.",
+    "Nothing locks StartGate's use of gatePorts. A StartGate that ignored the file would still pass every committed test except on the rare collision. That is wiring; the throwaway probe above is its proof."
   ]
 }
