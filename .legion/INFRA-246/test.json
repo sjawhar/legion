@@ -2,76 +2,65 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-246",
-  "completed": "2026-10-25T12:45:00Z",
-  "round": "testing round 7, over review round 6's blocking finding - the hold bookkeeping (code head 1363aa8f50571be6128fcc0b4ec202804e2fc158)",
+  "completed": "2026-10-25T13:35:00Z",
+  "round": "testing round 8, over review round 7's three text corrections (code head 8af013ebda1adbf1073d072e715076fb3e7e7e40)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "The judge case was checked as a judge: byte-identical across all three commits of this round (sha256 of its 50 lines, 65b28855dee520e3 at d4d000b5, 1363aa8f and 87b2a25f), red when the round-6 product code is put back under it, green at this head. Every claim the implementer made about what its tests do and do not prove was re-measured here, including the one that matters most - that the judge does not judge the adoption gate. The two claims I could not confirm exactly are recorded below with the numbers I got. Both live arms were re-run, since the plugin's product code moved again, and after every mutation the file was restored and re-hashed to 9fd2cd7888b1f8320b393ca745a3275ad31b981a6b8f92e5635874bbbeffa0b5, the implementer's own baseline.",
-    "rounds": {
-      "1": "verified at 7045a3a4; 2: verified at 3355028f, verdict fail; 3: verified at e80f1d5d; 4: verified at 9d878270; 5: verified at 4fca4b9c; 6: verified at cb9ef49b (the revert verified as a revert)."
-    }
+    "how": "This round changes no behaviour, and that is the first thing checked rather than assumed: with every comment line stripped, packages/pi-envoy/extensions/envoy.ts at the round-7 code head 1363aa8f and at this head hash to the same bytes (963b5bcade90b118), every changed line in that file's diff is a comment (`grep -vc` over the diff's +/- lines excluding `//` returns 0), and the diff names only packages/pi-envoy/AGENTS.md and that file outside .legion/. packages/pi-envoy/extensions/envoy.test.ts is byte-identical across the two heads (5c6d522c5f9b1209, 243 cases), so round 7's acceptance and every mutation count I measured there carry over whole, and no live arm was re-run. The direction of each correction was checked against the code, not just its presence, and the suite count was recounted here.",
+    "roundsCarried": "The live acceptance, both controls, the judge case, the gate's own case and the twelve/one/three mutation counts are round 7's, at code head 1363aa8f, whose product code this head reproduces byte for byte once comments are stripped."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The blocking finding is closed by a test written before the design and never edited: this pane must not hold a role the listener names a live session for.",
-      "surface": "The plugin's suite against the fake listener, with the round-6 product code swapped under the unchanged test file.",
-      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'a role another process holds under a session this process left stays with that live session when this pane wants the role', first with packages/pi-envoy/extensions/envoy.ts taken from fabca81c255be2d6cd75335f98a8b0848326c987 and then restored",
-      "observed": "Against the round-6 product code the case fails with `Expected: \"ses_lk\" / Received: \"ses_lk_b\"` at envoy.test.ts:6819 - the pane holding a role the listener names a live session for, exactly the reviewer's trace. Against this head's product code it passes. The case itself is byte-identical across every commit of this round (50 lines, sha 65b28855dee520e3 at d4d000b5d6e5, 1363aa8f5057 and 87b2a25fa00e), so it judges the design rather than describing it; it did not exist at 4fca4b9c or fabca81c, which is why the comparison is product code under a fixed test rather than two versions of the test. The product file was restored and re-hashed to 9fd2cd78… before anything else ran.",
-      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
-      "negativeControl": "The swap is the control: one file changed, the test untouched, red then green."
+      "criterion": "The product delta is empty: this round moves comments and one documentation sentence, nothing a pane executes.",
+      "surface": "The two heads' copies of the plugin, compared with comments stripped, and the round's own diff.",
+      "command": "cd \"$LEGION_WORKSPACE\" && for rev in 1363aa8f50571be6128fcc0b4ec202804e2fc158 8af013ebda1a; do jj file show -r $rev packages/pi-envoy/extensions/envoy.ts | grep -vE '^\\s*//|^\\s*\\*|^\\s*/\\*' | sha256sum; done ; jj diff --from 1363aa8f… --to 8af013ebda1a --stat",
+      "observed": "Both stripped files hash to 963b5bcade90b118 over 2384 lines, while the raw files differ (9fd2cd7888b1f832 -> a386d1f9c8329bd1), so only comments moved. The diff's changed lines in envoy.ts are comments without exception: filtering its `+`/`-` lines for ones that are not `//` returns 0. Outside .legion/ the diff names packages/pi-envoy/AGENTS.md and packages/pi-envoy/extensions/envoy.ts and nothing else, and envoy.test.ts is byte-identical across the heads (5c6d522c5f9b1209, 243 cases).",
+      "headSha": "48a7d59b3acfd277665eba480489f8dca22dc292",
+      "negativeControl": "The raw hashes differing while the stripped hashes match is the control: a comparison that found both identical would mean the comparison was not reading the change at all."
     },
     {
-      "criterion": "The adoption's `sessionOpen(hold.id)` gate has a judge of its own, and it is not the case above - a gate whose only test passes without it would be this issue's own defect repeated.",
-      "surface": "The whole plugin suite against a mutated working tree, the gate removed from the adoption condition.",
-      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts, with envoy.ts:2296-2300 reduced to `if (wanted !== undefined && hold.topic === ROLE_TOPIC_PREFIX + wanted) {`",
-      "observed": "852 pass, 1 fail. Both halves of the implementer's claim hold: the judge case above is among the 852 - it does not judge the gate - and the single failure is `a pass that adopts a hold and fails the hand-back of the same role under another session records that hold for the listener to reap`, the case the implementer names as the gate's own judge. Restored and re-hashed to 9fd2cd78….",
-      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
-      "negativeControl": "The same suite at the head: 853 pass, 0 fail, so the one failure is the mutation's and not a flake."
+      "criterion": "The correction went in the right direction: the inaccurate text was corrected up to the code, not the accurate text harmonised down to the wrong word.",
+      "surface": "The code at `registerSession`, read in the tree, against the two documents that disagreed.",
+      "command": "read packages/pi-envoy/extensions/envoy.ts:1593-1612 ; jj diff --from 1363aa8f… --to 8af013ebda1a --git packages/pi-envoy/AGENTS.md packages/pi-envoy/extensions/envoy.ts",
+      "observed": "`registerSession` re-promotes every abandoned hold of the session it is registering at envoy.ts:1601-1604, before the `client.subscribe` call at :1606 and with no dependence on its answer, so AGENTS.md's `answered or not` was the true description. The corrected comments at :615-622 and :2277-2283 now say `any registration this process makes of a hold's session, in a pass or not and answered or not, first takes it back as a pending hand-back`, which is the code; AGENTS.md's own sentence keeps `answered or not`. The accurate text is unchanged and the inaccurate text moved to meet it - the opposite outcome would have read identically in a diff stat and would have removed the signal.",
+      "headSha": "48a7d59b3acfd277665eba480489f8dca22dc292",
+      "negativeControl": "The code is the arbiter rather than either document: the re-promotion's position above the listener call is what makes `answered or not` true, and it was read at the line rather than inferred from the diff."
     },
     {
-      "criterion": "The three deletions are deletions, not weakenings: the captured host is unrepresentable, the failed loop really writes what it says, and nothing in the diff widens the door the architect left open.",
-      "surface": "The function's signature read in the tree, the suite against a mutated failed loop, and the round's whole plugin diff grepped for the three names the open door is written through.",
-      "command": "grep -n 'settleEndedHolds' packages/pi-envoy/extensions/envoy.ts ; cd packages/pi-envoy && bun test extensions/envoy.test.ts with the failed loop mutated to drop its failures ; jj diff --from e8e18568939a --to 87b2a25fa00e --git packages/pi-envoy/extensions/envoy.ts | grep -E '^[+-].*(supersedes|previousSessionID|claimedRoleSessionID)'",
-      "observed": "The signature is `settleEndedHolds(wanted: string | undefined, live: Fence)` - the host parameter is absent, not guarded, so round 5's shape cannot return - and its one caller passes two arguments. Mutating the failed loop to drop its failures turns exactly twelve cases red, the implementer's number, and the list is the right one: the three new invariant cases, the salvaged round-6 case, `a refusal an abandoned move read does not take the role from the claim that replaced it`, and seven more about abandoned holds and reaping. The grep over the whole plugin diff returns nothing: no hunk of this round adds or removes a line carrying `supersedes`, `previousSessionID` or `claimedRoleSessionID`, so the pre-existing door at envoy.ts:1957-1966 is neither widened nor narrowed here. Restored and re-hashed after the mutation.",
-      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
-      "negativeControl": "Twelve red against 853 green at the head is the control for the loop; the empty grep is checked against a grep without the `^[+-]` anchor, which does match context lines, so the empty result is the filter working rather than a typo."
+      "criterion": "AGENTS.md's hold-model sentence now states the two things that would otherwise read as licence to restore the deleted host-dependent branch.",
+      "surface": "packages/pi-envoy/AGENTS.md:436, read sentence by sentence.",
+      "command": "awk 'NR==436' packages/pi-envoy/AGENTS.md | tr '.' '\\n'",
+      "observed": "The adoption sentence reads `the next pass hands that hold back whether or not its registration succeeds (pendingHandBacks), unless the hold is under the session open here, read at that moment (sessionOpen), and that session wants its role` - the gate and the moment it is read at, both named. The next two sentences read `A hold under a session this process has left is never its own again, since another process may run that session now` and `One the listener does not take back is abandoned (abandonedHolds), whatever session it is under, and waits for the listener's reaping until this process registers that session again`. The failed hand-back is abandoned whatever the session, as required, and nothing in the paragraph conditions either behaviour on a captured host.",
+      "headSha": "48a7d59b3acfd277665eba480489f8dca22dc292",
+      "negativeControl": "The sentence it replaces is in the diff and did not carry the `sessionOpen` gate or the `whatever session it is under` clause, so the requirement is newly met rather than restated."
     },
     {
-      "criterion": "The two removed or unwritten tests leave their behaviour pinned elsewhere, demonstrated by mutation rather than by reading.",
-      "surface": "The suite against two further mutations of the adoption, and the case the unwritten T4 would have duplicated, read in full.",
-      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts with the adoption disabled (`if (false)`), then with `holdUnconfirmed = true` changed to `false`; and envoy.test.ts:6267-6311 read",
-      "observed": "Adoption disabled: 850 pass, 3 fail - `a resume rolled back after its event ended the role, with nothing else, keeps the hold …`, its sibling `… with the model claiming another role there …`, and the gate's case. Trusting the hold without claiming it: 850 pass, 3 fail - `a hold taken back on returning to its abandoned session is claimed before it is trusted, when the listener reaped it`, its sibling `… when a third session took the role`, and the gate's case again. So both behaviours the removed seventh case carried are pinned by named existing cases that go red when the behaviour is removed. For the unwritten T4 I read `an abandoned hold whose session another process heartbeats again is the newer holder: refused once seen, never taken back` (envoy.test.ts:6267): it moves `lastSeen` for the abandoned session, asserts exactly one further claim after that and none later, and asserts the pane never takes the role back once the other process ends. That is the `last_seen` bound T4 would have asserted, so a second case would have duplicated it.",
-      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
-      "negativeControl": "Each mutation is its own control, and the two mutations fail disjoint pairs of cases, so neither pair is passing by accident of the other's behaviour."
+      "criterion": "The suite count in the body is the true one, and the mutation counts quoted beside it were measured on the suite as it stands.",
+      "surface": "The plugin's suite run whole at this head, and the test file compared with the round-7 head.",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts ; jj file show -r 1363aa8f… packages/pi-envoy/extensions/envoy.test.ts | sha256sum",
+      "observed": "853 pass, 0 fail, 7309 expect() calls - the corrected number, not 854. The stale 854 cannot have propagated into the mutation counts: envoy.test.ts is byte-identical at the round-7 code head and here (5c6d522c5f9b1209), and every mutation count I quote was measured in round 7 against that same file, after the planner's seventh case had already been removed. My own counts there were twelve (failed loop drops its failures), one (adoption's `sessionOpen(hold.id)` gate removed) and three (adoption disabled); the three is where my measurement and the implementer's four still differ, recorded in round 7 and unchanged by this round.",
+      "headSha": "48a7d59b3acfd277665eba480489f8dca22dc292",
+      "negativeControl": "The file hash is what rules out a re-measure: a test file that had moved would make round 7's counts unusable here, and it has not."
     },
     {
-      "criterion": "The acceptance the issue rests on still holds at the head that merges, whose plugin product code moved again.",
-      "surface": "Real headless `omp --mode rpc --no-ui` panes of this checkout's plugin against the production Envoy listener, the same two arms as every round.",
-      "command": "cd \"$LEGION_WORKSPACE\" && packages/pi-envoy/scripts/smoke-registration-stall.sh --arm stall ; packages/pi-envoy/scripts/smoke-registration-stall.sh --arm recover",
-      "observed": "SMOKE stall PASS: 01a17308-6336-7170-a304-68f1074685c5 stayed listed 365 s after registration 3 wedged, last_seen 1792931386912 -> 1792931836907, seven registrations, exactly one stall line; measured at the listener the accepted-registration gaps were 180.035, 89.995, 90.000 and 89.965 s, so the worst gap during the stall is 180.0 s against the 300 s lifetime. SMOKE recover PASS: 01a17308-6337-70c0-a443-71b2488959db deleted while its process ran and re-registering itself 93 s later.",
-      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
-      "negativeControl": "Both controls stand from round 4 and measure code no round since has touched: `--arm stall --control --base-rev c88a3a194c79` PASS (the base plugin posted nothing after the wedge and its record was gone 213 s later, never returning, watched to 395 s) and `--arm recover --control` PASS (a SIGKILLed pane's deleted record stayed gone the whole 135 s)."
-    },
-    {
-      "criterion": "The head keeps every check the base branch requires green, and each red lane is inherited rather than this branch's.",
-      "surface": "GitHub Actions at the code head, the repository's ruleset, and the branch's own diff against its fork point.",
-      "command": "gh run list --commit 1363aa8f5057… ; gh run view 40192235745 ; gh run view 40192235713 ; jj diff --from 'fork_point(main@origin | 1363aa8f5057…)' --to 1363aa8f5057… --stat packages/envoy/cmd/broker packages/envoy/internal/broker",
-      "observed": "Tests run 40192235745: lint, typecheck and test all success. PR Title run 40193045366 success, Docs run 40192235779 success, Worker Image run 40192235740 success. The pull request reads MERGEABLE. `Legion Envoy and Contracts` run 40192235713 carries one failing job, `broker-multiprocess`, step `Two-process tests of the secrets broker`; this branch changes no file under packages/envoy/cmd/broker or packages/envoy/internal/broker (`0 files changed` against its fork point), the failure is tracked as dispatch://INFRA-379 (`main of sjawhar/legion fails go vet: a caller of startBroker was not updated for its new signature`, status todo), and the lane is not among the four checks main's ruleset requires. `pi-legion` passes in that same run, so the skills-guard red of round 6 is gone, as INFRA-376 landing on main would do.",
-      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
-      "negativeControl": "The inheritance is established by the branch's own diff rather than by main's runs, which were all still in progress when read; and the required set was read from the ruleset rather than assumed."
+      "criterion": "The head keeps every check the base branch requires green, and the two red Go lanes are main's.",
+      "surface": "GitHub Actions at the code head, with each failing job's log read, and the branch's own diff under the broker.",
+      "command": "gh run view 40196020851 ; gh run view 40196020845 --log-failed ; jj diff --from 'fork_point(main@origin | 8af013ebda1a…)' --to 8af013ebda1a… --stat packages/envoy",
+      "observed": "Tests run 40196020851: lint, typecheck and test all success. PR Title run 40196130113 success; Docs run 40196020892 and Worker Image run 40196020849 success. The pull request reads MERGEABLE. `Legion Envoy and Contracts` run 40196020845 fails two jobs, `envoy-go` (step `Unit test envoy Go package`) and `broker-multiprocess` (step `Two-process tests of the secrets broker`), and both carry the same compile error: `cmd/broker/service_account_scope_test.go:48:13: assignment mismatch: 2 variables but startBroker returns 1 value`. That is dispatch://INFRA-379 verbatim. This branch's own changes under packages/envoy are three files - cmd/listener/delivery.go, cmd/listener/main.go and internal/session/claim.go - and none is under cmd/broker or internal/broker, so the break is inherited through the merge build. Neither lane is among the four checks main's ruleset requires.",
+      "headSha": "48a7d59b3acfd277665eba480489f8dca22dc292",
+      "negativeControl": "The failing job's own log names the file and the symbol, so the attribution is read rather than assumed; and `go vet ./cmd/broker/... ./internal/broker/...` passes in this workspace, whose merge base predates the break, which is what makes it main's rather than this tree's."
     }
   ],
   "observations": [
-    "Two counts of mine differ from the implementer's, neither in a direction that changes a verdict, and both are recorded rather than smoothed over. Mutating the adoption to never adopt turns three cases red here, not four: the two `a resume rolled back after its event ended the role …` cases and the gate's own case. The fourth the implementer counted is most likely one of the `a hold taken back on returning to its abandoned session is claimed before it is trusted` pair, which my run showed red under the `holdUnconfirmed` mutation instead. The twelve-case count for the failed loop reproduced exactly.",
-    "Deliberately still open, and checked only for widening as the architect asked: envoy.ts:1957-1966, inside `if (!sessionOpen(id))`, writes `claimedRoleSessionID` for a session that is by construction not open, and `settleRole` can later name it as `previousSessionID`. It is pre-existing at c88a3a19, it is in the body's risk entry, and no hunk of this round touches any of the three names it is written through.",
-    "What was left behind: two smoke panes in fresh /tmp scratch directories, no role claimed and no message sent; the only listener writes were the recover arm's single DELETE and one cleanup DELETE. GET /v1/sessions filtered to those directories returns zero rows.",
-    "Static lanes were read, not re-run: lint, typecheck and the unit suites are cited from the CI line at the code head. The five mutation runs above are the check of specific claims about specific cases, each with the file restored and re-hashed to 9fd2cd7888b1f8320b393ca745a3275ad31b981a6b8f92e5635874bbbeffa0b5 afterwards."
+    "No live arm was re-run this round and no control was repeated, because the product delta is comments only and the test file is byte-identical to round 7's. Round 7's evidence stands at this head: the stall arm's worst accepted-registration gap 180.0 s against the 300 s lifetime with exactly one stall line, the recover arm at 93 s, and both negative controls from round 4.",
+    "Nothing was left behind this round: no pane was started, no listener write was made, and the workspace is clean (`jj status` reports no changes).",
+    "Static lanes were read, not re-run, except the plugin suite, which was run once to recount it - the one number this round asked to be confirmed."
   ],
   "ciRead": {
-    "codeHead": "1363aa8f50571be6128fcc0b4ec202804e2fc158",
+    "codeHead": "8af013ebda1adbf1073d072e715076fb3e7e7e40",
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "verdict": "all four required checks success at the code head (Tests run 40192235745; PR Title run 40193045366). Docs and Worker Image success. Legion Envoy and Contracts run 40192235713 has one failing job, broker-multiprocess, inherited from main and tracked at dispatch://INFRA-379; it is not in the required set. pi-legion passes there. The pull request reads MERGEABLE."
+    "verdict": "all four required checks success (Tests run 40196020851; PR Title run 40196130113). Docs and Worker Image success. Legion Envoy and Contracts run 40196020845 fails envoy-go and broker-multiprocess, both on main's startBroker signature break (dispatch://INFRA-379), neither required. The pull request reads MERGEABLE."
   }
 }
