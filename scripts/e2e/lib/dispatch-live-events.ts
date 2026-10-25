@@ -267,9 +267,12 @@ async function watch(options: Options): Promise<boolean> {
       }
       const start = asEventsStart(frame);
       if (start !== undefined) {
-        // The feed is carried again: the next loss backs off from the first delay.
+        // The feed is carried again: the next loss backs off from the first delay. Dispatch starts
+        // a feed at what it was asked or below it, never above (a `--since` past its head, or a
+        // resume across a reset of its event log), so the start is the cursor: an event after it
+        // is new, not a duplicate of an id the probe asked past.
         attempt = 0;
-        if (cursor === null) cursor = eventID(start.since, "events_start.since");
+        cursor = eventID(start.since, "events_start.since");
         return;
       }
       const ended = asEnded(frame);
@@ -290,9 +293,9 @@ async function watch(options: Options): Promise<boolean> {
       const event = asEventFrame(frame);
       if (event === undefined) return;
       const id = eventID(event.id, "event.id");
-      // The cursor only rises: an event at or below it was written already (an older frame, or a
-      // redial's replay), so it is noted rather than written again, and the audits that count the
-      // event lines count it once.
+      // An event only raises the cursor: one at or below it was written already (an older frame,
+      // or a redial's replay), so it is noted rather than written again, and the audits that count
+      // the event lines count it once.
       if (cursor !== null && BigInt(id) <= BigInt(cursor)) {
         write({ duplicate: id });
         return;

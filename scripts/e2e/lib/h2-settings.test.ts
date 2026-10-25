@@ -2,9 +2,10 @@ import { afterAll, afterEach, beforeAll, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import http2 from "node:http2";
 import https from "node:https";
-import type { AddressInfo } from "node:net";
+import net, { type AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import tls from "node:tls";
 
 // The probe runs as an operator runs it, a process of its own, against a local TLS server that
 // does or does not advertise SETTINGS_ENABLE_CONNECT_PROTOCOL. The certificate is made per run and
@@ -49,7 +50,7 @@ afterEach(() => {
 afterAll(() => rmSync(scratch, { force: true, recursive: true }));
 
 /** Listens `server` on a loopback port and returns it; the row's end closes it. */
-async function listen(server: http2.Http2SecureServer | https.Server): Promise<number> {
+async function listen(server: net.Server): Promise<number> {
   const listening = Promise.withResolvers<void>();
   server.listen(0, "127.0.0.1", () => listening.resolve());
   await listening.promise;
@@ -121,6 +122,37 @@ test("a certificate the probe cannot verify is no answer, exit 2", async () => {
   expect(result.stdout).toBe("");
   expect(result.stderr).toStartWith(`h2-settings: https://localhost:${port}: `);
 });
+
+// The handshake and the server's first SETTINGS share one 10 s deadline: a server that chooses h2
+// and then sends nothing, and one that accepts the connection and never answers the handshake, are
+// no answer. Both run at once, so the row waits the deadline once.
+test("a server that sends no SETTINGS within 10 s is no answer, exit 2", async () => {
+  const chosen: (string | false)[] = [];
+  const silentH2 = tls.createServer({ ...tlsFiles, ALPNProtocols: ["h2"] });
+  // Holds the connection and writes nothing on it: no SETTINGS, no close.
+  silentH2.on("secureConnection", (socket) => chosen.push(socket.alpnProtocol ?? false));
+  const silentTcp = net.createServer();
+  const ports = [await listen(silentH2), await listen(silentTcp)];
+
+  const runs = await Promise.all(
+    ports.map(async (port) => {
+      const started = Date.now();
+      const result = await run([`https://localhost:${port}`]);
+      return { ...result, ms: Date.now() - started, port };
+    })
+  );
+  // The probe offered h2 and the silent server chose it, so its wait was for the SETTINGS alone.
+  expect(chosen).toEqual(["h2"]);
+  for (const result of runs) {
+    expect(result.code).toBe(2);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      `h2-settings: https://localhost:${result.port} sent no SETTINGS within 10s\n`
+    );
+    expect(result.ms).toBeGreaterThanOrEqual(10_000);
+    expect(result.ms).toBeLessThan(15_000);
+  }
+}, 20_000);
 
 test("anything but one https URL is a usage error, exit 2", async () => {
   for (const args of [[], ["http://localhost:1"], ["https://a.example", "https://b.example"]]) {

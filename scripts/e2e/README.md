@@ -2795,7 +2795,36 @@ is true, naming the origin on stderr; 0 when it is false or the server speaks no
 usage error, or when it has no answer: a TLS or certificate failure, or no SETTINGS within 10 s.
 Certificates are verified, so a proxy behind a private CA needs `NODE_EXTRA_CA_CERTS`.
 `h2-settings.test.ts` (`bun test scripts/e2e/lib`) runs it against a local
-`http2.createSecureServer` with and without `settings.enableConnectProtocol`.
+`http2.createSecureServer` with and without `settings.enableConnectProtocol`, against an https
+server with no HTTP/2, against a certificate it cannot verify, and against two servers that answer
+nothing — one that chooses h2 and sends no SETTINGS, one that never finishes the handshake — which
+it leaves after the 10 s deadline with exit 2.
+
+## lib/dispatch-live-events.ts
+
+A Dispatch deployment's event feed as a page reads it, for a stage proof's audit of what a run
+wrote and for the production check after a deploy. It opens `/ws/live`, subscribes the event feed
+and writes one JSON line per frame until an event matches `--until` (exit 0) or `--timeout`
+seconds pass (exit 1); Dispatch's refusal of the feed is printed on stderr (exit 1), a usage error
+exits 2:
+
+```sh
+bun scripts/e2e/lib/dispatch-live-events.ts --url https://<dispatch host> \
+  --bearer-file <token file> --since <event id> --until '"state":"answered"' --timeout 70
+```
+
+`--user <email>` takes the place of `--bearer-file` against a server in header identity (the e2e
+harness). The lines are `{"event": …}` for each event, `{"close": <code>, "reason": …}` and
+`{"resubscribed": <cursor>}` around each reopen - a socket closed at its age (`4001`) or a restart
+(`1012`) reopens at once, anything else after a backoff - `{"ended": <reason>, "resubscribed":
+<cursor>}` where Dispatch drops the feed and leaves the socket open, and `{"duplicate": <id>}` for
+an event at or below the cursor, which is written once as an event and never again. The cursor is
+Dispatch's own `events_start.since` at every subscribe, since Dispatch starts a feed at what it
+was asked or below it, never above: a `--since` past its head, and a resume across a reset of its
+event log, both start lower, and the events after that start are new rather than duplicates. So an
+audit that counts the `event` lines counts each event once, however often the feed reopened.
+`dispatch-live-events.test.ts` (`bun test scripts/e2e/lib`) runs it against a Bun websocket server
+that rotates, ends the feed, repeats events and clamps a start.
 
 ## lib/stage4b-tools.jq
 

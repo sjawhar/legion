@@ -3,11 +3,15 @@ import type { Server, ServerWebSocket } from "bun";
 
 import { readAgentReplay } from "./agent-replay";
 
-// readAgentReplay runs in the page in dispatch-user-turns.sh's `count`; here it runs in Bun against
-// a stand-in for Dispatch's live socket that answers the agent view's subscribe as the script
-// tells it to. Its two waits are its own real timers, read against real socket traffic, so these
-// rows give it short ones (`emptyAfterMs` 300 ms, and a 1 s timeout where the timeout is the point)
-// rather than faking a clock the socket's delivery does not run on.
+// readAgentReplay runs in the page in dispatch-user-turns.sh's `count`, where Playwright's
+// `page.evaluate` sends the page its source alone (`toString()`) and the page evaluates that. These
+// rows run it the same way: its source evaluated in Bun's global scope, where nothing of this
+// module or agent-replay.ts is reachable, so a helper it names from outside the function fails a
+// row here as it would fail in the page. They run it against a stand-in for Dispatch's live socket
+// that answers the agent view's subscribe as the script tells it to. Its two waits are its own
+// real timers, read against real socket traffic, so these rows give it short ones (`emptyAfterMs`
+// 300 ms, and a 1 s timeout where the timeout is the point) rather than faking a clock the socket's
+// delivery does not run on.
 
 const SESSION = "01a0e0c1-0000-7000-8000-00000000beef";
 const SUB = "dispatch-user-turns";
@@ -64,8 +68,12 @@ async function timed(
   }
 }
 
+/** readAgentReplay as `page.evaluate` runs it: its source, evaluated by an indirect `eval`, which
+ *  reads only the global scope. */
+const inPage = (0, eval)(`(${readAgentReplay.toString()})`) as typeof readAgentReplay;
+
 const read = (url: string, timeoutMs = 10_000) =>
-  readAgentReplay({ emptyAfterMs: 300, sessionId: SESSION, timeoutMs, url });
+  inPage({ emptyAfterMs: 300, sessionId: SESSION, timeoutMs, url });
 
 test("a responding session's replay is the answer", async () => {
   const dispatch = fakeDispatch((socket) => {

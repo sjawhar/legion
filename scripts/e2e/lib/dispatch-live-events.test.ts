@@ -182,9 +182,9 @@ test("the live event probe subscribes again from its cursor when Dispatch ends t
 
 // A redial resumes after the cursor, so Dispatch replays nothing at or below it; a duplicate that
 // arrives anyway (an older frame on the socket, or a replay after a redial) is noted, not written as
-// an event, so the audits that count the event lines count it once, and it never moves the cursor
+// an event, so the audits that count the event lines count it once, and no event moves the cursor
 // back.
-test("the live event probe writes a duplicate once and never lowers its cursor", async () => {
+test("the live event probe writes a duplicate once and no event lowers its cursor", async () => {
   const subscriptions: unknown[] = [];
   const event = (id: number, extra: object = {}) =>
     JSON.stringify({
@@ -253,6 +253,78 @@ test("the live event probe writes a duplicate once and never lowers its cursor",
     typeof line === "object" && line !== null && "event" in line ? [line.event] : []
   );
   expect(counted).toHaveLength(3);
+});
+
+// Dispatch starts a feed at what it was asked or below it, never above: below a `--since` past its
+// head (clamped to the head), and below the resume a redial asks once its event log was reset. The
+// probe takes the start as its cursor every time, so the events after it are written as events, not
+// as duplicates of ids the probe asked past.
+test("the live event probe takes every events_start as its cursor, below what it asked included", async () => {
+  const subscriptions: unknown[] = [];
+  const event = (id: number, extra: object = {}) =>
+    JSON.stringify({
+      event: { id, type: "issue.updated", ...extra },
+      id: String(id),
+      sub: "events",
+      type: "event",
+    });
+  const server = Bun.serve({
+    fetch(request, srv) {
+      if (new URL(request.url).pathname !== "/ws/live")
+        return new Response("not found", { status: 404 });
+      return srv.upgrade(request) ? undefined : new Response("upgrade failed", { status: 400 });
+    },
+    hostname: "127.0.0.1",
+    port: 0,
+    websocket: {
+      message(socket, raw) {
+        subscriptions.push(JSON.parse(String(raw)));
+        if (subscriptions.length === 1) {
+          // Asked to start after 100, past the head: the feed starts at the head, 5.
+          socket.send(JSON.stringify({ since: "5", sub: "events", type: "events_start" }));
+          socket.send(event(6));
+          socket.send(event(7));
+          socket.close(1012, "service restart");
+          return;
+        }
+        // The log was reset across the restart: the resume after 7 starts at the new head, 2.
+        socket.send(JSON.stringify({ since: "2", sub: "events", type: "events_start" }));
+        socket.send(event(3));
+        socket.send(event(3));
+        socket.send(event(4, { note: "needle" }));
+      },
+    },
+  });
+  servers.push(server);
+
+  const result = await run(
+    "--url",
+    `http://127.0.0.1:${server.port}`,
+    "--user",
+    "alice@example.com",
+    "--since",
+    "100",
+    "--until",
+    "needle",
+    "--timeout",
+    "2"
+  );
+
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(subscriptions).toEqual([
+    { resume: { since: "100" }, sub: "events", type: "subscribe", view: { kind: "events" } },
+    { resume: { since: "7" }, sub: "events", type: "subscribe", view: { kind: "events" } },
+  ]);
+  expect(result.stdout).toEqual([
+    { event: { id: 6, type: "issue.updated" } },
+    { event: { id: 7, type: "issue.updated" } },
+    { close: 1012, reason: "service restart" },
+    { resubscribed: "7" },
+    { event: { id: 3, type: "issue.updated" } },
+    { duplicate: "3" },
+    { event: { id: 4, note: "needle", type: "issue.updated" } },
+  ]);
 });
 
 test("the live event probe prints Dispatch's refusal of the feed and exits 1", async () => {
