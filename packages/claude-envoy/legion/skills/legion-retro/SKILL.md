@@ -22,9 +22,10 @@ Retro runs on the reviewed head, after the architect's acceptance and before the
   merge would carry the handoffs onto the base, where nothing reads them. Every implement, test or
   review phase after a retro writes the directory again, so every retro ends with the removal.
 
-Work on the existing issue branch: never rebase, never make another branch or bookmark, and push
-only fast-forward, because READY reads this branch's head and a forced push can drop another
-role's commits. The one exception is the rewrite in
+Work on the existing issue branch: never rebase it onto another base, never make another branch or
+bookmark, and push only fast-forward, because READY reads this branch's head and a forced push can
+drop another role's commits. Reordering your own unpushed commits (the `jj rebase -r @- -B` in
+`pr-body-content.md`) is not a rebase of the branch. The one exception is the rewrite in
 `skill://legion-retro/references/pr-body-content.md#a-pushed-head-that-carries-skip-checks`.
 
 ## When retro stops

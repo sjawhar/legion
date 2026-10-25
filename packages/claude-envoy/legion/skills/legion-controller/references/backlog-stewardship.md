@@ -59,8 +59,8 @@ Treat a session route as stopped only after two reads of
 `dispatch issues --project <KEY> --route-status no_holder --limit 250` at least ten minutes apart
 both list it, as "The owner audit" in `skill://dispatch/references/issues.md` says, because a
 restarting session is absent for minutes. Do not poll to create the second read; use the next
-controller wake. Then check that `envoy_sessions` lists no session whose `dir` is a checkout of
-the issue's repository.
+controller wake. Then confirm with `envoy_sessions` that no live session owns the work (the
+session the route names, or one that took it over), because a live owner still holds it.
 
 For work that a ruling of a person's, recorded in the plan with its link (the ruling section
 above), says moves to Legion when its session stops, preserve its existing labels, add `legion`,
