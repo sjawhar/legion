@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-364",
-  "completed": "2026-10-25T17:02:00Z",
+  "completed": "2026-10-25T17:35:00Z",
   "pr": "https://github.com/sjawhar/legion/pull/2201",
-  "headSha": "28dcd7a1b4e9e05828bfd8abc5c517064725ef5c",
+  "headSha": "f12514e89234f30662b332eaf0222338e1f41b67",
   "testCommit": "79a4d10bda98",
   "proof": [
     {
@@ -12,7 +12,7 @@
       "surface": "Local Dispatch harness: packages/dispatch/e2e/run-server.sh on rootless Postgres 17 + pgvector (/legion/harness, database dispatch_proof, port 18777), agent bearer e2e-token, future rows inserted by psql",
       "command": "bash /legion/harness/proof.sh head (curl -H 'Authorization: Bearer e2e-token' $H/api/v1/references?to=dispatch://CORE-1 and ?from=dispatch://OPS-1/comment/<id>); outputs in https://github.com/sjawhar/legion/pull/2201#issuecomment-6400482181",
       "observed": "?to= 200 with mentions artifact (CORE/design-notes), mentions comment, attached_to spec, no future; ?from= 200 with the mention of CORE-1 only",
-      "headSha": "28dcd7a1b4e9e05828bfd8abc5c517064725ef5c",
+      "headSha": "f12514e89234f30662b332eaf0222338e1f41b67",
       "negativeControl": "Same database served by a binary built at test commit 79a4d10bda98: both reads 500, server log 'graph node kind \"future\" is not addressable'"
     },
     {
@@ -20,7 +20,7 @@
       "surface": "Same harness, GET /api/v1/issues/CORE-1",
       "command": "curl -H 'Authorization: Bearer e2e-token' $H/api/v1/issues/CORE-1 | jq .referenced_by_count, beside jq '.edges|length' of C1's ?to= read",
       "observed": "referenced_by_count 3 = listed 3 = the fixture's known citers (document mention, comment mention, attached spec)",
-      "headSha": "28dcd7a1b4e9e05828bfd8abc5c517064725ef5c",
+      "headSha": "f12514e89234f30662b332eaf0222338e1f41b67",
       "negativeControl": "Test-commit binary on the same rows: referenced_by_count 4 while its list read is a 500"
     },
     {
@@ -28,7 +28,7 @@
       "surface": "Same harness, GET /api/v1/artifacts/<design-notes uuid>/references",
       "command": "curl -H 'Authorization: Bearer e2e-token' $H/api/v1/artifacts/<doc>/references, with incoming and outgoing future rows, then with only the outgoing one",
       "observed": "200; outgoing [artifact CORE/missing unresolved, issue CORE-1 unresolved], referenced_by [the comment]; with only the outgoing future row, outgoing is the same two entries",
-      "headSha": "28dcd7a1b4e9e05828bfd8abc5c517064725ef5c",
+      "headSha": "f12514e89234f30662b332eaf0222338e1f41b67",
       "negativeControl": "Test-commit binary: 500 with both rows; with only the outgoing future row, outgoing lists {kind: future, to_id: x#y}"
     },
     {
@@ -36,7 +36,7 @@
       "surface": "Real CLI against the harness",
       "command": "env -u DISPATCH_TOKEN_FILE DISPATCH_URL=http://127.0.0.1:18777 DISPATCH_TOKEN=e2e-token bun packages/envoy-client/bin/dispatch.ts read --issue CORE-1",
       "observed": "Referenced by: lists the document mention, the comment mention and the attached spec; Links: none (CORE-1 links nothing); no unavailable row",
-      "headSha": "28dcd7a1b4e9e05828bfd8abc5c517064725ef5c",
+      "headSha": "f12514e89234f30662b332eaf0222338e1f41b67",
       "negativeControl": "Test-commit binary: 'Referenced by:' then '- unavailable: internal server error'"
     },
     {
@@ -44,8 +44,16 @@
       "surface": "Signed-in dashboard, Playwright Chromium against the real server and database (packages/dispatch/e2e)",
       "command": "cd packages/dispatch && bun run build:web && bunx playwright test --config e2e/playwright.config.ts references.e2e.ts --project chromium -g 'skip an edge of a node kind'",
       "observed": "1 passed: header Referenced by (2), panel lists Message · OPS issue, no 'Referenced by unavailable.'; whole references.e2e.ts on chromium 10 passed",
-      "headSha": "28dcd7a1b4e9e05828bfd8abc5c517064725ef5c",
+      "headSha": "f12514e89234f30662b332eaf0222338e1f41b67",
       "negativeControl": "Same test at test commit 79a4d10bda98 fails: the page shows button 'Referenced by (3)' and the click on 'Referenced by (2)' times out"
+    },
+    {
+      "criterion": "Review round 1 (thread PRRT_kwDORFy7ds6wDTYA): every ask read, which counts with AskBacklinkExclusions, leaves an unknown-kind source out of referenced_by_count, and a test fails if it does not",
+      "surface": "Local Dispatch harness (dispatch_proof, port 18777): an ask on OPS-1 cited by a comment on CORE-1 plus a (future, x#y, ask, <id>) row; and go test on the Postgres harness",
+      "command": "bash /legion/harness/proof-ask.sh (GET /api/v1/asks/<id>, GET /api/v1/issues/OPS-1/asks, GET /api/v1/references?to=dispatch://OPS-1/ask/<id>); go test ./internal/dispatch/refs/ -run TestGraphReadsSkipANodeKindThisBuildCannotAddress -v; outputs https://github.com/sjawhar/legion/pull/2201#issuecomment-6400825018",
+      "observed": "referenced_by_count 1 on both ask reads, ?to= 200 with the comment mention only; the test passes at head",
+      "headSha": "f12514e89234f30662b332eaf0222338e1f41b67",
+      "negativeControl": "Test-commit server: ask count 2 and ?to= 500; the reviewer mutation (node-kind filter only when excludeKinds is empty) fails the test: refs_test.go:386 issue backlink counts with the ask exclusions = map[CORE-1:2 OPS-1:1]; want map[CORE-1:1]"
     }
   ],
   "filesChanged": [
@@ -64,8 +72,10 @@
   ],
   "deviations": [
     "Simplify pass applied one finding (fixed $3 placeholder in BacklinkCounts), folded into the unpushed fix commit; every check and proof ran after it at 28dcd7a1.",
-    "Harness: rootless Postgres 17.11 + pgvector 0.8.0 from Debian packages at /legion/harness (setup.sh, env.sh; lanes per LEGION_ROLE: implementer 18777/dispatch_impl_e2e, tester 18877/dispatch_test_e2e, reviewer 18977/dispatch_review_e2e). Its cluster is initdb --locale=C, so api's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses to run there by design (it needs a non-byte-order collation); unrelated to this change, CI's Postgres runs it."
+    "Harness: rootless Postgres 17.11 + pgvector 0.8.0 from Debian packages at /legion/harness (setup.sh, env.sh; lanes per LEGION_ROLE: implementer 18777/dispatch_impl_e2e, tester 18877/dispatch_test_e2e, reviewer 18977/dispatch_review_e2e). Its cluster is initdb --locale=C, so api's TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses to run there by design (it needs a non-byte-order collation); unrelated to this change, CI's Postgres runs it.",
+    "Round 1 changes only refs_test.go (the ask-exclusion count case); C1-C4 re-run at f12514e8 with the same results, C5 not re-run since no server or web code changed."
   ],
   "openQuestions": [],
-  "discoveredComplexity": []
+  "discoveredComplexity": [],
+  "round": 1
 }
