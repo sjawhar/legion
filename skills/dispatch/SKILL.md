@@ -5,16 +5,16 @@ description: "Use before your first dispatch command in a session: a message, co
 
 # Dispatch
 
-Dispatch holds each issue's spec, asks, comments and documents. It is a record for the people who decide, never a log of your work.
+Dispatch is a record for the people who decide, never a log of your work.
 
-- Use the `dispatch` command; the HTTP API is only for what no command does. `dispatch <command> --help` gives each command's rules, limits and an example.
+- Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives each command's rules and an example.
 - Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`). Give object and list fields as JSON.
-- Exit 1 means Dispatch refused, 2 a usage error. A refusal lists each problem and what to fix: fix them all, then call once.
+- Exit 1 is a refusal, 2 a usage error. A refusal lists each problem: fix them all, then call once.
 - `DOC_SERVICE_UNAVAILABLE` means the document is reloading and nothing was written. Wait a few seconds and repeat the call.
 
 ## Asks and ask blocks
 
-- A question about a design a document records is an ask block (a decision block) at the end of the section it concerns, at each phase:
+- A question about a design a document records is an ask block (a decision block) at the end of its section, at each phase:
 
 ```md
 :::ask{urgency="med"}
@@ -27,19 +27,17 @@ The problem and why it matters. Recommendation: the option and its reason.
 
 - A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`. A Legion phase worker sends its decision to its architect.
 - In a Legion session, only the controller files an issue for a finding outside your issue. Send it a clear defect, and ask about a decision (`skill://legion-worker/references/findings.md`).
-- An ask stands alone: its view does not show the issue's comments.
 - An open ask is the request. Do not raise it again in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask again in a new block.
 - Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
-- When an answer's option and its typed text disagree, the text is the answer.
+- When an answer's option and text disagree, the text is the answer.
 - An ask block has a block id, for `doc-edit`, and an ask id, for the ask commands. `dispatch read --ref dispatch://KEY/ask/<id>` takes either.
 - An ask reaches the issue's assignee. On an unassigned issue, name who must answer.
-- After `doc-edit` adds a block, read it back with `dispatch doc-read`.
 
 ## Choosing what to work on
 
 - When you finish an issue, take the top ready issue: status `todo`, by priority and then board rank, in each project.
-- `todo` means specced and waiting on no deploy or decision. An issue that waits goes in `backlog`, saying what it waits on.
+- `todo` means specced and waiting on nothing. An issue that waits goes in `backlog`, saying on what.
 - Hold at most three issues in flight. Past three, move unfinished work to `backlog`, saying where it is.
 - Never reorder the board. When the top looks wrong, tell the project's order keeper: `notifications.role.legion-<project>-controller`.
 
@@ -50,13 +48,12 @@ Outside Legion, claim your issue (`dispatch claim`) and move it and the children
 ## Close what you opened
 
 - An ask you opened is yours until it is answered or resolved. When the answer comes another way, or the design makes it moot, `dispatch resolve-ask` it in the same turn.
-- Each later write names your open asks. Resolve each one no longer needed, and retract each one a new ask replaces.
+- Resolve each open ask a later write names that is no longer needed; retract one a new ask replaces.
 
 ## Structure over stream
 
 - One issue per deliverable, with its content as the issue's document. Decisions are asks. A message only announces.
-- A message replies to a person, or tells them a change they must know now. Never progress or status.
-- `You've sent N messages …` means three with no reply. Wait, or ask once.
+- A message replies to a person, or tells them a change they must know now.
 - Text a person must read to decide is a section of the spec. An artifact is a real file.
 
 ## Architecture components
@@ -65,7 +62,7 @@ Attach each architectural issue to the components it changes (`--components-json
 
 ## References
 
-Link each issue, ask, comment, document or message you name:
+Link each item you name:
 
 ```text
 dispatch://KEY
@@ -78,10 +75,10 @@ dispatch://PROJECT/artifact/<slug>[@vN]
 dispatch://PROJECT/artifact/<slug>/ask/<id>
 ```
 
-A bare id or filename is not a reference. An id can be a unique prefix of 8 hex characters.
+A bare id or filename is not a reference. An ask or comment id can be an 8-hex prefix.
 
 ## Setup and the HTTP API
 
 - Use a personal token from Dispatch **Settings → Agent tokens**, as `DISPATCH_TOKEN` or `dispatch.token` in the session's `envoy.json`.
-- `GET /api/v1` lists every route. Never guess a path. Branch on an error's `code`, never its text.
+- `GET /api/v1` lists every route; never guess one. Branch on an error's `code`, not its text.
 - No command reorders the board: `PATCH /api/v1/issues/{key}` with `{"rank": {"before": "<key>", "after": "<key>"}, "actor": {"kind": "session", "id": "<your session id>"}}`.

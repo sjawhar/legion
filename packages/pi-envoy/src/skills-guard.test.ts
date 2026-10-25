@@ -70,6 +70,20 @@ test("the injected dispatch-first skill fits its budget on every host", () => {
   expect(`Instructions from: ${file}\n${skill}`.length).toBeLessThan(6_000);
 });
 
+// dispatch-first is the one Dispatch skill every session holds without loading it, so the two
+// rules that keep a person's view of an agent's work true live there: a blocker is an open ask,
+// and every accepted request is recorded and read back before the turn ends. The test reads the
+// context a session receives, not only the file.
+test("the injected dispatch-first context holds the blocker and accepted-request rules", () => {
+  const context = readDispatchFirstContext(dispatchFirstSkillFile(staged));
+  for (const rule of [
+    "The moment a person blocks your work, open a `dispatch ask` for it. A blocker that is not an open ask does not exist for them. Before you say you wait on a person, run `dispatch open-asks`.",
+    "Record every request you accept in Dispatch before you start it: an issue, or a line in your issue's record. Before you end a turn, read that record. Each item is done, in progress, or an open ask. Never drop one.",
+  ]) {
+    expect(context).toContain(rule);
+  }
+});
+
 // The three Dispatch skills are read by every session with Dispatch, so their length is a cost on
 // each one. Every file of the three staged skills counts, frontmatter included, as `wc -w` counts:
 // whitespace-separated tokens.

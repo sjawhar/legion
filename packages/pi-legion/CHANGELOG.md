@@ -46,6 +46,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   search and their docs or code. It writes what it found in the spec with links, designs the
   standard way unless it has a reason not to, and treats a sharp departure from the standard as a
   sign to fix the underlying problem.
+- `legion-controller`'s daily report names each issue by its `dispatch://` link and what it does for
+  the reader, as `dispatch-writing-specs` now says, in place of its key and title.
 
 - An architect's questions about its own tree follow `dispatch-writing-specs`, "Questions". When
   the issue already says to do a thing, it does not ask whether. It asks about an open point only

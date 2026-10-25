@@ -333,7 +333,8 @@ While you are registered, the daemon's `tick` gives you a turn at least every
 
 **What.** One `dispatch message --issue <report KEY> --body-file -` of at most 2,000 characters,
 since it is a report rather than a log of the day, written as `skill://dispatch-writing-specs`'s "Rules for
-the text" say: every issue by its key and title, every pull request by its URL.
+the text" say: every issue by its `dispatch://` link and what it does for the reader, every pull
+request by its URL.
 
 - **Finished.** `dispatch issues --project <PROJECT> --status done --updated-since <the
   previous report's time, or 24 hours ago> --limit 250`, read every page, and keep the issues

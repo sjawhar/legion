@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
+  record every request you accept in Dispatch and read that record back before a turn ends (INFRA-140).
+
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on
   the calling process's environment: tmux printed the tabs as `_` to a process with neither `TMUX`
   nor a UTF-8 locale, and the answer read as one field. A Claude Code session in a tmux pane has

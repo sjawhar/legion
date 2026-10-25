@@ -33,9 +33,9 @@ For each spec, ask, comment and message:
 - State the current design, never how people reached it.
 - Link each source where the person wrote it: `dispatch://KEY/comment/<id>`, `/ask/<id>`, `/message/<id>`, or a Slack URL. With no link, state the design.
 - Write about the design, never the person. Never quote people, repeat an answered ask, or upload their words.
-- Name your session only when a reader must reach it.
+- Name your session only if a reader must reach it.
 - Keep only text that helps a reader understand, decide, build, check.
-- Explain each name or term a new reader may not know; title each issue key.
+- Explain each name or term a new reader may not know. Name an issue by its `dispatch://` link, and say in a clause what it does for this reader. Never write a bare key.
 - In an ask, ask block, comment or message, name a requirement or check by what it is, never its number.
 
 ## Questions
@@ -48,7 +48,7 @@ For each spec, ask, comment and message:
 
 ## Each version
 
-1. After a person's answer, comment or edit, rewrite what it touches; delete what it contradicts. Reply in a comment's thread; resolve the ask it answers.
+1. After a person's answer, comment or edit, rewrite what it touches; delete what it contradicts. Write what is true now. Never narrate an edit or what used to be here; versions and comments hold the history. Reply in a comment's thread; resolve the ask it answers.
 2. Before each spec write, paste the whole spec, never a path, into a fresh subagent's assignment. It lists gaps, conflicts, uncheckable requirements, unclear text, and missing or needless questions. Fix or record each.
 3. Before each approval request, a read-only agent checks its facts: `task(agent="scout")`, or `plan-gap-analyst` and `plan-reviewer` in Legion.
 4. Name each version with `dispatch doc-edit --summary`.
