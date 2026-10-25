@@ -208,6 +208,7 @@ export interface IssueComponentsInput {
 export interface WriteAdvice {
   /** Issue-scoped fields are omitted on project-document writes. */
   readonly issue_status?: IssueStatus;
+  /** The calling session's own messages, comments and asks on the issue since the last human event. */
   readonly session_writes_since_human?: number;
   readonly your_open_asks?: Array<{ id: string; question: string }>;
   /** The ask blocks in the document an upload or issue creation stored, answered ones included. */
@@ -231,6 +232,15 @@ export interface WriteAdvice {
    * `suggestions.missing` explains why search did not answer in time instead.
    */
   readonly suggestions?: Suggestions;
+  /**
+   * True when the issue carries the `legion` label in any case, or sits under an issue that
+   * does, so only the Legion daemon writes its status and a status anyone else sets is undone.
+   * Resolved only where a line depends on it: a session's write on an issue whose status is
+   * `triage`, where it decides whether the "still in triage" advice is printed. Absent
+   * everywhere else — on a write to an issue past triage, and on a write whose actor is not a
+   * session, which is answered without running any advice query.
+   */
+  readonly legion_managed_status?: boolean;
 }
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };
@@ -322,6 +332,23 @@ export interface IssueRouteReach {
   readonly route_status: IssueRouteStatus | null;
   /** The live session the route reaches; set only when `route_status` is `live`. */
   readonly route_holder: string | null;
+}
+
+/**
+ * What both claim routes answer: the issue, flat, with whether the Legion daemon owns its
+ * status. `legion_managed_status` is true when the issue carries the `legion` label in any case,
+ * or sits under an issue that does; on such an issue only the Legion daemon writes the status,
+ * and a status anyone else sets is undone. It is resolved on read from the issue's labels and
+ * its parents', stored nowhere, and never on an event payload, which is why it is not a field of
+ * `Issue`.
+ */
+export interface ClaimedIssue extends Issue {
+  /**
+   * Absent when the server did not answer it: a Dispatch older than the field, or a label walk
+   * that failed (the claim still stands). A client reads an absent field as not Legion-managed,
+   * which is what every client said before the field existed.
+   */
+  readonly legion_managed_status?: boolean;
 }
 
 export interface IssueSummary

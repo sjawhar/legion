@@ -130,11 +130,15 @@ merged by a person instead, and its READY says so. Nothing in Legion approves a 
 your behalf or changes who may merge.
 
 The merge closes the issue: it moves to `done` the moment GitHub reports the pull request merged.
-The architect accepted the change before that, when the reviewer approved it, with a comment on
-the issue summarizing the evidence. After the close the implementer checks the change in
-production, once your deploy carries it, and records what it saw on the pull request's
-`Production:` line; a closed issue takes no further write, so look there. The tree's workspace is
-kept for three days (`linger_hours`, 72 by default) in case the work resumes.
+A root with work still running beneath it is the exception: its merge is recorded and the issue
+waits until the last other issue of its tree is done or parked, so no child's finished work is cut
+off, and then it closes. The architect accepted the change before that, when the reviewer approved
+it, with a comment on the issue summarizing the evidence; Legion refuses that acceptance while any
+issue beneath it is still running, so a parent is accepted after its children. After the close the
+implementer checks the change in production, once your deploy carries it, and records what it saw
+on the pull request's `Production:` line; a closed issue takes no further write, so look there.
+The tree's workspace is kept for three days (`linger_hours`, 72 by default) in case the work
+resumes.
 
 ## Stop, park or rerun
 
@@ -163,5 +167,5 @@ architect is told who wrote it; only a person's move in the dashboard, the contr
 | `in_progress` | the daemon | Admitted: the architect is writing the spec or waiting for your approval, or the planner or implementer is working. Work sent back by a failed test, red CI or a review returns here. |
 | `testing` | the daemon | The implementer opened the pull request and finished; the tester is checking the change. |
 | `needs_review` | the daemon | The tester passed; Legion's reviewer is reviewing, and once it approves the architect reads the evidence and accepts the change or sends it back. Your GitHub review counts now. |
-| `retro` | the daemon | The architect accepted. The issue stays here through retro, `READY` and the wait for the merge. |
-| `done` | the daemon at the merge, or a person | Finished: the pull request merged. The implementer's production check follows on the pull request; the tree lingers, then closes. |
+| `retro` | the daemon | The architect accepted. The issue stays here through retro, `READY` and the wait for the merge — and, for a root whose tree still runs, through the wait between its merge and its close. |
+| `done` | the daemon at the merge, or a person | Finished: the pull request merged. A root whose tree is still running waits in `retro` until the last of it is done or parked, then closes. The implementer's production check follows on the pull request; the tree lingers, then closes. |

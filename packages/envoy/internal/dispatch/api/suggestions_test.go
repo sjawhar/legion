@@ -350,15 +350,21 @@ func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 		createdAskID  string
 		database      *store.Store
 	}
+	// Both asks are filed by a session, not a human: the armed advice hook fires from
+	// computeWriteAdvice, which writeAdvice runs for a session actor alone (write_advice.go), so
+	// a human-actor write would never reach the failing query these cases are about and the
+	// suggestions-only fallback (asks.go) would never run. Answering the decision ask stays a
+	// human's, as it is.
+	askActor := adviceSessionActor("session-advice-fails")
 	fileAsk := func(t *testing.T, allowance time.Duration) filedAsk {
 		t.Helper()
 		handler, database := newFailingAdviceHandler(t, "session_writes_since_human", allowance)
 		createAdviceProject(t, handler, "ADVFAIL")
 		decisionSpec := ""
 		decisionIssue := createAdviceIssue(t, handler, "ADVFAIL", "Choose a transport for the billing service", &decisionSpec)
-		decisionAsk := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+decisionIssue.Key+"/asks", map[string]any{
-			"question": "Should the billing service public API use REST or GraphQL?",
-		}, "alice")
+		decisionAsk := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+decisionIssue.Key+"/asks", map[string]any{
+			"question": "Should the billing service public API use REST or GraphQL?", "actor": askActor,
+		})
 		decisionAskID := decodeBody[testAskWithSuggestions](t, decisionAsk).ID
 		if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+decisionAskID+"/answer", map[string]any{
 			"text": "REST.", "expected_edited_at": nil,
@@ -368,9 +374,9 @@ func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 
 		targetSpec := ""
 		target := createAdviceIssue(t, handler, "ADVFAIL", "Pick a transport for the notifications service", &targetSpec)
-		response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target.Key+"/asks", map[string]any{
-			"question": "Should the billing service public API use REST or GraphQL?",
-		}, "alice")
+		response := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+target.Key+"/asks", map[string]any{
+			"question": "Should the billing service public API use REST or GraphQL?", "actor": askActor,
+		})
 		if response.Code != http.StatusCreated {
 			t.Fatalf("open ask with failed write-advice: status=%d body=%s", response.Code, response.Body.String())
 		}
