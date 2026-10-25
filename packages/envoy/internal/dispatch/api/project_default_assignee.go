@@ -50,10 +50,12 @@ func (s *server) listProjectDefaultAssignees(w http.ResponseWriter, r *http.Requ
 	WriteJSON(w, http.StatusOK, defaults)
 }
 
-// putProjectDefaultAssignee sets a project's default assignee, or clears it with a null. Human-
-// only, as the file's head says. A login that is not a person who has signed in is refused here
-// (400 ASSIGNEE_NOT_ALLOWED) so a typo never becomes a stored default; a default that goes stale
-// later is not refused but ignored, by the create chain.
+// putProjectDefaultAssignee sets a project's default assignee, or clears it with an explicit
+// null. Human-only, as the file's head says. A body without an assignee is refused (400
+// INVALID_PROJECT), never read as a null, so a PUT of `{}` cannot wipe a default. A login that
+// is not a person who has signed in is refused here (400 ASSIGNEE_NOT_ALLOWED) so a typo never
+// becomes a stored default; a default that goes stale later is not refused but ignored, by the
+// create chain.
 func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Request) {
 	actor, ok := s.requireHuman(w, r)
 	if !ok {
@@ -67,8 +69,14 @@ func (s *server) putProjectDefaultAssignee(w http.ResponseWriter, r *http.Reques
 		s.writeHandlerError(w, err)
 		return
 	}
+	// encoding/json leaves the RawMessage empty when the key is absent and hands it the literal
+	// null for an explicit null: only the latter clears.
+	if len(input.Assignee) == 0 {
+		writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "assignee is required: a person's email, or null to clear the default")
+		return
+	}
 	var assignee *string
-	if raw := strings.TrimSpace(string(input.Assignee)); raw != "" && raw != "null" {
+	if raw := strings.TrimSpace(string(input.Assignee)); raw != "null" {
 		var login string
 		if err := json.Unmarshal(input.Assignee, &login); err != nil {
 			writeError(w, "INVALID_PROJECT", http.StatusBadRequest, "assignee must be a person's email or null")
