@@ -2056,6 +2056,35 @@ test("a pick in the paste's own task cannot move the upload", async () => {
   }
 });
 
+// Dispatch stored a pasted file and lost its answer (`409 KEY_COMMITTED`): there is no version to
+// name, so nothing is written into the draft, nothing shows as refused, and the composer says the
+// file was stored and its reference not added - the upload is not made a second time.
+test("a pasted file answered KEY_COMMITTED says it was stored and adds no reference", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockRejectedValue(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "already made" })
+  );
+  const { view } = renderComposer();
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "See " } });
+    const file = new File(["# Notes"], "notes.md", { type: "text/markdown" });
+    fireEvent.paste(field, { clipboardData: { files: [file] } });
+
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "The upload of notes.md was made, but Dispatch lost its answer, so it may take a moment to appear. Its reference was not added to your message."
+    );
+    expect(field.value).toBe("See ");
+    expect(screen.queryByRole("alert")).toBeNull();
+    await Bun.sleep(20);
+    expect(uploadArtifact).toHaveBeenCalledTimes(1);
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
 /** The server's answer to an upload of `name` as `slug`, at `version`. */
 function uploaded(slug: string, name: string, version: number) {
   return {

@@ -137,6 +137,45 @@ test("a refused create keeps the dialog and draft, shows the server message, and
   }
 });
 
+// Dispatch made the issue and lost its answer (`409 KEY_COMMITTED`): the dialog has no issue to
+// open, so it lets go of the draft and says what was made - and a second press, with the draft
+// gone, sends nothing, where the old draft would have made a second issue.
+test("a create answered KEY_COMMITTED drops the draft, says the issue was made, and a second press sends nothing", async () => {
+  let attempts = 0;
+  let closed = 0;
+  const view = renderDialog(
+    async () => {
+      attempts += 1;
+      throw new ApiError(409, { code: "KEY_COMMITTED", error: "already made" });
+    },
+    "/",
+    () => {
+      closed += 1;
+    }
+  );
+  try {
+    await screen.findByRole("combobox", { name: "Project" });
+    const title = screen.getByRole<HTMLInputElement>("textbox", { name: "Title" });
+    fireEvent.change(title, { target: { value: "Made once" } });
+    fireEvent.submit(screen.getByRole("dialog", { name: "Create issue" }));
+
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "The issue “Made once” was made, but Dispatch lost its answer, so it may take a moment to appear."
+    );
+    expect(title.value).toBe("");
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("current-route").textContent).toBe("/");
+
+    fireEvent.submit(screen.getByRole("dialog", { name: "Create issue" }));
+    await Bun.sleep(20);
+    expect(attempts).toBe(1);
+    expect(closed).toBe(0);
+  } finally {
+    view.unmount();
+  }
+});
+
 test("a possible duplicate names the candidate and Create anyway forces the create", async () => {
   const calls: CreateIssueInput[] = [];
   const view = renderDialog(async (input) => {

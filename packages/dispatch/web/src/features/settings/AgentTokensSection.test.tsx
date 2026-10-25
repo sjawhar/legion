@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { AgentToken } from "../../api/types";
 import { AgentTokensSection } from "./AgentTokensSection";
 
@@ -119,5 +119,70 @@ test("Settings copies a new token through the legacy clipboard fallback", async 
       value: originalExecCommand,
     });
     Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+  }
+});
+
+// A mint Dispatch made and lost the answer to (`409 KEY_COMMITTED`) made a token whose value,
+// shown only once, is gone: the form lets go of its label, so a second press mints nothing, says
+// the value was lost, and offers to revoke the token - once it is listed - and mint another.
+test("a mint answered KEY_COMMITTED says its value was lost, and replaces it on request", async () => {
+  const lost: AgentToken = {
+    ...token,
+    created_at: "2026-09-13T00:00:00Z",
+    id: "33333333-3333-3333-3333-333333333333",
+    name: "reviewer",
+  };
+  const listAgentTokens = spyOn(api, "listAgentTokens")
+    .mockResolvedValueOnce([token])
+    .mockResolvedValue([lost, token]);
+  const createAgentToken = spyOn(api, "createAgentToken")
+    .mockRejectedValueOnce(new ApiError(409, { code: "KEY_COMMITTED", error: "already made" }))
+    .mockResolvedValueOnce({
+      ...lost,
+      id: "44444444-4444-4444-4444-444444444444",
+      token: "dsp_replacement",
+    });
+  const revokeAgentToken = spyOn(api, "revokeAgentToken").mockResolvedValue();
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
+
+  try {
+    render(
+      <QueryClientProvider client={queryClient}>
+        <AgentTokensSection />
+      </QueryClientProvider>
+    );
+    await screen.findByRole("cell", { name: "dsp_AbCdEf12…" });
+    const label = screen.getByLabelText<HTMLInputElement>("Token label");
+    fireEvent.change(label, { target: { value: "reviewer" } });
+    fireEvent.click(screen.getByRole("button", { name: "New token" }));
+
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "Token “reviewer” was made, but Dispatch lost its answer, so it may take a moment to appear. Its value is shown only once and was lost with the answer, so revoke it and mint another."
+    );
+    expect(label.value).toBe("");
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    // The emptied form mints nothing on a second press.
+    fireEvent.submit(label.closest("form") as HTMLFormElement);
+    await Bun.sleep(20);
+    expect(createAgentToken).toHaveBeenCalledTimes(1);
+
+    // Once the list is read again the lost token is there, and the offer revokes it and mints
+    // another under its label.
+    const replace = await screen.findByRole("button", { name: "Revoke it and mint another" });
+    fireEvent.click(replace);
+    await waitFor(() => expect(revokeAgentToken).toHaveBeenCalledWith(lost.id, keyedAttempt));
+    await waitFor(() => expect(createAgentToken).toHaveBeenCalledTimes(2));
+    expect(createAgentToken.mock.calls[1]?.[0]).toEqual({ name: "reviewer" });
+    expect(await screen.findByText("dsp_replacement")).toBeDefined();
+    expect(screen.queryByTestId("landed-without-answer")).toBeNull();
+  } finally {
+    cleanup();
+    queryClient.clear();
+    listAgentTokens.mockRestore();
+    createAgentToken.mockRestore();
+    revokeAgentToken.mockRestore();
   }
 });

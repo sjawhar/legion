@@ -28,6 +28,7 @@ import {
   textMutedOnSurfaceMuted,
 } from "../../theme/classes";
 import { buildDispatchReference, type DispatchReferenceRoute } from "../refs/routes";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 export interface UploadResult {
@@ -118,6 +119,9 @@ export interface DraftUpload {
   error: unknown;
   isError: boolean;
   isPending: boolean;
+  /** The name of the last file Dispatch stored with no answer to give for it, so its reference
+   *  could not be added to the draft; null otherwise. */
+  madeUnanswered: string | null;
   /** Uploads the last refused file again, to the owner it was sent to. */
   retry(): void;
 }
@@ -134,6 +138,7 @@ export interface DraftUpload {
 export function useDraftUpload(insert: (text: string) => void): DraftUpload {
   const queryClient = useQueryClient();
   const [pending, setPending] = useState(0);
+  const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
   const retryGuard = useSubmitGuard();
   // Each file is one write under a key of its own, its refusal shown here beside the draft.
   const upload = useKeyedWrite({
@@ -146,9 +151,13 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
     inline: true,
     label: ({ file }) => `Upload of ${file.name || "a file"}`,
     onMutate: () => setPending((count) => count + 1),
-    onSuccess: ({ file, owner, result }) => {
-      insert(uploadedFileText(owner, file, result));
+    onLanded: (landed, { file, owner }) => {
       refreshOwnerArtifacts(queryClient, owner);
+      if (landed === null) {
+        setMadeUnanswered(file.name || "the file");
+        return;
+      }
+      insert(uploadedFileText(owner, file, landed.result));
     },
     onSettled: () => {
       setPending((count) => count - 1);
@@ -160,6 +169,7 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
       return;
     }
     event.preventDefault();
+    setMadeUnanswered(null);
     for (const file of [...files]) upload.mutate({ file, owner });
   };
   return {
@@ -167,6 +177,7 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
     error: upload.error,
     isError: upload.isError,
     isPending: upload.isPending,
+    madeUnanswered,
     paste: (event, owner) => receive(event.clipboardData.files, owner, event),
     pending,
     retry: () => {
@@ -192,6 +203,11 @@ export function DraftUploadStatus({ upload }: { upload: DraftUpload }): ReactNod
           retrying={upload.isPending}
         />
       ) : null}
+      {upload.madeUnanswered === null ? null : (
+        <LandedWithoutAnswer what={`The upload of ${upload.madeUnanswered}`}>
+          Its reference was not added to your message.
+        </LandedWithoutAnswer>
+      )}
     </>
   );
 }
@@ -211,6 +227,8 @@ export interface ArtifactUpload {
   fileInputRef: RefObject<HTMLInputElement | null>;
   isError: boolean;
   isPending: boolean;
+  /** The name of the last file Dispatch stored with no answer to give for it; null otherwise. */
+  madeUnanswered: string | null;
   openPicker(): void;
   pendingFile: File | null;
   selectFile(event: ChangeEvent<HTMLInputElement>): void;
@@ -235,6 +253,7 @@ export function useArtifactUpload(
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [summary, setSummary] = useState("");
   const [isDragging, setIsDragging] = useState(false);
+  const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
   const upload = useKeyedWrite({
     write: (file: File, bounds) =>
       uploadFile(
@@ -245,17 +264,24 @@ export function useArtifactUpload(
       ),
     inline: true,
     label: (file) => `Upload of ${file.name || "a file"}`,
-    onSuccess: (result) => {
+    onLanded: (result, file) => {
+      // Stored either way: the staged file and its summary go, so a second press sends nothing.
       setPendingFile(null);
       setSummary("");
-      void queryClient.invalidateQueries({ queryKey: ["artifact", result.artifact.id] });
       refreshOwnerArtifacts(queryClient, owner);
+      if (result === null) {
+        setMadeUnanswered(name ?? (file.name || "the file"));
+        return;
+      }
+      setMadeUnanswered(null);
+      void queryClient.invalidateQueries({ queryKey: ["artifact", result.artifact.id] });
     },
   });
   const receive = (file: File | undefined) => {
     if (file === undefined) {
       return;
     }
+    setMadeUnanswered(null);
     if (immediate) {
       upload.mutate(file);
     } else {
@@ -290,6 +316,7 @@ export function useArtifactUpload(
     fileInputRef,
     isError: upload.isError,
     isPending: upload.isPending,
+    madeUnanswered,
     openPicker: () => fileInputRef.current?.click(),
     pendingFile,
     selectFile: (event) => {
@@ -365,6 +392,13 @@ export function ArtifactUploadStatus({ upload }: { upload: ArtifactUpload }): Re
       <p className={`w-full text-sm ${dangerText}`} role="alert">
         {uploadErrorMessage(upload.error)}
       </p>
+    );
+  }
+  if (upload.madeUnanswered !== null) {
+    return (
+      <div className="w-full">
+        <LandedWithoutAnswer what={`The upload of ${upload.madeUnanswered}`} />
+      </div>
     );
   }
   return null;

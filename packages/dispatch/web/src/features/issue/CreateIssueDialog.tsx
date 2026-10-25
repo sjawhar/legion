@@ -26,6 +26,7 @@ import {
 } from "../../theme/classes";
 import { buildIssuePath, routeProjectOf } from "../refs/routes";
 import { useDialog } from "../shell/useDialog";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 const createIssue = (input: CreateIssueInput, bounds: WriteBounds): Promise<Issue> =>
@@ -56,6 +57,9 @@ export function CreateIssueDialog({
   const [project, setProject] = useState<string | undefined>(undefined);
   const [title, setTitle] = useState("");
   const [spec, setSpec] = useState("");
+  /** The title of the issue the last create made with no answer to open it by, until the next
+   *  edit. */
+  const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
   const submitGuard = useSubmitGuard();
   // The dialog shows a refusal itself, beside the draft it was refused over.
   const mutation = useKeyedWrite({
@@ -63,11 +67,18 @@ export function CreateIssueDialog({
     label: (input: CreateIssueInput) => `New issue “${input.title}”`,
     onSettled: () => submitGuard.release(),
     write: create,
-    onSuccess: (issue) => {
+    onLanded: (issue, input) => {
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
       void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
-      onClose();
-      navigate(buildIssuePath({ key: issue.key, kind: "issue" }));
+      if (issue !== null) {
+        onClose();
+        navigate(buildIssuePath({ key: issue.key, kind: "issue" }));
+        return;
+      }
+      // Made, with no answer to open: the draft goes, so a second press makes nothing.
+      setTitle("");
+      setSpec("");
+      setMadeUnanswered(input.title);
     },
   });
 
@@ -146,7 +157,10 @@ export function CreateIssueDialog({
               className={`mt-1 block min-h-11 w-full rounded-lg border px-3 py-2 text-sm font-normal outline-none ${inputClasses(true)}`}
               disabled={mutation.isPending}
               maxLength={ISSUE_TITLE_MAX}
-              onChange={(event) => setTitle(event.target.value)}
+              onChange={(event) => {
+                setMadeUnanswered(null);
+                setTitle(event.target.value);
+              }}
               ref={titleRef}
               type="text"
               value={title}
@@ -163,6 +177,9 @@ export function CreateIssueDialog({
               value={spec}
             />
           </label>
+          {madeUnanswered === null ? null : (
+            <LandedWithoutAnswer what={`The issue “${madeUnanswered}”`} />
+          )}
           {mutation.isError ? (
             duplicate === undefined ? (
               <QueryError

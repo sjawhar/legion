@@ -18,6 +18,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import {
   settingsFieldLabel,
@@ -35,6 +36,8 @@ export function ProjectsSection(): ReactNode {
   const queryClient = useQueryClient();
   const [projectKey, setProjectKey] = useState("");
   const [projectName, setProjectName] = useState("");
+  /** The project the last create made with no answer to show it by, until the next edit. */
+  const [madeUnanswered, setMadeUnanswered] = useState<string | null>(null);
   const projectSubmitGuard = useSubmitGuard();
   const projects = useQuery(projectsQuery());
   // The form shows a refused create beside the key it was refused over.
@@ -43,14 +46,17 @@ export function ProjectsSection(): ReactNode {
     label: (input: CreateProjectInput) => `New project ${input.key}`,
     write: (input, bounds) => api.createProject(input, bounds),
     onSettled: () => projectSubmitGuard.release(),
-    onSuccess: () => {
+    onLanded: (project, input) => {
       void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });
       setProjectKey("");
       setProjectName("");
+      setMadeUnanswered(project === null ? input.key : null);
     },
   });
   const submitProject = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    // An emptied form - a create that landed - sends nothing, whatever submits it.
+    if (projectKey === "" || projectName.trim() === "") return;
     projectSubmitGuard.guard(() => createProject.mutate({ key: projectKey, name: projectName }));
   };
 
@@ -124,7 +130,10 @@ export function ProjectsSection(): ReactNode {
                 className={settingsMonoInput}
                 disabled={createProject.isPending}
                 id="project-key"
-                onChange={(event) => setProjectKey(event.target.value.trim().toUpperCase())}
+                onChange={(event) => {
+                  setMadeUnanswered(null);
+                  setProjectKey(event.target.value.trim().toUpperCase());
+                }}
                 placeholder="CORE"
                 required
                 value={projectKey}
@@ -151,6 +160,11 @@ export function ProjectsSection(): ReactNode {
               New project
             </button>
           </form>
+          {madeUnanswered === null ? null : (
+            <div className="mt-4">
+              <LandedWithoutAnswer what={`Project ${madeUnanswered}`} />
+            </div>
+          )}
           {createProject.isError ? (
             <div className="mt-4">
               <QueryError

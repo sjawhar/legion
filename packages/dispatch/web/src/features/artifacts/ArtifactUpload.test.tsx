@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen } from "@testing-library/react";
 import type { ReactNode } from "react";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { ArtifactDropZone, ArtifactUploadRow, useArtifactUpload } from "./ArtifactUpload";
 
 function TestHarness(): ReactNode {
@@ -19,6 +19,7 @@ function renderHarness() {
   const queryClient = new QueryClient({
     defaultOptions: { mutations: { retry: false }, queries: { retry: false } },
   });
+  queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
   return render(
     <QueryClientProvider client={queryClient}>
       <TestHarness />
@@ -81,6 +82,37 @@ test("confirming the staged file uploads it with the typed summary", async () =>
     const [, input] = uploadArtifact.mock.calls[0] ?? [];
     expect(input?.name).toBe("notes.md");
     expect(input?.summary).toBe("First draft");
+  } finally {
+    view.unmount();
+    uploadArtifact.mockRestore();
+  }
+});
+
+// Dispatch stored the file and lost its answer (`409 KEY_COMMITTED`): the staged file and its
+// summary go, the row says what was stored, and the row's Upload is the picker again, so a second
+// press sends nothing.
+test("an upload answered KEY_COMMITTED lets go of the staged file, says it was stored, and a second press sends nothing", async () => {
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockRejectedValue(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "already made" })
+  );
+  const view = renderHarness();
+
+  try {
+    const file = new File(["content"], "notes.md", { type: "text/markdown" });
+    fireEvent.change(screen.getByLabelText("Upload artifact"), { target: { files: [file] } });
+    await screen.findByText("notes.md");
+    fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "The upload of notes.md was made, but Dispatch lost its answer, so it may take a moment to appear."
+    );
+    expect(screen.queryByLabelText("Summary (optional)")).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Upload" }));
+    await Bun.sleep(20);
+    expect(uploadArtifact).toHaveBeenCalledTimes(1);
   } finally {
     view.unmount();
     uploadArtifact.mockRestore();

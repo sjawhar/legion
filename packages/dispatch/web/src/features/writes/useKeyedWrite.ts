@@ -25,6 +25,14 @@ export interface KeyedWriteOptions<TData, TVariables, TContext>
   /** Whether this surface shows a refusal itself (a form the reader is in front of): the
    *  indicator then shows the write only while it is out. A function decides it per write. */
   readonly inline?: boolean | ((variables: TVariables) => boolean);
+  /**
+   * Called once the write has landed: with Dispatch's answer, or with `null` when Dispatch made
+   * the write and has no answer to give for it (`AnswerNotKeptError`: `409 KEY_COMMITTED`, or a
+   * replay of an answer it did not keep). A surface that creates something - a form the reader
+   * would otherwise press again - handles both here, in one place: it lets go of its draft either
+   * way, and for `null` says what was made (`LandedWithoutAnswer`) rather than opening it.
+   */
+  readonly onLanded?: (data: TData | null, variables: TVariables) => void;
 }
 
 /**
@@ -44,6 +52,7 @@ export interface KeyedWriteOptions<TData, TVariables, TContext>
 export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
   inline,
   label,
+  onLanded,
   write,
   ...options
 }: KeyedWriteOptions<TData, TVariables, TContext>): UseMutationResult<
@@ -57,7 +66,7 @@ export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
   const stopped = useRef<{ readonly key: string; readonly variables: TVariables } | undefined>(
     undefined
   );
-  const { onError, onSettled } = options;
+  const { onError, onSettled, onSuccess } = options;
   const mutation = useMutation({
     ...options,
     mutationFn: (variables: TVariables) => {
@@ -83,10 +92,19 @@ export function useKeyedWrite<TData, TVariables = void, TContext = unknown>({
     // A write that landed with no answer to give (`AnswerNotKeptError`) is no refusal: the queue
     // has read again everything it could have changed, so the surface rolls nothing back and
     // settles as on a landing, with no error.
-    onError: (error, ...rest) =>
-      error instanceof AnswerNotKeptError ? undefined : onError?.(error, ...rest),
+    onError: (error, variables, ...rest) => {
+      if (error instanceof AnswerNotKeptError) {
+        onLanded?.(null, variables);
+        return;
+      }
+      return onError?.(error, variables, ...rest);
+    },
     onSettled: (data, error, ...rest) =>
       onSettled?.(data, error instanceof AnswerNotKeptError ? null : error, ...rest),
+    onSuccess: (data, variables, ...rest) => {
+      onLanded?.(data, variables);
+      return onSuccess?.(data, variables, ...rest);
+    },
   });
   // Nor does the surface show it as one: the mutation is reset before the browser paints it.
   const landedWithoutAnswer = mutation.error instanceof AnswerNotKeptError;

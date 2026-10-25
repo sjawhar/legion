@@ -5,6 +5,7 @@ import { api } from "../../api/client";
 import type { AgentToken, CreatedAgentToken } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useCopyFeedback } from "../../hooks/useCopyFeedback";
+import { compareTimestamps } from "../../lib/timestamps";
 import {
   borderDefault,
   card,
@@ -23,6 +24,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { LandedWithoutAnswer } from "../writes/LandedWithoutAnswer";
 import { useKeyedWrite } from "../writes/useKeyedWrite";
 import {
   settingsSubmitButton,
@@ -33,10 +35,30 @@ import {
 
 const agentTokensQueryKey = ["agent-tokens"] as const;
 
+/** The live token labelled `name` that a mint whose answer was lost made: the newest of that label,
+ *  since the mint is the latest thing to have made one. */
+function lostToken(
+  tokens: readonly AgentToken[] | undefined,
+  name: string
+): AgentToken | undefined {
+  return tokens
+    ?.filter((token) => token.name === name && token.revoked_at === null)
+    .reduce<AgentToken | undefined>(
+      (newest, token) =>
+        newest === undefined || compareTimestamps(token.created_at, newest.created_at) > 0
+          ? token
+          : newest,
+      undefined
+    );
+}
+
 export function AgentTokensSection(): ReactNode {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [shownToken, setShownToken] = useState<CreatedAgentToken>();
+  /** The label of a token Dispatch minted whose value was lost with its answer, until it is
+   *  replaced or the reader writes another label. */
+  const [lostLabel, setLostLabel] = useState<string | null>(null);
   const { copy, reset: resetCopyStatus, status: copyStatus } = useCopyFeedback();
   const tokens = useQuery({ queryKey: agentTokensQueryKey, queryFn: () => api.listAgentTokens() });
   // The form shows a refused mint beside the name it was refused over.
@@ -44,15 +66,24 @@ export function AgentTokensSection(): ReactNode {
     inline: true,
     label: (input: { name: string }) => `New agent token ${input.name}`,
     write: (input, bounds) => api.createAgentToken(input, bounds),
-    onSuccess: (created) => {
+    onLanded: (created, input) => {
+      setName("");
+      if (created === null) {
+        // Minted, and its value - shown once only - is gone with the answer: the token is
+        // listed once the list is read again, and the reader can replace it.
+        setShownToken(undefined);
+        setLostLabel(input.name);
+        void queryClient.invalidateQueries({ queryKey: agentTokensQueryKey });
+        return;
+      }
       const { token, ...safeToken } = created;
       queryClient.setQueryData<AgentToken[]>(agentTokensQueryKey, (current = []) => [
         safeToken,
         ...current,
       ]);
+      setLostLabel(null);
       setShownToken(created);
       resetCopyStatus();
-      setName("");
     },
   });
   const revokeToken = useKeyedWrite({
@@ -68,7 +99,16 @@ export function AgentTokensSection(): ReactNode {
   });
   const submit = (event: FormEvent<HTMLFormElement>) => {
     event.preventDefault();
+    // An emptied form - a mint that landed - sends nothing, whatever submits it.
+    if (name.trim() === "") return;
     createToken.mutate({ name });
+  };
+  const lost = lostLabel === null ? undefined : lostToken(tokens.data, lostLabel);
+  /** Revokes the token whose value was lost, then mints another under its label. */
+  const replaceLost = () => {
+    if (lost === undefined || lostLabel === null) return;
+    const label = lostLabel;
+    revokeToken.mutate(lost.id, { onSuccess: () => createToken.mutate({ name: label }) });
   };
   const copyToken = () => {
     if (shownToken === undefined) {
@@ -188,7 +228,10 @@ export function AgentTokensSection(): ReactNode {
           <input
             className={`min-h-11 rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
             id="agent-token-name"
-            onChange={(event) => setName(event.target.value)}
+            onChange={(event) => {
+              setLostLabel(null);
+              setName(event.target.value);
+            }}
             placeholder="Architect"
             required
             value={name}
@@ -198,6 +241,22 @@ export function AgentTokensSection(): ReactNode {
           New token
         </button>
       </form>
+      {lostLabel === null ? null : (
+        <div className="mt-4 space-y-2">
+          <LandedWithoutAnswer what={`Token “${lostLabel}”`}>
+            Its value is shown only once and was lost with the answer, so revoke it and mint
+            another.
+          </LandedWithoutAnswer>
+          <button
+            className={settingsSubmitButton}
+            disabled={lost === undefined || revokeToken.isPending || createToken.isPending}
+            onClick={replaceLost}
+            type="button"
+          >
+            {lost === undefined ? "Waiting for it to be listed…" : "Revoke it and mint another"}
+          </button>
+        </div>
+      )}
       {createToken.isError ? (
         <div className="mt-4">
           <QueryError

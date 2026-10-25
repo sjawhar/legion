@@ -3,7 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 import { keyedAttempt } from "../../__tests__/keyed-attempt";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { DocumentList } from "./DocumentList";
 
@@ -113,6 +113,44 @@ test("New document opens its document page", async () => {
     expect(screen.getByTestId("location").textContent).toBe(
       "/projects/CORE/documents/design-notes"
     );
+  } finally {
+    view.unmount();
+    listProjectArtifacts.mockRestore();
+    uploadArtifact.mockRestore();
+  }
+});
+
+// Dispatch made the document and lost its answer (`409 KEY_COMMITTED`): there is no document page
+// to open, so the form closes, says what was made and the list is read again - and the form opened
+// again starts empty, so a second press makes no second document.
+test("New document answered KEY_COMMITTED closes the form, says it was made, and a second press sends nothing", async () => {
+  const { listProjectArtifacts, view } = renderList([]);
+  const uploadArtifact = spyOn(api, "uploadArtifact").mockRejectedValue(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "already made" })
+  );
+
+  try {
+    await screen.findByText("No documents yet.");
+    fireEvent.click(screen.getByRole("button", { name: "New document" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Title" }), {
+      target: { value: "Design notes" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Create" }));
+
+    const made = await screen.findByTestId("landed-without-answer");
+    expect(made.textContent).toBe(
+      "Document Design notes was made, but Dispatch lost its answer, so it may take a moment to appear."
+    );
+    expect(screen.queryByRole("form", { name: "New document" })).toBeNull();
+    expect(screen.queryByRole("alert")).toBeNull();
+    expect(screen.getByTestId("location").textContent).toBe("/");
+    await waitFor(() => expect(listProjectArtifacts.mock.calls.length).toBeGreaterThan(1));
+
+    fireEvent.click(screen.getByRole("button", { name: "New document" }));
+    expect(screen.getByRole<HTMLInputElement>("textbox", { name: "Title" }).value).toBe("");
+    fireEvent.submit(screen.getByRole("form", { name: "New document" }));
+    await Bun.sleep(20);
+    expect(uploadArtifact).toHaveBeenCalledTimes(1);
   } finally {
     view.unmount();
     listProjectArtifacts.mockRestore();
