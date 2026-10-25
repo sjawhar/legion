@@ -19,13 +19,14 @@ const embedCanary = "dispatch embedqueue confirmation canary"
 // confirmSoloFailure decides whether a solo row's own non-throttled failure is this row's own
 // fault or a systemic condition, by immediately probing embedCanary - right after the row's own
 // failed call, in the same call context, drawing its own token reservation like any other
-// background call since it is a real (if tiny) Bedrock request. A canary success proves the
-// service, credentials and model were all working at that exact moment, so the row's own failure
-// is confirmed permanent. A canary failure - including a throttle - means the condition is
-// systemic, not this row's fault: nothing is confirmed, the row goes back to retry, and if the
-// canary itself was throttled, throttled is reported too, so the caller backs off exactly as an
-// outright-throttled call would. The confirmation is local to this one row and its own fresh
-// canary call, never reasoning about any other row's result in the same batch or bisection.
+// background call since it is a real (if tiny) request to the model service. A canary success
+// proves the service, credentials and model were all working at that exact moment, so the row's
+// own failure is confirmed permanent. A canary failure - including a throttle - means the
+// condition is systemic, not this row's fault: nothing is confirmed, the row goes back to retry,
+// and if the canary itself was throttled, throttled is reported too, so the caller backs off
+// exactly as an outright-throttled call would. The confirmation is local to this one row and its
+// own fresh canary call, never reasoning about any other row's result in the same batch or
+// bisection.
 func confirmSoloFailure(ctx context.Context, deps Deps, group []pendingRow, rowErr error, renewal *claimRenewal) bisectResult {
 	renewal.renew(ctx)
 	reserveBackgroundTokens(ctx, deps, []string{embedCanary}, renewal)
