@@ -2,27 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T14:07:13Z",
-  "round": 3,
-  "reviewedCodeHead": "c9b95f0c760dd8fd959fc846f531385154577dcf",
-  "base": "56ba79b8cf6d981ce6ba2f588204fd8ff3778d1b",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T16:00:39Z",
+  "round": 4,
+  "reviewedCodeHead": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
+  "base": "687c9e6f2b92b9c0b0e59df6ca026b7bc899304b",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
   "previousRounds": [
-    {"round": 1, "codeHead": "7d38337be60f", "decision": "changes_requested", "findings": "e2e-local.sh destroyed a live same-checkout run; stale README; false guard comment. Fixed in 529a9c541aef, re-driven at cb81dabd."},
-    {"round": 2, "codeHead": "cb81dabd7aac", "decision": "changes_requested", "findings": "Gate port band inside gVisor's ephemeral range; relay.Close comment. Fixed in c9b95f0c760d; both thermonuclear passes approve that fix at c9b95f0c."}
+    {"round": 1, "codeHead": "7d38337be60f", "decision": "changes_requested", "findings": "e2e-local.sh destroyed a live same-checkout run; stale README; false guard comment. Fixed in 529a9c541aef."},
+    {"round": 2, "codeHead": "cb81dabd7aac", "decision": "changes_requested", "findings": "Gate port band inside gVisor's ephemeral range; relay.Close comment. Fixed in c9b95f0c760d."},
+    {"round": 3, "codeHead": "c9b95f0c760d", "decision": "changes_requested", "findings": "envoy-go-race red: overlap test's subtests shared one account and raced nats-server's delete-then-create window. Fixed in cf4fb50d1afc (URL per subtest; kv_test.go recreate through RecreateKeyValue); envoy-go-race success at 9ca2004f."}
   ],
-  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. CI head c9b95f0c760d (the newest pull_request run); compare to 25a7b6a6183a is ahead, 2 files, both under .legion/. lint, typecheck, test, pr-title all completed/success. Legion Envoy and Contracts run 40195850135 completed failure on three jobs: broker-multiprocess and envoy-go (its unit step's only FAIL is 'cmd/broker [build failed]', startBroker signature mismatch from main, dispatch://INFRA-379; go vet -tags multiprocess ./cmd/broker/ is clean on this branch, which touches no cmd/broker file; envoy-go's natslive and integration steps were therefore skipped at this head), and envoy-go-race, which is this round's finding.",
-  "thermonuclear": "Both passes at c9b95f0c: deep-review APPROVE (gatePorts parsing and floor traced, no 15xxx fixed listener in the repository, macOS falls back to 15000-15999 below Darwin's 49152; go test ./internal/testnats/ ./internal/bus/ -run 'Gate|Reconnect' ok), code-quality APPROVE (wording-only nits on nats.go:688-690). Neither pass saw the envoy-go-race result, which settled after them.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/bus/stream_config_test.go:421-453",
-      "description": "envoy-go-race at c9b95f0c (job 121177536920) fails TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn/narrow at line 453 with 'nats: error creating store for stream': the nats-server delete-then-create race testnats.RecreateKeyValue documents (nats.go:982-990). The parent test takes one account (URL and Connect at 421-422) and both subtests use its js; 'narrow' deletes the stream 'widen' made, the account's last, and recreates the same name at once. testnats.URL's own contract (nats.go:97-103) says each subtest gets its own account because subtests that delete and recreate one name in a shared account race. The test predates this PR, but it now runs against the in-process server, which the race detector instruments together with the test, and this is its first red at this branch's heads (envoy-go-race success at 7d38337be60f). 200 non-race runs pass in this pod, which cannot run -race (no C compiler). Fix: take URL and Connect inside each subtest, and check the module's other delete-then-recreate sites (DeleteStream/DeleteKeyValue followed by a create of the same name without RecreateKeyValue) for the same pattern."
-    }
+  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. CI head 9ca2004f5f5f is the newest pull_request run; compare to 160e82120e54 is ahead, 2 files, both under .legion/. lint, typecheck, test, pr-title completed/success. Legion Envoy and Contracts run 40206938033: envoy-go (unit, natslive, integration), envoy-go-race, envoy-infra-go, envoy-smoke, envoy-e2e-local, dispatch-memory, dispatch-multiprocess, broker-multiprocess, pi-legion all success; dispatch still in progress at the read (not required).",
+  "thermonuclear": "Both passes at 9ca2004f: deep-review APPROVE (the fixes close the window; every other same-name delete-then-create in packages/envoy tests is retried, keeps other streams in its account, or is cleanup-only; the merge keeps the flock ahead of every destructive step; #2191's tests take NATS through testnats.URL; go vet ./... exit 0), code-quality APPROVE (wording-only notes on stream_config_test.go:421-423 and nats_test.go:354-355).",
+  "keyFindings": [],
+  "risksRecorded": [
+    "In a worker pod, cmd/listener's four dispatch_resolution_test.go tests (from #2191, merged in) panic with 'rootless Docker not found' through testpg.URL (Postgres); the architect ruled it out of this issue's scope and routed it to the controller. The proven claim is that no NATS container starts anywhere, not that every package passes in a pod.",
+    "internal/kvwatch/kvwatch_test.go:837-840 deletes its account's only stream and restores the same name from a snapshot with no retry: the same server window, unchanged by this PR, behind several request round trips before the restore commits; not seen failing.",
+    "TestEveryGatePortLiesJustBelowThisMachinesEphemeralRange passes on a pod even if StartGate ignored the file, since the pod's range equals the fallback; it fails such a regression on a default Linux runner."
   ],
-  "verifiedProofs": "E2E (implementer) and E2E (tester) lines both present. The round-2 fix is proved by the tester's three 2000-bind runs (0 in 15000-15999) and attacked table, and by the deep-review pass's targeted run.",
-  "threads": "PRRT_kwDORFy7ds6wBYc9 (gate band) and PRRT_kwDORFy7ds6wBYc_ (relay.Close comment): fixed in c9b95f0c760d, accepted; replied on each. Round-1 threads already accepted."
+  "verifiedProofs": "E2E (implementer) and E2E (tester) lines both present; the round-3 fix is confirmed by envoy-go-race success at 9ca2004f, the one configuration the pod cannot run.",
+  "threads": "All four threads (PRRT_kwDORFy7ds6wAuxe, PRRT_kwDORFy7ds6wAuxh, PRRT_kwDORFy7ds6wBYc9, PRRT_kwDORFy7ds6wBYc_) carry my answer and are resolved; no bot threads. Round 3's finding had no thread."
 }
