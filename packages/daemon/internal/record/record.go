@@ -68,6 +68,15 @@ type Issue struct {
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
 	HandedOver bool
+	// TakenBack is whether this record is a tree Legion took back after it had finished and
+	// lingered: a root set back to todo in its linger, or after it closed, which the re-admission
+	// of the root's own tree sets (admit.readmit). Every re-admission that carries another tree's
+	// work into a root of its own — a hand-over's child, an orphan a person labelled — clears it,
+	// so no record keeps a mark the next arrival contradicts. Promotion reads it because such a
+	// tree starts again whatever its links say, and once re-admission has written them a returning
+	// root and a never-started child handed over from a finished tree are the same shape; only the
+	// mark tells the exempt one from the one still checked (blockers.Exempt).
+	TakenBack bool
 	// DispatchStatus is the status Dispatch showed at the newest event or boot listing applied to the
 	// record (LastDispatchSeq's), whatever the daemon has queued since: every event carries the whole
 	// issue, so only an event whose status differs from it writes a status.
@@ -706,6 +715,19 @@ func (i Issue) Lingers() bool { return i.LingerUntil != nil }
 func (i Issue) LingersAt(generation uint64) bool {
 	return i.Lingers() && i.Generation == generation
 }
+
+// CarriesRun says whether the issue carries a run: it started a phase, and its tree neither left
+// it admitted nor finished or parked it (phase done). It is one reading with two uses, and the
+// only definition of it.
+//
+// A child moving to a root of its own carries its run there when it has one: a child still
+// admitted never started under its old tree's gate, and a finished one (set back to todo during
+// its tree's linger, say) has no run to carry — carried at done, its new root would take a slot
+// and start an architect with nothing to run. Every path that moves a child to a tree of its own
+// asks it: a hand-over's event, the outbox's direct consumption, and a person's labelling of an
+// orphan. And work already under way is never stopped and never re-checked, so a candidate that
+// carries a run waits on nothing, whatever its links say (blockers.Exempt).
+func (i Issue) CarriesRun() bool { return i.Phase != phase.Admitted && i.Phase != phase.Done }
 
 // ParentOf is an observed parent key as a record holds it: nil for none. Dispatch says "no parent"
 // with an empty string, and the record says it with a nil pointer.

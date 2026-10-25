@@ -62,13 +62,13 @@ func Unfinished(rows map[string]Row, key string) []string {
 // It is the two decisions themselves, read rather than made: a root of waiting — the line
 // admission promotes from, which the caller passes as it computes it — that promotion skips
 // (admit.waitsOn), and a recorded child the workflow holds at `admitted`
-// (workflow.Engine.StartUnblockedChildren). A candidate that carries a run is never judged, as
-// neither decider judges one: work already under way is never stopped and never re-checked,
-// whatever its links say.
+// (workflow.Engine.StartUnblockedChildren). A candidate the rule exempts is never judged, as the
+// decider that would admit it does not judge it either (Exempt): what promotion starts whatever
+// its links say is never reported as waiting on them.
 func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.BlockedIssue {
 	blocked := make([]record.BlockedIssue, 0, len(waiting))
 	for _, issue := range waiting {
-		if carriesRun(issue) {
+		if Exempt(issue) {
 			continue
 		}
 		if unfinished := Unfinished(rows, issue.Key); len(unfinished) > 0 {
@@ -87,9 +87,14 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.Block
 	return blocked
 }
 
-// carriesRun says whether an issue carries a run: it started a phase, and its tree neither left
-// it admitted nor finished it. It is admit.startedRun's rule, the one that keeps a handed-over
-// child or a re-admitted tree out of every blocker judgement.
-func carriesRun(issue record.Issue) bool {
-	return issue.Phase != phase.Admitted && issue.Phase != phase.Done
-}
+// Exempt says whether an issue starts whatever its links say, and so is neither held by the
+// promotion skip (admit.waitsOn) nor reported here. It is the one definition both readings share,
+// so an issue one of them exempts can never be reported blocked by the other.
+//
+// Two kinds of issue are exempt. One that carries a run into a tree of its own — a handed-over
+// child, a re-admitted tree — is work already under way, which is never stopped and never
+// re-checked (record.Issue.CarriesRun). And a tree Legion takes back after it has finished and
+// lingered starts again at its person's word (record.Issue.TakenBack), though re-admission leaves
+// it carrying no run. Everything else is checked like any other issue, a child that has been
+// released but never started among them.
+func Exempt(issue record.Issue) bool { return issue.CarriesRun() || issue.TakenBack }

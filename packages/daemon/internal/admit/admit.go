@@ -525,12 +525,13 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 			if err != nil {
 				return err
 			}
-			// The carry's own test is startedRun, deliberately and only that: what the child waits
-			// on is not read here. A hand-over moves work already under way into a root of its
-			// own, and promotion admits such a candidate whatever its links say (waitsOn).
+			// The carry's own test is the child's own run (record.Issue.CarriesRun), deliberately
+			// and only that: what the child waits on is not read here. A hand-over moves work
+			// already under way into a root of its own, and promotion admits such a candidate
+			// whatever its links say (waitsOn).
 			if !handover.Cancelled && root != nil && root.LingersAt(handover.Generation) {
 				a.log.Info("admission hand-over", "issue", stored.Key, "tree", handover.Tree, "linger", handover.Generation)
-				return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, startedRun(stored))
+				return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, stored.CarriesRun())
 			}
 		}
 	}
@@ -544,9 +545,9 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 	if orphan {
 		// An orphan that started a phase is the same work as a hand-over, whoever handed it to
 		// Legion: a child stranded by a root that closed before its hand-over existed carries its
-		// phase, gate and pull request too (startedRun).
+		// phase, gate and pull request too (record.Issue.CarriesRun).
 		a.log.Info("admission orphan", "issue", stored.Key, "parent", observation.Parent)
-		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, startedRun(stored))
+		return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, stored.CarriesRun())
 	}
 	return a.recordObservation(ctx, tx, stored, observed{
 		Title: observation.Title, Parent: observation.Parent, Rank: observation.Rank,
@@ -559,7 +560,7 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 // ordinary daemon todo echo because it carries the persisted fence identity. It logs the hand-over
 // as the event path does, marked as the outbox's, once it commits: the live proof tells the two
 // consumers of a person's labelled todo (this, or admission's orphan carry) apart by it. Its carry
-// is the event path's: startedRun, and not what the child waits on.
+// is the event path's: record.Issue.CarriesRun, and not what the child waits on.
 func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.Handover) error {
 	stored, err := a.store.Issue(ctx, tx, fact.Issue)
 	if err != nil || stored == nil {
@@ -576,7 +577,7 @@ func (a *Admission) consumeHandover(ctx context.Context, tx pgx.Tx, fact intake.
 	intake.OnCommit(ctx, func() {
 		a.log.Info("admission hand-over", "issue", fact.Issue, "tree", fact.Tree, "linger", fact.Generation, "via", "outbox")
 	})
-	return a.readmit(ctx, tx, *stored, stored.Title, deref(stored.Parent), stored.Rank, stored.LastDispatchSeq, startedRun(*stored))
+	return a.readmit(ctx, tx, *stored, stored.Title, deref(stored.Parent), stored.Rank, stored.LastDispatchSeq, stored.CarriesRun())
 }
 
 // orphan says whether an observation makes a recorded child an orphan, admitted as a root of its
@@ -643,16 +644,6 @@ func readmittable(stored record.Issue) bool {
 	return claim.IsTreeRoot(stored.Key, stored.Tree) && (stored.Lingers() || stored.Phase == phase.Done)
 }
 
-// startedRun says whether a child moving to a root of its own carries its run there: it started a
-// phase, and its tree neither left it admitted nor finished or parked it (phase done). One still
-// admitted never started under its old tree's gate, and a finished one (set back to todo during its
-// tree's linger, say) has no run to carry: carried at done, its new root would take a slot and start
-// an architect with nothing to run. Every path that moves a child to a tree of its own applies it:
-// a hand-over's event, the outbox's direct consumption, and a person's labelling of an orphan.
-func startedRun(issue record.Issue) bool {
-	return issue.Phase != phase.Admitted && issue.Phase != phase.Done
-}
-
 // mirror is this project's whole mirror of what Dispatch says each of its issues waits on, in one
 // query (record.Store.DispatchIssues). Admission decides inside a transaction that performs no
 // I/O, so it cannot ask Dispatch what a root is blocked by: it reads the rows the blockers.Mirror
@@ -668,11 +659,23 @@ func (a *Admission) mirror(ctx context.Context, tx pgx.Tx) (map[string]blockers.
 
 // waitsOn is what candidate still waits on, from rows: the issues Dispatch says it is blocked by
 // that are not done (blockers.Unfinished, which counts a blocker the daemon has no row of as not
-// done), and nothing at all for a candidate that carries a run (startedRun). An issue that carries
-// a run into a tree of its own — a handed-over child, a re-admitted tree — is work already under
-// way, and work already under way is never stopped and never re-checked, whatever its links say.
+// done), and nothing at all for a candidate the rule exempts (blockers.Exempt, the one definition
+// the state's `blocked` is read from too).
+//
+// The exemption is two sentences of the spec, one for each half of it. "An issue that carries a
+// run into a tree of its own, meaning its phases have already begun, by whichever of the three
+// doors it arrives through" is record.Issue.CarriesRun: a handed-over child, an orphan a person
+// labelled, work already under way, which is never stopped and never re-checked. "And a tree
+// Legion takes back after it has finished and lingered" is record.Issue.TakenBack, which
+// re-admission writes for the root's own tree returning, since that root comes back at
+// phase.Admitted carrying no run. "Those start again whatever their links say."
+//
+// Everything else is checked: "an issue that carries no run is checked like any other, a child
+// that has been released but never started among them" — a never-started child handed to Legion
+// as a root of its own when its tree finished arrives here carrying neither mark, and its
+// unfinished blockers hold it in the waiting line.
 func waitsOn(rows map[string]blockers.Row, candidate record.Issue) []string {
-	if startedRun(candidate) {
+	if blockers.Exempt(candidate) {
 		return nil
 	}
 	return blockers.Unfinished(rows, candidate.Key)
@@ -686,6 +689,10 @@ func waitsOn(rows map[string]blockers.Row, candidate record.Issue) []string {
 // both its architect and the role of that carried phase. A merged pull request is never observed as
 // merged again, and a review, acceptance or READY would otherwise rerun work already decided or
 // landed.
+//
+// This is also the one place that knows whose tree is arriving, which outlives it as
+// record.Issue.TakenBack: afterwards a root whose own tree came back and a child another tree
+// handed over are the same shape, both tree roots at admitted, handed over, a generation on.
 func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank string, seq int64, carry bool) error {
 	if stored.Generation == ^uint64(0) {
 		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
@@ -710,6 +717,11 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.HandedOver = true
 	stored.Parent = record.ParentOf(parentKey)
 	stored.Tree = stored.Key
+	// The root's own tree coming back is the re-admission promotion exempts: such a tree starts
+	// again whatever its links say. Every other arrival here is another tree's work reaching a
+	// root of its own — a hand-over's carry, an orphan a person labelled, a child that never
+	// started — and clears the mark, so no record keeps one its next arrival contradicts.
+	stored.TakenBack = claim.IsTreeRoot(stored.Key, oldTree)
 	if !orphan {
 		stored.Phase, stored.Hold, stored.ReadyPendingVersion = phase.Admitted, nil, nil
 	}

@@ -258,8 +258,10 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // back as a root of its own once they close. A never-gated child of a finishing tree, which waits
 // on nothing, would instead take an admission slot for work its tree's design never opened. The
 // mirror is read once for the whole call, as every blocker judgement reads it (Engine.mirror):
-// startedRun is false at phase.Admitted, so the new root carries no run, which is what the
-// blocked-root rule reads when the child comes up for admission.
+// record.Issue.CarriesRun is false at phase.Admitted, so the new root carries no run, and its
+// re-admission is another tree's work arriving rather than its own coming back, so it is no tree
+// taken back either — it is checked, which is what the blocked-root rule reads when the child
+// comes up for admission (blockers.Exempt).
 func (e *Engine) settleUnfinished(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) error {
 	rows, err := e.mirror(ctx, tx)
 	if err != nil {

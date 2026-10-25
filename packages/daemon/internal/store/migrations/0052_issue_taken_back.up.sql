@@ -1,0 +1,18 @@
+-- 0052_issue_taken_back.up.sql -- whether the record is a tree Legion took back after it had
+-- finished and lingered (INFRA-225).
+--
+-- A root set back to todo while its tree lingers after its sign-off, or after it closed, starts
+-- again whatever Dispatch says it waits on; a child of that tree handed to Legion as a root of its
+-- own without ever having started a phase is checked like any other root. Once re-admission has
+-- written them, the two records are the same shape — a tree root at `admitted`, handed over, at a
+-- new generation whose tree is its own key — so nothing else in the record tells them apart. The
+-- distinction exists only inside the re-admission: whether the tree coming back is the root's own.
+--
+-- The mark is stored rather than derived because the judgement is not made in that moment. A
+-- returning root whose project has no free slot keeps its place in the waiting line and is judged
+-- again by a later pass — a tick, a hold's release, the next boot — which has nothing of the
+-- re-admission left to read.
+--
+-- The default leaves every row already recorded judged exactly as it is today: an issue recorded
+-- before this column is not retroactively exempt, and its next re-admission writes the mark.
+alter table issues add column taken_back boolean not null default false;
