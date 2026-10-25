@@ -1139,45 +1139,88 @@ deployment still on the file store copies its sessions into the table first ([Co
 sessions before turning it on](#copying-file-sessions-before-turning-it-on)); a sessions table
 behind is a deployment every issue's next launch fails on, not something the cutover repairs.
 
-**The earlier daemon is stopped before the new image boots.** Scale its Deployment to 0 and wait
-for its pod to go, as the session copy does ([Copying file sessions before turning it
-on](#copying-file-sessions-before-turning-it-on), step 2), rather than rolling one image onto the
-other: nothing makes a daemon a singleton, and a daemon that is restarting or refusing its
-configuration leaves the earlier release's issue pods running with nobody supervising them
-([Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees)).
-Migration 0051 strips the `release` key from every `issue_suspend` row still queued, because this
-release decodes that payload strictly and no longer has the field; an earlier daemon still
-running after the strip, closing a child as done during the overlap, queues the key again,
-and the new daemon's decode then stalls that issue's lifecycle lane on a row no retry can finish —
-the very failure the migration exists to prevent.
+**Every running issue is pushed and stopped while the earlier daemon still runs, because the first
+boot of this release cuts over every live claim by itself.** This release raises the daemon's
+plugin contract to 36, and every claim of a deployment on the release before it recorded 35. The
+boot posts `StalePlugin` to each restored claim whose process has registered and whose recorded
+contract is not the daemon's (`refreshStalePlugins`, `internal/daemon/daemon.go`), and the
+supervisor answers it by replacing that process, mid-turn if a turn is running (`refreshPlugin`,
+`internal/supervise/plugin.go`). That relaunch finds the issue's Sandbox of the previous disk shape
+and replaces it (`replaceSupersededSandbox`, `internal/runtime/sandbox/relaunch.go`), deleting it
+together with the volume that holds the issue's whole workspace. A role keeps its process until
+its issue leaves the workflow, idle between phases or not, so every issue still in the workflow
+when this release boots is cut over by that boot, all at once, and whatever it had not pushed is
+gone before the operator can read a line of the log. The last moment an agent can be asked to push
+is while the earlier daemon still supervises it, and the steps below are ordered to take it.
 
-The cutover itself, once that daemon is stopped and the image is applied:
+The order is the runbook's to keep, not a hold in the daemon. Holding the migrating relaunch until
+an operator chose to start the issue would give the daemon a new kind of control over work, and
+this project keeps the daemon to moving work through its phases and keeping its pods running,
+adding to that only when the person who owns the daemon says so. A hold would not save anything
+this change has not already given up either: its approved specification is that work nobody pushed
+dies with its pod, and the cutover's loss is that rule applied once, to every issue at the same
+moment. Nor does the order ask the operator for anything new: the earlier daemon has to be stopped
+before the image is applied regardless (step 4), and the push and the stop the runbook already
+asked for simply come before it.
 
-1. **Read the boot log for the issues still to cut over.** The census accepts an issue Sandbox
+The cutover, in this order:
+
+1. **Have every running issue's work pushed, and confirm it.** Under the earlier daemon, still
+   running, list the issues it has pods for: `kubectl -n legion get pods -l
+   'legion.dev/project=<project>,legion.dev/issue' -L legion.dev/issue`. Each one holds a live
+   claim, so each is one the boot would cut over. Ask the role that has work in hand on each,
+   through Dispatch, to push it to `legion/<KEY>`, letting a role mid-turn finish first; a role
+   between phases pushed when it completed. Then confirm rather than trust the answer: take the
+   commit id the role reports, and in any clone of the repository `git fetch
+   https://github.com/<owner>/<repo> legion/<KEY> && git merge-base --is-ancestor <commit>
+   FETCH_HEAD` exits 0 only when the branch carries it. The pushed branch is the one copy of the
+   issue's work that survives the cutover.
+2. **Stop those issues.** A person moves each out of the workflow (`backlog`, from the Dispatch
+   dashboard or with `legion status <KEY> backlog --operator-token-file <file>`); for a root that
+   takes its tree out, whose cleanup deletes every issue Sandbox of the tree, volumes and all,
+   which is why its children's pushes are confirmed first. The earlier daemon ends the issue's
+   processes and leaves its Sandbox `Suspended`, owning its volume, with no pod. A claim with no
+   running process is not one the boot replaces, so the issue waits, disk intact, for the launch
+   the operator chooses in step 7.
+3. **Leave none running.** Step 1's listing prints no pod before the next step, unless it is the
+   pod of an issue whose loss you have chosen to accept. An issue nobody stops still cuts over, and
+   when depends on its claims. One whose claims are suspended, stopped in step 2 or before the
+   upgrade, cuts over at its next launch, whenever that launch comes, since any launch replaces a
+   Sandbox of the previous shape. One whose claims are live has no such grace: its launch is the
+   boot itself, which replaces its Sandbox and deletes the volume, taking whatever was unpushed,
+   before step 6's census can be read. The census logs before anything is relaunched, so it still
+   names that Sandbox, as work to do, when the Sandbox and its disk are already gone; an operator
+   who waits for that list to learn what is at risk learns it from a census of disks that no
+   longer exist. Steps 1 and 2 are how the loss is chosen rather than met.
+4. **Stop the earlier daemon.** Scale its Deployment to 0 and wait for its pod to go, as the
+   session copy does ([Copying file sessions before turning it
+   on](#copying-file-sessions-before-turning-it-on), step 2), rather than rolling one image onto
+   the other: nothing makes a daemon a singleton, and a daemon that is restarting or refusing its
+   configuration leaves the earlier release's issue pods running with nobody supervising them
+   ([Upgrading a deployment with running trees](#upgrading-a-deployment-with-running-trees)).
+   Migration 0051 strips the `release` key from every `issue_suspend` row still queued, because
+   this release decodes that payload strictly and no longer has the field; an earlier daemon
+   still running after the strip, closing a child as done during the overlap, queues the key
+   again, and the new daemon's decode then stalls that issue's lifecycle lane on a row no retry
+   can finish — the very failure the migration exists to prevent.
+5. **Apply this release.** Pin the daemon's image and `runtime.kubernetes.image` to this release
+   through the deploy path, with the `legion.yaml` that names the database and its secret (above).
+6. **Read the boot log for the issues still to cut over.** The census accepts an issue Sandbox
    that still owns the `issue` template and logs one line for each, `sandbox runtime: the issue
    Sandbox owns a claim template, the disk shape before the pod-owned disk; its next launch
    replaces it`, which names the Sandbox in the line's `sandbox` attribute, not in its text (the
    template's name is its `claim_template`), so grep the message and read the names off the
-   attribute. That list is the work.
-2. **Stop each issue running that day with its work pushed, and start it again.** The push is the
-   point: the launch that puts the issue on the new shape deletes the Sandbox and the volume it
-   owns, so every change not on `legion/<KEY>` is gone. Let a role mid-turn finish, or ask it
-   through Dispatch to push; a phase between workers has already pushed. Then a person moves the
-   issue out of the workflow and back (`backlog`, then `todo`, from the Dispatch dashboard or
-   with `legion status <KEY> <status> --operator-token-file <file>`); for a root that takes its
-   tree out, whose cleanup deletes every issue Sandbox of the tree, volumes and all. The issue's
-   next launch creates a Sandbox of the new shape, and its pod brings a disk of its own.
-3. **Leave none to chance.** An issue nobody stops cuts over at its next launch all the same —
-   any relaunch replaces a Sandbox of the previous shape, which is the point of accepting it at
-   boot (`replaceSupersededSandbox`, `relaunch.go`) — but it does so whenever that launch comes,
-   taking whatever was unpushed with it. Working the list is how the loss is chosen rather than
-   met.
-4. **Delete the old-shape Sandboxes no issue will start again.** An issue stopped before the
-   upgrade left a `Suspended` Sandbox owning its volume, and nothing launches it, so the operator
-   deletes each by name once its issue is one no person intends to resume:
-   `kubectl -n legion delete sandbox <name>`, which takes the volume it owns with it. The boot
-   log's list names them.
-5. **Audit the namespace.** The cutover is done when every claim in the namespace is a pod's own
+   attribute. With every issue stopped first, each name is a `Suspended` Sandbox whose volume
+   still exists, and the list is the work.
+7. **Start each stopped issue again.** A person moves it back into the workflow (`todo`, the same
+   two ways). Its launch deletes the Sandbox of the previous shape and the volume it owns, creates
+   a Sandbox of the new shape, and its pod brings a disk of its own, provisioned from the pushed
+   branch step 1 confirmed.
+8. **Delete the old-shape Sandboxes no issue will start again.** A `Suspended` Sandbox whose issue
+   nobody launches keeps its volume indefinitely, so the operator deletes each by name once its
+   issue is one no person intends to resume: `kubectl -n legion delete sandbox <name>`, which
+   takes the volume it owns with it. Step 6's list names them.
+9. **Audit the namespace.** The cutover is done when every claim in the namespace is a pod's own
    or one of the three exceptions. `kubectl -n legion get pvc -l legion.dev/project=<PROJECT>`
    answers this question with silence whether the cutover worked or not — an issue's disk carries
    no label now — so read every claim and judge it by its owner:
@@ -1194,7 +1237,7 @@ The cutover itself, once that daemon is stopped and the image is applied:
    ```
 
    It prints nothing when the cutover is complete. Every line it does print is a claim no pod
-   owns, which on this release is either an issue's volume of the previous shape (step 4) or
+   owns, which on this release is either an issue's volume of the previous shape (step 8) or
    something that is not Legion's at all. The three names it passes over are the exceptions, each
    owned by a Sandbox or by nothing and each right as it is: every repository cache's claim,
    `cache-legion-<project>-cache-<owner>-<repo>-<hash>` ([The repository
@@ -2421,8 +2464,8 @@ Every pod runs:
 
 The project controller's Sandbox under `controller: daemon`, `legion-<project>-controller`, is the
 same pod with a one-role list: it carries `legion.dev/project` and `legion.dev/role=controller` and
-no tree or issue label, one init container (`workspace-init controller`) and one launcher container,
-`controller`, both carrying the controller's reservation, and owns a volume of its own the same way,
+no tree or issue label, runs no init container and one launcher container, `controller`, carrying
+the controller's reservation, and owns a volume of its own the same way,
 `issue-legion-<project>-controller` ([Daemon-launched controller](#daemon-launched-controller)).
 
 The image probe runs as a Sandbox of its own, `legion-probe-<project>-<digest12>`, with
@@ -3014,7 +3057,7 @@ ephemeral-storage request (the node-disk bound, below): each role container its 
 (`runtime.kubernetes.resources.<role>`, the daemon's default where the file sets none —
 [Configuration](#configuration)), both init containers the reservation of the role whose launch
 created the pod (`issuePod.initContainers`, `internal/runtime/sandbox/podkind.go`), the controller's
-launcher and init container the controller's, and the image probe's one container the probe's own
+launcher the controller's, and the image probe's one container the probe's own
 fixed 250m / 1Gi, request equal to limit (`probeReservation`, [Configuration](#configuration)), no
 role's share. Inside a pod, under gVisor, one role may use what its idle siblings reserved (below).
 At the defaults a six-role issue pod sums to 3 CPU and 19 GiB, the init containers adding nothing: a
@@ -4457,11 +4500,9 @@ App, refreshed every minute as every role's is; a failed review-App mint fails t
 the role, and the keeper relaunches it. A project with no GitHub owner to mint for (none of its
 repositories has an App) starts the controller anyway with `gh` acting as nobody, as `legion
 controller start` does there: its role Secret records an empty `github-default`, its `gh-controller`
-volume is an empty directory, and it holds owners from its next pod on. Its one init container,
-`legion workspace-init controller --root
-/legion` (`controllerPod.initContainers`), creates nothing at all: it refuses a `--root` that is
-not absolute and a pod handed the provisioning token, which the controller never holds, and
-otherwise exits 0. The pod
+volume is an empty directory, and it holds owners from its next pod on. It runs no init container
+(`controllerPod.initContainers`): nothing on its volume needs preparing before the launcher starts.
+The pod
 carries `legion.dev/project` and `legion.dev/role=controller` and no tree or issue label, so no
 tree's cleanup lists it, and the boot census holds it to exactly the one launcher those labels
 name and to the volume it owns. Under `runtime.kubernetes.agent_secrets` it is enrolled with the

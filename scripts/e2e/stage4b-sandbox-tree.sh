@@ -845,7 +845,11 @@ assert_pod_disk() {
     fail "pod $1's disk$2 is '${found:-none}', want '$1-issue Bound Pod/$1': a pod's disk is its own, created and deleted with it"
 }
 # assert_no_pod_disk POD CONTEXT fails unless POD's disk is gone, which is what a pod that is gone
-# leaves: the disk is the pod's, not its Sandbox's, so nothing of it outlives the pod.
+# leaves: the disk is the pod's, not its Sandbox's, so nothing of it outlives the pod for long. It
+# does outlive the pod object briefly: the claim is the pod's dependent, which the garbage collector
+# reaps only after the pod is deleted (about a second on a real cluster), so this one-shot read is
+# only for a pod gone well before it. A wait for a pod to go reads the disk inside its own gone-wait
+# instead (child1_released, child2_parked, root_parked).
 assert_no_pod_disk() {
   found=$(pod_disk "$1") || fail "the operator could not read pod $1's disk"
   [ -z "$found" ] ||
@@ -3637,19 +3641,22 @@ jq -e 'length > 0 and all(.[]; .state == "retired" and .session == "" and .sessi
 note "at $at $child1 is done: its Sandbox and pod are gone (kubectl get sandboxes,pods -l legion.dev/issue=$child1: nothing), and the disk $child1_pod-issue its pod owned is gone with it; the daemon logged \"$deleted_msg\" for it once and no lost volume; its claims: $retired"
 note "the root $tree1 kept Sandbox $root_pod Running, its pod's own disk ${found%% *} Bound and pod uid $root_uid"
 set_status "$child2" backlog
-# child2_parked: the park leaves the child no Sandbox and no pod, the same gone-read as
+# child2_parked: the park leaves the child no Sandbox, no pod and no disk, the same gone-read as
 # child1_released and for the same reason — SuspendIssue deletes the Sandbox once the pod is gone,
 # whether the stop was a close or a park. The signal is the API server's own answer rather than the
 # delete's log line, for two reasons: this read is the cluster's own state, where the line is only
 # the daemon's account of it, and child 2 is parked three times in this run (child-reentered parks
 # it twice more), so a log count would need a mark of its own at each wait while this read is the
-# same end state every time. A gone-wait holds each read to its exit status (see child1_released).
+# same end state every time. The disk is read inside the wait, not after it: it is the pod's own
+# ephemeral claim, which the garbage collector reaps only once the pod object is gone, so a stop
+# that went perfectly can still show it for a moment after the pod has left. A gone-wait holds each
+# read to its exit status (see child1_released).
 child2_parked() {
   local out
-  out=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/issue=$child2" -o name) && [ -z "$out" ]
+  out=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/issue=$child2" -o name) && [ -z "$out" ] &&
+    out=$(pod_disk "$child2_pod") && [ -z "$out" ]
 }
-until_true 600 "$child2's Sandbox and pod to be gone after its backlog" child2_parked
-assert_no_pod_disk "$child2_pod" " after its backlog"
+until_true 600 "$child2's Sandbox, pod and disk to be gone after its backlog" child2_parked
 note "at $(date -u +%FT%TZ) $child2 is in backlog: no Sandbox, no pod and no disk (kubectl get sandboxes,pods -l legion.dev/issue=$child2: nothing) — the park deleted the Sandbox with the role Secrets it owned, and the pod took its own disk with it"
 pass
 
@@ -3693,8 +3700,7 @@ reentry_tasks=$(planning_tasks "$child2") || fail "$child2's planner session cou
 [ "$reentry_tasks" = 2 ] || fail "$child2's resumed planner session holds $reentry_tasks planning tasks, want the first run's and the re-entered run's"
 note "$child2 set back to todo: the daemon resumed its planner $reentry_planner by rule ($reentry_rule) on its session $(jq -r .session <<<"$reentry_was"), suspendedBy daemon before and none after, and its session holds the re-entered run's planning task"
 set_status "$child2" backlog
-until_true 900 "$child2's Sandbox and pod to be gone after its second backlog" child2_parked
-assert_no_pod_disk "$child2_pod" " after its second backlog"
+until_true 900 "$child2's Sandbox, pod and disk to be gone after its second backlog" child2_parked
 reentry_parked=$(claim_by_token "$reentry_planner") || fail "legion claims shows no planner claim $reentry_planner on $child2"
 jq -e '.state == "suspended" and .suspendedBy == "daemon"' <<<"$reentry_parked" >/dev/null ||
   fail "$child2's planner after its second backlog is $(jq -c '{state, suspendedBy}' <<<"$reentry_parked"), want suspended by the daemon"
@@ -3732,8 +3738,7 @@ held_tasks=$(planning_tasks "$child2") || fail "$child2's planner session could 
 [ "$held_tasks" = 3 ] || fail "$child2's planner session holds $held_tasks planning tasks after the operator's resume, want three: one per run"
 note "the operator's resume relaunched $reentry_planner and the waiting start gave it the run's planning task, its session's third"
 set_status "$child2" backlog
-until_true 900 "$child2's Sandbox and pod to be gone after its last backlog" child2_parked
-assert_no_pod_disk "$child2_pod" " after its last backlog"
+until_true 900 "$child2's Sandbox, pod and disk to be gone after its last backlog" child2_parked
 held_planner_parked=$(claim_by_token "$reentry_planner") || fail "legion claims shows no planner claim $reentry_planner on $child2"
 jq -e '.state == "suspended" and .suspendedBy == "daemon"' <<<"$held_planner_parked" >/dev/null ||
   fail "$child2's planner after its last backlog is $(jq -c '{state, suspendedBy}' <<<"$held_planner_parked"), want suspended by the daemon"
@@ -5915,23 +5920,24 @@ smoke_main_cleaning=
 timeout_hook=limit_pending_blocked # clean_smoke_main leaves the hook empty
 # A look took up to 10 minutes from its task to its report in acceptance runs.
 on_tree "$tree1" until_true 600 "the implementer's pending report on the first look of $tree1's production check" check_look_reported "$tree1" 1
-# root_parked: the root keeps no Sandbox and no pod between its looks. The pending report suspends
-# the implementer's claim and queues an IssueSuspend, which deletes the Sandbox with the six role
-# Secrets it owned once the pod is gone (internal/workflow/check.go endLookPending), exactly as any
-# other stop of an issue does, so there is no mode left to read: the gone-read of child1_released is
-# the signal here too. root_running: a look's wake has made the Sandbox again, Running, with a pod.
-# Each read is held to its exit status (see child1_released).
+# root_parked: the root keeps no Sandbox, no pod and no disk between its looks. The pending report
+# suspends the implementer's claim and queues an IssueSuspend, which deletes the Sandbox with the six
+# role Secrets it owned once the pod is gone (internal/workflow/check.go endLookPending), exactly as
+# any other stop of an issue does, so there is no mode left to read: the gone-read of
+# child1_released is the signal here too, the pod's disk inside it for the reason child2_parked
+# gives. root_running: a look's wake has made the Sandbox again, Running, with a pod. Each read is
+# held to its exit status (see child1_released).
 root_parked() {
   local out
-  out=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/issue=$tree1" -o name) && [ -z "$out" ]
+  out=$(op get sandboxes,pods -l "legion.dev/project=$run_label,legion.dev/issue=$tree1" -o name) && [ -z "$out" ] &&
+    out=$(pod_disk "$root_pod") && [ -z "$out" ]
 }
 root_running() {
   local mode pods
   mode=$(op get sandbox "$root_pod" -o jsonpath='{.spec.operatingMode}') && { [ -z "$mode" ] || [ "$mode" = Running ]; } &&
     pods=$(op get pods -l "legion.dev/project=$run_label,legion.dev/issue=$tree1" -o name) && [ -n "$pods" ]
 }
-until_true 600 "the pending report to delete the root's Sandbox $root_pod and take its pod" root_parked
-assert_no_pod_disk "$root_pod" " between the looks of its production check"
+until_true 600 "the pending report to delete the root's Sandbox $root_pod and take its pod and disk" root_parked
 until_true 300 "the pending report to suspend the implementer's claim beside the five suspended claims of $tree1" claim_states_are "$tree1" suspended suspended
 [ -n "$(issue_worker_session "$tree1" implementer)" ] || fail "the implementer's claim lost its session at its suspension between looks"
 state_file check-look-1
@@ -6140,8 +6146,7 @@ check_look_logged "$tree1" 2 bound ||
 check_closed_as "$tree1" not_run ||
   fail "the daemon log records no close of $tree1's production check as not_run: $(log_lines "workflow: production check closed" | tail -1)"
 until_true 120 "the check's close to retire the implementer's claim beside the five suspended claims of $tree1" claim_states_are "$tree1" retired suspended
-until_true 600 "the check's close to delete the root's Sandbox $root_pod again and take its pod" root_parked
-assert_no_pod_disk "$root_pod" " after its production check closed"
+until_true 600 "the check's close to delete the root's Sandbox $root_pod again and take its pod and disk" root_parked
 state_file check-closed
 note "the bound woke look 2 of $tree1's production check (the state at the wake: $(jq -c --arg issue "$tree1" '.issues[$issue].check | if . == null then "already closed" else {looks, lookOpen, lastWake: .lastWake.kind, last} end' "$evidence/check-look-2.json"); the daemon log: look 2, cause bound, last), Sandbox $root_pod Running with its pod back; its pending closed the check as not_run, the state omits it, the implementer's claim is retired while the five others stay suspended ($(issue_claim_states "$tree1" | paste -sd ',' -)), and the Sandbox is gone again with the pod and the disk it owned"
 pass
