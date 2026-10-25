@@ -170,6 +170,15 @@ func (s *Service) joinLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 // document's advisory lock (awaitRoomRecovery says why no transaction waits for such work): it
 // fails with ErrServiceUnavailable, as on a failed room, and its caller retries once the room has
 // reloaded.
+//
+// Taking the slot moves the room's generation, which ends a settlement already running or about to
+// run: one whose timer fired whose settleRoomWithin has not yet read the generation, or one past
+// that read whose supersession check or reload (reloadRoomBehindHead) then meets the moved
+// generation and writes nothing. The write takes that settlement over (settleDeferred), as it takes
+// over an armed timer it stops, and finishing it arms the settlement again, whether or not the write
+// changed anything: a write that changed nothing publishes no update whose observer would arm one.
+// A settlement that got past its supersession check before the write opened commits its own work,
+// and the one the write arms then finds nothing new.
 func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID string) (*liveWrite, error) {
 	write := &liveWrite{artifactID: artifactID, clientID: crdt.NewClientID(), done: make(chan struct{})}
 	for {
@@ -181,7 +190,7 @@ func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 		if state.liveWriter == nil {
 			state.liveWriter = write
 			state.roomGeneration++
-			state.settleDeferred = s.stopSettleTimer(state.settle)
+			state.settleDeferred = s.takeOverSettlementLocked(state)
 			s.unlockState(artifactID, state)
 			write.state = state
 			break

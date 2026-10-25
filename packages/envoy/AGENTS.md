@@ -90,11 +90,12 @@ A settlement that wrote into the room commits what it wrote even when the docume
 read, since the room and its browsers hold it; one that wrote nothing leaves a moved document to
 the settlement the move scheduled. A repair is written only into the document the settlement read
 (`applySuppressed`): one whose room was evicted and reloaded since is refused and retried. Every
-close of a room the service makes - a failed room's eviction, `Evict`
-and `Quiesce`, an issue's close, `Shutdown`'s close of a room with an editor - goes through its
-server's `CloseRoom` (`roomServer`, which shadows ygo's, so a call written against ygo's API is
-gated too). That close waits for a repair committing into the room and refuses new repairs while
-it closes; a repair never waits for a close and gives the write up as for a replaced room
+close of a room the service makes - a failed room's eviction, the close of a room behind the
+durable head (`closeRoomInstance`), `Evict` (tests) and `Quiesce`, an issue's close, `Shutdown`'s
+close of a room with an editor - goes through its server's close gate (`roomServer`: its
+`CloseRoom`, which shadows ygo's, so a call written against ygo's API is gated too, or its
+`closeInstance`). That close waits for a repair committing into the room and refuses new repairs
+while it closes; a repair never waits for a close and gives the write up as for a replaced room
 (`holdOpen`). `roomServer` says why a close retiring the room's worker under a repair's commit
 hung (LEGION-498). A room's close gate lives only while a close or a repair holds or waits on it.
 A repair's suppression slot that its settlement discarded is consumed by that repair's own update
@@ -660,13 +661,19 @@ can pass the gate and three would fail the room, refusing every transaction on t
 its eviction ran; the settlement re-arms on the reloaded room (INFRA-218). It leaves the room open
 while a write of this process is in flight on it (an open live write, which arms the settlement
 when it finishes, or an update its persistence has not stored, whose settlement is armed a settle
-delay later) and during a shutdown, which leaves the settlement to the next process. The
-stale-room evictor's close (`closeRoomBehindHead`) and this one both reserve the room under its
-state lock in the same hold that found no write in flight (`reserveRoomCloseLocked`): the
-reservation closes only the instance that was checked, never a room that replaced it, and until
-the close has forgotten the state the room's writer slot is refused, `503
-DOC_SERVICE_UNAVAILABLE` as on a failed room, rather than handed to a write the close would
-forget, whose commit would move the reloaded room's cursor past an update that room never took. A
+delay later) and during a shutdown, which leaves the settlement to the next process. A write that
+opens while a settlement runs, or after its timer has fired, takes the settlement over and arms it
+when it ends, whether or not it changed anything (`openLiveWrite`). The stale-room evictor's close
+(`closeRoomBehindHead`) and this one both reserve the room under its state lock in the same hold
+that found no write in flight (`reserveRoomCloseLocked`), and until the close has forgotten the
+state the room's writer slot is refused, `503 DOC_SERVICE_UNAVAILABLE` as on a failed room, rather
+than handed to a write the close would forget, whose commit would move the reloaded room's cursor
+past an update that room never took. The close reaches only the instance that was checked, never a
+room that replaced it: ygo's `CloseRoom` closes whatever room the name holds, and ygo's idle sweep
+retires a room without the close gate, so the close checks the instance again inside a
+`Server.Apply` on the room, which the sweep never retires, with the close gate held
+(`closeRoomInstance`); a room the sweep or another close retired first is left to the room that
+holds the document now, the reservation is lifted, and the settlement is armed again on it. A
 named or snapshot version whose room is behind the head, read under the document's advisory lock,
 is rendered from the stored document instead (`storedTree`), and neither it nor a version over a
 cold fork lists the room's in-flight credits (`withoutInflight`): the store holds none of those

@@ -1132,10 +1132,14 @@
   named or snapshot version taken from a room behind the head rendered that room's text while
   recording the stored head, so no later settlement versioned the other process's words, and it
   listed the room's unstored browser edits, whose authors were listed again once the edit was
-  resent; it now renders the stored document and lists none of them. The settlement's close and
-  the stale-room evictor's both reserve the room they checked, so a write that would open between
-  the check and the close answers 503 and is retried on the reloaded room instead of being
-  forgotten with the closed one, and neither closes a room that replaced the one it checked.
+  resent; it now renders the stored document and lists none of them, and neither does a version an
+  edit with a summary writes over the stored document. The settlement's close and the stale-room
+  evictor's both reserve the room they checked, so a write that would open between the check and
+  the close answers 503 and is retried on the reloaded room instead of being forgotten with the
+  closed one; and neither closes a room that replaced the one it checked, including one ygo's idle
+  sweep retired and a load replaced before the close reached it. A write that opens while a
+  settlement runs takes the settlement over and arms it when it ends, so a write that changed
+  nothing no longer leaves the document's settlement to the one-minute resumption.
 
 - A burst of device logins no longer stalls the secrets broker's database pool. Each
   `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while

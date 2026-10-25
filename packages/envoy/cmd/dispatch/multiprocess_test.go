@@ -797,11 +797,12 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	var evicted time.Time
 	select {
 	case <-editor.Ended:
-		// Where the interval's window starts, as closely as this side can see it: Evict closes
-		// the room - which is what ends this socket - and the stamp the interval reads is taken
-		// as that call returns (recordEviction, docs/stale_room.go). This stamp is on the test's
-		// side of that close, so it is the later of the two, and the gap measured at the end of
-		// this helper reads shorter than the window the write really spent, by the close's trip
+		// Where the interval's window starts, as closely as this side can see it: the evictor's
+		// close (closeRoomBehindHead) closes the room - which is what ends this socket - and the
+		// stamp the interval reads is taken as that call returns (recordEviction,
+		// docs/stale_room.go). This stamp is on the test's side of that close, so it is the
+		// later of the two, and the gap measured at the end of this helper reads shorter than
+		// the window the write really spent, by the close's trip
 		// out to this process. The error runs towards under-reading, which makes the assertion
 		// below permissive rather than conservative: a write that landed a hair past the
 		// interval could still read under it. That is acceptable for what this guard is for -
@@ -899,7 +900,7 @@ func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what
 // settlement past the window. That settlement is armed when A's reconnecting browser loads the
 // room, because the document owes one (onLoadDocument), and it is the other path that closes this
 // room: the durable gate refuses it from a room behind the head, and the refusal closes the room
-// at once (reloadRoomBehindHead, INFRA-218). At the default two seconds it fired 10-50 ms after the
+// (reloadRoomBehindHead, INFRA-218). At the default two seconds it fired 10-50 ms after the
 // window's own close, close enough on a loaded runner to come first, and its close is not the
 // evictor's, so the row failed on requireTheSecondEviction. Ten seconds keeps the settlement clear
 // of the window and of refusedWindowClosesWithin below, so the window is what closes the room
@@ -910,8 +911,9 @@ const owedSettlementDelay = 10 * time.Second
 // room, since a bound above both would be green on either. The window's own re-examination
 // closes it a little under two seconds after the trailing write - what the write left of the
 // interval, plus the close - which was 1.9486 s in this row's green run here and 1.88 s when it
-// was built. The owed settlement closes it at owedSettlementDelay after A's reconnect, which is
-// before the trailing write, so about ten seconds from that write.
+// was built. The owed settlement closes it no sooner than owedSettlementDelay after A's reconnect
+// (every later arm restarts its timer), which is before the trailing write, so about ten seconds
+// or more from that write.
 //
 // Both of those figures are taken from the trailing write; this budget is not counted from
 // there. It is spent by requireTheRoomClosed's own time.After, which starts when that helper is
@@ -972,9 +974,12 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 // timer-armed path (scheduleSettleLocked), while settleLastPeer - wired as OnLastPeer - settles
 // at once when the last browser leaves whatever timer is armed, retrySettleSoon re-arms at a
 // fixed 10 ms, and a mark's expiry arms its own. What makes the delay enough here is that the
-// close this row measures is Evict, which stops the room's armed settle timer before it closes
-// the room, and that the row asserts afterwards that A wrote no "dispatch: settle document" line
-// for this document - a settlement that fired on any of those paths would be in A's output.
+// close this row measures, the evictor's (closeRoomBehindHead), stops the room's armed settle
+// timer as it reserves the room, and that the row asserts afterwards that A ran no settlement of
+// this document: one that committed or failed would have logged "dispatch: settle document", and
+// one the durable gate refused from this room behind the head would have logged a line naming
+// "its settlement found behind the durable head" (reloadRoomBehindHead logs one for every
+// outcome) - so a settlement that fired on any of those paths would be in A's output.
 //
 // The condition itself was tried first and did not hold: B was given a settle delay short enough
 // to clear the pending row before A's reconnect loaded the room, and the row asserted that row
@@ -988,7 +993,7 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 // Its budget stays at thirty seconds, which already discriminates: with the wake unwired nothing
 // closes this room at all, so no bound is needed to tell the window from a rescuer it has none
 // of.
-func TestTheRefusedNotificationClosesARoomNoSettlementWillFail(t *testing.T) {
+func TestTheRefusedNotificationClosesARoomNoSettlementWillClose(t *testing.T) {
 	pair := newPair(t)
 	pair.a = startDispatchProcessWith(t, pair.databaseURL(t), dispatchOptions{
 		NATSURL: pair.nats, SigningKey: multiprocessSigningKey, SettleDelay: 30 * time.Minute,
@@ -1000,12 +1005,14 @@ func TestTheRefusedNotificationClosesARoomNoSettlementWillFail(t *testing.T) {
 	pair.b.waitHealthy(t)
 
 	project := uniqueProjectKey(t, "OWN")
-	pair.b.createProject(t, project, "No settlement will fail it")
+	pair.b.createProject(t, project, "No settlement will close it")
 	_, artifactID := pair.b.createIssueIn(t, project, "Open here, typed into never", "before")
 
 	reconnected, wrote := burstLeavingTheRoomBehind(t, pair, artifactID, nil)
-	requireTheRoomClosed(t, pair.a, reconnected, artifactID, wrote, 30*time.Second, "no settlement will fail it")
-	if settled := pair.a.logLines("dispatch: settle document", artifactID); len(settled) > 0 {
+	requireTheRoomClosed(t, pair.a, reconnected, artifactID, wrote, 30*time.Second, "no settlement will close it")
+	settled := pair.a.logLines("dispatch: settle document", artifactID)
+	settled = append(settled, pair.a.logLines("its settlement found behind the durable head", artifactID)...)
+	if len(settled) > 0 {
 		t.Errorf("A settled this room after all, so something other than the window could have closed it:\n%v", settled)
 	}
 }

@@ -248,6 +248,15 @@ func TestARefusedSettlementLeavesItsRoomOpenWhileWorkIsInFlightOnIt(t *testing.T
 			if err != nil {
 				t.Fatalf("open a live write on task A's room: %v", err)
 			}
+			// The write opened with no settlement armed or running, so it owes none yet: the one
+			// it arms when it ends is the one the refused settlement hands it.
+			state := pair.taskA.room(pair.artifactID)
+			state.mu.Lock()
+			owes := state.settleDeferred
+			state.mu.Unlock()
+			if owes {
+				t.Fatal("the write took a settlement over as it opened, so this row would not test the refused settlement's handoff")
+			}
 			return func() { pair.taskA.finishLiveWrite(write) }
 		}},
 		{"an append its persistence has not stored", func(t *testing.T, pair processPair) func() {
@@ -389,7 +398,7 @@ func TestTheEvictorClosesOnlyTheRoomItFoundBehindTheHead(t *testing.T) {
 	}
 	replacement := pair.taskA.srv.GetDoc(pair.artifactID)
 
-	closed, err := pair.taskA.closeRoomBehindHead(pair.artifactID, stale)
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, stale)
 	if err != nil || closed {
 		t.Fatalf("close the replaced room = %v, %v, want false and no error", closed, err)
 	}
@@ -397,6 +406,205 @@ func TestTheEvictorClosesOnlyTheRoomItFoundBehindTheHead(t *testing.T) {
 		t.Fatal("the close of the replaced instance closed the room that replaced it")
 	}
 	requireRoomStillWrites(t, pair.taskA, pair.artifactID, 2)
+}
+
+// A close of a room behind the head - a refused settlement's, or the stale-room evictor's - closes
+// the instance it checked and no other, however that instance goes before the close reaches it.
+// ygo's idle sweep retires a room without the close gate, so the room can be retired, and a
+// browser's or a read's load can replace it at the head, after the close checked it and before
+// ygo looks the room up by name: ygo's CloseRoom then closed the replacement, dropping its
+// browsers, and the reservation stayed on the state the replacement loaded onto, refusing every
+// write on it as reloading. The replacement stays open and writable, and the document settles.
+func TestACloseOfARoomBehindTheHeadLeavesTheRoomThatReplacedIt(t *testing.T) {
+	for _, closer := range []struct {
+		name  string
+		close func(t *testing.T, pair processPair)
+	}{
+		{"a refused settlement", func(t *testing.T, pair processPair) {
+			settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+		}},
+		{"the stale-room evictor", func(t *testing.T, pair processPair) {
+			if newStaleRoomEvictor(pair.taskA).documentChanged(context.Background(), pair.artifactID) {
+				t.Fatal("the evictor reports a close of the room it checked, which was retired before the close reached it")
+			}
+		}},
+	} {
+		t.Run(closer.name, func(t *testing.T) {
+			pair := newProcessPair(t)
+			pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob-on-task-b"}, "Bob's paragraph.\n")
+			pair.taskA.settle = 20 * time.Millisecond
+			var replacement *crdt.Doc
+			var reached atomic.Bool
+			pair.taskA.afterRoomCloseReserved = func(room string) {
+				if room != pair.artifactID || !reached.CompareAndSwap(false, true) {
+					return
+				}
+				// ygo's idle sweep, which takes no close gate, retires the room, and a load brings
+				// the document back at the head.
+				if err := pair.taskA.srv.Server.CloseRoom(room, true); err != nil {
+					t.Errorf("retire task A's room as the idle sweep does: %v", err)
+					return
+				}
+				if err := pair.taskA.warmLiveDocument(context.Background(), room); err != nil {
+					t.Errorf("load the room that replaces it: %v", err)
+					return
+				}
+				replacement = pair.taskA.srv.GetDoc(room)
+			}
+
+			closer.close(t, pair)
+			if !reached.Load() {
+				t.Fatal("the close never reserved task A's room")
+			}
+			if replacement == nil {
+				t.Fatal("no room replaced the one the sweep retired")
+			}
+			if live := pair.taskA.srv.GetDoc(pair.artifactID); live != replacement {
+				t.Fatal("the close of the retired room closed the room that replaced it")
+			}
+			agent := model.Actor{Kind: "session", ID: "agent-session"}
+			insert := []model.EditOp{{Op: "insert", Markdown: "Agent's paragraph.", After: "Bob's paragraph."}}
+			if _, err := joinedApplyOps(pair.taskA, pair.artifactID, insert, agent, nil); err != nil {
+				t.Fatalf("a write on the room that replaced the closed one: %v", err)
+			}
+			waitFor(t, 30*time.Second, "the document to settle on the room that replaced the closed one", func() bool {
+				owed, err := settlementPending(context.Background(), pair.database.Pool, pair.artifactID)
+				return err == nil && !owed
+			})
+			markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+			for _, want := range []string{"Bob's paragraph.", "Agent's paragraph."} {
+				if !strings.Contains(markdown, want) {
+					t.Fatalf("the settled version = %q, want it to hold %q", markdown, want)
+				}
+			}
+			if head := storedHead(t, pair.database, pair.artifactID); cursor != head {
+				t.Fatalf("the settled version records update cursor %d, want the head %d", cursor, head)
+			}
+			if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+				t.Fatalf("task A's room failed: %v", err)
+			}
+			requireRoomStillWrites(t, pair.taskA, pair.artifactID, 2)
+		})
+	}
+}
+
+// The close of a room behind the head holds the room it checked against ygo's idle sweep until it
+// has closed it: the sweep retires a room no peer is in once it has been idle for the room idle
+// timeout, and it takes no close gate, so a check of the instance ahead of the close would not
+// hold the instance ygo then looks up by name. The close runs inside a Server.Apply, which the
+// sweep never retires; here it waits inside that Apply for longer than the sweep needs, and the
+// room it checked is still the one the document holds when it closes it. The control after it is
+// the same room left idle as long with nothing holding it, which the sweep retires.
+func TestACloseOfARoomBehindTheHeadHoldsItAgainstTheIdleSweep(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	// ygo's sweeper reads the timeout when the first room starts it, so it is set before any room:
+	// a room idle for a second is retired at the next sweep, which then runs every second.
+	service.srv.RoomIdleTimeout = time.Second
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
+	live := service.srv.GetDoc(artifactID)
+	if live == nil {
+		t.Fatal("no room is resident")
+	}
+	const idleLongEnough = 3 * time.Second
+	var heldThrough atomic.Bool
+	service.afterRoomClosePinned = func(room string) {
+		time.Sleep(idleLongEnough)
+		heldThrough.Store(service.srv.GetDoc(room) == live)
+	}
+	closed, err := service.closeRoomInstance(context.Background(), artifactID, live)
+	if err != nil {
+		t.Fatalf("close the room: %v", err)
+	}
+	if !heldThrough.Load() {
+		t.Fatalf("the idle sweep retired the room within %v while the close held it", idleLongEnough)
+	}
+	if !closed {
+		t.Fatal("the close of the room it held closed nothing")
+	}
+	waitForNoLiveDocument(t, service, artifactID)
+
+	service.afterRoomClosePinned = nil
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room again: %v", err)
+	}
+	waitFor(t, 2*idleLongEnough, "the idle sweep to retire the room nothing holds", func() bool {
+		return service.srv.GetDoc(artifactID) == nil
+	})
+}
+
+// A write that opens while a settlement runs moves the room's generation, which ends that
+// settlement, so the write takes it over and arms it when the write ends - also when the write
+// changed nothing, which publishes no update whose observer would arm one. A settlement the durable
+// gate refused from a room behind the head that met such a write left nothing armed: a write still
+// open took it only when the refusal found the write open, and one that had ended took nothing,
+// so the document stayed owed until the minute-old resumption came back for it.
+func TestAWriteOpenedWhileASettlementRunsArmsItWhenItEnds(t *testing.T) {
+	for _, writer := range []struct {
+		name string
+		// open runs inside the settlement, after it read its generation and before its gate, and
+		// returns what ends the write, or nil for a write that has ended already.
+		open func(t *testing.T, pair processPair) (end func())
+	}{
+		{"still open at the refusal", func(t *testing.T, pair processPair) func() {
+			write, err := pair.taskA.openLiveWrite(context.Background(), &Ledger{}, pair.artifactID)
+			if err != nil {
+				t.Errorf("open a live write on task A's room: %v", err)
+				return nil
+			}
+			return func() { pair.taskA.finishLiveWrite(write) }
+		}},
+		{"ended having changed nothing before the refusal", func(t *testing.T, pair processPair) func() {
+			write, err := pair.taskA.openLiveWrite(context.Background(), &Ledger{}, pair.artifactID)
+			if err != nil {
+				t.Errorf("open a live write on task A's room: %v", err)
+				return nil
+			}
+			pair.taskA.finishLiveWrite(write)
+			return nil
+		}},
+	} {
+		t.Run(writer.name, func(t *testing.T) {
+			pair := newProcessPair(t)
+			pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob-on-task-b"}, "Bob's paragraph.\n")
+			versions := latestVersionNumber(t, pair.taskA, pair.artifactID)
+			stale := pair.taskA.srv.GetDoc(pair.artifactID)
+			pair.taskA.settle = 20 * time.Millisecond
+			var once sync.Once
+			var end func()
+			pair.taskA.afterSettleLock = func(room string) {
+				if room == pair.artifactID {
+					once.Do(func() { end = writer.open(t, pair) })
+				}
+			}
+
+			settleCurrentGeneration(t, pair.taskA, pair.artifactID)
+			if end != nil {
+				if live := pair.taskA.srv.GetDoc(pair.artifactID); live != stale {
+					t.Fatal("the refused settlement closed task A's room with a write open on it")
+				}
+				if now := latestVersionNumber(t, pair.taskA, pair.artifactID); now != versions {
+					t.Fatalf("task A's refused settlement wrote version %d", now)
+				}
+				end()
+			}
+			waitFor(t, 30*time.Second, "the settlement the write took over to settle the document", func() bool {
+				owed, err := settlementPending(context.Background(), pair.database.Pool, pair.artifactID)
+				return err == nil && !owed
+			})
+			if err := pair.taskA.roomFailure(pair.artifactID); err != nil {
+				t.Fatalf("task A's room failed: %v", err)
+			}
+			markdown, cursor := latestVersionOf(t, pair.database, pair.artifactID)
+			if !strings.Contains(markdown, "Bob's paragraph.") || cursor != storedHead(t, pair.database, pair.artifactID) {
+				t.Fatalf("the settled version = %q at cursor %d, want Bob's paragraph at the head %d",
+					markdown, cursor, storedHead(t, pair.database, pair.artifactID))
+			}
+		})
+	}
 }
 
 // A named version on a process whose room stands behind the head records the stored document,

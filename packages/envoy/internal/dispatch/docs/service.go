@@ -167,8 +167,11 @@ type Service struct {
 	afterStateLookup func(room string)
 	// afterRoomCloseReserved runs once a close of a room behind the durable head has reserved the
 	// room (reserveRoomCloseLocked) and released its state lock, before the close. Nil outside
-	// tests; tests use it to open a write in that window.
+	// tests; tests use it to open a write, or to retire and reload the room, in that window.
 	afterRoomCloseReserved func(room string)
+	// afterRoomClosePinned runs once that close holds the room it checked in a Server.Apply, before
+	// it closes it (closeRoomInstance). Nil outside tests.
+	afterRoomClosePinned func(room string)
 	// inServiceTransaction runs first in every transaction a service mutation makes through
 	// Server.Apply (serviceTransact). Nil outside tests; tests use it to change the live document
 	// between the mutation's read of it and its write, where a peer's update can land: Apply runs
@@ -901,6 +904,18 @@ func (s *Service) stopSettleTimer(timer *time.Timer) bool {
 	}
 	s.settleWG.Done()
 	return true
+}
+
+// takeOverSettlementLocked is for a caller that has just moved state's generation, which ends every
+// settlement that read the old one: it stops the room's armed timer, and answers whether that ended
+// a settlement the caller now owes - one the timer would have run, one whose timer has fired and
+// whose callback has not returned (still registered, isSettleTimerArmed), or one running on the
+// state (settling, which settleLastPeer counts from the moment it takes the timer). A settlement
+// past its supersession check commits its own work, and the one its caller arms finds nothing new.
+// Its caller holds state.mu.
+func (s *Service) takeOverSettlementLocked(state *roomState) bool {
+	stopped := s.stopSettleTimer(state.settle)
+	return stopped || s.isSettleTimerArmed(state.settle) || state.settling > 0
 }
 
 // takeSettleTimer stops an armed settlement timer and hands its caller the settleWG count the timer
@@ -1642,20 +1657,31 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 // later: that update's append from this room is refused, which fails the room, and the reload the
 // failure makes arms one too (onLoadDocument), so either timer meets the failed room or the
 // reloaded one. A shutdown's settlement leaves the room for the next process, as it does for any
-// other write into a room it is closing (retry). Those checks and the close's reservation are made
-// under one hold of the room's state lock (reserveRoomCloseLocked), so no write opens between them.
+// other write into a room it is closing. Those checks and the close's reservation are made under
+// one hold of the room's state lock (reserveRoomCloseLocked), so no write opens between them.
 //
-// A write that opened since the settlement started moved the room's generation, and arms a
-// settlement when it ends only if one was armed as it opened (openLiveWrite), which this one no
-// longer was, so the refused settlement is handed to that write whatever the generation says.
-// Otherwise the settlement compares its generation, under that lock, with the one it started at,
-// and the reservation moves it, so of two settlements that meet the same refusal only one closes
-// the room; and the reservation closes live alone, never a room that replaced it.
+// A write that opened while this settlement ran took the settlement over as it opened
+// (openLiveWrite), and arms it when it ends whether or not it is still open here. Otherwise the
+// settlement compares its generation, under that lock, with the one it read: whatever moved the
+// generation since owns the settlement (an armed timer, another close's reservation, a write), and
+// the reservation moves it, so of two settlements that meet the same refusal only one closes the
+// room. A room the close does not reach - live already retired or replaced - is left to whatever
+// holds the document, and the settlement is armed again on it. Each outcome is logged, so every
+// refused settlement leaves a line naming what became of its room.
 func (s *Service) reloadRoomBehindHead(ctx context.Context, tx pgx.Tx, room string, state *roomState, generation uint64, live *crdt.Doc, refusal error, retry func(error)) {
 	_ = tx.Rollback(ctx)
-	if ctx.Err() != nil || s.shuttingDown(room) {
+	if ctx.Err() != nil {
 		retry(refusal)
 		return
+	}
+	if s.shuttingDown(room) {
+		slog.Warn("dispatch: skip shutdown document settlement from a room behind the durable head; the next process settles it",
+			"room", room, "error", refusal)
+		return
+	}
+	leftOpen := func(reason string) {
+		slog.Info("dispatch: left open a document room its settlement found behind the durable head",
+			"room", room, "reason", reason, "error", refusal)
 	}
 	state.mu.Lock()
 	if s.stopping.Load() || state.closed || state.failed != nil {
@@ -1665,35 +1691,45 @@ func (s *Service) reloadRoomBehindHead(ctx context.Context, tx pgx.Tx, room stri
 	if state.liveWriter != nil {
 		state.settleDeferred = true
 		s.unlockState(room, state)
+		leftOpen("a live write of this process is open on it, and arms the settlement when it ends")
 		return
 	}
 	if state.roomGeneration != generation {
 		s.unlockState(room, state)
+		leftOpen("the room's generation moved since the settlement read it, and what moved it settles the document")
 		return
 	}
 	if state.pendingUpdates > 0 || state.durableAppends.Load() > 0 {
 		s.scheduleSettleLocked(room, state)
 		s.unlockState(room, state)
+		leftOpen("an update of this room's has not been stored yet; the settlement is armed again")
 		return
 	}
-	// A room replaced or closed since the settlement read it is not this settlement's to close,
-	// and neither is one another close has reserved: the settlement is armed all the same, and
-	// runs on whatever room holds the document then.
-	reserved := s.reserveRoomCloseLocked(room, state, live)
+	reserved, stopped := s.reserveRoomCloseLocked(room, state, live)
 	s.unlockState(room, state)
-	if reserved && s.afterRoomCloseReserved != nil {
+	if !reserved {
+		// A room replaced or closed since the settlement read it is not this settlement's to
+		// close, and neither is one another close has reserved: the settlement is armed all the
+		// same, and runs on whatever room holds the document then.
+		leftOpen("the room it read was retired, replaced or reserved by another close; the settlement is armed again")
+		s.scheduleSettle(room)
+		return
+	}
+	if s.afterRoomCloseReserved != nil {
 		s.afterRoomCloseReserved(room)
 	}
-	if reserved {
-		if err := s.evictRoom(room, state); err != nil {
-			// A forced close is refused only once the server is shutting down
-			// (ErrServerShutdown). The pending-settlement row the rollback kept leaves the
-			// settlement to the next process, so nothing is armed on a room that cannot close.
-			slog.Warn("dispatch: close a document room its settlement found behind the durable head", "room", room, "error", err)
-			return
-		}
+	closed, err := s.closeReservedRoom(ctx, room, state, live, stopped)
+	switch {
+	case err != nil:
+		// A close refused (a shutdown under way, a room that failed meanwhile, an issue that
+		// closed) leaves the room to what refused it; the settlement is armed again, and
+		// scheduleSettle arms nothing on a service that is stopping.
+		slog.Warn("dispatch: close a document room its settlement found behind the durable head", "room", room, "error", err)
+	case closed:
 		slog.Info("dispatch: closed a document room its settlement found behind the durable head; settling it again from the store",
 			"room", room, "error", refusal)
+	default:
+		leftOpen("the room it read was retired or replaced before the close reached it; the settlement is armed again")
 	}
 	s.scheduleSettle(room)
 }
@@ -1701,32 +1737,37 @@ func (s *Service) reloadRoomBehindHead(ctx context.Context, tx pgx.Tx, room stri
 // closeRoomBehindHead closes live, room's resident instance, which the stale-room evictor found
 // behind the durable head, and forgets the room's state, so the next access loads the document at
 // the head. It closes nothing, and answers false, while a write of this process is in flight on
-// the room (hasWriteInFlight) or once live is no longer the instance room holds: both are read
+// the room (writeInFlightLocked) or once live is no longer the instance room holds: both are read
 // under the state lock that reserves the close (reserveRoomCloseLocked), so no writer is admitted
-// between the check and the close, and a room another close already replaced is left as it is.
-// The state is taken as lockState takes it: a room that loaded onto a state an earlier close then
+// between the check and the close, and the close reaches live alone (closeRoomInstance). The
+// state is taken as lockState takes it: a room that loaded onto a state an earlier close then
 // forgot has none registered, and one made for it here is the one the close forgets.
-func (s *Service) closeRoomBehindHead(room string, live *crdt.Doc) (bool, error) {
+func (s *Service) closeRoomBehindHead(ctx context.Context, room string, live *crdt.Doc) (bool, error) {
 	state := s.lockState(room)
-	if state.writeInFlightLocked() || !s.reserveRoomCloseLocked(room, state, live) {
+	if state.writeInFlightLocked() {
 		s.unlockState(room, state)
 		return false, nil
 	}
+	reserved, stopped := s.reserveRoomCloseLocked(room, state, live)
 	s.unlockState(room, state)
+	if !reserved {
+		return false, nil
+	}
 	if s.afterRoomCloseReserved != nil {
 		s.afterRoomCloseReserved(room)
 	}
-	return true, s.evictRoom(room, state)
+	return s.closeReservedRoom(ctx, room, state, live, stopped)
 }
 
 // reserveRoomCloseLocked reserves state, room's, for a close of live, the room instance its caller
 // found behind the durable head and found no write of this process in flight on under this same
-// hold of state.mu. It answers false, reserving nothing, when live is no longer the instance room
-// holds, when the room has failed (its failure's own eviction reloads it), or when another close
-// has reserved it already. Otherwise it marks the state reloading, which refuses every transaction
-// that would take the room's writer slot from here until the close has forgotten the state
-// (openLiveWrite), moves the room's generation, which ends the settlements that read it, and stops
-// its timer.
+// hold of state.mu. It reserves nothing when live is no longer the instance room holds, when the
+// room has failed (its failure's own eviction reloads it), or when another close has reserved it
+// already. Otherwise it marks the state reloading, which refuses every transaction that would take
+// the room's writer slot from here until the close has forgotten the state or lifted the
+// reservation (openLiveWrite), moves the room's generation, which ends the settlements that read
+// it, and stops its timer. stopped is whether that ended a settlement armed or about to run, which
+// a close that does not reach live arms again (closeReservedRoom).
 //
 // Without the reservation a write could take the slot after its caller's check and before the
 // close. The close would forget that write's state with the room, and the room that replaces it
@@ -1735,14 +1776,78 @@ func (s *Service) closeRoomBehindHead(room string, live *crdt.Doc) (bool, error)
 // its update (Ledger.takeRoomCursors), so it would record text missing the write at a cursor
 // claiming to hold it. The state's lock is not held across the close itself, whose peers'
 // disconnects and persistence flush take it. Its caller holds state.mu.
-func (s *Service) reserveRoomCloseLocked(room string, state *roomState, live *crdt.Doc) bool {
+func (s *Service) reserveRoomCloseLocked(room string, state *roomState, live *crdt.Doc) (reserved, stopped bool) {
 	if state.reloading || state.failed != nil || s.srv.GetDoc(room) != live {
-		return false
+		return false, false
 	}
 	state.reloading = true
 	state.roomGeneration++
-	s.stopSettleTimer(state.settle)
-	return true
+	stopped = s.takeOverSettlementLocked(state)
+	return true, stopped
+}
+
+// closeReservedRoom closes live, room's instance, which its caller found behind the durable head
+// and reserved state for (reserveRoomCloseLocked), and forgets state once it has closed it. When
+// the room no longer holds live by the time the close reaches it - the idle sweep or another close
+// retired it, and a load may have replaced it - nothing is closed and the reservation is lifted, so
+// a write on the room that holds the document now is not refused, and the settlement the
+// reservation stopped (stopped) is armed again.
+func (s *Service) closeReservedRoom(ctx context.Context, room string, state *roomState, live *crdt.Doc, stopped bool) (bool, error) {
+	closed, err := s.closeRoomInstance(ctx, room, live)
+	state.mu.Lock()
+	if closed {
+		if !state.released {
+			s.forgetLocked(room, state)
+		}
+		state.mu.Unlock()
+		return true, nil
+	}
+	released := state.released
+	if !released {
+		state.reloading = false
+		if stopped {
+			s.scheduleSettleLocked(room, state)
+		}
+	}
+	s.unlockState(room, state)
+	if released && stopped {
+		s.scheduleSettle(room)
+	}
+	return false, err
+}
+
+// closeRoomInstance closes live, room's instance, and never a room that replaced it, answering
+// whether it closed it. ygo's CloseRoom closes whatever room the name holds when it looks the name
+// up, and ygo's idle sweep retires a room without the close gate every other close the service
+// makes takes (roomServer), so a check of the instance made before the close can be stale by the
+// time ygo looks: the sweep retires live, a load replaces it, and the close drops the
+// replacement's browsers and the state a write on it holds. So the close runs inside a
+// Server.Apply on the room, which the idle sweep never retires while an Apply is in it (sjawhar/ygo
+// v1.51.3-sami.1, provider/websocket/idle_sweep.go:186, and Apply clears the room's idle stamp
+// until it returns), with the close gate held (roomServer.closeInstance): a room that still holds
+// live once both are held is the room ygo then closes. A room already gone from the name is not
+// loaded for the check; one retired between that look and the Apply is loaded by the Apply at the
+// head, and left open. The Apply waits for no failed room's recovery (WithoutRecoveryWait): a
+// failed room's own eviction closes it.
+func (s *Service) closeRoomInstance(ctx context.Context, room string, live *crdt.Doc) (bool, error) {
+	if s.srv.GetDoc(room) != live {
+		return false, nil
+	}
+	var closed bool
+	var closeErr error
+	err := s.srv.Apply(WithoutRecoveryWait(ctx), room, func(held *crdt.Doc, _ func(func(*crdt.Transaction))) {
+		if held != live {
+			return
+		}
+		if s.afterRoomClosePinned != nil {
+			s.afterRoomClosePinned(room)
+		}
+		closed, closeErr = s.srv.closeInstance(room, live)
+	})
+	if err != nil && !errors.Is(err, websocket.ErrNoChanges) {
+		return closed, err
+	}
+	return closed, closeErr
 }
 
 // currentUpdateCursor is the version q sees the document's stored history standing at: the read

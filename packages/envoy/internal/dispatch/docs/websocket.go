@@ -591,7 +591,9 @@ func (s *Service) removeConnection(room string, id uint64) {
 // settleLastPeer runs the settlement a room's last browser leaving owes now rather than when its
 // timer fires. It takes over the timer's settleWG count, so Shutdown joins it as it would the
 // timer's settlement: Shutdown reports which documents settled, and stops ygo, only once it has
-// returned.
+// returned. It counts itself as running (settling) from the moment it takes the timer, as the timer
+// it replaces counted as armed: a write that opens before the settlement reaches its own count
+// then takes the settlement over (openLiveWrite) rather than ending it with nobody to arm it again.
 func (s *Service) settleLastPeer(_ context.Context, room string) {
 	state := s.lockExistingState(room)
 	if state == nil {
@@ -602,7 +604,13 @@ func (s *Service) settleLastPeer(_ context.Context, room string) {
 		return
 	}
 	generation := state.roomGeneration
+	state.settling++
 	s.unlockState(room, state)
 	defer s.settleWG.Done()
+	defer func() {
+		state.mu.Lock()
+		state.settling--
+		s.unlockState(room, state)
+	}()
 	s.settleRoom(room, generation)
 }

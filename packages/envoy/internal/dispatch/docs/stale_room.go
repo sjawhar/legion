@@ -244,13 +244,13 @@ func (e *staleRoomEvictor) notified(ctx context.Context) func(channel, artifactI
 // nothing, so it says nothing about the room, and it touches neither reachedVerdict nor armRetry
 // - mayEvict has already deferred the room on a window of its own, and a burst of refusals that
 // armed the retry instead would push the backoff out for a room nothing is wrong with. A verdict
-// - no room here, no cursor, the room at the head, or a room behind the head that Evict closed -
-// says what was to become of the room, so the window that brought it here has done its work, and
-// the run of attempts that got no answer before it, if there was one, ends with it
-// (reachedVerdict). A head read that failed, an Evict that closed nothing, or a write of this
-// process still in flight is an attempt that got no answer, so the room is armed again (armRetry)
-// and the next wake tries it: the notification that brought it here is already spent - the last
-// of a burst is one the interval refuses - and a dropped attempt leaves a connected reader
+// - no room here, no cursor, the room at the head, or a room behind the head that the close
+// (closeRoomBehindHead) closed - says what was to become of the room, so the window that brought it
+// here has done its work, and the run of attempts that got no answer before it, if there was one,
+// ends with it (reachedVerdict). A head read that failed, a close that closed nothing, or a write
+// of this process still in flight is an attempt that got no answer, so the room is armed again
+// (armRetry) and the next wake tries it: the notification that brought it here is already spent -
+// the last of a burst is one the interval refuses - and a dropped attempt leaves a connected reader
 // holding text the store replaced, with nothing left to re-examine the room (roomIdleTimeout
 // counts from the last peer leaving, and that reader has not left).
 func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID string) bool {
@@ -324,9 +324,10 @@ func (e *staleRoomEvictor) documentChanged(ctx context.Context, artifactID strin
 	// still owes the store, and drops the resident state, so the next access loads the durable
 	// document. The room's browsers are closed with it and reconnect to the reloaded room. It
 	// closes live, the instance read above, alone: a write that opened since the check above, or a
-	// room that replaced live (a settlement's own reload, reloadRoomBehindHead), is left as it is,
-	// and the room is armed again like any other attempt that got no answer.
-	closed, err := service.closeRoomBehindHead(artifactID, live)
+	// room that replaced live (a settlement's own reload, reloadRoomBehindHead, or ygo's idle sweep
+	// and a load), is left as it is, and the room is armed again like any other attempt that got no
+	// answer.
+	closed, err := service.closeRoomBehindHead(ctx, artifactID, live)
 	if err != nil {
 		slog.Warn("dispatch: close a document room another process's write left behind", "room", artifactID, "error", err)
 		e.armRetry(artifactID)
@@ -434,7 +435,7 @@ func (e *staleRoomEvictor) dueRooms() []string {
 // once the evictions stop it stops growing with them. It also keeps mayEvict to its one lookup,
 // which is the point of asking it first.
 //
-// Only an eviction that happened is stamped (service.Evict returned no error): a close that
+// Only an eviction that happened is stamped (closeRoomBehindHead closed the room): a close that
 // failed left the stale room resident, and stamping it would refuse that room for the rest of
 // the interval over an eviction this process never made. Nor is such a room left to its next
 // notification, which may never come - the write that announced this one can be the last: the
@@ -499,7 +500,7 @@ func staleRoomRetryBackoff(attempt int) time.Duration {
 }
 
 // armRetry gives artifactID a window to be re-examined in after an attempt that reached no
-// verdict - a head read that failed, an Evict that closed nothing, or a write of this process
+// verdict - a head read that failed, a close that closed nothing, or a write of this process
 // still in flight (documentChanged). The room is as stale as that attempt found it, the
 // notification that carried the attempt is spent, and a document nobody writes again notifies
 // nobody again, so the wake this window asks for is the only thing that comes back for it

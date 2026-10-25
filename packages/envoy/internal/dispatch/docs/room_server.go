@@ -1,6 +1,7 @@
 package docs
 
 import (
+	"errors"
 	"sync"
 
 	"github.com/reearth/ygo/crdt"
@@ -52,6 +53,28 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 	gate.Lock()
 	defer gate.Unlock()
 	return r.Server.CloseRoom(room, force)
+}
+
+// closeInstance closes room through ygo's CloseRoom only while room holds doc, answering whether it
+// closed it. It holds the close gate as CloseRoom does, so no other close the service makes, and no
+// repair, comes between its check of the instance and ygo's lookup of the room by name. Its caller
+// keeps ygo's idle sweep, the one retirement that takes no gate, off the room for the same span (a
+// Server.Apply on it, closeRoomInstance), so the room the check found is the room ygo closes.
+func (r *roomServer) closeInstance(room string, doc *crdt.Doc) (bool, error) {
+	gate := r.acquireGate(room)
+	defer r.releaseGate(room, gate)
+	gate.Lock()
+	defer gate.Unlock()
+	if r.GetDoc(room) != doc {
+		return false, nil
+	}
+	if err := r.Server.CloseRoom(room, true); err != nil {
+		if errors.Is(err, websocket.ErrRoomNotFound) {
+			return false, nil
+		}
+		return false, err
+	}
+	return true, nil
 }
 
 // holdOpen holds doc's room open while a repair commits into it, until release. It refuses,
