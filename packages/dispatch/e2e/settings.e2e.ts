@@ -567,6 +567,115 @@ test("default assignee picks still saving when Settings is left and reopened go 
   }
 });
 
+// A person who changes their mind while a save is out is choosing, not saving each choice: the
+// picks made in between are superseded before they leave the browser, as the issue's own
+// assignee picker does (useIssueFieldWrite). Each pick the server stores is a default an issue
+// created in that moment is assigned to for good, so a person arrowing through the list must not
+// walk the project's default through everyone they passed.
+test("default assignee picks made while a save is out are superseded by the newest, so only it follows the save", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the queue");
+  await createProject({ key: "CORE", name: "Core" });
+  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  await createProject({ key: "QA", name: "Quality" }, "carol");
+  await createProject({ key: "ENG", name: "Engineering" }, "dave");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    const held = Promise.withResolvers<void>();
+    const wire: string[] = [];
+    await page.route("**/api/v1/projects/CORE/default-assignee", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      const { assignee } = route.request().postDataJSON() as { assignee: string | null };
+      const first = wire.length === 0;
+      wire.push(`sent ${assignee}`);
+      if (first) await held.promise;
+      const response = await route.fetch();
+      wire.push(`answered ${assignee}`);
+      return route.fulfill({ response });
+    });
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    await expect(core).toBeEnabled();
+    await core.focus();
+    await expect(core.locator("option")).toHaveText([
+      "Unassigned",
+      "alice",
+      "bob",
+      "carol",
+      "dave",
+    ]);
+
+    await core.selectOption("bob");
+    await expect.poll(() => wire).toEqual(["sent bob"]);
+    for (const pick of ["carol", "dave", "alice"]) {
+      await core.selectOption(pick);
+      await expect(core).toHaveValue(pick);
+    }
+
+    held.resolve();
+    // Wait for the newest pick's answer, then read every PUT that left the browser before it.
+    await expect.poll(() => wire.includes("answered alice")).toBe(true);
+    await expect(core).toHaveValue("alice");
+    expect(wire).toEqual(["sent bob", "answered bob", "sent alice", "answered alice"]);
+    const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
+    expect(defaults.map((row) => [row.project, row.assignee])).toEqual([["CORE", "alice"]]);
+  } finally {
+    await context.close();
+  }
+});
+
+// A save refused while the reader is away from Settings is still theirs to hear about: on the way
+// back the row says its last save was refused, beside the stored value it fell back to, rather
+// than showing the old default as if nothing had been asked.
+test("a default assignee save refused while Settings is left says so when Settings is reopened", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the remount");
+  await createProject({ key: "CORE", name: "Core" });
+  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  await putProjectDefaultAssignee("CORE", { assignee: "alice" });
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    const held = Promise.withResolvers<void>();
+    let answered = false;
+    await page.route("**/api/v1/projects/CORE/default-assignee", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      await held.promise;
+      answered = true;
+      return route.fulfill({
+        json: { code: "INTERNAL", error: "the default assignee save was refused" },
+        status: 500,
+      });
+    });
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    await expect(core).toBeEnabled();
+    await core.focus();
+    await expect(core.locator("option")).toHaveText(["Unassigned", "alice", "bob"]);
+    await core.selectOption("bob");
+
+    const navigation = page.getByRole("navigation", { name: "Navigation" });
+    await navigation.getByRole("link", { name: "Inbox" }).click();
+    await expect(core).toHaveCount(0);
+    held.resolve();
+    await expect.poll(() => answered).toBe(true);
+
+    await navigation.getByRole("link", { name: "Settings" }).click();
+    await expect(core).toBeEnabled();
+    await expect(core).toHaveValue("alice");
+    await expect(
+      page.getByRole("alert").filter({ hasText: "the default assignee save was refused" })
+    ).toBeVisible();
+  } finally {
+    await context.close();
+  }
+});
+
 test("a default assignee the page has not read yet is never shown as Unassigned", async ({
   browser,
 }, testInfo) => {
