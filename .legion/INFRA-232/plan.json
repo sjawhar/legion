@@ -1,0 +1,69 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-232",
+  "completed": "2026-10-25T13:28:00Z",
+  "plan": "dispatch://INFRA-232/artifact/plan-md (version 2). This issue's pull request is documentation only: docs/kubernetes.md, section 'Running a workload in the cluster from a role'. The tasks are plan.md section 4 (T1-T8), with line numbers at base 95a937ab. Acceptance is section 5, rows A1-A7, each with its command and negative control. The admission policy is NOT in this issue: it is a successor child the architect files on the deployment repository, blocked by INFRA-232 (plan.md section 6).",
+  "architectRulings": "INFRA-71's architect, 2026-10-25T13:24Z, over Envoy (plan.md section 8). (1) Split approved: this issue delivers the guidance only. The policy is a new child of INFRA-71, blocked by INFRA-232, and it applies only after this pull request merges and this issue's production check reports pass, not pending. Spec lines 2-3 move to it. (2) Mechanism (a2): a mutating policy drops a submitter's own name when generateName is set, a validating rule requires generateName and the generator's shape, and a tail rule goes on the Service policy. Option (b) is refused, and spec line 3 is rewritten to what (a2) delivers. (3) The limit to the submitters goes inside the new rule's expression, not a policy-wide match condition. (4) The architect corrects the spec: 'Merging this change' struck, the three exemptions sourced to INFRA-206's review rounds, the Kyverno line dropped unless sourced. The spec edits and the child are the architect's.",
+  "deliverable": "This issue's implementer and tester deliver plan.md section 5 rows A1-A7 and nothing else. In the published sequence, the Job's manifest takes metadata.generateName '<issue key lowercased>-postgres-', and the create becomes created=$(kubectl create -o jsonpath='{.metadata.name} {.metadata.uid}' -f job.yaml), which sets workload and uid. workload=\"\" is set before the trap is installed, and the trap does nothing but print a no-Job line when it is empty. The Service stays kubectl apply, and its selector stays the Job's uid. The naming paragraphs, the Job-manifest sentence, the gate paragraph's first sentence, the trap and recovery text and the evidence passage change as plan.md T2-T6 say. Every sentence must be true both before and after the policy is applied, and the rule list gets no new bullet.",
+  "elision": "Never write any of these in the diff, a commit, the branch, the pull request, a review reply, a handoff or an Envoy message: the namespace, the admission policies' names, the reachability label, the deployment's owner and domain, or the deployment repository's owner and path. check-private-names.sh catches only the owner's company name. Before each push and each body edit, sweep with patterns held in shell variables read from the live sources, and record only the hit count. Quote a refusal as ValidatingAdmissionPolicy '<policy>' ... denied request: <rule message>.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker with references/pr-body.md: the body template, the proof definition, and no Thermo line on a docs-only pull request",
+      "skill://legion-worker/references/default-branch-check.md before the push",
+      "skill://legion-worker/references/findings.md for anything found outside this issue",
+      "skill://dispatch-first and skill://dispatch for any Dispatch write; skill://envoy for messages to the architect",
+      "skill://ce-simplify-code does not run: the diff is documentation only (pr-body.md, Thermo line)"
+    ],
+    "test": [
+      "skill://legion-worker with references/pr-body.md: the tester runs the application, which here is the page's own sequence. It re-runs P1, P3 and P5 from its role container at the reviewed head, under its own generated names, and reads CI for the static checks",
+      "skill://dispatch-first, skill://dispatch and skill://envoy for any write or message"
+    ],
+    "review": [
+      "skill://legion-worker with references/review-threads.md (one disposition reply per thread), references/merge-gate.md (the order of a review round, and the approval of the head) and references/pr-body.md (the lines the reviewer owns)",
+      "Read every changed sentence against both cluster states (before and after the policy apply), and run the elision sweep on the diff"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The issue cannot deliver both repositories. Dispatch recorded it on sjawhar/legion, its gh is read-only on the deployment repository's owner, and the spec says the change lands in the deployment repository.", "answer": "Plan section 2: this issue delivers the guidance only. The policy is a successor child, which the architect files on the deployment repository, blocked by INFRA-232. The decision was sent to the architect."},
+      {"finding": "A validating policy alone cannot require a server-generated name. A client-chosen name that has a matching or one-letter generateName looks the same at validation.", "answer": "Measured on a local kube-apiserver v1.36.2 (plan.md section 1, items 1 and 2). Section 6.1 gives three mechanisms and recommends (a2): a mutating policy removes a submitter's own name when generateName is set, plus validating shape rules. The live cluster serves MutatingAdmissionPolicy v1. The decision was sent to the architect."},
+      {"finding": "Spec acceptance line 3 promises to close the forged-owner Service road, which a rule on the Job's name does not reach.", "answer": "Section 6.1: under (a2), the Service policy also refuses any name that does not have the generator's five-character tail. A forged Service of generator shape remains, and it lasts only until the garbage collector sweeps it. The architect ruled (a2), refused (b), and rewrites line 3 to what (a2) delivers (plan.md section 8)."},
+      {"finding": "'A deployment carries it' is not an observable gate for a page that roles read from a checkout or from main.", "answer": "Section 6.4 gives two preconditions before the apply: this pull request merged, and this issue's production check pass, which runs P1 from the text on main at the merge commit. A stale checkout's Job is refused at create and leaves nothing. The refusal message names the fix."},
+      {"finding": "A rule that applies only to creates leaves client-named Jobs created before the apply able to back Services.", "answer": "Section 6.3: the census before the apply lists the namespace's Jobs. Such a Job expires within 36 hours, and the apply's record says whether any was present."},
+      {"finding": "The sequence needs a lifecycle migration, not a field rename: kubectl apply refuses generateName, the trap runs under set -u before the name is known, and the recovery and naming text depend on when the name exists.", "answer": "Tasks T1-T5. Job via kubectl create returning name and uid. workload=\"\" plus a guard in the trap; without it, kubectl delete job \"\" fails 'resource name may not be empty', which was measured. The print moves to after the create. The recovery text names the printed name and the issue-key listing. The Service stays apply."},
+      {"finding": "The Job policy applies to every identity, and the deployment repository's proof script and probes create submitter Jobs under names they choose.", "answer": "Section 6.2 limits only the new rule to the submitters, inside its own expression, and adds no policy-wide match condition. Section 6.3 lists the fixtures to migrate, each keeping its own refusal reason."},
+      {"finding": "After the change, the evidence bullets that say 'exactly as published above' are untrue.", "answer": "Task T6: the two INFRA-215 bullets are re-labelled 'as published then'. One new dated bullet records only the observed runs at this change's head."},
+      {"finding": "The spec's 'Merging this change' rests on 'no branch protection', which is stale since a ruleset was created 2026-10-25T10:10Z.", "answer": "Section 6.5: the successor's merger reads the live ruleset and the pull request's state. The paragraph does not apply to this issue's pull request on sjawhar/legion."},
+      {"finding": "Public artifacts must carry none of the private names, and the generic check catches few of them.", "answer": "Plan.md section 3 and this handoff's elision field: a sweep with patterns read from live sources, and the result recorded as a count."},
+      {"finding": "The spec's 'three name-based exemptions' and its 'Kyverno's own guidance' attribution are unsupported.", "answer": "Plan.md section 8 records this as a finding for the architect. It does not affect any task."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "This issue's change lands in the deployment repository, and acceptance lines 2 and 3 (and the second half of line 4) are the policy's.",
+      "plan": "This issue delivers the guidance change in sjawhar/legion. The policy is a successor child on the deployment repository, blocked by INFRA-232, which the architect files with plan.md section 6 as its brief.",
+      "evidence": "Dispatch records this issue's repository as sjawhar/legion, and the daemon does not apply a later repository change to an admitted issue (AGENTS.md, Issue Lifecycle). This issue's gh writes only to the sjawhar owner (legion-worker skill, 'How gh works in a worker pane').",
+      "outcome": {"kind": "changed", "scope": "This issue delivers spec line 1 and the guidance half of line 4. Lines 2-3 and the apply half of line 4 move to the successor child.", "acceptance": ["Line 2 moves to the successor.", "Line 3 moves to the successor.", "Line 4: this issue proves the guidance is on main and runs before the policy; the successor applies only after this issue's production check passes."]}
+    },
+    {
+      "spec": "Require a generated name, 'so every name a submitter can take is one the API server handed it'. Line 3: a submitter can no longer create a Service under a name the API server did not hand it.",
+      "plan": "A validating policy alone cannot do this. The recommended (a2) adds a mutating policy that removes a submitter's own name when generateName is set, a validating rule for generateName and the generator's shape, and a five-character-tail rule on Services. The guarantee then holds for every Job and every standing Service, but not for a forged-owner Service of generator shape during its garbage-collection window. Only option (b) meets line 3 literally.",
+      "evidence": "Measured on a local kube-apiserver v1.36.2: a validating policy sees {name: X, generateName: x} exactly as given, and a generated name looks the same as a client-chosen one of matching shape. A mutating policy in front replaced the client's name in every case. The live cluster serves MutatingAdmissionPolicy v1.",
+      "outcome": {"kind": "changed", "summary": ["The fix requires a server-generated Job name through a mutating and validating policy pair, not a validating rule alone."], "acceptance": ["Line 3, as the architect rewrites it: every Job and every standing Service carries a server-handed name, and a forged-owner Service is bounded by the garbage collector's sweep. Option (b) was refused."]}
+    },
+    {
+      "spec": "Line 1: every place the name appears moves with it, including the Service's 'selector'.",
+      "plan": "The Service's selector is the Job's uid, not its name, and stays so. The Service stays kubectl apply. Only the Job moves to kubectl create, because kubectl apply refuses generateName.",
+      "evidence": "docs/kubernetes.md:3076 selects by batch.kubernetes.io/controller-uid, which the namespace's admission requires. kubectl apply of a generateName manifest: 'error: from x-: cannot use generate name with apply' (measured).",
+      "outcome": {"kind": "changed", "acceptance": ["Line 1 reads: the Job, the Service's name, its owner reference, both waits, the logs, the delete and the address move with the generated name; the selector stays the Job's uid."]}
+    },
+    {
+      "spec": "Line 2 implies the page states the generated-name rule as one the admission enforces.",
+      "plan": "The page states the generated name as the sequence's own form, with its reason, plus a dated 'not yet enforced on that date'. The rule list gets no bullet.",
+      "evidence": "The rule list's lead sentence (docs/kubernetes.md:2913-2915) says every rule but the last is enforced by the namespace's admission, which would be false until the successor's apply. Measured today: a client-named Job is admitted by a server dry run.",
+      "outcome": {"kind": "changed", "scope": "The page carries no enforced-rule bullet for the generated name. Who updates the rule list after the apply is the architect's call."}
+    }
+  ]
+}
