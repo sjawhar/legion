@@ -47,6 +47,9 @@ export function dispatchToolSchema<E extends SchemaNode<E>>(
 const ISSUE_REFERENCE =
   "An issue is a native KEY or external owner/repo#n reference. An external reference addresses an existing Dispatch issue, including one linked to that GitHub pull request; only dispatch issue with --external creates a native issue.";
 
+const BOARD_NEIGHBOUR_REFUSAL =
+  "The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.";
+
 const OWNER_REFERENCE =
   "Exactly one of issue and project is required. An issue is a native KEY or external owner/repo#n reference; a project is a project key such as CORE and addresses an unlinked project document named by artifact.";
 
@@ -119,7 +122,7 @@ const commentValidation: NonNullable<DispatchToolSpec["validation"]> = {
 };
 
 const ISSUE_UPDATE_FIELDS_RULE =
-  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo.";
+  "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.";
 const ISSUE_UPDATE_DONE_RULE =
   "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts";
 const ISSUE_UPDATE_REASON_RULE = "reason goes only with status done";
@@ -142,6 +145,8 @@ function issueUpdateProblem(value: unknown): string | undefined {
     readonly blocked_by?: unknown;
     readonly components?: unknown;
     readonly repo?: unknown;
+    readonly before?: unknown;
+    readonly after?: unknown;
   };
   if (input.status === "done") {
     if (typeof input.reason !== "string" || input.reason.trim() === "") {
@@ -163,7 +168,9 @@ function issueUpdateProblem(value: unknown): string | undefined {
     typeof input.parent === "string" ||
     Array.isArray(input.blocked_by) ||
     (typeof input.components === "object" && input.components !== null) ||
-    typeof input.repo === "string";
+    typeof input.repo === "string" ||
+    typeof input.before === "string" ||
+    typeof input.after === "string";
   return changesAField ? undefined : ISSUE_UPDATE_FIELDS_RULE;
 }
 
@@ -391,14 +398,15 @@ export const dispatchToolSpecs = [
     name: "dispatch_issue_update",
     example: {
       issue: "DSP-1",
-      status: "done",
-      reason: "Shipped in owner/repo#7; verified on the production dashboard.",
+      priority: 1,
+      before: "DSP-2",
     },
     description:
       "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " +
       "its priority, link a URL (the pull request that delivers it, a run, a document), set its " +
       "route, set or clear its parent, replace the issues it is blocked by, attach it to " +
-      "architecture components, or set the repository it targets. Status is one of " +
+      "architecture components, set the repository it targets, or move it on its project's " +
+      "board. Status is one of " +
       `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` +
       "Legion the daemon moves it. A non-empty external_links is " +
       "merged into the issue's existing links by URL, so linking the pull request you just opened " +
@@ -406,12 +414,15 @@ export const dispatchToolSpecs = [
       "replaces the issue's own attachment. Closing an issue " +
       "(status done) requires reason, the note that says why: it is posted on the issue as a " +
       "message, then the issue closes, because a closed issue refuses messages, comments, and " +
-      "artifacts; reason goes only with status done. A closed issue takes only rank, components, " +
+      "artifacts; reason goes only with status done. A closed issue takes only a board move " +
+      "(before, after), components, " +
       "a reopening status (any status but done), and an external_links write that adds no new " +
       "link (so a link can move to the issue that replaced it); everything else, priority " +
       "included, waits for the reopen. " +
-      "priority is yours to set and a human overrides it; rank, the board's own order, is not " +
-      "settable here. At least one " +
+      "priority is yours to set and a human overrides it. before and after move the issue on " +
+      "its project's board: before puts it above that issue, after below, and both together " +
+      "land it between them. A project's board order is one agent's to keep; in a Legion " +
+      "deployment that is the controller. At least one " +
       `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z) => ({
       issue: z.string().describe(ISSUE_REFERENCE),
@@ -466,6 +477,18 @@ export const dispatchToolSpecs = [
         .string()
         .describe(
           "The repository the issue targets, owner/name, mapped to the issue's project in Settings; an empty string clears it, so the issue inherits its parent's or the project's default again."
+        )
+        .optional(),
+      before: z
+        .string()
+        .describe(
+          `Move the issue above this issue on its project's board: an issue key in the same project. With after, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`
+        )
+        .optional(),
+      after: z
+        .string()
+        .describe(
+          `Move the issue below this issue on its project's board: an issue key in the same project. With before, the issue lands between the two. ${BOARD_NEIGHBOUR_REFUSAL}`
         )
         .optional(),
     }),

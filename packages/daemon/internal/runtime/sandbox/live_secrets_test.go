@@ -286,7 +286,7 @@ func (r *liveRig) checkSecretsCopiedTokenNegative() error {
 // daemon's launcher-proof path, so the CLI refuses before it could present a credential.
 func (r *liveRig) checkSecretsSelfEnrollNegative() error {
 	root := r.claim("root")
-	script := `mkdir -p /tmp/second && tp=$(/opt/legion/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/bin/agent-secrets enroll --kind pod --runtime-id "$POD_UID" --thumbprint "$tp" 2>&1; echo "---exit $?---"`
+	script := `mkdir -p /tmp/second && tp=$(/opt/legion/bin/agent-secrets keygen --out /tmp/second) && /opt/legion/bin/agent-secrets enroll --runtime-id "$POD_UID" --thumbprint "$tp" 2>&1; echo "---exit $?---"`
 	out, err := r.exec(root, "sh", "-c", script)
 	if err != nil && !strings.Contains(out, "---exit ") {
 		return err
