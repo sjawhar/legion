@@ -2,84 +2,82 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T12:45:00Z",
-  "round": "the second implementing round, answering the tester's seven failures at 434ff59bbdd7",
+  "completed": "2026-10-25T14:20:00Z",
+  "round": "the third implementing round, answering the reviewer's four findings and its missing contract census at 772b9b0fd1ab (code e55e76f6e6fa)",
   "proof": [
     {
-      "criterion": "Every one of the tester's seven failures is answered, and each of its three red tests passes unmodified.",
-      "surface": "The tester's own red tests, at this head, each run by name.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -run TestIntrospectionAnswersOnlyAnAccessToken ./internal/broker/oauth/ ; go test -count=1 -run TestACredentialPageWithAnUnreadableAccountTokenDoesNotBlameTheBroker ./cmd/dispatch/ ; cd ../envoy/infra && go test -count=1 -run TestDispatchWithABrokerPresentsItsOwnServiceAccountToken ./gcp/",
-      "observed": "All three PASS. None of the three test files was weakened: the two Go test files are not in the diff at all, and the Pulumi one changed only where the removed component input made it stop compiling -- the red test function itself is byte-identical to the tester's commit 3f9f2c921c05, checked by extracting the function from both and comparing (1649 bytes, identical).",
-      "headSha": "e55e76f6e6facd2bfc1753a029815ffb1473151b",
-      "negativeControl": "Each of the three failed before the fix at the tester's head 434ff59bbdd7, which is why they exist; the introspection one still fails if Provider.Introspect goes back to discarding the kind the library reports finding."
+      "criterion": "A session name cannot be taken by another principal, and a name an entry fixes works for every instance of that entry (the reviewer's findings 1 and 2, both reproduced on Postgres).",
+      "surface": "The real provider on a real Postgres, through the exchange's own HTTP grant.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 ./internal/broker/oauth/ ./internal/broker/exchange/ ./internal/broker/oauthstore/",
+      "observed": "ok, with the reviewer's two reproductions now tests. TestEveryPodOfAFixedSessionAccountWritesUnderItsName alternates an old and a new pod uid under a fixed name and both are accepted; TestEveryRunOfAFixedSessionWorkflowWritesUnderItsName accepts runs 4242, 4243 and 4244. A name is keyed to the principal -- the listed account, the listed workflow entry, or the person a machine credential acts for -- so a replacement pod, a rolling update and a resumed Legion session all keep their name, and the claim is made from the issued token's own expiry inside the transaction that stores it rather than from a lifetime guessed before it.",
+      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
+      "negativeControl": "TestAnotherPrincipalIsRefusedANameAfterItsHoldersTokenLapses is the reviewer's own reproduction with a one-second access lifetime: a pod of another account, in another project, is refused the name after its holder's token has lapsed, and the holder then renews. TestANameAnEntryFixesIsRefusedToEveryOtherCaller refuses a dev box a name the configuration fixes, which is reserved before that entry's own caller has ever exchanged."
     },
     {
-      "criterion": "The head can be judged by CI and merged: the pull request's required checks run at the head (the tester's first failure).",
-      "surface": "GitHub's own view of the pull request, after two forward merges of main.",
-      "command": "gh pr view 2187 --repo sjawhar/legion --json mergeable,mergeStateStatus",
-      "observed": "MERGEABLE (was CONFLICTING), and GitHub started its runs on e55e76f6e6fa: Tests 40193878201, Legion Envoy and Contracts 40193878349, Docs 40193878289, Worker Image 40193878233. Main moved twice under the branch during the round -- first with #2145, #2153 and #2126, then with #2162 -- so there were two merges, each with its fingerprint comment on the pull request; the diff changed both times, so the next test round is a full one.",
-      "headSha": "e55e76f6e6facd2bfc1753a029815ffb1473151b",
-      "negativeControl": "PR Title run 40193878232 failed at that head, on the title this pull request had opened with, which is not a conventional commit subject. The title is now `feat(broker)!: ...` and the check re-runs on the edit -- a required check that was never going to pass while the pull request conflicted, and the first thing the merge made visible."
+      "criterion": "An introspection never answers a storage outage as a confident negative (the reviewer's finding 3).",
+      "surface": "The introspection route itself, against a store that has been closed under it.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -run TestIntrospectionAnswersAStorageOutage503 ./internal/broker/api/",
+      "observed": "PASS. The route answers 200 active for a live token, and 503 DATABASE_UNAVAILABLE once the store is closed, where before the change the library's 401-coded wrapper made every storage failure come back as 200 {\"active\":false}. Introspect classifies by cause now: only the library's own not-found, inactive, expired, malformed and signature-mismatch sentinels, and a bare unauthorized with no cause beneath it, are not live; every other error is returned.",
+      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
+      "negativeControl": "TestIntrospectionAnswersARevokedTokenAsNotLive in the same file: a token revoked through the route answers 200 with nothing but active false, so the fix did not turn a genuine negative into an error."
     },
     {
-      "criterion": "No Dispatch built from this change is refused at boot by the configuration this repository renders for it (the tester's second failure, and the deployment break).",
-      "surface": "The Pulumi component this repository ships, through its own rendering test.",
-      "command": "cd packages/envoy/infra && go test -count=1 -run TestDispatchWithABrokerPresentsItsOwnServiceAccountToken -v ./gcp/ and go test -count=1 ./...",
-      "observed": "PASS. envoy-dispatch now gets DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE on a projected serviceAccountToken volume for the audience the deployment names, and neither removed variable; the Secret Manager secret, its accessor grant and its SecretProviderClass are gone, since the whole point is that nothing stores this credential. The component input that held the secret is replaced by agentSecretsAudience rather than left beside it. README.md says what the broker must change in the same deploy.",
-      "headSha": "e55e76f6e6facd2bfc1753a029815ffb1473151b",
-      "negativeControl": "The red test's own second half: Dispatch is refused at boot while either removed variable is set, which is what would have crash-looped the next image built from the deployment."
+      "criterion": "A machine-token exchange cannot step over a revoke (the reviewer's finding 4).",
+      "surface": "The real provider on Postgres, with a concurrent revoke and a held row lock.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -run 'TestAMachineExchange' ./internal/broker/oauth/",
+      "observed": "PASS. TestAMachineExchangeHoldsItsCredentialAgainstARevoke blocks an exchange at its insert, runs enroll's revoke in another transaction, and checks that the revoke is waiting on the launcher credential row the exchange holds `for no key update` rather than passing it; once released, the exchange's token introspects not live and both access-token rows naming the credential are inactive. The lock is oauthstore.LockCredential, which machine.Service.Live now calls too, so the device grant and the exchange cannot drift on what a live credential is.",
+      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
+      "negativeControl": "TestAMachineExchangeOfAnEndedCredentialIsRefused: a lapsed credential with an active token row is refused 400 invalid_grant and nothing is stored; TestLockCredentialHoldsOnlyALiveCredential proves the lock is really held, another connection's `for no key update nowait` getting 55P03."
     },
     {
-      "criterion": "The test suites and the local development path run without a shared secret (the tester's third failure, and the spec's 'local development and the test suites get a path that is not a shared secret').",
-      "surface": "The browser suite's own server and the local dev broker, each started by hand.",
-      "command": "cd packages/dispatch/e2e && DATABASE_URL=<url> DISPATCH_E2E_PORT=18777 bash run-server.sh ; and DEV_BROKER_POSTGRES_URL=<url> bash packages/envoy/scripts/dev-broker.sh",
-      "observed": "run-server.sh boots and GET /healthz answers 200, where at the tester's head it exited 1 with 'DISPATCH_AGENT_SECRETS_TOKEN is no longer read and must be unset'. dev-broker.sh starts the new dev-oidc-issuer ('issuer listening url=http://127.0.0.1:52364'), then the broker ('broker listening addr=127.0.0.1:42106', 'token exchange state=on kubernetes=true github=false accounts=1 workflows=0'); with the account token it exports, GET /v1/pending?approver=ada@example.com answered 200 {\"pending\":[]} and /v1/grants 200 {\"grants\":[]}, agent-secrets-devrelay reached the handler's own validation rather than an authentication refusal, and a token-exchange request with the exported pod token answered 400 invalid_dpop_proof, so the local exchange is configured too.",
-      "headSha": "e55e76f6e6facd2bfc1753a029815ffb1473151b",
-      "negativeControl": "The same GET /v1/pending against that local broker with no token answered 401 {\"code\":\"ACCOUNT_TOKEN_INVALID\"}: the local caller identity is a real check, not a switch left open for development."
-    },
-    {
-      "criterion": "The change the first round proved still holds at this head, after two merges with main and the simplify pass.",
+      "criterion": "The change the earlier rounds proved still holds at this head.",
       "surface": "The real compiled cmd/broker binary on a real Postgres, as the package's own live-binary test.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -v -run TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt ./cmd/broker/",
-      "observed": "--- PASS, all 12 subtests, ok github.com/sjawhar/envoy/cmd/broker 13.080s: the exchange, the introspection naming the session, the person, the project, the expiry and the key thumbprint, renewal past a two-second lifetime, and eight refusals.",
-      "headSha": "e55e76f6e6facd2bfc1753a029815ffb1473151b",
-      "negativeControl": "Eight of its twelve subtests are the refusals, among them a second pod asking for the session name the first holds and the same exchange request carrying a client secret."
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -run TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt ./cmd/broker/",
+      "observed": "ok github.com/sjawhar/envoy/cmd/broker 25.439s. Its second-pod subtest changed with the binding model: a second pod of the same listed account now writes under the name, and a pod of a second listed account is refused it, which is the behaviour the reviewer asked for.",
+      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
+      "negativeControl": "Eight of its subtests are refusals, among them the pod of another account asking for a held name and the exchange request carrying a client secret."
     },
     {
-      "criterion": "Nothing in the tree tells a person to set a setting the broker or Dispatch now refuses at boot (the tester's fifth failure).",
-      "surface": "A repository-wide search for the removed names, at this head.",
-      "command": "grep -rn 'AGENT_SECRETS_UI_TOKEN|BROKER_UI_TOKEN|DISPATCH_AGENT_SECRETS_TOKEN' --include=*.go --include=*.sh --include=*.ts --include=*.md .",
-      "observed": "Every remaining hit is a place that refuses the name or explains the removal: config.go's and settings.go's removed-variable tables and their tests, the Pulumi test that pins Dispatch refusing them, and prose in three guides saying they are gone. The roughly fifteen sites that read as current instruction -- operate.md's example environment, concepts.md, three broker guides, packages/dispatch's AGENTS.md and README, and four Go comments -- now say what to set instead.",
-      "headSha": "e55e76f6e6facd2bfc1753a029815ffb1473151b",
-      "negativeControl": "`check-private-names.sh` over the whole tree: no file or path names the private deployment repository or the company, 4928 files."
+      "criterion": "The body carries the contract change census the reviewer required, with every hit disposed of and a rollout line (the reviewer's finding 5).",
+      "surface": "The searches themselves, in this repository and in the deployment repository.",
+      "command": "grep -rn 'BROKER_UI_TOKEN' . ; grep -rn 'DISPATCH_AGENT_SECRETS_TOKEN' . ; grep -rn 'agentSecretsTokenSecret|AgentSecretsTokenSecret' . ; grep -rn 'UI_INVALID' . ; and gh api -X GET search/code -f q='<each> repo:theorem-labs/agent-infra'",
+      "observed": "Four boundary contracts, each a refusal rather than a deprecation, are in the body as a table of hits with dispositions: the two boot refusals, the removed envoy-infra component input (which the deployment repository's dispatch/main.go sets today, so its next preview fails until it moves to agentSecretsAudience and its vendored SDK is regenerated), and the nine routes that moved off the bearer with UI_INVALID gone. The rollout line names the order, and says plainly that approvals are down between the broker's deploy and Dispatch's, that the two deploys are separate and Dispatch's is by hand (dispatch://INFRA-64), and why no overlap window is engineered: a dual-accept broker would keep the shared bearer alive for the length of a rollout, which is the thing being removed. The Deployment section no longer calls BROKER_API_ACCOUNTS required for boot: config.Load treats it as optional and a broker without it answers every approval route 403 ACCOUNT_NOT_LISTED.",
+      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
+      "negativeControl": "The search for UI_INVALID finds no hit outside this pull request's own handoffs, so the removed code has no caller left; and `check-private-names.sh` passes over the whole tree (4985 files), so the census names nothing it must not."
+    },
+    {
+      "criterion": "The repository's own gates are green for the paths this round changed.",
+      "surface": "The repository's fast local checks.",
+      "command": "cd packages/envoy && gofmt -l . ; go vet ./... ; BROKER_TEST_DATABASE_URL=... go test -count=1 ./internal/broker/... ./cmd/broker/... ; cd ../.. && bunx biome check . ; bash .github/scripts/check-private-names.sh",
+      "observed": "gofmt silent, vet clean, biome clean, private names clean. Every broker and cmd/broker package green except internal/broker/helper, which fails only with this pod's SO_PEERPIDFD errors.",
+      "headSha": "962f924510f4d87a8e2f4e55161e86cfd72125cb",
+      "negativeControl": "The same helper failure is present on the base and in every earlier round of this branch, and the tests that fail name the kernel call they cannot make rather than anything this change touches."
     }
   ],
   "filesChanged": [
-    "Two forward merges of main (#2145, #2153, #2126; then #2162), seventeen conflicted files resolved so both sides survive, and this branch's migration renumbered 0018 because main landed an 0017.",
-    "packages/envoy/internal/broker/oauth/introspect.go: Introspect reads the kind the library reports finding and answers anything that is not a live access token as not live.",
-    "packages/envoy/internal/dispatch/agentsecrets/client.go, internal/dispatch/api/credential_requests.go: an unreadable ServiceAccount token file is its own error type, answered 500 AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE and logged once with its path, instead of being reported as the broker being unreachable.",
-    "packages/envoy/internal/broker/exchange/exchange.go: Set.Pod's comment says what the offline check proves and what bounds the reach that follows.",
-    "packages/envoy/infra/gcp/{dispatch.go,dispatch_kube.go,dispatch_cloud.go}, its goldens and README: a projected ServiceAccount token in place of the Secret Manager bearer, with agentSecretsAudience replacing agentSecretsTokenSecret.",
-    "packages/envoy/cmd/dev-oidc-issuer/: a new dev-only command serving internal/oidc/oidctest on a loopback port and writing a ServiceAccount token per account, rewritten at four fifths of its life as a kubelet does.",
-    "packages/envoy/scripts/dev-broker.sh and its test, packages/envoy/cmd/agent-secrets-devrelay/, packages/dispatch/e2e/{run-server.sh,harness-broker.ts,local-instance.ts,fake-broker.ts,fake-broker-account-token}, docs/site/media/broker/{rig.sh,README.md}: each local path gets a caller identity of its own.",
-    "packages/envoy/cmd/broker/main.go: the two issuer-key reads run on the serving context, as #2162 requires of every boot call after the bind, so a signal during them drains rather than kills.",
-    "docs/site/src/content/docs/broker/{operate.md,concepts.md,guides/*}, packages/dispatch/{AGENTS.md,README.md}, packages/envoy/{AGENTS.md,CHANGELOG.md} and four Go comments: no instruction to set a removed bearer."
+    "packages/envoy/internal/broker/exchange/exchange.go and its test: Claims.Binding becomes Claims.Principal; the three constructors resolve the listed account, the listed workflow entry or the person; NewSet refuses two entries that fix one name and two workflow entries whose principals would read the same; Set.Reservations names what the configuration fixes.",
+    "packages/envoy/internal/broker/oauthstore/exchange.go and its test: BindSession is keyed by principal; ReserveSessions holds every fixed name with no expiry in one statement; SessionRetention is ninety days past a token's expiry, documented.",
+    "packages/envoy/internal/broker/oauth/{exchange.go,provider.go} and their tests: the reservation runs once per process on the first exchange; the claim is made after the token is issued, from its own expiry, in the same transaction; the machine path locks its launcher credential before the token is issued.",
+    "packages/envoy/internal/broker/oauthstore/store.go and its test: LockCredential and ErrCredentialEnded, the one statement that decides what a live credential is; hydrate no longer wraps GetClient's not-found, which the library would have read as 'no such token'.",
+    "packages/envoy/internal/broker/machine/machine.go: Service.Live calls LockCredential rather than keeping a second copy of its statement.",
+    "packages/envoy/internal/broker/oauth/introspect.go: classify a failure by cause, so an outage is an outage.",
+    "packages/envoy/internal/broker/api/introspect_test.go: the route's 503 on a closed store, and a revoked token still answering not live.",
+    "packages/envoy/internal/broker/store/migrations/0018_oauth_token_exchange.up.sql: the binding column is principal, changed in place because 0018 is introduced by this same unmerged pull request.",
+    "packages/envoy/cmd/broker/token_exchange_test.go: the live-binary test's second-pod subtest follows the new model."
   ],
   "trickyParts": [
-    "The tester's red test in packages/envoy/infra/gcp/dispatch_test.go could not be kept out of the diff: the file's own helper and nine refusal rows set the component input the task removes, so the file stopped compiling. The red test function itself is unchanged, verified byte for byte against the tester's commit; everything else in that file moved to the new input.",
-    "dev-oidc-issuer's first test was flaky: it minted a two-second token and verified it again while waiting for the rewrite, so a loaded machine failed on 'token expired'. The lifetime is six seconds now and only the rewritten token is verified, which still proves the rewrite happens before the token lapses. It was caught by -count=5 and under a parallel run, not by the first green run.",
-    "main's #2162 moved the one boot call that runs after the bind onto the serving context, so a pod the load balancer may already be reaching drains rather than dies. This branch's two issuer-key reads also run after the bind and were on the signal context; they are on serving now, and the comment that called the other one 'the one boot call that runs after the bind' says what is true."
+    "Keying the reservation tighter is what the reviewer proved breaks relaunch, so the fix is not 'bind tighter': it is to key by principal and keep the uid only as proof the token came from a pod. The architect ruled this and named the limit it leaves (two pods of one project are one principal) as dispatch://INFRA-382.",
+    "A name the configuration fixes has to be refused to strangers before that entry's own caller has ever exchanged, or a dev box could take 'legion-daemon:<PROJECT>' before the daemon first runs. The reservation is written through the same table and the same check, once per process at the first exchange, with no expiry, so every refusal still comes from one statement rather than a second mechanism.",
+    "The library wraps a failed token read as unauthorized, not as a server error, so a status test could never see a storage outage. Classifying by cause means listing the sentinels that genuinely mean 'not live' and returning everything else, which also surfaced a second bug: a stored row naming an unregistered client decoded to the library's not-found and would have answered not live."
   ],
   "deviations": [
-    "None from the architect's rulings this round. The scope question the tester raised -- how the local run gets a caller identity -- was answered by the architect (a local OIDC issuer and a listed dev account, reusing the rig's issuer) and is built that way.",
-    "The architect also asked that the minted access token's lifetime be short by default; it already is, BROKER_ACCESS_TOKEN_SECONDS defaults to 900 (fifteen minutes), and the corrected comment and pull request bullet now name it as what bounds a deleted pod's reach."
+    "The architect asked to be told before a schema change was written for the binding. The change is a column rename (identity to principal) inside migration 0018, which this same unmerged pull request introduces, so it is an edit in place and costs no migration on any deployed database; reported to the architect with this round's completion."
   ],
   "openQuestions": [
-    "Real liveness checking at exchange time is not in this slice: the architect ruled it a child issue of its own if it is wanted. The claim now says what the offline check proves.",
-    "main has moved twice during this round and may move again; a third conflict is a third forward merge, not a reshaping of the slice."
+    "dispatch://INFRA-382 owns the limit this round deliberately leaves: inside one project, two pods are the same principal, so one could still name another issue's session. The body says so in plain words.",
+    "The approval gap between the broker's deploy and Dispatch's is accepted and announced rather than engineered away; the census says why and in what order the two deploys run."
   ],
   "discoveredComplexity": [
-    "main@origin's own cmd/broker tests did not compile at 3ca092a69891: service_accounts_test.go and service_account_scope_test.go still called the startBroker form #2162 replaced. They are fixed in the merge rather than left, since the branch cannot be green while its base is not.",
-    "This pod has no psql, which dev-broker.sh has always needed, so the local walk-through was run with a pgx stand-in for its three psql calls, outside the repository; the script itself ran unchanged. The same pod cannot run a workload in the cluster (kubectl auth can-i create services answers no), so the Postgres every live run needs is a standalone build fetched onto the issue's volume."
+    "The reviewer's envoy-go failure is a timing test in scripts/listener-deploy-probe.test.sh, a file this diff does not touch, and envoy-go is not required on main; not chased, as the architect directed."
   ]
 }
