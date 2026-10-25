@@ -2,45 +2,44 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T16:40:00Z",
-  "round": "the sixth implementing round, answering the tester's single failure at 2fa337992ae8: the mid-rollout alternation the body denied",
+  "completed": "2026-10-25T16:55:00Z",
+  "round": "the seventh implementing round, answering the tester's single failure at 6c9e78b02f9b: one sentence of the body claimed a universal where the truth is scoped. No code, no test, no behaviour moved.",
   "proof": [
     {
-      "criterion": "What a mid-rollout really does to a fixed session name is written in the body as it is, and is something a reviewer can run rather than has to trust (the tester's failure; the architect's ruling: describe it, do not engineer against it).",
-      "surface": "Real compiled broker processes against one Postgres, as the tester drove it.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -tags multiprocess -count=1 -run TestAFixedSessionNameAcrossARollout -v ./cmd/broker",
-      "observed": "--- PASS, all four subtests, ok github.com/sjawhar/envoy/cmd/broker 7.318s. The fourth, added this round, is the tester's sequence: for three turns the old entry's exchange on a surviving old-configuration process takes the name back and the new entry's exchange on the new process takes it again, each take logged with both principals; while either holds it, that holder is answered 200 on every process, including the one whose configuration fixes the name for the other; the old process is then stopped, the holder does not move at the stop, and the new entry's next exchange leaves the name with the new entry while the old entry -- which no running configuration fixes it for now -- is refused 400 invalid_grant.",
+      "criterion": "The sentence the tester falsified is scoped to what it is true of, and the behaviour it describes is unchanged (the tester's failure; the architect's ruling: scope it, change no code, add no test).",
+      "surface": "The pull request body's rollout paragraph, read against the sequence the tester drove on real broker processes.",
+      "command": "the body, read against Store.ReserveSessions and Store.BindSession in packages/envoy/internal/broker/oauthstore/exchange.go, and against the tester's live sequence in .legion/INFRA-228/test.json",
+      "observed": "The universal is gone. In its place are two scoped statements, each matching one shape of the window: while both generations fix the same name, one of their two entries holds it and every other principal is refused it; and a name a rollout newly fixes -- one the old configuration fixed for nobody -- stays with whichever principal already held it under the ordinary rule, answered on every process including those whose configuration fixes it for someone else, until the new entry's first exchange. That second case is the one the tester produced: B holds the name under the ninety-day rule, the new process logs that it left the name with its holder, B is answered 200 on both processes, and only C's first exchange moves it.",
       "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-      "negativeControl": "Throughout that alternation a principal no running configuration fixes the name for is refused it, which is subtest 1 holding over the whole sequence; and the third subtest still fails against the pre-fix code, so the lockout this pull request removed is still pinned."
+      "negativeControl": "The phrase itself is gone from the body: 'at every moment the name is held' returns zero hits, as 'exactly two ways' and 'cannot take a name from each other' already did from the rounds before."
     },
     {
-      "criterion": "No sentence of the body claims more than the code, and a reader finishes the paragraph knowing the binding is strong and the rollout window is untidy (the architect's standard, and its explicit request about the wording).",
-      "surface": "The body's session-name bullet, read against the two statements that implement it.",
-      "command": "the body, read against BindSession and ReserveSessions in internal/broker/oauthstore/exchange.go",
-      "observed": "The bullet reaches for no count at all: it says what moves a name (the retention running out; the caller a running broker's configuration fixes the name for taking it at its exchange) and says plainly that starting a replica moves nothing. It then states the two things a reader would otherwise discover: a re-point takes effect at the new entry's first exchange, so an entry that never exchanges leaves the name with its previous holder; and during a rollout the name alternates between the two generations' entries, with its bound named -- it lasts as long as any process of the old configuration still serves, so a stalled rollout prolongs it. It keeps the narrower true statement in place of the deleted clause (neither generation can leave the other's entry locked out), and says why the binding is not weakened: at every moment the name is held by an entry some running configuration fixes it for, and a principal no configuration designates is refused throughout.",
+      "criterion": "The same false universal is gone from its second place, the Threads ledger, where a reviewer reading the ledger rather than the bullet would have taken the wrong rule away.",
+      "surface": "The body's Threads section, the line recording the round-3 fix.",
+      "command": "the body's Threads line for PRRT_kwDORFy7ds6wBhTN",
+      "observed": "It said 'so no lapse hands it to another account, workflow or person'. It now says a token lapsing no longer hands the name to another account, workflow or person, that a claim gives way only after the ninety-day retention, and that the Change bullet is where every way a name moves is written -- so the ledger points at the one place that statement is kept rather than restating it.",
       "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-      "negativeControl": "The phrases the tester and the reviewer caught are gone from the body: 'exactly two ways' and 'cannot take a name from each other' each return zero hits."
+      "negativeControl": "'no lapse hands it' returns zero hits in the body."
     },
     {
-      "criterion": "No behaviour changed this round.",
-      "surface": "The working copy and the broker suites.",
-      "command": "jj diff --stat ; cd packages/envoy && gofmt -l . ; go vet ./... ; go vet -tags multiprocess ./cmd/broker ; BROKER_TEST_DATABASE_URL=... go test -count=1 ./cmd/broker/ ./internal/broker/oauth/ ./internal/broker/oauthstore/",
-      "observed": "One file changed, packages/envoy/cmd/broker/multiprocess_test.go, +102/-1, and it is a test. gofmt silent, both vets clean, cmd/broker ok 112.367s, internal/broker/oauth ok 38.254s, internal/broker/oauthstore ok 18.481s.",
+      "criterion": "Nothing of the code or the tests moved this round.",
+      "surface": "The working copy.",
+      "command": "jj -R \"$LEGION_WORKSPACE\" status",
+      "observed": "No change at all: the code head is still 6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa, the head the tester read. A fifth two-process test pinning the newly-fixed-name window was written during this round and discarded on the architect's ruling -- subtest 4 already runs the behaviour, and the fix for prose is prose.",
       "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-      "negativeControl": "The architect called this a body round and not a code round; the only file that changed is a test, so the behaviour the body now describes is the behaviour the previous head already had."
+      "negativeControl": "The suites therefore stand as the previous round left them: TestAFixedSessionNameAcrossARollout green on four subtests, five runs of five, and the whole broker suite green but for this pod's SO_PEERPIDFD failures."
     }
   ],
-  "filesChanged": [
-    "packages/envoy/cmd/broker/multiprocess_test.go: a fourth subtest of TestAFixedSessionNameAcrossARollout pinning the mid-rollout alternation, its holder answered on every process, and its bound once the last old-configuration process stops. No behaviour changed."
-  ],
+  "filesChanged": [],
   "trickyParts": [
-    "The alternation is not a defect and engineering against it would cost more than it buys: ordering configurations needs a generation an operator sets on every change, a column to carry it and a comparison at every claim, and a generation that goes backwards would pin a name to the old entry for good -- the lockout two rounds were spent removing. The architect and I reached that costing independently."
+    "The first correction I wrote reached for another universal -- 'a name can be held by a principal no running configuration fixes it for; it cannot be acquired by one' -- which is itself false, because a name whose ninety-day claim has run out is acquired by whoever asks next. It was replaced before the edit went up. The habit this slice keeps punishing is the sentence that generalises one true case; the cure is to write the cases."
   ],
-  "deviations": [
-    "The architect's ruling for this round was 'no code, the body'. One test was added anyway, which the architect then said was the thing it would have asked for next: after three corrections on this slice, a body claim a reviewer can run is worth more than one they must trust. Nothing but that test changed."
-  ],
+  "deviations": [],
   "openQuestions": [
-    "dispatch://INFRA-382 still owns the limit this slice leaves: inside one project, two pods are the same principal."
+    "dispatch://INFRA-382 still owns the limit this slice leaves: inside one project, two pods are the same principal.",
+    "The architect has called this the last body round on the slice: a seventh wrinkle in that paragraph goes to a child issue with its acceptance, so that the text stops moving and a reviewer can approve it."
   ],
-  "discoveredComplexity": []
+  "discoveredComplexity": [
+    "The architect records that the falsified sentence was its own, asked for in the round before to separate a strong binding from an untidy window, and that reaching for that one line is what produced the universal. Written here because the pattern is the lesson: five of this slice's corrections have been one sentence generalising one true case, and the only reliable cure found was to state the cases and let the reader draw the rule."
+  ]
 }
