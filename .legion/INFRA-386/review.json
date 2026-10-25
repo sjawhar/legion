@@ -2,48 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T18:58:57Z",
-  "round": 6,
-  "decision": "changes_requested",
+  "completed": "2026-10-25T19:42:34Z",
+  "round": 7,
+  "decision": "approved",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "reviewedCodeHead": "9d9bcf0ecca26298410bf72945d973833fad59cc",
-  "roundReason": "Implementing rounds 7-8, under the architect's rulings (PR comments 6400492408, 6400601649, 6400670216, 6400709005): cleanup() ignores further INT/TERM/HUP, and each trap kubectl runs under setsid -w; the hazard sentences are gone. The architect's Envoy note of 18:49Z asks that the set -m clause be deleted.",
+  "reviewedCodeHead": "342ac4ed6ad42faa39623153ffb82bc20719367b",
+  "roundReason": "Implementing round 9 answered the five findings of my review at 9d9bcf0e, with prose and comment edits only; the architect accepted all five (Envoy, 19:01Z).",
   "critical": 0,
-  "important": 3,
-  "minor": 2,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:3018-3020, 3218-3220",
-      "description": "The stated reason for the sessions is wrong for the trap's longest steps. 'kubectl ... keeps an inherited ignore of SIGINT and SIGHUP' does not hold for `kubectl delete` (waits by default) or `kubectl wait --for=delete`: while they wait, both call signal.Notify for INT, HUP and TERM, which Go documents as removing an inherited SIG_IGN. Measured 2026-10-25 with the pod's kubectl v1.35.9 against a stub API server whose watch never answers, launched with `trap '' INT TERM HUP`: `kubectl wait --for=delete service/x --timeout=60s` exited rc=1 on INT, on HUP and on TERM; the control `kubectl get --raw /hang` stayed alive after INT. The code is right. The reason is not, and it suggests the sessions are needed for TERM alone."
-    },
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:3227-3228",
-      "description": "'a form that put the trap in job control (set -m) let a SIGINT end it' holds only for a sequence started with SIGINT ignored, a launch the page never states (the tester's round-8 correction; the architect's Envoy note asks to delete the clause). Delete it."
-    },
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:3306-3309",
-      "description": "The INFRA-232 bullet's lead says 'with every command of the sequence as published above' while its own parenthetical lists command changes, and 'changed two of its comments' is now false (the block's changed comments are the label listing's, the `get job,service` one, the closing comment, and the new trap comments). Say the runs used the sequence as published then, and name what INFRA-386 has since changed."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:3026",
-      "description": "'# an empty listing proves nothing' contradicts 3184-3186, where an empty listing shows only that no such Job was stored by the time it ran."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:3220, 3229",
-      "description": "'nothing but a SIGKILL ends a clean-up in progress' and 'ends the sequence, its trap included' are too broad. A signal the shell neither traps nor ignores ends it too: a stub run with TERM then two USR1 stopped at 'cleanup: start' (QUIT, which bash ignores, finished). A group SIGKILL ends the shell but not the kubectl then running in its own session; that kubectl runs on and keeps the flock descriptor, so `flock ... cat` waits for it (stub: 5.5 s after the KILL)."
-    }
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "fixesVerified": [
+    "3018-3019 and 3217-3220: sessions needed because kubectl dies of an inherited-ignored TERM and its waits catch INT and HUP. Measured by the reviewer (kubectl v1.35.9, stub API server, hanging watch). Source checked at kubectl v0.35.0: delete.go:467 ConditionFn cmdwait.IsDeleted + RunWait; wait/delete.go:107 interrupt.New; util/interrupt/interrupt.go:28,90 signal.Notify(HUP, INT, TERM, QUIT)",
+    "set -m clause gone (grep 0); the rejected forms named are the published block without these lines (qpt87) and the ignore without sessions (g5cs8)",
+    "3309-3313 INFRA-232 lead: 'the sequence as this page published it then', listing INFRA-386's command and comment changes",
+    "3025 comment agrees with 3184-3186",
+    "3221-3224 and 3135-3138: only SIGKILL among the stop signals, which ends the shell alone; the running kubectl finishes and holds the flock; an untrapped, unignored signal can end the clean-up"
   ],
-  "ci": "Code head 9d9bcf0e: Tests 40221598914 in progress, PR Title 40221714979 success when read. Not waited for: a request for changes stands whatever CI says. main is 4ceb3aa9, with no docs/kubernetes.md change since base; GitHub reports MERGEABLE.",
-  "threads": "8 earlier threads, all resolved, nothing open. The implementer's pending-change comment 6401142937 (the set -m comment) is obsolete at this head, since set -m is gone.",
-  "thermo": "Not run: the diff is docs/kubernetes.md only. A reviewer subagent attacked the new trap code and prose with stub experiments in its place.",
+  "ci": "Required set (ruleset): lint, typecheck, test, pr-title. CI head 342ac4ed (newest pull_request run): Tests 40224138347 success (lint, typecheck, test); PR Title 40224248407 success; Legion Envoy and Contracts 40224138388 success; compare 342ac4ed...cce61ba3 touches only .legion/. main 6a91d153 has no docs/kubernetes.md change since base; GitHub reports MERGEABLE.",
+  "threads": "14 review threads, all mine; each answered by a fix and my confirming reply, resolved by the implementer. PR conversation comments read through 6402044956 (reading rules; no action).",
+  "thermo": "Not run: the diff is docs/kubernetes.md only.",
   "notProvenOrRisk": [
     "A create the API server stores only after the trap's label delete has listed the Jobs is not measured; the page names it and gives the re-list and label delete.",
     "No wait was measured, so no re-list is proven to rule a late-stored Job out; the page says so.",
-    "Between the EXIT trap's start and `trap '' INT TERM HUP`, a few builtins run with the stop signals still trapped to `exit` or at their defaults; a stop landing there ends the clean-up. Not measured; the window is a few builtin statements."
+    "A group SIGKILL during the clean-up, leaving the running kubectl to finish in its own session and hold the flock, was shown with a stub, not the real block.",
+    "Between the EXIT trap's start and `trap '' INT TERM HUP`, a few builtins run with the stop signals still trapped to `exit` or at their defaults; a stop landing there ends the clean-up. Not measured."
   ]
 }
