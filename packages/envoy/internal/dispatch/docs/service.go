@@ -1036,7 +1036,13 @@ func ArtifactVersionEventPayload(
 // id it changed. Its caller decides from a read of its own whether any id needs repair, so a
 // document that needs none opens no transaction, and records the stamped asks
 // (recordStampedAskBlocks) once it holds the room's state lock, which no Yjs transaction takes.
+// A document already past the decode cap is stamped nothing and opens no transaction: the stamp
+// adds an item for every id it mints, so it would carry such a document further past what ygo can
+// decode, and it returns errPastDecodeCap before it writes.
 func stampBlockIDs(doc *crdt.Doc, origin any) (*pmdoc.Node, int, []stampedAsk, error) {
+	if pastDecodeCap(doc) {
+		return nil, 0, nil, errPastDecodeCap
+	}
 	minted := 0
 	var stamped []stampedAsk
 	tree, _, err := rewriteLive(doc, origin, func(live *pmdoc.Node) bool {
@@ -1356,7 +1362,16 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return minted > 0, stampErr
 		})
 		keep(slot, update)
-		if err != nil {
+		switch {
+		case errors.Is(err, errPastDecodeCap):
+			// The stamp wrote nothing (stampBlockIDs), so the settlement carries on with the tree it
+			// read, ids unrepaired, rather than ending: a document's clocks never fall, so one past
+			// the cap would refuse every later stamp too, and a settlement that ended here would
+			// leave its browsers' edits unversioned until it was rebuilt. Nothing failed, so no
+			// settle failure is counted.
+			reconciled = read
+			s.logPastDecodeCap(room, "settlement's block-id stamp")
+		case err != nil:
 			if len(slots) == 0 && errors.Is(err, ErrDocSchema) {
 				slog.Error("dispatch: settle document outside Proof schema", "room", room, "error", err)
 				return
@@ -1418,7 +1433,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	// observer has not left its blocks unseen, for the settlement that observer arms (askBlockSources).
 	credit.askSources = state.askSources()
 	state.mu.Unlock()
-	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, reconciled, credit, beforeMarkdown)
+	reconciliation, err := s.reconcileAskBlocks(ctx, tx, room, owner, doc, reconciled, credit, beforeMarkdown)
 	if err != nil {
 		abandon(err)
 		return
@@ -1783,7 +1798,13 @@ func (s *Service) backfillBlockIDs(ctx context.Context, artifactID string) Block
 		return minted > 0, nil
 	})
 	if slot == nil {
-		if err != nil {
+		switch {
+		case errors.Is(err, errPastDecodeCap):
+			// The stamp wrote nothing (stampBlockIDs): the document is left as it is, and the
+			// backfill goes on to the next one, as it does past a document that is stopping.
+			report.Skipped = "document past the decode cap"
+			s.logPastDecodeCap(artifactID, "block-id backfill")
+		case err != nil:
 			report.Err = fmt.Errorf("stamp document: %w", err)
 		}
 		return report

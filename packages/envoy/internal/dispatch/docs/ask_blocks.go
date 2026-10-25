@@ -224,12 +224,14 @@ func settlementRetraction(resolution model.AskResolution) bool {
 // gets its decided wording back first (restoreDocumentDecidedWordings), so the block is written
 // back to it, and its copies settle again.
 // before is the document's rendering as settlement read it ("" where it did not render), which the
-// answers settlement writes back into returning blocks are weighed against (withholdAnswers).
+// answers settlement writes back into returning blocks are weighed against, and live is the room's
+// document their repairs are written into, whose decode cap is asked first (withholdAnswers).
 func (s *Service) reconcileAskBlocks(
 	ctx context.Context,
 	tx pgx.Tx,
 	artifactID string,
 	owner artifactOwner,
+	live *crdt.Doc,
 	tree *pmdoc.Node,
 	credit settlementVersionCredit,
 	before string,
@@ -385,7 +387,7 @@ func (s *Service) reconcileAskBlocks(
 			reconciled.repairAsk(block.node, block.id, ask, "", &repaired)
 		}
 	}
-	reconciled.withholdAnswers(artifactID, tree, before)
+	reconciled.withholdAnswers(artifactID, live, tree, before)
 
 	for _, ask := range rows {
 		// Only an open ask is retracted: an answered or resolved one is already closed, its

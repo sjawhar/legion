@@ -827,15 +827,28 @@ func (s *Service) sweepUnrecordedMarks(room string, tree *pmdoc.Node) {
 	if len(expired) == 0 {
 		return
 	}
-	if err := s.unmarkExpired(room, expired); err != nil {
+	switch err := s.unmarkExpired(room, expired); {
+	case errors.Is(err, errPastDecodeCap):
+		// The marks stay, and stay expired: every later settlement's pass finds them again and is
+		// refused again, which is why the refusal is logged once rather than on each.
+		s.logPastDecodeCap(room, "unrecorded-mark sweep")
+	case err != nil:
 		slog.Error("dispatch: sweep unrecorded marks", "room", room, "error", err)
 	}
 }
 
-// unmarkExpired removes from room's live document each of expired that it still holds.
+// unmarkExpired removes from room's live document each of expired that it still holds. It unmarks
+// them all in one transaction on the room itself, which cannot be rolled back once begun, so a
+// document already past the decode cap is refused before that transaction opens (errPastDecodeCap)
+// and left as it was: each mark it removes writes new format items around the text it covered,
+// carrying the document further past what ygo can decode.
 func (s *Service) unmarkExpired(room string, expired []pmdoc.MarkRef) error {
 	var sweepErr error
 	err := s.srv.Apply(context.Background(), room, func(doc *crdt.Doc, transact func(func(*crdt.Transaction))) {
+		if pastDecodeCap(doc) {
+			sweepErr = errPastDecodeCap
+			return
+		}
 		transact, release := s.serviceTransact(transact)
 		defer release()
 		fragment := doc.GetXmlFragment(fragmentName)

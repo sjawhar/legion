@@ -3,6 +3,8 @@ package docs
 import (
 	"log/slog"
 
+	"github.com/reearth/ygo/crdt"
+
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -61,7 +63,14 @@ type serverRewrite struct {
 // A repair that then changes nothing is dropped with its block.repaired. A document that does not
 // render cannot be weighed, so its answers all stay out, and the settlement that renders it next
 // fails as it would have.
-func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdoc.Node, before string) {
+//
+// live is the room's document the repairs will be written into (writeLive). One already past the
+// decode cap (pastDecodeCap) has no room for any answer whatever its rendering weighs, since an
+// answer's text is new items in it, so every answer stays out and none is given back. It is asked
+// here, before anything is written, and answered the way a full document is rather than as a
+// failed write: three failures in a row fail the room (maxSettleFailures, retrySettleLocked), and
+// the ask already keeps the answer.
+func (r *settlementReconciliation) withholdAnswers(artifactID string, live *crdt.Doc, tree *pmdoc.Node, before string) {
 	var answered []int
 	for index, rewrite := range r.rewrites {
 		if rewrite.answer {
@@ -71,11 +80,18 @@ func (r *settlementReconciliation) withholdAnswers(artifactID string, tree *pmdo
 	if len(answered) == 0 {
 		return
 	}
-	after, err := renderTree(tree)
-	rendered := err == nil
-	if rendered {
-		if err = weighRendering(before, after); err == nil {
-			return
+	var err error
+	rendered := false
+	if pastDecodeCap(live) {
+		err = errPastDecodeCap
+	} else {
+		var after string
+		after, err = renderTree(tree)
+		rendered = err == nil
+		if rendered {
+			if err = weighRendering(before, after); err == nil {
+				return
+			}
 		}
 	}
 	// changes says whether each block repaired without its answer still changes from what
