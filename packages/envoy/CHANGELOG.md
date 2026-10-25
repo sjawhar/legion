@@ -4,6 +4,29 @@
 
 ### Added
 
+- A release of a stored secret checks the policy again once it has read the store: a retag to a
+  kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
+  releases nothing and ends the grant for good, as a kind change found before the read does, so a
+  grant made while the secret was plain never returns the App key or refresh token stored once it
+  is a kind. Retag a stored secret to a kind, and store its key only after the retag exits 0,
+  printing `broker: serving NAME (kind <kind>)`.
+- A mint error names an upstream's HTTP status by its number and a failed call by its class
+  (cancelled, timed out, not resolved, not reached, a failed TLS handshake, an answer ended early,
+  or no usable HTTP answer), never Go's transport text, the reason phrase or the body, any of which
+  an upstream can fill with the credential it was sent. A Google refusal names its `error_subtype`
+  only when it is `invalid_rapt` or `rapt_required`, and `unknown` otherwise. A GitHub App
+  installation record with no positive id is skipped: no token is asked for installation 0.
+- `agent-secrets secret retag` writes against the tags it checked. On GCP it sends the annotations
+  and etag of its one read, so a write another person made in between refuses it, `another write
+  changed the secret after this retag read it`, with nothing written. On AWS, whose tag calls take
+  no condition, it reads the tags back after its write, and when another writer left a `github-app`
+  secret without owners it restores the tags it read and exits 1 naming the race: retag on AWS one
+  writer at a time.
+- `POST /v1/secrets/{name}/reread` answers `kind`, the kind the broker serves the secret as (absent
+  for a stored secret), and `agent-secrets secret retag` exits 1 when that is not the kind it wrote:
+  `the broker still sees the old tags`, since a stale metadata read serves the secret as it was, and
+  a secret served as stored releases its stored value. Store an App key or a login in a secret only
+  after its retag to that kind exits 0, printing `broker: serving NAME (kind <kind>)`.
 - A person's machine login is an OAuth 2.0 device authorization grant (RFC 8628) on the secrets
   broker's own `POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`, and it refreshes
   itself. `agent-secrets machine login` prints the same code, which the person the login names
@@ -28,7 +51,9 @@
   proof within `BROKER_PROOF_SKEW_SECONDS` of the broker's clock, and spends a per-address rate
   limit bucket of its own (429 `RATE_LIMITED` with `Retry-After`). A login through the earlier
   `POST /v1/launcher-credentials` route, which cannot refresh, keeps its seven-day credential, or
-  `BROKER_LAUNCHER_CREDENTIAL_SECONDS` when that is shorter. The provider's device codes, tokens,
+  `BROKER_LAUNCHER_CREDENTIAL_SECONDS` when that is shorter (that route is removed since: see the
+  Breaking entry under Changed on serving a person's machine login only through the OAuth device
+  grant). The provider's device codes, tokens,
   DPoP proofs and nonces and its HMAC secret live in the tables migration 0016 creates. Revoking a machine (Dispatch or `agent-secrets machine revoke`) ends
   its refresh tokens too, so its helper's next refresh is refused, and the helper drops the login,
   logs `the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh
@@ -99,12 +124,29 @@
   …/release-envoy-listener.yaml@refs/heads/main --source-ref refs/heads/main
   --deny-self-hosted-runners` accepts an image only when a run on `main` built it. `latest` is a
   separate index with no attestation; pin the `<commit>` image its revision annotation names.
-- The secrets broker serves a minted secret: a GCP secret with no version tagged
-  `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists
-  its name with that account and its owner and the secret is human-tier. Each release mints a
-  Google access token for the account, lasting the shorter of an hour and the grant's remaining
-  life, after rereading the secret (at most once per name per 30 seconds); a request for one must
-  ask for at most an hour (`400 MINT_REQUIRES_LIFETIME`).
+- The secrets broker mints releases by each secret's `kind` tag. `github-app` releases contain
+  installation tokens for every installation of the GitHub App that is not suspended and is on an
+  account the secret's `github-owners` tag lists (GitHub logins separated by spaces); a
+  `github-app` secret without that tag is refused `github-owners-missing`, and one whose list
+  holds a comma, or an entry no GitHub login can be (not starting with an ASCII letter or digit,
+  holding anything but ASCII letters, digits and hyphens, over 39 characters, or the word `none`),
+  `github-owners-malformed`,
+  since anyone can install a public App. `google-login`
+  releases contain
+  a Google access token. A kind secret holds its key or refresh
+  token as a current value, which the broker never returns, and a mint GitHub or Google refuses
+  is `502 MINT_FAILED` with their reason, logged at ERROR as `broker: mint failed` with the
+  secret's name, kind and the failure's class. `max-grant` limits a request's `--ttl`; a missing or
+  longer lifetime is `400 GRANT_REQUIRES_LIFETIME`. A grant ends for good when a release finds its
+  secret's kind changed or its lifetime over the current `max-grant` (`GRANT_NOT_LIVE`); a change
+  reverted before any release finds it leaves the grant as it was, and to end a grant, revoke it. A
+  `max-grant` set or lowered later also refuses approval of a longer pending request
+  (`NOT_APPROVER`). `BROKER_MINT_TARGETS` is removed and the broker refuses it when it is set.
+  `agent-secrets secret create` takes `--kind`, `--github-owners` and `--max-grant`, and `secret
+  retag` takes `--kind`, `--github-owners LOGINS|none` and `--max-grant DURATION|none`. A retag
+  either sets tags or removes them (`none`), in one write, so a refused write leaves the secret as
+  it was. A retag that names `none` beside another change exits 2 before it writes anything, and
+  so does a create or retag that would leave a `github-app` secret without `github-owners`.
 
 - Dispatch records which repository each issue targets. A repository mapping
   (`/api/v1/settings/repo-projects`) carries `default`, at most one per project, set from the
@@ -516,6 +558,30 @@
   recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, and only when a
   repair has failed or none has run within a minute, so a stop the self-health rebuild repairs a
   moment later no longer raises one (INFRA-182).
+- **Breaking:** once any secret with a `kind` tag holds a value, roll the secrets broker forward,
+  never back past this release. A broker before kinds reads no `kind` tag and would serve the
+  secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes
+  `mint-service-account: kind-secret` beside every kind, which every broker from
+  legion-envoy-v13.19.0 up to this release refuses as `mint-target-malformed`, and `retag --kind
+  none` removes it with the kind. A broker older than legion-envoy-v13.19.0 reads no such tag and
+  serves the value, and so does every earlier broker for a kind secret written without the tag. To
+  go back anyway, first disable every kind secret's versions.
+- **Breaking:** the secrets broker serves a person's machine login only through the OAuth device
+  grant. `POST /v1/launcher-credentials` and its poll `GET /v1/launcher-credentials/{pending}`,
+  the login helpers before legion-envoy 14 used, are gone: the POST answers `405 Method Not
+  Allowed` (Dispatch's `GET` on that path remains) and the poll `404`. Migration 0017 drops their
+  `machine_login_polls` table. A broker of the release before this one still boots on the
+  migrated database, its two removed routes answering 500. Dispatch's routes are unchanged:
+  `GET /v1/launcher-credentials`, `POST /v1/launcher-credentials/{id}/revoke-by-approver`,
+  `POST /v1/machine-logins/lookup` and the record decisions, as is the Legion daemon's
+  `POST /v1/launcher-credentials/token`. A login such a route opened and left pending is still
+  decided by its code; its machine learns nothing of it and logs in again.
+- **Breaking:** `agent-secrets-helper` answers `enroll-box` and `unenroll-box`, the ops of an
+  `agent-secrets` before legion-envoy 10, `BAD_REQUEST unknown op`; `agent-secrets enroll` and
+  `unenroll` ask only `enroll-session-key` and `unenroll-session-key`, never falling back to a
+  helper before legion-envoy 10; `agent-secrets enroll` takes no `--kind`, so `--kind box` exits 2
+  naming the flag; and `POST /v1/enrollments` refuses the kinds `host` and `box`, which only such a
+  helper sent, `400 INVALID_KIND`, where it recorded them as `session`.
 - **Breaking:** the secrets broker needs `BROKER_MACHINE_LOGIN_URL`, the absolute http(s) URL of
   Dispatch's machine-login page (`https://<dispatch>/credentials/machine`), and refuses to start
   without it. The device authorization answer's `verification_uri` names that page, where the
@@ -525,7 +591,8 @@
   broker of this release: against an earlier broker, `agent-secrets machine login` fails. Upgrade
   the broker before the helpers. The broker still serves `POST /v1/launcher-credentials` and
   `GET /v1/launcher-credentials/{pending}` for helpers from earlier releases, whose logins it never
-  refreshes.
+  refreshes. (Superseded by the Breaking entry under Changed on serving a person's machine login
+  only through the OAuth device grant: those routes are removed.)
 - `BROKER_LAUNCHER_CREDENTIAL_SECONDS` defaults to 2592000 (30 days), up from 604800 (7 days), and
   is how long a machine login lasts without a refresh: an approval mints its credential for that
   long, and each refresh moves its expiry to that long from then. Its maximum stays 2592000.
@@ -746,7 +813,8 @@
   clients in the field keep working through the rollout in either order: the broker records an
   older helper's `host` or `box` as `session` and logs `an enrollment named a legacy kind`; this
   helper asks an older broker, which refuses `session` with `400 INVALID_KIND`, once more as
-  `host` or `box`. The broker is forward-only from this migration: a broker before it inserts
+  `host` or `box` (the broker's half is removed since: it now refuses `host` and `box` with
+  `400 INVALID_KIND`). The broker is forward-only from this migration: a broker before it inserts
   `host` and `box`, which the new constraint refuses, so roll forward rather than back.
 - **Breaking:** a grant lasts until its session ends unless its request asked for a shorter
   lifetime (`--ttl`, above); there is no fixed lifetime and no cap. `BROKER_MAX_GRANT_SECONDS`
@@ -784,7 +852,8 @@
   stderr; and `enroll --helper --kind box`, which dotfiles' agentbox passes, enrolls as before
   until dotfiles pins this release and agentbox stops passing it, while any other `--kind` exits 2
   naming the flag, as every `--kind` but `box` did before. An `enroll` without `--helper` is
-  refused for that first, whatever `--kind` it carries, as before.
+  refused for that first, whatever `--kind` it carries, as before. (Superseded by the Breaking
+  entry on `enroll-box`, `unenroll-box` and `--kind` under Changed: those fallbacks are removed.)
 - `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
   naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
   Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not

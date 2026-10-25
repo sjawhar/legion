@@ -24,19 +24,9 @@ import (
 // pod's enrollment is its own launcher's job.
 func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	flagArgs, positional := splitArgs(args, map[string]bool{
-		"kind": true, "runtime-id": true, "thumbprint": true, "session-id": true,
+		"runtime-id": true, "thumbprint": true, "session-id": true,
 	})
-	if len(positional) > 0 {
-		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
-		return exitUsageError
-	}
 	flags := newFlagSet("enroll", stderr)
-	// --kind box is accepted because dotfiles' scripts/agentbox passes it on every box it enrolls,
-	// and must until its pinned agent-secrets is legion-envoy 10 or later: an agent-secrets before
-	// that refuses `enroll --helper` without --kind box. Any other --kind is refused. The flag goes
-	// once dotfiles' pin is legion-envoy 10 or later and scripts/agentbox on dotfiles' main passes
-	// no --kind.
-	kind := flags.String("kind", "", `"box" (accepted for agentbox compatibility)`)
 	runtimeID := flags.String("runtime-id", "", "this runtime's stable id")
 	thumbprint := flags.String("thumbprint", "", "the signing key's RFC 7638 thumbprint")
 	sessionID := flags.String("session-id", "", "the agent session the broker notifies if one of this session's pending requests expires")
@@ -44,12 +34,12 @@ func cmdEnroll(args []string, stdout, stderr io.Writer) int {
 	if err := flags.Parse(flagArgs); err != nil {
 		return exitUsage(err)
 	}
-	if !*helperFlag {
-		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls only through the local agent-secrets-helper socket)")
+	if len(positional) > 0 {
+		fmt.Fprintf(stderr, "agent-secrets enroll: unexpected argument %q\n", positional[0])
 		return exitUsageError
 	}
-	if *kind != "" && *kind != "box" {
-		fmt.Fprintf(stderr, "agent-secrets enroll: --kind %q is not a kind enroll takes: every session a launcher enrolls is one kind, so leave --kind out\n", *kind)
+	if !*helperFlag {
+		fmt.Fprintln(stderr, "agent-secrets enroll: --helper is required (this CLI enrolls only through the local agent-secrets-helper socket)")
 		return exitUsageError
 	}
 	return cmdEnrollHelper(*runtimeID, *thumbprint, *sessionID, stdout, stderr)
@@ -75,7 +65,7 @@ func cmdEnrollHelper(runtimeID, thumbprint, sessionID string, stdout, stderr io.
 	if sessionID != "" {
 		sessionIDPtr = &sessionID
 	}
-	resp, err := enrollRetryingDrain(sock, helper.Request{Op: "enroll-session-key", RuntimeID: runtimeID, Thumbprint: thumbprint, SessionID: sessionIDPtr}, stderr)
+	resp, err := enrollRetryingDrain(sock, helper.Request{Op: "enroll-session-key", RuntimeID: runtimeID, Thumbprint: thumbprint, SessionID: sessionIDPtr})
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets enroll: %v\n", err)
 		return 1
@@ -101,36 +91,17 @@ func cmdEnrollHelper(runtimeID, thumbprint, sessionID string, stdout, stderr io.
 // install's drain-to-restart window enrolls with the restarted helper. Only tests shorten it.
 var enrollDrainWait = 30 * time.Second
 
-// enrollRetryingDrain is callSessionKeyOp for "enroll", retried every 250 ms while the helper
-// answers DRAINING, until enrollDrainWait has passed; the last answer is returned as it came.
-func enrollRetryingDrain(sock string, req helper.Request, stderr io.Writer) (helper.Response, error) {
+// enrollRetryingDrain asks the helper req, again every 250 ms while it answers DRAINING, until
+// enrollDrainWait has passed; the last answer is returned as it came.
+func enrollRetryingDrain(sock string, req helper.Request) (helper.Response, error) {
 	deadline := time.Now().Add(enrollDrainWait)
 	for {
-		resp, err := callSessionKeyOp(sock, "enroll", req, stderr)
+		resp, err := helper.Call(sock, req, 30*time.Second)
 		if err != nil || resp.OK || resp.Code != helper.CodeDraining || !time.Now().Before(deadline) {
 			return resp, err
 		}
 		time.Sleep(250 * time.Millisecond)
 	}
-}
-
-// oldHelperSessionKeyOps names, for each kind-free op, the op an agent-secrets-helper from before
-// this release serves the call under. This CLI ships with the helper in one release, but a helper
-// restarts onto it only once no session is registered with it, so until then this CLI meets the
-// older helper; the map goes once no helper older than this release runs.
-var oldHelperSessionKeyOps = map[string]string{"enroll-session-key": "enroll-box", "unenroll-session-key": "unenroll-box"}
-
-// callSessionKeyOp asks the helper req, and asks it again under the old-helper op when the helper
-// answers that it does not know the new one, saying so on stderr under command's name.
-func callSessionKeyOp(sock, command string, req helper.Request, stderr io.Writer) (helper.Response, error) {
-	resp, err := helper.Call(sock, req, 30*time.Second)
-	if err != nil || resp.OK || resp.Code != helper.CodeBadRequest || resp.Error != "unknown op "+req.Op {
-		return resp, err
-	}
-	legacy := oldHelperSessionKeyOps[req.Op]
-	fmt.Fprintf(stderr, "agent-secrets %s: this machine's agent-secrets-helper is older than this client (it has no %s op); asking its %s instead. It moves onto this release when it restarts with no session registered.\n", command, req.Op, legacy)
-	req.Op = legacy
-	return helper.Call(sock, req, 30*time.Second)
 }
 
 // cmdUnenroll implements "unenroll --helper --enrollment <id>". --helper is required for the
@@ -164,7 +135,7 @@ func cmdUnenroll(args []string, stdout, stderr io.Writer) int {
 // Prints nothing on success, matching the exit-code-only unenroll contract.
 func cmdUnenrollHelper(enrollmentID string, stderr io.Writer) int {
 	sock, _ := helperSocket()
-	resp, err := callSessionKeyOp(sock, "unenroll", helper.Request{Op: "unenroll-session-key", EnrollmentID: enrollmentID}, stderr)
+	resp, err := helper.Call(sock, helper.Request{Op: "unenroll-session-key", EnrollmentID: enrollmentID}, 30*time.Second)
 	if err != nil {
 		fmt.Fprintf(stderr, "agent-secrets unenroll: %v\n", err)
 		return 1
