@@ -98,6 +98,18 @@ func (a *servicePersistenceAdapter) StoreUpdate(room string, update []byte) erro
 // lands its credit here instead: the room drops it with the update, which the browser resends.
 func (a *servicePersistenceAdapter) StoreUpdateContext(ctx context.Context, room string, update []byte) error {
 	if a.service.roomFailed(room) {
+		// The failed room's update is dropped and its browser resends it to the room that
+		// replaces this one, but its class is taken all the same, so the work the record counts
+		// for it ends here. Left counted, it would be an append no callback can ever finish:
+		// the record - or the one registered in its place, which carries the updates the room's
+		// persistence never took (handOverFailedRoomLocked) - would read as having a write in
+		// flight for ever, so the stale-room evictor would refuse to close that room, the
+		// settlement would retry without end, and the record would never be released.
+		class, counted, found := a.service.consumeUpdateClass(room, update)
+		if found && class.durable {
+			a.service.finishDurableAppend(room, counted)
+		}
+		class.credit.landed()
 		return nil
 	}
 	class, counted, found := a.service.consumeUpdateClass(room, update)

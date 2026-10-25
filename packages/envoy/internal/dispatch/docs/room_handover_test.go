@@ -515,3 +515,75 @@ func TestAFailedRoomsUnstoredUpdatesGoToTheRecordThatReplacesIt(t *testing.T) {
 		t.Fatalf("the record that replaced the failed room counts %d appends and %d pending updates once the carried append finished, want none", appends, pending)
 	}
 }
+
+// The two shapes of a failed room's update, through the persistence adapter itself.
+//
+// One is handed on while the failure stands: the service drops it, the browser resends it to the
+// room that replaces this one, and the work the record counts for it ends there. Left counted, it
+// is an append no callback can ever finish, and the record - or the one registered in its place,
+// which carries what the room's persistence never took - reads as having a write in flight for
+// ever: the stale-room evictor refuses to close that room (hasWriteInFlight), the settlement
+// retries without end, and the record is never released.
+//
+// The other is handed on after the hand-over, by ygo's stranded persistence once the eviction has
+// cleared the failure. That one is stored, and it must still carry the class and the credit its
+// observer recorded, or the person who typed it is on no version and in no pending row.
+func TestAFailedRoomsUpdatesEndOrMoveWithTheRecordThatReplacesIt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	adapter := &servicePersistenceAdapter{store: service.persistence, service: service}
+	state := service.room(artifactID)
+
+	// The update the failure drops, handed on while the room is failed.
+	dropped := []byte("the update the failure dropped")
+	service.recordUpdateClass(artifactID, dropped, documentUpdateClass{contentChanged: true, durable: true})
+	stranded := []byte("the update the room's persistence never took")
+	service.recordUpdateClass(artifactID, stranded, documentUpdateClass{contentChanged: true, durable: true})
+	state.mu.Lock()
+	state.failed = errors.New("the room failed on an append")
+	state.mu.Unlock()
+	if err := adapter.StoreUpdate(artifactID, dropped); err != nil {
+		t.Fatalf("hand the failed room's update to its persistence: %v", err)
+	}
+	state.mu.Lock()
+	pending, appends := state.pendingUpdates, state.durableAppends.Load()
+	state.failed = nil
+	service.handOverFailedRoomLocked(artifactID, state)
+	state.mu.Unlock()
+	if pending != 1 || appends != 1 {
+		t.Fatalf("the failed room's record counts %d pending updates and %d appends after an update it dropped, want 1 and 1: the dropped update's own count must end with it",
+			pending, appends)
+	}
+
+	// The update the room's persistence never took moves to the record registered in its place,
+	// with the one append it counts, where ygo's stranded persistence finds it.
+	successor := service.room(artifactID)
+	if successor == state {
+		t.Fatal("the failed room's record was kept, so nothing here is tested")
+	}
+	successor.mu.Lock()
+	pending, appends = successor.pendingUpdates, successor.durableAppends.Load()
+	successor.mu.Unlock()
+	if pending != 1 || appends != 1 {
+		t.Fatalf("the record that replaced the failed room counts %d pending updates and %d appends, want 1 and 1: the update the room's persistence never took, and no other", pending, appends)
+	}
+	class, counted, found := service.consumeUpdateClass(artifactID, stranded)
+	if !found || !class.durable || counted != successor {
+		t.Fatal("the stranded update is unknown to the record that replaced the failed room: its append would be credited to nobody")
+	}
+	if _, _, droppedFound := service.consumeUpdateClass(artifactID, dropped); droppedFound {
+		t.Fatal("the update the failure dropped was carried to the record that replaced the failed room")
+	}
+	service.finishDurableAppend(artifactID, counted)
+	successor.mu.Lock()
+	pending, appends = successor.pendingUpdates, successor.durableAppends.Load()
+	successor.mu.Unlock()
+	if pending != 0 || appends != 0 {
+		t.Fatalf("the record counts %d pending updates and %d appends once its carried append finished, want none", pending, appends)
+	}
+}
