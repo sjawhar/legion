@@ -772,6 +772,43 @@ func TestIntrospectionAnswersOnlyAnAccessToken(t *testing.T) {
 	t.Run("once that access token has expired", check)
 }
 
+// TestAnIntrospectionFailureNamesItsCause: when Introspect cannot stand behind an answer it
+// returns an error, which the route logs as the one line an operator reads beside its 503. That
+// error must say what failed. The library wraps a failed read of a token's row in its own
+// unauthorized error, whose text is only "request_unauthorized", so returned as it is, an outage
+// and a row the broker cannot decode both reach the log as an authorization failure naming
+// neither: the cause is kept beneath it and never printed.
+func TestAnIntrospectionFailureNamesItsCause(t *testing.T) {
+	f := newExchangeFixture(t, func(*oauth.Config) {})
+	ctx := context.Background()
+	key := newKey(t)
+	token := f.exchanged(t, exchangeForm(f.podToken(t, "pod-uid-1", nil), oauthwire.SubjectTokenTypeKubernetes, "implementer-g1"), key)
+
+	t.Run("a stored row naming a client the provider does not register", func(t *testing.T) {
+		if _, err := f.pool.Exec(ctx, `update oauth_access_tokens set request = jsonb_set(request, '{client_id}', '"unregistered-client"')`); err != nil {
+			t.Fatalf("rewrite the token's row: %v", err)
+		}
+		_, err := f.provider.Introspect(ctx, token)
+		if err == nil {
+			t.Fatal("Introspect of a row naming an unregistered client answered no error")
+		}
+		if !strings.Contains(err.Error(), "unregistered-client") {
+			t.Fatalf("Introspect's error reads %q: it must name the row's unregistered client, which is what failed", err.Error())
+		}
+	})
+
+	t.Run("a store that has gone away", func(t *testing.T) {
+		f.pool.Close()
+		_, err := f.provider.Introspect(ctx, token)
+		if err == nil {
+			t.Fatal("Introspect on a closed store answered no error")
+		}
+		if !strings.Contains(err.Error(), "closed pool") {
+			t.Fatalf("Introspect's error reads %q: it must carry the store's own failure (pgx's \"closed pool\")", err.Error())
+		}
+	})
+}
+
 // TestTheExchangeClientAuthenticatesWithNoCredentialAndOnlyThere: the broker answers the exchange
 // client as authenticated when it presents nothing at the token-exchange grant, because the
 // subject token is the credential and shipping a secret to every pod is what this removes. Every
