@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-188",
+  "completed": "2026-10-25T05:55:00Z",
+  "round": 1,
+  "reviewedHead": "de88015273b9893862f53356d4a56f9b3b58f123",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "skills/dispatch/references/issues.md:40",
+      "description": "The diff created a dangling `rank` reference in a text agents read. Line 40 still says \"A closed issue takes only `rank`, `components`, a reopening status, and an external-links write that adds no link.\" Before this diff that word was anchored by line 46, which named the `rank` body field of a hand-built PATCH; the diff replaced line 46 with the `--before`/`--after` command and reworded the identical sentence in the tool description to \"A closed issue takes only a board move (before, after), components, …\" (packages/contracts/src/dispatch-tools.ts:417-419), leaving :40 as the one text that still names a field an agent cannot set: `dispatch_issue_update` is strict and has no `rank` argument, pinned at packages/contracts/src/dispatch-tools.test.ts:565, so no `--rank` flag is generated. Acceptance criterion A4 asks that the texts agents read send nobody to a hand-built request; :40 is the sentence that still does. Remediation: say \"a board move (`--before` / `--after`)\" there, as the tool description now does. Found independently by both thermonuclear agents (deep-review Minor 2, code-quality rank 1)."
+    },
+    {
+      "severity": "important",
+      "file": "packages/contracts/src/dispatch-tools.ts:399-403",
+      "description": "`dispatch_issue_update`'s `example` was not updated although the argument shape changed. packages/contracts/AGENTS.md:62 states the rule without condition: \"Every Dispatch spec includes `example`, a schema-valid call that `dispatch <command> --help` and every refusal print as a command line; update it with any argument-shape change.\" Verified at this head that the example is the one line every refusal prints: `bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-1` answers `Example: dispatch issue-update --issue DSP-1 --status done --reason '…'`, which shows nothing of the move this issue exists to deliver (the allowed-flag list does name --before/--after, and `--help` carries both descriptions, so the gap is the example alone). Remediation: one string, plus the schema-validity assertion that already covers every example at packages/contracts/src/dispatch-tools.test.ts:298. The architect asked for this in this round rather than after it."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy-client/src/__tests__/dispatch-execute.test.ts:2853-2897",
+      "description": "The new executor test covers `before`, `after`, both, and the no-neighbour case, but not an empty neighbour. `before: \"\"` is the case the guard's shape (`rankBefore === undefined`) deliberately passes through so the server refuses it (`RANK_INPUT: rank neighbor must name another issue`, packages/envoy/internal/dispatch/api/issue_rank.go), and the contract test records that intent in a comment only (packages/contracts/src/dispatch-tools.test.ts:470-472). A later falsy or trimming guard would turn that loud server refusal into a PATCH with no `rank` key that still satisfies the \"at least one field besides issue\" rule — a call that prints success and moves nothing. One assertion in the test the diff already adds locks it."
+    }
+  ],
+  "declined": [
+    {
+      "file": "packages/contracts/src/dispatch-api.ts:2060",
+      "description": "The code-quality pass asked that `IssueRankInput` be narrowed to a union so `rank: {}` becomes a compile error. Declined for this pull request: that type is the shared Dispatch wire shape generated into Go and consumed by the server, so narrowing it is a change to the API contract rather than to this diff, and the runtime guard (packages/envoy-client/src/dispatch-execute.ts:2885-2891, the only producer) plus its unit lock already make the empty shape unreachable."
+    },
+    {
+      "file": "packages/envoy/internal/dispatch/api/issue_queries.go:92",
+      "description": "The tester and the architect both noted that `dispatch issues` orders by status bucket first and rank second, so a neighbour in another status column ranks the card correctly project-wide while the listing shows it among its own status. Not asked for: it is true of the board before this change, the acceptance criteria use one status throughout, and the controller's own listings filter by a single status (skills/legion-controller/SKILL.md:154, :330), where the grouping is invisible."
+    }
+  ],
+  "ciRead": {
+    "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
+    "source": "repos/sjawhar/legion/rules/branches/main required_status_checks; branch protection carries none",
+    "ciHead": "066ac315a446bd03a1436eddd28b311a41aef614",
+    "onlyLegionAbove": true,
+    "observed": "At 2026-10-25T05:50Z: lint success, typecheck success, pr-title success, test in_progress. Not required and failing: envoy-go-race (run 40165272311, job 121087374105); the same job was green on main at the merge base 116821ebfebc (run 40153231713) and this diff changes no Go, so it is not this change's red. The corrective push restarts every lane.",
+    "note": "Approval was not reached this round, so no required check was waited for: a request for changes stands whatever CI says."
+  },
+  "thermonuclear": {
+    "head": "de88015273b9893862f53356d4a56f9b3b58f123",
+    "deepReview": "Verdict: APPROVE at de880152. Two Minor findings: Security[authz] (the board move is one flag for any session the PATCH already authorizes, with no server-side role check — packages/envoy/internal/dispatch/api/issue_patch.go, issue_rank.go; pre-existing authority, since the merge base's skill taught the same raw PATCH at skills/dispatch/references/issues.md:46) and the dangling `rank` at skills/dispatch/references/issues.md:40, carried above.",
+    "codeQuality": "Verdict: APPROVE at de880152. Ranked findings: issues.md:40 (carried above), the IssueRankInput narrowing (declined above), the missing empty-neighbour assertion (carried above), and a renamed contract test whose name promises more than it asserts (packages/contracts/src/dispatch-tools.test.ts:553)."
+  },
+  "verifiedOnTheForge": {
+    "threads": "0 review threads on sjawhar/legion#2174 (gh api graphql reviewThreads), 0 prior reviews; nothing to answer or accept this round.",
+    "e2eLines": "Both present in the pull request body: E2E (implementer) at head 066ac315a446 and E2E (tester) at head 2a2256ed2a39.",
+    "serverContract": "Checked the claims the texts make against the server and the daemon: `after` resolves the previous rank and `before` the next (packages/envoy/internal/dispatch/api/issue_rank.go), a rank with neither neighbour falls through to lastProjectRank, which is the hazard the executor's guard avoids; admission reads no priority (packages/daemon/internal/admit/admit.go, packages/daemon/internal/record/project.go:34), so backlog-stewardship.md's corrected rule is right."
+  }
+}
