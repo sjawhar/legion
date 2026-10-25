@@ -1,0 +1,52 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-95",
+  "completed": "2026-10-25T06:06:30Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/styles.css:97-98",
+      "description": "The note's Inbox row is wrong about the call site it names by file. It says an Inbox ask card (AskCard.tsx) is 14px on 20px lines and the 3px clears the line above by 1px. AskCard.tsx:522 wraps MarkdownBody in text-[15px] leading-relaxed, and .dispatch-markdown{font-size:inherit;line-height:inherit} wins over .prose-sm{font-size:.875rem;line-height:1.71429} in the built bundle (packages/dispatch/web/dist/assets/index-BKmvhNR3.css, same specificity, .dispatch-markdown 56k later in the file), which is also why the message turn measures 16px/24px rather than prose-sm's own size. So that surface is 15px on 24.375px lines, about 2px of clearance, which is what this pull request's own gap analysis already carried (.legion/INFRA-95/plan.json, F3: 'the Inbox ask card is about 24.4px (AskCard.tsx:522-523)'). 14px/20px is text-sm, which AskCard uses for its other paragraphs. The same number is in the PR body's pitch table and in the enumeration comment on dispatch://INFRA-95. The enumeration's conclusion is unaffected: the tight surface is the 12px/16px agent turn, and dispatch://INFRA-304 owns it."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/phone.e2e.ts:639-642",
+      "description": "The composer guard is asserted 95 lines after the clicks it is there to explain. In the state it names - the turn left under the fixed comment composer - the first trial click at :557 refuses first with a 5 s actionability timeout, so the message 'the turn was left under the fixed comment composer' is essentially never printed and the next investigation starts from a bare timeout. .legion/INFRA-95/test.json's note claims the row 'keeps an assertion that names that state ... so the row is independent of INFRA-303 rather than blind to it at its own point'; the code as ordered does not carry that claim. probeClear also fails open when the composer element is not found (:545, composer === null || ...), so a change to the form's accessible name silently degrades check 4 to a viewport-bounds test."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/e2e/phone.e2e.ts:583-586",
+      "description": "The tap's read-back is the one unsynchronised read left in a row whose acceptance line is that it gives the same answer every time: tap(), then a single page.evaluate of dataset.e2eTappedLink with 'no-click' as the fallback. The click Chromium synthesises from a touch sequence is not guaranteed to be dispatched in the task that resolves tap(); if it ever lands a tick late the row goes red as 'no-click'. The determinism evidence for it (240 taps, 30 of 30, 10 of 10 under load) is all from this one pod, and a GitHub runner is the machine this row's flake lived on. The suite's convention for a value that arrives asynchronously is expect.poll (packages/dispatch/e2e/attention.e2e.ts:155)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/phone.e2e.ts:478-503",
+      "description": "A second, wall-clock settle stands beside the suite's own frame-based one, whose doc comment argues against exactly this form: deep-links.e2e.ts:112-120 counts stillness in animation frames because 'a machine under load stretches them and stretches this with them, which a wall-clock window cannot do'. The same block also writes 'the seeded upper link outside the ask cards' a third time (:481-483, :506-509 and the CSS form at :553-555), each with its own error string."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/phone.e2e.ts:628-654",
+      "description": "The numbered checklist at the foot of the row no longer maps to the code: item 5 (:643-645) has no expect at all, its check being the trial click at :562, and item 3 (:632-635) narrates a click that happened 95 lines above while the expect under it is only lowerClearance >= 0."
+    }
+  ],
+  "ci": {
+    "codeHead": "8bd43a9218fa8f5bc5ba0c15fd733c945fffcd4c",
+    "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
+    "read": "All four required checks completed success at the code head; the browser job dispatch (not required on main) success too. gh api repos/sjawhar/legion/compare/8bd43a9218fa...4146492078b2 lists only .legion/INFRA-95/implement.json and .legion/INFRA-95/test.json, so those are the checks that stand for the code reviewed."
+  },
+  "thermonuclear": {
+    "head": "4146492078b2352e54cbf9e33dde7ec6a3b21b7d",
+    "deepReview": "APPROVE at 41464920 - two Minors: the composer diagnostic cannot fire for the case it names, and probeClear fails open when the composer is not found. It confirmed the offset arithmetic against playwright-core's _offsetPoint and Blink's border quad for an inline box, that the trial click really hit-tests, that tapped cannot read a stale click, and that the settle terminates.",
+    "codeQuality": "CHANGES at 41464920 - five findings: the deferred-assertion model and its checklist, the dead probeClear guard, the rival wall-clock settle and the triple link lookup, the unsynchronised tap read-back, and the styles.css pitch."
+  },
+  "threads": {
+    "opened": 3,
+    "botThreadsAdjudicated": 0,
+    "note": "No review thread existed on the pull request before this round (gh api graphql reviewThreads: 0 nodes), and no bot has opened one. The three threads this round opens are the three important findings; the two minor ones are the review body's Fast-follow line and a remark inside the second thread."
+  }
+}
