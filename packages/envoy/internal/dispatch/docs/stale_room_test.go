@@ -501,6 +501,33 @@ func TestACloseOfARoomBehindTheHeadLeavesTheRoomThatReplacedIt(t *testing.T) {
 	}
 }
 
+// The close of a room behind the durable head is the service's own, so a closed issue does not
+// refuse it. The close runs inside a Server.Apply, and an injection a browser or an agent makes is
+// refused once the document's issue is closed (allowInject): without the service's own mark on
+// that context (withOwnerVerified), the close of a room whose issue closed between its load and
+// the notification was refused ErrIssueClosed, and the room stayed resident with text the store no
+// longer holds until its idle minute ran out. The issue closes in the database alone here, as the
+// close's own transaction leaves it for the moment before SetIssueClosed runs, and as a room this
+// process holds sees an issue the other process closed.
+func TestACloseOfARoomBehindTheHeadIsNotRefusedByItsClosedIssue(t *testing.T) {
+	pair := newProcessPair(t)
+	pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob-on-task-b"}, "Bob's paragraph.\n")
+	stale := pair.taskA.srv.GetDoc(pair.artifactID)
+	if _, err := pair.database.Pool.Exec(context.Background(),
+		`update issues set closed_at = now() where key = 'DOC-1'`); err != nil {
+		t.Fatalf("close the document's issue: %v", err)
+	}
+
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, stale)
+	if err != nil {
+		t.Fatalf("close the closed issue's room behind the head: %v", err)
+	}
+	if !closed {
+		t.Fatal("the close of the closed issue's room behind the head closed nothing")
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
 // The close of a room behind the head holds the room it checked against ygo's idle sweep until it
 // has closed it: the sweep retires a room no peer is in once it has been idle for the room idle
 // timeout, and it takes no close gate, so a check of the instance ahead of the close would not

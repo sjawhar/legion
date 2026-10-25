@@ -689,7 +689,11 @@ it: ygo's `CloseRoom` closes whatever room the name holds, and ygo's idle sweep 
 without the close gate, so the close checks the instance again inside a `Server.Apply` on the
 room, which the sweep never retires, with the close gate held (`closeRoomInstance`); a room the
 sweep or another close retired first is left to the room that holds the document now, the
-reservation is lifted, and the settlement is armed again on it. A named or snapshot version whose
+reservation is lifted, and the settlement is armed again on it. That `Server.Apply` is the
+service's own injection and carries its mark (`withOwnerVerified`), which `allowInject` admits on
+a closed issue: a room loaded while the issue was open and left behind the head by the other
+process's write is closed whenever its issue closed, rather than kept resident with text the store
+no longer holds until its idle minute runs out. A named or snapshot version whose
 room is behind the head, read under the document's advisory lock, is rendered from the stored
 document instead (`storedTree`), and neither it nor a version over a cold fork lists the room's
 in-flight credits (`withoutInflight`): the store holds none of those changes, and an append the

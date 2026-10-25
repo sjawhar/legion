@@ -1888,13 +1888,17 @@ func (s *Service) closeReservedRoom(ctx context.Context, reservation roomCloseRe
 // live once both are held is the room ygo then closes. A room already gone from the name is not
 // loaded for the check; one retired between that look and the Apply is loaded by the Apply at the
 // head, and left open. The Apply waits for no failed room's recovery (WithoutRecoveryWait): a
-// failed room's own eviction closes it.
+// failed room's own eviction closes it. It is the service's own injection, not a caller's write,
+// so it carries the service's mark (withOwnerVerified): allowInject refuses an unmarked injection
+// on a closed issue, and this close has to run on one - a room loaded while the issue was open and
+// left behind the head by the other process's write is closed whenever its issue closed, rather
+// than kept resident with text the store no longer holds until its idle minute runs out.
 func (s *Service) closeRoomInstance(ctx context.Context, room string, live *crdt.Doc) (closed bool, err error) {
 	if s.srv.GetDoc(room) != live {
 		return false, nil
 	}
 	var closeErr error
-	err = s.srv.Apply(WithoutRecoveryWait(ctx), room, func(held *crdt.Doc, _ func(func(*crdt.Transaction))) {
+	err = s.srv.Apply(withOwnerVerified(WithoutRecoveryWait(ctx)), room, func(held *crdt.Doc, _ func(func(*crdt.Transaction))) {
 		if held != live {
 			return
 		}

@@ -1160,7 +1160,10 @@
   another process's edit that several browsers could have made is not credited to whoever edited
   here before; the closed room's settlement failures end with its generation rather than once the
   close returns, so they never wipe the failures of the room that replaced it, and an issue's
-  close ends them the same way; and the browser-test harness's quiesce drops the edit source of
+  close ends them the same way; the close of a room behind the stored document carries the
+  service's own mark, so a closed issue no longer refuses it and such a room is closed rather than
+  left resident with text the store no longer holds until its idle minute runs out; and the
+  browser-test harness's quiesce drops the edit source of
   the settlement it cancels, and once its closes have ended drops any source a reconnect or an
   edit recorded meanwhile, so the record of a closed document it truncates away is not kept for
   ever.
