@@ -137,7 +137,7 @@ test("an ask is a thread: replies before and after answering, then a live agent 
   await expect(margin.getByText(/Answered by/)).toBeVisible();
 
   // The asking session replies over the API (bearer auth, its own comment on
-  // the ask). Alice's already-open page shows it live over SSE, no reload.
+  // the ask). Alice's already-open page shows it live from the event feed, no reload.
   await createComment(issue.key, { ask_id: ask.id, body: "Thanks, merging." }, bobSession);
   await expect(threadAfterAnswer.getByText("Thanks, merging.")).toBeVisible();
   await expect(replies).toHaveCount(2);

@@ -183,7 +183,7 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 	// five-second shutdown, the load balancer's idle timeout - left one attempt stranded
 	// pending and every later recipient with a message and no attempt at all, which nothing
 	// recovers. Every recipient's attempt, receipt and reply reaches an open broadcast view
-	// over the event stream, so nothing is lost by answering first.
+	// over the live event feed, so nothing is lost by answering first.
 	messages := make([]model.Message, 0, len(created.Recipients))
 	for _, recipient := range created.Recipients {
 		messages = append(messages, recipient.Message)

@@ -463,7 +463,7 @@ func TestHeaderChangesRequestedAnswersTheOpenApprovalAskAndNeedsAReason(t *testi
 // away. Settlement indexes those blocks seconds later, over words nobody has touched since. A
 // version minted for that indexing stales an approval a human has just given, and Legion's
 // design gate - open exactly while the approved version is the latest - closes with nothing in
-// the event stream to explain it (LEGION-273).
+// the event log to explain it (LEGION-273).
 func TestApprovedSpecStaysApprovedThroughItsAskBlockSettlement(t *testing.T) {
 	handler, _ := blockAskHandler(t)
 	issue := createInteractionIssue(t, handler, "TEST", "Approve the decisions", "Context\n\n"+transportAsk)

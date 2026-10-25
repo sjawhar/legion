@@ -52,9 +52,9 @@ func TestOnlyTheBrokerInsertsEvents(t *testing.T) {
 	if len(offences) > 0 {
 		t.Fatalf("only %s may insert into events, and these statements also do:\n\t%s\n"+
 			"Append the event through events.Broker.Append instead. Its commit-order lock is what "+
-			"makes events.id commit order, and the live event stream reads the log by id: a row "+
+			"makes events.id commit order, and the event stream relay reads the log by id: a row "+
 			"inserted without that lock can commit behind the relay's cursor and reach no open "+
-			"stream.", brokerEventInsert, strings.Join(offences, "\n\t"))
+			"events subscription.", brokerEventInsert, strings.Join(offences, "\n\t"))
 	}
 	if broker != 1 {
 		t.Fatalf("%s holds %d event inserts the scan can see, want 1: if the insert moved or was "+

@@ -738,9 +738,9 @@ func TestTheDisconnectHookSendsTheEventFeedThroughItsResume(t *testing.T) {
 	}
 }
 
-// The server-sent event stream and its test hook are gone, test hooks or not: the event feed is the
-// live socket's.
-func TestTheServerSentEventStreamIsGone(t *testing.T) {
+// GET /api/v1/events and its test hook are gone, test hooks or not: the event feed is the live
+// socket's.
+func TestTheEventsRouteIsGone(t *testing.T) {
 	rig := newLiveSocketRig(t, testServerOptions{testHooks: true}, nil)
 	for _, request := range []struct{ method, target string }{
 		{http.MethodGet, "/api/v1/events"},
@@ -769,15 +769,15 @@ func liveFixtureEvent() model.Event {
 	}
 }
 
-// An event frame's event is byte for byte what GET /api/v1/events' data line carried, the event's
-// own encoding (json.Marshal of the event the log reads back), so a page reads every event as it
-// always has; the socket's writer keeps those bytes; and fixtures/live/event.json, which the
-// contracts' and the dashboard's tests read, is that frame.
-func TestAnEventFrameCarriesTheSSEBytes(t *testing.T) {
+// An event frame's event is byte for byte the event's own encoding (json.Marshal of the event the
+// log reads back), so a page reads every event as it always has; the socket's writer keeps those
+// bytes; and fixtures/live/event.json, which the contracts' and the dashboard's tests read, is that
+// frame.
+func TestAnEventFrameCarriesTheEventsOwnBytes(t *testing.T) {
 	event := liveFixtureEvent()
-	sse, err := json.Marshal(event)
+	encoded, err := json.Marshal(event)
 	if err != nil {
-		t.Fatalf("encode the event as the event stream did: %v", err)
+		t.Fatalf("encode the event: %v", err)
 	}
 	frame, err := liveEventFrame("events-1", event)
 	if err != nil {
@@ -786,15 +786,15 @@ func TestAnEventFrameCarriesTheSSEBytes(t *testing.T) {
 	if frame.Type != "event" || frame.Sub != "events-1" || frame.ID != "42" {
 		t.Fatalf("frame = %+v, want events-1's event 42", frame)
 	}
-	if !bytes.Equal(frame.Event, sse) {
-		t.Fatalf("the frame's event\n\t%s\ndiffers from the event stream's data line\n\t%s", frame.Event, sse)
+	if !bytes.Equal(frame.Event, encoded) {
+		t.Fatalf("the frame's event\n\t%s\ndiffers from the event's own encoding\n\t%s", frame.Event, encoded)
 	}
 	written, err := json.Marshal(frame)
 	if err != nil {
 		t.Fatalf("encode the frame as the socket's writer does: %v", err)
 	}
-	if !bytes.Contains(written, sse) {
-		t.Fatalf("the socket writes\n\t%s\nwhich does not carry the event's bytes\n\t%s", written, sse)
+	if !bytes.Contains(written, encoded) {
+		t.Fatalf("the socket writes\n\t%s\nwhich does not carry the event's bytes\n\t%s", written, encoded)
 	}
 
 	fixture, err := os.ReadFile(filepath.Join("..", "..", "..", "..", "contracts", "fixtures", "live", "event.json"))
@@ -809,7 +809,7 @@ func TestAnEventFrameCarriesTheSSEBytes(t *testing.T) {
 	if err := json.Compact(&compact, held.Event); err != nil {
 		t.Fatalf("compact the fixture's event: %v", err)
 	}
-	if held.Type != frame.Type || held.Sub != frame.Sub || held.ID != frame.ID || !bytes.Equal(compact.Bytes(), sse) {
+	if held.Type != frame.Type || held.Sub != frame.Sub || held.ID != frame.ID || !bytes.Equal(compact.Bytes(), encoded) {
 		t.Fatalf("fixtures/live/event.json holds %s, want the frame %s", fixture, written)
 	}
 }

@@ -162,7 +162,7 @@ func TestSettlementIndexesRetractsAndRestoresTypedAskBlocks(t *testing.T) {
 // a version: indexing it afterwards is bookkeeping over the same document. Settlement recording
 // that bookkeeping as a version of its own wrote a byte-identical version credited to nobody,
 // which stales the approval pinned to the version the agent wrote - and Legion's design gate,
-// open exactly while the approved version is the latest, closes with nothing in the event stream
+// open exactly while the approved version is the latest, closes with nothing in the event log
 // to explain it (LEGION-273).
 func TestSettlementIndexingAnAskBlockTheEditVersionedWritesNoVersion(t *testing.T) {
 	service, artifactID := newTestService(t)

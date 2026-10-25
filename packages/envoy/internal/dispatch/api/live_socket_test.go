@@ -549,7 +549,7 @@ func TestABearerMayReadTheSocket(t *testing.T) {
 }
 
 // A bearer revoked while its socket is open loses the socket at the next heartbeat's resolution, as
-// the document socket and the event stream do: the request's context ends, and the socket closes
+// the document socket does: the request's context ends, and the socket closes
 // with 1008. The heartbeat is a second, so the client's pong, which gorilla's default handler
 // writes, has a heartbeat to meet the pong deadline on a loaded runner: the socket must last until
 // the revocation, and a pong timeout would end it first.

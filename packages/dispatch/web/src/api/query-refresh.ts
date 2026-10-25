@@ -1,13 +1,15 @@
 import type { Query, QueryClient } from "@tanstack/react-query";
 
-/** Whether a query is owned by Dispatch's live delivery socket rather than refreshed by events. */
+/** Whether a query is owned by a live socket subscription (a delivery view) rather than refreshed
+ *  by events. */
 export function isLiveQuery(query: Pick<Query, "meta">): boolean {
   return query.meta?.live === true;
 }
 
 /**
- * How a stream event refreshes the query cache: which of a batch's keys are worth invalidating,
- * and what to do about a query whose first response is still in flight when the event arrives.
+ * How an event of the feed refreshes the query cache: which of a batch's keys are worth
+ * invalidating, and what to do about a query whose first response is still in flight when the
+ * event arrives.
  * `api/event-feed.ts` owns which keys an event names; this module owns what happens to them.
  */
 
@@ -89,8 +91,8 @@ function stateFor(queryClient: QueryClient): FirstLoadState {
  * Progress is guaranteed and the post-event body still wins. Only active, non-static queries
  * are cancelled, which is a subset of the set `invalidateQueries` refetches. A live-owned query
  * (`meta.live`, the delivery reads `api/live-socket.ts` keeps current) is never cancelled: its
- * first load is a subscription whose snapshot the live client writes itself, and no event of
- * this stream names it.
+ * first load is a subscription whose snapshot the live client writes itself, and no event of the
+ * feed names it.
  *
  * The cancelled request is not aborted on the wire: TanStack aborts through the signal on the
  * query function's context, and no query function in this app reads it. So the window costs two
@@ -135,9 +137,9 @@ function cancelFirstLoads(
 }
 
 /** Refreshes `queryKeys`, or every query the app holds but the live-owned ones when they are
- *  omitted: a live query is kept current by its own socket, so a whole-cache refresh (the stream's
- *  reconnect, an unknown event) would only re-subscribe it and have Dispatch send its snapshot
- *  again. */
+ *  omitted: a live query is kept current by its own subscription, so a whole-cache refresh (the
+ *  feed's start after a gap, an unknown event) would only re-subscribe it and have Dispatch send
+ *  its snapshot again. */
 export function refreshQueries(
   queryClient: QueryClient,
   queryKeys?: readonly (readonly unknown[])[]

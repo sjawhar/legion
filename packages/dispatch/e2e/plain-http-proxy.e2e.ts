@@ -16,7 +16,7 @@ import { resetDatabase } from "./seed";
 
 // Runs only in the `chromium-plain-http` project, whose host name Chromium maps to loopback: the
 // proxy that stands in for a plain-HTTP origin (e2e/plain-http-proxy.ts) must not open the server
-// under test to names its own fence refuses, nor hold the server's event streams after a page goes.
+// under test to names its own fence refuses, nor hold a request open upstream after its page goes.
 const proxyModule = fileURLToPath(new URL("./plain-http-proxy.ts", import.meta.url));
 
 test.skip(httpsTarget, plainHttpSkipReason);
@@ -70,10 +70,10 @@ test("the proxy refuses a Host that is not the plain-HTTP origin and forwards it
 });
 
 test("a page that closes leaves no request open upstream of the proxy", async ({ browser }) => {
-  // A stand-in upstream sees what the server under test sees: the page's event stream arriving and
-  // ending. The server's subscriber for a stream lives exactly as long as its request
-  // (packages/envoy/internal/dispatch/api/events.go), so a request the proxy keeps open after the
-  // page has gone is a subscriber the server keeps feeding every later row's events.
+  // A stand-in upstream counts what the server under test would see: a request that never answers
+  // in full - an EventSource stream, the longest a page can hold open - arriving and ending. A
+  // request the proxy keeps open after the page has gone is work the server keeps doing for a page
+  // nobody has open.
   let streamsOpened = 0;
   let streamsOpen = 0;
   const upstream = createServer((request, response) => {

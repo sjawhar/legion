@@ -130,7 +130,7 @@ test("does not mistake a later arrival for the send once ownSendCount is recorde
     unmount = view.unmount;
     expect(window.scrollY).toBe(RESTING_SCROLL_Y);
 
-    // The SSE stream can invalidate the events query independently of the mutation's own
+    // The live event feed can invalidate the events query independently of the mutation's own
     // callback, sometimes landing the seq change *before* `ownSendCount` catches up. While the
     // reader is still pinned this just follows, exactly like any other arrival.
     act(() => {

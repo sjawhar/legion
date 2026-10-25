@@ -11,8 +11,8 @@ import { coalescePrefixKeys } from "../api/query-refresh";
 import type { Event, EventType } from "../api/types";
 
 /**
- * The pre-#1248 reference implementation, copied verbatim from `main`'s
- * `packages/dispatch/web/src/api/sse.ts`. It is the oracle this PR's behaviour is compared
+ * The pre-#1248 reference implementation of the event-to-key mapping, copied verbatim from the
+ * event feed module `main` held then. It is the oracle this PR's behaviour is compared
  * against: every event must invalidate exactly what main invalidated, except the single
  * documented subtraction (the Inbox query for plain messages and non-ask comments).
  */

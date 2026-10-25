@@ -115,7 +115,7 @@ func (r *eventStreamRelay) start(ctx context.Context) error {
 	}
 	cursor, cursorAt, _, err := eventCursorCheck(ctx, r.server.deps.Store.Pool, 0)
 	if err != nil {
-		return fmt.Errorf("read the live event stream's cursor: %w", err)
+		return fmt.Errorf("read the event stream relay's cursor: %w", err)
 	}
 	r.cursor, r.cursorAt = cursor, cursorAt
 	r.started = true
@@ -187,7 +187,7 @@ func (r *eventStreamRelay) read(ctx context.Context) bool {
 	switch reset, err := r.resetCursor(tracked); {
 	case err != nil:
 		if ctx.Err() == nil {
-			slog.Warn("dispatch: live event stream could not check its cursor against the event log; retrying", "error", err)
+			slog.Warn("dispatch: the event stream relay could not check its cursor against the event log; retrying", "error", err)
 		}
 		return false
 	case reset:
@@ -198,7 +198,7 @@ func (r *eventStreamRelay) read(ctx context.Context) bool {
 		committed, err := r.server.readEventsAfterID(tracked, cursor)
 		if err != nil {
 			if ctx.Err() == nil {
-				slog.Warn("dispatch: live event stream could not read the committed events; retrying", "error", err)
+				slog.Warn("dispatch: the event stream relay could not read the committed events; retrying", "error", err)
 			}
 			return false
 		}

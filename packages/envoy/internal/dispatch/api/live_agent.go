@@ -12,8 +12,8 @@ import (
 
 // The agent view is one live session's own conversation on a page's live socket: its turns, tool
 // calls and streamed output, relayed from the session itself (agentstream), one agent frame each.
-// It replaced GET /api/v1/agents/{session_id}/stream, the server-sent stream, and keeps every rule
-// that stream kept (agent_stream.go): a person's alone, nothing written, no frame's bytes logged.
+// It keeps every rule of the agent stream (agent_stream.go): a person's alone, nothing written, no
+// frame's bytes logged.
 //
 // A subscription subscribes to the session's frames before anything else, which is what makes the
 // replay safe to stitch on: a frame the session publishes while the replay request is in flight

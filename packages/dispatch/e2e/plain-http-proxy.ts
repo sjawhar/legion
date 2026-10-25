@@ -64,8 +64,8 @@ function sendUpstream(socket: ProxySocket, message: ArrayBuffer | string | Uint8
 
 Bun.serve<ProxySocket>({
   hostname: "127.0.0.1",
-  // The workspace event stream is silent between the server's 15 s heartbeats, and Bun's default
-  // 10 s idle timeout would cut it before the first one.
+  // A request the server under test is slow to answer sends nothing while it waits, and Bun's
+  // default 10 s idle timeout would cut it; the browser and the server keep their own deadlines.
   idleTimeout: 0,
   port: harnessPorts.plainHttp.port,
   async fetch(request, server) {
@@ -100,8 +100,8 @@ Bun.serve<ProxySocket>({
       headers,
       method: request.method,
       redirect: "manual",
-      // A browser that leaves (a closed page, a reconnecting event stream) ends the upstream
-      // request with it, so the server under test keeps no subscriber for a page that is gone.
+      // A browser that leaves (a closed page, an abandoned request) ends the upstream request with
+      // it, so the server under test does no work for a page that is gone.
       signal: request.signal,
     });
   },

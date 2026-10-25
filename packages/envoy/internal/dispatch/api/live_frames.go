@@ -157,7 +157,7 @@ type LiveEventsStart struct {
 }
 
 // LiveEventFrame is one event of the feed: its decimal id and the event's own JSON encoding, byte
-// for byte what the server-sent event stream this feed replaced carried on its data line.
+// for byte, which is what a page reads every event as.
 type LiveEventFrame struct {
 	Type  string          `json:"type"`
 	Sub   string          `json:"sub"`

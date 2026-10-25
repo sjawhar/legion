@@ -424,7 +424,7 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
 // The answered card moves from Needs you to the decided asks in place - one keyed list - so its
 // card is the one the reader was in, with whatever they had started in it (`threads.e2e.ts` types
 // a reply there), rather than a fresh mount of it.
-test("Margin moves an answered anchored ask out of Needs you in place, without an event stream", async () => {
+test("Margin moves an answered anchored ask out of Needs you in place, without the live event feed", async () => {
   const queryClient = new QueryClient({
     defaultOptions: {
       mutations: { retry: false },

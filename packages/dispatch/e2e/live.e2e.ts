@@ -16,7 +16,7 @@ import { seedFakeGithub } from "./fake-github-helpers";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
-// These scenarios exercise the event stream fanning updates into other open tabs, so
+// These scenarios exercise the live event feed fanning updates into other open tabs, so
 // the counterparty ("bob") is an autonomous session acting through the bearer API —
 // only alice's browser needs to be real, since that is what proves the live update.
 const bob = { actor: { kind: "session" as const, id: "bob" }, as: "agent" as const };

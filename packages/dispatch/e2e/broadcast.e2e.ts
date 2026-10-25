@@ -124,7 +124,7 @@ test("a broadcast lists recipient cards in the non-alphabetical order the sender
     ]);
 
     // The Planner answers its own delivery, and the open view picks the answer up from the
-    // event stream without a reload.
+    // live event feed without a reload.
     const [summary] = await listBroadcasts();
     if (summary === undefined) throw new Error("the broadcast was not recorded");
     const stored = await getBroadcast(summary.id);

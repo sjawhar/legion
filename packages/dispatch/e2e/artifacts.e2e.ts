@@ -232,7 +232,7 @@ test("an uploaded document is linked from the Activity tab and counted on its ow
     name,
   });
 
-  // The live event stream refreshes the issue and its tabs: no reload.
+  // The live event feed refreshes the issue and its tabs: no reload.
   await expect(page.getByRole("tab", { exact: true, name: "Artifacts (2)" })).toBeVisible();
   const tablist = page.getByRole("tablist", { name: "Issue detail" });
   const tabs = tablist.getByRole("tab");

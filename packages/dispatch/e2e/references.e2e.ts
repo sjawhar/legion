@@ -106,7 +106,7 @@ test("an open backlink panel follows a mention added, replied to, and removed", 
   const references = page.getByTestId("issue-header").getByRole("region", {
     name: "Referenced by",
   });
-  // Each step waits on a server write, the event stream, and the panel's refetch, so these are
+  // Each step waits on a server write, the live event feed, and the panel's refetch, so these are
   // deliberately generous on a loaded box.
   const live = { timeout: 30_000 };
   await expect(references).toContainText("Attached document", live);

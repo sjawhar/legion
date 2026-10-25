@@ -180,7 +180,9 @@ test("an ask thread shows its newest two replies, expands older replies, and put
   }
 });
 
-test("an SSE reply refreshes a thread hydrated by the Inbox response", async ({ browser }) => {
+test("a reply on the live event feed refreshes a thread hydrated by the Inbox response", async ({
+  browser,
+}) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Live Inbox thread" });
   const ask = await createAsk(issue.key, { question: "Which thread should refresh?" }, session);
@@ -855,7 +857,7 @@ test("a pending credential request alone is listed, counted, and keeps the empty
         requested_at: new Date().toISOString(),
       },
     ]);
-    // The broker publishes nothing to Dispatch's event stream, so the list is read on load.
+    // The broker publishes nothing to Dispatch's event feed, so the list is read on load.
     await page.reload();
     const requests = page.getByRole("region", { name: "Credential requests" });
     await expect(requests.getByRole("link")).toHaveCount(1);

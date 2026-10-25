@@ -517,7 +517,8 @@ func (s *server) getMessage(w http.ResponseWriter, r *http.Request) {
 // is in (the root targets it, or it authored a reply). The session is the caller's own claim,
 // like `actor`, so this keeps a session from reading another session's direct conversation by
 // mistake; it is not an authorization boundary. Direct-conversation text also reaches every
-// authenticated caller through GET /api/v1/events; nothing in Dispatch restricts it by session.
+// authenticated caller through that caller's events view on GET /ws/live; nothing in Dispatch
+// restricts it by session.
 func (s *server) getMessageThread(w http.ResponseWriter, r *http.Request) {
 	_, human, err := s.optionalActor(r)
 	if err != nil {

@@ -437,7 +437,7 @@ func TestAFastBrowserClockNeitherHidesNorUncountsTheNextReply(t *testing.T) {
 	}
 }
 
-// A read mark or Clear is announced on the event stream with the login it belongs to, so the
+// A read mark or Clear is announced on the live event feed with the login it belongs to, so the
 // viewer's other open tabs and devices refresh their badge instead of waiting for a focus.
 func TestAgentStateWriteAnnouncesItselfToTheViewersOtherDevices(t *testing.T) {
 	handler, database := newTestHandlerWithStore(t)

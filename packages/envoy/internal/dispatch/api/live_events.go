@@ -10,8 +10,7 @@ import (
 )
 
 // The events view is the Dispatch event feed on a page's live socket: every committed event, in id
-// order, one event frame each. It replaced GET /api/v1/events, the server-sent event stream, and
-// keeps every rule that stream kept.
+// order, one event frame each.
 //
 // Its live source is the process's event stream relay (event_stream_relay.go), which publishes
 // every committed event it reads back out of Postgres - this process's and the other
@@ -69,7 +68,7 @@ func (s *server) startEventsSubscription(ctx context.Context, stream liveStreame
 func (s *server) feedEvents(ctx context.Context, stream liveStreamer, sub string, since *int64) {
 	relayed, unsubscribe, err := s.eventRelay.subscribe(ctx)
 	if err != nil {
-		endEventsAfterFailure(ctx, stream, sub, "subscribe to the live event stream", err)
+		endEventsAfterFailure(ctx, stream, sub, "subscribe to the event stream relay", err)
 		return
 	}
 	defer unsubscribe()
@@ -188,8 +187,8 @@ func liveEventsStart(sub string, since int64) LiveEventsStart {
 	return LiveEventsStart{Type: "events_start", Sub: sub, Since: strconv.FormatInt(since, 10)}
 }
 
-// liveEventFrame is event's frame on sub: its decimal id and its own JSON encoding, byte for byte
-// the data line the server-sent event stream carried for it.
+// liveEventFrame is event's frame on sub: its decimal id and its own JSON encoding, byte for byte,
+// which is what a page reads every event as.
 func liveEventFrame(sub string, event model.Event) (LiveEventFrame, error) {
 	data, err := json.Marshal(event)
 	if err != nil {

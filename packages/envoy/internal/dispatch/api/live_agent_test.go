@@ -509,9 +509,9 @@ func TestAnAgentViewWhoseRelayFailsEndsAsDropped(t *testing.T) {
 	}
 }
 
-// The server-sent agent stream is gone; the test hook that feeds the in-memory relay stays, since
-// the browser suite's agent views read from it.
-func TestTheServerSentAgentStreamIsGone(t *testing.T) {
+// GET /api/v1/agents/{session_id}/stream is gone; the test hook that feeds the in-memory relay
+// stays, since the browser suite's agent views read from it.
+func TestTheAgentStreamRouteIsGone(t *testing.T) {
 	source := agentstream.NewMemory()
 	rig := newLiveSocketRig(t, testServerOptions{testHooks: true, agentStream: source}, nil)
 	if response := dispatchRequest(t, rig.handler, http.MethodGet, "/api/v1/agents/"+plannerSessionID+"/stream", nil, "alice"); response.Code != http.StatusNotFound {

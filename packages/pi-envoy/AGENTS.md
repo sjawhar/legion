@@ -133,7 +133,7 @@ replay's byte budget (`historyBytes`, UTF-8 bytes of JSON) on its own, so a repl
 it. A host without `sendUserInput` publishes no list, and its viewer offers no completion.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
-(every authenticated caller's event stream carries it, and Dispatch publishes it before its own
+(every authenticated caller's event feed carries it, and Dispatch publishes it before its own
 frame goes out) and names the attempt first spends it. If the accept answers 200, the person's
 stored body is the turn, and Dispatch's frame then arrives as a duplicate card when the forger used
 a key of its own, or is dropped by the session's dedupe when it used Dispatch's own idempotency key

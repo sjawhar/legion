@@ -67,7 +67,7 @@ func lockAgentArtifacts(ctx context.Context, tx pgx.Tx, session string) error {
 }
 
 // ownsEvents reports whether an upload to the target appends an event. An agent's conversation
-// owns none: the event log, the outbox's topics and the event stream each address an issue, a
+// owns none: the event log, the outbox's topics and the live event feed each address an issue, a
 // document or a project, so a session's upload appends none, and the message that carries the
 // file is the conversation's record of it.
 func (target artifactTarget) ownsEvents() bool {

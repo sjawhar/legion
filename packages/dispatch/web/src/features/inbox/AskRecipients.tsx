@@ -24,7 +24,7 @@ type AskOwner = Pick<Ask, "artifact_id" | "issue_key">;
 
 /** The subscribers list shared with the owner's header: the issue's Subscribed agents panel
  *  (`IssueHeader`) or the project document page. Same key, so a removal from either surface
- *  refreshes both, and an SSE `subscription.removed` refreshes this card too. */
+ *  refreshes both, and a `subscription.removed` on the live event feed refreshes this card too. */
 function ownerSubscription(owner: AskOwner):
   | {
       id: string;
@@ -96,7 +96,8 @@ export function AskRecipients({
   // Same key as the issue header (`IssueHeader`) and the project document page
   // (`DocumentPage`), so an Inbox of cards on one issue shares one fetch with its header. Each
   // fetch is two Envoy listener round trips (interests + sessions), so it is held fresh for a
-  // while rather than refetched on every mount and focus; SSE invalidation still refreshes it.
+  // while rather than refetched on every mount and focus; the event feed's invalidation still
+  // refreshes it.
   const subscribersQuery = useQuery({
     enabled: subscription !== undefined && human,
     queryKey: ["subscribers", subscription?.id],

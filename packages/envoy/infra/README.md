@@ -317,10 +317,10 @@ therefore takes an `up` with `deletionProtection: false` before `destroy`.
 
 `envoy-dispatch` itself is not yet safe at more than one concurrent process: its two delivery
 consumers are exclusive push durables, so a second process logs a bind error for as long as it
-runs, its SSE broker and its live document rooms are per-process, its outbox publisher claims no
-row before it publishes, and several of its loops are written for the one process that runs them,
-so a second copy runs them again. The component carries the capability and leaves the default at
-1; raising a production deployment above it waits on that separate work.
+runs, its live document rooms are per-process, its outbox publisher claims no row before it
+publishes, and several of its loops are written for the one process that runs them, so a second
+copy runs them again. The component carries the capability and leaves the default at 1; raising a
+production deployment above it waits on that separate work.
 
 To inspect pending migrations before an image update, run the image with the deployment's service
 account and `DATABASE_URL` from its Secret:
@@ -335,7 +335,7 @@ kubectl -n dispatch run census --rm -it --restart=Never --image=<envoyImage> \
 
 The first Google Cloud deployment proves the Autopilot admission of both native sidecars, the
 Secret Manager CSI mount, the Auth Proxy's private-IP connection, the cluster's IP allocation,
-tailnet Serve for HTTPS, SSE and websockets, the SOCKS5 connection to the hub, the non-root image
+tailnet Serve for HTTPS and websockets, the SOCKS5 connection to the hub, the non-root image
 user, and the exec-plugin credentials on the machine that runs Pulumi. It also verifies that the
 pod is ready, Dispatch reports a schema version, the site signs in through the configured client,
 and the database retains backups and point-in-time recovery.
