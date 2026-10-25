@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T17:55:00Z",
+  "completed": "2026-10-25T19:10:00Z",
   "evidenceLinks": [
     "Rounds 1-3: https://github.com/sjawhar/legion/pull/2173#issuecomment-6399449475",
     "Round 4: https://github.com/sjawhar/legion/pull/2173#issuecomment-6397391272",
@@ -11,7 +11,8 @@
     "Round 7: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400027590",
     "Round 8: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400527686",
     "Round 9: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400760136",
-    "Round 10: https://github.com/sjawhar/legion/pull/2173#issuecomment-6401036185"
+    "Round 10: https://github.com/sjawhar/legion/pull/2173#issuecomment-6401036185",
+    "Round 11: https://github.com/sjawhar/legion/pull/2173#issuecomment-6401890618"
   ],
   "rounds": [
     {
@@ -68,11 +69,18 @@
       "verdict": "pass",
       "completed": "2026-10-25T17:55:00Z",
       "what": "Four checks: the skill sentence against the daemon's own branch, the generated mirror compared rather than rebuilt, the swept texts, and a refusal message that changed a string main owns."
+    },
+    {
+      "round": 11,
+      "codeHead": "569486518494",
+      "verdict": "pass",
+      "completed": "2026-10-25T19:10:00Z",
+      "what": "The rig run against both halves, three sentences read against their paths rather than their predecessors, the fixture inversion stated at its real strength, and the daemon package's gap closed rather than stated: it runs here against a Postgres on this issue's own volume."
     }
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 10: I read `linger.go` and `check.go` myself rather than the review's account of them, compared the generated mirror with its source instead of trusting that a build ran, and drove the changed refusal with a binary built from this head \u2014 the previous round's binary still prints the old string, which is how the check could have gone wrong. Rounds 1 to 9 were each verified as those rounds record."
+    "how": "Round 11: I ran the rig's vector suite myself at this head and then restored the aliasing in an out-of-tree copy to see all nine fail, rather than taking the author's report of 9 of 9; I read each of the three corrected sentences against the code path it describes (Runtime.Release's call to releaseControllerSandbox, check.go's two IssueSuspend enqueue sites, podsafety's controller exception) rather than against the sentence it replaced; and I checked the claim that the daemon package cannot run here instead of recording it, which is how it turned out to be a Postgres rather than Docker. Rounds 1 to 10 were each verified as those rounds record."
   },
   "failed": 0,
   "failures": [],
@@ -112,21 +120,59 @@
       "observed": "Two sites survive in files this change owns: `workflow/merge_close_test.go:215` and `daemon/outbox_issue_suspend_test.go:657`, each saying a Sandbox is released 'with its volume'. Both are a comment and a failure message rather than behaviour. Every other hit is correct: the repository cache and the controller do own volumes, and `docs/kubernetes.md:5183` names the file store in the past tense.",
       "headSha": "0d503c1f1b7b",
       "negativeControl": "The correct hits are the control on the search: a union that returned only false positives, or only the sites already fixed, would say nothing about coverage."
+    },
+    {
+      "round": 11,
+      "criterion": "The rig this change introduced gives an ephemeral volume a disk of the pod's own, and the vectors it carries detect what they claim to.",
+      "surface": "The rig's own suite in `internal/runtime/sandbox`, run in this pod.",
+      "command": "`go test ./internal/runtime/sandbox -run TestWhatAnIssuePlantsNeitherReadsTheProvisioningTokenNorOutlivesItsPod -count=1 -v`, at this head and again with the aliasing restored in an out-of-tree copy",
+      "observed": "9 of 9 pass at this head. With `case volume.Ephemeral != nil: dir = rig.tree` restored \u2014 the aliasing the change removed \u2014 9 of 9 fail. The copy was restored afterwards.",
+      "headSha": "569486518494",
+      "negativeControl": "The aliased rig is the control, and it is the item: a vector suite that passes here and was never run against the aliased rig would show only that it compiles."
+    },
+    {
+      "round": 11,
+      "criterion": "Each of the three corrected sentences is true of the path it describes.",
+      "surface": "The daemon's own code, read path by path.",
+      "command": "Read `supervise/table.go:1114-1124` against `Runtime.Release` (`sandbox.go:769-780`) and `releaseControllerSandbox`; the skill's close paragraph against every `IssueSuspend{` enqueue in `workflow/check.go`; `podsafety.go:12-20` against the controller's pod",
+      "observed": "`Release` suspends the locator, forgets the claim and calls `releaseControllerSandbox`, which deletes a Sandbox only where the store holds it as the controller's \u2014 so the comment's 'it deletes no issue Sandbox' is true. `IssueSuspend` is enqueued at exactly two sites, `check.go:261` in `endLookPending` and `:293` in `closeCheck` beside the `issue_close`, which is the three-way entry the skill now names instead of making `pending` exclusive. `podsafety` scopes its claim to the probe's pod and an issue's and excepts the controller's pod, which does mount a Sandbox-owned volume.",
+      "headSha": "569486518494",
+      "negativeControl": "The controller is the control in all three: it is the one pod whose disk does outlive it, so a sentence that still claimed no pod mounts such a disk would be caught by it, and `releaseControllerSandbox` is the path that makes the first sentence's 'only the controller's' exact rather than rhetorical."
+    },
+    {
+      "round": 11,
+      "criterion": "The daemon package's tests that use the inverted fixture run, pass, and each still fails for its own reason.",
+      "surface": "`go test ./internal/daemon` in this pod, against a PostgreSQL 16.2 unpacked onto this issue's own volume and started on 127.0.0.1:55432.",
+      "command": "`LEGION_TEST_PG_DSN=postgres://legion@127.0.0.1:55432/postgres?sslmode=disable go test ./internal/daemon -run 'TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns|TestIssueCloseDeletesTheSandboxAfterARestart|TestTheSweepDeletesACarriedChildsOwnSandboxOnceItLeavesTheLine' -count=1 -v`, then once per mutation",
+      "observed": "All three run and pass. Neutering `SuspendIssue`'s `deleteStoredSandbox` reddens the first two and leaves the third green, because the sweep deletes through `ReconcileOrphans`; neutering the orphan sweep's own `deleteFenced` reddens the third, which is green again once restored. The claim that the package needs Docker was half right: the skip names `LEGION_TEST_PG_DSN`, and only `TestABootWaitsOutAGitHubRequestThatNeverAnswers` needs rootless Docker.",
+      "headSha": "569486518494",
+      "negativeControl": "Each mutation is its own negative control, and the one that failed to redden a test is the sharpest: it showed the mutation had missed that test's path rather than the test being weak."
+    },
+    {
+      "round": 11,
+      "criterion": "The fixture inversion keeps the architectural split between an issue's Sandbox and the controller's.",
+      "surface": "The fixtures and the goldens.",
+      "command": "Read `issueSandbox` in `outbox_issue_suspend_test.go`; read `claimTemplates` from `testdata/golden/{controller,controller-resume,worker}.json`; then put the superseded shape back into the fixture and re-run the three tests",
+      "observed": "`issueSandbox` builds `spec: {operatingMode: Running}` with no claim template, and `pvcs`/`pvc` are `disks`/`disk`. Both controller goldens still carry `claimTemplates: ['issue']` and the worker golden carries none, so the rename did not erase the split. With the superseded shape restored, all three tests still pass.",
+      "headSha": "569486518494",
+      "negativeControl": "The restored superseded shape is the control, and its result is the honest half: the inversion adds no test power, it makes the fixture say what the runtime builds."
     }
   ],
   "ciAtCodeHead": {
-    "head": "0d503c1f1b7b",
-    "read": "2026-10-25T17:47:00Z",
-    "state": "typecheck and pr-title success; lint and test in progress; most others queued \u2014 cited as running, not green",
-    "previousHead": "At 00516adc6b34 all four required lanes and envoy-go read success, which is a statement about that head and nothing else.",
-    "note": "Read, not re-run; no lane waited for."
+    "head": "569486518494",
+    "read": "2026-10-25T19:05:00Z",
+    "state": "lint, typecheck, test and pr-title all success; envoy-go and the other lanes queued or running, cited as such",
+    "previousHead": "At 0d503c1f1b7b the same four were success when the reviewer read them; each head needs its own read.",
+    "note": "Read, not re-run; no lane waited for. The handoff commit 8ad809db carries skip-checks: true and is handoff-only, so the lanes live at the code head 569486518494."
   },
   "observations": [
-    "The previous round's binary still prints the pre-change refusal, and I ran it before noticing. Rebuilding from the head under test is the fourth instance today of the same discipline \u2014 verify the instrument is the one the question is about before reading what it says."
+    "The previous round's binary still prints the pre-change refusal, and I ran it before noticing. Rebuilding from the head under test is the fourth instance today of the same discipline \u2014 verify the instrument is the one the question is about before reading what it says.",
+    "Round 11, the same rule a fifth time and twice over: `go test -run <one test>` printed `ok` in 0.026s and `-v` showed `--- SKIP`, so an unrun test looked like a passing one; and a mutation of `SuspendIssue`'s delete left the sweep's test green because that test deletes through `ReconcileOrphans`, another path. A test that survives a mutation is a question, and both times the answer was my instrument rather than the test."
   ],
   "notReachedHere": [
-    "The seven inverted Stage 4a per-check assertions are unrun, not passing, and Stage 4b has run at no head \u2014 eight readings of that harness have now found eight defects in it and nothing of it has been executed.",
-    "Nothing this round ran against the cluster namespace."
+    "The seven inverted Stage 4a per-check assertions are unrun, not passing, and Stage 4b has run at no head \u2014 eleven readings of that harness have now found defects in it and nothing of it has been executed.",
+    "One test of `internal/daemon`, TestABootWaitsOutAGitHubRequestThatNeverAnswers, needs rootless Docker and panics, which takes an unfiltered package run down with it. That is the package's remaining limit: one test, not the package, and not the fixture tests this round checked.",
+    "Nothing this round ran against the cluster namespace. The admission policy there refused a scratch Postgres Job, saying a smaller build runs in its Legion pod, and that is what I did."
   ],
   "residualRisks": [
     "Unchanged from round 5: the single generation counter behind the gap record; a daemon restarting inside the replacement's gap; the stable claim name meaning a replacement pod waits on its predecessor's claim being reaped.",
@@ -134,9 +180,9 @@
   ],
   "findingsNotFailures": [
     {
-      "what": "Two more sites of the swept prose class, and the fixture asymmetry behind one of them.",
-      "evidence": "`workflow/merge_close_test.go:215` and `daemon/outbox_issue_suspend_test.go:657` still say a Sandbox is released 'with its volume'. The second sits on `internal/daemon`'s `issueSandbox` helper, which builds `volumeClaimTemplates: [{name: issue}]` for every fixture Sandbox at six sites, where `internal/runtime/sandbox` inverted its own fixture this change: `sandboxObject` owns no template and three sites opt into the old shape with `withSupersededDisk`.",
-      "verdict": "A finding to fix in this pull request, not a round failure: both are prose, and the fixture is bounded today because those daemon tests suspend and delete rather than launch, so nothing branches on the template. It is worth fixing rather than noting because `supersededDisk()` is true for any issue Sandbox carrying a template \u2014 so a daemon test that ever launches into one of these fixtures takes the migration path silently, passes, and proves the wrong thing. One package's fixtures model the world this change makes and the other's model the world it replaces."
+      "what": "Round 10's finding is fixed in this round, and its claim is now stated at its real strength.",
+      "evidence": "`issueSandbox` builds no claim template and `pvcs`/`pvc` are `disks`/`disk`; both controller goldens keep `claimTemplates: ['issue']` against the worker golden's none, so the rename did not erase the architectural split. Putting the superseded shape back into the fixture leaves all three tests passing.",
+      "verdict": "The inversion adds no test power: it makes the fixture say what the runtime builds, and the risk I named in round 10 is closed by construction rather than by any assertion. Each of the three tests was separately mutation-checked and pins its own reason \u2014 two reddened by neutering SuspendIssue's delete, the third by neutering the orphan sweep's own deleteFenced."
     }
   ]
 }
