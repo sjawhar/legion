@@ -1,0 +1,132 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-251",
+  "completed": "2026-10-25T02:35:00Z",
+  "plan": "dispatch://INFRA-251/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase contract, the push rules and the author check; the adopted 18 commits are a person's in both author and committer columns, which is correct here and must not be read as the identity hazard.",
+      "skill://legion-worker/references/pr-body.md: the pull request body template, what a proof is, and the rule that the implementer never waits on CI; this issue's E2E lines are written from the pod runs first and the arranged developer-machine run second.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: both forward merges of task 2 and the post-merge one of task 5 are governed by it, and this branch must never be rebased because other work reads it.",
+      "skill://ce-simplify-code: one pass in the first implementing round, since the diff touches runtime Go.",
+      "skill://dispatch and skill://dispatch-first: every Dispatch write, including the proof record artifact."
+    ],
+    "test": [
+      "skill://legion-worker: the phase contract and the handoff fields.",
+      "skill://legion-worker/references/pr-body.md: the tester runs the application and reads CI for everything static; it decides implementerProof and records A3/A4 honestly while the arranged run is awaited.",
+      "docs/testing.md: this repository's rules a test must follow that the code does not show, the unix socket path limit among them, which matters because the pod rig puts sockets under a directory of its own.",
+      "skill://dispatch: any question to the architect's decision about whether to pass while the developer-machine run is outstanding."
+    ],
+    "review": [
+      "skill://legion-worker: the phase contract and the order of a review round.",
+      "skill://legion-worker/references/merge-gate.md: the review round's order, what READY checks, and why gate G1 must hold before acceptance.",
+      "skill://legion-worker/references/review-threads.md: one disposition reply and one resolution per thread, never in bulk.",
+      "skill://legion-worker/references/pr-body.md: the reviewer writes Look at first and Not proven / risk, and `none` is a finding while A3/A4 stand unproven at the head.",
+      "skill://dispatch: writing for the human in anything the reviewer posts."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: the merge-base and ordering story with pull request #2131 is undecided, and both orders break a sentence of the spec: if this issue merges first, its squash is what delivers #2131's whole change to main.",
+        "answer": "The plan fixes the order and enforces it. The base is main from the first push, never stacked, because the daemon reads what the base branch requires to decide whether CI is red (packages/daemon/internal/requiredchecks/requiredchecks.go, lines 1 to 10) and #2131's branch is unprotected. Gate G1 forbids READY and acceptance while `gh api repos/sjawhar/legion/compare/main...<head>` still lists packages/contracts/src/legion-api.ts, a file #2131 changes and this issue does not, so this pull request cannot merge before #2131 has landed in main. Task 5 is the forward merge of main after #2131 lands, and the full test round it forces."
+      },
+      {
+        "finding": "F2: the recorded PASS at 7d8db6262 and the green Go suite at bd3892e47 are not at the head that will be reviewed, and the repository's fingerprint rule then demands a full test round rather than bare gates.",
+        "answer": "The plan says so in task 5: the forward merge after #2131 lands changes the difference, so the fingerprint changes, a full test round at that head is required, and the developer-machine run must be at that head or later. The earlier PASS is cited as history, never as this issue's evidence."
+      },
+      {
+        "finding": "F3: A3 and A4's surface is one no Legion role may drive, and the spec's escape clause conflicts with the worker skill's rule that a missing surface is a report to the architect.",
+        "answer": "Settled by the architect and written into the plan as settled, not open: when the reviewer approves a head, the architect sends it to the Legion stream lead and the deployment session runs the script once on its own machine and posts the output on the pull request and on INFRA-251. The plan gives the full command line, the environment it needs, the PASS line, and exactly what the run must hand back so the implementer can write the E2E lines without a conversation. The planner's own measurements establish that no pod can run it."
+      },
+      {
+        "finding": "F4: the controller skill tells the controller to do the opposite of A3 and A4 in several places that the delta may not touch.",
+        "answer": "Checked against the branch, not assumed. The delta changes the start procedure's step 3 to run the walk, changes the parked-tree sentence from 'needs nothing from you' to 'waits for step 3's walk', adds a bullet to the closed list of moves to todo, adds the parked-decision wake row, and adds the walk to the tick row. The new reference is linked from five places in the skill. Nothing contradictory remains in references/admission.md, whose two rows are about a child under a parked root and about someone else moving an issue."
+      },
+      {
+        "finding": "F5: A4's mechanism is unstated and runs against the daemon's live-only controller wake.",
+        "answer": "Named in the plan: the walk reads Dispatch's issue events, not an outbox row (skills/legion-controller/references/parked-decisions.md, 'The walk', lines 147 to 176), which is why no controller being live loses nothing. A4's check is the run's walk-on-start checkpoint reporting ok."
+      },
+      {
+        "finding": "F6: 'take that work over on this issue's own Legion branch' has three readings, and the adopted commits are a person's in both the author and the committer column, which the default-branch check does not excuse.",
+        "answer": "Settled by doing it: the planner created legion/INFRA-251 from the adopted branch head unchanged, with the plan handoff on top, so the implementer inherits a fact rather than a choice. The plan states that the 18 adopted commits are a person's in both columns, that this is what adopting the work means here, and that the check applies to the commits each role makes itself."
+      },
+      {
+        "finding": "F7: A5 lands after the merge that closes the issue, and its only precondition is the release pins the spec puts out of scope.",
+        "answer": "The plan writes A5 as the production check rather than a merge gate: the implementer reports pending while production does not carry the merge, is woken when a daemon boots on a build containing it, and reports pass once it has read a parked-decision notice and the matching controller comment. The two bounds are named: 2 hours a look, 336 hours the check."
+      },
+      {
+        "finding": "F8: A5 waits on an event no agent may cause, since no Legion role may approve a spec or move a person's parked issue.",
+        "answer": "The plan says the implementer waits for the first organic decision and, if the bound passes with none, records exactly that on the pull request with the daemon log lines it did read, calling the change deployed and unexercised rather than claiming a pass. It asks nobody to stage one."
+      },
+      {
+        "finding": "F9: A1 and A2 do not say what the notice is keyed on, and the existing controller wake dedupes per project and kind, which would collapse two decisions on two parked trees.",
+        "answer": "Read from the code and written into the plan: parkDecision marks the dropped notice's own outbox key processed under the source parked-decision (packages/daemon/internal/daemon/parked_decision.go, lines 14 to 22 and 73 to 80), not the controller wake path, so two decisions on two trees write two notices and a retried row writes none. The tester's break list includes a second genuine decision on a still-parked tree."
+      },
+      {
+        "finding": "F10: the generated plugin mirror must be rebuilt on the pinned Bun after every merge and skill edit, and cannot be hand-resolved.",
+        "answer": "Gate G3 in task 3: run bun run build in packages/claude-envoy and commit the result in the same commit; bun scripts/build.ts --check must print that dist/ and legion/ match a fresh build. Measured passing at the branch head."
+      },
+      {
+        "finding": "F11: the controller skill is close to the 500-line guard.",
+        "answer": "Measured exactly: the file is 498 lines, and the guard fails when split(\\n) reaches 500, which is 499 lines counted by wc -l. So there is no headroom at all. Gate G2 says the file must stay at 498 lines or fewer, checked after every edit and every merge, with detail going into the reference."
+      },
+      {
+        "finding": "F12: nothing fails when a controller reference is unlinked, so a new reference could ship unread.",
+        "answer": "Checked: the reference is linked from five places in the controller skill, and gate G3's mirror rebuild keeps the generated copy in step. The plan names the five link sites so a later edit cannot quietly drop them."
+      },
+      {
+        "finding": "F13: A3's 'signed-in person' has two readings, a header-driven stand-in or a live human clicking approve.",
+        "answer": "The plan says which: the script's proof human, whose Dispatch writes carry the X-Dispatch-User header the scratch Dispatch trusts, and the approval goes through Dispatch's own approval route so the event the controller acts on is artifact.approved. No human clicks anything."
+      },
+      {
+        "finding": "F14: A5's 'the controller's comment says what it did' names no artifact and no text, so no check decides it.",
+        "answer": "Given a machine-checkable form in the plan's A5 section: dispatch read on the root shows a comment from a controller session, posted after the notice, whose first line begins 'Parked decision read:' and which names the decision it read and what it did with the tree."
+      },
+      {
+        "finding": "F15: A1 and A2 cover a replay but not a second genuine decision on a tree that is still parked.",
+        "answer": "Added to the tester's break list in task 6, with the expected answer derived from the dedupe key: a second genuine decision writes a second notice. Also in the list: a decision by the daemon's own session, a notice with no actor as gates.design off writes it, and a child's decision whose notice must name the root."
+      },
+      {
+        "finding": "F16: the migration number is only safe until another branch lands 0051 or 0052 first.",
+        "answer": "Gate G4 in task 3: after the second merge, list the migrations directory and renumber if anything else took 0051 or 0052, since two files sharing a version are refused by name in embed.go. main is at 0050 and #2131 adds 0051."
+      },
+      {
+        "finding": "F17: what base main requires is never named, though the merge and the red-CI machinery both read it.",
+        "answer": "Read live and named in the plan: four required status checks from GitHub Actions, lint, typecheck, test and pr-title; one approving review; squash as the only merge method; the strict up-to-date policy off; and require_extra_approval_for_unattributed_changes on, which the plan carries as a named risk because the branch holds 18 commits written by someone who is not the pull request's author."
+      },
+      {
+        "finding": "F18: the e2e README is where 'which surface can run it' becomes durable, and it was not visible in the measured file list.",
+        "answer": "It is in the delta: scripts/e2e/README.md gains 87 lines on this branch, which is the script's row and its own section. No further work is planned for it beyond keeping it true through the merges."
+      },
+      {
+        "finding": "F19: several of the planner's measurements could not be re-read by a read-only analyst, and the problem statement should cite the outbox line that drops the notice today.",
+        "answer": "Every measurement is reproduced in the plan as the command that made it with the result beside it, so the next reader re-runs rather than trusts. The branch is fetched into this workspace and the reviewed revision is named in each citation. The spec's own Problem section already cites the two outbox lines and the finding report behind them, and this issue's plan does not restate the design."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "Scope: 'If it is opened stacked on #2131's branch, it is retargeted to base main and merged forward before the merger is reached.'",
+      "plan": "The pull request is opened on base main from the first push and is never stacked, so there is no retarget. Until #2131 merges, the difference against main carries its work, and gate G1 forbids READY and acceptance while it does.",
+      "evidence": "packages/daemon/internal/requiredchecks/requiredchecks.go, lines 1 to 10: only what the base branch requires decides whether CI is red at a head. #2131's branch sami/gate-frees-slot is an ordinary unprotected branch and requires nothing, so a stacked pull request would run its whole testing and reviewing phases with the daemon's red-check machinery inert and would meet the merger's note for a base requiring no check. Read live on 2026-10-25: main requires lint, typecheck, test and pr-title, with one approving review.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The retarget step named in the spec's scope is removed and replaced by gate G1 and the post-merge forward merge of task 5. Nothing else of the scope changes, and the sentence the spec's scope rests on, that the pull request must merge into main, is kept."
+      }
+    },
+    {
+      "spec": "Scope: 'Re-run the end-to-end proof at the head that is reviewed, or state plainly which surface can run it.'",
+      "plan": "The plan does both halves, and names who runs it: no Legion pod can run the proof, and the architect has arranged the single run on the deployment session's own machine at the head this issue's reviewer approves, with the full command line and the record it must hand back.",
+      "evidence": "Measured in this issue's pod on 2026-10-25. The cluster-job route is closed by docs/kubernetes.md's own rule, since kubectl auth can-i answers yes, no, no for create jobs, create services and get services. The pod can host the infrastructure: a portable PostgreSQL 17.2 runs and the daemon's Postgres-backed suites pass against it, tmux 3.5a runs, nats-server 2.11.3 runs, bun install succeeds. It stops at the credentials: the secrets broker answers UNKNOWN_SECRET for the implement App's private key, so a scratch Legion in a pod has no implement App at all.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ]
+}
