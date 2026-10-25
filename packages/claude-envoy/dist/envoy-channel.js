@@ -44197,6 +44197,7 @@ var legionPullRequestView = exports_external.strictObject({
   repo: nonEmptyString,
   number: exports_external.number().int().positive(),
   head: nonEmptyString,
+  state: exports_external.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
   fixAttempts: exports_external.number().int().nonnegative()
@@ -47092,7 +47093,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 35
+  daemonApiVersion: 36
 };
 
 // src/channel-forwarder.ts
