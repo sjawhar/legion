@@ -64,10 +64,10 @@ three artefacts in this repository are what draw the line — not a claim about 
   row (`packages/daemon/internal/capabilities/capabilities.go`) grants them by name. A runner put
   in the image deliberately and granted by a capability row is not a route around a withheld one.
 - **What the pod configures for those runners to write.** A role container's environment relocates
-  `UV_CACHE_DIR` (`podkind.go`) and `BUN_INSTALL_CACHE_DIR`, `GOCACHE` and `GOMODCACHE`
-  (`roleEnvironment`, `packages/daemon/internal/runtime/sandbox/manifest.go`) onto the issue's
-  volume, shared by the issue's roles. Legion provisions the caches a pinned run fills; filling
-  them is what they are for.
+  `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR` (`podkind.go`) and `BUN_INSTALL_CACHE_DIR`, `GOCACHE`
+  and `GOMODCACHE` (`roleEnvironment`, `packages/daemon/internal/runtime/sandbox/manifest.go`)
+  onto the issue's volume, shared by the issue's roles. Legion provisions the caches a pinned run
+  fills; filling them is what they are for.
 - **What Legion itself does at launch.** `installBlock`
   (`packages/daemon/internal/runtime/sandbox/plugins.go`) renders a `bun add` under
   `/usr/bin/flock` into that shared bun install cache on every installing launch. Fetching a pinned
@@ -110,29 +110,47 @@ issue's own volume, through one of the variables the runtime actually sets for y
 `GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` (`/legion/uv/cache`) and
 `UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`) — and after the command exits nothing else
 resolves differently. (`XDG_CONFIG_HOME` is set too and is not one of them: it is the pod's shared
-in-memory volume.) `uv run --with pyyaml==6.0.2 --no-project` passes both, and so does the
-interpreter `uv run` downloads for a project whose `.python-version` names one: the wheel lands in
-`UV_CACHE_DIR`, the interpreter under `UV_PYTHON_INSTALL_DIR`, and the issue's next pod finds both
-there. A browser download passes only if you point that tool's own cache variable at a directory
-under one of those paths yourself — the runtime sets no browser path at all, so an unset one leaves
-the download wherever the tool defaults, which is nowhere this runtime chose.
+in-memory volume.) `uv run --with pyyaml==6.0.2 --no-project` passes both: the wheel lands in
+`UV_CACHE_DIR`, under `wheels-v6/pypi/pyyaml/6.0.2-…`, and `UV_PYTHON_INSTALL_DIR` is never
+created, because the image's own `python3` served the run. The interpreter is the other run: a
+project whose `.python-version` names an interpreter uv must fetch puts about 70 MB under
+`UV_PYTHON_INSTALL_DIR`, where the issue's next pod finds it, while the cache takes about 20 KB and
+holds no wheel. A browser download passes too, and for Playwright — the browser driver this
+repository's own Dispatch suite installs (`playwright install`, `packages/dispatch`'s
+`e2e:install`) — it passes as it stands, with nothing pointed anywhere: playwright-core resolves
+its browser registry under `XDG_CACHE_HOME`, which the runtime has already put on the issue's
+volume, so the issue's roles share one registry under the exclusive install lock that
+`docs/kubernetes.md` writes down in "Anatomy of a Sandbox pod", the paragraph on sharing the cache
+home — worth reading before an install, for the two things that follow from sharing. Pointing
+`PLAYWRIGHT_BROWSERS_PATH` elsewhere is what costs you: that shared registry, and the lock that
+makes a second role installing at the same time wait rather than race. The condition is for a tool
+whose cache the runtime does not already place — Puppeteer is one, resolving its browser cache to
+`join(homedir(), '.cache', 'puppeteer')` and so to the container's own filesystem whatever
+`XDG_CACHE_HOME` says. For that one, point the tool's own cache variable (`PUPPETEER_CACHE_DIR`
+here) at a directory under one of the paths above yourself, since an unset one leaves the download
+wherever the tool defaults, which is nowhere this runtime chose.
 
 Where it lands is what you pay. Under one of those variables it is on the issue's volume: it
-outlives the pod, every role of the issue shares it, and a later pod of the issue reuses it. Under
-`$HOME` — `/home/legion`, which no volume is mounted on — it is the container's own filesystem: one
-copy per role, per pod, gone when the role relaunches, and charged to the gigabyte of ephemeral
-storage the container is admitted with. Moving exactly these writes off that filesystem is what
-`roleEnvironment` (`packages/daemon/internal/runtime/sandbox/manifest.go`) exists for, after GKE
-Autopilot evicted issue pods that charged their caches to it — so an install under `$HOME` fails
-the first condition and is outside the sanctioned form, however little else it changes. It is the
-withheld capability when either condition fails — anything that writes into a system prefix, and
-anything that leaves a toolchain, shim or binary which a later launch or another role's process
-will resolve without asking for it. Between two installs that both land in the right place, the
-test is resolution, not disk: a second toolchain that only an explicit absolute path reaches is
-sanctioned; the same toolchain put where `PATH` finds it is operator setup, whoever typed the
-command. The three artefacts above are the whole of that line's ground. Disk is not: the issue's
-volume is 49 GiB with 5.2 GiB used and every cache already relocated onto it, and a sanctioned
-install is paid once per issue, on the issue's own disk, by the issue's roles together.
+outlives the pod, and every role of the issue shares it — under every one of those variables but
+`XDG_STATE_HOME`, which is `/legion/scratch/state/<role>`, "the one directory of the issue's
+scratch that is the role's own rather than the issue's" (`roleEnvironment`), because Oh My Pi
+names its browser broker's lock from the state root and an abstract socket name is one name across
+every container of the pod — and a later pod of the issue reuses it. Under `$HOME` —
+`/home/legion`, which no volume is mounted on — it is the container's own filesystem: one copy per
+role, per pod, gone when the role relaunches, and charged to the container's ephemeral-storage
+limit, which is per role and smaller than the volume. Moving exactly these writes off that
+filesystem is what `roleEnvironment` (`packages/daemon/internal/runtime/sandbox/manifest.go`)
+exists for, after GKE Autopilot evicted issue pods that charged their caches to it — so an install
+under `$HOME` fails the first condition and is outside the sanctioned form, however little else it
+changes. It is the withheld capability when either condition fails — anything that writes into a
+system prefix, and anything that leaves a toolchain, shim or binary which a later launch or
+another role's process will resolve without asking for it. Between two installs that both land in
+the right place, the test is resolution, not disk: a second toolchain that only an explicit
+absolute path reaches is sanctioned; the same toolchain put where `PATH` finds it is operator
+setup, whoever typed the command. The three artefacts above are the whole of that line's ground.
+Disk is not: the issue's volume is 49 GiB with 5.2 GiB used and every cache already relocated onto
+it, and a sanctioned install is paid once per issue, on the issue's own disk, by the issue's roles
+together.
 
 ## The three pinned runner forms
 
@@ -296,22 +314,32 @@ halves are yours to type.
 ## When no runner reaches it
 
 A tool that is neither in the image nor reachable through one of the three runners is an image
-change: a pull request against sjawhar/legion that carries the same name through five files,
-because its own tests hold them to each other. The apt line in
-`packages/daemon/docker/worker.Dockerfile`, with the comment saying why that package is carried,
-installs it; the `toolchain` name list in `packages/daemon/internal/capabilities/image.go` makes
-the probe require it; that row's summary in `packages/daemon/internal/capabilities/capabilities.go`
-has to name it, a test holding the summary to the list; the stub binaries at
-`packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go:14` have to include it,
-or the capability and `probe-image` tests fail on an image that does not carry it; and
+change: a pull request against sjawhar/legion that carries the same name through every site that
+spells it out, and those sites are not all held by a test.
+
+Three are in `packages/daemon/docker/worker.Dockerfile`: the apt line, with the comment saying why
+that package is carried, installs it; the `THIRD_PARTY_NOTICES` intro string hand-lists the Debian
+packages the image installs, and that file is assembled into the image at
+`/usr/share/doc/legion/THIRD_PARTY_NOTICES`; and the toolchain smoke step runs each tool once, so a
+new one needs its own invocation there (`nc` and `dig` take no `--version`). Four are in Go: the
+`toolchain` name list in `packages/daemon/internal/capabilities/image.go` makes the probe require
+it; that row's summary in `packages/daemon/internal/capabilities/capabilities.go` has to name it, a
+test holding the summary to the list; the stub binaries in
+`packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go` have to include it, or
+the capability and `probe-image` tests fail on an image that does not carry it; and
 `packages/daemon/internal/capabilities/image_test.go` spells the expected detail string out again.
-A pull request that stops at the first two opens red. It reaches a role only once a deployment pins
-the new image digest, as every Legion change does — never within your own phase.
+
+Only those four Go sites are gated: miss one and the suite is red, which is what makes them easy to
+find. Nothing holds the notices string or the smoke step to anything, so a change that stops at the
+gated sites opens green and ships a licence file that does not name the package it installs. It
+reaches a role only once a deployment pins the new image digest, as every Legion change does —
+never within your own phase.
 
 So when your work needs such a tool, say so to the architect that owns your issue (`envoy_publish`
 to its role topic), with the tool, what your phase needs it for, and the runner forms you already
 ruled out. Improvising — an extraction prefix, a vendored binary, a hand-rolled substitute — is not
 the step: the architect decides whether the image change is work to schedule.
 
-The full decision, with its measurement table and every number behind the forms above, is in
+The operator's side of this — why the image carries those five clients rather than anything else,
+the five priced options with their measurements, and what the clients cost the image — is in
 `docs/kubernetes.md`, the subsection "The tools a role's own work needs".
