@@ -1,5 +1,12 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
-import { type FakeSession, getSentMessages, setLiveSessions, setSessionSendStatus } from "./agents";
+import {
+  type FakeSession,
+  getSentMessages,
+  setLiveSessions,
+  setSessionLive,
+  setSessionRecord,
+  setSessionSendStatus,
+} from "./agents";
 import {
   createComment,
   createIssue,
@@ -550,6 +557,72 @@ test("a duplicated mention delivery says the listener already had it, and offers
     // reached the listener, so neither the sentence nor the button may appear for it.
     await expect(deliveries).not.toContainText("Retry won't deliver it twice");
     await expect(deliveries.getByRole("button", { name: "Retry" })).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// INFRA-249. The listener answers its live-session list out of an in-memory cache, so every
+// session working behind a cache that is refilling - the session bucket was recreated, another
+// listener's registrations are still arriving - is missing from that list. Dispatch asks about
+// the mentioned session by id now, which reads the session store through, so the comment is
+// delivered; before, the conversation showed "no live session planner" for a session that had
+// never gone anywhere.
+test("a mention reaches a session the listener's list has dropped while its record stands", async ({
+  browser,
+}) => {
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Mention through a refilling cache" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const field = page.getByRole("form", { name: "Comment composer" }).getByLabel("Comment");
+    await selectMention(page, field, "/btw @", "Planner");
+    // The composer offered the mention off the listener's list, and the list drops the session
+    // between that read and the send, with the session's own record untouched.
+    await setSessionLive("planner", false);
+    expect(await issueCommentPayload(page, issue.key)).toEqual({
+      body: "@Planner",
+      delivery: "btw",
+      mentions: [{ target: "session:planner" }],
+    });
+    await expect.poll(() => getSentMessages()).toMatchObject([{ target_session: "planner" }]);
+    const deliveries = page.getByRole("list", { name: "Mention deliveries" });
+    await expect(deliveries).toContainText("sent");
+    await expect(deliveries).not.toContainText("no live session");
+  } finally {
+    await alice.close();
+  }
+});
+
+// The other half of INFRA-249: a session the listener holds no record of has really ended, and
+// that is the one answer a reader may act on, so its wording must not have moved.
+test("a mention of a session the listener holds no record of is still refused as no live session", async ({
+  browser,
+}) => {
+  await setLiveSessions([planner]);
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Mention of an ended session" });
+  const alice = await asUser(browser, "alice");
+
+  try {
+    const page = await alice.newPage();
+    await page.goto(`/issues/${issue.key}/conversation`);
+    const field = page.getByRole("form", { name: "Comment composer" }).getByLabel("Comment");
+    await selectMention(page, field, "/btw @", "Planner");
+    await setSessionRecord("planner", "absent");
+    expect(await issueCommentPayload(page, issue.key)).toEqual({
+      body: "@Planner",
+      delivery: "btw",
+      mentions: [{ target: "session:planner" }],
+    });
+    await expect(page.getByRole("list", { name: "Mention deliveries" })).toContainText(
+      "no live session planner"
+    );
+    expect(await getSentMessages()).toEqual([]);
   } finally {
     await alice.close();
   }
