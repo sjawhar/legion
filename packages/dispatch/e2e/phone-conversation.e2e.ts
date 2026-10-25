@@ -660,9 +660,10 @@ test("on a phone, Jump to latest covers none of the docked composer's Retry or D
 });
 
 // The shell's connection pill floats at the foot of the screen, where a phone's docked composer
-// sits and grows upward with a refusal's row. In both of its states it sits above the composer,
-// on the narrowest phone and a common one, so it covers neither Retry, nor Send, nor the line
-// under Send.
+// sits and grows upward with a refusal's row. While the page is offline the live socket is let go
+// and the pill reads `Reconnecting…`; it sits above the composer, on the narrowest phone and a
+// common one, so it covers neither Retry, nor Send, nor the line under Send, and it leaves once
+// the socket reopens. (The two-minute stuck state is `live-socket.test.ts`'s, under fake timers.)
 test("on a phone, the connection pill covers none of the docked composer", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Connection pill over a refusal" });
@@ -686,18 +687,11 @@ test("on a phone, the connection pill covers none of the docked composer", async
     await expectUncovered(pill, form);
     await page.setViewportSize(phone);
     await expectUncovered(pill, form);
-
-    // Every reconnect is refused after Playwright opens the routed socket, so the socket's own
-    // backoff keeps the pill reconnecting.
-    await page.routeWebSocket(/\/ws\/live$/u, (route) => {
-      // Playwright opens a routed socket once this handler returns; close it after that open.
-      setTimeout(() => void route.close({ code: 1011, reason: "test network drop" }), 100);
-    });
-    await alice.setOffline(false);
-    await expect(pill).toHaveText("Reconnecting…");
-    await expectUncovered(pill, form);
     await page.setViewportSize(narrow);
     await expectUncovered(pill, form);
+
+    await alice.setOffline(false);
+    await expect(pill).toHaveCount(0);
   } finally {
     await alice.close();
   }
@@ -705,7 +699,7 @@ test("on a phone, the connection pill covers none of the docked composer", async
 
 // A thread opened full-screen on a phone has its own composers fixed at the foot of the screen:
 // the one a comment's Reply opens there, and the thread card's own inline reply. The connection
-// pill sits above whichever is on screen, grown by a refusal's row, in both of the pill's states.
+// pill sits above whichever is on screen, grown by a refusal's row, while the page is offline.
 test("on a phone, the connection pill covers none of a thread's composers", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Connection pill over a thread" });
@@ -732,16 +726,8 @@ test("on a phone, the connection pill covers none of a thread's composers", asyn
     await alice.setOffline(true);
     await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, threadForm);
-
-    // Every reconnect is refused after Playwright opens the routed socket, so the socket's own
-    // backoff keeps the pill reconnecting.
-    await page.routeWebSocket(/\/ws\/live$/u, (route) => {
-      // Playwright opens a routed socket once this handler returns; close it after that open.
-      setTimeout(() => void route.close({ code: 1011, reason: "test network drop" }), 100);
-    });
     await alice.setOffline(false);
-    await expect(pill).toHaveText("Reconnecting…");
-    await expectUncovered(pill, threadForm);
+    await expect(pill).toHaveCount(0);
 
     // Cancel reply gives the thread back its card's own reply, which a refusal grows too.
     await threadForm.getByRole("button", { name: "Cancel reply" }).click();
@@ -751,9 +737,13 @@ test("on a phone, the connection pill covers none of a thread's composers", asyn
     await cardForm.getByRole("textbox", { name: "Reply" }).fill("A reply\nover\nfour lines");
     await cardForm.getByRole("button", { exact: true, name: "Send" }).click();
     await expect(cardForm.getByText("Couldn't send — the server is down")).toBeVisible();
+    await alice.setOffline(true);
+    await expect(pill).toHaveText("Reconnecting…");
     await expectUncovered(pill, cardForm);
     await page.setViewportSize(phone);
     await expectUncovered(pill, cardForm);
+    await alice.setOffline(false);
+    await expect(pill).toHaveCount(0);
   } finally {
     await alice.close();
   }
