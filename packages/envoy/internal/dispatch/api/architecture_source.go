@@ -278,25 +278,65 @@ func (s *server) syncArchitectureSources(w http.ResponseWriter, r *http.Request)
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
+	sources, ok := s.syncProjectSources(w, r)
+	if !ok {
+		return
+	}
+	WriteJSON(w, http.StatusOK, sources)
+}
+
+// syncSingularArchitectureSource answers the singular sync that `dispatch architecture-sync`
+// from dispatch clients older than this release makes. It imports every source as
+// syncArchitectureSources does and answers one row in the shape those clients read: the first
+// row in id order whose last_error is set, or the first row when none failed, so a failure on any
+// source reaches them. A project with no source is a 404 SOURCE_NOT_FOUND, and a failure that
+// could not be recorded is a 500, as before. An access failure (no installation, no Contents:
+// read, no such branch) was a 409 SOURCE_ACCESS; it is now recorded on its row, so it answers
+// 200 with that row's last_error, which those clients print as "Sync failed for ...". It stays
+// until no such client is left.
+func (s *server) syncSingularArchitectureSource(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	slog.Warn("dispatch: POST /api/v1/projects/{key}/architecture-source/sync called by a dispatch client older than this release; upgrade it, the route will be removed", "project", r.PathValue("key"))
+	sources, ok := s.syncProjectSources(w, r)
+	if !ok {
+		return
+	}
+	answer := sources[0]
+	for _, source := range sources {
+		if source.LastError != nil {
+			answer = source
+			break
+		}
+	}
+	WriteJSON(w, http.StatusOK, answer)
+}
+
+// syncProjectSources imports every source of the request's project and answers the rows in id
+// order, at least one. When there is nothing to answer it writes the error itself and reports
+// false: 404 SOURCE_NOT_FOUND for a project with no source, and the handler error for a failure
+// that could not be recorded on its row.
+func (s *server) syncProjectSources(w http.ResponseWriter, r *http.Request) ([]model.ArchitectureSource, bool) {
 	key := r.PathValue("key")
 	results, err := s.deps.Architecture.SyncProject(r.Context(), key)
 	if errors.Is(err, architecture.ErrNoSource) || (err == nil && len(results) == 0) {
 		writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source configured for "+key)
-		return
+		return nil, false
 	}
 	if err != nil {
 		s.writeHandlerError(w, err)
-		return
+		return nil, false
 	}
 	sources := make([]model.ArchitectureSource, 0, len(results))
 	for _, result := range results {
 		if result.Err != nil && result.Source.Project == "" {
 			s.writeHandlerError(w, result.Err)
-			return
+			return nil, false
 		}
 		sources = append(sources, result.Source)
 	}
-	WriteJSON(w, http.StatusOK, sources)
+	return sources, true
 }
 
 func writeSourceNotFound(w http.ResponseWriter, key, repo string) {

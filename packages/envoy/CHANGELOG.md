@@ -679,15 +679,21 @@
   `delete from components c where not exists (select 1 from architecture_sources s where s.project_key = c.project_key)`
   and take the census again (`cmd/dispatch/README.md`, "Database migrations").
 - **Breaking:** the singular architecture source routes `PUT` and `DELETE
-  /api/v1/projects/{key}/architecture-source` and `POST …/architecture-source/sync` are gone. A
-  source is addressed by its repository under
-  `/api/v1/projects/{key}/architecture-sources/{owner}/{repo}`, and a project's sources are listed
-  at `/api/v1/projects/{key}/architecture-sources`. A `dispatch architecture-sync` older than this
-  release answers `404`; the `dispatch` CLI of this release uses the new routes.
-  `GET /api/v1/projects/{key}/architecture-source` is kept for `dispatch` clients older than this
-  release, which read it on every issue create: `200 null` when the project has no source,
-  otherwise its first source's row, `404` for an unknown project. Each call is logged at warn,
-  naming the project, and the list route replaces it.
+  /api/v1/projects/{key}/architecture-source` are gone. A source is addressed by its repository
+  under `/api/v1/projects/{key}/architecture-sources/{owner}/{repo}`, and a project's sources are
+  listed at `/api/v1/projects/{key}/architecture-sources`; the `dispatch` CLI of this release uses
+  the new routes. Two singular routes are kept for `dispatch` clients older than this release,
+  each call logged at warn naming the route and the project:
+  `GET /api/v1/projects/{key}/architecture-source`, which those clients read on every issue
+  create, answers `200 null` when the project has no source, otherwise its first source's row,
+  `404` for an unknown project, and the list route replaces it;
+  `POST /api/v1/projects/{key}/architecture-source/sync`, which their `dispatch architecture-sync`
+  calls, imports every source as `POST …/architecture-sources/sync` does and answers one row: the
+  first source in the order they were added whose `last_error` is set, or the first source when
+  none failed. A project with no source is still `404 SOURCE_NOT_FOUND`, and a failure that could
+  not be recorded `500`; a credential or branch problem, once a `409 SOURCE_ACCESS`, is recorded
+  on its row and answers `200` with that `last_error`, which those clients print as
+  `Sync failed for …`. `POST …/architecture-sources/sync` replaces it.
 - **Breaking:** the Dispatch auto-deployer (`deploy/scripts/autodeploy.sh`) accepts `DATABASE_URL`
   in one form only, `postgres[ql]://<user>[:<password>]@<host>[:<port>]/<database>`, with an
   optional query of `sslmode`, `connect_timeout` and `application_name`.
