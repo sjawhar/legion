@@ -2798,7 +2798,6 @@ func TestSlackDeliveredText(t *testing.T) {
 		body          map[string]any
 		wantSummary   string
 		wantText      string
-		wantNoText    bool
 		wantTruncated bool
 		forbidden     []string
 	}{
@@ -2876,7 +2875,7 @@ func TestSlackDeliveredText(t *testing.T) {
 			wantText:    "Build failed",
 		},
 		{
-			name: "own words and a rich-text block",
+			name: "own words and the client's rich-text copy",
 			body: map[string]any{
 				"team_id": "T01234567",
 				"event": map[string]any{
@@ -2897,7 +2896,47 @@ func TestSlackDeliveredText(t *testing.T) {
 			wantText:    "Deploy failed <@U1>",
 		},
 		{
-			name: "a contained piece shorter than the words",
+			name: "an author's escaped characters are delivered once",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567",
+					"text": "<@U0LEGION> build &amp; deploy failed: p99 &gt; 500ms",
+					"blocks": []any{map[string]any{
+						"type": "rich_text",
+						"elements": []any{map[string]any{
+							"type": "rich_text_section",
+							"elements": []any{
+								map[string]any{"type": "user", "user_id": "U0LEGION"},
+								map[string]any{"type": "text", "text": " build & deploy failed: p99 > 500ms"},
+							},
+						}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: <@U0LEGION> build &amp; deploy failed: p99 &gt; 500ms",
+			wantText:    "<@U0LEGION> build &amp; deploy failed: p99 &gt; 500ms",
+		},
+		{
+			name: "a rich-text block on a message with no words of its own",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"blocks": []any{map[string]any{
+						"type": "rich_text",
+						"elements": []any{map[string]any{
+							"type":     "rich_text_section",
+							"elements": []any{map[string]any{"type": "text", "text": "Deploy failed on web-1"}},
+						}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Deploy failed on web-1",
+			wantText:    "Deploy failed on web-1",
+		},
+		{
+			name: "a field value the words merely contain",
 			body: map[string]any{
 				"team_id": "T01234567",
 				"event": map[string]any{
@@ -2906,7 +2945,7 @@ func TestSlackDeliveredText(t *testing.T) {
 				},
 			},
 			wantSummary: "slack message in C01234567 from U01234567: deploy to web-1 failed",
-			wantText:    "deploy to web-1 failed",
+			wantText:    "deploy to web-1 failed\nweb-1",
 		},
 		{
 			name: "a piece that extends one already taken",
@@ -2923,6 +2962,64 @@ func TestSlackDeliveredText(t *testing.T) {
 			},
 			wantSummary: "slack message in C01234567 from U01234567: CPU high",
 			wantText:    "CPU high\nCPU high on host-a",
+		},
+		{
+			name: "an attachment's label and value fields",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567",
+					"text": "<@U0LEG> page: incident 4213",
+					"attachments": []any{map[string]any{
+						"title": "Disk check",
+						"fields": []any{
+							map[string]any{"title": "Severity", "value": "1"},
+							map[string]any{"title": "Hosts down", "value": "2"},
+							map[string]any{"title": "Action", "value": "page oncall"},
+						},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: <@U0LEG> page: incident 4213",
+			wantText:    "<@U0LEG> page: incident 4213\nDisk check\nSeverity\n1\nHosts down\n2\nAction\npage oncall",
+		},
+		{
+			name: "a section's own text before its fields",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"blocks": []any{map[string]any{
+						"type": "section",
+						"text": map[string]any{"type": "mrkdwn", "text": "*p99* is 3.2s"},
+						"fields": []any{
+							map[string]any{"type": "mrkdwn", "text": "*Service*"},
+							map[string]any{"type": "mrkdwn", "text": "api"},
+						},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: *p99* is 3.2s",
+			wantText:    "*p99* is 3.2s\n*Service*\napi",
+		},
+		{
+			name: "a button's label before its hidden value",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"blocks": []any{map[string]any{
+						"type": "actions",
+						"elements": []any{map[string]any{
+							"type":  "button",
+							"text":  map[string]any{"type": "plain_text", "text": "Acknowledge"},
+							"value": "ack:alert-77",
+						}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Acknowledge",
+			wantText:    "Acknowledge\nack:alert-77",
 		},
 		{
 			name: "an edited message",
@@ -2958,7 +3055,7 @@ func TestSlackDeliveredText(t *testing.T) {
 			wantText:    "event attachment words",
 		},
 		{
-			name: "whitespace-only own words",
+			name: "own words that are only whitespace",
 			body: map[string]any{
 				"team_id": "T01234567",
 				"event": map[string]any{
@@ -2967,7 +3064,7 @@ func TestSlackDeliveredText(t *testing.T) {
 				},
 			},
 			wantSummary: "slack message in C01234567 from U01234567: the words",
-			wantText:    "   \nthe words",
+			wantText:    "the words",
 		},
 		{
 			name: "shapes that carry nothing: a list that is not a list",
@@ -2980,7 +3077,6 @@ func TestSlackDeliveredText(t *testing.T) {
 				},
 			},
 			wantSummary: "slack message in C01234567 from U01234567: ",
-			wantNoText:  true,
 		},
 		{
 			name: "shapes that carry nothing: values that are not strings",
@@ -2992,7 +3088,6 @@ func TestSlackDeliveredText(t *testing.T) {
 				},
 			},
 			wantSummary: "slack message in C01234567 from U01234567: ",
-			wantNoText:  true,
 		},
 		{
 			name: "shapes that carry nothing: a loose string in an array",
@@ -3044,7 +3139,6 @@ func TestSlackDeliveredText(t *testing.T) {
 				},
 			},
 			wantSummary: "slack message in C01234567 from U01234567:  (1 file(s): design)",
-			wantNoText:  true,
 		},
 		{
 			name: "a deleted message",
@@ -3057,7 +3151,6 @@ func TestSlackDeliveredText(t *testing.T) {
 				},
 			},
 			wantSummary: "slack message deleted in C01234567: 456.789",
-			wantNoText:  true,
 			forbidden:   []string{"words that must not be delivered"},
 		},
 	}
@@ -3070,11 +3163,11 @@ func TestSlackDeliveredText(t *testing.T) {
 			}
 			payload := decodePayload(t, envelope.Payload)
 			text, hasText := payload["text"]
-			switch {
-			case tt.wantNoText && hasText:
-				t.Fatalf("payload unexpectedly contains text: %q", text)
-			case !tt.wantNoText && text != tt.wantText:
-				t.Fatalf("payload[\"text\"] = %q, want %q", text, tt.wantText)
+			if text != tt.wantText || hasText != (tt.wantText != "") {
+				t.Fatalf(
+					"payload[\"text\"] = %q (present %t), want %q (present %t)",
+					text, hasText, tt.wantText, tt.wantText != "",
+				)
 			}
 			truncated, hasTruncated := payload["body_truncated"]
 			switch {
