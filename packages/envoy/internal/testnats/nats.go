@@ -17,11 +17,12 @@ package testnats
 
 import (
 	"context"
-	"crypto/rand"
+	crand "crypto/rand"
 	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"regexp"
@@ -146,10 +147,12 @@ func startAccountServer(accounts int) (*accountServer, error) {
 	return &accountServer{host: host, secret: secret, declared: accounts, holders: map[string]string{}}, nil
 }
 
-// accountSecret draws the password every account of one test binary's server shares.
+// accountSecret draws the password every account of one test binary's server shares. crypto/rand
+// is aliased crand in this file: main's own math/rand/v2 import holds the name rand, and the two
+// merged into one import block without a textual conflict and refused to compile.
 func accountSecret() (string, error) {
 	raw := make([]byte, 16)
-	if _, err := rand.Read(raw); err != nil {
+	if _, err := crand.Read(raw); err != nil {
 		return "", fmt.Errorf("draw the test server's account password: %w", err)
 	}
 	return hex.EncodeToString(raw), nil
@@ -252,13 +255,29 @@ func Start(t testing.TB) (*tcnats.NATSContainer, string) {
 	return ctr, uri
 }
 
+// nkeyUserConfig is the configuration of a server with JetStream whose one user authenticates as
+// the nkey user whose public key is user. StartNkeyAuthorized and StartNkeyAuthorizedContainer
+// start the same server, so the literal has one definition.
+func nkeyUserConfig(user string) string {
+	return nkeyConfig(fmt.Sprintf("{ nkey: %q }", user))
+}
+
 // StartNkeyAuthorized runs a NATS test container on Image, with JetStream, that accepts only
 // clients authenticating as the nkey user whose public key is user, removed when the test ends,
 // and returns its client URL once the server refuses a client with no credential (awaitAuth).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
-	_, uri := startNkeyConfig(t, nkeyConfig(fmt.Sprintf("{ nkey: %q }", user)))
+	_, uri := StartNkeyAuthorizedContainer(t, user)
 	return uri
+}
+
+// StartNkeyAuthorizedContainer runs the server StartNkeyAuthorized runs and returns it with its
+// own client URL, for a test that must stop and start the server under a connected client. That
+// URL is Docker's mapping of this run of the container, so a test that needs one address across a
+// stop and a start reaches the container through a Gate instead.
+func StartNkeyAuthorizedContainer(t testing.TB, user string) (*tcnats.NATSContainer, string) {
+	t.Helper()
+	return startNkeyConfig(t, nkeyUserConfig(user))
 }
 
 // NkeyGrant is a NATS test server, started by StartNkeyGranted, whose one nkey user may publish
@@ -480,6 +499,95 @@ func StartRestartable(t testing.TB) (*tcnats.NATSContainer, string) {
 	uri := "nats://" + listener.Addr().String()
 	Connect(t, uri).Close()
 	return ctr, uri
+}
+
+// Gate is one TCP address a test holds for its whole life, which relays to a container's client
+// port while it is open and has nothing listening at all while it is closed.
+//
+// nats.go runs ReconnectErrCB only for a reconnect attempt whose dial failed: an attempt that
+// connects and then fails the protocol handshake is silent. So a test that needs a connected
+// client's reconnect attempts to fail needs an address nothing listens on, which a relay that
+// accepts and closes the connection does not give it, and a test that then needs a successful
+// reconnect needs that same address to come back once the server is up.
+type Gate struct {
+	t        testing.TB
+	ctr      *tcnats.NATSContainer
+	address  string
+	mu       sync.Mutex
+	listener net.Listener
+}
+
+// gatePortFirst and gatePortCount are the range a gate picks its port from. A :0 port would come
+// from the kernel's ephemeral range (32768-60999 on Linux), which is also where Docker publishes
+// a container's random host port, so another container started while the gate was closed could
+// take it and the gate's address would never come back. Nothing in 20000-29999 is allocated on
+// its own, so a port this process has proven free by binding it stays free for the test.
+const (
+	gatePortFirst = 20000
+	gatePortCount = 10000
+)
+
+// StartGate opens a gate on a free port of that range, relaying to ctr, and closes its listener
+// when the test ends.
+func StartGate(t testing.TB, ctr *tcnats.NATSContainer) *Gate {
+	t.Helper()
+	g := &Gate{t: t, ctr: ctr}
+	var last error
+	for range 100 {
+		address := fmt.Sprintf("127.0.0.1:%d", gatePortFirst+rand.IntN(gatePortCount))
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			last = err
+			continue
+		}
+		g.address, g.listener = address, listener
+		go relay(listener, g.endpoint)
+		t.Cleanup(g.Close)
+		return g
+	}
+	t.Fatalf("hold a gate port: %v", last)
+	return nil
+}
+
+// endpoint is the container's client address now, resolved per connection so that the host port
+// Docker moves across a stop and a start is invisible to the gate's client.
+func (g *Gate) endpoint(ctx context.Context) (string, error) {
+	return g.ctr.PortEndpoint(ctx, "4222/tcp", "")
+}
+
+// URL is the client URL of the gate's address, which is the same for the test's whole life.
+func (g *Gate) URL() string { return "nats://" + g.address }
+
+// Close stops listening, so every dial of the gate's address is refused. It does nothing when the
+// gate is already closed. It does not break a connection already joined through the gate, whose
+// relay keeps copying until one side ends, so a test that needs a connected client to lose its
+// connection stops the server too.
+func (g *Gate) Close() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.listener == nil {
+		return
+	}
+	_ = g.listener.Close()
+	g.listener = nil
+}
+
+// Open listens on the gate's address again, so dials reach the container once more. It does
+// nothing when the gate is already open, and fails the test when the address cannot be taken.
+func (g *Gate) Open() {
+	g.t.Helper()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.listener != nil {
+		return
+	}
+	listener, err := net.Listen("tcp", g.address)
+	if err != nil {
+		g.t.Fatalf("open the gate at %s: %v", g.address, err)
+		return
+	}
+	g.listener = listener
+	go relay(listener, g.endpoint)
 }
 
 // relay joins each connection listener accepts to the server's current address, until the

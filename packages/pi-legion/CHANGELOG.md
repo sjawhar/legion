@@ -7,6 +7,20 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
+  `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
+  is refused while an issue beneath it is still in the workflow and a merged root's close waits
+  for the rest of its tree, so a root stands in `awaiting_merge` for days and an operator reads
+  the merge here rather than guessing at it. Always emitted, so a plugin built before it refuses
+  the state. Install this release with a `legion` built from the same commit.
+- The `legion-controller` skill this plugin ships reorders a project's board with
+  `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`, and its backlog
+  stewardship reference is corrected to the rule the daemon applies: Legion admits waiting roots by
+  board rank alone, so board rank alone carries the weekly plan's order. The controller still sets
+  the coarse priority, as the signal people and filters read and as the order by which an agent
+  takes its own next issue, but it changes no admission; the reference used to have the controller
+  set priority and rank together so that "highest priority, then board rank" produced the plan's
+  order (INFRA-188).
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
