@@ -2,76 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-92",
-  "completed": "2026-10-25T11:20:00Z",
-  "round": "the reviewer's second changes-requested round at ab2e7080c1ba: three findings, two of them in the role-file work, plus the interaction of those two fixes, which the architect ruled belongs in this pull request because this change carries it in",
+  "completed": "2026-10-25T11:40:00Z",
+  "round": "an identity rewrite only, on the architect's instruction: this branch's code commit 39175757c326 was authored by the review App, and no line of content changes in this round",
   "proof": [
     {
-      "criterion": "Finding 1: a soft setRole refused at startup no longer costs the session its role for the life of the process, and a refusal that repeats is still retried.",
-      "surface": "The committed dist/envoy-channel.js run as Claude Code runs it, against a real nats-server with JetStream and an Envoy listener built from this tree, with a proxy in front of the listener that answers 503 to the first two POSTs of /v1/roles/set and forwards everything else.",
-      "command": "a throwaway probe, /tmp/role-round2-probe.sh (not in the tree), case one",
-      "observed": "After startup: the session alive and already holding — no, precisely: alive=yes with one stderr line, 'could not restore the role from <…> (POST …/v1/roles/set failed with 503: injected listener outage); the next heartbeat retries'. The proxy recorded refusals=2, so the first heartbeat's retry was refused as well, and the listener named the session holder of the role after the third claim. Two refusals, not one, is the point: `transferRole` clears the queued retry only once `restoreRole` resolves, so a single failure would pass even if the retry were one-shot.",
-      "headSha": "39175757c326",
-      "negativeControl": "The same code path with the refusals exhausted is the control the probe's own second case runs: with REFUSALS=0 the claim lands at startup and no retry line is written. Before this round, the catch wrote the same line and nothing ever re-ran the claim — the unit row 'a role claim that fails at startup still starts the session, and the next heartbeat takes the role back' fails against that code."
-    },
-    {
-      "criterion": "Finding 2: the role sweep no longer deletes a live holder's only recovery record, and still deletes an abandoned one.",
-      "surface": "The same live rig: a channel server holding a role against the real listener, with two role records in the same directory, both aged past the sweep's thirty days — one belonging to the running session, one to a session that is not running.",
-      "command": "the same probe, case two, then a second channel server whose startup runs the sweep",
-      "observed": "Both records aged to 31.0 days while the first session was running and holding. After two heartbeats: the live holder's record read 0.0 days and the abandoned one still 31.0. After the next session's startup sweep: the live holder's record kept, the abandoned one deleted.",
-      "headSha": "39175757c326",
-      "negativeControl": "The abandoned record in the same run and the same directory, identical in age and shape, deleted by the same sweep — so what kept the other one is the heartbeat's touch and not a sweep that stopped working."
-    },
-    {
-      "criterion": "Finding 3: the row's media query and its `md:` classes answer alike at a root font size other than 16 px.",
-      "surface": "Dispatch's own browser suite in a real Chromium launched with `--blink-settings=defaultFontSize=20`, in this pod, at an 800 px viewport — between 768 px as an absolute number and 48rem as 960 px at that default.",
-      "command": "a throwaway spec run in the chromium project and then deleted (not in the tree): it reads both media queries and the row's rendered directory",
-      "observed": "root 20px: (min-width: 768px)=true, (min-width: 48rem)=false, and the row's directory reads the whole path, `build-host · /workspaces/sjawhar/legion/infra-92/packages/dispatch/web/src/features` — the below-`md` layout, which is where the `md:` classes also are at that width. 1 passed.",
-      "headSha": "39175757c326",
-      "negativeControl": "The constant as it was is measured in the same run: `(min-width: 768px)` answers true there, which is the divergence — the shortened directory inside the layout meant to keep the whole path — that the new value removes."
-    },
-    {
-      "criterion": "The interaction of the two role fixes: a record already older than the sweep's thirty days, whose startup claim the listener refuses, is not deleted before the queued retry can use it.",
-      "surface": "The committed dist/envoy-channel.js against a real nats-server and a real Envoy listener, behind the same proxy, with the session's own role record aged to 31 days before it starts.",
-      "command": "the throwaway probe /tmp/role-round2-probe.sh (not in the tree), third case: one refused POST /v1/roles/set, a 31-day-old record, then the startup sweep and the heartbeats",
-      "observed": "After the refused claim and the startup sweep that follows it: record=kept. After the heartbeats: holder=role-round2-0004, record=kept — the role recovered from the record the sweep would have deleted.",
-      "headSha": "39175757c326",
-      "negativeControl": "The abandoned record in the same run, identically aged and swept by the same sweep at the same startup: deleted. So what keeps the running session's record is the one condition on the session id, not a sweep that stopped deleting."
-    },
-    {
-      "criterion": "Nothing on the Agents page moved, and the plugin still registers the name a person gave the session.",
-      "surface": "Dispatch's browser suite (chromium and iphone) over the Agents spec, and the committed bundles against a real nats-server and Envoy listener.",
-      "command": "bunx playwright test --config e2e/playwright.config.ts --project=chromium --project=iphone e2e/agents.e2e.ts, then bash packages/claude-envoy/scripts/smoke-session-title.sh",
-      "observed": "34 passed, 0 failed, the tester's row at :1807 and the laptop row at :1717 among them; and the smoke PASS — 'eeny meeny', then 'miny moe', then 'probe-project smoke-ti', with the dispatch stamp holding 'miny moe'.",
-      "headSha": "39175757c326",
-      "negativeControl": "The smoke's own last case: main@origin's dist/envoy-channel.js registered the folder-and-short-id fallback and not the chosen name."
+      "criterion": "Every commit of this branch above main carries the right App in both columns, and the rewrite that achieved it changed no content.",
+      "surface": "The branch itself, in the issue workspace and then at origin: `jj log` over `main@origin..@` for the identities, and the unchanged-diff fingerprint of `skill://legion-worker/references/conflicts-and-rewrites.md` for the content.",
+      "command": "jj log -r 'main@origin..@' -T 'commit_id ++ author.email() ++ committer.email()'; the fingerprint command of that reference at the tip before and after; the guard `descendants(39175757c326) ~ ::@`; `jj metaedit --update-author -r 39175757c326`",
+      "observed": "Before: 39175757c326 author legion-reviewer[bot], committer legion-implementer[bot] — the one mismatch on the branch. The guard printed nothing, so nothing outside this chain descended from it. After `jj metaedit --update-author` and its rebase of two descendants, the commit is d4de531733a9 with legion-implementer[bot] in both columns, and a template over every commit of `main@origin..@` that prints a line only where author and committer differ printed nothing at all. Each handoff commit still carries its own role's App: the planner's, the tester's and the reviewer's are legion-reviewer[bot], every code commit and every implement handoff legion-implementer[bot]. Fingerprint before aef279e370c6ed9b6aefa03bff53781f94e61b4c440c21c1c8d9c9a7d4ce33fe, after the same value — the content is provably identical.",
+      "headSha": "the rewritten head, pushed with --allow-backwards; see the PR comment for the pair of tips",
+      "negativeControl": "The fingerprint is the control for the content: it is taken over the branch's whole diff against its fork point with only `.legion/` and `docs/solutions/` left out, so any line that had moved would change it. The identity audit is its own control in the other direction — it reads every commit of the branch, not the one rewritten, and would have printed any other mismatch."
     }
   ],
   "reviewFindings": [
-    "1 (blocking) — fixed. The startup catch sets `roleTransferFrom = identity.id`, so the heartbeat's existing `transferRole` → `restoreRole` path re-runs the claim, and because `transferRole` clears the queue only after `restoreRole` resolves, a repeated failure stays queued. A role file that cannot be parsed is deliberately not queued: no later read of the same bytes succeeds, and a transfer that threw every tick would end each one before its interests reconciliation. The stderr line says which case it was.",
-    "2 (blocking) — fixed. `reassertRole`'s holder-confirmed branch touches the record through the new `touchStateFile`. A timestamp touch, not a rewrite, on the architect's instruction: the content has not changed, and an atomic rewrite would drop a temporary file into `roles/` every two minutes — which is also why the three existing `readdir(roles)` assertions the first attempt had to move after `shutdown()` are back where they were, untouched.",
-    "3 (minor) — fixed. `MD_VIEWPORT_QUERY` is `(min-width: 48rem)` and its comment says why the unit matters. Only that token changed: `COMPACT_VIEWPORT_QUERY` and `PHONE_VIEWPORT_QUERY` carry the same px-against-rem mismatch and are left alone, as the reviewer asked, as the pull request's one Fast-follow line.",
-    "Threads — the five the reviewer named as accepted are resolved by node id. The reviewer also opened three threads for this round's findings, which it did not name: each has one disposition reply and is resolved. PRRT_kwDORFy7ds6v9duc, which the reviewer asked to leave open, is answered and resolved too, on the architect's instruction that it stays open only until finding 3 is in the head — which this head carries.",
-    "Interaction of 1 and 2 — fixed in this round on the architect's ruling that a defect these fixes carry in is this pull request's. `pruneStaleSessionRoles` now takes the id of the session running it and never deletes that session's own record, whatever its age: the sweep runs at startup, before any heartbeat has touched anything, and a session whose claim was refused has not touched its own record either. Expiring an abandoned record is the sweep's whole point and the running session's record is by construction not abandoned, so it is one condition on the session id rather than a second rule about timing. The two candidates I had offered are worse: sweeping before the restore deletes the record even when the claim would have succeeded, and skipping the sweep while a retry is queued teaches the sweep about the queue and still leaves the record deletable at the next startup."
+    "No finding of the reviewer is open; this round answers the tester's record defect alone. The three round-two findings and their interaction are in the head already (39175757c326, now d4de531733a9)."
   ],
   "filesChanged": [
-    "packages/claude-envoy/src/envoy-channel-server.ts — the startup catch queues the retry; `refreshRoleRecord` touches the record on a confirmed hold, best-effort with one stderr line per failure run; the three startup sweeps are closures, so the role sweep is told whose session it is",
-    "packages/claude-envoy/src/session-state.ts — `touchStateFile`",
-    "packages/claude-envoy/src/session-identity.ts — `pruneStaleSessionRoles(stateDirectory, currentSessionId)`, which never deletes the sweeping session's own record, and the doc comment that reasons it through",
-    "packages/claude-envoy/tests/envoy-channel-handoff.test.ts — three rows: a claim refused twice at startup and recovered by a heartbeat, a heartbeat refreshing the record the age sweep reads (swept as another session, so the refresh is what the row measures), and an aged record surviving a refused-claim startup",
-    "packages/claude-envoy/tests/session-identity.test.ts — the sweep keeps the sweeper's own record whatever its age",
-    "packages/claude-envoy/dist/ — rebuilt",
-    "packages/dispatch/web/src/features/shell/useDialog.ts — `(min-width: 48rem)`"
+    "none — no line of content changed in this round; the only change is the author of one commit and the commit ids its rewrite moved"
   ],
   "trickyParts": [
-    "The touch has to be a touch. A rewrite through `writePersistedRole` is atomic — a temporary file in `roles/` renamed over the record — so every two minutes a listing of that directory could catch the temporary file, which is what made three existing assertions flake until they were moved after shutdown. `touchStateFile` writes nothing and leaves nothing beside the record, and those three assertions are back in their original places.",
-    "An unparseable role file is not queued for retry. It is the one failure a later read of the same bytes cannot fix, and a `transferRole` that threw on every tick would end each heartbeat before `syncRegisteredInterests`."
+    "The cause is the empty working-copy commit a previous role's push left behind: splitting it keeps that commit's author and takes the splitter as committer, which is how a code commit came to say the review App wrote it. `handoff_complete` refuses a handoff carried by another App's commit, so every handoff on this branch is clean; nothing checks a code commit, which is why this reached a push. Before this rewrite I moved off the reviewer-authored empty commit with `jj new @-` so the same thing could not happen again in this round.",
+    "The rewrite's head is a code push, so it carries no `skip-checks: true` line. The rebased handoff commit beneath it still carries its own, which is correct: GitHub reads the trailer on the pushed head alone."
   ],
   "deviations": [],
-  "openQuestions": [
-    "Recorded for the reviewer, which asked for the disclosure to stay: the interaction above was not in either finding. It was found by the first version of the probe, which aged the record and refused the claim in the same run and ended with the record deleted and the role unheld; separating the two cases is what exposed it. It is fixed in this head and has its own proof entry and its own unit row, 'a record already past the sweep's age survives a startup whose claim was refused, and the heartbeat restores it'."
-  ],
+  "openQuestions": [],
   "discoveredComplexity": [
-    "A worker container's /home is not durable within a session: `nats-server`, installed into GOPATH's bin earlier in this issue and used by three smoke runs, was gone by this round, and the smoke failed with `nats-server: command not found` through a listener that then died of `nats: no servers available`. It is reinstalled at /legion/scratch/bin, on the issue volume, which the rest of the rig already uses. A smoke or probe that needs a tool should look there first.",
-    "The browser rig needs `@legion/contracts` built (`cd packages/contracts && bun run build`, 0.13 s) before Playwright loads the specs, and a run killed by a command deadline leaves its five harness listeners holding their ports; both cost a run each in earlier rounds and are in the retro learning already queued."
+    "A guard that covers the handoff commit but not the code commit reads as covering both. `handoff_complete` checks the authoring App of the commit carrying the handoff, which is why five rounds of handoffs are clean, and nothing checks the App of a code commit at all; the pre-push identity check in `skill://legion-worker/references/default-branch-check.md` is the only thing that would have caught this, and it is a step a role performs rather than a gate. This goes in the retro learning with the rest, together with the rule it rests on: the working-copy commit found at a turn's start can carry the previous role's author."
   ]
 }
