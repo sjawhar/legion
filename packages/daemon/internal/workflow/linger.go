@@ -33,11 +33,14 @@ import (
 // release (closeCheck). A done child set back to todo starts fresh. An issue leaving disarms its
 // open pull request (disarmOpen), as a root's linger disarms every member's.
 //
-// A child's leave may be the last its root waited for: a root the boot's sweep left in
-// awaiting_merge on a merged pull request while a child still ran (booted) closes once no child is
-// in the workflow (closeAwaitingRoot). The child's check opens after that close, so its start row
-// follows the linger's suspends and resumes the implementer as a root's own check does, rather
-// than being stopped by them.
+// A member's leave may be the last its root waited for: a merged root stands in awaiting_merge
+// while any other issue of its tree is in the workflow (closeMerged), and closes once the last of
+// them leaves (closeAwaitingRoot). Every way a member stops holding it runs this function — a
+// status moving to backlog, icebox, triage or done (dispatchIssue), a phase reaching done
+// (transition), the architect's close_root, and LeaveUnslotted — and the boot's sweep is the
+// backstop. The child's check opens after that close, so its start row follows the linger's
+// suspends and resumes the implementer as a root's own check does, rather than being stopped by
+// them.
 func (e *Engine) leave(ctx context.Context, tx pgx.Tx, issue record.Issue, status string) error {
 	e.logOnCommit(ctx, "workflow: issue left the workflow", "issue", issue.Key, "tree", issue.Tree, "status", status)
 	if claim.IsTreeRoot(issue.Key, issue.Tree) {
