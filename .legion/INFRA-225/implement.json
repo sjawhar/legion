@@ -2,14 +2,14 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-225",
-  "completed": "2026-10-25T08:45:00Z",
+  "completed": "2026-10-25T12:45:00Z",
   "proof": [
     {
       "criterion": "A root handed to Legion whose blocked-by link names an issue that is not done is not admitted while slots are free; the next unblocked root in rank order is admitted instead, and the blocked one is skipped before any tree of its own is opened.",
       "surface": "The Legion daemon booted and driven: the real Dispatch server (packages/envoy/cmd/dispatch) with its events on, a real Postgres 17 and a real NATS JetStream server, all local processes; every issue created and moved through Dispatch's own HTTP API, every assertion read from GET /legion/v1/state on the running daemon.",
       "command": "LEGION_TEST_PG_DSN='postgres://legion@127.0.0.1:55432/postgres?sslmode=disable' LEGION_TEST_NATS_URL='nats://127.0.0.1:4222' LEGION_TEST_NATS_MONITOR_URL='http://127.0.0.1:8222' go test -count=1 -run TestBlockedIssuesAreNotStartedAgainstScratchDispatch ./internal/daemon/ -v",
       "observed": "PASS in 10.39s. The daemon's own state with cap 3: \"active\":[\"<p>-1\",\"<p>-3\"],\"waiting\":[\"<p>-2\"],\"blocked\":[{\"issue\":\"<p>-2\",\"blockedBy\":[\"<p>-1\"]}] — the blocked root passed over while a slot stood free and the next root admitted in its place, the blocked root left in todo at the admitted phase with no slot.",
-      "headSha": "ac1d73a58cd9ff64b8b6cc2569272e1c0f109c13",
+      "headSha": "05caa7425c19f3158366650e951db91f474102d7",
       "negativeControl": "The blocker moved to backlog instead of closed: the root stayed passed over, while admission demonstrably ran on that very event (it released the blocker's own slot, \"active\" dropped to one of three) and the state still read \"waiting\":[\"<p>-2\"],\"blocked\":[{\"issue\":\"<p>-2\",\"blockedBy\":[\"<p>-1\"]}]. Backlog stops an issue; it does not finish it."
     },
     {
@@ -17,7 +17,7 @@
       "surface": "The same booted daemon; the blocker closed with a real Dispatch write whose event the daemon consumed from NATS. No synthetic fact and no direct database write.",
       "command": "LEGION_TEST_PG_DSN=… LEGION_TEST_NATS_URL=… LEGION_TEST_NATS_MONITOR_URL=… go test -count=1 -run TestBlockedIssuesAreNotStartedAgainstScratchDispatch ./internal/daemon/ -v",
       "observed": "After the close, \"active\":[\"<p>-2\",\"<p>-3\"],\"waiting\":[],\"blocked\":[] — the formerly blocked root holds a slot and nothing is reported waiting on a link.",
-      "headSha": "ac1d73a58cd9ff64b8b6cc2569272e1c0f109c13",
+      "headSha": "05caa7425c19f3158366650e951db91f474102d7",
       "negativeControl": "The backlog step above is this criterion's control too: the same admission pass that released a slot left the root unadmitted while the blocker was not done. go test ./internal/admit/ locks the rest, comparing the admission that follows the close row for row against a control admission of an unblocked root (same outbox payloads, same issue record, same slots)."
     },
     {
@@ -25,7 +25,7 @@
       "surface": "The same booted daemon: POST /legion/v1/waves/release on the running daemon with a real architect grant minted by the launched architect's own claim, after the child was created and set todo through Dispatch's API.",
       "command": "LEGION_TEST_PG_DSN=… LEGION_TEST_NATS_URL=… LEGION_TEST_NATS_MONITOR_URL=… go test -count=1 -run TestBlockedIssuesAreNotStartedAgainstScratchDispatch ./internal/daemon/ -v",
       "observed": "The route answered {\"released\":[\"<p>-4\"],\"started\":[],\"held\":[{\"issue\":\"<p>-4\",\"blockedBy\":[\"<p>-2\"]}]}, the child's record stayed at the admitted phase with no planner start, and the state named the same wait under admission.blocked at the same moment.",
-      "headSha": "ac1d73a58cd9ff64b8b6cc2569272e1c0f109c13",
+      "headSha": "05caa7425c19f3158366650e951db91f474102d7",
       "negativeControl": "This run found a real defect, which the change fixes: before it, the same route answered held:[] on the same daemon at the same moment, because releaseOutcome read the blockers mirror with the claim project token while the mirror is keyed by the Dispatch project key. api.Options now carries both names, and the api tests run under two deliberately different keys, so a route reading the wrong one finds no rows and fails."
     },
     {
@@ -33,7 +33,7 @@
       "surface": "The same booted daemon: the held child's blocker closed through Dispatch's API, the child's phase read from GET /legion/v1/state.",
       "command": "LEGION_TEST_PG_DSN=… LEGION_TEST_NATS_URL=… LEGION_TEST_NATS_MONITOR_URL=… go test -count=1 -run TestBlockedIssuesAreNotStartedAgainstScratchDispatch ./internal/daemon/ -v",
       "observed": "The child left the admitted phase into planning once its blocker closed, with admission.blocked empty.",
-      "headSha": "ac1d73a58cd9ff64b8b6cc2569272e1c0f109c13",
+      "headSha": "05caa7425c19f3158366650e951db91f474102d7",
       "negativeControl": "Before that close the child sat at the admitted phase under an open design gate (the architect had registered the root's spec, which opens the gate with gates.design off), proving the gate's opening does not start a held child; go test ./internal/workflow/ locks the same by all three doors with the IssueBranch row, the planner start and the child-status notice."
     },
     {
@@ -41,7 +41,7 @@
       "surface": "The admission package against a real migrated Postgres, with a counting store wrapping record.Store and three blocked roots in the waiting line.",
       "command": "LEGION_TEST_PG_DSN=… go test -count=1 -run TestPromotionReadsTheMirrorOnceWhateverTheNumberOfBlockedRoots ./internal/admit/ -v",
       "observed": "PASS: exactly one DispatchIssues call per promoteHolds call with three blocked candidates queued, and no slot taken.",
-      "headSha": "ac1d73a58cd9ff64b8b6cc2569272e1c0f109c13",
+      "headSha": "05caa7425c19f3158366650e951db91f474102d7",
       "negativeControl": "The test fails on any read inside the candidate loop: it asserts the count is 1, so a per-candidate read reports 3."
     },
     {
@@ -49,8 +49,32 @@
       "surface": "The daemon's own recorded-example tests and the legion CLI's output tests, plus the plugin packages that parse those examples.",
       "command": "go test -count=1 ./internal/api/ ./internal/projection/ ./internal/admit/ ./cmd/legion/ in packages/daemon; bun test in packages/contracts, packages/pi-legion and packages/claude-envoy",
       "observed": "All pass. The recorded state examples carry admission.blocked (a blocked root and a held child, by issue key), version.json reads 36, legion state prints `blocked on Dispatch links: 2 — … waits on …; … waits on …` and `blocked on Dispatch links: none`, the tick controller notice carries the same list and no other wake kind does, and the strict zod schemas parse every regenerated example.",
-      "headSha": "ac1d73a58cd9ff64b8b6cc2569272e1c0f109c13",
+      "headSha": "05caa7425c19f3158366650e951db91f474102d7",
       "negativeControl": "packages/contracts' legion-api.test.ts refuses a state whose admission drops `blocked` and one whose blocked row has no `blockedBy`, and refuses a wave release answer carrying neither `started` nor `held`."
+    },
+    {
+      "criterion": "A tree already running is not stopped, paused or re-checked when a blocker is added to its issue afterwards (the tester's first defect: a root already admitted into a slot was judged by the gate like a child, and froze at the admitted phase holding its slot, reported nowhere).",
+      "surface": "The Legion daemon booted and driven: the real Dispatch server (packages/envoy/cmd/dispatch) with its events on, a real Postgres 17 and a real NATS JetStream server, all local processes; every issue created and moved through Dispatch's own HTTP API, every assertion read from GET /legion/v1/state on the running daemon.",
+      "command": "LEGION_TEST_PG_DSN='postgres://legion@127.0.0.1:55432/postgres?sslmode=disable' LEGION_TEST_NATS_URL='nats://127.0.0.1:4222' LEGION_TEST_NATS_MONITOR_URL='http://127.0.0.1:8222' go test -count=1 -run TestBlockedIssuesAreNotStartedAgainstScratchDispatch ./internal/daemon/ -v",
+      "observed": "PASS in 13.6s, step 3. A root in its slot has blocked_by [<late>] added through Dispatch's PATCH; the daemon takes the link in (its mirror row reaches the PATCH's own sequence) and the root stays in its slot at the admitted phase; its architect then registers the design gate with a real grant and the root reaches planning: \"active\":[\"-2\",\"-3\",\"-4\"],\"waiting\":[],\"blocked\":[] with -3 at planning, approvedVersion 1. Every state read from the PATCH to the gate's opening is checked: -3 is named in admission.blocked at no point, because a root in a slot is held by nothing.",
+      "headSha": "05caa7425c19f3158366650e951db91f474102d7",
+      "negativeControl": "The fix taken back alone (advanceAdmittedTree judging the root again): the same step fails, 'Legion opened the design gate of <root> and left the root at admitted rather than starting planning: it judged a root already in its slot by <late>, linked after its admission, so the root holds its slot with nothing left to start it'."
+    },
+    {
+      "criterion": "An issue that carries no run is checked (the tester's second defect: a waiting root a person moved to backlog and back was marked taken back and admitted though it had never held a slot or run a phase).",
+      "surface": "The Legion daemon booted and driven: the real Dispatch server (packages/envoy/cmd/dispatch) with its events on, a real Postgres 17 and a real NATS JetStream server, all local processes; every issue created and moved through Dispatch's own HTTP API, every assertion read from GET /legion/v1/state on the running daemon.",
+      "command": "LEGION_TEST_PG_DSN='postgres://legion@127.0.0.1:55432/postgres?sslmode=disable' LEGION_TEST_NATS_URL='nats://127.0.0.1:4222' LEGION_TEST_NATS_MONITOR_URL='http://127.0.0.1:8222' go test -count=1 -run TestBlockedIssuesAreNotStartedAgainstScratchDispatch ./internal/daemon/ -v",
+      "observed": "PASS in 13.6s, step 5. A root blocked by an unfinished issue waits and is named in admission.blocked; moved to backlog it leaves the waiting line; moved back to todo it is waiting and named again rather than admitted, with a slot free the whole time; its blocker closed through Dispatch, it is admitted and no longer named.",
+      "headSha": "05caa7425c19f3158366650e951db91f474102d7",
+      "negativeControl": "The fix taken back alone (readmit writing TakenBack for every returning root, with the transition write removed): the same step fails, the root admitted at generation 2 with its blocker still unfinished."
+    },
+    {
+      "criterion": "The blocker's closing event alone admits the waiting root, including when the blocker is an issue Legion keeps no record of and nobody handed to it.",
+      "surface": "The Legion daemon booted and driven: the real Dispatch server (packages/envoy/cmd/dispatch) with its events on, a real Postgres 17 and a real NATS JetStream server, all local processes; every issue created and moved through Dispatch's own HTTP API, every assertion read from GET /legion/v1/state on the running daemon.",
+      "command": "LEGION_TEST_PG_DSN='postgres://legion@127.0.0.1:55432/postgres?sslmode=disable' LEGION_TEST_NATS_URL='nats://127.0.0.1:4222' LEGION_TEST_NATS_MONITOR_URL='http://127.0.0.1:8222' go test -count=1 -run TestBlockedIssuesAreNotStartedAgainstScratchDispatch ./internal/daemon/ -v",
+      "observed": "PASS in 13.6s, step 6. The blocker is created in Dispatch without the legion label and never put in todo, so the daemon records nothing of it; the root waits, is named in admission.blocked, and a slot stands free. The blocker closed through Dispatch, the root is admitted 89.3ms after the close, with the blocker still unrecorded and the processed-event count of controller ticks unchanged across the window (the test runs with both tick intervals set to an hour, so no tick exists to admit it).",
+      "headSha": "05caa7425c19f3158366650e951db91f474102d7",
+      "negativeControl": "Before the fix the same step failed with the root still waiting 60s after the close, a slot free and its blocker mirrored done; admission's unrecorded-issue exits returned before promoting, so only the next controller tick (about 58s) admitted it."
     }
   ],
   "filesChanged": [
@@ -80,11 +104,20 @@
   "deviations": [
     "The committed plan handoff's specDepartures entry and its answer to gap finding F8 are superseded: the architect ruled that a held child's start tells the architect with the existing child-status notice from a third producer, not with phase-finished, and version 3 of the plan document (dispatch://INFRA-225/artifact/plan-md, decision D7) records it. That is what is built (workflow/effects.go ChildUnblockedNotice). plan.json was not edited — the plan document is the record — and this handoff records no spec departure, since with child-status the spec's words hold as written.",
     "Discovered scope the plan named and the architect approved (D12): packages/daemon/internal/testnats gained LEGION_TEST_NATS_URL and LEGION_TEST_NATS_MONITOR_URL, mirroring the door packages/envoy/cmd/dispatch/multiprocess_test.go already has. Without it the issue's own acceptance proof could not run in a pod with no Docker. The testcontainers path is unchanged for CI.",
-    "The spec's exemption of a tree taken back after it finished and lingered was not met by the first implementation, which exempted only an issue carrying a run. It is implemented here with migration 0052 and record.Issue.TakenBack; the test that had been written against the wrong behaviour was inverted."
+    "The spec's exemption of a tree taken back after it finished and lingered was not met by the first implementation, which exempted only an issue carrying a run. It is implemented here with migration 0052 and record.Issue.TakenBack; the test that had been written against the wrong behaviour was inverted.",
+    "Round 2 answers the tester's two defects and the third this change's own proof found; the tester's two red tests (TestTheGateOpeningStartsAnAdmittedRootWhateverItsLinksSay, TestABlockedRootThatLeftTheQueueAndCameBackIsStillChecked) pass unmodified and were not touched.",
+    "TakenBack's meaning changed under the architect's ruling: it is now 'the issue has stood in a phase of its own', written by Engine.transition as a phase begins and never cleared, rather than 'a root came back through readmit'. Admission.readmit writes it no more. Migration 0052 keeps its column name and gains a backfill for rows already recorded (a phase that carries a run, or a non-architect phases row). Its name stays TakenBack because the tester's red test seeds that field by name.",
+    "A third way into the state the architect's invariant forbids was fixed with them: a held child whose blocked-by links a person takes off is held by nothing, and StartUnblockedChildren now starts it (no child-status notice, since no blocker closed). The half of TestAHeldChildStartsWhenItsLastBlockerCloses that pinned the old stuck behaviour was replaced by TestAHeldChildWhoseLinksAreTakenOffStarts.",
+    "The forward merge of main (56ba79b8) was made because GitHub reported the head CONFLICTING and so ran no checks on it at all: jj new legion/INFRA-225 main, never a rebase; fingerprint d4281e37f190232c419231432506ed6e7480bd2cfd92888a0ea311668ba89fe9 -> a5c678765c7be70808d335cabd7c4d151beb8dd2e276277114f3cbcb214addd1, changed, with the three deliberate reasons posted on the pull request.",
+    "DaemonAPIVersion is 37. main carried 36 when the merge was made and still carried 36 when this handoff was written, both read from packages/daemon/internal/api/version.go on main itself: INFRA-229 took 36 while this branch was open, so this change takes the number above it, with the ledger entry, the zod schemas, the recorded version example and both plugin manifests moving together.",
+    "main's INFRA-376 moved the architect skill's wake-routing table into skills/legion-architect/references/wake-routing.md, so this change's child-status row went there in the wording it already had, and its hand-over clause into main's rewritten paragraph; the Claude plugin mirror was rebuilt with bun run build."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
     "Four packages of packages/daemon cannot pass in this pod and were verified by reading their failures rather than by a green run: internal/testnats and internal/natsauth need Docker (they start containers with their own authorization, which no environment variable can replace), and internal/launcher's TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten and internal/ompsessions' TestImportRefusesContentNoTextValueHolds fail on this sandbox's filesystem and encoding behaviour. None is touched by this change. Three internal/daemon tests (TestTmuxBootRewritesEveryOlderClonesCredentialHelper, TestATerminalAttemptLeavesLaterChildrenSIGTTOUsDefault, TestATerminalAttemptIgnoresSIGTSTP) were shown to fail identically at the base commit, with this change's one file in that package reverted. CI runs all of them.",
-    "packages/claude-envoy's `queryTmux is bounded even by a tmux that ignores SIGTERM` is flaky under load here: it fails in a full-suite run and passes alone and in a second full run."
+    "packages/claude-envoy's `queryTmux is bounded even by a tmux that ignores SIGTERM` is flaky under load here: it fails in a full-suite run and passes alone and in a second full run.",
+    "Two defects of this change were found by its own proof rather than by review: release_children reading the mirror with the claim project token instead of the Dispatch project key (held was always empty in a deployment), and admission not promoting on an observation of an issue it keeps no record of (the close of such a blocker waited about 58s for the controller tick). Both are fixed, and both have driven coverage.",
+    "internal/daemon is close to Go's ten-minute package timeout under load: it hit 600.080s and failed as a timeout while other packages ran beside it, against 510s alone. The driven proof's one-minute wait for the runtime's first controller tick was the cause and is gone (the boot override sets the first tick too), bringing the package to about 469-580s. A tester running the whole module on a loaded machine should know the margin is thin.",
+    "This pod has no C compiler, so internal/supervise's type-check tests (TestTheTableHasARowOrANamedIgnoreForEveryEventInEveryState and its two neighbours) fail here with 'go tool cgo: exit status 2' and pass with CGO_ENABLED=0. Nothing of this change touches that package."
   ]
 }
