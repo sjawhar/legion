@@ -1,8 +1,7 @@
-import type { AgentStreamFrame, AgentStreamReplay, AgentStreamResponder } from "@legion/contracts";
+import { useQueryClient } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
 
-import { EventStreamHttpError, readEventStream } from "../../api/live";
-import { reconnectDelayMs } from "../../api/live-socket";
+import { liveSocketFor, useLiveSocketState } from "../../api/live-socket";
 import {
   type AgentConversation,
   applyFrame,
@@ -16,9 +15,10 @@ export interface AgentStreamState {
   readonly conversation: AgentConversation;
   readonly status: AgentStreamStatus;
   /** The one signal that the whole transcript was rebuilt from the session's replay, counted up
-   *  once per rebuild: the first connection, a reconnect, and a new session's first replay. A
-   *  reader who has scrolled back is put back on the turn they were reading when it survives the
-   *  rebuild (`use-live-follow.ts`), so this has to count every rebuild, not only a reconnect. */
+   *  once per rebuild: the first subscription, every time the socket sends it again (a reconnect,
+   *  a rotation, Dispatch ending it), and a new session's first replay. A reader who has scrolled
+   *  back is put back on the turn they were reading when it survives the rebuild
+   *  (`use-live-follow.ts`), so this has to count every rebuild, not only a reconnect. */
   readonly replays: number;
   /** Whether the session answers the relay on its control subject; `undefined` until it says.
    *  `false` is a session that cannot stream - an older plugin, or one no longer running - and
@@ -26,103 +26,81 @@ export interface AgentStreamState {
   readonly responding: boolean | undefined;
 }
 
+/** What the view has heard on its subscription to one session. */
+interface Heard {
+  readonly conversation: AgentConversation;
+  readonly replays: number;
+  readonly responding: boolean | undefined;
+  /** Whether any of the session's frames has arrived since the view subscribed. */
+  readonly answered: boolean;
+  /** Dispatch refused the subscription: a viewer who is not a person, a deployment with no relay,
+   *  a session id that is not a UUID, a socket at its cap. Final for this session id: the socket
+   *  never sends a refused view again. */
+  readonly refused: boolean;
+}
+
+const NOTHING_HEARD: Heard = {
+  answered: false,
+  conversation: EMPTY_CONVERSATION,
+  refused: false,
+  replays: 0,
+  responding: undefined,
+};
+
 /**
- * Watches one session's own conversation.
+ * Watches one session's own conversation, as a subscription on the tab's live socket.
  *
  * The stream is not resumable: it carries no cursor and the server keeps no log of it, because
- * nothing about a session's conversation is stored. A reconnect therefore asks the session for
- * its replay again and rebuilds from that, which is exactly what a first connection does.
+ * nothing about a session's conversation is stored. Each time the socket sends the subscription
+ * again, the session is asked for its replay and the view rebuilds from that, which is exactly
+ * what a first subscription does.
  */
 export function useAgentStream(sessionID: string): AgentStreamState {
-  const [state, setState] = useState<AgentStreamState>({
-    conversation: EMPTY_CONVERSATION,
-    replays: 0,
-    responding: undefined,
-    status: "connecting",
-  });
+  const queryClient = useQueryClient();
+  const connection = useLiveSocketState().state;
+  const [heard, setHeard] = useState<Heard>(NOTHING_HEARD);
 
   useEffect(() => {
-    let stopped = false;
-    let attempt = 0;
-    let controller: AbortController | null = null;
-    let reconnect: number | undefined;
     // A new session starts its own count: its first replay is a rebuild of this viewer's
     // transcript as much as a reconnect's is.
-    setState({
-      conversation: EMPTY_CONVERSATION,
-      replays: 0,
-      responding: undefined,
-      status: "connecting",
+    setHeard(NOTHING_HEARD);
+    // The socket calls none of these handlers once the unsubscribe returned here has run.
+    return liveSocketFor(queryClient).subscribeAgent(sessionID, {
+      onResponder: (responder) =>
+        setHeard((previous) => ({ ...previous, answered: true, responding: responder.responding })),
+      // A rebuild from the session's own replay rather than a layer over a conversation whose
+      // newest frames may already be gone from the session's ring.
+      onReplay: (replay) =>
+        setHeard((previous) => ({
+          ...previous,
+          answered: true,
+          conversation: applyFrames(EMPTY_CONVERSATION, replay.frames),
+          replays: previous.replays + 1,
+        })),
+      onFrame: (frame) =>
+        setHeard((previous) => ({
+          ...previous,
+          answered: true,
+          conversation: applyFrame(previous.conversation, frame),
+          // A frame is a session speaking, which is the same evidence the responder answer is.
+          responding: true,
+        })),
+      onUnavailable: () => setHeard((previous) => ({ ...previous, refused: true })),
     });
+  }, [queryClient, sessionID]);
 
-    const open = (): void => {
-      const current = new AbortController();
-      controller = current;
-      void readEventStream(`/api/v1/agents/${encodeURIComponent(sessionID)}/stream`, {
-        onChunk: () => undefined,
-        onEvent: (raw) => {
-          if (stopped) return;
-          if (raw.event === "responder") {
-            const responder = JSON.parse(raw.data) as AgentStreamResponder;
-            setState((previous) => ({ ...previous, responding: responder.responding }));
-            return;
-          }
-          if (raw.event === "replay") {
-            const replay = JSON.parse(raw.data) as AgentStreamReplay;
-            // A reconnect rebuilds from the session's own replay rather than layering it over
-            // a conversation whose newest frames may already be gone from the session's ring.
-            setState((previous) => ({
-              conversation: applyFrames(EMPTY_CONVERSATION, replay.frames),
-              replays: previous.replays + 1,
-              responding: previous.responding,
-              status: "live",
-            }));
-            return;
-          }
-          if (raw.event !== "frame") return;
-          const frame = JSON.parse(raw.data) as AgentStreamFrame;
-          setState((previous) => ({
-            conversation: applyFrame(previous.conversation, frame),
-            replays: previous.replays,
-            // A frame is a session speaking, which is the same evidence the replay answer is.
-            responding: true,
-            status: "live",
-          }));
-        },
-        onOpen: () => {
-          if (stopped) return;
-          attempt = 0;
-          setState((previous) => ({ ...previous, status: "live" }));
-        },
-        signal: current.signal,
-      }).then(
-        () => settle(current, undefined),
-        (error: unknown) => settle(current, error)
-      );
-    };
-
-    const settle = (current: AbortController, error: unknown): void => {
-      if (stopped) return;
-      controller = null;
-      // A relay this deployment does not have, a session id that is not a human's to watch, or a
-      // signed-out viewer: reconnecting changes none of them.
-      if (!current.signal.aborted && error instanceof EventStreamHttpError && error.status < 500) {
-        setState((previous) => ({ ...previous, status: "unavailable" }));
-        return;
-      }
-      setState((previous) => ({ ...previous, status: "reconnecting" }));
-      reconnect = window.setTimeout(open, reconnectDelayMs(attempt));
-      attempt += 1;
-    };
-
-    open();
-    return () => {
-      stopped = true;
-      window.clearTimeout(reconnect);
-      controller?.abort();
-      controller = null;
-    };
-  }, [sessionID]);
-
-  return state;
+  // A refusal outranks the socket's state; a lost socket outranks what the view last heard.
+  const status: AgentStreamStatus = heard.refused
+    ? "unavailable"
+    : connection === "reconnecting"
+      ? "reconnecting"
+      : heard.answered
+        ? "live"
+        : "connecting";
+  return {
+    conversation: heard.conversation,
+    replays: heard.replays,
+    responding: heard.responding,
+    status,
+  };
 }

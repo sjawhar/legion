@@ -1,11 +1,30 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
-import type { AgentStreamCommand, AgentStreamFrame } from "@legion/contracts";
+import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
+import {
+  type AgentStreamCommand,
+  type AgentStreamFrame,
+  LIVE_SOCKET_MAX_AGE_CLOSE,
+} from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  type RenderResult,
+  render,
+  screen,
+  waitFor,
+  within,
+} from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
+import {
+  errorFrame,
+  type FakeLiveSocket,
+  type FakeLiveSockets,
+  installFakeLiveSockets,
+} from "../../__tests__/live-socket-harness";
 import { api } from "../../api/client";
-import * as live from "../../api/live";
+import { liveSocketFor } from "../../api/live-socket";
 import type { Agent, Message, MessageRead, UserAgentStates } from "../../api/types";
 import { Sidebar } from "../sidebar/Sidebar";
 import { AgentConversationPage } from "./AgentConversationPage";
@@ -58,16 +77,103 @@ const conversation: MessageRead[] = [
 ];
 
 const spies: { mockRestore: () => void }[] = [];
+const clients: QueryClient[] = [];
+let sockets: FakeLiveSockets;
+
+beforeEach(() => {
+  sockets = installFakeLiveSockets();
+});
 
 afterEach(() => {
   cleanup();
   for (const spy of spies.splice(0)) spy.mockRestore();
+  for (const client of clients.splice(0)) liveSocketFor(client).close();
+  sockets.restore();
 });
+
+/** A query client whose live socket the teardown closes. */
+function newClient(): QueryClient {
+  const client = new QueryClient({
+    defaultOptions: { queries: { gcTime: 0, retry: false, staleTime: 0 } },
+  });
+  clients.push(client);
+  return client;
+}
+
+/** Dispatch's reads, signed in as sami, with `agents` the live sessions. */
+function mockDispatch({
+  agentState,
+  agents,
+  messages,
+  putAgentState,
+}: {
+  agentState: UserAgentStates;
+  agents: Agent[];
+  messages: MessageRead[];
+  putAgentState: Mock<typeof api.putAgentState>;
+}): void {
+  spies.push(
+    spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "sami" }),
+    spyOn(api, "listAgents").mockResolvedValue(agents),
+    spyOn(api, "listAgentMessages").mockResolvedValue(messages),
+    spyOn(api, "getMyAgentState").mockResolvedValue(agentState),
+    spyOn(api, "getInbox").mockResolvedValue([]),
+    spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "listProjects").mockResolvedValue([]),
+    putAgentState
+  );
+}
+
+/** Session `session`'s live view on `queryClient`, beside the navigation when `sidebar`. */
+function renderPage(queryClient: QueryClient, session: string, sidebar = false): RenderResult {
+  return render(
+    <MemoryRouter initialEntries={[`/agents/${session}/live`]}>
+      <QueryClientProvider client={queryClient}>
+        {sidebar ? <Sidebar user={{ kind: "user", login: "sami" }} /> : null}
+        <Routes>
+          <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
+        </Routes>
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+}
+
+/** The id of session `session`'s live view subscription, as the page last sent it on `socket`. */
+function agentSubscription(socket: FakeLiveSocket, session = SESSION): string {
+  const sent = socket
+    .subscribes()
+    .filter((frame) => frame.view.kind === "agent" && frame.view.session_id === session)
+    .at(-1);
+  if (sent === undefined) throw new Error(`no live view of ${session} was subscribed`);
+  return sent.sub;
+}
+
+/** Dispatch answering a live view's subscription on `socket`, as it does each time the page sends
+ *  it: whether the session answers the relay, then the session's replay when it holds any. */
+function answer(
+  socket: FakeLiveSocket,
+  frames: readonly AgentStreamFrame[],
+  session = SESSION
+): void {
+  const sub = agentSubscription(socket, session);
+  act(() => {
+    socket.receive({ type: "agent", sub, event: "responder", data: { responding: true, v: 1 } });
+    if (frames.length > 0) {
+      socket.receive({
+        type: "agent",
+        sub,
+        event: "replay",
+        data: { frames, session_id: session, v: 1 },
+      });
+    }
+  });
+}
 
 /**
  * The live view for SESSION, signed in as sami, beside the navigation that carries the unread
- * badge, as the app lays them out. The relayed stream answers with `replay` and then stays open;
- * with none it never opens, so everything shown comes from Dispatch.
+ * badge, as the app lays them out. With `replay` the tab's socket opens and Dispatch answers the
+ * view with the session's replay; with none the socket never opens, so everything shown comes from
+ * Dispatch's stored messages.
  */
 function renderLiveView({
   agentState,
@@ -79,42 +185,31 @@ function renderLiveView({
   agentState: UserAgentStates;
   capabilities?: string[];
   messages: MessageRead[];
-  putAgentState: ReturnType<typeof spyOn<typeof api, "putAgentState">>;
+  putAgentState: Mock<typeof api.putAgentState>;
   replay?: AgentStreamFrame[];
-}): void {
-  spies.push(
-    spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "sami" }),
-    spyOn(api, "listAgents").mockResolvedValue([{ ...agent, capabilities }]),
-    spyOn(live, "readEventStream").mockImplementation((url, handlers) => {
-      if (replay !== undefined && url.endsWith("/stream")) {
-        handlers.onEvent({
-          data: JSON.stringify({ frames: replay, session_id: SESSION, v: 1 }),
-          event: "replay",
-          id: undefined,
-        });
-      }
-      return new Promise<void>(() => undefined);
-    }),
-    spyOn(api, "listAgentMessages").mockResolvedValue(messages),
-    spyOn(api, "getMyAgentState").mockResolvedValue(agentState),
-    spyOn(api, "getInbox").mockResolvedValue([]),
-    spyOn(api, "listIssues").mockResolvedValue([]),
-    spyOn(api, "listProjects").mockResolvedValue([]),
-    putAgentState
-  );
-  const queryClient = new QueryClient({
-    defaultOptions: { queries: { gcTime: 0, retry: false, staleTime: 0 } },
-  });
-  render(
-    <MemoryRouter initialEntries={[`/agents/${SESSION}/live`]}>
-      <QueryClientProvider client={queryClient}>
-        <Sidebar user={{ kind: "user", login: "sami" }} />
-        <Routes>
-          <Route element={<AgentConversationPage />} path="/agents/:sessionId/live" />
-        </Routes>
-      </QueryClientProvider>
-    </MemoryRouter>
-  );
+}): QueryClient {
+  mockDispatch({ agentState, agents: [{ ...agent, capabilities }], messages, putAgentState });
+  const queryClient = newClient();
+  renderPage(queryClient, SESSION, true);
+  if (replay !== undefined) {
+    const socket = sockets.latest();
+    act(() => socket.open());
+    answer(socket, replay);
+  }
+  return queryClient;
+}
+
+/** Every way the live view's header names the relay. */
+const RELAY_LABELS = [
+  "Connecting to the session",
+  "Live",
+  "Reconnecting",
+  "This session's conversation is unavailable",
+];
+
+/** The relay labels `view`'s header shows; exactly one in any coherent state. */
+function relayStatus(view: HTMLElement = screen.getByTestId("agent-conversation")): string[] {
+  return RELAY_LABELS.filter((label) => within(view).queryByText(label) !== null);
 }
 
 /** The navigation's Agents entry, which wears the unread badge. */
@@ -448,6 +543,152 @@ test("the live view shows nothing for a session whose client reports no model", 
   await within(thread).findByText("Switching to it now.");
   expect(screen.queryByTestId("agent-session-model")).toBeNull();
   expect(within(thread).queryByTestId("agent-message-model")).toBeNull();
+});
+
+// The header says what the relay is doing: connecting until the session's first answer arrives on
+// the tab's socket, live from then on, and reconnecting while that socket is lost.
+test("the live view connects, goes live on the session's answer, and reconnects with the socket", async () => {
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+  expect(relayStatus()).toEqual(["Connecting to the session"]);
+
+  // An open socket is not yet an answer: the view goes live on its first frame.
+  const first = sockets.latest();
+  act(() => first.open());
+  expect(first.subscribed("agent").view).toEqual({ kind: "agent", session_id: SESSION });
+  expect(relayStatus()).toEqual(["Connecting to the session"]);
+  answer(first, [assistantFrame(1, Date.parse("2026-09-27T21:16:16Z"), "Before the restart.")]);
+  await within(screen.getByTestId("agent-thread")).findByText("Before the restart.");
+  expect(relayStatus()).toEqual(["Live"]);
+
+  // Dispatch restarting (1012) is a gap the page shows until the next socket opens.
+  act(() => first.drop(1012));
+  expect(relayStatus()).toEqual(["Reconnecting"]);
+  const second = sockets.latest();
+  expect(second).not.toBe(first);
+  act(() => second.open());
+  expect(relayStatus()).toEqual(["Live"]);
+  expect(agentSubscription(second)).toBe(agentSubscription(first));
+});
+
+// Dispatch rotates every socket once it reaches its age (4001): the page reopens at once and sends
+// the live view again, and the session answers with its replay, everything it still holds. The
+// transcript is rebuilt from that replay rather than layered over the old one, whose oldest turns
+// may be gone from the session's ring, and nothing about the relay reads as lost.
+test("a rotation rebuilds from the replay and keeps status live", async () => {
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+    replay: [assistantFrame(1, Date.parse("2026-09-27T21:16:16Z"), "Before the rotation.")],
+  });
+  const thread = await screen.findByTestId("agent-thread");
+  await within(thread).findByText("Before the rotation.");
+  expect(relayStatus()).toEqual(["Live"]);
+
+  const first = sockets.latest();
+  act(() => first.drop(LIVE_SOCKET_MAX_AGE_CLOSE));
+  expect(sockets.sockets).toHaveLength(2);
+  expect(relayStatus()).toEqual(["Live"]);
+  const second = sockets.latest();
+  act(() => second.open());
+  expect(agentSubscription(second)).toBe(agentSubscription(first));
+  expect(relayStatus()).toEqual(["Live"]);
+
+  answer(second, [assistantFrame(2, Date.parse("2026-09-27T21:17:16Z"), "After the rotation.")]);
+  await within(thread).findByText("After the rotation.");
+  await waitFor(() => expect(within(thread).queryByText("Before the rotation.")).toBeNull());
+  expect(relayStatus()).toEqual(["Live"]);
+});
+
+// Dispatch relays a session's conversation to a person only. Refused, the view says it cannot
+// reach the conversation, and that holds for this session: no reconnect of the tab's socket sends
+// the view again or shows it reconnecting.
+test("a human-only refusal shows the view unavailable", async () => {
+  const queryClient = renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+  // The app's event feed rides the same socket, so the socket outlives the refused view.
+  liveSocketFor(queryClient).subscribeEvents({
+    onEvent: () => undefined,
+    onStart: () => undefined,
+    onSubscribed: () => undefined,
+    since: () => null,
+  });
+  const first = sockets.latest();
+  act(() => first.open());
+  act(() =>
+    first.receive(
+      errorFrame(agentSubscription(first), "HUMAN_ONLY", "only users may perform this action")
+    )
+  );
+  expect((await screen.findByTestId("agent-stream-unavailable")).textContent).toBe(
+    "This Dispatch cannot reach the session's conversation."
+  );
+  expect(relayStatus()).toEqual(["This session's conversation is unavailable"]);
+
+  act(() => first.drop(1012));
+  expect(relayStatus()).toEqual(["This session's conversation is unavailable"]);
+  const second = sockets.latest();
+  expect(second).not.toBe(first);
+  act(() => second.open());
+  expect(second.subscribes().map((frame) => frame.view.kind)).toEqual(["events"]);
+  expect(relayStatus()).toEqual(["This session's conversation is unavailable"]);
+  expect(screen.getByTestId("agent-stream-unavailable")).toBeTruthy();
+});
+
+// Two live views in one tab are two subscriptions on the tab's one socket, each answered on its
+// own; leaving one lets only its subscription go.
+test("two agent views share the tab's socket", async () => {
+  const REVIEWER = "01a0e090-4848-7473-acc5-fc96e6a646d4";
+  mockDispatch({
+    agentState: {},
+    agents: [agent, { ...agent, session_id: REVIEWER, title: "Reviewer" }],
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+  const queryClient = newClient();
+  const planner = renderPage(queryClient, SESSION);
+  const reviewer = renderPage(queryClient, REVIEWER);
+  expect(sockets.sockets).toHaveLength(1);
+  const socket = sockets.latest();
+  act(() => socket.open());
+  expect(socket.subscribes().map((frame) => frame.view)).toEqual([
+    { kind: "agent", session_id: SESSION },
+    { kind: "agent", session_id: REVIEWER },
+  ]);
+  expect(agentSubscription(socket, SESSION)).not.toBe(agentSubscription(socket, REVIEWER));
+
+  const at = Date.parse("2026-09-27T21:16:16Z");
+  answer(socket, [assistantFrame(1, at, "Planning the change.")], SESSION);
+  answer(socket, [assistantFrame(1, at, "Reviewing the change.")], REVIEWER);
+  await within(planner.container).findByText("Planning the change.");
+  await within(reviewer.container).findByText("Reviewing the change.");
+  expect(within(planner.container).queryByText("Reviewing the change.")).toBeNull();
+  expect(within(reviewer.container).queryByText("Planning the change.")).toBeNull();
+  expect(relayStatus(planner.container)).toEqual(["Live"]);
+  expect(relayStatus(reviewer.container)).toEqual(["Live"]);
+
+  const plannerSub = agentSubscription(socket, SESSION);
+  planner.unmount();
+  expect(socket.unsubscribes()).toEqual([{ type: "unsubscribe", sub: plannerSub }]);
+  await Promise.resolve();
+  expect(socket.closedWith).toBeUndefined();
+  act(() =>
+    socket.receive({
+      type: "agent",
+      sub: agentSubscription(socket, REVIEWER),
+      event: "frame",
+      data: assistantFrame(2, at + 1_000, "Still reviewing."),
+    })
+  );
+  await within(reviewer.container).findByText("Still reviewing.");
+  expect(sockets.sockets).toHaveLength(1);
 });
 
 /** The slash commands a session advertises (LEGION-394), in the order it lists them: one only its

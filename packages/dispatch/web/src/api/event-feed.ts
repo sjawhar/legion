@@ -13,10 +13,9 @@ import {
   projectsQuery,
   userAgentStateQuery,
   userStateQuery,
-  whoAmIQuery,
 } from "./queries";
 import { coalescePrefixKeys, refreshQueries } from "./query-refresh";
-import type { ChangedReference, Event, EventType } from "./types";
+import type { AuthenticatedUser, ChangedReference, Event, EventType } from "./types";
 
 const knownEventTypes: Record<EventType, true> = {
   "project.created": true,
@@ -70,7 +69,6 @@ const knownEventTypes: Record<EventType, true> = {
 
 const inboxQueryKey = inboxQuery().queryKey;
 const [inboxKey] = inboxQueryKey;
-const whoAmIKey = whoAmIQuery().queryKey;
 
 /** The one documented subtraction, named once so every call site shares it. */
 function withoutInbox(keys: (readonly unknown[])[]): (readonly unknown[])[] {
@@ -709,7 +707,7 @@ export function useEventFeed({
     // event's own invalidation refreshes. It is read once, here: a later check names a head no
     // read of the page was made after. A server older than the field names none, and the feed
     // adopts where Dispatch starts it (`events_start`).
-    const eventHead = queryClient.getQueryData(whoAmIKey)?.event_head;
+    const eventHead = queryClient.getQueryData<AuthenticatedUser>(["whoami"])?.event_head;
     let cursor = eventHead === undefined ? null : eventPosition(eventHead);
     let flush: number | undefined;
     // `pendingAll` is the whole-cache entry of the pending set: it means "something changed
@@ -796,7 +794,10 @@ export function useEventFeed({
         const event = raw as Event;
         try {
           prependEventToLog(queryClient, event);
-          const keys = eventQueryKeys(event, queryClient.getQueryData(whoAmIKey)?.login);
+          const keys = eventQueryKeys(
+            event,
+            queryClient.getQueryData<AuthenticatedUser>(["whoami"])?.login
+          );
           markAskThreadsSeededByAnInFlightInbox(queryClient, keys);
           queueInvalidations(keys);
         } catch (error) {
