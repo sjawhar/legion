@@ -8,10 +8,10 @@
 // or late decision changes nothing. A request that needs approval also freezes an append-only
 // credential-request record (internal/broker/record): the requester's signed request object plus
 // the broker's decision fields. The record is decided by a Dispatch login, which Dispatch's server
-// sends on the UI routes and the UI bearer vouches for: its approver's, or anyone's for a record
-// whose approver is record.AnyoneApprover. Every release of a grant it produced re-verifies the
-// whole chain — record hash, requester signature, one approval by a login the record allows — so
-// a row written by anyone but the broker releases nothing.
+// sends on the UI routes and its listed ServiceAccount (BROKER_API_ACCOUNTS) vouches for: its
+// approver's, or anyone's for a record whose approver is record.AnyoneApprover. Every release of a
+// grant it produced re-verifies the whole chain — record hash, requester signature, one approval
+// by a login the record allows — so a row written by anyone but the broker releases nothing.
 package requests
 
 import (

@@ -43,7 +43,7 @@ func TestOneServicesTwoAccountsEachGetItsSecret(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	addr, boot := startBroker(t,
+	addr, boot, _ := startBroker(t,
 		"BROKER_DATABASE_URL="+databaseURL,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",

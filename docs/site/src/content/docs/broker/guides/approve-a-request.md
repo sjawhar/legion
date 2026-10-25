@@ -58,10 +58,11 @@ The broker refuses a decision that cannot stand, and Dispatch shows its message 
 ## Without Dispatch
 
 On the [local stack](/legion/broker/guides/run-locally/), `agent-secrets-devrelay` stands in for
-Dispatch: it calls the same broker routes, with the same UI token and an approver's login.
+Dispatch: it calls the same broker routes as a listed caller, presenting the ServiceAccount token
+the stack's issuer keeps in `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, with an approver's login.
 
 ```console
-$ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL/v1/pending?approver=$AGENT_SECRETS_APPROVER" | jq .
+$ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" "$AGENT_SECRETS_URL/v1/pending?approver=$AGENT_SECRETS_APPROVER" | jq .
 {
   "pending": [
     {

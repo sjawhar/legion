@@ -7,11 +7,15 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
 // capturedRequest snapshots what the client actually put on the wire, so a subtest can assert
-// on method, path (including querystring), the UI bearer header, and the body byte-for-byte.
+// on method, path (including querystring), the bearer header carrying Dispatch's ServiceAccount
+// token, and the body byte-for-byte.
 type capturedRequest struct {
 	Method string
 	Path   string
@@ -40,19 +44,30 @@ func serveCapturing(t *testing.T, status int, response string) (*httptest.Server
 	return server, captured
 }
 
+// tokenFile writes token to a file of the test's own directory and answers its path: the
+// projected ServiceAccount token file a client reads its bearer from.
+func tokenFile(t *testing.T, token string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "token")
+	if err := os.WriteFile(path, []byte(token), 0o600); err != nil {
+		t.Fatalf("write the token file: %v", err)
+	}
+	return path
+}
+
 func TestPendingSendsBearerAndApproverQuery(t *testing.T) {
 	server, captured := serveCapturing(t, http.StatusOK, `{"requests":[]}`)
 	defer server.Close()
 
-	body, err := New(server.URL, "ui-token").Pending(context.Background(), "sjawhar")
+	body, err := New(server.URL, tokenFile(t, "account-token")).Pending(context.Background(), "sjawhar")
 	if err != nil {
 		t.Fatalf("Pending: %v", err)
 	}
 	if captured.Method != http.MethodGet || captured.Path != "/v1/pending?approver=sjawhar" {
 		t.Fatalf("request = %s %s, want GET /v1/pending?approver=sjawhar", captured.Method, captured.Path)
 	}
-	if captured.Auth != "Bearer ui-token" {
-		t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
+	if captured.Auth != "Bearer account-token" {
+		t.Fatalf("Authorization = %q, want Bearer account-token", captured.Auth)
 	}
 	if string(body) != `{"requests":[]}` {
 		t.Fatalf("body = %s, want the broker's response relayed verbatim", body)
@@ -63,14 +78,14 @@ func TestRecordSendsBearerAndPath(t *testing.T) {
 	server, captured := serveCapturing(t, http.StatusOK, `{"id":"req-1"}`)
 	defer server.Close()
 
-	if _, err := New(server.URL, "ui-token").Record(context.Background(), "req-1"); err != nil {
+	if _, err := New(server.URL, tokenFile(t, "account-token")).Record(context.Background(), "req-1"); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
 	if captured.Method != http.MethodGet || captured.Path != "/v1/credential-requests/req-1" {
 		t.Fatalf("request = %s %s, want GET /v1/credential-requests/req-1", captured.Method, captured.Path)
 	}
-	if captured.Auth != "Bearer ui-token" {
-		t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
+	if captured.Auth != "Bearer account-token" {
+		t.Fatalf("Authorization = %q, want Bearer account-token", captured.Auth)
 	}
 }
 
@@ -93,14 +108,14 @@ func TestDecisionsSendBearerPathAndTheApproverDispatchNames(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			server, captured := serveCapturing(t, http.StatusOK, `{"ok":true}`)
 			defer server.Close()
-			if _, err := tc.decide(New(server.URL, "ui-token")); err != nil {
+			if _, err := tc.decide(New(server.URL, tokenFile(t, "account-token"))); err != nil {
 				t.Fatalf("%s: %v", tc.name, err)
 			}
 			if captured.Method != http.MethodPost || captured.Path != tc.wantPath {
 				t.Fatalf("request = %s %s, want POST %s", captured.Method, captured.Path, tc.wantPath)
 			}
-			if captured.Auth != "Bearer ui-token" {
-				t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
+			if captured.Auth != "Bearer account-token" {
+				t.Fatalf("Authorization = %q, want Bearer account-token", captured.Auth)
 			}
 			if string(captured.Body) != tc.wantBody {
 				t.Fatalf("body = %s, want %s", captured.Body, tc.wantBody)
@@ -114,14 +129,14 @@ func TestMachineLookupSendsBearerAndPath(t *testing.T) {
 	defer server.Close()
 
 	requestBody := json.RawMessage(`{"public_key":"ssh-ed25519 AAAA..."}`)
-	if _, err := New(server.URL, "ui-token").MachineLookup(context.Background(), requestBody); err != nil {
+	if _, err := New(server.URL, tokenFile(t, "account-token")).MachineLookup(context.Background(), requestBody); err != nil {
 		t.Fatalf("MachineLookup: %v", err)
 	}
 	if captured.Method != http.MethodPost || captured.Path != "/v1/machine-logins/lookup" {
 		t.Fatalf("request = %s %s, want POST /v1/machine-logins/lookup", captured.Method, captured.Path)
 	}
-	if captured.Auth != "Bearer ui-token" {
-		t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
+	if captured.Auth != "Bearer account-token" {
+		t.Fatalf("Authorization = %q, want Bearer account-token", captured.Auth)
 	}
 	if string(captured.Body) != string(requestBody) {
 		t.Fatalf("relayed body = %s, want byte-identical %s", captured.Body, requestBody)
@@ -132,14 +147,14 @@ func TestGrantsSendsBearerAndApproverQuery(t *testing.T) {
 	server, captured := serveCapturing(t, http.StatusOK, `{"grants":[]}`)
 	defer server.Close()
 
-	if _, err := New(server.URL, "ui-token").Grants(context.Background(), "sjawhar"); err != nil {
+	if _, err := New(server.URL, tokenFile(t, "account-token")).Grants(context.Background(), "sjawhar"); err != nil {
 		t.Fatalf("Grants: %v", err)
 	}
 	if captured.Method != http.MethodGet || captured.Path != "/v1/grants?approver=sjawhar" {
 		t.Fatalf("request = %s %s, want GET /v1/grants?approver=sjawhar", captured.Method, captured.Path)
 	}
-	if captured.Auth != "Bearer ui-token" {
-		t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
+	if captured.Auth != "Bearer account-token" {
+		t.Fatalf("Authorization = %q, want Bearer account-token", captured.Auth)
 	}
 }
 
@@ -147,14 +162,14 @@ func TestRevokeByApproverSendsBearerPathAndTheApprover(t *testing.T) {
 	server, captured := serveCapturing(t, http.StatusOK, `{"ok":true}`)
 	defer server.Close()
 
-	if _, err := New(server.URL, "ui-token").RevokeByApprover(context.Background(), "grant-1", "sjawhar"); err != nil {
+	if _, err := New(server.URL, tokenFile(t, "account-token")).RevokeByApprover(context.Background(), "grant-1", "sjawhar"); err != nil {
 		t.Fatalf("RevokeByApprover: %v", err)
 	}
 	if captured.Method != http.MethodPost || captured.Path != "/v1/grants/grant-1/revoke-by-approver" {
 		t.Fatalf("request = %s %s, want POST /v1/grants/grant-1/revoke-by-approver", captured.Method, captured.Path)
 	}
-	if captured.Auth != "Bearer ui-token" {
-		t.Fatalf("Authorization = %q, want Bearer ui-token", captured.Auth)
+	if captured.Auth != "Bearer account-token" {
+		t.Fatalf("Authorization = %q, want Bearer account-token", captured.Auth)
 	}
 	if string(captured.Body) != `{"approver":"sjawhar"}` {
 		t.Fatalf("body = %s, want {\"approver\":\"sjawhar\"}", captured.Body)
@@ -169,7 +184,7 @@ func TestNonTwoXXResponseReturnsTypedErrorWithStatusCodeAndBody(t *testing.T) {
 	server, _ := serveCapturing(t, http.StatusForbidden, responseBody)
 	defer server.Close()
 
-	_, err := New(server.URL, "ui-token").Pending(context.Background(), "sjawhar")
+	_, err := New(server.URL, tokenFile(t, "account-token")).Pending(context.Background(), "sjawhar")
 	var brokerErr *Error
 	if !errors.As(err, &brokerErr) {
 		t.Fatalf("err = %v (%T), want *Error", err, err)
@@ -192,7 +207,7 @@ func TestNonTwoXXResponseWithUnparsableBodyPreservesBodyWithEmptyCode(t *testing
 	server, _ := serveCapturing(t, http.StatusInternalServerError, "not json at all")
 	defer server.Close()
 
-	_, err := New(server.URL, "ui-token").Pending(context.Background(), "sjawhar")
+	_, err := New(server.URL, tokenFile(t, "account-token")).Pending(context.Background(), "sjawhar")
 	var brokerErr *Error
 	if !errors.As(err, &brokerErr) {
 		t.Fatalf("err = %v (%T), want *Error", err, err)
@@ -215,12 +230,77 @@ func TestTransportFailureIsNotATypedError(t *testing.T) {
 	closed := httptest.NewServer(http.NotFoundHandler())
 	closed.Close()
 
-	_, err := New(closed.URL, "ui-token").Pending(context.Background(), "sjawhar")
+	_, err := New(closed.URL, tokenFile(t, "account-token")).Pending(context.Background(), "sjawhar")
 	if err == nil {
 		t.Fatal("Pending against a closed listener: got nil error")
 	}
 	var brokerErr *Error
 	if errors.As(err, &brokerErr) {
 		t.Fatalf("err = %v, want a plain transport error, not *Error", err)
+	}
+}
+
+// A projected token is rewritten in place by the kubelet, so the client sends what the file
+// holds now: the copy it cached stands until the cache lapses, and the next call after that
+// reads the file again.
+func TestARewrittenTokenFileReachesTheBrokerOnceTheCacheLapses(t *testing.T) {
+	server, captured := serveCapturing(t, http.StatusOK, `{"requests":[]}`)
+	defer server.Close()
+	path := tokenFile(t, "first-token")
+	client := New(server.URL, path)
+
+	if _, err := client.Pending(context.Background(), "sjawhar"); err != nil {
+		t.Fatalf("the first call: %v", err)
+	}
+	if captured.Auth != "Bearer first-token" {
+		t.Fatalf("Authorization = %q, want Bearer first-token", captured.Auth)
+	}
+	if err := os.WriteFile(path, []byte("second-token\n"), 0o600); err != nil {
+		t.Fatalf("rewrite the token file: %v", err)
+	}
+	if _, err := client.Pending(context.Background(), "sjawhar"); err != nil {
+		t.Fatalf("the call inside the cache window: %v", err)
+	}
+	if captured.Auth != "Bearer first-token" {
+		t.Fatalf("Authorization = %q within %v of the read, want the cached Bearer first-token", captured.Auth, tokenCacheTTL)
+	}
+
+	client.tokenTTL = 0
+	if _, err := client.Pending(context.Background(), "sjawhar"); err != nil {
+		t.Fatalf("the call after the cache lapsed: %v", err)
+	}
+	if captured.Auth != "Bearer second-token" {
+		t.Fatalf("Authorization = %q, want the rewritten Bearer second-token, trimmed", captured.Auth)
+	}
+}
+
+// A token file Dispatch cannot read, or that holds nothing, fails the call naming the file and
+// sends the broker nothing: an empty bearer would be refused there as an unauthenticated caller,
+// hiding Dispatch's own misconfiguration behind the broker's verdict.
+func TestAMissingOrEmptyTokenFileFailsNamingItAndSendsNothing(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		path func(t *testing.T) string
+	}{
+		{"missing", func(t *testing.T) string { return filepath.Join(t.TempDir(), "nothing-here") }},
+		{"empty", func(t *testing.T) string { return tokenFile(t, "  \n") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server, captured := serveCapturing(t, http.StatusOK, `{"requests":[]}`)
+			defer server.Close()
+			path := tc.path(t)
+
+			_, err := New(server.URL, path).Pending(context.Background(), "sjawhar")
+			if err == nil || !strings.Contains(err.Error(), path) {
+				t.Fatalf("Pending with a %s token file: err = %v, want a refusal naming %s", tc.name, err, path)
+			}
+			var brokerErr *Error
+			if errors.As(err, &brokerErr) {
+				t.Fatalf("err = %v, want a plain error, not a broker verdict", err)
+			}
+			if captured.Method != "" {
+				t.Fatalf("the broker received %s %s, want no request at all", captured.Method, captured.Path)
+			}
+		})
 	}
 }

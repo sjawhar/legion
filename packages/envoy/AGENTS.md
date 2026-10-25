@@ -2259,13 +2259,17 @@ its environment. Its `secret` forms are how a person manages the agent secrets t
 broker's own store (AWS Secrets Manager or GCP Secret Manager) under their own cloud sign-in (below); the broker writes no secret. The broker holds
 no Dispatch credential and opens no Dispatch ask anywhere. Every
 human decision — approving or denying a secret request, approving or denying a machine login,
-revoking a grant, ending a machine login — made in Dispatch reaches the broker's UI routes from
-its server, carrying the UI bearer and the deciding person's Dispatch login, their email, in the
-body's `approver` field. The bearer
-vouches for that login: Dispatch fills it from its own signed-in session, never from the browser,
-and the broker checks it against the record's approver and records it on the decision event. The
-UI bearer is therefore an approval credential, and keeping it and Dispatch's identity closed to
-agents is the deployment's job; a person's own machine ends their machine logins and grants through
+revoking a grant, ending a machine login — made in Dispatch reaches the broker's approval routes
+from its server, carrying Dispatch's own projected Kubernetes ServiceAccount token and the
+deciding person's Dispatch login, their email, in the body's `approver` field. The token says
+only which service is calling: the broker verifies it against `BROKER_K8S_OIDC_ISSUER` and reads
+the caller's name off `BROKER_API_ACCOUNTS` (`accountAuth`, below), and then takes the approver
+on that caller's word — Dispatch fills it from its own signed-in session, never from the browser,
+and the broker checks it against the record's approver and records it on the decision event.
+Reaching those routes is therefore reaching an approval credential, and keeping Dispatch's
+ServiceAccount and its identity closed to agents is the deployment's job; dispatch://INFRA-314 is
+what replaces that trust with a credential the approver's own session holds. A person's own
+machine ends their machine logins and grants through
 the operator routes instead (below), under its machine login. `internal/broker/enroll` turns a
 launcher credential into a leased
 enrollment keyed by the caller's own signing key thumbprint (and, for a pod, a projected
@@ -2933,8 +2937,17 @@ imports no AWS SDK), whose pool `BeforeConnect` mints an RDS IAM token per new c
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
 `BROKER_MACHINE_LOGIN_URL` (required; absolute http(s) URL — Dispatch's `/credentials/machine`
 page, the device grant's `verification_uri`, where a person types a machine login's code),
-`BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
-proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
+`BROKER_API_ACCOUNTS` (optional; whitespace-separated `<caller>=<service account>` entries, such
+as `dispatch=system:serviceaccount:example-ns:example-dispatch`: the ServiceAccounts that reach
+the routes `accountAuth` authenticates — the approval routes Dispatch's server calls on a
+person's behalf, and the introspection route a resource server reads an access token back
+through. Each caller presents its own projected token for `BROKER_K8S_OIDC_AUDIENCE`, verified
+against `BROKER_K8S_OIDC_ISSUER` as every other ServiceAccount token is, so this needs that pair;
+a token living longer than an hour from its issue is refused, as a service login's is. The
+caller's name (lowercase letters, digits and hyphens, at most 64) is only what the log calls it
+when it acts. A namespace's `default` account is refused, as is an account given twice, since
+each account names one caller. Keyed by account. Unset, no caller reaches those routes, which is
+how a local run without a cluster leaves them),
 `BROKER_SECRETS_STORE` (optional; `aws-secrets-manager`, the default, or `gcp-secret-manager`:
 which store the secrets live in, deciding the prefix's form and which key variable is read),
 `BROKER_SECRETS_PREFIX` (required; the namespace: a Secrets Manager name prefix ending in `/`, or
@@ -2960,6 +2973,32 @@ once and named exactly, keyed by account in `Config.ServiceLogins`; read by the 
 is an account `BROKER_SERVICES` binds for a service's pods, since every such pod holds a token for
 it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 `BROKER_K8S_OIDC_ISSUER` / `BROKER_K8S_OIDC_AUDIENCE` (set together or not at all),
+`BROKER_EXCHANGE_K8S_AUDIENCE` (optional; the audience a pod's projected token must carry to be
+exchanged for a Dispatch access token — its own, beside `BROKER_K8S_OIDC_AUDIENCE`, so neither
+token is spendable where the other is; its issuer is the one cluster the broker is told about,
+`BROKER_K8S_OIDC_ISSUER`, which it needs; unset, no pod exchanges),
+`BROKER_EXCHANGE_GITHUB_ISSUER` / `BROKER_EXCHANGE_GITHUB_AUDIENCE` (optional, set together or
+not at all; the issuer of a continuous-integration workflow run's token,
+`https://token.actions.githubusercontent.com` for runs on GitHub's own hosts, and the audience
+the run asks GitHub to mint it for; neither, and no workflow token is accepted at all),
+`BROKER_EXCHANGE_ACCOUNTS` (optional; whitespace-separated
+`<service account>=<project>=<person>[=<session>]` entries, such as
+`system:serviceaccount:example-ns:example-worker=EXAMPLE=ada@example.com`: the token minted for a
+pod of that account may write that one project, acts for that person, and writes under the
+session the entry fixes — an entry that fixes none requires the pod to name its own. The session
+is everything after the third `=`, so it alone may carry one; a namespace's `default` account and
+an account listed twice are refused. Needs `BROKER_K8S_OIDC_ISSUER` and
+`BROKER_EXCHANGE_K8S_AUDIENCE`; unset, no account exchanges),
+`BROKER_EXCHANGE_WORKFLOWS` (optional; whitespace-separated
+`<repository>=<workflow path>=<ref>=<project>=<person>[=<session>]` entries, such as
+`example-org/example-repo=.github/workflows/release.yaml=refs/heads/main=EXAMPLE=ada@example.com`.
+Every field is compared exactly and nothing is wildcarded, so a run of another workflow, or of
+this one on another ref, is not this entry; the session is everything after the fifth `=`, and a
+workflow listed twice is refused. Needs `BROKER_EXCHANGE_GITHUB_ISSUER` and
+`BROKER_EXCHANGE_GITHUB_AUDIENCE`; unset, no workflow exchanges),
+`BROKER_ACCESS_TOKEN_SECONDS` (default 900, min 1, max 3600 — how long an access token the OAuth
+provider issues lasts, a machine login's and an exchanged one's alike: it trades how often every
+caller renews against how long a revoked credential's last token stays spendable),
 `BROKER_ENVOY_URL` (optional; turns on best-effort wake notifications to the requesting session
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
 set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600),
@@ -2976,12 +3015,14 @@ one. Unset, the default, keys on
 `r.RemoteAddr` directly, correct only when the broker is reached without a proxy in front of it;
 behind one — this broker's documented production shape, the shared internal ALB — `r.RemoteAddr`
 is the proxy's own address for every caller, collapsing each per-address bucket into one shared by
-everyone unless this variable is set). `BROKER_UI_TOKEN` and `BROKER_ENVOY_TOKEN` follow the
+everyone unless this variable is set). `BROKER_ENVOY_TOKEN` follows the
 broker's `_FILE` secret-loading convention: `<NAME>_FILE`, when set, names a file whose trimmed
 contents win over a bare `<NAME>` — with both set, the file wins silently, nothing is refused — and
 a named-but-unreadable or empty file is a startup error naming the file, never a silent fallback to
 an unset value. `config.Load` refuses to start naming a stale removal still set in the
-environment — the removed `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
+environment — the removed `BROKER_UI_TOKEN[_FILE]` (the approval routes take the calling
+service's own ServiceAccount token, so its account goes in `BROKER_API_ACCOUNTS` instead of a
+bearer shared with Dispatch's server), `BROKER_DISPATCH_URL`, `BROKER_DISPATCH_TOKEN[_FILE]`,
 `BROKER_DISPATCH_PROJECT` and `BROKER_ASK_POLL_SECONDS` (the broker holds no Dispatch credential
 and asks/issues nothing), `BROKER_UI_ORIGIN` (approval is by Dispatch login, so the broker
 checks no WebAuthn origin), `BROKER_DATABASE_PASSWORD` (on RDS the broker signs in by IAM token,
@@ -2997,7 +3038,11 @@ store, a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or ho
 and a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed elsewhere, and a
 bare key id names no account); with the GCP store, a prefix not of its form (a project id in place
 of the number among them) and a key name outside `global`; the other store's key variable set; exactly one of
-`BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; and a `_SECONDS` variable that isn't a
+`BROKER_K8S_OIDC_ISSUER`/`BROKER_K8S_OIDC_AUDIENCE` set; a `BROKER_API_ACCOUNTS`,
+`BROKER_SERVICE_LOGINS` or `BROKER_EXCHANGE_K8S_AUDIENCE` set with no cluster issuer, a
+`BROKER_EXCHANGE_ACCOUNTS` with no `BROKER_EXCHANGE_K8S_AUDIENCE` and a
+`BROKER_EXCHANGE_WORKFLOWS` with no `BROKER_EXCHANGE_GITHUB_ISSUER`, each naming the pair whose
+tokens its callers present; and a `_SECONDS` variable that isn't a
 whole number between the min and max its row of Load's `ints` table gives (non-numeric fails the
 same check as out of range). `cmd/broker/main.go` logs at boot, before it loads the AWS config or
 opens the database, how it signs in (`database sign-in method=rds-iam` when `Config.DatabaseIAM`,
@@ -3036,17 +3081,28 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 29 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 30 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
-wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
-which fixes both the credential `server.authenticate` checks and the caller the handler receives (a
-launcher `enroll.Credential`, an enrollment id, or nothing at all for a UI route — the UI bearer
-proves the caller is Dispatch, so every UI handler takes its subject from the path or body: a
-decision or a revoke names the deciding human in `approver`, and a list the person it lists for in
-`?approver=`, which Dispatch filled from its own session; an empty one is `400 APPROVER_REQUIRED`),
+wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`,
+`renewAuth`, `accountAuth`),
+which fixes both the credential `server.authenticate` checks and the caller the handler receives
+(a launcher `enroll.Credential`, an enrollment id, or, for an `accountAuth` route, the name
+`BROKER_API_ACCOUNTS` gives the calling service — which is all that credential says, so every
+such handler takes its subject from the path or body: a decision or a revoke names the deciding
+human in `approver`, and a list the person it lists for in `?approver=`, which Dispatch filled
+from its own session; an empty one is `400 APPROVER_REQUIRED`. Taking the approver on the
+caller's word is what dispatch://INFRA-314 replaces, and each of those rows says so),
 so a handler cannot be wired to the wrong kind of caller. A bad credential is a 401
-(`LAUNCHER_INVALID`, `PROOF_INVALID`, or `UI_INVALID`); `renewAuth` alone adds
+(`LAUNCHER_INVALID`, `PROOF_INVALID`, or, for `accountAuth`, `ACCOUNT_TOKENS_OFF` on a broker
+that trusts no Kubernetes issuer, `ACCOUNT_TOKEN_EXPIRED`, `ACCOUNT_TOKEN_INVALID` and
+`ACCOUNT_TOKEN_TOO_LONG_LIVED` for a token that names no `iat` or whose `exp` lies more than
+`machine.MaxTokenLoginLifetime` plus the proof skew past it, with the one 403,
+`ACCOUNT_NOT_LISTED`, for a sound token of an account `BROKER_API_ACCOUNTS` does not name: the
+credential is good and it is the broker's list that refuses, and no refusal repeats the token.
+`accountCaller` is the check a service's token login makes
+(`machine.Service.VerifyServiceToken`), against the same verifier and with the same taxonomy);
+`renewAuth` alone adds
 `ENROLLMENT_NOT_LIVE` for a valid session proof that names an ended enrollment. A store that
 cannot answer while authenticating is a 503 naming it. Every 500 is logged with its cause
 (`writeInternal`), every JSON body is capped at 1 MiB with unknown fields refused (`readJSON`),
@@ -3073,6 +3129,62 @@ token signature makes the verifier fetch the issuer's keys again; a verified acc
 an `account:<subject>` bucket of the per-login limit (`refuseAccount`), the same address-then-key
 pair the device-code route spends. Behind a proxy, `BROKER_TRUSTED_PROXY_HEADER` keys the address
 bucket on the caller's own address. Read `routes()` for the current, authoritative route list.
+
+The RFC 8693 token exchange is the token endpoint's other grant (`POST /v1/oauth/token`,
+`oauth.Provider.exchangeGrant`): a caller presents the platform identity it already holds and
+gets back one of the broker's access tokens, which it writes Dispatch with. Three subject tokens
+reach it, each under its own `subject_token_type` (`internal/broker/oauthwire`, the wire contract
+the broker and its callers share): a pod's projected ServiceAccount token
+(`urn:envoy:params:oauth:token-type:kubernetes-service-account`, minted for
+`BROKER_EXCHANGE_K8S_AUDIENCE` and verified against `BROKER_K8S_OIDC_ISSUER`, and it must carry
+the pod it is bound to); a continuous-integration workflow run's GitHub token
+(`urn:envoy:params:oauth:token-type:github-workflow-run`, against
+`BROKER_EXCHANGE_GITHUB_ISSUER`/`_AUDIENCE`, single use, since a run mints a fresh one per
+request, while a pod's standing token is exchanged as often as its role needs); and a dev box
+session's own machine access token (`urn:ietf:params:oauth:token-type:access_token`), which no
+entry lists, because the person is the approver its machine login already records. A subject
+token must be signed with one of its issuer's published asymmetric keys — `none` and a shared
+secret are refused before any key is fetched — and its audience is checked by the broker itself,
+which the library does not do. Every caller presents the same client id,
+`dispatch-token-exchange`, and no client credential at all (`exchangeClientAuth`): shipping a
+secret to every pod is the shared secret this whole slice removes, and keying client
+authentication would lock out the workflow caller, which has no enrolled key. RFC 8693 Section
+2.1 leaves that choice to the deployment; the subject token is the credential the request is
+judged on, and the caller's DPoP proof binds the minted token to its own key. Any other request
+— another client presenting nothing, this client on another grant, this client presenting a
+credential of any kind — goes to the library and is answered as it always was.
+`internal/broker/exchange` is the policy half and nothing else (it verifies no token, reads no
+configuration and takes no clock): handed the verified claims, it answers the session the token
+writes as, the person it acts for, and its project scope — `named`, the one project
+`BROKER_EXCHANGE_ACCOUNTS`/`BROKER_EXCHANGE_WORKFLOWS` fixes, or `person`, every project its
+person may write, which is what a person's own credential gets. Its refusals are one answer an
+operator can act on each: `ErrNoEntry`, `ErrNoPodBinding`, `ErrSessionMismatch`,
+`ErrSessionRequired`, `ErrSessionInvalid` and `ErrClaimMissing`. The whole exchange runs in one
+transaction, because the claim on the session name and the token it is claimed for must land
+together or not at all.
+
+`POST /v1/oauth/introspect` (RFC 7662, `handlers_introspect.go`) is how a resource server reads
+one of those opaque access tokens back: the broker's tokens carry no claims in their own bytes,
+so what a token says lives on its stored session and this route is the only way to read it. It
+is an `accountAuth` route — the caller's own ServiceAccount token, which RFC 7662 Section 2.1
+allows in place of OAuth client authentication, so the provider's `Introspect` answers it
+directly rather than authenticating an OAuth client. The form's `token` parameter names the
+token (missing, `400 TOKEN_REQUIRED`), and the answer is `oauth.Introspection`: `active`, and
+when it is live the `session` the token's writes are recorded as, the `person` it acts for, the
+`project_scope` (`named` or `person`) and the `project` a named one may write, the `scope`, `exp`
+and `client_id`, and `jkt`, the thumbprint of the key the token is DPoP-bound to — which is what
+makes a stolen token useless, since whoever reads this answer checks the caller's proof against
+it. A machine login's own token carries neither project field, no exchange having decided for
+it. A token the broker does not know, one it revoked and one that has expired are all `active`
+false and nothing else (Section 2.2), so an answer discloses nothing to a caller holding a string
+at random. So is any token that is not an access token, a machine login's refresh token among
+them: the answer names no token type, and a refresh token, which outlives the access token issued
+beside it, answered live would pass for a credential no request can present, so `Introspect`
+checks the kind the library reports finding rather than trusting the `access_token` hint it
+passes. Only the broker's own failure to read its storage is a refusal (503), since answering
+that as "not live" would deny a sound token and hide the outage. It spends its source address's
+own bucket (`DefaultIntrospectLimit`) before the provider reads anything, `429 RATE_LIMITED` with
+`Retry-After`, and logs no caller: reading a token back acts on nobody's behalf.
 
 A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
 token (`POST /v1/launcher-credentials/token`: `machine.Service.VerifyServiceToken`, then
@@ -3410,8 +3522,8 @@ machine login. Dispatch's machine-login page lists and revokes, through these tw
 signed-in person's own machines' logins and every service's.
 
 The operator routes (`api/handlers_operator.go`) are the same lists and revokes for a person at
-their own machine, authenticated by that machine's launcher proof (`launcherAuth`) rather than the
-UI bearer, and acting for the calling credential's `operator`. `GET /v1/operator/grants` answers
+their own machine, authenticated by that machine's launcher proof (`launcherAuth`) rather than by
+a listed caller's ServiceAccount token, and acting for the calling credential's `operator`. `GET /v1/operator/grants` answers
 exactly what `GET /v1/grants` answers for that person, and `POST /v1/operator/grants/{id}/revoke`
 revokes as that person through `RevokeByApprover`, with the same refusals and the operator's
 withhold (one function each, `writeApproverGrants` and `revokeGrantAs`). The machine routes cover
@@ -3459,7 +3571,7 @@ or revoke holds are left to the next tick. Each ended enrollment's live grants a
 lookup each rather than a scan of `grants`.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
-./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/...`. The Postgres-backed tests skip, rather
+./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/dev-oidc-issuer/...`. The Postgres-backed tests skip, rather
 than fail, when `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`,
 `internal/broker/requests`); `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for
 them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and
@@ -3473,14 +3585,30 @@ rather than a hand-rolled fake standing in for broker behavior — `internal/bro
 (settings and reread alone) are the sanctioned exceptions, since they exist to test the CLI
 binary's own request-building and response-parsing logic, not broker behavior;
 `secret_e2e_test.go` runs the same forms against the real rig.
-`packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
-for Dispatch's relay: it sends the broker's UI routes the UI bearer and a login, as Dispatch does
-when a signed-in human clicks Approve) run a whole local broker stack by hand for manual smoke
-testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-listener`,
-`envoy-dispatch`, `envoy-broker`, and `agent-secrets`. `dev-broker.sh` prints the exports a second
-shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_UI_TOKEN`, `AGENT_SECRETS_APPROVER`, the helper's
-`AGENT_SECRETS_HELPER_SOCK` and `AGENT_SECRETS_OPERATOR_FILE`, both in its workdir, where it writes
-the operator file, and `DEV_BROKER_DIR`, the workdir itself). Each `dev-broker.sh` run creates
+`packages/envoy/scripts/dev-broker.sh`, `cmd/agent-secrets-devrelay` (a stand-in for Dispatch's
+relay: it presents a listed caller's ServiceAccount token, read from `--account-token-file` /
+`AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, and a login, as Dispatch sends its own token and a login when a
+signed-in human clicks Approve) and `cmd/dev-oidc-issuer` (a stand-in for a cluster's
+ServiceAccount token issuer) run a whole local broker stack by hand for manual smoke testing, with
+no cluster and no Docker beyond the Postgres below; none ships in `docker/Dockerfile`, which builds
+exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`.
+`dev-oidc-issuer` serves `internal/oidc/oidctest`'s issuer, the Go tests' own, on a loopback port
+(a process `oidctest.TB` whose `Fatalf` exits), and keeps each `--token
+<audience>=<service account>=<file>` in its file, minted for `machine.MaxTokenLoginLifetime`,
+bound to a pod uid of its own, and rewritten by rename at four fifths of that life, as a kubelet
+rewrites a projected token; it logs `issuer listening url=<url>` once every file is written. Its
+key lives in its memory alone, so its tokens stop verifying when it stops. `dev-broker.sh` starts
+it with two tokens, `account-token` for `system:serviceaccount:example-ns:example-dispatch` (the
+broker's `BROKER_API_ACCOUNTS` caller `dispatch`) and `exchange-token` for
+`system:serviceaccount:example-ns:example-worker`'s pod at the exchange audience (its
+`BROKER_EXCHANGE_ACCOUNTS` entry, project `EXAMPLE` for `ada@example.com`, no fixed session),
+points the broker's `BROKER_K8S_OIDC_ISSUER` at it, and stops it on exit. It prints the exports a
+second shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`,
+`AGENT_SECRETS_APPROVER`, the helper's `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE`
+and `AGENT_SECRETS_MACHINE_FILE`, all in its workdir, where it writes the operator file, and
+`DEV_BROKER_DIR`, the workdir itself). The docs rig (`docs/site/media/broker/rig.sh`) starts the
+same issuer for Dispatch's own token.
+Each `dev-broker.sh` run creates
 and drops its own isolated database, on the shared `dispatch-pg` container, which it boots through
 `dev-postgres.sh` (so a `dispatch-pg` off that script's pinned image is refused before anything is
 created), or, with `DEV_BROKER_POSTGRES_URL` set, through `psql` on the server that URL names (no
@@ -3488,8 +3616,9 @@ Docker), so concurrent instances never see each other's enrollments, requests or
 listens on the
 port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`), so
 concurrent instances can never collide on a shared port either.
-`dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
-runs in CI's `envoy-go` job.
+`dev-broker.test.sh` proves both kinds of isolation, and that each instance's broker trusts the
+issuer that instance started, lists its dev caller, exports the caller token that issuer wrote and
+stops the issuer on exit, with fakes (no real Postgres or network) and runs in CI's `envoy-go` job.
 
 `.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the
 image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds,

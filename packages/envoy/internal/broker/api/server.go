@@ -4,7 +4,6 @@ package api
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,17 +24,24 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/requests"
+	"github.com/sjawhar/envoy/internal/oidc"
 )
 
 type Deps struct {
 	PublicURL string
-	// UIToken is BROKER_UI_TOKEN: the shared bearer uiAuth compares against (constant-time),
-	// authenticating Dispatch's server, which vouches for the approver login it sends.
-	UIToken      string
-	Enroll       *enroll.Service
-	Machine      *requests.Machine
-	MachineLogin *machine.Service
-	Proof        *proof.Verifier
+	// APIAccounts is BROKER_API_ACCOUNTS: the ServiceAccount subject of each listed caller of the
+	// routes accountAuth authenticates, answering the caller's name. A subject it does not name
+	// is refused, so an account taken off it stops calling as soon as the broker reads it again.
+	APIAccounts map[string]string
+	// AccountTokens verifies those callers' projected ServiceAccount tokens, against the same
+	// Kubernetes issuer and audience a pod enrolls with (cmd/broker passes the one verifier it
+	// builds). Nil is a broker that trusts no Kubernetes issuer, where every such route refuses
+	// every caller.
+	AccountTokens enroll.PodVerifier
+	Enroll        *enroll.Service
+	Machine       *requests.Machine
+	MachineLogin  *machine.Service
+	Proof         *proof.Verifier
 	// Policy is the live agent-secret policy, which POST /v1/secrets/{name}/reread rereads one
 	// name of (policy.Current.RefreshOne).
 	Policy *policy.Current
@@ -59,14 +65,18 @@ type Deps struct {
 	RereadOverallLimit *ratelimit.Limit
 	// TokenLimit bounds POST /v1/oauth/token per source address; nil means DefaultTokenLimit.
 	TokenLimit *ratelimit.Limit
+	// IntrospectLimit bounds POST /v1/oauth/introspect per source address; nil means
+	// DefaultIntrospectLimit.
+	IntrospectLimit *ratelimit.Limit
 	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
 	// per-address buckets trust for the real client address; empty means keying on r.RemoteAddr,
 	// correct only when the broker is reached directly rather than through a reverse proxy or load
 	// balancer. See limits.go's clientAddress.
 	TrustedProxyHeader string
-	// OAuth is the machine login's OAuth provider. POST /v1/oauth/device_authorization and POST
-	// /v1/oauth/token are mounted only when it is set, with DeviceLogin and both TokenHooks, which
-	// it then requires (Register panics without them).
+	// OAuth is the machine login's OAuth provider and the token exchange. POST
+	// /v1/oauth/device_authorization, POST /v1/oauth/token and POST /v1/oauth/introspect are
+	// mounted only when it is set, with DeviceLogin and both TokenHooks, which it then requires
+	// (Register panics without them).
 	OAuth *oauth.Provider
 	// DeviceLogin opens a device login's record from the device authorization request's form and
 	// the user code the provider minted, in the provider's transaction (oauthstore.TxFrom on ctx);
@@ -84,8 +94,10 @@ type server struct {
 	// neither.
 	rereadLimiter *ratelimit.Keyed
 	rereadOverall *ratelimit.Bucket
-	// tokenLimiter is TokenLimit applied per source address (clientAddress).
-	tokenLimiter *ratelimit.Keyed
+	// tokenLimiter is TokenLimit applied per source address (clientAddress), and
+	// introspectLimiter IntrospectLimit, each over its own route's bucket.
+	tokenLimiter      *ratelimit.Keyed
+	introspectLimiter *ratelimit.Keyed
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
@@ -108,12 +120,17 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.TokenLimit != nil {
 		token = *deps.TokenLimit
 	}
+	introspect := DefaultIntrospectLimit
+	if deps.IntrospectLimit != nil {
+		introspect = *deps.IntrospectLimit
+	}
 	s := &server{
-		deps:            deps,
-		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
-		rereadLimiter:   ratelimit.NewKeyed(reread),
-		rereadOverall:   ratelimit.NewBucket(rereadOverall),
-		tokenLimiter:    ratelimit.NewKeyed(token),
+		deps:              deps,
+		launcherLimiter:   newLauncherLimiter(limits, deps.TrustedProxyHeader),
+		rereadLimiter:     ratelimit.NewKeyed(reread),
+		rereadOverall:     ratelimit.NewBucket(rereadOverall),
+		tokenLimiter:      ratelimit.NewKeyed(token),
+		introspectLimiter: ratelimit.NewKeyed(introspect),
 	}
 	for _, route := range routes() {
 		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {
@@ -139,13 +156,8 @@ func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth route
 	switch auth {
 	case authNone:
 		return caller{}, true
-	case authUI:
-		token := bearer(r)
-		if token == "" || subtle.ConstantTimeCompare([]byte(token), []byte(s.deps.UIToken)) != 1 {
-			writeError(w, http.StatusUnauthorized, "UI_INVALID", "the UI bearer token is not valid")
-			return caller{}, false
-		}
-		return caller{}, true
+	case authAccount:
+		return s.accountCaller(w, r)
 	case authLauncher:
 		subject, err := s.proofSubject(r)
 		switch {
@@ -197,6 +209,42 @@ func (s *server) sessionCaller(w http.ResponseWriter, r *http.Request, notLiveCo
 		return caller{}, false
 	}
 	return caller{enrollment: subject.EnrollmentID}, true
+}
+
+// accountCaller authenticates a listed caller's own projected ServiceAccount token for
+// authenticate, the credential accountAuth's routes take. It is the check a service's token login
+// makes (machine.Service.VerifyServiceToken), against the same verifier and with the same
+// taxonomy: a broker that trusts no Kubernetes issuer, a token that has expired, one that does
+// not verify, one that lives longer than machine.MaxTokenLoginLifetime from its issue (so a
+// copied token is spendable for at most an hour), and an account BROKER_API_ACCOUNTS does not
+// name. Only the last is a 403: the credential is sound and it is the broker's list that refuses.
+// No refusal repeats the token.
+func (s *server) accountCaller(w http.ResponseWriter, r *http.Request) (caller, bool) {
+	if s.deps.AccountTokens == nil {
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKENS_OFF", "this broker trusts no Kubernetes token issuer, so no caller authenticates with a ServiceAccount token")
+		return caller{}, false
+	}
+	claims, err := s.deps.AccountTokens.VerifyAccount(r.Context(), bearer(r))
+	switch {
+	case errors.Is(err, oidc.ErrExpired):
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_EXPIRED", "the ServiceAccount token has expired")
+		return caller{}, false
+	case err != nil:
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_INVALID", "the ServiceAccount token does not verify")
+		return caller{}, false
+	case claims.IssuedAt.IsZero():
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED", "the ServiceAccount token names no issue time (iat)")
+		return caller{}, false
+	case claims.Expiry.Sub(claims.IssuedAt) > machine.MaxTokenLoginLifetime+s.deps.Proof.Skew:
+		writeError(w, http.StatusUnauthorized, "ACCOUNT_TOKEN_TOO_LONG_LIVED", "the ServiceAccount token lives longer than an hour from its issue")
+		return caller{}, false
+	}
+	name, listed := s.deps.APIAccounts[claims.Subject]
+	if !listed {
+		writeError(w, http.StatusForbidden, "ACCOUNT_NOT_LISTED", "this ServiceAccount is not in BROKER_API_ACCOUNTS")
+		return caller{}, false
+	}
+	return caller{account: name}, true
 }
 
 // proofSubject verifies r's Proof header and returns who it authenticates, unwrapped: authLauncher

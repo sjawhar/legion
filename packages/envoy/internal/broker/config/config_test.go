@@ -2,12 +2,15 @@
 package config
 
 import (
-	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"maps"
 	"os"
+	"slices"
 	"strconv"
 	"strings"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/broker/exchange"
+	"github.com/sjawhar/envoy/internal/broker/secrets"
 )
 
 func env(m map[string]string) func(string) string {
@@ -21,7 +24,6 @@ func validEnv() map[string]string {
 		"BROKER_DATABASE_URL":        "postgres://x",
 		"BROKER_PUBLIC_URL":          "https://secrets.internal.example",
 		"BROKER_MACHINE_LOGIN_URL":   "https://dispatch.internal.example/credentials/machine",
-		"BROKER_UI_TOKEN":            "ui-token",
 		"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
 		"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
 	}
@@ -87,34 +89,31 @@ func TestLoadRefusesMaxGrantSeconds(t *testing.T) {
 	}
 }
 
-func TestLoadRequiresUIToken(t *testing.T) {
-	e := validEnv()
-	delete(e, "BROKER_UI_TOKEN")
-	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_UI_TOKEN") {
-		t.Fatalf("expected BROKER_UI_TOKEN refusal, got %v", err)
+// TestLoadRefusesTheUIToken pins that the removed shared bearer fails loudly, by either name:
+// the routes it authenticated take the calling service's own ServiceAccount token now, so a
+// deployment still setting it is one whose callers were never listed.
+func TestLoadRefusesTheUIToken(t *testing.T) {
+	for _, name := range []string{"BROKER_UI_TOKEN", "BROKER_UI_TOKEN_FILE"} {
+		e := validEnv()
+		e[name] = "whatever"
+		_, err := Load(env(e))
+		if err == nil || !strings.HasPrefix(err.Error(), name+" is removed; ") || !strings.Contains(err.Error(), "BROKER_API_ACCOUNTS") {
+			t.Fatalf("Load(%s set) = %v, want a refusal naming %s and BROKER_API_ACCOUNTS", name, err, name)
+		}
 	}
 }
 
-func TestLoadReadsUITokenFileAheadOfValue(t *testing.T) {
-	dir := t.TempDir()
-	path := dir + "/token"
-	if err := os.WriteFile(path, []byte("  tok-from-file\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	e := validEnv()
-	e["BROKER_UI_TOKEN_FILE"] = path
-	e["BROKER_UI_TOKEN"] = "ignored"
-	cfg, err := Load(env(e))
+// TestLoadDefaultsTheIntegerSettings pins every seconds setting's default, the values a
+// deployment that sets none runs on.
+func TestLoadDefaultsTheIntegerSettings(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.UIToken != "tok-from-file" {
-		t.Fatalf("token file must win: got %d-byte token, want the %d-byte file value", len(cfg.UIToken), len("tok-from-file"))
-	}
-	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 ||
+	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 || cfg.AccessTokenSeconds != 900 ||
 		cfg.LauncherCredentialSeconds != 2592000 || cfg.SweepSeconds != 5 {
-		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
-			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
+		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d AccessTokenSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
+			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.AccessTokenSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
 	}
 }
 
@@ -617,5 +616,210 @@ func TestLoadRefusesAnIAMURLThatDoesNotVerifyTheServer(t *testing.T) {
 				t.Errorf("refusal %q quotes the URL; it should name the host alone", err)
 			}
 		})
+	}
+}
+
+// withK8sIssuer is validEnv with the cluster issuer every ServiceAccount token setting needs.
+func withK8sIssuer() map[string]string {
+	e := validEnv()
+	e["BROKER_K8S_OIDC_ISSUER"] = "https://oidc.eks.example.invalid/id/EXAMPLE"
+	e["BROKER_K8S_OIDC_AUDIENCE"] = "agent-secrets"
+	return e
+}
+
+// TestLoadReadsTheAPIAccounts pins BROKER_API_ACCOUNTS: whitespace-separated <caller>=<account>
+// entries keyed by account, none when unset, and refusals naming the entry for one that is not
+// of that form, a namespace's default account and an account named twice. It needs the cluster
+// issuer, since the broker verifies those callers' tokens against it.
+func TestLoadReadsTheAPIAccounts(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.APIAccounts != nil {
+		t.Fatalf("APIAccounts = %v, want nil when BROKER_API_ACCOUNTS is unset", cfg.APIAccounts)
+	}
+	e := withK8sIssuer()
+	e["BROKER_API_ACCOUNTS"] = " dispatch=system:serviceaccount:example-ns:example-dispatch\nlistener=system:serviceaccount:example-ns:example-listener "
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]string{
+		"system:serviceaccount:example-ns:example-dispatch": "dispatch",
+		"system:serviceaccount:example-ns:example-listener": "listener",
+	}
+	if !maps.Equal(cfg.APIAccounts, want) {
+		t.Fatalf("APIAccounts = %v, want %v", cfg.APIAccounts, want)
+	}
+	for _, bad := range []string{
+		"dispatch", "=system:serviceaccount:a:b", "Dispatch=system:serviceaccount:a:b",
+		"dispatch=example-dispatch", "dispatch=system:serviceaccount:example-ns:default",
+	} {
+		e := withK8sIssuer()
+		e["BROKER_API_ACCOUNTS"] = bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_API_ACCOUNTS") || !strings.Contains(err.Error(), strconv.Quote(bad)) {
+			t.Errorf("BROKER_API_ACCOUNTS = %q: err = %v, want a refusal naming the setting and the entry", bad, err)
+		}
+	}
+	e = withK8sIssuer()
+	e["BROKER_API_ACCOUNTS"] = "dispatch=system:serviceaccount:x:y listener=system:serviceaccount:x:y"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "system:serviceaccount:x:y") {
+		t.Errorf("BROKER_API_ACCOUNTS naming one account twice: err = %v, want a refusal naming the account", err)
+	}
+	e = validEnv()
+	e["BROKER_API_ACCOUNTS"] = "dispatch=system:serviceaccount:example-ns:example-dispatch"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_K8S_OIDC_ISSUER") {
+		t.Errorf("BROKER_API_ACCOUNTS with no token issuer: err = %v, want a refusal naming BROKER_K8S_OIDC_ISSUER", err)
+	}
+}
+
+// TestLoadReadsTheAccessTokenLifetime pins BROKER_ACCESS_TOKEN_SECONDS: whole seconds, 900 by
+// default, and a refusal naming the variable and its range for anything else.
+func TestLoadReadsTheAccessTokenLifetime(t *testing.T) {
+	e := validEnv()
+	e["BROKER_ACCESS_TOKEN_SECONDS"] = "30"
+	cfg, err := Load(env(e))
+	if err != nil || cfg.AccessTokenSeconds != 30 {
+		t.Fatalf("Load(BROKER_ACCESS_TOKEN_SECONDS=30) = (%d, %v), want 30", cfg.AccessTokenSeconds, err)
+	}
+	for _, bad := range []string{"0", "3601", "fifteen", "-1", "900.0"} {
+		e := validEnv()
+		e["BROKER_ACCESS_TOKEN_SECONDS"] = bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_ACCESS_TOKEN_SECONDS") {
+			t.Errorf("BROKER_ACCESS_TOKEN_SECONDS = %q: err = %v, want a refusal naming the variable", bad, err)
+		}
+	}
+}
+
+// TestLoadReadsTheExchangeAccounts pins BROKER_EXCHANGE_ACCOUNTS: whitespace-separated
+// <account>=<project>=<person>[=<session>] entries in order, none when unset, a session that may
+// itself carry "=", and refusals naming the entry for one that is not of that form, has a blank
+// field, names a namespace's default account or lists an account twice. It needs the cluster
+// issuer and the exchange audience, whose tokens its pods present.
+func TestLoadReadsTheExchangeAccounts(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ExchangeAccounts != nil {
+		t.Fatalf("ExchangeAccounts = %v, want nil when BROKER_EXCHANGE_ACCOUNTS is unset", cfg.ExchangeAccounts)
+	}
+	withExchange := func() map[string]string {
+		e := withK8sIssuer()
+		e["BROKER_EXCHANGE_K8S_AUDIENCE"] = "dispatch-exchange"
+		return e
+	}
+	e := withExchange()
+	e["BROKER_EXCHANGE_ACCOUNTS"] = "system:serviceaccount:example-ns:example-worker=EXAMPLE=ada@example.com\n" +
+		" system:serviceaccount:example-ns:example-daemon=EXAMPLE=ada@example.com=legion-daemon:EXAMPLE=1 "
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []exchange.AccountEntry{
+		{Account: "system:serviceaccount:example-ns:example-worker", Project: "EXAMPLE", Person: "ada@example.com"},
+		{Account: "system:serviceaccount:example-ns:example-daemon", Project: "EXAMPLE", Person: "ada@example.com", Session: "legion-daemon:EXAMPLE=1"},
+	}
+	if !slices.Equal(cfg.ExchangeAccounts, want) {
+		t.Fatalf("ExchangeAccounts = %v, want %v", cfg.ExchangeAccounts, want)
+	}
+	for _, bad := range []string{
+		"system:serviceaccount:example-ns:example-worker", "system:serviceaccount:example-ns:example-worker=EXAMPLE",
+		"system:serviceaccount:example-ns:example-worker==ada@example.com", "=EXAMPLE=ada@example.com",
+		"example-worker=EXAMPLE=ada@example.com", "system:serviceaccount:example-ns:default=EXAMPLE=ada@example.com",
+	} {
+		e := withExchange()
+		e["BROKER_EXCHANGE_ACCOUNTS"] = bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_EXCHANGE_ACCOUNTS") || !strings.Contains(err.Error(), strconv.Quote(bad)) {
+			t.Errorf("BROKER_EXCHANGE_ACCOUNTS = %q: err = %v, want a refusal naming the setting and the entry", bad, err)
+		}
+	}
+	e = withExchange()
+	e["BROKER_EXCHANGE_ACCOUNTS"] = "system:serviceaccount:x:y=A=ada@example.com system:serviceaccount:x:y=B=ada@example.com"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "system:serviceaccount:x:y") {
+		t.Errorf("BROKER_EXCHANGE_ACCOUNTS naming one account twice: err = %v, want a refusal naming the account", err)
+	}
+	e = withK8sIssuer()
+	e["BROKER_EXCHANGE_ACCOUNTS"] = "system:serviceaccount:example-ns:example-worker=EXAMPLE=ada@example.com"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_EXCHANGE_K8S_AUDIENCE") {
+		t.Errorf("BROKER_EXCHANGE_ACCOUNTS with no exchange audience: err = %v, want a refusal naming BROKER_EXCHANGE_K8S_AUDIENCE", err)
+	}
+	e = validEnv()
+	e["BROKER_EXCHANGE_K8S_AUDIENCE"] = "dispatch-exchange"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_K8S_OIDC_ISSUER") {
+		t.Errorf("BROKER_EXCHANGE_K8S_AUDIENCE with no cluster issuer: err = %v, want a refusal naming BROKER_K8S_OIDC_ISSUER", err)
+	}
+}
+
+// TestLoadReadsTheExchangeWorkflows pins BROKER_EXCHANGE_WORKFLOWS:
+// <repository>=<workflow>=<ref>=<project>=<person>[=<session>] entries in order, none when unset,
+// and refusals naming the entry for one that is not of that form or lists a workflow twice. It
+// needs GitHub's issuer and audience, whose tokens its runs present.
+func TestLoadReadsTheExchangeWorkflows(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.ExchangeWorkflows != nil {
+		t.Fatalf("ExchangeWorkflows = %v, want nil when BROKER_EXCHANGE_WORKFLOWS is unset", cfg.ExchangeWorkflows)
+	}
+	withGitHub := func() map[string]string {
+		e := validEnv()
+		e["BROKER_EXCHANGE_GITHUB_ISSUER"] = "https://token.actions.githubusercontent.com"
+		e["BROKER_EXCHANGE_GITHUB_AUDIENCE"] = "dispatch-exchange"
+		return e
+	}
+	e := withGitHub()
+	e["BROKER_EXCHANGE_WORKFLOWS"] = "example-org/example-repo=.github/workflows/release.yaml=refs/heads/main=EXAMPLE=ada@example.com=release=1"
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []exchange.WorkflowEntry{{
+		Repository: "example-org/example-repo", Workflow: ".github/workflows/release.yaml", Ref: "refs/heads/main",
+		Project: "EXAMPLE", Person: "ada@example.com", Session: "release=1",
+	}}
+	if !slices.Equal(cfg.ExchangeWorkflows, want) {
+		t.Fatalf("ExchangeWorkflows = %v, want %v", cfg.ExchangeWorkflows, want)
+	}
+	for _, bad := range []string{
+		"example-org/example-repo", "example-org/example-repo=.github/workflows/release.yaml=refs/heads/main=EXAMPLE",
+		"example-org/example-repo=.github/workflows/release.yaml==EXAMPLE=ada@example.com",
+	} {
+		e := withGitHub()
+		e["BROKER_EXCHANGE_WORKFLOWS"] = bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_EXCHANGE_WORKFLOWS") || !strings.Contains(err.Error(), strconv.Quote(bad)) {
+			t.Errorf("BROKER_EXCHANGE_WORKFLOWS = %q: err = %v, want a refusal naming the setting and the entry", bad, err)
+		}
+	}
+	e = withGitHub()
+	entry := "example-org/example-repo=.github/workflows/release.yaml=refs/heads/main"
+	e["BROKER_EXCHANGE_WORKFLOWS"] = entry + "=A=ada@example.com " + entry + "=B=ada@example.com"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), entry) {
+		t.Errorf("BROKER_EXCHANGE_WORKFLOWS naming one workflow twice: err = %v, want a refusal naming the workflow", err)
+	}
+	e = validEnv()
+	e["BROKER_EXCHANGE_WORKFLOWS"] = entry + "=EXAMPLE=ada@example.com"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_EXCHANGE_GITHUB_ISSUER") {
+		t.Errorf("BROKER_EXCHANGE_WORKFLOWS with no GitHub issuer: err = %v, want a refusal naming BROKER_EXCHANGE_GITHUB_ISSUER", err)
+	}
+}
+
+// TestLoadRefusesAHalfConfiguredGitHubIssuer pins that GitHub's issuer and audience are
+// both-or-neither, as the cluster's pair is: half a pair would register a token type whose tokens
+// could not be checked.
+func TestLoadRefusesAHalfConfiguredGitHubIssuer(t *testing.T) {
+	for _, half := range []string{"BROKER_EXCHANGE_GITHUB_ISSUER", "BROKER_EXCHANGE_GITHUB_AUDIENCE"} {
+		e := validEnv()
+		e[half] = "https://token.actions.githubusercontent.com"
+		_, err := Load(env(e))
+		if err == nil || !strings.Contains(err.Error(), "BROKER_EXCHANGE_GITHUB_ISSUER") || !strings.Contains(err.Error(), "BROKER_EXCHANGE_GITHUB_AUDIENCE") {
+			t.Errorf("Load(%s alone) = %v, want a refusal naming both halves", half, err)
+		}
+	}
+	cfg, err := Load(env(validEnv()))
+	if err != nil || cfg.ExchangeGitHubIssuer != "" || cfg.ExchangeGitHubAudience != "" {
+		t.Fatalf("Load with neither half = (%q, %q, %v), want no GitHub issuer and no error", cfg.ExchangeGitHubIssuer, cfg.ExchangeGitHubAudience, err)
 	}
 }

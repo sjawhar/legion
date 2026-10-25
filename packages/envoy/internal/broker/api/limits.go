@@ -50,6 +50,13 @@ var DefaultLauncherLimits = LauncherLimits{
 // never meet it; a flood from one address is refused before the provider does any work.
 var DefaultTokenLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 60}
 
+// DefaultIntrospectLimit bounds POST /v1/oauth/introspect per source address, in a bucket of its
+// own: a burst of 200 and fifty a second. The route is authenticated, so this bounds a listed
+// caller rather than a flood — a resource server asks about one token per request it serves, with
+// its own short cache in front, and fifty a second is well past what one such server asks and far
+// below what would keep the broker's storage busy.
+var DefaultIntrospectLimit = ratelimit.Limit{Every: 20 * time.Millisecond, Burst: 200}
+
 // DefaultRereadLimit bounds POST /v1/secrets/{name}/reread per source address: a person's write
 // burst passes; a flood cannot make the broker hammer DescribeSecret.
 var DefaultRereadLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 30}
