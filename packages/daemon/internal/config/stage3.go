@@ -13,6 +13,7 @@ import (
 
 	"gopkg.in/yaml.v3"
 
+	"github.com/sjawhar/legion/daemon/internal/ghrepo"
 	"github.com/sjawhar/legion/daemon/internal/lookpath"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
@@ -37,15 +38,30 @@ type Gates struct {
 }
 
 // Project is a Dispatch project prefix's configuration: its optional merge-queue role, merge rules,
-// and the Slack channels whose @-mentions reach its controller. Its repositories are Dispatch's
-// mapping (Settings → Repositories → Projects), which the daemon reads at boot and when it
-// changes, never this file.
+// the Slack channels whose @-mentions reach its controller, and the deploy workflows whose runs
+// wake its production checks. Its repositories are Dispatch's mapping (Settings → Repositories →
+// Projects), which the daemon reads at boot and when it changes, never this file.
 type Project struct {
 	MergeQueueRole string
 	Merge          MergeRules
 	// SlackChannels are `slack_channels`, the Slack channel ids whose app mentions the project's
 	// controller subscribes to, in the file's order; nil when the file names none.
 	SlackChannels []string
+	// Deploys are `deploys`, the workflows that deploy the project's repositories, in the file's
+	// order; nil when the file names none.
+	Deploys []Deploy
+}
+
+// Deploy is one `projects.<KEY>.deploys` entry: Workflow, a workflow file of Repo (its path, as
+// GitHub's `workflow_run.path` names it), deploys the repository to production in each run where
+// a step named Step succeeds. Each such step that finishes after a production check's pull request
+// merged wakes the check. The step and the workflow are the repository's own words, so the file
+// names them rather than Legion guessing a convention, which would cost a GitHub read for every
+// default-branch run of every repository.
+type Deploy struct {
+	Repo     ghrepo.Repository
+	Workflow string
+	Step     string
 }
 
 // MergeRules is the project's `merge` policy. A path matching ByHand is never auto-armed.
@@ -145,7 +161,7 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 	if value.Kind != yaml.MappingNode {
 		return Project{}, fmt.Errorf("%s must be a mapping", key)
 	}
-	fields, err := members(value, key, "merge", "merge_queue_role", "mergeQueueRole", "slack_channels")
+	fields, err := members(value, key, "deploys", "merge", "merge_queue_role", "mergeQueueRole", "slack_channels")
 	var unknown unknownKeyError
 	if errors.As(err, &unknown) {
 		if unknown.name == "repo" {
@@ -178,6 +194,11 @@ func readProject(value *yaml.Node, key string) (Project, error) {
 			return Project{}, err
 		}
 	}
+	if deploys := fields["deploys"]; deploys != nil {
+		if project.Deploys, err = readDeploys(deploys, key+".deploys"); err != nil {
+			return Project{}, err
+		}
+	}
 	return project, nil
 }
 
@@ -197,6 +218,69 @@ func readSlackChannels(value *yaml.Node, key string) ([]string, error) {
 		}
 	}
 	return channels, nil
+}
+
+// readDeploys is a project's `deploys`: a list of mappings, each exactly a `repo` Parse takes, a
+// `workflow` that is a file directly under `.github/workflows/` ending `.yml` or `.yaml` (the only
+// place GitHub runs a workflow from, and the path a run names, so anything else would match no run),
+// and a non-empty `step`. One repository's workflow is named once, its repository compared as
+// GitHub compares names, without case: a second entry would wake each check twice for one run, or
+// name two steps where a run is matched by its workflow alone. An empty list is no deploy, as an
+// absent key is.
+func readDeploys(value *yaml.Node, key string) ([]Deploy, error) {
+	if value.Kind != yaml.SequenceNode {
+		return nil, fmt.Errorf("%s must be an array", key)
+	}
+	var deploys []Deploy
+	for index, entry := range value.Content {
+		field := fmt.Sprintf("%s[%d]", key, index)
+		if entry.Kind != yaml.MappingNode {
+			return nil, fmt.Errorf("%s must be a mapping", field)
+		}
+		fields, err := members(entry, field, "repo", "workflow", "step")
+		if err != nil {
+			return nil, err
+		}
+		repo, err := requiredString(fields["repo"], field+".repo", "")
+		if err != nil {
+			return nil, err
+		}
+		var deploy Deploy
+		if deploy.Repo, err = ghrepo.Parse(field+".repo", repo); err != nil {
+			return nil, err
+		}
+		if deploy.Workflow, err = requiredString(fields["workflow"], field+".workflow", ""); err != nil {
+			return nil, err
+		}
+		if !workflowFile(deploy.Workflow) {
+			return nil, fmt.Errorf("%s.workflow %q must be a file directly under .github/workflows/ ending .yml or .yaml, as a workflow run's path names it", field, deploy.Workflow)
+		}
+		if deploy.Step, err = requiredString(fields["step"], field+".step", ""); err != nil {
+			return nil, err
+		}
+		if slices.ContainsFunc(deploys, func(named Deploy) bool {
+			return strings.EqualFold(named.Repo.String(), deploy.Repo.String()) && named.Workflow == deploy.Workflow
+		}) {
+			return nil, fmt.Errorf("%s names %s %s twice", key, deploy.Repo, deploy.Workflow)
+		}
+		deploys = append(deploys, deploy)
+	}
+	return deploys, nil
+}
+
+// workflowFile says whether path names a workflow file as GitHub runs one: directly under
+// `.github/workflows/`, never in a directory beneath it, with a name before its `.yml` or `.yaml`.
+func workflowFile(path string) bool {
+	name, found := strings.CutPrefix(path, ".github/workflows/")
+	if !found || strings.Contains(name, "/") {
+		return false
+	}
+	for _, extension := range []string{".yml", ".yaml"} {
+		if stem, found := strings.CutSuffix(name, extension); found && stem != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func readMergeRules(value *yaml.Node, key string) (MergeRules, error) {

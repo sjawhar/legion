@@ -227,7 +227,7 @@ func TestDrainClosesAtItsDeadlineWhileADeliverySubscriptionDrains(t *testing.T) 
 // reconnecting reaches the server, so a drained subscription would keep its server-side SUB (a
 // reconnect re-sends it) and the drain would only run out its deadline.
 func TestDrainWhileReconnectingClosesAtOnce(t *testing.T) {
-	ctr, uri := testnats.StartRestartable(t)
+	srv, uri := testnats.Start(t)
 	client, err := bus.ConnectOwningStream([]string{uri})
 	if err != nil {
 		t.Fatalf("connect: %v", err)
@@ -236,7 +236,7 @@ func TestDrainWhileReconnectingClosesAtOnce(t *testing.T) {
 	if _, err := client.SubscribeCore("notifications.role.drain-reconnecting", func(*natsgo.Msg) {}, "drain-reconnecting"); err != nil {
 		t.Fatalf("role subscribe: %v", err)
 	}
-	testnats.Stop(t, ctr)
+	srv.Stop(t)
 	waitFor(t, 15*time.Second, "the client to start reconnecting", func() bool { return client.Conn.IsReconnecting() })
 
 	began := time.Now()
