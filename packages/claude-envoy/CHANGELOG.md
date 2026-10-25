@@ -12,12 +12,13 @@
   `legion/` were regenerated (INFRA-188).
 - The `dispatch` command (`dist/dispatch.js`) imports every architecture source of a project, one
   per repository: `dispatch architecture-sync --project <KEY>` prints a line for each source, and
-  `--repo <owner/name>` imports that one alone. It needs a Dispatch of the same release, which
-  serves the per-repository source routes. The `dispatch` skill says an issue's component ids may
-  come from any of its project's source repositories, and the plugin's own copy of the
-  `legion-architect` skill says a component file goes in the branch of the source repository that
-  holds it, with an id no other source of the project uses, since `dist/` and `legion/` were
-  regenerated (INFRA-391).
+  `--repo <owner/name>` imports that one alone. Against a Dispatch older than this release,
+  `dispatch architecture-sync --project <KEY>` falls back to that server's single-source sync and
+  prints its one line, and `--repo` needs a Dispatch of this release. The `dispatch` skill says an
+  issue's component ids may come from any of its project's source repositories, and the plugin's
+  own copy of the `legion-architect` skill says a component file goes in the branch of the source
+  repository that holds it, with an id no other source of the project uses, since `dist/` and
+  `legion/` were regenerated (INFRA-391).
 
 ### Changed
 

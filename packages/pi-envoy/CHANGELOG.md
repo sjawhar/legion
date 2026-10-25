@@ -14,10 +14,11 @@
   (INFRA-188).
 - The `dispatch` command's `architecture-sync` imports every architecture source of the project,
   one per repository, and prints a line for each, or with `--repo <owner/name>` that one source
-  alone (INFRA-391). It needs a Dispatch of the same release, which serves the per-repository
-  source routes. The `dispatch` skill this plugin ships says an issue's component ids may come
-  from any of its project's source repositories, and its issues reference gives the per-source
-  output and `--repo`.
+  alone (INFRA-391). Against a Dispatch older than this release,
+  `dispatch architecture-sync --project <KEY>` falls back to that server's single-source sync and
+  prints its one line, and `--repo` needs a Dispatch of this release. The `dispatch` skill this
+  plugin ships says an issue's component ids may come from any of its project's source
+  repositories, and its issues reference gives the per-source output and `--repo`.
 
 ### Fixed
 

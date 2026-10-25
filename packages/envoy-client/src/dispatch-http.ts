@@ -124,6 +124,18 @@ function isJson(response: Response): boolean {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
 
+/** Whether `error` is a server's answer that it has no route for the request (`404 NOT_FOUND`,
+ *  "no route for …"), as a server older than a route answers it; a `404 NOT_FOUND` for a
+ *  resource the server does not know says "not found" instead. */
+function isNoRoute(error: unknown): boolean {
+  return (
+    error instanceof DispatchServiceError &&
+    error.status === 404 &&
+    error.code === "NOT_FOUND" &&
+    error.message.startsWith("no route for ")
+  );
+}
+
 export interface ListIssuesOptions {
   readonly project?: string;
   readonly status?: string;
@@ -553,12 +565,7 @@ export class DispatchClient {
     try {
       return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
     } catch (error) {
-      const noRoute =
-        error instanceof DispatchServiceError &&
-        error.status === 404 &&
-        error.code === "NOT_FOUND" &&
-        error.message.startsWith("no route for ");
-      if (!noRoute) throw error;
+      if (!isNoRoute(error)) throw error;
     }
     try {
       const source: ArchitectureSource | null = await this.#json("GET", [
@@ -584,9 +591,36 @@ export class DispatchClient {
   /** `POST /api/v1/projects/{key}/architecture-sources/sync`: import every source of the
    *  project now. Every source is attempted, and each row's `last_error` says whether its
    *  import replaced its components or its previous ones stay up. 404 SOURCE_NOT_FOUND when the
-   *  project has no source. */
+   *  project has no source.
+   *
+   *  The plugin and the server ship separately, so a rollout mixes versions (#1522). A server
+   *  older than this route has no route for it (`404 NOT_FOUND`, "no route for …"), so the client
+   *  asks its `POST /api/v1/projects/{key}/architecture-source/sync` instead, which imports that
+   *  server's one source, and returns the row as a one-element array. Any other answer of either
+   *  call throws as is, so that server's `404 SOURCE_NOT_FOUND` for a project with no source is
+   *  still an error. */
   async syncArchitectureSources(project: string): Promise<ArchitectureSource[]> {
-    return this.#json("POST", ["api", "v1", "projects", project, "architecture-sources", "sync"]);
+    try {
+      return await this.#json("POST", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-sources",
+        "sync",
+      ]);
+    } catch (error) {
+      if (!isNoRoute(error)) throw error;
+    }
+    const source: ArchitectureSource = await this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-source",
+      "sync",
+    ]);
+    return [source];
   }
 
   /** `POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync`: import the one

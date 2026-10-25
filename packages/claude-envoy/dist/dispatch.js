@@ -15237,6 +15237,9 @@ function asErrorShape(value) {
 function isJson(response) {
   return response.headers.get("content-type")?.includes("application/json") ?? false;
 }
+function isNoRoute(error48) {
+  return error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "NOT_FOUND" && error48.message.startsWith("no route for ");
+}
 var ISSUE_EVENTS_PAGE_MAX = 200;
 var DISPATCH_TOOL_DEADLINE_MS = 60000;
 function requestSignal(signal) {
@@ -15431,8 +15434,7 @@ class DispatchClient {
     try {
       return await this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
     } catch (error48) {
-      const noRoute = error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "NOT_FOUND" && error48.message.startsWith("no route for ");
-      if (!noRoute)
+      if (!isNoRoute(error48))
         throw error48;
     }
     try {
@@ -15452,7 +15454,28 @@ class DispatchClient {
     }
   }
   async syncArchitectureSources(project) {
-    return this.#json("POST", ["api", "v1", "projects", project, "architecture-sources", "sync"]);
+    try {
+      return await this.#json("POST", [
+        "api",
+        "v1",
+        "projects",
+        project,
+        "architecture-sources",
+        "sync"
+      ]);
+    } catch (error48) {
+      if (!isNoRoute(error48))
+        throw error48;
+    }
+    const source = await this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-source",
+      "sync"
+    ]);
+    return [source];
   }
   async syncArchitectureSource(project, repo2) {
     const [owner, name, ...rest] = repo2.split("/");
