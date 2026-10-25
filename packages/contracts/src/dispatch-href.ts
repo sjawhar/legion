@@ -54,8 +54,8 @@ export function itemFromSearch(search: string): DispatchHrefItem | undefined | n
  * `packages/envoy/internal/dispatch/text` through its JSON copy of these rows - so a new href
  * shape cannot reach one of them and not the others.
  *
- * A `#b-<block>` href resolves to its document, not to the ask the block holds: it is a document
- * link with a block anchor, and naming the ask would need a block-id-to-ask lookup on the server.
+ * A `#b-<block>` href names that block of its document: its reference is the document's with
+ * `#b-` and the id written by `encodeBlockId`. Any other fragment leaves the document.
  */
 export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] = [
   { href: "/issues/CORE-1", ref: "dispatch://CORE-1" },
@@ -101,13 +101,18 @@ export const DISPATCH_HREF_REFERENCES: readonly { href: string; ref: string }[] 
     href: "/projects/CORE/documents/handbook-md?ask=99999999-9999-4999-8999-999999999999",
     ref: "dispatch://CORE/artifact/handbook-md/ask/99999999-9999-4999-8999-999999999999",
   },
-  { href: "/issues/CORE-1/spec#b-ship-it", ref: "dispatch://CORE-1/spec" },
+  { href: "/issues/CORE-1/spec#b-ship-it", ref: "dispatch://CORE-1/spec#b-ship-it" },
   {
     href: "/issues/CORE-1/artifacts/notes-md#b-ship-it",
-    ref: "dispatch://CORE-1/artifact/notes-md",
+    ref: "dispatch://CORE-1/artifact/notes-md#b-ship-it",
   },
   {
     href: "/projects/CORE/documents/handbook-md#b-ship-it",
-    ref: "dispatch://CORE/artifact/handbook-md",
+    ref: "dispatch://CORE/artifact/handbook-md#b-ship-it",
   },
+  {
+    href: "/issues/CORE-1/spec#b-d%C3%A9cision%3A1",
+    ref: "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1",
+  },
+  { href: "/issues/CORE-1/spec#top", ref: "dispatch://CORE-1/spec" },
 ];

@@ -187,5 +187,110 @@
     "refs": [
       "dispatch://LEGION-1/artifact/shot-png@v1"
     ]
+  },
+  {
+    "body": "see dispatch://CORE-1/spec#b-d%C3%A9cision%3A1.",
+    "refs": [
+      "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1"
+    ]
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-d%c3%a9",
+    "refs": [
+      "dispatch://CORE-1/spec#b-d%C3%A9"
+    ]
+  },
+  {
+    "body": "dispatch://CORE-1/artifact/notes-md#b-ship-it",
+    "refs": [
+      "dispatch://CORE-1/artifact/notes-md#b-ship-it"
+    ]
+  },
+  {
+    "body": "dispatch://CORE/artifact/handbook-md#b-ship-it",
+    "refs": [
+      "dispatch://CORE/artifact/handbook-md#b-ship-it"
+    ]
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-",
+    "refs": []
+  },
+  {
+    "body": "dispatch://CORE-1/spec#c-x",
+    "refs": []
+  },
+  {
+    "body": "dispatch://CORE-1/artifact/notes-md@v2#b-x",
+    "refs": []
+  },
+  {
+    "body": "dispatch://CORE-1#b-x",
+    "refs": []
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-%E0%A4",
+    "refs": []
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-%0A",
+    "refs": []
+  },
+  {
+    "body": "https://dispatch.test/issues/CORE-1/spec#b-ship-it",
+    "refs": [
+      "dispatch://CORE-1/spec#b-ship-it"
+    ]
+  },
+  {
+    "body": ":::callout{#d1 affects=\"dispatch://CORE-1/spec#b-a dispatch://CORE-1/spec#b-b\"}",
+    "refs": [
+      "dispatch://CORE-1/spec#b-a",
+      "dispatch://CORE-1/spec#b-b"
+    ]
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-ship-it@v2",
+    "refs": [
+      "dispatch://CORE-1/spec#b-ship-it@v2"
+    ]
+  },
+  {
+    "body": "see dispatch://CORE-1/artifact/notes-md#b-d%C3%A9cision%3A1@v12.",
+    "refs": [
+      "dispatch://CORE-1/artifact/notes-md#b-d%C3%A9cision%3A1@v12"
+    ]
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-ship-it@v",
+    "refs": []
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-ship-it@v0",
+    "refs": []
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-ship-it@v01",
+    "refs": []
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-ship-it@vx",
+    "refs": []
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-a@b",
+    "refs": []
+  },
+  {
+    "body": "dispatch://CORE-1/spec#b-it%40v2",
+    "refs": [
+      "dispatch://CORE-1/spec#b-it%40v2"
+    ]
+  },
+  {
+    "body": "https://dispatch.test/issues/CORE-1/artifacts/notes-md?v=2#b-ship-it",
+    "refs": [
+      "dispatch://CORE-1/artifact/notes-md@v2"
+    ]
   }
 ]

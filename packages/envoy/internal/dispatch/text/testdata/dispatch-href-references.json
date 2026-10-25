@@ -53,14 +53,22 @@
   },
   {
     "href": "/issues/CORE-1/spec#b-ship-it",
-    "ref": "dispatch://CORE-1/spec"
+    "ref": "dispatch://CORE-1/spec#b-ship-it"
   },
   {
     "href": "/issues/CORE-1/artifacts/notes-md#b-ship-it",
-    "ref": "dispatch://CORE-1/artifact/notes-md"
+    "ref": "dispatch://CORE-1/artifact/notes-md#b-ship-it"
   },
   {
     "href": "/projects/CORE/documents/handbook-md#b-ship-it",
-    "ref": "dispatch://CORE/artifact/handbook-md"
+    "ref": "dispatch://CORE/artifact/handbook-md#b-ship-it"
+  },
+  {
+    "href": "/issues/CORE-1/spec#b-d%C3%A9cision%3A1",
+    "ref": "dispatch://CORE-1/spec#b-d%C3%A9cision%3A1"
+  },
+  {
+    "href": "/issues/CORE-1/spec#top",
+    "ref": "dispatch://CORE-1/spec"
   }
 ]

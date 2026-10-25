@@ -8,7 +8,10 @@
  * names can change on one side only. A reference ends at whitespace (Unicode space separators
  * included, a vertical tab and U+FEFF not), an angle or square bracket, a quote, a backtick or a
  * pipe; the sentence punctuation, emphasis and strikethrough delimiters and unbalanced closing
- * parenthesis after it are dropped. External URLs cite nothing.
+ * parenthesis after it are dropped. External URLs cite nothing. A block reference is its
+ * document's reference, `#b-` and the block id as `encodeBlockId` writes it (readers take any
+ * percent-encoding), optionally pinned to version N of the document by a trailing `@v<N>`; each
+ * `refs` entry for one is written that canonical way.
  */
 export const DISPATCH_TEXT_REFERENCES: readonly {
   body: string;
@@ -141,5 +144,61 @@ export const DISPATCH_TEXT_REFERENCES: readonly {
   {
     body: "![shot.png](dispatch://LEGION-1/artifact/shot-png@v1)",
     refs: ["dispatch://LEGION-1/artifact/shot-png@v1"],
+  },
+  // A block of a document: its id is read with any percent-encoding and written as
+  // `encodeBlockId` writes it.
+  {
+    body: "see dispatch://CORE-1/spec#b-d%C3%A9cision%3A1.",
+    refs: ["dispatch://CORE-1/spec#b-d%C3%A9cision%3A1"],
+  },
+  { body: "dispatch://CORE-1/spec#b-d%c3%a9", refs: ["dispatch://CORE-1/spec#b-d%C3%A9"] },
+  {
+    body: "dispatch://CORE-1/artifact/notes-md#b-ship-it",
+    refs: ["dispatch://CORE-1/artifact/notes-md#b-ship-it"],
+  },
+  {
+    body: "dispatch://CORE/artifact/handbook-md#b-ship-it",
+    refs: ["dispatch://CORE/artifact/handbook-md#b-ship-it"],
+  },
+  // No block: an empty id, another fragment, a versioned document, an issue, an id that is not
+  // UTF-8 or decodes to a control character.
+  { body: "dispatch://CORE-1/spec#b-", refs: [] },
+  { body: "dispatch://CORE-1/spec#c-x", refs: [] },
+  { body: "dispatch://CORE-1/artifact/notes-md@v2#b-x", refs: [] },
+  { body: "dispatch://CORE-1#b-x", refs: [] },
+  { body: "dispatch://CORE-1/spec#b-%E0%A4", refs: [] },
+  { body: "dispatch://CORE-1/spec#b-%0A", refs: [] },
+  // A dashboard page's `#b-` fragment names the block it lands on.
+  {
+    body: "https://dispatch.test/issues/CORE-1/spec#b-ship-it",
+    refs: ["dispatch://CORE-1/spec#b-ship-it"],
+  },
+  // A `block[]` attribute's value: both readers end the second reference at the `"`.
+  {
+    body: ':::callout{#d1 affects="dispatch://CORE-1/spec#b-a dispatch://CORE-1/spec#b-b"}',
+    refs: ["dispatch://CORE-1/spec#b-a", "dispatch://CORE-1/spec#b-b"],
+  },
+  // A block pinned to version N of its document: `@v` and N without a sign or a leading zero.
+  {
+    body: "dispatch://CORE-1/spec#b-ship-it@v2",
+    refs: ["dispatch://CORE-1/spec#b-ship-it@v2"],
+  },
+  {
+    body: "see dispatch://CORE-1/artifact/notes-md#b-d%C3%A9cision%3A1@v12.",
+    refs: ["dispatch://CORE-1/artifact/notes-md#b-d%C3%A9cision%3A1@v12"],
+  },
+  // A malformed pin, or a raw `@` that starts no pin, names nothing.
+  { body: "dispatch://CORE-1/spec#b-ship-it@v", refs: [] },
+  { body: "dispatch://CORE-1/spec#b-ship-it@v0", refs: [] },
+  { body: "dispatch://CORE-1/spec#b-ship-it@v01", refs: [] },
+  { body: "dispatch://CORE-1/spec#b-ship-it@vx", refs: [] },
+  { body: "dispatch://CORE-1/spec#b-a@b", refs: [] },
+  // An `@` in the id is written `%40`: the block `it@v2`, unpinned.
+  { body: "dispatch://CORE-1/spec#b-it%40v2", refs: ["dispatch://CORE-1/spec#b-it%40v2"] },
+  // A version page is the versioned document whatever its fragment: pins are written only as
+  // `dispatch://` references.
+  {
+    body: "https://dispatch.test/issues/CORE-1/artifacts/notes-md?v=2#b-ship-it",
+    refs: ["dispatch://CORE-1/artifact/notes-md@v2"],
   },
 ];

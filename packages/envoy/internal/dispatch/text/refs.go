@@ -64,12 +64,17 @@ func IsSessionID(value string) bool {
 // the component id for components. Project is set instead of IssueKey for
 // unlinked project-document references and for components, and Session instead of
 // both for an artifact an agent's conversation owns (`agent/<session id>/artifact/<slug>`).
+// A block of a document (Kind "block") carries its document's fields, the block's id as
+// written in the document in Block, and in Pin the version a pinned reference (`@v<N>` after
+// the fragment) names, or 0.
 type Ref struct {
 	Kind     string
 	IssueKey string
 	Project  string
 	Session  string
 	ID       string
+	Block    string
+	Pin      int
 }
 
 // Located is a parsed reference and the byte offset of its first character in the body it
@@ -144,11 +149,14 @@ func trimReference(raw string) string {
 
 // parseDispatch reads a `dispatch://` reference, without its scheme, by the grammar the dashboard's
 // `parseDispatchReference` reads: a slug as written, an `@v` version, an agent's session id as
-// written, and an item id decoded as `itemSegment` decodes it. A reference holding a control
-// character names nothing.
+// written, an item id decoded as `itemSegment` decodes it, and a `#b-` block of a document as
+// parseBlock reads it. A reference holding a control character names nothing.
 func parseDispatch(value string) (Ref, bool) {
 	if hasControl(value) {
 		return Ref{}, false
+	}
+	if document, fragment, found := strings.Cut(value, "#"); found {
+		return parseBlock(document, fragment)
 	}
 	key, tail, found := strings.Cut(value, "/")
 	if issueKeyPattern.MatchString(key) {
@@ -234,6 +242,74 @@ func parseArtifactSlug(value string) (string, bool) {
 	return slug, true
 }
 
+// EncodeBlockID writes a block id as a reference's `#b-` fragment carries it: every UTF-8 byte
+// percent-encoded in upper-case hex except ASCII letters, digits and `-`, so no character a
+// reference ends at or the grammar trims, and no `@` a pin could be read from, is written bare.
+// Its twin is encodeBlockId in @legion/contracts; both are tested against
+// `testdata/dispatch-block-id-encodings.json`.
+func EncodeBlockID(id string) string {
+	const digits = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len(id))
+	for i := range len(id) {
+		c := id[i]
+		if 'a' <= c && c <= 'z' || 'A' <= c && c <= 'Z' || '0' <= c && c <= '9' || c == '-' {
+			b.WriteByte(c)
+			continue
+		}
+		b.WriteByte('%')
+		b.WriteByte(digits[c>>4])
+		b.WriteByte(digits[c&15])
+	}
+	return b.String()
+}
+
+// parseBlock reads `<document reference>#b-<block id>[@v<N>]`: a block of an issue's spec, an
+// issue's document or a project's document, optionally pinned to version N of that document. The
+// id is read with any valid percent-encoding (EncodeBlockID writes one), so `%40` is an `@` in the
+// id and a raw `@` is only ever the pin. Any other fragment, a raw `@` that does not start a
+// well-formed pin, a versioned document, an agent conversation's document, an item, or an id that
+// is empty or does not decode names nothing. A document version shows only as an `@` in the
+// document part: no key or slug holds one.
+func parseBlock(document, fragment string) (Ref, bool) {
+	encoded, ok := strings.CutPrefix(fragment, "b-")
+	if !ok || strings.Contains(document, "@") {
+		return Ref{}, false
+	}
+	pin := 0
+	if unpinned, version, pinned := strings.Cut(encoded, "@"); pinned {
+		number, ok := strings.CutPrefix(version, "v")
+		if !ok || !versionPattern.MatchString(number) {
+			return Ref{}, false
+		}
+		parsed, err := strconv.Atoi(number)
+		if err != nil {
+			return Ref{}, false
+		}
+		encoded, pin = unpinned, parsed
+	}
+	id, ok := blockID(encoded)
+	if !ok {
+		return Ref{}, false
+	}
+	ref, ok := parseDispatch(document)
+	if !ok || ref.Kind != "artifact" || ref.Session != "" {
+		return Ref{}, false
+	}
+	ref.Kind, ref.Block, ref.Pin = "block", id, pin
+	return ref, true
+}
+
+// blockID decodes the id part of a `#b-` fragment: not empty, holding no raw `@`, and decoding
+// as decodeItemID decodes an item id to a non-empty id.
+func blockID(encoded string) (string, bool) {
+	if encoded == "" || strings.Contains(encoded, "@") {
+		return "", false
+	}
+	id, ok := decodeItemID(encoded)
+	return id, ok && id != ""
+}
+
 // itemSegment is an item id as a reference writes it, decoded, as the dashboard reads one: written
 // without a `/`, `?`, `#` or whitespace (JavaScript's `\s`, which adds U+FEFF to the Unicode space
 // separators; its ASCII whitespace is control characters, which no reference holds), then decoded
@@ -258,8 +334,9 @@ func decodeItemID(value string) (string, bool) {
 
 // parseServer reads a dashboard URL against its parsed server URL as the dashboard's
 // `referenceRouteFromHref` reads it: the key and the path's item id as written, the query as
-// `searchParams` reads it, a version a positive decimal. A URL holding a control character names
-// nothing; net/url refuses only the ASCII ones.
+// `searchParams` reads it, a version a positive decimal, and a `#b-` fragment on a document page
+// as documentPage reads it. A URL holding a control character names nothing; net/url refuses only
+// the ASCII ones.
 func parseServer(raw string, base *url.URL) (Ref, bool) {
 	if base == nil || base.Scheme == "" || base.Host == "" {
 		return Ref{}, false
@@ -292,7 +369,7 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 		// A document page of the issue, which `dispatch search` links to with the item in its query
 		// for an anchored comment or ask.
 		case len(parts) == 3 && parts[2] == "spec":
-			return documentItem(Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, query)
+			return documentPage(Ref{Kind: "artifact", IssueKey: key, ID: "spec"}, query, "v", value)
 		case len(parts) == 4 && parts[2] == "artifacts":
 			slug, err := url.PathUnescape(parts[3])
 			if err != nil || !artifactSlugPattern.MatchString(slug) {
@@ -301,7 +378,7 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 			if version := query.Get("v"); version != "" && !versionPattern.MatchString(version) {
 				return Ref{}, false
 			}
-			return documentItem(Ref{Kind: "artifact", IssueKey: key, ID: slug}, query)
+			return documentPage(Ref{Kind: "artifact", IssueKey: key, ID: slug}, query, "v", value)
 		case len(parts) == 4 && (parts[2] == "asks" || parts[2] == "comments" || parts[2] == "messages"):
 			if id, ok := itemSegment(parts[3]); ok {
 				return Ref{Kind: strings.TrimSuffix(parts[2], "s"), IssueKey: key, ID: id}, true
@@ -323,7 +400,25 @@ func parseServer(raw string, base *url.URL) (Ref, bool) {
 	if version := query.Get("version"); version != "" && !versionPattern.MatchString(version) {
 		return Ref{}, false
 	}
-	return documentItem(Ref{Kind: "artifact", Project: parts[1], ID: slug}, query)
+	return documentPage(Ref{Kind: "artifact", Project: parts[1], ID: slug}, query, "version", value)
+}
+
+// documentPage reads a document page of an issue or a project: the item its query names, as
+// documentItem reads it, else the block its `#b-<block id>` fragment names (blockID; a raw `@` is
+// no pin here, since pins are written only as `dispatch://` references), else the document. A
+// version page (`versionParam` set) is the document whatever its fragment: a version's stored
+// markdown carries no block ids to land on.
+func documentPage(document Ref, query url.Values, versionParam string, page *url.URL) (Ref, bool) {
+	ref, ok := documentItem(document, query)
+	if !ok || ref.Kind != "artifact" || query.Get(versionParam) != "" {
+		return ref, ok
+	}
+	if encoded, found := strings.CutPrefix(page.EscapedFragment(), "b-"); found {
+		if id, ok := blockID(encoded); ok {
+			ref.Kind, ref.Block = "block", id
+		}
+	}
+	return ref, true
 }
 
 // agentArtifactPage reads the dashboard page of an artifact an agent's conversation owns,

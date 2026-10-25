@@ -5,6 +5,7 @@ import (
 	"os"
 	"reflect"
 	"slices"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -99,7 +100,8 @@ func TestExtractTerminatesArtifactSlugsAtMarkdownPunctuation(t *testing.T) {
 // order of first appearance, and nothing else, so the reference graph and the dashboard composer
 // agree on what a text cites. The table is generated from `DISPATCH_TEXT_REFERENCES` in
 // `@legion/contracts`, which `packages/contracts/src/dispatch-text-references.test.ts` holds this
-// file to; the composer walks the same rows.
+// file to; the composer walks the same rows. A row's block reference is written canonically, so
+// its fragment is the parsed block id as EncodeBlockID writes it and the parsed pin.
 func TestExtractMatchesTheSharedTextTable(t *testing.T) {
 	raw, err := os.ReadFile("testdata/dispatch-text-references.json")
 	if err != nil {
@@ -129,6 +131,9 @@ func TestExtractMatchesTheSharedTextTable(t *testing.T) {
 				if len(parsed) != 1 || parsed[0].Kind == "url" {
 					t.Fatalf("%s is not a reference: %#v", ref, parsed)
 				}
+				if parsed[0].Kind == "block" && !strings.HasSuffix(ref, blockFragment(parsed[0])) {
+					t.Fatalf("%s parsed as %#v, whose fragment is %s", ref, parsed[0], blockFragment(parsed[0]))
+				}
 				want = append(want, parsed[0])
 			}
 			got := []Ref{}
@@ -141,6 +146,67 @@ func TestExtractMatchesTheSharedTextTable(t *testing.T) {
 				t.Errorf("Extract() cites %#v; want %#v", got, want)
 			}
 		})
+	}
+}
+
+// blockFragment writes a parsed block reference's fragment canonically: `#b-`, the id as
+// EncodeBlockID writes it, and `@v<N>` for a pinned one.
+func blockFragment(ref Ref) string {
+	fragment := "#b-" + EncodeBlockID(ref.Block)
+	if ref.Pin != 0 {
+		fragment += "@v" + strconv.Itoa(ref.Pin)
+	}
+	return fragment
+}
+
+// Every writer of a `#b-` fragment writes the block id one way, the way the contracts' table
+// says; the table is generated from `DISPATCH_BLOCK_ID_ENCODINGS` in `@legion/contracts`, which
+// `packages/contracts/src/dispatch-block-ref.test.ts` holds this file to.
+func TestEncodeBlockIDMatchesTheSharedTable(t *testing.T) {
+	raw, err := os.ReadFile("testdata/dispatch-block-id-encodings.json")
+	if err != nil {
+		t.Fatalf("read table: %v", err)
+	}
+	var rows []struct {
+		ID      string `json:"id"`
+		Encoded string `json:"encoded"`
+	}
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("parse table: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("the shared block id table is empty")
+	}
+	for _, row := range rows {
+		if got := EncodeBlockID(row.ID); got != row.Encoded {
+			t.Errorf("EncodeBlockID(%q) = %q; want %q", row.ID, got, row.Encoded)
+		}
+	}
+}
+
+// A dashboard page's `#b-` fragment names the block the page lands on, read with any
+// percent-encoding. A pin is written only as a `dispatch://` reference, so a raw `@` in a page's
+// fragment names no block; an item in the query or a version page is what it names today.
+func TestExtractReadsADashboardPageBlockFragment(t *testing.T) {
+	const server = "https://dispatch.test"
+	cases := []struct {
+		href string
+		want Ref
+	}{
+		{"/issues/CORE-1/spec#b-it%40v2", Ref{Kind: "block", IssueKey: "CORE-1", ID: "spec", Block: "it@v2"}},
+		{"/projects/CORE/documents/handbook-md#b-q%3a1", Ref{Kind: "block", Project: "CORE", ID: "handbook-md", Block: "q:1"}},
+		{"/issues/CORE-1/spec#b-ship-it@v2", Ref{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"}},
+		{"/issues/CORE-1/spec#b-", Ref{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"}},
+		{"/issues/CORE-1/spec#b-%0A", Ref{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"}},
+		{"/issues/CORE-1/spec?v=2#b-ship-it", Ref{Kind: "artifact", IssueKey: "CORE-1", ID: "spec"}},
+		{"/projects/CORE/documents/handbook-md?version=3#b-ship-it", Ref{Kind: "artifact", Project: "CORE", ID: "handbook-md"}},
+		{"/issues/CORE-1/spec?comment=c1#b-ship-it", Ref{Kind: "comment", IssueKey: "CORE-1", ID: "c1"}},
+	}
+	for _, tc := range cases {
+		got := Extract(server+tc.href, server)
+		if len(got) != 1 || got[0] != tc.want {
+			t.Errorf("Extract(%s) = %#v; want %#v", tc.href, got, tc.want)
+		}
 	}
 }
 
