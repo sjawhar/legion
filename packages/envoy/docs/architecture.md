@@ -120,7 +120,7 @@ starting` itself.
 | `receipt_timeout` | A role forward reached the server and its live holder sent no receipt within two seconds |
 | `unplaceable_no_record` | An agent delivery given up: no session record this listener could read |
 | `unplaceable_no_push_target` | An agent delivery given up: a record that names nothing to push to |
-| `unplaceable_push_failed` | An agent delivery given up: a record naming a serve port the push did not reach |
+| `unplaceable_push_failed` | An agent delivery given up: a record named a serve port and the push did not land on it — an unreachable peer, a session process restarting, a connection refused, or a server that answered with anything but 204 |
 
 `envoy_delivery_duration_seconds` carries the same label for the attempts it times.
 

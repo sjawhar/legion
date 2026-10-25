@@ -7,8 +7,8 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
-// HandleAgentReason names why a delivery attempt did not reach the session, for the one question
-// the caller cannot answer from Delivered alone: whether waiting could change the answer. The
+// HandleAgentReason names why a delivery attempt did not land, for the one question the caller
+// cannot answer from Delivered alone: whether waiting could change the answer. The
 // three causes reach the caller as one undelivered result otherwise, and it would have to
 // re-derive them from the error text to tell them apart.
 type HandleAgentReason uint8
