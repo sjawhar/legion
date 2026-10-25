@@ -602,9 +602,15 @@
   — keeps the 503 and the `Retry-After: 1` but answers
   `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}`. The
   413 for a message NATS cannot take whole and the 400 for a subject or key it refuses are
-  unchanged. A send resolves its target from the session store itself rather than from this
-  listener's cache of it — a cache miss is read through to the `envoy_sessions` bucket within a
-  second, the same direct get the role paths already make — so
+  unchanged. A publish on either route whose request context has already ended — its budget
+  spent, which the role-holder read ahead of the publish can do, or the request cancelled — puts
+  nothing on the wire and is answered that 503: a core subject has no duplicate window and the
+  client retries every 5xx, so a message emitted behind a failure answer would reach its
+  subscriber twice. A core publish checks its deadline immediately before it publishes and its
+  context's cancellation before that; a JetStream publish relies on nats.go, whose request sends
+  nothing under an ended context. A send resolves its target from the session store itself rather
+  than from this listener's cache of it — a cache miss is read through to the `envoy_sessions`
+  bucket within a second, the same direct get the role paths already make — so
   `404 {"error":"no live session <id>"}` is now only the store's own word that the key is gone,
   and an agent delivery reads that same store before it pushes. A delivery this listener cannot
   place — no session record, a record naming nothing to push to, or a push that failed — is NAK'd
@@ -612,24 +618,30 @@
   its age in the stream and stopping at 18 deliveries. The first two causes push nothing, so a
   retry repeats nothing, and they are deferred as many times as the new
   `ENVOY_UNPLACEABLE_RETRY_WINDOW` (default `60s`) buys at that delay, twelve at the default. A
-  push that failed is deferred once, so it is delivered at most twice, however long the window:
-  it may have landed, since a refused prompt, a connection that never reached the session and an
-  answer lost after the session server took the prompt all come back as the same failure, and a
-  retry that clears the attempt record to push again would repeat an instruction the session may
-  already have, once per retry. At most 64 such messages are held deferred at once by the whole
+  push that failed is deferred once however long the window, and its give-up is final whether or
+  not the give-up's notice can be published, so it is pushed at most twice: it may have landed,
+  since a refused prompt, a connection that never reached the session and an answer lost after
+  the session server took the prompt all come back as the same failure, and a retry that clears
+  the attempt record to push again would repeat an instruction the session may already have, once
+  per retry. At most 64 such messages are held deferred at once by the whole
   listener (a quarter of the durable's ack-pending budget, one slot of which each deferral holds
   for its whole window), in one budget shared by every delivery handler it builds — the one a
   rebind after a NATS flap builds included — and keyed on each message, so only a message this
   listener deferred gives a slot back when it is redelivered; one arriving past that cap is given
   up at once. Each deferral logs `listener agent delivery deferred` at INFO with `reason`,
   `attempt` and `window_deferrals`, the deferrals that message's cause is allowed (1 for
-  `push_failed`), and the give-up logs `listener agent delivery given up` at WARN with the
-  `no_holder` delivery exception published once; the ambiguous `listener agent session not found
-  anywhere`, which acknowledged such a message away on its first attempt and counted it `skipped`,
-  is gone, and `envoy_messages_delivered_total` carries the new `delivery_status` labels
-  `unplaceable_no_record`, `unplaceable_no_push_target` and `unplaceable_push_failed` for those
-  give-ups. Every send and publish is recorded in one line, `listener send` or `listener publish`,
-  INFO when accepted and WARN when refused, naming the route's destination (`target_session` or
+  `push_failed`). The give-up counts its `delivery_status` and logs `listener agent delivery given
+  up` at WARN first, and only then publishes the `no_holder` delivery exception, once. A notice
+  that cannot be published — it embeds the original payload, so an envelope near the server's max
+  payload has its notice refused as too large on every attempt — logs `listener exception publish
+  failed` beside the give-up line and nothing else: the message is not NAK'd, it is acknowledged,
+  and it keeps the attempt record that stops a redelivery from pushing again. The ambiguous
+  `listener agent session not found anywhere`, which acknowledged such a message away on its first
+  attempt and counted it `skipped`, is gone, and `envoy_messages_delivered_total` carries the new
+  `delivery_status` labels `unplaceable_no_record`, `unplaceable_no_push_target` and
+  `unplaceable_push_failed` for those give-ups. Every send and publish is recorded in one line,
+  `listener send` or `listener publish`, INFO when accepted and WARN when refused, naming the
+  route's destination (`target_session` or
   `topic`), the envelope's `event_id`, `source`, `source_session` and `payload_summary`, the
   `status` answered, the `holder` a role lane resolved, and an `outcome` of `accepted`,
   `invalid_request`, `too_large` or `bus_unavailable` on either line, `no_live_session` or

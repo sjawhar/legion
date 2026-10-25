@@ -98,6 +98,17 @@ settles, but answers its own body,
 `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}`,
 recorded `role_holder_changed`: every bus read answered, so no bus was unavailable.
 
+A publish whose caller's context has already ended puts nothing on the wire; on these two routes it
+is answered the 503 above. A core publish (a role lane or an ad-hoc topic) checks its deadline
+immediately before it publishes (`publishConfirmed`, `internal/bus/confirm.go`), and
+`publishCoreTo` (`internal/bus/nats.go`) refuses a context cancelled while its deadline is still
+ahead, which a deadline alone cannot show; the JetStream path has no check of its own and relies on
+nats.go's, whose request returns the context's error before it sends anything. It matters because
+the publish route's role-holder read runs before the publish and can spend the request's budget: a
+core subject has no duplicate window, and the client retries every 5xx
+(`packages/envoy-client/src/transport.ts`), so a message emitted behind a failure answer would
+reach its subscriber twice.
+
 Each inbound send and publish is recorded in one line, INFO when accepted and WARN when refused:
 `listener send` (`target_session`) and `listener publish` (`topic`), both carrying `event_id`,
 `source`, `source_session`, `payload_summary`, `outcome` and `status`, and `holder` as well when a
@@ -160,18 +171,20 @@ the original delivery fields:
 | `source`, `source_session` | Original envelope source fields |
 
 An agent subject's `no_holder` is published once per message, at give-up rather than on the first
-attempt that failed to place it. A delivery this listener cannot place — no session record it
-could read, a record naming nothing to push to, or a push that failed — is NAKed for redelivery
-every five seconds, counted from the message's first delivery rather than from its age in the
-stream: `ENVOY_UNPLACEABLE_RETRY_WINDOW` (default 60 s) is spent as whole five-second deferrals,
-so it buys twelve of them at that default, and the delivery count stops the retries at 18
-whatever the window says. The first two causes push nothing, so retrying them repeats nothing, and
-they keep the window's whole allowance. A push that failed is deferred once, however long the
-window, so it is delivered at most twice: it may have landed — the session server refusing the
-prompt, a connection that never reached it and an answer lost after the server took the prompt all
-come back as the same failure — and a deferral clears the attempt-cache entry that otherwise keeps
-a redelivery from pushing again, so each retry can repeat an instruction the session already has.
-One retry covers a peer restarting or a connection refused for a moment; twelve would let the same
+attempt that failed to place it, and only after the give-up itself is recorded. A delivery this
+listener cannot place — no session record it could read, a record naming nothing to push to, or a
+push that failed — is NAKed for redelivery every five seconds, counted from the message's first
+delivery rather than from its age in the stream: `ENVOY_UNPLACEABLE_RETRY_WINDOW` (default 60 s) is
+spent as whole five-second deferrals, so it buys twelve of them at that default, and the delivery
+count stops the retries at 18 whatever the window says. The first two causes push nothing, so
+retrying them repeats nothing, and they keep the window's whole allowance. A push that failed is
+deferred once, however long the window, and the give-up after it is terminal whether or not its
+notice can be published, so it is pushed at most twice: it may have landed — the session server
+refusing the prompt, a connection that never reached it and an answer lost after the server took
+the prompt all come back as the same failure — and a deferral clears the attempt-cache entry that
+otherwise keeps a redelivery from pushing again, so each retry can repeat an instruction the
+session already has. One retry covers a peer restarting or a connection refused for a moment;
+twelve would let the same
 instruction arrive thirteen times. At most 64 agent deliveries are held deferred at once — a
 quarter of the durable's 256 ack-pending slots, one of which a deferred message holds for its whole
 window — and a message that arrives while that cap is reached is given up at once. The 64 is one
@@ -181,10 +194,15 @@ opens no second budget beside the first. The set is keyed on each message's JetS
 sequence, so only that message's next delivery gives its slot back; a redelivery this listener
 never deferred (another branch's NAK, an expired ack wait) frees nothing. Each deferral logs
 `listener agent delivery deferred` with `reason`, `attempt` and `window_deferrals`, the deferrals
-that message's cause is allowed (1 for `push_failed`); only the give-up logs `listener agent
-delivery given up`, publishes the exception, and counts `unplaceable_no_record`,
-`unplaceable_no_push_target` or `unplaceable_push_failed`. A role lane publishes its exception on
-the attempt itself, since nothing redelivers a core message.
+that message's cause is allowed (1 for `push_failed`); only the give-up counts
+`unplaceable_no_record`, `unplaceable_no_push_target` or `unplaceable_push_failed`, logs WARN
+`listener agent delivery given up`, and then publishes the exception. A notice that cannot be
+published — it embeds the original payload, so an envelope near the server's max payload has its
+notice refused as too large on every attempt — logs ERROR `listener exception publish failed`
+beside the give-up line and changes nothing else: the message is not NAKed, it keeps the
+attempt-cache entry that turns a redelivery a lost ACK brings into `listener attempt-dedupe skip`,
+and it is ACKed. Only the fanout path still NAKs a message whose exception could not be published.
+A role lane publishes its exception on the attempt itself, since nothing redelivers a core message.
 
 Role exceptions use core NATS with the role lane. Other control exceptions retain ordinary
 JetStream transport. Exception topics do not produce further exception events.
