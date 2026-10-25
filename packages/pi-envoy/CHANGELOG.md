@@ -85,6 +85,12 @@
   `dispatch ask` for it, and run `dispatch open-asks` before you say you wait on a person; and record
   every request you accept in Dispatch before you start it, read that record before a turn ends, and
   drop no item. `src/skills-guard.test.ts` holds both rules to the context a session receives.
+- `dispatch-writing-specs`: name an issue by its `dispatch://` link and say in a clause what it does
+  for the reader, never a bare key; and when a person's answer, comment or edit changes a text, write
+  what is true now and never narrate the edit, since versions and comments hold the history. In
+  `dispatch`, three lines that repeat what the command prints are gone: the meaning of `You've sent N
+  messages`, "never progress or status" (`dispatch message --help`) and the read-back after an
+  inserted block (`dispatch doc-edit --help`).
 - `dispatch-writing-specs`, "Approval": after a person approves a spec, an agent makes a new version
   only for a change to scope, acceptance, cost, risk or a decision the person made, and puts all
   such changes into one version. Any other fix goes in the plan or a comment, so the person is not

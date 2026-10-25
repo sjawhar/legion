@@ -26,6 +26,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   factual claim in the spec against the code, the docs or a command, resolves each finding of the
   fresh-reader check, and requests approval once. `dispatch-writing-specs`, "Approval", says the
   same for every spec.
+- `legion-controller`'s daily report names each issue by its `dispatch://` link and what it does for
+  the reader, as `dispatch-writing-specs` now says, in place of its key and title.
 
 - An architect's questions about its own tree follow `dispatch-writing-specs`, "Questions". When
   the issue already says to do a thing, it does not ask whether. It asks about an open point only

@@ -5,7 +5,7 @@ description: "Use before your first dispatch command in a session: a message, co
 
 # Dispatch
 
-Dispatch holds each issue's spec, asks, comments and documents. It is a record for the people who decide, never a log of your work.
+Dispatch is a record for the people who decide, never a log of your work.
 
 - Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives each command's rules and an example.
 - Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`). Give object and list fields as JSON.
@@ -33,7 +33,6 @@ The problem and why it matters. Recommendation: the option and its reason.
 - When an answer's option and text disagree, the text is the answer.
 - An ask block has a block id, for `doc-edit`, and an ask id, for the ask commands. `dispatch read --ref dispatch://KEY/ask/<id>` takes either.
 - An ask reaches the issue's assignee. On an unassigned issue, name who must answer.
-- After `doc-edit` adds a block, read it back with `dispatch doc-read`.
 
 ## Choosing what to work on
 
@@ -49,13 +48,12 @@ Outside Legion, claim your issue (`dispatch claim`) and move it and the children
 ## Close what you opened
 
 - An ask you opened is yours until it is answered or resolved. When the answer comes another way, or the design makes it moot, `dispatch resolve-ask` it in the same turn.
-- Each later write names your open asks. Resolve each one no longer needed, and retract each one a new ask replaces.
+- Resolve each open ask a later write names that is no longer needed; retract one a new ask replaces.
 
 ## Structure over stream
 
 - One issue per deliverable, with its content as the issue's document. Decisions are asks. A message only announces.
-- A message replies to a person, or tells them a change they must know now. Never progress or status.
-- `You've sent N messages …` means three with no reply. Wait, or ask once.
+- A message replies to a person, or tells them a change they must know now.
 - Text a person must read to decide is a section of the spec. An artifact is a real file.
 
 ## Architecture components
@@ -64,7 +62,7 @@ Attach each architectural issue to the components it changes (`--components-json
 
 ## References
 
-Link each issue, ask, comment, document or message you name:
+Link each item you name:
 
 ```text
 dispatch://KEY
@@ -77,10 +75,10 @@ dispatch://PROJECT/artifact/<slug>[@vN]
 dispatch://PROJECT/artifact/<slug>/ask/<id>
 ```
 
-A bare id or filename is not a reference. An id can be a unique prefix of 8 hex characters.
+A bare id or filename is not a reference. An ask or comment id can be an 8-hex prefix.
 
 ## Setup and the HTTP API
 
 - Use a personal token from Dispatch **Settings → Agent tokens**, as `DISPATCH_TOKEN` or `dispatch.token` in the session's `envoy.json`.
-- `GET /api/v1` lists every route. Never guess a path. Branch on an error's `code`, never its text.
+- `GET /api/v1` lists every route; never guess one. Branch on an error's `code`, not its text.
 - No command reorders the board: `PATCH /api/v1/issues/{key}` with `{"rank": {"before": "<key>", "after": "<key>"}, "actor": {"kind": "session", "id": "<your session id>"}}`.
