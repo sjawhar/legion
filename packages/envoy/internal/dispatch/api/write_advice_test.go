@@ -486,24 +486,19 @@ func TestWriteAdviceReportsIssueStatusAtWriteTime(t *testing.T) {
 	}
 }
 
-// adviceLabelledIssueKey seeds one issue with the given labels under the given parent (empty for
-// none), for the advice over who owns an issue's status.
-func adviceLabelledIssueKey(t *testing.T, handler http.Handler, project, title string, labels []string, parent string) string {
+// rawAdviceFields reads a write response's advice as raw JSON, so a test can tell a field that
+// was omitted from one that came back false, which a decode into testWriteAdvice cannot.
+func rawAdviceFields(t *testing.T, what, responseBody string) map[string]json.RawMessage {
 	t.Helper()
-	body := map[string]any{"project": project, "title": title, "force": true}
-	if labels != nil {
-		body["labels"] = labels
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(responseBody), &envelope); err != nil {
+		t.Fatalf("decode %s: %v body=%s", what, err, responseBody)
 	}
-	if parent != "" {
-		body["parent"] = parent
+	var rawAdvice map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["advice"], &rawAdvice); err != nil {
+		t.Fatalf("decode %s advice: %v body=%s", what, err, responseBody)
 	}
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create issue %s: status=%d body=%s", title, created.Code, created.Body.String())
-	}
-	return decodeBody[struct {
-		Key string `json:"key"`
-	}](t, created).Key
+	return rawAdvice
 }
 
 // A Legion child issue sits in triage until its daemon releases it, so a write there has to say
@@ -513,19 +508,18 @@ func adviceLabelledIssueKey(t *testing.T, handler http.Handler, project, title s
 // resolved only where it decides that line - a session's write on an issue still in triage.
 func TestWriteAdviceAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 	handler := newTestHandler(t)
-	createAdviceProject(t, handler, "OWNED")
 	actor := adviceSessionActor("session-owner")
 
-	parent := adviceLabelledIssueKey(t, handler, "OWNED", "Split the billing worker", []string{"legion"}, "")
+	parent := labelledIssueKey(t, handler, "OWNED", "Split the billing worker", []string{"legion"}, "")
 	for _, want := range []struct {
 		name    string
 		key     string
 		managed bool
 	}{
-		{"the legion label", adviceLabelledIssueKey(t, handler, "OWNED", "Rotate the certificates", []string{"legion"}, ""), true},
-		{"the label as Legion", adviceLabelledIssueKey(t, handler, "OWNED", "Back up the volume", []string{"Legion"}, ""), true},
-		{"a child under a labelled parent", adviceLabelledIssueKey(t, handler, "OWNED", "Draft an invoice renderer", nil, parent), true},
-		{"no such label on it or above it", adviceLabelledIssueKey(t, handler, "OWNED", "Tidy the checklist", []string{"infra"}, ""), false},
+		{"the legion label", labelledIssueKey(t, handler, "OWNED", "Rotate the certificates", []string{"legion"}, ""), true},
+		{"the label as Legion", labelledIssueKey(t, handler, "OWNED", "Back up the volume", []string{"Legion"}, ""), true},
+		{"a child under a labelled parent", labelledIssueKey(t, handler, "OWNED", "Draft an invoice renderer", nil, parent), true},
+		{"no such label on it or above it", labelledIssueKey(t, handler, "OWNED", "Tidy the checklist", []string{"infra"}, ""), false},
 	} {
 		t.Run(want.name, func(t *testing.T) {
 			written := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+want.key+"/messages", map[string]any{
@@ -546,15 +540,7 @@ func TestWriteAdviceAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 	if human.Code != http.StatusCreated {
 		t.Fatalf("human message: status=%d body=%s", human.Code, human.Body.String())
 	}
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(human.Body.Bytes(), &envelope); err != nil {
-		t.Fatalf("decode human write: %v", err)
-	}
-	var rawAdvice map[string]json.RawMessage
-	if err := json.Unmarshal(envelope["advice"], &rawAdvice); err != nil {
-		t.Fatalf("decode human advice: %v body=%s", err, human.Body.String())
-	}
-	if _, exists := rawAdvice["legion_managed_status"]; exists {
+	if _, asked := rawAdviceFields(t, "a human write", human.Body.String())["legion_managed_status"]; asked {
 		t.Fatalf("human write advice carried legion_managed_status: %s", human.Body.String())
 	}
 }
@@ -563,8 +549,7 @@ func TestWriteAdviceAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 // line whatever the answer would be, so an ordinary write on an ordinary issue gains no query.
 func TestWriteAdviceLeavesWhoOwnsTheStatusUnaskedPastTriage(t *testing.T) {
 	handler := newTestHandler(t)
-	createAdviceProject(t, handler, "PAST")
-	key := adviceLabelledIssueKey(t, handler, "PAST", "Already under way", []string{"legion"}, "")
+	key := labelledIssueKey(t, handler, "PAST", "Already under way", []string{"legion"}, "")
 	moved := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]string{
 		"status": "in_progress",
 	}, "alice")
@@ -578,15 +563,7 @@ func TestWriteAdviceLeavesWhoOwnsTheStatusUnaskedPastTriage(t *testing.T) {
 	if advice := adviceFromResponse(t, written.Code, written.Body.String()); advice.IssueStatus != "in_progress" {
 		t.Fatalf("advice issue_status = %q, want in_progress", advice.IssueStatus)
 	}
-	var envelope map[string]json.RawMessage
-	if err := json.Unmarshal(written.Body.Bytes(), &envelope); err != nil {
-		t.Fatalf("decode write past triage: %v", err)
-	}
-	var rawAdvice map[string]json.RawMessage
-	if err := json.Unmarshal(envelope["advice"], &rawAdvice); err != nil {
-		t.Fatalf("decode advice past triage: %v body=%s", err, written.Body.String())
-	}
-	if _, exists := rawAdvice["legion_managed_status"]; exists {
+	if _, asked := rawAdviceFields(t, "a write past triage", written.Body.String())["legion_managed_status"]; asked {
 		t.Fatalf("a write past triage asked who owns the status: %s", written.Body.String())
 	}
 }

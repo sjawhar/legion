@@ -379,30 +379,31 @@ func TestClaimAndStatusMoveIndependently(t *testing.T) {
 	}
 }
 
-// claimLabelledIssueKey seeds one issue with the given labels under the given parent (empty for
-// none), for the tests over who owns an issue's status.
-func claimLabelledIssueKey(t *testing.T, handler http.Handler, title string, labels []string, parent string) string {
+// labelledIssueKey seeds one issue of project (created if it is not there yet) with the given
+// labels under the given parent (empty for none), for the tests over who owns an issue's status:
+// both the claim routes' and the write advice's.
+func labelledIssueKey(t *testing.T, handler http.Handler, project, title string, labels []string, parent string) string {
 	t.Helper()
-	project := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
-		"key": "TEST", "name": "Test project",
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": project, "name": project + " project",
 	}, "alice")
-	if project.Code != http.StatusCreated && project.Code != http.StatusConflict {
-		t.Fatalf("create project: status=%d body=%s", project.Code, project.Body.String())
+	if created.Code != http.StatusCreated && created.Code != http.StatusConflict {
+		t.Fatalf("create project %s: status=%d body=%s", project, created.Code, created.Body.String())
 	}
-	body := map[string]any{"project": "TEST", "title": title}
+	body := map[string]any{"project": project, "title": title, "force": true}
 	if labels != nil {
 		body["labels"] = labels
 	}
 	if parent != "" {
 		body["parent"] = parent
 	}
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create issue %s: status=%d body=%s", title, created.Code, created.Body.String())
+	issue := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+	if issue.Code != http.StatusCreated {
+		t.Fatalf("create issue %s: status=%d body=%s", title, issue.Code, issue.Body.String())
 	}
 	return decodeBody[struct {
 		Key string `json:"key"`
-	}](t, created).Key
+	}](t, issue).Key
 }
 
 // TestClaimAnswersWhoOwnsTheIssuesStatus covers the answer a session acts on: on an issue Legion
@@ -413,11 +414,11 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 	live.set("session-one")
 	handler, _ := claimHandler(t, live)
 
-	lowercase := claimLabelledIssueKey(t, handler, "Rotate the staging certificates", []string{"legion"}, "")
-	uppercase := claimLabelledIssueKey(t, handler, "Back up the metrics volume", []string{"Legion"}, "")
-	parent := claimLabelledIssueKey(t, handler, "Split the billing worker", []string{"legion"}, "")
-	child := claimLabelledIssueKey(t, handler, "Draft an invoice renderer", nil, parent)
-	plain := claimLabelledIssueKey(t, handler, "Tidy the onboarding checklist", []string{"infra"}, "")
+	lowercase := labelledIssueKey(t, handler, "TEST", "Rotate the staging certificates", []string{"legion"}, "")
+	uppercase := labelledIssueKey(t, handler, "TEST", "Back up the metrics volume", []string{"Legion"}, "")
+	parent := labelledIssueKey(t, handler, "TEST", "Split the billing worker", []string{"legion"}, "")
+	child := labelledIssueKey(t, handler, "TEST", "Draft an invoice renderer", nil, parent)
+	plain := labelledIssueKey(t, handler, "TEST", "Tidy the onboarding checklist", []string{"infra"}, "")
 
 	for _, want := range []struct {
 		name    string

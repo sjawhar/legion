@@ -405,14 +405,9 @@ describe("Dispatch write advice", () => {
     expect(later.text).toContain("is still in triage");
   });
 
-  test.each([
-    ["false", false],
-    ["absent", undefined],
-  ])("renders the triage pointer when legion_managed_status is %s", async (_name, managed) => {
-    const rawAdvice = advice({
-      issue_status: "triage",
-      ...(managed === undefined ? {} : { legion_managed_status: managed }),
-    });
+  // The absent case is the rest of this file's fixtures, which carry no field and print the line.
+  test("renders the triage pointer when legion_managed_status is false", async () => {
+    const rawAdvice = advice({ issue_status: "triage", legion_managed_status: false });
     const result = await executeWrite(
       "dispatch_message",
       { issue: "DSP-42", body: "First" },

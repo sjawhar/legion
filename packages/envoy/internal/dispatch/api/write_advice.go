@@ -76,7 +76,7 @@ func (s *server) computeWriteAdvice(
 	excludeAskID string,
 	status string,
 ) (*writeAdvice, error) {
-	advice := &writeAdvice{YourOpenAsks: []adviceAsk{}}
+	advice := &writeAdvice{YourOpenAsks: []adviceAsk{}, IssueStatus: status}
 	if err := s.runAdviceQueryHook(ctx, tx, "session_writes_since_human"); err != nil {
 		return nil, &adviceQueryError{query: "session_writes_since_human", err: err}
 	}
@@ -117,19 +117,18 @@ func (s *server) computeWriteAdvice(
 	if err := rows.Err(); err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
-	if status != model.IssueStatusTriage {
-		return advice, nil
+	if status == model.IssueStatusTriage {
+		if err := s.runAdviceQueryHook(ctx, tx, "legion_managed_status"); err != nil {
+			return nil, &adviceQueryError{query: "legion_managed_status", err: err}
+		}
+		// The same helper the claim routes use (issue_claim.go), so the write advice and the
+		// claim result never disagree about who owns the status.
+		managed, err := legionManagedStatus(ctx, tx, issueKey)
+		if err != nil {
+			return nil, &adviceQueryError{query: "legion_managed_status", err: err}
+		}
+		advice.LegionManagedStatus = &managed
 	}
-	if err := s.runAdviceQueryHook(ctx, tx, "legion_managed_status"); err != nil {
-		return nil, &adviceQueryError{query: "legion_managed_status", err: err}
-	}
-	// The same helper the claim routes use (issue_claim.go), so the write advice and the claim
-	// result never disagree about who owns the status.
-	managed, err := legionManagedStatus(ctx, tx, issueKey)
-	if err != nil {
-		return nil, &adviceQueryError{query: "legion_managed_status", err: err}
-	}
-	advice.LegionManagedStatus = &managed
 	return advice, nil
 }
 
@@ -190,7 +189,6 @@ func (s *server) writeAdvice(
 		s.logAdviceError(route, issueKey, "savepoint", err)
 		return nil
 	}
-	advice.IssueStatus = status
 	return advice
 }
 
