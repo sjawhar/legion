@@ -132,13 +132,14 @@ export default defineConfig({
       use: { ...devices["Desktop Safari"] },
     },
     // The live view's phone layout (its keyboard cap, gutter and scroll locks), its model
-    // pill's ellipsis (the two engines lay out a flex child's min-width differently), and what
-    // the Conversation's floating pills cover on a phone, also run in WebKit, the engine iOS
-    // Safari uses; only those rows, since the rest of each spec is engine-agnostic.
+    // pill's ellipsis (the two engines lay out a flex child's min-width differently), the
+    // header's model and thinking pickers on a phone, and what the Conversation's floating pills
+    // cover on a phone, also run in WebKit, the engine iOS Safari uses; only those rows, since
+    // the rest of each spec is engine-agnostic.
     {
       name: "webkit-iphone",
-      testMatch: /(agent-view|phone-conversation|delivery-live)\.e2e\.ts/,
-      grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page/,
+      testMatch: /(agent-view|agent-view-settings|phone-conversation|delivery-live)\.e2e\.ts/,
+      grep: /on a phone the live view|a document-scrolling route|covers none of|a capped model name|on a phone the delivery page|the header shows the session's reported model/,
       use: { ...devices["iPhone 13"] },
     },
     // Firefox's native editing mishandles text typed over what follows a block's last line break,
