@@ -8,6 +8,7 @@ import {
   MESSAGE_REFUSED,
   navigateInApp,
   refusePosts,
+  WRITE_REFUSED,
   WRITE_REFUSED_TEXT,
 } from "./sends";
 import { asUser } from "./users";
@@ -41,7 +42,11 @@ test("a docked Conversation send refused while the reader is on the Inbox is the
 
     await navigateInApp(page, "/");
     await expect(page.locator("main").getByRole("heading", { name: "Inbox" })).toBeVisible();
-    const refused = answeredPost(page, `/api/v1/issues/${issue.key}/comments`, 503);
+    const refused = answeredPost(
+      page,
+      `/api/v1/issues/${issue.key}/comments`,
+      WRITE_REFUSED.status
+    );
     refuse();
     await refused;
 
@@ -131,7 +136,11 @@ test("a docked Reply on a different comment redirects onto the one whose refusal
     await field.fill("Reply meant for A");
     await composer.getByRole("button", { exact: true, name: "Send" }).click();
     await expect(field).toBeDisabled();
-    const refused = answeredPost(page, `/api/v1/issues/${issue.key}/comments`, 503);
+    const refused = answeredPost(
+      page,
+      `/api/v1/issues/${issue.key}/comments`,
+      WRITE_REFUSED.status
+    );
     refuse();
     await refused;
     await expect(composer.getByText(refusedText)).toBeVisible();
@@ -190,7 +199,11 @@ test("a thread's own reply refused after the reader left it past the deadline is
       await expect(turn.getByRole("button", { name: "Expand thread" })).toBeVisible();
     }
     await expect(field).toHaveCount(0);
-    const refused = answeredPost(page, `/api/v1/issues/${issue.key}/comments`, 503);
+    const refused = answeredPost(
+      page,
+      `/api/v1/issues/${issue.key}/comments`,
+      WRITE_REFUSED.status
+    );
     refuse();
     await refused;
 

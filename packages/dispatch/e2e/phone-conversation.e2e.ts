@@ -10,7 +10,7 @@ import {
 } from "./api";
 import { expectUncovered } from "./layout";
 import { resetDatabase } from "./seed";
-import { answeredPost, holdPosts, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
+import { answeredPost, holdPosts, refusePosts, WRITE_REFUSED, WRITE_REFUSED_TEXT } from "./sends";
 import { asUser } from "./users";
 
 // The phone layout on every project: on a phone a comment's thread opens full-screen over the
@@ -473,7 +473,11 @@ test("on a phone, a thread reply refused after Back comes back in its own thread
     await thread.getByRole("button", { exact: true, name: "Send" }).click();
     await expect(field).toBeDisabled();
     await leaveThread(page);
-    const refused = answeredPost(page, `/api/v1/issues/${issue.key}/comments`, 503);
+    const refused = answeredPost(
+      page,
+      `/api/v1/issues/${issue.key}/comments`,
+      WRITE_REFUSED.status
+    );
     refuse();
     await refused;
 

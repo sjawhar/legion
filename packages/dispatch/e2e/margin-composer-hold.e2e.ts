@@ -11,7 +11,14 @@ import {
   setSheet,
 } from "./editor";
 import { resetDatabase } from "./seed";
-import { answeredPost, holdPosts, navigateInApp, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
+import {
+  answeredPost,
+  holdPosts,
+  navigateInApp,
+  refusePosts,
+  WRITE_REFUSED,
+  WRITE_REFUSED_TEXT,
+} from "./sends";
 import { asUser } from "./users";
 
 // The composer a selection-bar action opens holds a send's draft until the server answers, like
@@ -70,7 +77,7 @@ test("a newer bar Comment while a margin send is out leaves the composer on the 
     await expect(form.locator("blockquote")).toHaveText("quick");
     await expect(form.getByLabel("Comment")).toHaveValue("About quick");
 
-    const refused = refusal(page, issue.key, 503);
+    const refused = refusal(page, issue.key, WRITE_REFUSED.status);
     refuse();
     await refused;
     await expect(form.getByText(WRITE_REFUSED_TEXT)).toBeVisible();
@@ -147,7 +154,7 @@ test("leaving a document while a margin send is out keeps its draft and refusal 
     await navigateInApp(page, "/");
     await expect(page.locator("main").getByRole("heading", { name: "Inbox" })).toBeVisible();
     await expect(composer(page)).toHaveCount(0);
-    const refused = refusal(page, issue.key, 503);
+    const refused = refusal(page, issue.key, WRITE_REFUSED.status);
     refuse();
     await refused;
 
@@ -190,7 +197,7 @@ test("the Pinned tab while a margin send is out keeps the composer, its draft an
     const margin = page.getByTestId("margin-sheet");
     await margin.getByRole("tab", { name: "Pinned" }).click();
     await expect(composer(page)).toHaveCount(0);
-    const refused = refusal(page, issue.key, 503);
+    const refused = refusal(page, issue.key, WRITE_REFUSED.status);
     refuse();
     await refused;
     await margin.getByRole("tab", { name: "Comments" }).click();
@@ -222,7 +229,7 @@ test("collapsing the margin while its send is out keeps the composer, its draft 
 
     await page.getByRole("button", { name: "Hide margin" }).click();
     await expect(page.getByTestId("margin-rail")).toBeVisible();
-    const refused = refusal(page, issue.key, 503);
+    const refused = refusal(page, issue.key, WRITE_REFUSED.status);
     refuse();
     await refused;
     await page.getByRole("button", { name: "Show margin" }).click();
@@ -295,7 +302,7 @@ test("on a phone, a margin thread opened while the margin's send is out keeps th
       .click();
     const thread = page.getByRole("dialog", { name: "Thread" });
     await expect(thread).toBeVisible();
-    const refused = refusal(page, issue.key, 503);
+    const refused = refusal(page, issue.key, WRITE_REFUSED.status);
     refuse();
     await refused;
     await thread.getByRole("button", { name: "Back" }).click();

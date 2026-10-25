@@ -3,7 +3,13 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import { createComment, createIssue, createProject, resolveComment } from "./api";
 import { documentEditor, marginCard, openedThreadCard, openSpec, setSheet } from "./editor";
 import { resetDatabase } from "./seed";
-import { answeredPost, navigateInApp, refusePosts, WRITE_REFUSED_TEXT } from "./sends";
+import {
+  answeredPost,
+  navigateInApp,
+  refusePosts,
+  WRITE_REFUSED,
+  WRITE_REFUSED_TEXT,
+} from "./sends";
 import { asUser } from "./users";
 
 // A margin thread's own reply holds its draft until the server answers, like every composer.
@@ -35,7 +41,7 @@ async function seed(title: string) {
 
 /** The refusal `refusePosts` hands the reply, once the page has it. */
 function refusal(page: Page, issueKey: string) {
-  return answeredPost(page, `/api/v1/issues/${issueKey}/comments`, 503);
+  return answeredPost(page, `/api/v1/issues/${issueKey}/comments`, WRITE_REFUSED.status);
 }
 
 /** On a phone the Thread dialog's Back waits for the reply until the send's deadline; past it,
