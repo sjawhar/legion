@@ -67,9 +67,9 @@ family the new pin catalogues (`omp models anthropic` on the new build) and the 
 serves, never to another family, and adds that model to `enabledModels` and to `models.yml` and
 `models-key-file.yml`. A gateway serves only the ids it was set up for and answers any other with
 404, so on the gateway route run one `omp -p --model @<role> "Reply ok."` turn through the new
-`models.yml` for each new model id before applying. The older
-models stay in all three, because a resumed session restores its own model and the pinned Oh My
-Pi refuses to resume one the profile no longer has (`docs/kubernetes.md`).
+`models.yml` for each new model id before applying. The older models stay in all three, because a
+resumed session restores its own model and the pinned Oh My Pi refuses to resume one the profile
+no longer has (`docs/kubernetes.md`).
 
 `apply.sh` writes with a server-side apply under its own field manager,
 `legion-operator-route-apply`, and forces conflicts. When another tool wrote the ConfigMap before

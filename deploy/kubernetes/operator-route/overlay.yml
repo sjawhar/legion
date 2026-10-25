@@ -30,23 +30,23 @@ disabledProviders:
   - llama.cpp
   - lm-studio
   - openai
-# Each role runs the newest model of its family the pinned Oh My Pi catalogues (.omp-pin): Fable
-# 5.1, Opus 5.5, Sonnet 5.5. A pin bump moves each line to the newest model of the same family the
-# new pin catalogues, never to another family, and keeps the older models in enabledModels and
-# models.yml so a session started on one still resumes (docs/kubernetes.md, the resume of a
-# session's own model).
+# claude-opus-5-5 and claude-sonnet-5-5 are in enabledModels and both models files, and no role runs
+# on them yet: they are served on Anthropic's own API and through a LiteLLM gateway keyed to it,
+# and not yet shown on the ServiceAccount-token gateway models.yml routes through, which answers an
+# id it does not serve with 404. Move a role once that gateway serves its model (README.md beside
+# this file, "Changing a role's model").
 modelRoles:
   default: anthropic/claude-fable-5-1:xhigh
   plan: anthropic/claude-fable-5-1:max
-  slow: anthropic/claude-opus-5-5:xhigh
-  smol: anthropic/claude-sonnet-5-5
-  task: anthropic/claude-sonnet-5-5
-  vision: anthropic/claude-sonnet-5-5
-  commit: anthropic/claude-sonnet-5-5
-  tiny: anthropic/claude-sonnet-5-5
-  advisor: anthropic/claude-sonnet-5-5:medium
-  review: anthropic/claude-opus-5-5:high
-  oracle: anthropic/claude-opus-5-5:high
+  slow: anthropic/claude-opus-5:xhigh
+  smol: anthropic/claude-sonnet-5
+  task: anthropic/claude-sonnet-5
+  vision: anthropic/claude-sonnet-5
+  commit: anthropic/claude-sonnet-5
+  tiny: anthropic/claude-sonnet-5
+  advisor: anthropic/claude-sonnet-5:medium
+  review: anthropic/claude-opus-5:high
+  oracle: anthropic/claude-opus-5:high
   deep: anthropic/claude-fable-5-1:xhigh
 retry:
   # A failed model call is retried on another model (Sami's ruling of 2026-10-08 on
