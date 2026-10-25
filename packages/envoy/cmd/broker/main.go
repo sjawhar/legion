@@ -82,6 +82,16 @@ const rereadListenWait = 5 * time.Second
 // the end of the grace period. Ten seconds is far above any contention two statements against a
 // one-row table ever meet, and far below the 60-second shutdownTimeout the grace period already
 // has to cover, so it can only fire on a database that has stopped answering.
+//
+// The headroom is measured, not assumed. Two sessions running these two statements at the same
+// moment against a fresh database - the contention a cold two-pod boot makes on
+// oauth_provider_secret, where both pods insert the row and one of them loses - take 2.7-6.3 ms
+// for the session that waits and 0.8-1.5 ms for the one that does not, over five runs: three
+// orders of magnitude inside this bound. The caveat belongs with the figure. That was measured
+// with psql against a one-row table of the same shape rather than through the broker's own pgx
+// call on the migrated schema, so it is the order of magnitude of the contention and not the
+// whole cost of the call. oauth_secret_timeout_test.go measures the call itself, and asserts a
+// margin rather than a duration.
 const oauthSecretTimeout = 10 * time.Second
 
 func main() {
@@ -241,6 +251,16 @@ func main() {
 	// loop logs no failed-load line once its context has ended, which is now the end of the
 	// shutdown rather than the signal, so the line a deployment alarms on still counts only loads
 	// that failed while the broker was meant to be serving.
+	//
+	// Written down so nobody rediscovers it as a hang: one signal does not interrupt this call.
+	// A store that never answers the first load leaves it running - it runs on serving, which no
+	// signal cancels, and the ctx.Err() check below sits after it returns - so a single SIGTERM
+	// is noted and nothing more until the load ends. That is safe, and it stays as it is. A pod
+	// here has bound nothing, is in no EndpointSlice and serves no caller, so there is no request
+	// to answer and nothing to drain by ending it sooner; what does end it is a second signal,
+	// which the watchdog goroutine at the top of main reads from `again` and answers with
+	// os.Exit(1) (measured: gone within 30 ms of that signal), or the kubelet's SIGKILL at the
+	// end of the grace period.
 	current, err := policy.NewCurrent(serving, loader, policyRefresh)
 	fatal(err)
 	// A signal that arrived while that first load ran leaves nothing to drain. The load runs on

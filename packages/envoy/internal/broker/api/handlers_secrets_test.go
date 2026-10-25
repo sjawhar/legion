@@ -95,7 +95,7 @@ func TestSettingsAnswersTheGCPStore(t *testing.T) {
 
 // rereadsFreely is the broker-wide bucket a row about what a reread *answers* mounts, so that
 // row never meets the production sizing of a bucket it is not about. The production figure
-// (api.DefaultRereadOverallLimit) is a burst of five refilled one a second, sized for the fleet
+// (api.DefaultRereadOverallLimit) is a burst of ten refilled one a second, sized for the fleet
 // rather than for a test: a row driving several rereads back to back, and any row that later
 // drives one more, would be answered by a limiter rather than by the handler it is testing, and
 // would go red on a sizing change that was correct. The rows that *are* about the limiter inject

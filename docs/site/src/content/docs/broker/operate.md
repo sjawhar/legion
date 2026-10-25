@@ -220,18 +220,21 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   only that no agent secret has the name, says it only to an enrolled session, and never separates a
   secret that does not exist from one the broker refuses; it is what anyone allowed to list the
   namespace reads from the secrets' own names and tags (or annotations).
-  Rereads are limited twice, by fixed limits rather than settings (`DefaultRereadLimit`,
+  Rereads are limited twice, by fixed limits rather than settings (`RereadLimitFor`,
   `DefaultRereadOverallLimit` and `GCPRereadOverallLimit` in
   `packages/envoy/internal/broker/api/limits.go`): each source address gets a burst of 30,
-  refilled one every 8 seconds, and the broker as a whole takes one a second, burst 5, however
+  refilled one every twice the broker-wide bucket this process mounts — 2 seconds on the default
+  store — and the broker as a whole takes one a second, burst 10, however
   many addresses the rereads come from — each one takes the policy's writer lock while it reads
   the secret, so that lock, not the caller, is what the second limit bounds. On Google Secret
   Manager, where a reread spends two reads of the project's shared metadata quota, that
-  broker-wide limit is one reread every 4 seconds, burst 5. A reread counts against either limit
+  broker-wide limit is one reread every 4 seconds, burst 10, and an address's own is one every 8
+  seconds there. A reread counts against either limit
   only when both let it run, so one address flooding past its own limit leaves the broker-wide
   one to everyone else. Past either, the broker answers `429 RATE_LIMITED` with a `Retry-After`
   header naming the limit that refused: 1 second for the broker-wide limit, 4 seconds for Secret
-  Manager's, and 8 seconds for an address's own.
+  Manager's, and for an address's own twice whichever of those this process mounted — 2 seconds on
+  the default store, 8 under Secret Manager.
   Each of these buckets is one process's, and the broker-wide pair is sized from what the whole
   fleet spends of the secret store, which is not the same as what it spends in HTTP rereads: one
   reread the broker accepts costs the store **one read per pod**, because the pod that served it
@@ -242,12 +245,16 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   Manager `2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads = 2 a second`, the same 120
   metadata reads a minute as before. Read those as the arithmetic rather than as the number two:
   a third replica divides the fleet's budget by nine, not by four.
-  Their **burst** is divided by the replica count alone, not by its square, because a burst is a
-  depth and what it has to admit is one person's write burst, which the replica count does not
-  change; what does grow is each pod's own transient, its own burst plus every peer's, so
-  `10 / replicas = 5` leaves that where one pod's always was. The **per-address** bucket is
-  derived from the shared pair rather than chosen: it refills at half the rate of the tighter of
-  the two, so it always takes at least two addresses to hold the fleet's budget at zero. That
+  Their **burst** is not divided at all: it stays at the budget's ten. A burst is a depth and
+  what it has to admit is one person's write burst, a hard floor that the replica count does not
+  change, while what it guards — each pod's own transient, its own burst plus every peer's — is a
+  soft cost, latency rather than quota, spent once and re-bounded immediately by the rate.
+  Dividing it by the replica count put the depth at 3 for a three-pod fleet, under the floor of
+  four that `agent-secrets`' own end-to-end test measures, so ten now carries six tokens of
+  headroom at any fleet size. The **per-address** bucket is
+  derived from the bucket this process mounts rather than chosen: it refills at half that
+  bucket's rate, so it always takes at least two addresses to hold the fleet's budget at zero,
+  on either store and without tightening a deployment for a bucket it does not mount. That
   ordering matters because the route takes no credential and a refusal costs a caller nothing,
   so a caller that merely keeps succeeding at the shared refill rate would otherwise starve the
   fan-out for everyone. All three are re-derived together when the replica count changes.
@@ -422,10 +429,18 @@ and each peer the fan-out tells — so the fleet's store traffic is `replicas² 
 and the two broker-wide buckets' **rate** is the fleet's whole budget divided by that: at two pods
 one reread a second, or one every 4 seconds against Google Secret Manager, which leaves the store
 exactly the 4 reads a second, and Secret Manager the 120 metadata reads a minute, that one pod
-alone was allowed. Their **burst** is divided by the replica count alone, 5 at two pods, because a
-burst is a depth and what it admits is one person's write burst, which the replica count does not
-change. The **per-address** bucket is derived from them in turn — it refills at half the rate of
-the tighter of the two, one every 8 seconds at two pods — so no single address can hold the
+alone was allowed. Their **burst** is not divided at all and stays at ten, because a burst is a
+depth and what it admits is one person's write burst, which the replica count does not change,
+while what it guards is a transient on each pod's own writer lock — latency, spent once, and
+re-bounded by the rate. A burst momentarily lets the fleet accept `replicas × burst` rereads and
+each costs a read on every pod, so the store sees `replicas² × burst`: 40, 90 and 160 reads at
+two, three and four pods, twice that in metadata reads under Secret Manager (80, 180, 320), which
+is 8, 18 and 32 seconds of its 600 a minute — transients, re-bounded immediately by the rate.
+That cost grows with the square of the replica count while the rate is already divided by it, so
+a fleet much larger than two re-derives the burst against the quota rather than carrying ten
+forward unexamined. The **per-address** bucket is derived from them in turn — it refills at half
+the rate of the bucket this process mounts, 2 seconds on the default store and 8 under Secret
+Manager — so no single address can hold the
 fleet's budget at zero on a route that takes no credential. Every other limiter is per process, so
 a fleet of N pods allows N times each ([Network and trust](#network-and-trust)). All three are
 re-derived together when the replica count changes.

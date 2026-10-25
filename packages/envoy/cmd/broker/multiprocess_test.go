@@ -638,7 +638,7 @@ func TestTwoBrokers(t *testing.T) {
 
 	// The fan-out spends no rate-limit token on the pod it reaches. Every reread takes the
 	// policy's writer lock for one store read, so the public route is capped broker-wide as well
-	// as per address (api.DefaultRereadOverallLimit: a burst of five, one back every second),
+	// as per address (api.DefaultRereadOverallLimit: a burst of ten, one back every second),
 	// and that cap's rate is sized as the fleet's whole store budget divided by the replica count
 	// squared, since one accepted reread costs a store read on every pod — the sizing row 7
 	// below measures. That arithmetic holds only if a reread another pod's notification drives

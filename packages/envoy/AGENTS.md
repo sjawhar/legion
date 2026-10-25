@@ -3074,16 +3074,19 @@ cannot answer while authenticating is a 503 naming it. Every 500 is logged with 
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
 against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
 unauthenticated `POST /v1/secrets/{name}/reread` is rate limited both per source address and over
-every caller at once (`DefaultRereadLimit`, burst 30 and one back every 8 s, and
-`DefaultRereadOverallLimit`, burst 5 and one back every second — under the GCP store
-`GCPRereadOverallLimit`, burst 5 and one back every 4 s, which `cmd/broker` passes as
+every caller at once (the per-address bucket, which is `RereadLimitFor` of the shared bucket this
+process mounts — burst `DefaultRereadBurst` (30) and one back every `2 ×` that bucket's `Every` —
+and `DefaultRereadOverallLimit`, burst 10 and one back every second — under the GCP store
+`GCPRereadOverallLimit`, burst 10 and one back every 4 s, which `cmd/broker` passes as
 `Deps.RereadOverallLimit` — since each reread holds
 the policy's writer lock for one `DescribeSecret`, so a flood spread over addresses cannot hold up a
 reload; a reread spends a token from either bucket only when both allow it
 (`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
-with the refusing limit's `Retry-After`: 1 s for the shared bucket, 4 s for the GCP one and 8 s for
-an address's own). The two shared buckets' **rate** is the fleet's whole store budget divided by
+with the refusing limit's `Retry-After`: 1 s for the shared bucket, 4 s for the GCP one, and the
+address's own is twice whichever of those the process mounted — 2 s on the default store, 8 s
+under Secret Manager).
+The two shared buckets' **rate** is the fleet's whole store budget divided by
 the replica count **squared**, because one accepted reread costs the store one read
 per pod — the pod that served it and every peer the fan-out tells — so the fleet spends
 replicas × rate × replicas (default: 2 pods × 1 reread/s × 2 store reads = the 4 store reads a
@@ -3092,18 +3095,38 @@ since AWS serves `DescribeSecret` at 40,000 a second; GCP: 2 pods × 0.25 reread
 × 2 metadata reads = the same 120 reads a minute, a fifth of the 600 a minute per project Secret
 Manager serves, the rest being every pod's reload, its miss-path rereads and its releases) — read
 them as that arithmetic, never as the number two, since a
-third replica divides by nine rather than by four. Their **burst** divides by the replica count
-alone, not by its square: a burst is a depth and what it admits is one person's write burst, which
-the replica count does not change, while what grows is each pod's own transient (its own burst
-plus every peer's, N × B), so B = 10 / N = 5 puts that back where one pod's was — a burst of 2
-refused a person's third consecutive write, which
-`cmd/agent-secrets/secret_e2e_test.go`'s `TestSecretDeleteAndRestoreAreServedByTheBrokerAtOnce`
-holds this floor to. `DefaultRereadLimit`'s rate is derived from the shared pair rather than
-chosen: half the tighter of the two (`2 × GCPRereadOverallLimit.Every`), so it always takes at
-least two addresses to hold the fleet's budget at zero — the route takes no credential, and
+third replica divides by nine rather than by four. Their **burst** does **not** divide at all: it
+stays at the budget's ten. A burst is a depth and what it must admit is one person's write burst,
+which is a hard floor fixed in the replica count, while what it guards — each pod's own transient,
+its own burst plus every peer's — is a soft cost, latency against the reload and the miss-path
+rereads rather than a quota, spent once and re-bounded immediately by the rate. One side is a hard
+floor and the other is a soft cost, and sizing by the soft one is the error this corrects: `10 / N`
+put the depth at 3 for a three-pod fleet, under the floor its own guard enforces. That floor is
+four, measured against the live row with an overlay changing only this burst (2 FAIL, 3 FAIL,
+4 ok, 5 ok), since `cmd/agent-secrets/secret_e2e_test.go`'s
+`TestSecretDeleteAndRestoreAreServedByTheBrokerAtOnce` sends four rereads — delete, restore,
+retag, and the `NO_VALUE_KEY` retag that expects `no-current-value` and meets `RATE_LIMITED`
+instead when the bucket is spent — so ten carries six tokens of headroom and that row is the
+burst's pin. The momentary cost is two quantities, never one: a burst lets the fleet accept
+`replicas × burst` rereads and each costs a store read on every pod, so the fleet's momentary
+store cost is `replicas² × burst` — 40, 90 and 160 store reads at two, three and four pods, twice
+that in metadata reads under Secret Manager (80, 180, 320), which against the cited 600 a minute
+is 8, 18 and 32 seconds of quota, each a transient spent once and re-bounded by the rate, which is
+the half of the pair that protects the provider. That cost grows with the square of the replica
+count while the rate is already divided by it, so there is a count beyond which this shape stops
+making sense; nothing in the code bounds it, because the fleet is two.
+`RereadLimitFor` derives the per-address rate from the shared bucket **this process mounts**,
+rather than from a constant: `cmd/broker` mounts the GCP bucket only under `gcp-secret-manager`,
+so one constant derived from the Google figure tightened every AWS deployment fourfold for a quota
+it never touches. Half that bucket's refill means at least two addresses on either store to hold
+the fleet's budget at zero — the route takes no credential, and
 `AllowBothAt` charges a refusal to neither bucket, so a caller that merely keeps succeeding at the
-shared refill starves the fan-out for everyone. All three are re-derived together when the replica
-count changes (at four pods: 4 s and 16 s shared, 32 s per address). A reread `reread.Listener` drives spends no
+shared refill starves the fan-out for everyone. That is a weakening on the default store, which
+used to take eight; the eight was never designed, and buying it back costs every bulk writer there
+a fourfold tightening for the difference between two attackers and eight on a route with no
+credential. The two shared rates are re-derived when the replica
+count changes (at four pods: 4 s and 16 s), and the per-address one follows them without being
+touched. A reread `reread.Listener` drives spends no
 token at all, since the pod that served the original call already paid for it. Every other limiter
 is one process's and unchanged, so a fleet of N pods allows N times each: the per-address reread
 bucket, both `LauncherLimits` buckets, `DefaultTokenLimit` and `DefaultMissRereads`. The

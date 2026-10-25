@@ -62,7 +62,10 @@ type Deps struct {
 	// /v1/launcher-credentials/token; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
 	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
-	// DefaultRereadLimit.
+	// RereadLimitFor of the shared bucket this process mounted - RereadOverallLimit, or
+	// DefaultRereadOverallLimit when that is nil too - so that an address's own rate is ordered
+	// against the bucket this process actually has rather than against a constant derived from a
+	// bucket it may never mount.
 	RereadLimit *ratelimit.Limit
 	// RereadOverallLimit bounds that route across every caller at once; nil means
 	// DefaultRereadOverallLimit.
@@ -118,13 +121,17 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.LauncherLimits != nil {
 		limits = *deps.LauncherLimits
 	}
-	reread := DefaultRereadLimit
-	if deps.RereadLimit != nil {
-		reread = *deps.RereadLimit
-	}
 	rereadOverall := DefaultRereadOverallLimit
 	if deps.RereadOverallLimit != nil {
 		rereadOverall = *deps.RereadOverallLimit
+	}
+	// Derived from the shared bucket resolved just above, and only when the caller named no
+	// bucket of its own: a caller that passes one - the rows that drive the per-address bucket
+	// on its own - keeps what it passed, exactly as every other optional dep here is defaulted
+	// rather than overridden.
+	reread := RereadLimitFor(rereadOverall)
+	if deps.RereadLimit != nil {
+		reread = *deps.RereadLimit
 	}
 	token := DefaultTokenLimit
 	if deps.TokenLimit != nil {
