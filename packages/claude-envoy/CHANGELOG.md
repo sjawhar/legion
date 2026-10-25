@@ -20,6 +20,10 @@
 
 ### Fixed
 
+- The plugin's `legion/` copy of the `legion-architect` skill is regenerated with the same
+  reference: its Wake routing table moves unchanged to
+  `skill://legion-architect/references/wake-routing.md` (INFRA-376).
+
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on
   the calling process's environment: tmux printed the tabs as `_` to a process with neither `TMUX`
   nor a UTF-8 locale, and the answer read as one field. A Claude Code session in a tmux pane has
