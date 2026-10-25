@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-354",
+  "completed": "2026-10-25T08:13:16Z",
+  "reviewedHead": "a1401b2e40c2f73a463796f2554d690125ec821a",
+  "codeHead": "d677494f626c8824b10a1b943b6b0896254e1af3",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/broker/policy/policy.go:313-315",
+      "description": "Requester.Service's doc comment still states the retired rule: set only when the pod's verified account 'is the one BROKER_SERVICES binds that service to'. Plan D6/task F put every passage that states the one-account rule in scope because no machine check reaches them; this one, on the field that carries the authorization decision, was missed. Rewrite to 'one of the accounts BROKER_SERVICES maps to that service'."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:2784-2787",
+      "description": "Plan D10's run record: the older bullet still says, 'at this change's head', that get/list/create services answer 'no', while the new bullet at :2805 records them 'yes' on 2026-10-25. Date or qualify the older bullet ('at the time of that run') as the second bullet already does, so the record reads as one history rather than a contradiction."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/broker/service_account_scope_test.go:72-190",
+      "description": "The tester's test copies the HTTP call, JSON decode, token login, pod enrollment, signed request and response type of service_accounts_test.go:73-190. Factor one test-only fixture in a new file shared by the two tests (not service_login_test.go, so the overlap with #2162 does not widen); keep both tests' cases and the real-binary boundary."
+    }
+  ],
+  "verified": [
+    "Production code: requester's guarded subject lookup (machine_state.go:214), Load's account-keyed map and direct overlap lookup (config.go:399-411), the same-service duplicate wording (config.go:221-225), loader's distinct services (main.go:133); all four requester call sites pass ServicesByAccount; no reader of the old ServiceAccounts field remains in packages/envoy or packages/daemon.",
+    "Sibling boundaries held by tests that fail when broken: unlisted account (service_accounts_test.go pod C; machine_test.go impostor), account listed for another service under a different launcher (service_account_scope_test.go, the tester's mutant), account dropped from the configuration (TestAServiceGrantStopsWhenItsServiceAccountChanges, inverted so its old subject is gone), session-kind and launcher-less pods (TestAServicesSecretGoesToItsOwnPodsAlone).",
+    "No contract change census needed: the change adds no refusal and removes or renames nothing at a process or package boundary; BROKER_SERVICES widens and the renamed fields are in internal packages.",
+    "Both E2E lines present with surface, command, observation, head and negative control; tester verified the implementer's proof.",
+    "CI at a1401b2e: Tests 40175223517, Legion Envoy and Contracts 40175223519, PR Title 40175310332 queued, Docs 40175223558 in progress at review time; not a basis for approval."
+  ]
+}
