@@ -104,10 +104,11 @@ func (s *server) rereadSecret(w http.ResponseWriter, r *http.Request) {
 	// when the live answer changed would need RefreshOne to report a change it does not report,
 	// and would still leave a hole: a pod whose own five-minute reload had already caught the
 	// retag would answer "unchanged" and tell nobody, leaving its peers stale for up to a reload.
-	// Notifying always is also the arithmetic DefaultRereadOverallLimit is halved by, and a
+	// Notifying always is also the arithmetic DefaultRereadOverallLimit is sized by, and a
 	// reread a notification drives takes no token from any of this package's buckets - the pod
-	// that served the original call already paid for it - so the fleet's whole metadata traffic
-	// is the sending pod's bucket times the replica count, whichever pod was asked.
+	// that served the original call already paid for it - so one accepted reread costs the fleet
+	// one store read per pod, and the fleet's whole store traffic is the sending pod's bucket
+	// times the replica count squared, whichever pod was asked.
 	//
 	// The fan-out deliberately drops r's cancellation, which fires as soon as the answer is
 	// written and which a caller that hangs up mid-reread fires earlier still: the local reread

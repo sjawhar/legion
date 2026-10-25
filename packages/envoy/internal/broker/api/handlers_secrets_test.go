@@ -93,8 +93,17 @@ func TestSettingsAnswersTheGCPStore(t *testing.T) {
 	}
 }
 
+// rereadsFreely is the broker-wide bucket a row about what a reread *answers* mounts, so that
+// row never meets the production sizing of a bucket it is not about. The production figure is
+// the fleet's whole store budget divided by the replica count squared
+// (api.DefaultRereadOverallLimit), which is a burst of two: small enough that a row driving
+// three or four rereads back to back would be refused by a limiter rather than answered by the
+// handler it is testing. The rows that *are* about the limiter inject a bucket of their own in
+// the same way, with no tokens left in it.
+var rereadsFreely = ratelimit.Limit{Every: time.Millisecond, Burst: 100}
+
 func TestRereadServesANewSecretAndDropsADeletedOne(t *testing.T) {
-	ts := newTestServer(t)
+	ts := newTestServerWith(t, func(d *api.Deps) { d.RereadOverallLimit = &rereadsFreely })
 	ts.Secrets.Put(policytest.Secret("NEW_KEY", testApprover, policy.TierAgent, "v1"))
 	status, body := ts.req(t, http.MethodPost, "/v1/secrets/NEW_KEY/reread", nil, nil)
 	if status != http.StatusOK {
@@ -122,7 +131,7 @@ func TestRereadServesANewSecretAndDropsADeletedOne(t *testing.T) {
 // as, and none for a stored secret, so a person who retags a secret to a kind can tell a reread
 // that read the new tags from one that read them stale. It carries nothing else of the tags.
 func TestARereadNamesTheKindItServes(t *testing.T) {
-	ts := newTestServer(t)
+	ts := newTestServerWith(t, func(d *api.Deps) { d.RereadOverallLimit = &rereadsFreely })
 	ts.Secrets.Put(policytest.Secret("PLAIN_KEY", testApprover, policy.TierAgent, "v1"))
 	_, body := ts.req(t, http.MethodPost, "/v1/secrets/PLAIN_KEY/reread", nil, nil)
 	if r := decode[wireReread](t, body); !r.Served || r.Kind != "" || strings.Contains(string(body), `"kind"`) {
@@ -298,7 +307,10 @@ func (n *recordingNotifier) recorded() []string {
 // RefreshOne does not report. A name no secret can carry rereads nothing, so it notifies nobody.
 func TestRereadNotifiesEveryOtherPodOnEvery200(t *testing.T) {
 	notifier := &recordingNotifier{}
-	ts := newTestServerWith(t, func(d *api.Deps) { d.NotifyReread = notifier.notify })
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.NotifyReread = notifier.notify
+		d.RereadOverallLimit = &rereadsFreely
+	})
 	ts.Secrets.Put(policytest.Secret("NEW_KEY", testApprover, policy.TierAgent, "v1"))
 
 	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/NEW_KEY/reread", nil, nil); status != http.StatusOK {

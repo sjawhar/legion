@@ -64,26 +64,41 @@ var DefaultRereadLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 30}
 // whatever address each comes from. Every reread takes the policy's writer lock for one
 // DescribeSecret, so a per-address limit alone bounds nothing a flood spread over addresses
 // cannot pass: with no cap of its own it could keep that lock busy and hold up the five-minute
-// reload and the miss-path rereads a session's own request waits on. Two a second, burst five:
-// well above the rereads a person's writes make (one per secret written, in bursts), and far
-// below what would keep the lock busy.
+// reload and the miss-path rereads a session's own request waits on.
 //
-// This bucket is per process, and is sized by the invariant that replicas × this rate, and
-// replicas × this burst, is the whole fleet's cap; the deployment runs two pods, so each is
-// allowed half of what one pod alone was, in rate and in burst alike. Read it as that
-// arithmetic rather than as the number two: a third replica makes both figures a third of the
-// fleet's cap, not half of it. A reread another pod's notification drives (Deps.NotifyReread)
-// takes no token from this bucket, since the pod that served the original call already paid for
-// it, so the fleet's reread traffic is still the sending pod's bucket times the replica count.
-var DefaultRereadOverallLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 5}
+// This bucket is per process, and every reread it accepts costs the fleet one read of the secret
+// store per pod rather than one in total: the pod that served the call reads the store, and the
+// fan-out (Deps.NotifyReread) makes every peer read it too. So the fleet's store traffic is
+// replicas × this rate × replicas - replicas² × this rate - and the bucket is sized by dividing
+// the whole fleet's budget by the replica count squared, in rate and in burst alike. The budget
+// divided here is four rereads a second and a burst of ten, which is what one pod alone was
+// allowed against a store where a reread is one read; the deployment runs two pods, so each pod
+// gets a quarter of it: 2 pods × 1 reread/s × 2 store reads = 4 store reads a second, the budget.
+// Read that as the arithmetic rather than as the number two - a third replica divides the fleet's
+// budget by nine, not by four.
+//
+// What the smaller burst costs a person: agent-secrets secret writing several secrets at once
+// meets this broker-wide 429 after two of them, sooner than it did, and is told to come back in
+// one second (Retry-After follows Every, retryAfterSeconds). The write itself stands in the store
+// either way; only the narrowing of who may read it waits for the next token. A reread another
+// pod's notification drives takes no token from this bucket, since the pod that served the
+// original call already paid for it - which is what makes the arithmetic above the whole of the
+// fleet's store traffic rather than a lower bound on it.
+var DefaultRereadOverallLimit = ratelimit.Limit{Every: time.Second, Burst: 2}
 
 // GCPRereadOverallLimit is DefaultRereadOverallLimit for the Google Secret Manager store, where a
-// reread costs two reads against the 600-a-minute metadata quota the whole project shares: half a
-// reread a second, burst five. It follows the same invariant - replicas × this rate × two reads
-// is what the public route can spend of that quota - restated for the fleet: 0.5 reread/s per pod
-// × 2 pods × 2 reads is 2 reads a second, the same 120 a minute the one-pod figure allowed. A
-// third replica needs the rate divided by three, not by two, to leave that 120 where it is.
-var GCPRereadOverallLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 5}
+// reread costs two reads against the 600-a-minute metadata quota the whole project shares. The
+// budget divided here is one reread a second and a burst of ten: the 120 metadata reads a minute
+// the public route may spend of that shared 600, which is what one pod alone was allowed. It is
+// divided by the replica count squared for the same reason as the default bucket - each accepted
+// reread costs a store read on every pod, so the fleet spends replicas² × this rate - which for
+// two pods is 2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads = 2 metadata reads a
+// second, the same 120 a minute. A third replica divides that budget by nine rather than by four.
+//
+// Here too the burst of two is what a person meets first: agent-secrets secret writing several
+// secrets at once is refused broker-wide after two and told to come back in four seconds, while
+// each write stands in the store regardless.
+var GCPRereadOverallLimit = ratelimit.Limit{Every: 4 * time.Second, Burst: 2}
 
 type launcherLimiter struct {
 	perAddress, perLogin *ratelimit.Keyed
