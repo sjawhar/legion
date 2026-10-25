@@ -1,0 +1,35 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-391",
+  "completed": "2026-10-25T20:49:30Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
+  "critical": 0,
+  "important": 3,
+  "minor": 0,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy-client/src/dispatch-http.ts",
+      "description": "listArchitectureSources reads only the new route, so this release's dispatch CLI against a Dispatch older than 0117 answers every issue create in a project with no architecture source with false advice ('Could not check whether project NOARCH has an architecture model: no route for GET /api/v1/projects/NOARCH/architecture-sources. Review the dispatch skill ...'), reproduced against the base server 83f63201 in the reviewer's lane; the base CLI on the same server prints nothing. This reintroduces the exact defect #1522 fixed (a project with no source reads as none from either server). Fix: on the older server's 404 NOT_FOUND for the list, read the singular GET (200 null or 404 SOURCE_NOT_FOUND -> [], a row -> [row]) and rethrow anything else; lock it with a test; correct the envoy-client CHANGELOG line that documents the false advice."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/routes_table.go",
+      "description": "Removing GET /api/v1/projects/{key}/architecture-source gives every session still on an earlier pi-envoy or claude-envoy the same false advice on every issue create once Dispatch deploys: base CLI 83f63201 against the head server printed 'Could not check whether project NOARCH has an architecture model: no route for GET /api/v1/projects/NOARCH/architecture-source ...' (reproduced); the head CLI on the same server prints nothing. Keep that read route in this release answering its old contract (null without a source, a source row otherwise), described as kept for clients older than this release."
+    },
+    {
+      "severity": "important",
+      "file": "PR body",
+      "description": "No '## Contract change census' although the PR removes four routes, renames GET /architecture's 'source' to 'sources', removes DispatchClient.getArchitectureSource, changes syncArchitectureSource's signature, drops 'repo' from the PUT body and changes dispatch_architecture_sync's details shape. The census needs its search commands, every hit with a disposition, and a rollout line that is warn-first or an immediate refusal naming the vulnerability it closes."
+    }
+  ],
+  "thermonuclear": {
+    "head": "0a3b99cf71046a5a527df5c91f4aae4939ed877c",
+    "deepReview": "approve, no findings; Security rows answered (authz, secret, untrusted-input, prompt, agent-def, transport; supply-chain and sandbox not touched)",
+    "codeQuality": "one maintainability item: architecture-source tests grow __tests__/settings.test.tsx from 928 to 1,084 lines with whole-App mocks; move them to features/settings/ArchitectureSourcesSection.test.tsx (AgentTokensSection.test.tsx pattern) — named as the fast-follow, to fold into the next push"
+  },
+  "ci": "At 97ddf0a48fc4 read 2026-10-25T20:48Z: Docs 40230403152 success, Worker Image 40230403197 success, PR Title 40230637803 success, Tests 40230403139 in progress, Legion Envoy and Contracts 40230403058 queued; required set lint, typecheck, test, pr-title. A request for changes does not wait on it.",
+  "verified": "PR files 80 = changed_files 80 (paginated); compare main...head not truncated (80 files). Migration 0117 is still the next free number on main. Tester's A2/A6/upgrade/race proofs read and consistent with the diff."
+}
