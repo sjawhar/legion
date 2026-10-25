@@ -595,15 +595,6 @@ func (s *server) owedBroadcastAttempts(ctx context.Context, messageIDs []string)
 	return owed, rows.Err()
 }
 
-// lifetime is the process context background work runs on: cancelled when the server shuts
-// down, unbounded in a test that configured none.
-func (s *server) lifetime() context.Context {
-	if s.deps.Lifetime == nil {
-		return context.Background()
-	}
-	return s.deps.Lifetime
-}
-
 // GET /api/v1/broadcasts
 func (s *server) listBroadcasts(w http.ResponseWriter, r *http.Request) {
 	if _, ok := s.requireHuman(w, r); !ok {

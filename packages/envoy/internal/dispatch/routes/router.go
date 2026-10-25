@@ -236,8 +236,9 @@ type pendingState struct {
 }
 
 // New returns an http.Handler that serves all dispatch routes, and a wait (waitBackground) that
-// returns once the delivery hub, every live socket and their subscriptions, and the event stream
-// relay have ended after the process lifetime is cancelled.
+// returns once every delivery a request left running past its answer has settled, and the
+// delivery hub, every live socket and their subscriptions, and the event stream relay have ended
+// after the process lifetime is cancelled.
 func New(ctx *AppContext) (http.Handler, func()) {
 	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState), retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
 	mux := http.NewServeMux()

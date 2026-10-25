@@ -94,12 +94,14 @@ type Deps struct {
 	// nil keeps them in each version's row, and a row that still holds bytes is served from the
 	// row either way (files.BackfillRows moves them).
 	Files files.Store
-	// Lifetime bounds work a handler starts and does not wait for, and every live socket: it is
-	// the process's own context, cancelled when the server is shutting down, so a deploy stops a
-	// broadcast's remaining deliveries instead of leaving goroutines behind, and closes each live
-	// socket with 1012, ending every subscription it carries, so http.Server.Shutdown is not held
-	// for its whole budget by a connection that never goes idle. The delivery hub runs on it, and
-	// GET /ws/live is mounted only with one. Nil means unbounded, which is what a test gets.
+	// Lifetime bounds every live socket and the loops that serve them: it is the process's own
+	// context, cancelled when the server is shutting down, so a deploy closes each live socket
+	// with 1012, ending every subscription it carries, and http.Server.Shutdown is not held for
+	// its whole budget by a connection that never goes idle. The delivery hub and the event
+	// stream relay run on it, and GET /ws/live is mounted only with one. It bounds no delivery: a
+	// send a request leaves running (a broadcast's recipients) finishes across the signal, and
+	// the wait Register returns holds shutdown for it. Nil means unbounded, which is what a test
+	// gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a document socket and a live socket resolve their caller again
@@ -134,7 +136,7 @@ type DepsInput struct {
 	// Embedder embeds a search request's query for meaning search (LEGION-549); nil turns it off.
 	Embedder embed.Embedder
 	Events   *events.Broker
-	// Lifetime is the process context background work runs on; see Deps.Lifetime.
+	// Lifetime is the process context the live sockets and their loops run on; see Deps.Lifetime.
 	Lifetime context.Context
 	// App is the loaded GitHub App credentials (nil when unconfigured);
 	// GitHubAPIBase overrides the GitHub API origin (DISPATCH_GITHUB_API_BASE).
@@ -333,6 +335,15 @@ func (s *server) waitBackground() {
 		s.deliveryHub.wait()
 	}
 	s.eventRelay.wait()
+}
+
+// lifetime is Deps.Lifetime, the context the event stream relay runs on, or an unbounded one for a
+// server a test built without one.
+func (s *server) lifetime() context.Context {
+	if s.deps.Lifetime == nil {
+		return context.Background()
+	}
+	return s.deps.Lifetime
 }
 
 // register is Register, answering the server it mounted, whose delivery hub and event stream
