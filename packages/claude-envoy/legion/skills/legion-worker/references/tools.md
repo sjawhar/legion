@@ -42,19 +42,16 @@ So that writable `$HOME`, and the issue's disk, are where an install for yoursel
 the mechanics the answer is not a flat no: `redis-cli`, `sqlite3` and `dig` did run from an
 extraction prefix under `$HOME` with `LD_LIBRARY_PATH` set, and `psql` did not — Debian's
 `/usr/bin/psql` is a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no
-extraction prefix is on. What rules such an attempt out is not the filesystem and not the
-unpacking: it is what the prefix leaves resolving, which is the next section's test, and the test
-is scope. A prefix you export for the commands of your own run is sanctioned; a prefix left where
-a later launch, another role or a subagent picks it up without naming it is not — which is why the
-harness below records its variables in a handoff note rather than leaving them set. Exported onto
-the `PATH` of the shell you go on working in, so your later commands and your subagents find
-`psql` there without asking, the same prefix is the withheld `operator-setup` capability (the
-Dispatch e2e stack, below, is the worked case). That verdict is about resolution, so it reads the
-same in a container that does hand you a writable `/usr/local/bin`, and the room on the issue's
-disk does not touch it either. For everything the five do not cover, the one documented step is a
-pinned run through one of the three package runners the image already carries — plus `uv run
---with` when what you need is a library rather than a command — and a tool no runner reaches is an
-image change ("When no runner reaches it", below).
+extraction prefix is on. What rules such an attempt out is not the unpacking: it is the next
+section's test ("The test: where it lands, and what it leaves resolving"), and an extraction under
+`$HOME` fails that test's first condition whatever you scope it to, because `/home/legion` is the
+container's own filesystem rather than the issue's volume — the placement `roleEnvironment`
+(`packages/daemon/internal/runtime/sandbox/manifest.go`) exists to move writes off. The sanctioned
+extraction is the harness's: onto the issue's volume, and exported around its own commands and no
+further (the Dispatch e2e stack, below, is the worked case). For everything the five do not cover,
+the one documented step is a pinned run through one of the three package runners the image already
+carries — plus `uv run --with` when what you need is a library rather than a command — and a tool
+no runner reaches is an image change ("When no runner reaches it", below).
 
 ## What the withheld capability is, and what it is not
 
@@ -80,8 +77,29 @@ three artefacts in this repository are what draw the line — not a claim about 
 
 So the withheld row is about a dependency **the pod carries**: something that outlives the command
 that created it, and that a later launch or another role's process then resolves *without asking
-for it*. That last clause is the test to apply to a new case — after your command exits, what does
-something else now resolve that it never named?
+for it*.
+
+### The test: where it lands, and what it leaves resolving
+
+An install of your own — an interpreter, a browser, a second toolchain, an extraction prefix — is
+on the sanctioned side when both of these hold: what it writes lands under the
+issue's own volume, through one of the variables the runtime actually sets for you —
+`XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
+`GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` (`/legion/uv/cache`) and
+`UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`) — and after the command exits nothing else
+resolves differently. (`XDG_CONFIG_HOME` is set too and is not one of them: it is the pod's shared
+in-memory volume.)
+
+It is the withheld capability when either condition fails — anything that writes into a
+system prefix, and anything that leaves a toolchain, shim or binary which a later launch or
+another role's process will resolve without asking for it. Between two installs that both land in
+the right place, the test is resolution, not disk, and it reads as scope: a second toolchain
+exported for the commands of your own run — by absolute path, or on a `PATH` your harness's own
+script sets around its own invocations — is sanctioned; the same toolchain left where a later
+launch, another role or a subagent picks it up without naming it is operator setup, whoever typed
+the command.
+
+What each shape leaves resolving:
 
 - A pinned runner run: nothing. `uvx --from httpie@3.2.4 http --version` leaves a cache entry
   addressed by that coordinate and that version, which the next command reaches only by writing the
@@ -96,15 +114,11 @@ something else now resolve that it never named?
   Debian packages under `$HOME`, export `LD_LIBRARY_PATH` in the shell you go on working in, and
   you change what every later command in that shell — and every subagent that inherits the
   environment — resolves `psql` or its libraries to, asked for or not, on a prefix nothing records,
-  pins or rebuilds: that is a dependency the pod carries, configured by the role, and it is the
-  withheld capability. Export the same prefix for the commands of your own run and it is
-  sanctioned, because when they exit nothing else resolves differently. The test is scope, not the
-  `PATH`: what crosses to another role is a note, not an environment — the harness below records
-  its `PATH`, `LD_LIBRARY_PATH` and `DATABASE_URL` in a handoff note the next role sets
-  deliberately, which is that role asking. The opposite shape is in the tree too, and superseded:
-  telling every subagent to prepend a directory to `PATH` because a subagent's shell starts
-  without it hands over an environment to processes that never named it. That is the difference
-  between standing a harness up and getting yourself a CLI.
+  pins or rebuilds: that fails both conditions, and it is the withheld capability. The harness
+  below is the shape that passes. The opposite shape is in the tree too, and superseded: telling
+  every subagent to prepend a directory to `PATH` because a subagent's shell starts without it
+  hands over an environment to processes that never named it. That is the difference between
+  standing a harness up and getting yourself a CLI.
 
 The test is about what a command leaves for other processes, never about getting the same bytes
 twice — because a pinned line does not promise the same bytes. What a pin binds is the named
@@ -116,18 +130,12 @@ too — a comparison that has to hold across days or across pods — that is a p
 with `uv run` or `bun install` in a workspace, not a one-off runner line.
 
 A pinned run whose tool then installs something of its own — an interpreter, a browser, a second
-toolchain — is on the sanctioned side when both of these hold: what it writes lands under the
-issue's own volume, through one of the variables the runtime actually sets for you —
-`XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
-`GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` (`/legion/uv/cache`) and
-`UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`) — and after the command exits nothing else
-resolves differently. (`XDG_CONFIG_HOME` is set too and is not one of them: it is the pod's shared
-in-memory volume.) `uv run --with pyyaml==6.0.2 --no-project` passes both: the wheel lands in
-`UV_CACHE_DIR`, under `wheels-v6/pypi/pyyaml/6.0.2-…`, and `UV_PYTHON_INSTALL_DIR` is never
-created, because the image's own `python3` served the run. The interpreter is the other run: a
-project whose `.python-version` names an interpreter uv must fetch puts about 70 MB under
-`UV_PYTHON_INSTALL_DIR`, where the issue's next pod finds it, while the cache holds no wheel. A
-browser download passes too, and for Playwright — the browser driver this
+toolchain — is where the first condition does the work. `uv run --with pyyaml==6.0.2 --no-project`
+passes both: the wheel lands in `UV_CACHE_DIR`, under `wheels-v6/pypi/pyyaml/6.0.2-…`, and
+`UV_PYTHON_INSTALL_DIR` is never created, because the image's own `python3` served the run. The
+interpreter is the other run: a project whose `.python-version` names an interpreter uv must fetch
+puts about 70 MB under `UV_PYTHON_INSTALL_DIR`, where the issue's next pod finds it, while the
+cache holds no wheel. A browser download passes too, and for Playwright — the browser driver this
 repository's own Dispatch suite installs (`playwright install`, `packages/dispatch`'s
 `e2e:install`) — it passes as it stands, with nothing pointed anywhere: playwright-core resolves
 its browser registry under `XDG_CACHE_HOME`, which the runtime has already put on the issue's
@@ -154,18 +162,10 @@ limit, which is per role and smaller than the volume. Moving exactly these write
 filesystem is what `roleEnvironment` (`packages/daemon/internal/runtime/sandbox/manifest.go`)
 exists for, after GKE Autopilot evicted issue pods that charged their caches to it — so an install
 under `$HOME` fails the first condition and is outside the sanctioned form, however little else it
-changes. It is the withheld capability when either condition fails — anything that writes into a
-system prefix, and anything that leaves a toolchain, shim or binary which a later launch or
-another role's process will resolve without asking for it. Between two installs that both land in
-the right place, the test is resolution, not disk, and it reads as scope: a second toolchain
-exported for the commands of your own run — by absolute path, or on a `PATH` your harness's own
-script sets around its own invocations — is sanctioned; the same toolchain left where a later
-launch, another role or a subagent picks it up without naming it is operator setup, whoever typed
-the command. The three artefacts above are the whole of
-that line's ground. Disk is not: every cache is already relocated onto the issue's volume, which
-has the room for them (`docs/kubernetes.md`, "The tools a role's own work needs", carries the
-figure), and a sanctioned install is paid once per issue, on the issue's own disk, by the issue's
-roles together.
+changes. The three artefacts above are the whole of that line's ground. Disk is not: every cache is
+already relocated onto the issue's volume, which has the room for them (`docs/kubernetes.md`, "The
+tools a role's own work needs", carries the figure), and a sanctioned install is paid once per
+issue, on the issue's own disk, by the issue's roles together.
 
 **The worked case, and the one a role actually meets: the Dispatch e2e stack.** A change to
 `packages/dispatch` is proved by driving its browser suite, which needs a Postgres with pgvector;
@@ -178,9 +178,8 @@ and
 puts it on the volume, moves the caches with it, and writes it as one idempotent script the next
 role re-runs. That passes both conditions, and the second is the one to get right: export the
 root's `PATH` and `LD_LIBRARY_PATH` around the harness's own commands — `initdb`, `pg_ctl`, the
-server, the Playwright run — rather than into the shell you go on working in, where every later
-command and every subagent of yours would resolve through them. Handing the harness to the next
-role is the same test passed again, and
+server, the Playwright run — rather than into the shell you go on working in. Handing the harness
+to the next role is the same test passed again, and
 `docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md`
 is the illustration: it leaves the server running and records the `LD_LIBRARY_PATH`, `PATH` and
 `DATABASE_URL` in its handoff's `trickyParts`, so what crosses to the next role is a note that
@@ -392,8 +391,8 @@ to its role topic), with the tool, what your phase needs it for, and the runner 
 ruled out. What is not the step is improvising a CLI for your own convenience — a vendored binary,
 a hand-rolled substitute, or an extraction prefix dropped on your own `PATH`: the architect decides
 whether the image change is work to schedule. An extraction a harness builds for its own runs is
-not improvising and is not what this rules out (the Dispatch e2e stack, above); the convenience
-case fails the same resolution test, and the mechanism is not what either verdict turns on.
+not improvising and is not what this rules out (the Dispatch e2e stack, above): the two cases part
+on "The test: where it lands, and what it leaves resolving", which the convenience case fails.
 
 The operator's side of this — why the image carries those five clients rather than anything else,
 the five priced options with their measurements, and what the clients cost the image — is in
