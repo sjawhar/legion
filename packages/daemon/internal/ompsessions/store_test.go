@@ -34,6 +34,40 @@ func TestInDatabaseIsTrueOfBothDatabaseKinds(t *testing.T) {
 	}
 }
 
+// An instance is valid exactly when the Cloud SQL connector would dial it whole: its parser takes
+// project:region:instance and the legacy domain-scoped domain:project:region:instance, never a
+// name with a segment missing or empty, a longer string it would take only part of, or whitespace
+// anywhere, which the Admin API would refuse at every generation start.
+func TestValidInstanceIsTheConnectorsRule(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		want bool
+	}{
+		{"example-project:us-central1:example-instance", true},
+		{"example.com:example-project:us-central1:example-instance", true},
+		{"example-instance", false},
+		{"example-project:us-central1", false},
+		{"example-project::example-instance", false},
+		{":us-central1:example-instance", false},
+		{"a:b:c:d:e", false},
+		{" example-project:us-central1:example-instance", false},
+		{"example-project:us-central1:example-instance ", false},
+		{"example-project:us central1:example-instance", false},
+		{"\texample-project:us-central1:example-instance", false},
+		{"example-project:us-central1:example-instance\t", false},
+		{"example-project:us\tcentral1:example-instance", false},
+		{"example-project:us-central1:example-instance\n", false},
+		{"example-project:us-central1\n:example-instance", false},
+		{"", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ValidInstance(tc.name); got != tc.want {
+				t.Errorf("ValidInstance(%q) = %t, want %t", tc.name, got, tc.want)
+			}
+		})
+	}
+}
+
 // Oh My Pi's client takes the socket whole as the URL's `path` parameter and ignores the host; the
 // login, which holds an `@`, is percent-encoded in the userinfo and survives net/url's own parser.
 func TestAgentURLNamesTheSocketAndSurvivesARoundTrip(t *testing.T) {

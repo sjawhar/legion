@@ -441,6 +441,11 @@ func TestLoadForValidationSettlesTheSessionStore(t *testing.T) {
 			ompsessions.Store{Kind: ompsessions.StoreCloudSQLIAM, Database: ompsessions.Database{
 				Instance: "example-project:us-central1:example-instance", Name: "legion_sessions", User: "legion-sessions@example-project.iam",
 			}}},
+		{"cloudsql-iam with a domain-scoped project", kubernetesFile + "    session_store: cloudsql-iam\n" +
+			"    session_database: {instance: \"example.com:example-project:us-central1:example-instance\", name: legion_sessions, user: legion-sessions@example-project.iam}\n",
+			ompsessions.Store{Kind: ompsessions.StoreCloudSQLIAM, Database: ompsessions.Database{
+				Instance: "example.com:example-project:us-central1:example-instance", Name: "legion_sessions", User: "legion-sessions@example-project.iam",
+			}}},
 		{"pvc", kubernetesFile + "    session_store: pvc\n", ompsessions.Store{Kind: ompsessions.StoreVolume}},
 		{"the default", kubernetesFile, ompsessions.Store{Kind: ompsessions.StoreVolume}},
 	} {
@@ -829,13 +834,19 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "session_database with an instance that is no connection name",
 			body: kubernetesFile + "    session_store: cloudsql-iam\n" +
 				"    session_database: {instance: example-instance, name: legion_sessions, user: legion-sessions@example-project.iam}\n",
-			want: `runtime.kubernetes.session_database.instance "example-instance" must be the Cloud SQL instance's connection name, project:region:instance`,
+			want: `runtime.kubernetes.session_database.instance "example-instance" must be the Cloud SQL instance's connection name, project:region:instance, or domain:project:region:instance for a domain-scoped project`,
 		},
 		{
 			name: "session_database with an instance missing a segment",
 			body: kubernetesFile + "    session_store: cloudsql-iam\n" +
 				"    session_database: {instance: \"example-project::example-instance\", name: legion_sessions, user: legion-sessions@example-project.iam}\n",
-			want: `runtime.kubernetes.session_database.instance "example-project::example-instance" must be the Cloud SQL instance's connection name, project:region:instance`,
+			want: `runtime.kubernetes.session_database.instance "example-project::example-instance" must be the Cloud SQL instance's connection name, project:region:instance, or domain:project:region:instance for a domain-scoped project`,
+		},
+		{
+			name: "session_database with an instance led by whitespace",
+			body: kubernetesFile + "    session_store: cloudsql-iam\n" +
+				"    session_database: {instance: \" example-project:us-central1:example-instance\", name: legion_sessions, user: legion-sessions@example-project.iam}\n",
+			want: `runtime.kubernetes.session_database.instance " example-project:us-central1:example-instance" must be the Cloud SQL instance's connection name, project:region:instance, or domain:project:region:instance for a domain-scoped project`,
 		},
 		{
 			name: "daemon_url empty",

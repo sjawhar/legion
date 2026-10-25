@@ -539,7 +539,11 @@ and refuses the other's, an inert key being refused and never ignored:
 cloudsql-iam; remove it`, and `runtime.kubernetes.session_database is not used when
 runtime.kubernetes.session_store is postgres; remove it`, each of them under `pvc` too, which
 carries neither. All three members of `session_database` are required, since no pod reaches the
-database without them; `instance` must be the connection name `project:region:instance`; and a
+database without them; `instance` must be a connection name the Cloud SQL connector uses whole —
+`project:region:instance`, or `domain:project:region:instance` for a legacy domain-scoped project,
+with no whitespace anywhere, which its own parser (`instance.ParseConnName`) accepts and reads back
+as exactly that string, so a longer string it would take only part of is refused too
+(`ValidInstance`, `internal/ompsessions/store.go`, which the pod's proxy holds to as well); and a
 member the mapping does not model is refused by name (`readSessionStore` and `readSessionDatabase`,
 `internal/config/kubernetes.go`).
 
@@ -1542,7 +1546,9 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
   `session_dsn_secret`, or with one that is empty or not a Secret data key (`[-._a-zA-Z0-9]+`);
   `cloudsql-iam` without `session_database`, or with one that is not a mapping, names a member but
   `instance`, `name` and `user`, leaves one of the three empty, or whose `instance` is not a
-  `project:region:instance` connection name; a `session_dsn_secret` under `pvc` or `cloudsql-iam`;
+  connection name the Cloud SQL connector uses whole (`project:region:instance`, or
+  `domain:project:region:instance` for a domain-scoped project, with no whitespace); a
+  `session_dsn_secret` under `pvc` or `cloudsql-iam`;
   and a `session_database` under `pvc` or `postgres` (an inert key is refused, never ignored). At
   boot the daemon also refuses, under `postgres`, a
   `session_dsn_secret` that is the providers Secret's `NATS_NKEY_SEED` and a `provider_keys` entry
@@ -3757,8 +3763,10 @@ without `session_dsn_secret`, or with one that is empty, is not a Secret data ke
 (`[-._a-zA-Z0-9]+`), or is named `OMP_SESSION_STORAGE` or `OMP_SESSION_SQL_DSN_FILE` (see
 [Selecting the store](#selecting-the-store)); `session_store: cloudsql-iam` comes without
 `session_database`, or with one that is not a mapping, names a member but `instance`, `name` and
-`user`, leaves one of the three empty, or whose `instance` is not the Cloud SQL connection name
-`project:region:instance`; `session_dsn_secret` is set under `pvc` or `cloudsql-iam`, or
+`user`, leaves one of the three empty, or whose `instance` is not a Cloud SQL connection name the
+connector uses whole (`project:region:instance`, or `domain:project:region:instance` for a
+domain-scoped project, with no whitespace); `session_dsn_secret` is set under `pvc` or
+`cloudsql-iam`, or
 `session_database` under `pvc` or `postgres` (an inert key
 is refused, never ignored); or the daemon runs neither with a `kubeconfig` nor inside a pod
 (`runtime.kubernetes.kubeconfig is not set and /var/run/secrets/kubernetes.io/serviceaccount/token

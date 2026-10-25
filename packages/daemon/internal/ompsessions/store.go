@@ -2,8 +2,10 @@ package ompsessions
 
 import (
 	"net/url"
-	"slices"
 	"strings"
+	"unicode"
+
+	"cloud.google.com/go/cloudsqlconn/instance"
 )
 
 // StoreKind is which session store a deployment runs (runtime.kubernetes.session_store).
@@ -34,16 +36,26 @@ type Store struct {
 	Database Database
 }
 
-// Database is a Cloud SQL session database: the instance's connection name
-// (project:region:instance), the database in it, and the IAM login a pod signs in as.
+// Database is a Cloud SQL session database: the instance's connection name (ValidInstance), the
+// database in it, and the IAM login a pod signs in as.
 type Database struct{ Instance, Name, User string }
 
-// ValidInstance reports whether name is a Cloud SQL instance's connection name,
-// project:region:instance: exactly three segments, none of them empty. It is the one rule, which
-// both the loader that reads the instance from the file and the proxy that dials it hold to.
+// ValidInstance reports whether name is a Cloud SQL instance's connection name the connector
+// uses whole: it holds no Unicode whitespace, the Cloud SQL connector's own parser
+// (cloudsqlconn's instance.ParseConnName) accepts it, and the project, region and name it parses
+// out, joined again as project:region:name, are name itself. The connector takes
+// project:region:instance, or domain:project:region:instance for a legacy domain-scoped project,
+// but its pattern is unanchored and would quietly take a part of a longer string (a:b:c:d:e parses
+// as project a:b, region c, name d), so the round trip refuses whatever it would not use whole.
+// It is the one rule, which both the loader that reads the instance from the file and the proxy
+// that dials it hold to, so --check-config accepts nothing the connector would refuse or read
+// otherwise.
 func ValidInstance(name string) bool {
-	segments := strings.Split(name, ":")
-	return len(segments) == 3 && !slices.Contains(segments, "")
+	if strings.ContainsFunc(name, unicode.IsSpace) {
+		return false
+	}
+	c, err := instance.ParseConnName(name)
+	return err == nil && c.Project()+":"+c.Region()+":"+c.Name() == name
 }
 
 // InDatabase is whether a session is a row rather than a file, which both database kinds are: then

@@ -1169,9 +1169,10 @@ func inertSessionKey(key string, kind ompsessions.StoreKind) error {
 }
 
 // readSessionDatabase reads `session_database` under `cloudsql-iam`: the instance's connection
-// name, project:region:instance, which the pod's proxy dials (internal/sessionproxy); the database
-// in it; and the IAM login the pod signs in as. All three are required, since no pod can reach the
-// database without them.
+// name, project:region:instance or domain:project:region:instance, which the pod's proxy dials
+// (internal/sessionproxy) and which must pass ompsessions.ValidInstance, the connector's own rule;
+// the database in it; and the IAM login the pod signs in as. All three are required, since no pod
+// can reach the database without them.
 func readSessionDatabase(value *yaml.Node) (ompsessions.Database, error) {
 	if value == nil {
 		return ompsessions.Database{}, errors.New(sessionDatabaseKey +
@@ -1198,7 +1199,7 @@ func readSessionDatabase(value *yaml.Node) (ompsessions.Database, error) {
 		return ompsessions.Database{}, err
 	}
 	if !ompsessions.ValidInstance(database.Instance) {
-		return ompsessions.Database{}, fmt.Errorf("%s.instance %q must be the Cloud SQL instance's connection name, project:region:instance", sessionDatabaseKey, database.Instance)
+		return ompsessions.Database{}, fmt.Errorf("%s.instance %q must be the Cloud SQL instance's connection name, project:region:instance, or domain:project:region:instance for a domain-scoped project", sessionDatabaseKey, database.Instance)
 	}
 	return database, nil
 }

@@ -40,7 +40,8 @@ type Config struct {
 	// connect to. It must not exist yet: the generation's private directory is fresh, so a socket
 	// already sitting there means something else holds the address.
 	Socket string
-	// Instance is the Cloud SQL instance connection name, project:region:instance.
+	// Instance is the Cloud SQL instance connection name, project:region:instance, or
+	// domain:project:region:instance for a domain-scoped project (ompsessions.ValidInstance).
 	Instance string
 	// NewDialer builds the upstream dialer. Nil builds the Cloud SQL connector's, dialing the
 	// instance's private IP with automatic IAM database authentication.
@@ -111,7 +112,7 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 		return nil, fmt.Errorf("sessionproxy: Socket %q is not an absolute path", cfg.Socket)
 	}
 	if !ompsessions.ValidInstance(cfg.Instance) {
-		return nil, fmt.Errorf("sessionproxy: Instance %q is not a project:region:instance connection name", cfg.Instance)
+		return nil, fmt.Errorf("sessionproxy: Instance %q is not the Cloud SQL instance's connection name, project:region:instance, or domain:project:region:instance for a domain-scoped project", cfg.Instance)
 	}
 	if cfg.ProofTimeout <= 0 {
 		return nil, fmt.Errorf("sessionproxy: ProofTimeout %s is not positive", cfg.ProofTimeout)
