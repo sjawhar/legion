@@ -2781,10 +2781,12 @@ sequence submits; the Service goes with its Job, and `kubectl get svc <workload>
 in the deployment it describes and partly from the declarations dispatch://INFRA-206 carries,
 and a reader is owed the boundary rather than a uniform voice:
 
-- *Executed from a role container here, at this change's head*: the three gate commands and the
-  whole grant matrix behind them (`create`/`delete jobs`, `list`/`get pods`, `pods/log` `yes`;
-  `patch`/`update jobs`, `get`/`list endpoints`, `get`/`list`/`create services`, `create pods`
-  `no`); the credential-less gate, with the in-cluster environment removed; the Job manifest
+- *Executed from a role container here, at the head of the change that first published this
+  section, before the deployment applied its Service grants*: the three gate commands and the
+  whole grant matrix behind them as they answered then (`create`/`delete jobs`, `list`/`get pods`,
+  `pods/log` `yes`; `patch`/`update jobs`, `get`/`list endpoints`, `get`/`list`/`create services`,
+  `create pods` `no` — the Service answers are `yes` since, as the last bullet records); the
+  credential-less gate, with the in-cluster environment removed; the Job manifest
   above through the namespace's own admission, server-side with nothing created, together with
   one deliberate breakage of each **enforced** rule, each refused naming the rule — the
   reachability label has no breakage to record, since admission does not check it, which is the
