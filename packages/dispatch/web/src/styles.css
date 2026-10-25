@@ -95,9 +95,9 @@ a {
      A `.dispatch-markdown` inherits its pitch from its call site, so "24px lines" is the
      message turn's, not every body's. Measured in the iPhone profile at 390px (INFRA-95):
      a message turn is 16px on 24px lines and the 3px clears the line above by 2px; an Inbox
-     ask card (`AskCard.tsx`) is 14px on 20px lines and clears it by 1px; an agent turn's
-     reasoning (`AgentThread.tsx`, `text-xs`) is 12px on 16px lines, where the 3px reaches
-     1px into the text of the line above. */
+     ask card (`AskCard.tsx`) is 15px on 24.375px lines and clears it by about 3.4px; an
+     agent turn's reasoning (`AgentThread.tsx`, `text-xs`) is 12px on 16px lines, where the
+     3px reaches 1px into the text of the line above. */
   .prose a {
     padding-block: 3px;
   }
