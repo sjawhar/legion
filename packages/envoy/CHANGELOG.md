@@ -418,6 +418,30 @@
 
 ### Changed
 
+- The Envoy listener answers a message route the bus did not serve with
+  `503 {"error":"envoy: the message bus did not answer: <reason>"}` and `Retry-After: 1`, in place
+  of the 500 that often reached no caller: `POST /v1/messages/send` and `POST /v1/messages/publish`
+  each take a 3.5 s budget from the request's own context, which the send's session read and both
+  routes' publish run inside, and the publish route answers that same 503 for a role-holder read
+  that did not answer. The 413 for a message NATS cannot take whole and the 400 for a subject or
+  key it refuses are unchanged. A send resolves its target from the session store itself rather
+  than from this listener's cache of it — a cache miss is read through to the `envoy_sessions`
+  bucket within a second, the same direct get the role paths already make — so
+  `404 {"error":"no live session <id>"}` is now only the store's own word that the key is gone,
+  and an agent delivery reads that same store before it pushes. A delivery this listener cannot
+  place is NAK'd and redelivered every five seconds while the message's JetStream age is inside
+  the new `ENVOY_UNPLACEABLE_RETRY_WINDOW` (default `60s`), logging `listener agent delivery
+  deferred` at INFO per attempt and, at give-up, `listener agent delivery given up` at WARN with
+  the `no_holder` delivery exception published once; the ambiguous `listener agent session not
+  found anywhere`, which acknowledged such a message away on its first attempt and counted it
+  `skipped`, is gone, and `envoy_messages_delivered_total` carries the new `delivery_status`
+  labels `unplaceable_no_record` and `unplaceable_no_push_target` for those give-ups. Every send
+  and publish is recorded in one line, `listener send` or `listener publish`, INFO when accepted
+  and WARN when refused, naming the route's destination (`target_session` or `topic`), the
+  envelope's `event_id`, `source`, `source_session` and `payload_summary`, the `status` answered,
+  the `holder` a role lane resolved, and an `outcome` of `accepted`, `invalid_request`,
+  `too_large`, `bus_unavailable`, `no_live_session`, `capability_refused`, `role_unclaimed` or
+  `role_lapsed` (INFRA-141).
 - A comment, comment edit, message or broadcast body is at most 32,000 characters
   (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
   `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is
