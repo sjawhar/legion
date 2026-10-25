@@ -37,6 +37,8 @@ import type {
   MyAnswersResponse,
   MyRepliesResponse,
   Project,
+  ProjectDefaultAssignee,
+  ProjectDefaultAssigneeInput,
   RepoProject,
   SearchResponse,
   UpdateIssueInput,
@@ -827,16 +829,10 @@ export function putArchitectureSource(
   );
 }
 
-/** A project and the person every unowned issue created under it falls to, or null for none. */
-interface ProjectDefaultAssignee {
-  project: string;
-  assignee: string | null;
-}
-
 /** Names the person a project's unowned new issues fall to, or clears it with `assignee: null`. */
 export function putProjectDefaultAssignee(
   project: string,
-  input: { assignee: string | null },
+  input: ProjectDefaultAssigneeInput,
   options: ApiOptions = {}
 ): Promise<ProjectDefaultAssignee> {
   return request<ProjectDefaultAssignee>(

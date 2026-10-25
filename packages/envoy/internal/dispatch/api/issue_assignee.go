@@ -56,33 +56,22 @@ func (s *server) allowedLogin(ctx context.Context, login string) (string, error)
 // among them, never reaches here: parseIssueAssignee decides both. The shared token creating a
 // root issue in a project with no default leaves it unassigned.
 //
-// The project's default is used only when it still names a person who has signed in. That check
-// is one query on q, the create's own transaction, which already holds the project row: it runs
-// only when every earlier step yielded nobody, so a create in a project with no default costs
-// nothing new. It is deliberately not allowedLogin: a default left stale by a restore or a
-// direct write must fall through to nobody, not refuse the create.
-func defaultAssignee(ctx context.Context, q queryer, actor model.Actor, parent, projectDefault *string) (*string, error) {
+// The project's default is used only when it still names a person who has signed in: the create's
+// own update of the project row returns the stored default only in that case (see the `returning`
+// in createIssue), so a create in a project with no default costs nothing new and no extra round
+// trip runs under the project row lock. That check is deliberately not allowedLogin: a default
+// left stale by a restore or a direct write must fall through to nobody, not refuse the create.
+func defaultAssignee(actor model.Actor, parent, projectDefault *string) *string {
 	if actor.Kind == "user" {
-		return new(model.CanonicalLogin(actor.ID)), nil
+		return new(model.CanonicalLogin(actor.ID))
 	}
 	if actor.Owner != nil {
-		return new(model.CanonicalLogin(*actor.Owner)), nil
+		return new(model.CanonicalLogin(*actor.Owner))
 	}
 	if parent != nil {
-		return parent, nil
+		return parent
 	}
-	if projectDefault == nil {
-		return nil, nil
-	}
-	var known bool
-	if err := q.QueryRow(ctx,
-		`select exists(select 1 from people where email = $1)`, *projectDefault).Scan(&known); err != nil {
-		return nil, fmt.Errorf("read project default assignee %q: %w", *projectDefault, err)
-	}
-	if !known {
-		return nil, nil
-	}
-	return projectDefault, nil
+	return projectDefault
 }
 
 type dispatchUser struct {

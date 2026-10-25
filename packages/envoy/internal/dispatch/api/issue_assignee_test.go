@@ -331,17 +331,6 @@ func TestWhoamiNamesHumanPersonalTokenOwnerAndSharedToken(t *testing.T) {
 	}
 }
 
-// setProjectDefaultAssignee sets (or clears, with nil) a project's default through the human-only
-// route the Settings page uses.
-func setProjectDefaultAssignee(t *testing.T, handler http.Handler, project string, assignee any) {
-	t.Helper()
-	response := dispatchRequest(t, handler, http.MethodPut, "/api/v1/projects/"+project+"/default-assignee",
-		map[string]any{"assignee": assignee}, "alice")
-	if response.Code != http.StatusOK {
-		t.Fatalf("set default assignee: status=%d body=%s", response.Code, response.Body.String())
-	}
-}
-
 // createSharedTokenIssue creates an issue as the shared token, which acts for nobody: the chain
 // then rests on the parent and the project's default.
 func createSharedTokenIssue(t *testing.T, handler http.Handler, body map[string]any) assigneeIssue {
@@ -360,7 +349,7 @@ func createSharedTokenIssue(t *testing.T, handler http.Handler, body map[string]
 func TestCreateIssueFallsBackToProjectDefaultAssignee(t *testing.T) {
 	handler := newTestHandler(t)
 	createAssigneeProject(t, handler)
-	setProjectDefaultAssignee(t, handler, "CORE", "Bob")
+	putDefaultAssignee(t, handler, "CORE", "Bob")
 
 	root := createSharedTokenIssue(t, handler, map[string]any{"project": "CORE", "title": "Root"})
 	expectAssignee(t, root.Assignee, "bob")
@@ -380,7 +369,7 @@ func TestCreateIssueFallsBackToProjectDefaultAssignee(t *testing.T) {
 func TestProjectDefaultAssigneeYieldsToEveryEarlierChainStep(t *testing.T) {
 	handler := newTestHandler(t)
 	createAssigneeProject(t, handler)
-	setProjectDefaultAssignee(t, handler, "CORE", "bob")
+	putDefaultAssignee(t, handler, "CORE", "bob")
 
 	explicit := createSharedTokenIssue(t, handler, map[string]any{
 		"project": "CORE", "title": "Naming someone wins", "assignee": "alice",
