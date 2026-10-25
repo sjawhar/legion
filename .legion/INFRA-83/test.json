@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-83",
+  "completed": "2026-10-25T12:20:00Z",
+  "round": 16,
+  "writtenFresh": "Retro removed .legion/INFRA-83/ in 05cd4b22e34c353bb34a3dad2895bd2bca2b5f94, taking plan.json, review.json and the previous test.json with it. A fifth forward merge of main then landed and the issue returned to testing, so this file is written new rather than edited, as the skill provides for a round after retro. The rounds before this one are not recoverable from the ledger; their method and evidence are in the pull request's comments, which is why the linked-evidence shape points at comments and never at a path under .legion/. That choice is load-bearing from this round on rather than theoretical.",
+  "readyConsequence": "The head carries .legion/INFRA-83/implement.json and, from this push, test.json. READY refuses READY_HEAD_CARRIES_HANDOFFS while they stand, so retro must run once more before the merger builds its packet. Flagged here and in the pull request body rather than left for READY to discover.",
+  "evidenceComment": {
+    "url": "https://github.com/sjawhar/legion/pull/2121#issuecomment-6397489685",
+    "why": "The body carries the verdict, the head and this link; the method, the fingerprint table across retro and the merge, the sweeps and the negative controls are here. The comment names the head it was taken at in its own text."
+  },
+  "rebaseRecheck": {
+    "reason": "Retro's two commits, then a fifth conflict-forced forward merge of main (5d8e06267f5736550fc83f6ea4177fa2cc261c17).",
+    "from": "3c518b2dd970e972683090eb9a1bcba30273fb98",
+    "fromFingerprint": "61c46e8da4d5807b...",
+    "afterRetro": "61c46e8da4d5807b... - unchanged across 05cd4b22's removal of the handoff ledger and b967b376's learning, because the fileset excludes .legion and docs/solutions. That is merge-gate's claim that retro's commits void no approval, measured rather than quoted.",
+    "to": "610fe0c83d1e8219b8a10aebc73f5db7a06c0244",
+    "toFingerprint": "b40053c5b2f37a41...",
+    "verdict": "changed at the merge - a full test round, and for the second round running the change is not a change in what the branch does. Main split skills/legion-architect/SKILL.md's wake-routing table into a new references/wake-routing.md, and this branch's own content - the four one-sentence merge-notice rows and the pointer paragraph this issue introduced - moved with it. Round fifteen was the base rewording a line the branch edits; this is the base moving the file it lives in. Both are invisible to the hash and visible in a minute from diffing the two branch-diffs."
+  },
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "The merge's resolution preserves this issue's architect-skill content through main's restructuring, which I verified rather than inferred: the merge-waiting row and the pointer paragraph are at skills/legion-architect/references/wake-routing.md:30, references/merge-notices.md survives with its ## merge-waiting section, and SKILL.md, wake-routing.md and merge-notices.md are each byte-identical to their packages/claude-envoy/legion copies. Retro's learning, docs/solutions/legion/a-record-is-true-when-written-and-read-later-so-pin-each-claim-to-a-command-or-delete-it-INFRA-83.md, carries no CI-line reference of any spelling, so it adds nothing to the corpus this issue retires. The sweeps at this head: the CI-line sweep over skills, the bundle and the prompts returns nothing at all; the predicate sweep returns 22 hits over the same 15 files as round fifteen, every one a known-good survivor; the deletion-survival check gives 493 removed lines, 477 after the reflow drop, 46 survivors over the 74 touched files, each read, none a restoration. Standing checks green: skills guard 11 pass 0 fail 23 expect() calls, check-dist a fresh build, ok internal/prompts.",
+    "proofCitationCheck": "The implement handoff's code head is 5d8e06267f5736550fc83f6ea4177fa2cc261c17. I read its checks on GitHub and watched them settle: lint, typecheck, test and pr-title all success, pi-legion success, test as check run 121157112539 of run 40189434511. 22 success, 2 skipped, and only the non-required dispatch lane still in_progress - I read the whole list rather than the four required names, which is the discipline round four bought. The pull request's head 610fe0c83d1e8219b8a10aebc73f5db7a06c0244 carries no check runs of its own and the compare of the code head with it is {\"files\":1,\"handoffsOnly\":true}."
+  },
+  "failed": 0,
+  "failures": [],
+  "proof": [
+    {
+      "criterion": "Retro's commits void nothing, and the merge that followed preserved this issue's content through main's restructuring of the file it lived in",
+      "surface": "The fingerprint computed at four heads across retro and the merge separately, and the relocated text read in both the skill tree and the staged bundle.",
+      "command": "The fingerprint command of skill://legion-worker/references/conflicts-and-rewrites.md at 3c518b2d, 05cd4b22, 5d8e0626 and 610fe0c8; diff of the two branch-diffs to find the merge's cause; grep -rn 'merge-waiting' over skills/legion-architect and its bundle copy; diff of SKILL.md, references/wake-routing.md and references/merge-notices.md against their packages/claude-envoy/legion copies; cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist; go -C packages/daemon test ./internal/prompts/... -count=1.",
+      "observed": "61c46e8da4d5807b at my last E2E head and still 61c46e8da4d5807b after retro removed the handoff ledger and added its learning - the fileset excludes .legion and docs/solutions, so retro's commits are invisible to it, which is what merge-gate asserts. b40053c5b2f37a41 at the merge and at the pull request's head, and the whole difference is main's split of the architect skill's wake-routing table into references/wake-routing.md, carrying this branch's four merge-notice rows and its pointer paragraph with it. The row is at wake-routing.md:30, merge-notices.md keeps its ## merge-waiting section, and all three files are byte-identical to their bundle copies. Guard 11 pass, check-dist a fresh build, ok internal/prompts.",
+      "headSha": "5d8e06267f5736550fc83f6ea4177fa2cc261c17",
+      "negativeControl": "The fingerprint table is the control in both directions in one run: unchanged where it must be blind (retro's ledger removal and learning) and changed where the base touched a file the branch edits, with the cause of each traced. A hash that had moved on retro would have sent a confirmation round chasing nothing; one that had stayed still across the merge would have hidden a relocation nobody had checked."
+    },
+    {
+      "criterion": "Nothing main brought in asserts that READY reads a check, and nothing this issue deleted came back",
+      "surface": "The agent-facing corpus and packages/daemon/internal, swept on the predicate rather than on remembered phrasing; and the branch's pre-merge diff against its fork point for the restoration half.",
+      "command": "grep -rnE for any CI-line reference in any spelling over skills, packages/claude-envoy/legion and packages/daemon/internal/prompts; grep -rniE for READY within seventy characters of check, checks, required set, required check, CI, green or verdict and the reverse, over the same roots plus packages/daemon/internal; the strong-string tree sweep; and the deletion-survival check against fork_point(main@origin | 05cd4b22e34c) with the reflow and touched-file refinements.",
+      "observed": "The CI-line sweep returns nothing at all. The predicate sweep returns 22 hits across 15 files, the same file set as round fifteen and each a known-good survivor: the api and classify doc comments that say READY reads no check, the surviving readyChecks function name, the merge-gate heading and the worker skill's reference row. The deletion-survival check gives 46 survivors over 74 touched files, all read, in the families of rounds 8, 9, 14 and 15 - shared Go imports, boilerplate assertions, the moved trailer-recipe lines, the dated quotation in template-names-a-ci-check. No deletion of this issue's came back.",
+      "headSha": "5d8e06267f5736550fc83f6ea4177fa2cc261c17",
+      "negativeControl": "The predicate sweep is a different instrument from the phrase list that missed required_checks.go for thirteen rounds, which is why its silence is worth something; the phrase list still returns only its usual ten. The deletion check runs against the branch's own fork point and not against main - the same 477 lines diffed against main would show nothing at all."
+    }
+  ],
+  "ciRead": {
+    "codeHead": "5d8e06267f5736550fc83f6ea4177fa2cc261c17",
+    "required": [
+      "lint",
+      "typecheck",
+      "test",
+      "pr-title"
+    ],
+    "observed": "All four completed success, watched until they settled, with pi-legion success beside them and test as check run 121157112539 of run 40189434511. 22 success, 2 skipped. Only dispatch is still in_progress, the non-required lane that has not settled inside any round of this issue; build, envoy-go, envoy-go-race, envoy-smoke, dispatch-memory and dispatch-multiprocess all settled success while I watched. I read the whole check list rather than the four required names. The pull request's head 610fe0c83d1e8219b8a10aebc73f5db7a06c0244 carries no check runs of its own, and gh api compare 5d8e0626...610fe0c8 is {\"files\":1,\"handoffsOnly\":true}.",
+    "rerun": "none: no CI lane was re-run as evidence in any round of this issue."
+  },
+  "notesForTheArchitect": [
+    "READY will refuse READY_HEAD_CARRIES_HANDOFFS at this head: retro removed .legion/INFRA-83/ and this round's push puts implement.json and test.json back. Retro has to run a second time before the merger builds its packet, which the merge gate provides for - every approval goes through acceptance to retro again - but it is worth knowing now rather than at the refusal.",
+    "Twice running the fingerprint has changed for something that is not a change in what the branch does: round fifteen the base reworded a line the branch edits, this round the base moved the file the branch's content lives in. Neither is distinguishable in the hash and both fell out in a minute from diffing the two branch-diffs. For dispatch://INFRA-152, the pair is the argument that 'changed' is a prompt to trace rather than a finding, and that the trace is cheap.",
+    "This round is the first where the linked-evidence choice paid rather than merely reasoned: retro deleted plan.json, review.json and the previous test.json, so every earlier round's method survives only in the pull request's comments. Had those been links into .legion/, fifteen rounds of evidence would have gone with the removal.",
+    "Fast-follow unchanged across sixteen rounds and still on the body's line: folding rememberWait's positional arm bool, and renaming readyChecks, which reads no check."
+  ]
+}
