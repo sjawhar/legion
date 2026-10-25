@@ -1993,8 +1993,10 @@ from a reuse:
   single-session send and the broadcast are the two (below). The layer replays the answer; the
   delivery code decides what is still owed.
 
-Every answer to a keyed request carries the key back (`Idempotency-Key: <key>`), and `/healthz`
-answers `idempotency_keys: true` on every build that judges the header, a fact of the binary
+Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the
+`400 IDEMPOTENCY_KEY_INVALID`, nor a request whose caller it could not resolve, nor one whose body
+is past the largest any route reads (26 MiB), each of which runs unkeyed - and `/healthz` answers
+`idempotency_keys: true` on every build that judges the header, a fact of the binary
 rather than of the probe. Together they are how a client tells a Dispatch that runs this layer
 from one that ignores the header and would run a retried write a second time: the agents' client
 resends only against a Dispatch it has seen answer with the echo, or whose `/healthz` it has read

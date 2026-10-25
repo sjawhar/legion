@@ -717,9 +717,12 @@ recovery.
 
 Migration `0116_request_keys` creates `request_keys`, the one record of every keyed write (Keyed
 writes, below): a new table that touches no row, which the release before it neither reads nor
-writes; its census answers `0`. From its release on, nothing reads or writes
-`broadcast_idempotency_keys` (`0055`), the broadcast's own key table before it; dropping it is a
-contracting migration, so it ships no earlier than the release after this one.
+writes; its census answers `0`. It takes the next free number on `main` at the rebase, since
+`main` has since given `0116` to `project_default_assignee` (the rule above: take the next free
+number on `main`). From its release on, nothing reads or writes
+`broadcast_idempotency_keys` (`0055`), the broadcast's own key table before it, and the table is
+kept: dropping it is a contracting migration, so it ships no earlier than the release after this
+one.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -1026,7 +1029,9 @@ is still owed and answers the message or broadcast as it stands now, under the f
 however the first request ended; a recipient a live sender still holds reads `pending`. Neither
 route takes a body `idempotency_key` any more.
 
-Every answer to a keyed request carries the key back (`Idempotency-Key: <key>`), and `/healthz`
+Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the
+`400 IDEMPOTENCY_KEY_INVALID`, a request whose caller it could not resolve, or one whose body is
+past the largest any route reads (26 MiB), each of which runs unkeyed - and `/healthz`
 answers `idempotency_keys: true` on every build that judges the header - a fact of the binary, so
 it is true whatever the database or NATS answer. A client tells a Dispatch that runs this layer
 from one that ignores the header, and would run a retried write a second time, by one or the
