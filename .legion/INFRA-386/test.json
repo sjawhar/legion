@@ -2,65 +2,119 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T16:50:30Z",
+  "completed": "2026-10-25T17:09:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "round": 4,
-  "testedHead": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
-  "roundReason": "Round 3's failure: the trap paragraph said the 0.33 s/0.35 s stops' placement is not shown by their output while the INFRA-232 bullet still said they and the measured kill -KILL 'landed inside the create', and the recovery paragraph said 'during the create'. The architect ruled the bullet's two placements in scope (base 3276-3282).",
+  "round": 5,
+  "testedHead": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+  "roundReason": "Review at 355ffe8e requested changes on four sentences: the closing comment (no-trap exits, a second stop during the trap), the recovery paragraph's list (failed label delete, cut-short label-path trap), the trap paragraph's count of label-path runs, the bullet's placement caveat; the deliberate-stop paragraph (base 3188-3191) changed at the reviewer's request.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its round-4 page checks on my own copy fetched at 355ffe8e (5d6812a0 serves the same bytes) and an independent reader probe over the same three excerpts; results match. It did not re-run P1 (block byte-identical); I did."
+    "how": "Re-ran its round-5 page checks on my own copy fetched at 241f4e1a (5ed92453 serves the same bytes) and reproduced its stub (one TERM: 'cleanup: delete done', 'sequence: exit 143'; two TERMs 0.5 s apart: 'cleanup: start' and nothing after). I also drove the double stop on the real filled block, which it did not, and re-ran P1."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round 3's failure resolved: the trap paragraph, the recovery paragraph and the INFRA-232 bullet agree on where the measured stops landed and on what evidence; A1-A3, A7, A8 hold",
+      "criterion": "Round 5: the four reviewed sentences and the deliberate-stop paragraph claim no more than the block and the runs show; A1-A3, A7, A8 hold",
       "surface": "docs/kubernetes.md fetched with gh api at the head from this issue's role container",
-      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=355ffe8e9ae9e76d2918e995b8fe1d6df3417eac\" -H \"Accept: application/vnd.github.raw\" > k-h4.md; plan section 4 checks; grep -n 'inside the create|during the create|landed (while|before|after)|landed first'; bullet outcomes compared with INFRA-232 implement.json@64dcfb2d",
-      "observed": "A1 0; A2 1 for all seven patterns; A3 date 4 and both timing pairs; A7 0; A8 0; 'inside the create' and 'during the create' 0 on the page; remaining placements are 'a stop that landed first' (before the name was read, 3157), the trap paragraph's 'not shown' sentence (3171) and the bullet's 'landed before the name printed' (3307); the bullet's 'two found the Job ... the rest found nothing' matches the source's 0.33/0.35 s found-and-deleted and 0.15-0.32/0.34 s 'No resources found'",
-      "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
-      "negativeControl": "at 3f864ba1 the same grep found 'inside the create' at 3304 and 3307 and 'during the create' at 3221"
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=241f4e1afcee63b80d5d76f5a3852816a6460d35\" -H \"Accept: application/vnd.github.raw\" > k-h5.md; plan section 4 checks; each new claim read against the block: 'trap - EXIT INT TERM HUP' at 3016 restores defaults; the label path prints 'cleanup: the Job's delete failed' at 3021; the label is printed (3010) before the create (3084)",
+      "observed": "A1 0; A2 1 for all seven patterns; A3 date 4 and both timing pairs; A7 0; A8 0; 'inside the create'/'during the create' 0; the closing comment's list (SIGKILL/pod, second stop, failed clean-up step, late-stored create) and the recovery paragraph's no-name list (SIGKILL/pod before the name, second stop on the label path, failed label delete, late-stored create) agree; main moved to 4792c8fa without touching docs/kubernetes.md",
+      "headSha": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+      "negativeControl": "base 371d6c87 fails A1, A2, A3, A7 (round 1); at 355ffe8e the closing comment said 'On the exits measured below, the trap above removed the workload' (the reviewer's finding)"
     },
     {
-      "criterion": "A4-A6, A5 as amended by the architect's rulings",
-      "surface": "the page at the head and the branch diff against main@origin (371d6c87)",
-      "command": "bash code.sh k-h4.md | sha256sum; cmp block.awk output with round 3; diff -U0 k-base.md k-h4.md | awk -f hunks3.awk (hunks.awk plus 3198-3202 and 3276-3282); bash a6.sh k-base.md k-h4.md",
-      "observed": "A4 abe1b4cf... (base); block byte-identical to round 3; six hunks old 3022, 3131, 3155-3165, 3199-3202, 3260-3261, 3278-3282 all ok, exit 0; A6 no NONCOMMENT, old-closing 0, old-listing 1",
-      "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
-      "negativeControl": "round 3's ranges (hunks2.awk) on the same diff exit 1 for the bullet hunk"
+      "criterion": "A4-A6, A5 as amended by the architect's and reviewer's rulings",
+      "surface": "the page at the head and the branch diff against 371d6c87",
+      "command": "bash code.sh k-h5.md | sha256sum; diff -U0 k-base.md k-h5.md | awk -f hunks5.awk (hunks3 ranges plus 3188-3191); bash a6.sh k-base.md k-h5.md",
+      "observed": "A4 abe1b4cf... (base); seven hunks old 3022, 3131, 3155-3165, 3188-3191, 3199-3202, 3260-3261, 3278-3282 all ok, exit 0; A6 no NONCOMMENT, old-closing 0, old-listing 1; the filled block differs from round 4's only in the closing comment lines",
+      "headSha": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+      "negativeControl": "hunks3.awk on the same diff exits 1 for the deliberate-stop hunk"
+    },
+    {
+      "criterion": "The new claim: a second stop while the trap runs ends it part-way, with no 'sequence: exit' line, and can leave the workload; the page's recovery lines then remove it",
+      "surface": "the real filled block at the head, run from this issue's role container against the applied cluster (stop2.sh: start the block, wait for 'workload:' in the sequence's own log, kill -TERM -- -<process>, a second 0.5 s later)",
+      "command": "bash stop2.sh t5-p1.sh t5-two.raw 2 (17:05:35Z); 5 s after the sequence ended, kubectl get job,service <name> and pods -l job-name=<name>; then kubectl delete job <name> --cascade=foreground; kubectl wait --for=delete service/<name> --timeout=60s",
+      "observed": "workload: infra-386-postgres-msg9v; 'Terminated'; the trap's readings (pod line, log refused while ContainerCreating, state) then nothing: no delete line, no 'sequence: exit' line; 5 s later job.batch/infra-386-postgres-msg9v and its pod still present; the recovery lines removed them in 2 s; 0 jobs, services or pods named infra-386-postgres- left",
+      "headSha": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+      "negativeControl": "one TERM at the same point (infra-386-postgres-wsh8c, 17:05:51Z): readings, 'job.batch ... deleted', 'No resources found', 'sequence: exit 143', 0 left"
     },
     {
       "criterion": "A10: the edited block still runs end to end",
-      "surface": "this issue's role container, against the applied cluster, through the role's own bash tool; can-i create jobs / create services / get services yes",
-      "command": "bash fill.sh k-h4.md t4-p1.sh (cmp-identical to round 3's filled copy); bash t4-p1.sh from 2026-10-25T16:46:33Z",
-      "observed": "run: sequence-run=1ac55736; workload: infra-386-postgres-9zldv; service created; condition met twice; answered; job deleted; No resources found; sequence: exit 0 at 16:48:06Z; 0 left; re-list by label No resources found",
-      "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
-      "negativeControl": "cpu \"1\" copy: refused by admission (policy, binding and rule text elided), 'cleanup: no Job name was read; deleting by label sequence-run=4bec85c6', No resources found, sequence: exit 1; 0 left; re-list No resources found"
-    },
-    {
-      "criterion": "A11 / round-3 failure: a fresh reader finds the three excerpts consistent",
-      "surface": "a fresh scout given only probe4.txt (trap paragraph, recovery paragraph, INFRA-232 bullet at the head)",
-      "command": "task(agent=scout): where did the 0.33/0.35 s stops land and do the excerpts agree; does the passage place the measured kill -KILL; any other contradiction or unsupported placement",
-      "observed": "\"The excerpts agree that the timing is unknown\"; the kill placed only 'before the name printed' in all three, 'The excerpts agree'; Q3 'None'",
-      "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
-      "negativeControl": "the same questions on 3f864ba1's excerpts (round 3): 'The excerpts disagree. The bullet says the two stops landed \"inside the create\", but the clean-up paragraph says nothing the runs printed shows that.'"
+      "surface": "this issue's role container, against the applied cluster; can-i create jobs / create services / get services yes",
+      "command": "bash fill.sh k-h5.md t5-p1.sh; bash t5-p1.sh from 2026-10-25T17:03:37Z",
+      "observed": "run: sequence-run=71caaaaf; workload: infra-386-postgres-mmkbj; service created; answered; job deleted; No resources found; sequence: exit 0 at 17:05:07Z; 0 left; re-list by label No resources found",
+      "headSha": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+      "negativeControl": "cpu \"1\" copy: refused by admission (policy, binding and rule text elided), 'cleanup: no Job name was read; deleting by label sequence-run=80553206', No resources found, sequence: exit 1; 0 left"
     },
     {
       "criterion": "A9: no private name enters the change",
-      "surface": "repository at the head, added lines, commit messages, live PR title and body, implement handoff, recorded run output",
+      "surface": "repository at the head, added lines, commit messages, live PR title and body, both handoffs",
       "command": "bash .github/scripts/check-private-names.sh; sweep.sh over each",
-      "observed": "exit 0 (5005 files); 0 literal, 0 whole-word for every file",
-      "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
-      "negativeControl": "scratch file holding one live pattern: whole-word 1"
+      "observed": "exit 0 (5005 files); 0 literal, 0 whole-word for every file; the raw output of the double-stop run prints the pod's labels (literal 1, whole-word 1) and is quoted nowhere",
+      "headSha": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+      "negativeControl": "that raw output itself: literal 1, whole-word 1"
     }
   ],
-  "ci": "At 355ffe8e: Tests 40213118224 in progress (typecheck and pi-legion success; lint and test in progress); Legion Envoy and Contracts 40213118122 success; PR Title 40213118183 and 40213179112 success. Cited, not waited for.",
+  "ci": "At 241f4e1a: Tests 40214431002 queued; Legion Envoy and Contracts 40214430972 in progress; PR Title 40214503926 pending (earlier PR Title runs queued or cancelled by body edits). Cited, not waited for.",
   "regressionTests": "Docs-only change: no suite reads this prose and the deployment instructions bar content-asserting tests; nothing for a red test to pin.",
   "notesForReviewer": [
     "docs/kubernetes.md:3022's code line remains 108 characters (judged not a defect in review)."
   ],
   "previousRounds": [
+    {
+      "round": 4,
+      "testedHead": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+      "roundReason": "Round 3's failure: the trap paragraph said the 0.33 s/0.35 s stops' placement is not shown by their output while the INFRA-232 bullet still said they and the measured kill -KILL 'landed inside the create', and the recovery paragraph said 'during the create'. The architect ruled the bullet's two placements in scope (base 3276-3282).",
+      "implementerProof": {
+        "verdict": "verified",
+        "how": "Re-ran its round-4 page checks on my own copy fetched at 355ffe8e (5d6812a0 serves the same bytes) and an independent reader probe over the same three excerpts; results match. It did not re-run P1 (block byte-identical); I did."
+      },
+      "failures": [],
+      "failed": 0,
+      "proof": [
+        {
+          "criterion": "Round 3's failure resolved: the trap paragraph, the recovery paragraph and the INFRA-232 bullet agree on where the measured stops landed and on what evidence; A1-A3, A7, A8 hold",
+          "surface": "docs/kubernetes.md fetched with gh api at the head from this issue's role container",
+          "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=355ffe8e9ae9e76d2918e995b8fe1d6df3417eac\" -H \"Accept: application/vnd.github.raw\" > k-h4.md; plan section 4 checks; grep -n 'inside the create|during the create|landed (while|before|after)|landed first'; bullet outcomes compared with INFRA-232 implement.json@64dcfb2d",
+          "observed": "A1 0; A2 1 for all seven patterns; A3 date 4 and both timing pairs; A7 0; A8 0; 'inside the create' and 'during the create' 0 on the page; remaining placements are 'a stop that landed first' (before the name was read, 3157), the trap paragraph's 'not shown' sentence (3171) and the bullet's 'landed before the name printed' (3307); the bullet's 'two found the Job ... the rest found nothing' matches the source's 0.33/0.35 s found-and-deleted and 0.15-0.32/0.34 s 'No resources found'",
+          "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+          "negativeControl": "at 3f864ba1 the same grep found 'inside the create' at 3304 and 3307 and 'during the create' at 3221"
+        },
+        {
+          "criterion": "A4-A6, A5 as amended by the architect's rulings",
+          "surface": "the page at the head and the branch diff against main@origin (371d6c87)",
+          "command": "bash code.sh k-h4.md | sha256sum; cmp block.awk output with round 3; diff -U0 k-base.md k-h4.md | awk -f hunks3.awk (hunks.awk plus 3198-3202 and 3276-3282); bash a6.sh k-base.md k-h4.md",
+          "observed": "A4 abe1b4cf... (base); block byte-identical to round 3; six hunks old 3022, 3131, 3155-3165, 3199-3202, 3260-3261, 3278-3282 all ok, exit 0; A6 no NONCOMMENT, old-closing 0, old-listing 1",
+          "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+          "negativeControl": "round 3's ranges (hunks2.awk) on the same diff exit 1 for the bullet hunk"
+        },
+        {
+          "criterion": "A10: the edited block still runs end to end",
+          "surface": "this issue's role container, against the applied cluster, through the role's own bash tool; can-i create jobs / create services / get services yes",
+          "command": "bash fill.sh k-h4.md t4-p1.sh (cmp-identical to round 3's filled copy); bash t4-p1.sh from 2026-10-25T16:46:33Z",
+          "observed": "run: sequence-run=1ac55736; workload: infra-386-postgres-9zldv; service created; condition met twice; answered; job deleted; No resources found; sequence: exit 0 at 16:48:06Z; 0 left; re-list by label No resources found",
+          "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+          "negativeControl": "cpu \"1\" copy: refused by admission (policy, binding and rule text elided), 'cleanup: no Job name was read; deleting by label sequence-run=4bec85c6', No resources found, sequence: exit 1; 0 left; re-list No resources found"
+        },
+        {
+          "criterion": "A11 / round-3 failure: a fresh reader finds the three excerpts consistent",
+          "surface": "a fresh scout given only probe4.txt (trap paragraph, recovery paragraph, INFRA-232 bullet at the head)",
+          "command": "task(agent=scout): where did the 0.33/0.35 s stops land and do the excerpts agree; does the passage place the measured kill -KILL; any other contradiction or unsupported placement",
+          "observed": "\"The excerpts agree that the timing is unknown\"; the kill placed only 'before the name printed' in all three, 'The excerpts agree'; Q3 'None'",
+          "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+          "negativeControl": "the same questions on 3f864ba1's excerpts (round 3): 'The excerpts disagree. The bullet says the two stops landed \"inside the create\", but the clean-up paragraph says nothing the runs printed shows that.'"
+        },
+        {
+          "criterion": "A9: no private name enters the change",
+          "surface": "repository at the head, added lines, commit messages, live PR title and body, implement handoff, recorded run output",
+          "command": "bash .github/scripts/check-private-names.sh; sweep.sh over each",
+          "observed": "exit 0 (5005 files); 0 literal, 0 whole-word for every file",
+          "headSha": "355ffe8e9ae9e76d2918e995b8fe1d6df3417eac",
+          "negativeControl": "scratch file holding one live pattern: whole-word 1"
+        }
+      ],
+      "ci": "At 355ffe8e: Tests 40213118224 in progress (typecheck and pi-legion success; lint and test in progress); Legion Envoy and Contracts 40213118122 success; PR Title 40213118183 and 40213179112 success. Cited, not waited for."
+    },
     {
       "round": 3,
       "testedHead": "3f864ba10cddca4711714a9dc0ee9470a089a0ee",
