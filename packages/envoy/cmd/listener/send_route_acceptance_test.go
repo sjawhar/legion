@@ -469,3 +469,85 @@ func TestListenerRecordsEverySendAndPublishRequest(t *testing.T) {
 		t.Fatalf("the unclaimed role's line names holder %v: there is no holder to name", fmt.Sprint(holder))
 	}
 }
+
+// A session read that did not answer is no evidence the session is gone, so the send that made it
+// is refused 503 naming the bus rather than 404 naming the session. The 404 is the one answer a
+// sender routes around the pane on, so it must rest on the bucket's own word
+// (nats.ErrKeyNotFound) and on nothing else — reporting an absence this listener never checked is
+// the incident INFRA-141 is about. It is the one row of the send route's status map that only an
+// unanswered read reaches: the cold-cache test's read answers, the bus-unreachable and
+// bus-refusal tests fail at the publish with the target already in the cache, and the absent
+// target's 404 is the bucket answering. Collapsing the two errors back into one 404 leaves every
+// other test in this package green.
+//
+// The negative control is the first send: the same route, the same listener, the same
+// unregistered target, with the bucket answering. It is the 404, and the second send differs from
+// it in one thing only — the bucket no longer answers — so a rig that refused every send could
+// not produce the pair.
+func TestSendRefusesTheBusRatherThanTheSessionWhenTheStoreReadDoesNotAnswer(t *testing.T) {
+	const target = "ses_unanswered_store_read"
+	const sender = "ses_unanswered_store_sender"
+	_, observer := trailingListeners(t)
+	send := func() (*httptest.ResponseRecorder, map[string]any, time.Duration) {
+		t.Helper()
+		started := time.Now()
+		recorder, record := serveRecorded(t, func(logger *logging.Logger) http.HandlerFunc {
+			return sendHandler(observer, logger)
+		}, postJSON("/v1/messages/send", sendBody(map[string]any{
+			"target_session": target,
+			"source":         "agent",
+			"source_session": sender,
+			"message":        "is the pane there?",
+		})))
+		return recorder, record, time.Since(started)
+	}
+
+	answered, answeredRecord, _ := send()
+	if answered.Code != http.StatusNotFound {
+		t.Fatalf("a send whose bucket read answered that the key is gone: status %d, body %s; want 404", answered.Code, answered.Body.String())
+	}
+	if got, want := strings.TrimSpace(answered.Body.String()), fmt.Sprintf(`{"error":"no live session %s"}`, target); got != want {
+		t.Fatalf("the 404 body is %s, want %s", got, want)
+	}
+	assertRecordFields(t, answeredRecord, map[string]any{
+		"msg":            "listener send",
+		"level":          "WARN",
+		"outcome":        "no_live_session",
+		"status":         float64(http.StatusNotFound),
+		"target_session": target,
+		"source_session": sender,
+	})
+
+	stallSessionReads(t, observer.sessions)
+	unanswered, unansweredRecord, elapsed := send()
+	if unanswered.Code != http.StatusServiceUnavailable {
+		t.Fatalf("a send whose bucket read never answered: status %d, body %s; want 503, since nothing was learned about %s", unanswered.Code, unanswered.Body.String(), target)
+	}
+	var refusal apiError
+	if err := json.Unmarshal(unanswered.Body.Bytes(), &refusal); err != nil {
+		t.Fatalf("decode the refusal %s: %v", unanswered.Body.String(), err)
+	}
+	if !strings.HasPrefix(refusal.Error, busUnansweredPrefix) {
+		t.Fatalf("the refusal reads %q, want it to begin %q", refusal.Error, busUnansweredPrefix)
+	}
+	if strings.Contains(refusal.Error, "no live session") {
+		t.Fatalf("the refusal reads %q: an unanswered read must not be reported as the session being gone", refusal.Error)
+	}
+	if got := unanswered.Header().Get("Retry-After"); got != "1" {
+		t.Fatalf("Retry-After = %q, want 1: the sender is being asked to try the same route again", got)
+	}
+	// The read's own bound (sendSessionReadTimeout) is what ends this request, and it is a
+	// fraction of the whole send budget: a handler that waited the bucket out would spend the
+	// caller's attempt on a read that was never going to answer.
+	if elapsed >= sendRequestBudget {
+		t.Fatalf("the 503 took %s, past the whole send budget %s, for a read bounded at %s", elapsed, sendRequestBudget, sendSessionReadTimeout)
+	}
+	assertRecordFields(t, unansweredRecord, map[string]any{
+		"msg":            "listener send",
+		"level":          "WARN",
+		"outcome":        "bus_unavailable",
+		"status":         float64(http.StatusServiceUnavailable),
+		"target_session": target,
+		"source_session": sender,
+	})
+}
