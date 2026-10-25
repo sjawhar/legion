@@ -190,7 +190,12 @@ func (env *testEnv) startConsumer(machineID string) {
 			if err == nil {
 				interestPtr = &interest
 			}
-			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, &env.deliverer)
+			entry, entryErr := env.sessions.Get(sessionID)
+			var entryPtr *session.SessionEntry
+			if entryErr == nil {
+				entryPtr = &entry
+			}
+			result := session.HandleAgentMessage(item, sessionID, machineID, interestPtr, entryPtr, &env.deliverer)
 			if result.Delivered {
 				env.dedupe.Record(item.DedupeKey, sessionID)
 			}

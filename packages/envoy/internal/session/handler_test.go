@@ -11,6 +11,18 @@ import (
 	"github.com/sjawhar/envoy/internal/store"
 )
 
+// resolvedEntry is the session record the listener resolves before it hands a message to
+// HandleAgentMessage: the registry's entry for sessionID, or nil when it holds none. Delivery no
+// longer reads the registry itself, so every test here resolves it the way its caller does.
+func resolvedEntry(t *testing.T, sessions *session.SessionRegistry, sessionID string) *session.SessionEntry {
+	t.Helper()
+	entry, err := sessions.Get(sessionID)
+	if err != nil {
+		return nil
+	}
+	return &entry
+}
+
 // TestHandleAgentMessage_DeliveredExactlyOnce tests that the agent message handler
 // delivers via interest OR registry lookup, never both.
 func TestHandleAgentMessage_DeliveredExactlyOnce(t *testing.T) {
@@ -38,7 +50,7 @@ func TestHandleAgentMessage_DeliveredExactlyOnce(t *testing.T) {
 
 	item := newTestEnvelope("agent", "notifications.agent.ses_target", "test message")
 
-	result := session.HandleAgentMessage(item, "ses_target", "test-machine", interest, &deliverer)
+	result := session.HandleAgentMessage(item, "ses_target", "test-machine", interest, resolvedEntry(t, sessions, "ses_target"), &deliverer)
 
 	if result.Err != nil {
 		t.Fatalf("expected success, got error: %v", result.Err)
@@ -71,7 +83,7 @@ func TestHandleAgentMessage_FallbackWhenNoInterest(t *testing.T) {
 	// No interest entry — handler should fall through to registry lookup
 	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
-		"ses_target", "test-machine", nil, &deliverer,
+		"ses_target", "test-machine", nil, resolvedEntry(t, sessions, "ses_target"), &deliverer,
 	)
 
 	if result.Err != nil {
@@ -92,7 +104,7 @@ func TestHandleAgentMessage_UnknownSession(t *testing.T) {
 
 	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_unknown", "test"),
-		"ses_unknown", "test-machine", nil, &deliverer,
+		"ses_unknown", "test-machine", nil, nil, &deliverer,
 	)
 
 	if result.Delivered {
@@ -100,6 +112,9 @@ func TestHandleAgentMessage_UnknownSession(t *testing.T) {
 	}
 	if result.ShouldNAK {
 		t.Fatal("unknown session should ACK (skip), not NAK (retry forever)")
+	}
+	if result.Reason != session.ReasonNoSessionRecord {
+		t.Fatalf("expected ReasonNoSessionRecord for a session with no record, got %v", result.Reason)
 	}
 }
 
@@ -131,7 +146,7 @@ func TestHandleAgentMessage_WrongMachine(t *testing.T) {
 
 	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
-		"ses_target", "test-machine", interest, &deliverer,
+		"ses_target", "test-machine", interest, resolvedEntry(t, sessions, "ses_target"), &deliverer,
 	)
 
 	// Interest is for different machine, so handler falls through to registry lookup.
@@ -177,7 +192,7 @@ func TestHandleAgentMessage_WrongMachineKVAcks(t *testing.T) {
 	// No interest — handler falls to registry lookup path
 	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
-		"ses_target", "machine-A", nil, &deliverer,
+		"ses_target", "machine-A", nil, resolvedEntry(t, sessions, "ses_target"), &deliverer,
 	)
 
 	// Remote delivery fails (machine-B unreachable), but handler ACKs
@@ -232,7 +247,7 @@ func TestHandleAgentMessage_InterestPathWrongMachineKVAcks(t *testing.T) {
 
 	result := session.HandleAgentMessage(
 		newTestEnvelope("agent", "notifications.agent.ses_target", "test"),
-		"ses_target", "machine-A", interest, &deliverer,
+		"ses_target", "machine-A", interest, resolvedEntry(t, sessions, "ses_target"), &deliverer,
 	)
 
 	// Interest path matches, but KV says session moved to unreachable machine-B.

@@ -176,8 +176,13 @@ func (h *listenerHarness) handleAgent(msg *natsgo.Msg, item contracts.Envelope) 
 	if err == nil {
 		interestPtr = &interest
 	}
+	entry, entryErr := h.env.sessions.Get(sessionID)
+	var entryPtr *session.SessionEntry
+	if entryErr == nil {
+		entryPtr = &entry
+	}
 	h.attemptCache.Record(item.DedupeKey, sessionID)
-	result := session.HandleAgentMessage(item, sessionID, h.machineID, interestPtr, &h.env.deliverer)
+	result := session.HandleAgentMessage(item, sessionID, h.machineID, interestPtr, entryPtr, &h.env.deliverer)
 	if result.Delivered {
 		h.dedupeCache.Record(item.DedupeKey, sessionID)
 	}

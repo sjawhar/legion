@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -510,6 +511,12 @@ func roleTopicDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessag
 	message.finalize(false)
 }
 
+// deliverySessionReadTimeout bounds the delivery path's read of the target session from the
+// bucket. Delivery answers no HTTP caller of its own, so it carries the role paths' bound rather
+// than the send route's tighter one: the cost of waiting is a message held, not a request kept
+// open, and the alternative - taking the cache's miss for an answer - ACKs the message away.
+const deliverySessionReadTimeout = 2 * time.Second
+
 // agentSubjectDelivery delivers directly to the session named by the topic
 // (notifications.agent.<session>), pushing over HTTP/WebSocket when the
 // session is live and falling back to whatever session.HandleAgentMessage
@@ -543,9 +550,22 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	if err == nil {
 		interestPtr = &interest
 	}
+	// The session record delivery pushes through is read from the session bucket itself, as the
+	// send route reads it: this listener's cache trails the bucket it follows, and is still being
+	// refilled after its bus connection came back, so a session registered a moment ago, or one
+	// this listener has not re-read since the reconnect, is in the bucket before it is in the
+	// cache - and a message dropped on that miss is gone, since it is already ACKed away.
+	// nats.ErrKeyNotFound is the bucket's own word that no record exists; any other error is a
+	// read that did not answer, which carries no record either and so is handled here exactly as
+	// no record is.
+	entry, entryErr := liveSessionEntry(context.Background(), cfg.sessions, sessionID, deliverySessionReadTimeout, registered)
+	var entryPtr *session.SessionEntry
+	if entryErr == nil {
+		entryPtr = &entry
+	}
 	cfg.attemptCache.Record(item.DedupeKey, sessionID)
 	deliveryTimer := metrics.NewTimer()
-	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, cfg.deliverer)
+	result := session.HandleAgentMessage(item, sessionID, cfg.machineID, interestPtr, entryPtr, cfg.deliverer)
 	if result.Err != nil {
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,

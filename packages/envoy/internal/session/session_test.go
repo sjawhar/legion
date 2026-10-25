@@ -146,8 +146,8 @@ func TestDeliver_ReturnsError_whenSessionHasNoPortAndIsNotSelfSubscribed(t *test
 	)
 
 	// Then
-	if err == nil || !strings.Contains(err.Error(), "no live serve port") {
-		t.Fatalf("expected no-live-serve-port error, got %v", err)
+	if !errors.Is(err, session.ErrNoPushTarget) {
+		t.Fatalf("expected ErrNoPushTarget for a registered session with no port, got %v", err)
 	}
 }
 
