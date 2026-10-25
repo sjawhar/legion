@@ -256,6 +256,16 @@ it, no longer than that. The call's timeout or its cancellation ends the write a
 never retried. Any other answer - a 2xx, a replay, `422 KEY_REUSED`, another 4xx - is the answer,
 at once.
 
+A write is asked again only against a Dispatch this process has seen run the keyed layer, since
+an earlier Dispatch ignores the header and would run a retried write a second time. The proof is
+Dispatch's own echo of the request's key on its answer (`Idempotency-Key: <key>`), remembered per
+process and per origin, so one of Dispatch's 5xx, 429 or `409 KEY_IN_FLIGHT` is resent at once. A
+transport failure and a gateway's answer carry no echo, so before the first resend the client
+reads `GET /healthz` once per process and origin, bounded at 5 s and cached, and resends only on
+`idempotency_keys: true`; a probe that fails, times out, answers no JSON or lacks the field means
+no resend at all, and the attempt's own failure is the call's. The probe runs only after a write
+has already failed, so the ordinary path makes no request of its own.
+
 A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
 `error`, is the error's message under its `code` (`HTTP_<status>` when the server set none), with
 `fromDispatch` true. Any other body — a gateway's HTML page, an empty body, JSON of another shape —

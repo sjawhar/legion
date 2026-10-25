@@ -80,7 +80,10 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   `409 KEY_IN_FLIGHT` (`isKeyInFlight`: its first request under the key is still running) and a
   2xx the caller counts undecided (a send whose message's one attempt is still pending; a
   broadcast with such a recipient) is tried again under that same key after 1 s, 2 s, 4 s and so
-  on up to 30 s; any other 4xx is its refusal. Its attempts run whether or not the
+  on up to 30 s; anything else - a 4xx, an answer Dispatch did not keep
+  (`AnswerNotKeptError`, a 2xx replay reading `ANSWER_NOT_KEPT`, whose write landed and whose
+  caller re-reads what it wrote), an error of the page's own - ends the write at once. Its
+  attempts run whether or not the
   browser reports a network (`networkMode: "always"`, every keyed write), so a write pressed
   while the browser is offline is attempted, goes late at the deadline and can be stopped; a
   mutation left on TanStack's default would have been paused offline,

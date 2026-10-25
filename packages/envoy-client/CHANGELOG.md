@@ -16,7 +16,12 @@
   an earlier attempt may have reached Dispatch (a gateway's 408 or 429, Dispatch's 429, and
   `409 KEY_IN_FLIGHT`): that is a `DispatchWriteUnsettledError`, naming the last answer, the
   attempts and that the write may or may not have taken effect. A replay whose first answer
-  Dispatch did not keep is a `DispatchAnswerNotKeptError`: the write ran.
+  Dispatch did not keep is a `DispatchAnswerNotKeptError`: the write ran. A write is resent only
+  against a Dispatch this process has seen run the keyed layer: Dispatch's echo of the key on its
+  answer (`Idempotency-Key`), remembered per process and origin, or, where no echo could arrive (a
+  transport failure, a gateway's answer), one cached `GET /healthz` read per process and origin
+  answering `idempotency_keys: true`. Against a Dispatch without the layer nothing is resent, and
+  the write is reported as one that may or may not have taken effect.
 - `DispatchClient.deliveryReply` sends a session's reply to a delivery attempt
   (`POST /api/v1/{messages,comments}/{id}/reply`), which `postDeliveryReply` used to send as a
   bare `fetch`: it is now keyed, retried and bounded by the client's 60 s deadline, and its

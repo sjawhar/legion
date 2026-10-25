@@ -1026,6 +1026,13 @@ is still owed and answers the message or broadcast as it stands now, under the f
 however the first request ended; a recipient a live sender still holds reads `pending`. Neither
 route takes a body `idempotency_key` any more.
 
+Every answer to a keyed request carries the key back (`Idempotency-Key: <key>`), and `/healthz`
+answers `idempotency_keys: true` on every build that judges the header - a fact of the binary, so
+it is true whatever the database or NATS answer. A client tells a Dispatch that runs this layer
+from one that ignores the header, and would run a retried write a second time, by one or the
+other: the agents' client resends a failed write only against a Dispatch whose answer carried the
+echo, or whose `/healthz` it has read (`packages/envoy-client/README.md`).
+
 ## Routes
 
 `GET /api/v1` (no credential) is the authoritative list: every mounted `/api/v1` route with its

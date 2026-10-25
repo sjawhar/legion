@@ -32,7 +32,10 @@
   commit a recovery point with what they made, so a repeat of either resumes whatever delivery it
   still owes and answers the message or broadcast as it stands, under the first's `201`, even
   across a crash between the send's commit and its answer. The dashboard and the `dispatch` CLI
-  send a key on every write and retry under it.
+  send a key on every write and retry under it. Every answer to a keyed request carries the key
+  back (`Idempotency-Key: <key>`), and `/healthz` answers `idempotency_keys: true` on every build
+  that judges the header, so a client can tell this Dispatch from one that ignores the header and
+  would run a retried write a second time.
 - `GET /auth/whoami` answers `event_head`, the newest committed event id as of the sign-in check
   (INFRA-292). A page's first events subscription on `/ws/live` resumes from it, so a change
   committed between that answer and the socket opening reaches the page instead of being lost

@@ -1993,6 +1993,13 @@ from a reuse:
   single-session send and the broadcast are the two (below). The layer replays the answer; the
   delivery code decides what is still owed.
 
+Every answer to a keyed request carries the key back (`Idempotency-Key: <key>`), and `/healthz`
+answers `idempotency_keys: true` on every build that judges the header, a fact of the binary
+rather than of the probe. Together they are how a client tells a Dispatch that runs this layer
+from one that ignores the header and would run a retried write a second time: the agents' client
+resends only against a Dispatch it has seen answer with the echo, or whose `/healthz` it has read
+(`packages/envoy-client/README.md`).
+
 A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`): the suggestion-outcome sweep's pass deletes
 every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat
 that finds an older row not yet swept treats the key as unused. The two hand-written key paths
