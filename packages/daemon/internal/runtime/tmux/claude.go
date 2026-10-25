@@ -45,16 +45,6 @@ func ClaudeConfigDir(stateDir string, token claim.Token) string {
 	return filepath.Join(stateDir, "claude", string(token))
 }
 
-// claudeResumeSession is the session id the pane's recorded transcript continues
-// (claudelaunch.ResumeSession), refusing a session that is not a transcript of the claim's own
-// Claude Code directory.
-func claudeResumeSession(configDir, file string) (string, error) {
-	return claudelaunch.ResumeSession(configDir, file)
-}
-
-// newSessionID is the session id a fresh pane starts (claudelaunch.NewSessionID).
-func newSessionID() string { return claudelaunch.NewSessionID() }
-
 // writeClaudeMCPConfig writes the pane's MCP configuration (claudelaunch.MCPConfig) into configDir,
 // 0600, and returns its path. The pane's Claude Code reads it off the daemon's own disk, which is
 // why the writing stays here; a pod's launcher writes the same document into its own directory.
@@ -97,9 +87,11 @@ func (l claudeLauncher) Launch(spec runtime.SpawnSpec, host Host) (inner string,
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("spawn %s: the Claude Code directory: %w", spec.Claim, err)
 	}
-	session, resume := newSessionID(), false
+	session, resume := claudelaunch.NewSessionID(), false
 	if spec.ResumeSessionFile != "" {
-		if session, err = claudeResumeSession(configDir, spec.ResumeSessionFile); err != nil {
+		// The pane's recorded transcript continues, refusing a session that is not a transcript of
+		// the claim's own Claude Code directory.
+		if session, err = claudelaunch.ResumeSession(configDir, spec.ResumeSessionFile); err != nil {
 			return "", nil, fmt.Errorf("spawn %s: %w", spec.Claim, err)
 		}
 		resume = true

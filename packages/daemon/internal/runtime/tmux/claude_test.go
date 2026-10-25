@@ -8,6 +8,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -38,9 +39,9 @@ func TestClaudeInnerCommand(t *testing.T) {
 func TestClaudeResumeSession(t *testing.T) {
 	dir := "/state/claude/legion-acme-acme-7-implementer"
 	id := "11111111-2222-4333-8444-555555555555"
-	got, err := claudeResumeSession(dir, filepath.Join(dir, "projects", "-state-workspaces-acme-7", id+".jsonl"))
+	got, err := claudelaunch.ResumeSession(dir, filepath.Join(dir, "projects", "-state-workspaces-acme-7", id+".jsonl"))
 	if err != nil || got != id {
-		t.Errorf("claudeResumeSession = %q, %v", got, err)
+		t.Errorf("claudelaunch.ResumeSession = %q, %v", got, err)
 	}
 	for file, want := range map[string]string{
 		"/state/trees/x/.omp/2026-10-18T00-00-00Z_" + id + ".jsonl":   "is not a Claude Code transcript",
@@ -49,8 +50,8 @@ func TestClaudeResumeSession(t *testing.T) {
 		filepath.Join(dir, "projects", "p", id+".jsonl.bak"):          "is not named for a Claude Code session id",
 		filepath.Join(dir, "projects", "..", "projects", id+".jsonl"): "is not a Claude Code transcript",
 	} {
-		if _, err := claudeResumeSession(dir, file); err == nil || !strings.Contains(err.Error(), want) {
-			t.Errorf("claudeResumeSession(%s) = %v, want %q", file, err, want)
+		if _, err := claudelaunch.ResumeSession(dir, file); err == nil || !strings.Contains(err.Error(), want) {
+			t.Errorf("claudelaunch.ResumeSession(%s) = %v, want %q", file, err, want)
 		}
 	}
 }
@@ -59,7 +60,7 @@ func TestNewSessionIDIsAVersion4UUID(t *testing.T) {
 	uuid := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 	seen := map[string]bool{}
 	for range 100 {
-		id := newSessionID()
+		id := claudelaunch.NewSessionID()
 		if !uuid.MatchString(id) || seen[id] {
 			t.Fatalf("newSessionID = %q", id)
 		}
