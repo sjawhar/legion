@@ -50,10 +50,10 @@ type Client struct {
 	// Addr is the host:port this client's connections actually go to, named in a failure so a
 	// message about two processes says which one answered.
 	Addr string
-	// UIToken is the bearer this client puts on the human/operator-facing routes. It is the
-	// package's own UIToken, which a Rig's broker takes; a caller driving a broker configured with
-	// another bearer (cmd/broker's BROKER_UI_TOKEN) replaces it rather than this package growing a
-	// second constant for that broker's token.
+	// UIToken is the bearer this client puts on the routes Dispatch's server calls: the token of
+	// an account the broker's BROKER_API_ACCOUNTS lists, from an issuer it trusts. The broker a
+	// Client drives mints and verifies no token this package knows, so the caller sets it, as it
+	// sets DPoP; a client that never calls such a route needs none.
 	UIToken string
 	// DPoP wraps this client's OAuth connections in DPoP proofs signed by a machine's key, which
 	// the device authorization, the device-code exchange and every refresh carry:
@@ -98,7 +98,7 @@ func NewClient(t *testing.T, publicURL, addr string) *Client {
 	}
 	t.Cleanup(transport.CloseIdleConnections)
 	return &Client{
-		PublicURL: publicURL, Addr: addr, UIToken: UIToken,
+		PublicURL: publicURL, Addr: addr,
 		transport: transport,
 		http:      &http.Client{Transport: transport, Timeout: clientTimeout},
 	}
@@ -112,8 +112,8 @@ func (c *Client) Req(t *testing.T, method, path string, headers map[string]strin
 	return request(t, c.http, c.PublicURL, method, path, headers, body, " (at "+c.Addr+")")
 }
 
-// UI is Req with the bearer every human/operator-facing route requires: the token Dispatch's own
-// server presents, UIToken here.
+// UI is Req as the listed caller of the routes Dispatch's server calls: it presents UIToken, the
+// credential Dispatch's own server presents in production.
 func (c *Client) UI(t *testing.T, method, path string, body any) (int, []byte) {
 	t.Helper()
 	return c.Req(t, method, path, map[string]string{"Authorization": "Bearer " + c.UIToken}, body)
