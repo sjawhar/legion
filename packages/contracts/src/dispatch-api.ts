@@ -1179,6 +1179,11 @@ export const IDEMPOTENCY_KEY_REUSED = "KEY_REUSED";
  *  nothing was run, and the client asks again under the same key. */
 export const IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
 
+/** The code of the `409` for a key whose write landed before its answer was lost: Dispatch will
+ *  not run it again and has no answer to replay. The write is done; a client treats it as landed
+ *  and reads again what it wrote (the event feed carries the change too). */
+export const IDEMPOTENCY_KEY_COMMITTED = "KEY_COMMITTED";
+
 /** The code of the `400` for an `IDEMPOTENCY_KEY_HEADER` that does not match
  *  `IDEMPOTENCY_KEY_PATTERN`. */
 export const IDEMPOTENCY_KEY_INVALID = "IDEMPOTENCY_KEY_INVALID";
