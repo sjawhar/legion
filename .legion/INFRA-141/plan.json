@@ -1,0 +1,123 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-141",
+  "completed": "2026-10-25T23:50:44Z",
+  "plan": "dispatch://INFRA-141/artifact/plan-md (version 2; its last section, 'The head this plan is carried by (generation 3, 2026-10-25)', replaces the acceptance table and the T6/T7 rig lists above it)",
+  "head": {
+    "pullRequest": "https://github.com/sjawhar/legion/pull/2167",
+    "headSha": "8be80926726bcf3ae2d372731f3902b0c019f712",
+    "approvedCodeSha": "bc2283ee8f1dd340b2db8ecf23827f05b32829c8",
+    "aboveApproved": "02388734294d (docs/solutions, retro) and 8be80926726b (retro's removal of .legion/INFRA-141/)",
+    "mustNotChange": "The code is the tree of 8be80926 outside .legion/. Pushes by the planner, implementer, tester and reviewer in this generation touch only .legion/INFRA-141/ and carry the skip-checks trailer; the reviewer approves the new head by SHA after checking that the diff from 8be80926 touches only .legion/; retro's push (optional docs/solutions/, then the removal of .legion/INFRA-141/) carries no trailer. Merge main forward only if GitHub reports CONFLICTING, per conflicts-and-rewrites.md, which then needs a new review."
+  },
+  "mainCheck": {
+    "mainAtCheck": "81a3b5ef7b47, then a9c9542fb738 (#2202)",
+    "github": "MERGEABLE / CLEAN at 8be80926; 16 checks SUCCESS, 9 SKIPPED",
+    "mergeTree": "git merge-tree --write-tree: 899b946f (main 81a3b5ef) and 315c9b4c (main a9c9542f), no conflict; the only file both sides change is packages/envoy/CHANGELOG.md, in different subsections of [Unreleased]",
+    "mergedTreeRuns": "On an export of tree 899b946f in this pod: go build ./... and go vet of cmd/listener, internal/{session,bus,integration,contracts} OK; go test -count=1: ok cmd/listener 234.352s (with -skip of the four #2191 Postgres-container tests TestDispatchMentionResolvesASessionTheCacheHasNotRefilled, TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled, TestDispatchRefusesABroadcastWhenASessionReadDoesNotAnswer, TestDispatchRefusesAClaimTakeoverWhileTheCacheRefills, which panic without a container runtime), ok internal/bus 214.639s, ok internal/session 8.014s, ok internal/integration 97.793s, ok internal/contracts 0.416s; bash scripts/e2e-local.sh exit 0, both PASS lines, bus-down send HTTP 503 in 3.503475 s, real client EnvoyApiError 503. On tree 315c9b4c: go build ./... and go vet incl. internal/dispatch/... OK."
+  },
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker — the phase contract: nothing is built this generation unless a finding requires it; any push before retro touches only .legion/INFRA-141/ and carries the skip-checks trailer, per plan.md's 'What this generation must not change'.",
+      "skill://legion-worker/references/pr-body.md — the PR body's E2E (implementer) line and proof array: the proof at this head is the existing one re-run on the code tree of 8be80926 (S1 go test, S2 bash scripts/e2e-local.sh), recorded against the new head SHA.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md — only if GitHub reports the pull request CONFLICTING: the forward merge, never a rebase, and the unchanged-diff fingerprint.",
+      "skill://dispatch-first and skill://dispatch — any post on INFRA-141 and any finding outside the issue."
+    ],
+    "test": [
+      "skill://legion-worker — the tester's charter and its handoff fields (implementerProof, failures, its own proof).",
+      "skill://legion-worker/references/pr-body.md — run the application rather than CI again: re-run plan.md's 'Acceptance at this head' table (S1 with -v, confirming each named test shows --- PASS; S2 bash scripts/e2e-local.sh) and the A6' jq check over out/e2e/listener.log, which no script or test asserts; try to break the deferral bound and the 3.5 s budget.",
+      "skill://dispatch-first and skill://dispatch — posting a failure or a finding on the issue."
+    ],
+    "review": [
+      "skill://legion-worker — the reviewer's charter, round order and handoff fields.",
+      "skill://legion-worker/references/merge-gate.md — approve the new head by SHA after confirming the diff from 8be80926 touches only .legion/; what READY compares against the approved head.",
+      "skill://legion-worker/references/review-threads.md — any thread a new finding opens, one disposition reply each.",
+      "skill://dispatch-first and skill://dispatch — posting the review's outcome on the issue."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "G1 — plan.md said nothing departs from the spec while the head answers a grant-denied publish 403 where spec bullet 4 says 503.",
+        "answer": "plan.md v2 amends that sentence and lists the 403 as head difference 1; specDepartures[0] records it with outcome changed (acceptance, spec bullet 4); named in the completion summary for the architect to rule on a spec change."
+      },
+      {
+        "finding": "G2 — the original acceptance table's commands are stale (…TwoCauses matches no test and exits 0; the env-var window has no effect on a test that sets it in code; A4 names the replaced nkey rig) and the draft table had no negative controls.",
+        "answer": "plan.md's new 'Acceptance at this head' table replaces the old table and the T6/T7 rig lists, names every test that exists at the head (verified by the reviewer with go test -list), carries a negative-control column from the PR body, adds -v to S1, and requires each named test to show --- PASS."
+      },
+      {
+        "finding": "G3 — committing plan.json moves the head above 8be80926 and READY's approved head; the rules for the rest of the generation were unstated.",
+        "answer": "plan.md 'What this generation must not change' and head.mustNotChange here: code is 8be80926's tree outside .legion/; pre-retro pushes are .legion/-only with the trailer; the reviewer approves the new head by SHA; retro removes .legion/INFRA-141/ again with no trailer; forward merge only on CONFLICTING."
+      },
+      {
+        "finding": "G4 — the give-up now keeps the attempt entry (publishNoHolderExceptionOrNak deleted), against the plan's T4 and a possible reading of spec bullet 5.",
+        "answer": "Head difference 5 in plan.md: each deferral clears the entry (spec: 'A retry must clear the attempt entry … before it tries'); the terminal give-up keeps it so an ACK lost on the wire does not push again. Read as no departure; named to the architect."
+      },
+      {
+        "finding": "G5 — with the deferral cap full a message is given up on its first delivery, against the spec's 'retried rather than thrown away'.",
+        "answer": "Head difference 4 and specDepartures[1], outcome changed (design), limited to messages beyond the 64 held at once to protect the durable's 256 pending acknowledgements."
+      },
+      {
+        "finding": "G6 — the minute is 12 deferrals counted from first delivery, not a clock; worst case about 86 s and backlog time uncounted.",
+        "answer": "Head difference 2 states the count, the worst case (marked inference) and the backlog effect; specDepartures[2] records it as a reading with acceptance unchanged for the architect to rule on; the tester is told to try to break the bound."
+      },
+      {
+        "finding": "G7 — no test or script asserts the request record under a real bus outage.",
+        "answer": "Acceptance row A6' gives the tester a jq check over out/e2e/listener.log (three bus_unavailable lines, observed on the merged tree at 23:41Z) and its control against nats.log's shutdown time; plan.md says the script does not assert it. Named to the architect: an assertion in e2e-local.sh would need a code round."
+      },
+      {
+        "finding": "G8 — the 403 is proven in two halves and the table named only cmd/listener.",
+        "answer": "Row A4 adds the internal/bus tests TestPublishCoreReportsAPublishNATSDenies and TestAnAdHocPublishNATSDeniesReturnsTheDenial, plus the ended-context tests, and says the 403 is proven by the two halves together."
+      },
+      {
+        "finding": "G9 — merged-tree test results were claimed before they finished; internal/bus was not run; S2 not run on the merged tree.",
+        "answer": "Quoted after the runs finished: internal/bus added (ok 214.639s), the four Postgres-container skips named with the reason, and e2e-local.sh run on the merged tree (exit 0)."
+      },
+      {
+        "finding": "G10 — the deferral line is written per delivery attempt, while the spec says nothing new is written per attempt.",
+        "answer": "Head difference 6 states the reading: that clause bounds the request records; the deferral line replaces the retired per-attempt 'session not found anywhere' line."
+      },
+      {
+        "finding": "G11 — main's movement poses no merge risk and the plan can say so precisely.",
+        "answer": "plan.md's 'Checked against current main' names the CHANGELOG overlap in different [Unreleased] subsections and both clean merge trees; no forward merge is needed."
+      },
+      {
+        "finding": "G12 — the follow-ups now have issue keys while the PR body still cites the ask.",
+        "answer": "plan.md 'Follow-ups now tracked' names dispatch://INFRA-261, INFRA-410 and INFRA-413, and that the PR body's Fast-follow line still cites the ask rather than INFRA-410; named to the architect, since the body edit is another role's."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "Acceptance bullet 4: 'Bus reachable but refusing the publish: the same 503 and the same record, carrying the bus's own reason'; and 'A publish the bus refuses outright is answered the same way'.",
+      "plan": "A publish the NATS server denies under this listener's own permissions answers 403, no Retry-After, body 'envoy: the message bus denied the publish under this listener's own permissions: <reason>', outcome publish_denied (api.go refuseBusUnavailable / publishDeniedPrefix). Only the publish route, for a topic the stream does not capture, can get it. A refusal from the stream itself keeps the 503 with the bus's reason.",
+      "evidence": "Review thread PRRT_kwDORFy7ds6v-r5h; packages/envoy-client/src/transport.ts retries every status >= 500, so a 503 sends the client back to a denial that cannot succeed. Tests: cmd/listener TestADeniedPublishIsRefusedPermanentlyAndNotRecordedAsBusUnavailable; internal/bus TestPublishCoreReportsAPublishNATSDenies, TestAnAdHocPublishNATSDeniesReturnsTheDenial. No Dispatch record of the human approving the acceptance change; spec approval is still v10.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "acceptance: spec bullet 4 ('Bus reachable but refusing the publish') — a grant denial is 403, not 503"
+      }
+    },
+    {
+      "spec": "'A message the delivery path still cannot place is retried rather than thrown away, for at most one minute, and then given up and counted.'",
+      "plan": "At most unplaceableDeferralCap (consumerMaxAckPending/4 = 64) messages are held deferred per listener at once, in one set shared by every handler. A message that finds the cap full is given up and counted on its first delivery, with no retry.",
+      "evidence": "delivery.go unplaceableDeferralCap and the take() fall-through to the give-up; without it, deferred messages hold the durable's 256 MaxAckPending slots and stall every topic. Tests: TestUnplaceableDeferralsStopAtTheirCap, TestUnplaceableRetryWindowFitsTheBoundsItDependsOn.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "design: the spec's second 'What would close it' point — beyond 64 held messages, an unplaceable message is given up at once rather than retried"
+      }
+    },
+    {
+      "spec": "'for at most one minute' of retrying (bullet 5: 'gives the message up after at most a minute of retrying'); how the retry is bounded is the plan's to settle.",
+      "plan": "The window buys window/5 s deferrals (12 by default) counted from the first delivery (NumDelivered), with a hard stop at 18 deliveries. Handler time (up to 2 s store read per delivery) and AckWait-expired deliveries are not timed, so the worst case from first delivery to give-up is about 86 s [inference from constants]; time a message spent in the stream before its first delivery is not counted.",
+      "evidence": "delivery.go unplaceableRetryDelay, deliverySessionReadTimeout, unplaceableMaxDeliveries and the window comment; review thread PRRT_kwDORFy7ds6v-r5c moved the clock from stream age to first delivery so a backlog replayed into a cold listener is not given up at once.",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    }
+  ]
+}
