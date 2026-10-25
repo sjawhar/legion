@@ -47,10 +47,14 @@ type fakeGitHub struct {
 	tokenExpiresAt time.Time
 	publicKey      *rsa.PublicKey
 	clientID       string
-	// commits maps a branch name to its commit sha; a missing branch answers 404. The commits
-	// route answers as GitHub does: the bare sha for Accept: application/vnd.github.sha, the
-	// commit's JSON otherwise.
+	// commits maps a branch name to its commit sha; a missing branch answers missingBranchStatus.
+	// The commits route answers as GitHub does: the bare sha for Accept:
+	// application/vnd.github.sha, the commit's JSON otherwise.
 	commits map[string]string
+	// missingBranchStatus is the status a branch absent from commits answers: 422 is GitHub's
+	// answer for a branch that does not exist, with GitHub's body; anything else (0 included) is
+	// 404 with no body.
+	missingBranchStatus int
 	// largeCommits names the branches whose JSON answer carries a file list that pushes it past
 	// 1 MiB, as a large commit's does on GitHub.
 	largeCommits map[string]bool
@@ -178,6 +182,12 @@ func (f *fakeGitHub) handler() http.Handler {
 		branch := r.PathValue("branch")
 		sha, ok := f.commits[branch]
 		if !ok {
+			if f.missingBranchStatus == http.StatusUnprocessableEntity {
+				w.Header().Set("Content-Type", "application/json; charset=utf-8")
+				w.WriteHeader(http.StatusUnprocessableEntity)
+				fmt.Fprintf(w, `{"message":"No commit found for SHA: %s","documentation_url":"https://docs.github.com/rest/commits/commits#get-a-commit","status":"422"}`, branch)
+				return
+			}
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -661,6 +671,30 @@ func TestRefResolvesTheBranchCommit(t *testing.T) {
 
 	if _, err := client.Ref(context.Background(), token, "legion", "arch", "gone"); !errors.Is(err, ErrNoBranch) {
 		t.Fatalf("missing branch: err=%v, want ErrNoBranch", err)
+	}
+}
+
+// GitHub answers a branch that does not exist with 422 and a repository the installation cannot
+// see with 404; Ref answers ErrNoBranch and no SHA for both.
+func TestRefMissingBranchIsErrNoBranch(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		status int
+	}{
+		{name: "404 not found", status: http.StatusNotFound},
+		{name: "422 no commit found", status: http.StatusUnprocessableEntity},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fake := &fakeGitHub{t: t, missingBranchStatus: tc.status}
+			client, token := newReaderFixture(t, fake)
+			sha, err := client.Ref(context.Background(), token, "legion", "arch", "gone")
+			if !errors.Is(err, ErrNoBranch) {
+				t.Fatalf("missing branch answered %d: err=%v, want ErrNoBranch", tc.status, err)
+			}
+			if sha != "" {
+				t.Fatalf("missing branch answered %d: sha=%q, want none", tc.status, sha)
+			}
+		})
 	}
 }
 

@@ -634,12 +634,13 @@ func (c *Client) request(ctx context.Context, method, target, authorization, acc
 
 // Ref resolves branch to its commit SHA under an installation token
 // (`GET /repos/{owner}/{repo}/commits/{branch}`) — one call that also proves
-// the branch exists: GitHub's 404 (and its 422 for an empty repository or a
-// malformed ref) is ErrNoBranch. It asks for the SHA alone
-// (`Accept: application/vnd.github.sha`), so the commit's file list, which
-// GitHub's JSON answer carries, never counts against responseLimit. An answer
-// that is not one 40-hex SHA is an error, never a SHA: a Dir read at it would
-// answer an empty model.
+// the branch exists. GitHub answers a branch that does not exist (also an
+// empty repository or a malformed ref) with 422, and a repository that is not
+// found or not visible to the installation with 404; both are ErrNoBranch.
+// It asks for the SHA alone (`Accept: application/vnd.github.sha`), so the
+// commit's file list, which GitHub's JSON answer carries, never counts
+// against responseLimit. An answer that is not one 40-hex SHA is an error,
+// never a SHA: a Dir read at it would answer an empty model.
 func (c *Client) Ref(ctx context.Context, token, owner, repo, branch string) (string, error) {
 	if c == nil {
 		return "", ErrNoAppKey
