@@ -1,15 +1,25 @@
 import { expect, type Page, type Request, test } from "@playwright/test";
 
-import { agentRow, getSentMessages, openAgents, plannerSession, seedAgents } from "./agents";
+import {
+  agentRow,
+  getSentMessages,
+  openAgents,
+  plannerSession,
+  postedBroadcasts,
+  reviewerSession,
+  seedAgents,
+} from "./agents";
 import { resetDatabase } from "./seed";
 import { asUser } from "./users";
 
 // A message to one session goes under an idempotency key, and the page tries it again under that
-// key until Dispatch answers it (`sendKeyedAgentMessage`). These rows run that against the real
-// server: an attempt whose answer the page never gets, and one a server that is down answers 503,
-// each end in one message delivered once, and the composer cleared.
+// key until Dispatch answers it (`sendKeyedAgentMessage`); a broadcast is keyed and kept the same
+// way (`broadcast-queue.ts`). These rows run both against the real server: an attempt whose answer
+// the page never gets, and one a server that is down answers 503, each end in one message per
+// recipient and the composer cleared.
 
 const messages = `/api/v1/agents/${plannerSession.session_id}/messages`;
+const broadcasts = "/api/v1/broadcasts";
 
 /** Every POST the page makes to the Planner's message route, in order. */
 function watchPosts(page: Page): Request[] {
@@ -30,6 +40,16 @@ async function send(page: Page, body: string): Promise<void> {
   await expect(field).toBeFocused();
   await page.keyboard.type(body);
   await page.keyboard.press("Control+Enter");
+}
+
+/** Ticks every session the page lists, types `body` into the broadcast composer and sends it. */
+async function broadcast(page: Page, body: string): Promise<void> {
+  for (const title of ["Planner", "Reviewer"]) {
+    await page.getByRole("checkbox", { name: `Select ${title} for broadcast` }).check();
+  }
+  const composer = page.getByRole("region", { name: "Broadcast" });
+  await composer.getByRole("textbox", { name: "Broadcast message" }).fill(body);
+  await composer.getByRole("button", { name: "Send to 2" }).click();
 }
 
 test.beforeEach(async () => {
@@ -192,6 +212,136 @@ test("a send held through a reload is resumed under its key, and delivered once"
     ]);
     expect(await getSentMessages()).toHaveLength(1);
     // A landed send leaves the tab's storage, so the next load resumes nothing.
+    await expect
+      .poll(() =>
+        page.evaluate(
+          () =>
+            Object.keys(window.sessionStorage).filter((name) =>
+              name.startsWith("dispatch.keyed-send:")
+            ).length
+        )
+      )
+      .toBe(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// A broadcast is keyed too, and the same loss of an answer is the same outcome: Dispatch made the
+// broadcast and sent every recipient their copy, and the repeat under that key is answered with it
+// (200) rather than making a second one.
+test("a broadcast whose answer is lost is tried again under its key, and each agent hears it once", async ({
+  browser,
+}) => {
+  await seedAgents();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const posted = postedBroadcasts(page);
+    let firstAnswer: number | undefined;
+    await page.route(`**${broadcasts}`, async (route) => {
+      if (route.request().method() !== "POST" || firstAnswer !== undefined) {
+        return route.fallback();
+      }
+      firstAnswer = (await route.fetch()).status();
+      return route.abort("failed");
+    });
+    const landed = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === broadcasts &&
+        response.status() === 200
+    );
+    await openAgents(page);
+    await broadcast(page, "Exactly once, everyone");
+
+    const answer = await landed;
+    expect(firstAnswer).toBe(201);
+    // The page opens the broadcast the repeat was answered with, which is the one the lost
+    // answer made.
+    await page.waitForURL(/\/agents\/broadcasts\/[0-9a-f-]+$/u);
+    expect(page.url().split("/").at(-1)).toBe((await answer.json()).id);
+    expect(posted).toHaveLength(2);
+    const [first, second] = posted;
+    expect(first).toEqual({
+      body: "Exactly once, everyone",
+      delivery: "btw",
+      idempotency_key: expect.any(String),
+      session_ids: [plannerSession.session_id, reviewerSession.session_id],
+    });
+    expect(second).toEqual(first);
+    await expect
+      .poll(async () => (await getSentMessages()).map((entry) => entry.target_session).sort())
+      .toEqual([plannerSession.session_id, reviewerSession.session_id].sort());
+    expect(await getSentMessages()).toHaveLength(2);
+    await expect(page.getByText(/^Could not send/)).toHaveCount(0);
+  } finally {
+    await alice.close();
+  }
+});
+
+// The broadcast kept through a reload: the tab asks before it is left, this row means to leave,
+// and the reloaded page sends the identical request under the same key, which Dispatch answers
+// with the broadcast the first attempt made. It was pressed before this visit, so the page stays
+// on Agents and its strip links the broadcast rather than opening it.
+test("a broadcast held through a reload is resumed under its key, and each agent hears it once", async ({
+  browser,
+}) => {
+  await seedAgents();
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    const posted = postedBroadcasts(page);
+    const prompts: string[] = [];
+    page.on("dialog", (dialog) => {
+      prompts.push(dialog.type());
+      void dialog.accept();
+    });
+    const reached = Promise.withResolvers<void>();
+    const reloaded = Promise.withResolvers<void>();
+    let firstAnswer: number | undefined;
+    await page.route(`**${broadcasts}`, async (route) => {
+      if (route.request().method() !== "POST" || firstAnswer !== undefined) {
+        return route.fallback();
+      }
+      firstAnswer = (await route.fetch()).status();
+      reached.resolve();
+      await reloaded.promise;
+      // The page cancelled the request with the reload; there is nothing left to answer.
+      await route.abort("failed").catch(() => undefined);
+    });
+    const resumed = page.waitForResponse(
+      (response) =>
+        response.request().method() === "POST" &&
+        new URL(response.url()).pathname === broadcasts &&
+        response.status() === 200
+    );
+    await openAgents(page);
+    await broadcast(page, "Kept through the reload");
+    await reached.promise;
+    expect(firstAnswer).toBe(201);
+
+    await page.reload();
+    reloaded.resolve();
+    await resumed;
+    expect(prompts).toEqual(["beforeunload"]);
+    expect(posted).toHaveLength(2);
+    const [first, second] = posted;
+    expect(first).toEqual({
+      body: "Kept through the reload",
+      delivery: "btw",
+      idempotency_key: expect.any(String),
+      session_ids: [plannerSession.session_id, reviewerSession.session_id],
+    });
+    expect(second).toEqual(first);
+    await expect(
+      page.getByRole("region", { name: "Sends" }).getByRole("link", { name: "Sent to 2 agents" })
+    ).toBeVisible();
+    await expect
+      .poll(async () => (await getSentMessages()).map((entry) => entry.target_session).sort())
+      .toEqual([plannerSession.session_id, reviewerSession.session_id].sort());
+    expect(await getSentMessages()).toHaveLength(2);
+    // A landed broadcast leaves the tab's storage, so the next load resumes nothing.
     await expect
       .poll(() =>
         page.evaluate(
