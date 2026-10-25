@@ -232,6 +232,58 @@ func TestRereadIsRateLimitedPerAddress(t *testing.T) {
 	}
 }
 
+// TestOneAddressNeverOutlastsTheSharedRereadBucket pins the ordering the whole fan-out leans on,
+// as a relation between the two buckets rather than as two numbers.
+//
+// POST /v1/secrets/{name}/reread takes no credential (routes_table.go: public), and
+// ratelimit.Keyed.AllowBothAt charges a refusal to neither bucket, so a caller that never floods
+// and merely keeps succeeding at the rate the broker-wide bucket refills holds that bucket at
+// zero for ever and is never refused itself. While it is empty no narrowing retag reaches any
+// pod before that pod's own five-minute reload, which is the one thing this fan-out exists to
+// prevent. So one address's own sustained rate has to be strictly less than the shared bucket's,
+// and by enough that holding it down takes more than one address: the rule is that the address
+// bucket refills at half the rate of the shared bucket THIS PROCESS MOUNTS.
+//
+// It has to be the mounted bucket and not a constant, because cmd/broker mounts
+// api.GCPRereadOverallLimit only under gcp-secret-manager and api.DefaultRereadOverallLimit
+// otherwise: an address limit derived from the Google figure alone makes every AWS deployment
+// pay a fourfold tightening for a Secret Manager quota it never touches, and one derived from
+// the default figure alone leaves a single address able to hold a Secret Manager fleet's budget
+// at zero.
+//
+// Retry-After is the observable: it carries the refusing bucket's own Every
+// (api/limits.go's retryAfterSeconds), so it says which bucket refused and at what rate,
+// which nothing else in the answer does. The mounted shared bucket is given a depth no row here
+// can reach, so the only refusal this can meet is the address's own.
+func TestOneAddressNeverOutlastsTheSharedRereadBucket(t *testing.T) {
+	for _, shared := range []time.Duration{time.Second, 4 * time.Second} {
+		t.Run(shared.String(), func(t *testing.T) {
+			ts := newTestServerWith(t, func(d *api.Deps) {
+				d.RereadOverallLimit = &ratelimit.Limit{Every: shared, Burst: 1000}
+				d.TrustedProxyHeader = "X-Forwarded-For"
+			})
+			want := fmt.Sprintf("%d", int(2*shared/time.Second))
+			from := map[string]string{"X-Forwarded-For": "203.0.113.7"}
+			for sent := 1; sent <= 400; sent++ {
+				status, headers, body := postReread(t, ts, "WORKER_TOKEN", from)
+				if status == http.StatusOK {
+					continue
+				}
+				if status != http.StatusTooManyRequests || decode[wireError](t, body).Code != "RATE_LIMITED" {
+					t.Fatalf("reread %d from one address against a shared bucket of %s = %d %s; want 200 until that address's own bucket refuses",
+						sent, shared, status, body)
+				}
+				if got := headers.Get("Retry-After"); got != want {
+					t.Fatalf("one address's own reread bucket refuses with Retry-After %q against a shared bucket refilling every %s; want %q — the address bucket refills at half the shared bucket this process mounts, so that no single unauthenticated address can hold the fleet's reread budget at zero and so that a deployment is not tightened by a bucket it does not mount",
+						got, shared, want)
+				}
+				return
+			}
+			t.Fatalf("400 rereads from one address and its own bucket never refused; the row cannot read a rate it never meets")
+		})
+	}
+}
+
 // TestRereadIsRateLimitedAcrossEveryAddress pins the broker-wide bound. Every reread takes the
 // policy's writer lock, so a flood spread over addresses that are each on their first reread —
 // well inside their own limit — is refused all the same, and names the broker-wide bucket's own
