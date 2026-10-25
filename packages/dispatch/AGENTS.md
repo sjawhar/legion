@@ -1217,11 +1217,14 @@ waits for the server's `/healthz` and every other listener's port, empties the d
 instance" section is its user's guide. Its database is `DATABASE_URL` or the `dispatch_local`
 database on `packages/envoy/scripts/dev-postgres.sh`'s container. Before it hands out the URL its
 startup smoke checks, over HTTP with a dev sign-in cookie, that `/auth/whoami` names `alice`, the
-Inbox holds the seed's rows, the seeded broadcast is listed, every seeded session is an agent and
-one of them answers its live view's agent routes. Every seeded session id is a UUID, from the one
-table `e2e/session-ids.ts` (`workspace.ts` and `e2e/agents.ts` both seed from it): Dispatch's
-agent routes take a session id no other shape (`400 SESSION_ID_INPUT`), so a session seeded under
-a name listed on the Agents page with a live view that could never load.
+Inbox holds the seed's rows, the seeded broadcast is listed and every seeded session is an agent,
+and then subscribes the Planner's agent view on the live socket as the page does
+(`agentViewRefusal`), refusing to hand out the URL with Dispatch's own refusal when that view
+would read `This session's conversation is unavailable`. Every seeded session id is a UUID, from
+the one table `e2e/session-ids.ts` (`workspace.ts` and `e2e/agents.ts` both seed from it):
+Dispatch's agent routes take a session id in no other shape (`400 SESSION_ID_INPUT`), so a
+session seeded under a name passed every HTTP check, listed on the Agents page, and had a live
+view that could never load.
 It deliberately does not check a broadcast's recipient order: `e2e/broadcast.e2e.ts` owns that
 assertion, so the command has to start on a server without that fix for the spec to go red
 against it. What it runs on lives in `e2e/local-instance-support.ts`, which runs nothing on
@@ -1251,10 +1254,15 @@ other close waits out a first backoff of at least 750 ms.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,
 `e2e/keyboard-agents-picker.e2e.ts`, `e2e/live-socket.e2e.ts`, and `e2e/offline-edits.e2e.ts`.
-Of the live-socket spec only its one-socket row (`a tab holds one live socket for every live
-view`) runs outside `chromium`, here and in `firefox`: a tab holds one live socket in every engine,
-and WebKit is the one iOS Safari uses for every subscription the row opens; each of its other
-rows skips outside `chromium`, since its proof needs to run once. Where a caret lands beside
+Every row of the live-socket spec runs in every project that lists the spec - `chromium`,
+`iphone`, `firefox` and, in CI, `webkit`: the APIs its rows need (`routeWebSocket`, the request
+events it counts navigations with, `page.clock`) exist in all three engines, and what they prove
+- one socket per tab, an idle page holding no request, a rotation that loses no event, a resume
+from the sign-in check's event head, and a live view keeping the reader's place - is each
+engine's own connection and timer behaviour, so it is proven in each rather than once. A reload
+is counted as a navigation request of the main frame, not a `load` event, since Playwright's
+Firefox fires one for the page's initial `about:blank` and Chromium none. The `webkit-iphone`
+project still takes the one-socket row alone, by title. Where a caret lands beside
 a collaborator's cursor differs by engine: Chromium drops typing there and WebKit misplaces it,
 while Firefox is unaffected, so that spec is the one that needs a second engine. The picker spec guards the Agents
 issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`), which holds only because every engine
