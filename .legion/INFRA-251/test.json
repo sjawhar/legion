@@ -1,0 +1,65 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-251",
+  "completed": "2026-10-25T11:55:00Z",
+  "round": 4,
+  "note": "Retro removed .legion/INFRA-251/ before READY, so this file is written fresh for this round; rounds 1 to 3 are recorded in the pull request body's own E2E (tester) blocks and are summarised under roundsOneToThree below.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the commands of its round-4 proof entry at this head (9d688fa557a18fbec8c9832df7ee954ec1252cd5): TestDaemonAPIVersionGolden PASS in ./internal/api/; `bun scripts/build.ts --check` in packages/claude-envoy prints 'dist/ and legion/ match a fresh build'; `bun test packages/contracts` 210 pass, 0 fail; the two skills-guard files with packages/pi-legion/src/daemon-api-version.test.ts 19 pass, 1 skip, 0 fail; and gh's own mergeability and run reads, which show five runs at this head where the previous head had none. I did not repeat its whole-package Go runs or the lane runs: those are CI's at this head, and no product code of this issue has moved since c3955ada8e44a4851e791918423d4d745751ab25."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "Round 4's first criterion: the relocation INFRA-376 made in main must not silently drop this branch's edited `design-changes-requested` row, and the branch's other two hunks in the architect skill must survive the merge.",
+      "surface": "The skill files a Legion architect loads, and the generated Claude Code mirror of them, at this head.",
+      "command": "cat skills/legion-architect/references/wake-routing.md; grep -c '^| `' skills/legion-architect/SKILL.md; grep -n 'register_gate` that version (step 5)|Never yield while waiting on a human' skills/legion-architect/SKILL.md; (cd packages/claude-envoy && bun run check-dist)",
+      "observed": "The row is in references/wake-routing.md with the branch's wording intact: 'Its `version` and `reason`: a human asked for changes to the root spec at `version`. Revise, request approval and `register_gate` again as section 1 says, then end the turn; the gate is closed.' SKILL.md holds no table row at all (count 0) and instead points at the reference ('Handle every delivered wake from the table in skill://legion-architect/references/wake-routing.md'). The branch's two other hunks survive: the approval-and-register_gate steps at line 175 and 'Never yield while waiting on a human' at line 450, both in the branch's own wording. The generated mirror carries the same row, and check-dist prints 'dist/ and legion/ match a fresh build'. The skills are 457 lines (architect) and 498 (controller), so the size guard main's #2180 left red is green here: the two skills-guard test files pass.",
+      "headSha": "9d688fa557a18fbec8c9832df7ee954ec1252cd5",
+      "negativeControl": "The failure mode here is a silent drop, so absence is the control: the branch's wording is found nowhere in SKILL.md and exactly once in each copy of wake-routing.md, and check-dist fails the moment the mirror and the source disagree — the mutation round 3 ran against the same build check proved it is not vacuous."
+    },
+    {
+      "criterion": "Round 4's second criterion: the daemon API contract renumber — every site naming this branch's shapes moved to 37, every site naming main's INFRA-229 shapes stayed 36, and the golden test and the contracts suite agree at the merged head.",
+      "surface": "The repository's own contract machinery: the Go constant, the golden fixture both sides read, the two plugin manifests, and the prose that attributes each number.",
+      "command": "cd packages/daemon && go test -count=1 -run TestDaemonAPIVersionGolden ./internal/api/; bun test packages/contracts; bun test packages/pi-legion/src/skills-guard.test.ts packages/pi-legion/src/daemon-api-version.test.ts packages/pi-envoy/src/skills-guard.test.ts; grep over every daemonApiVersion/DaemonAPIVersion site and over every branch-added line naming 36; ls packages/daemon/internal/store/migrations/",
+      "observed": "37 at every site of this branch's shapes: packages/contracts/fixtures/daemon-api/version.json, packages/daemon/internal/api/version.go's DaemonAPIVersion (line 315), packages/pi-legion/package.json and packages/claude-envoy/package.json. 36 left where main's INFRA-229 shapes are named: pi-legion/CHANGELOG.md:22, pi-legion/AGENTS.md:94, version.go:301 and contracts/src/legion-api.ts:159. Every remaining 36 in a branch-added line is either that attribution, the Go comment recording the renumber, or a Dispatch fixture's event id. TestDaemonAPIVersionGolden PASS; bun test packages/contracts 210 pass, 0 fail; the guard and version tests 19 pass, 1 skip, 0 fail. The migrations still end 0050_claim_failure, 0051_awaiting_person, 0052_parked_decisions, so main's changes added none that would collide with this issue's.",
+      "headSha": "9d688fa557a18fbec8c9832df7ee954ec1252cd5",
+      "negativeControl": "The golden test is the control in both directions and is not vacuous: it compares DaemonAPIVersion against packages/contracts/fixtures/daemon-api/version.json, and packages/pi-legion/src/daemon-api-version.test.ts compares that fixture against the plugin manifest, so a number moved on one side alone reddens one of them. The collision itself is the hazard being avoided: two branches at 36 would let a daemon at 36 pass the boot gate against a plugin whose strict reader refuses its state."
+    },
+    {
+      "criterion": "Round 4's third criterion: the fingerprint moved only by the relocation and the renumber, which is what lets the reviewer keep its approval of 57dab0ef.",
+      "surface": "The unchanged-diff fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md, computed over the workspace at the head this phase last verified and at this one, with the two diffs kept and compared.",
+      "command": "jj -R \"$LEGION_WORKSPACE\" git fetch; then for each of ea350c3a987ce21289c6c6d69d99156610ce79c9 and 9d688fa557a18fbec8c9832df7ee954ec1252cd5: jj diff --from 'fork_point(\"main\"@origin | <sha>)' --to <sha> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum; then diff the two saved diffs.",
+      "observed": "52945ed745bda765011292936c30047deee4c0f6d8403a88a0cea245b5bd46a7 → e218c8906ef29c324aa5ba54f7061167d67e00f48789b5b1ebc2bc3447dc4a7b: changed, by 84 lines, and every one of them is one of two things. The renumber: 36 → 37 in the Go constant and its comment (which now records why this branch took the number above main's), in packages/contracts/src/legion-api.ts's comment, in both manifests and in the pi-legion and claude-envoy changelog entries, with the rewrapped prose around them. The relocation: the branch's `design-changes-requested` row leaving skills/legion-architect/SKILL.md and appearing in skills/legion-architect/references/wake-routing.md, and the same pair in packages/claude-envoy/legion/skills/legion-architect/. No product file, test or script of this issue appears in the delta at all.",
+      "headSha": "9d688fa557a18fbec8c9832df7ee954ec1252cd5",
+      "negativeControl": "The procedure refuses rather than passes when it cannot answer: it prints a hash only when the base read, the fetch and the diff all succeed, and a changed hash is read as changed. Here the change was then named line by line rather than explained away, which is what would have exposed a product line the merge carried."
+    },
+    {
+      "criterion": "Round 4's fourth criterion: the lanes exist at this head, the condition round 2 failed for.",
+      "surface": "GitHub's own view of the pull request and its runs, read with gh.",
+      "command": "gh run list --commit 9d688fa557a18fbec8c9832df7ee954ec1252cd5 --repo sjawhar/legion; gh pr view 2163 --repo sjawhar/legion --json mergeable,mergeStateStatus",
+      "observed": "Five runs at this head: Tests 40189986513, Legion Envoy and Contracts 40189986509, Worker Image 40189986508, Docs 40189986541 and PR Title 40190058187, queued when read at 11:52Z, with an earlier PR Title run 40189986505 already completed success. Mergeability read UNKNOWN while GitHub recomputed it after the push, which is why the run set is the evidence here rather than the single word: a head with runs is a head GitHub is judging. No lane was re-run or waited for; the daemon reads every settlement and returns the issue to implementing if a required check settles red.",
+      "headSha": "9d688fa557a18fbec8c9832df7ee954ec1252cd5",
+      "negativeControl": "Round 2's head is the recorded control: at eb4e98d5 check-runs totalled 0 and gh answered CONFLICTING/DIRTY, which is a run set that will never fill, and this phase failed that round for it."
+    }
+  ],
+  "roundsOneToThree": {
+    "productHead": "c3955ada8e44a4851e791918423d4d745751ab25",
+    "standing": "Round 1 verified A1, A2 and the durable record against a real PostgreSQL in this pod at 7e7b935b, with concurrency, race, upsert and hostile-input break attempts and the refusal controls, and read the devbox verdict jq against a log the daemon itself wrote. Round 2 drove wait_for_run_processes at eb4e98d5 against stub walks and against rig.sh's own run_processes over real processes, and failed the round because the head had no CI. Round 3 confirmed the cure, compared the fingerprint and proved the fourth test case causal. None of that was re-driven here: no product code has moved since c3955ada, and this round's fingerprint comparison is the evidence."
+  },
+  "awaitingArrangedRun": [
+    "A3 and A4: the architect's one developer-machine run of scripts/e2e/parked-decision-devbox.sh at the head the reviewer approves, which must end 'parked decision devbox e2e: PASS'. No Legion pod can run it.",
+    "A5 belongs to the production check after the merge closes this issue.",
+    "Gate G1 still answers 17, so READY waits on sjawhar/legion#2131; that is the architect's wait, not a test failure."
+  ],
+  "observations": [
+    "packages/claude-envoy/CHANGELOG.md's [Unreleased] section now reads 36 above 37: main's INFRA-229 entry ('The plugin declares daemon API contract 36…') was prepended by the merge above this branch's own 'declares daemon API contract 37' entry, and an older 'declares 35' entry sits below both. The manifest is 37 and no check reads the prose, so this is wording, not a defect; a reader skimming the top of that section would nonetheless take 36 for the current number. Worth one line of tidying on the next claude-envoy change, not a reason to move this head."
+  ],
+  "ciRead": {
+    "at": "2026-10-25T11:52Z",
+    "head": "9d688fa557a18fbec8c9832df7ee954ec1252cd5",
+    "runs": "Tests 40189986513 queued; Legion Envoy and Contracts 40189986509 queued; Worker Image 40189986508 queued; Docs 40189986541 queued; PR Title 40190058187 queued; PR Title 40189986505 completed success. Mergeability UNKNOWN while GitHub recomputed after the push. No lane re-run or waited for."
+  }
+}
