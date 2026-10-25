@@ -751,12 +751,40 @@ func (c *Client) refused(err error, size int) error {
 	return err
 }
 
+// publishBound is the window an exported publish method gives a publish, its wait for a reconnect
+// and its JetStream acknowledgement together. Every publisher in the repository that has no
+// deadline of its own relies on it, so the exported methods keep it; it is also the HTTP client's
+// per-attempt deadline (packages/envoy-client/src/transport.ts), which a publish that spends the
+// whole bound can never be answered inside, and that is what the Within forms below exist for.
+const publishBound = 5 * time.Second
+
+// remainingPublishBound is what ctx leaves a publish, and publishBound for a context carrying no
+// deadline of its own, so a publish - its wait for a reconnect included - is bounded however its
+// caller called it.
+func remainingPublishBound(ctx context.Context) time.Duration {
+	deadline, ok := ctx.Deadline()
+	if !ok {
+		return publishBound
+	}
+	return time.Until(deadline)
+}
+
 // Publish routes role lanes, their delivery-exception lanes and every topic the stream does not
 // capture through core NATS (usesCoreTransport); every notification the stream captures retains
 // JetStream durability. Its signature is an interface method in cistore, outbox and webhook, so a
-// caller that wants JetStream's duplicate verdict calls PublishReportingDuplicate instead.
+// caller that wants JetStream's duplicate verdict calls PublishReportingDuplicate instead, and one
+// that has a deadline of its own calls PublishWithin.
 func (c *Client) Publish(item contracts.Envelope) error {
 	_, err := c.PublishReportingDuplicate(item)
+	return err
+}
+
+// PublishWithin publishes as Publish does, with ctx as the whole publish's bound - the wait for a
+// reconnect, the flush and the JetStream acknowledgement all end with it - instead of publishBound.
+// The listener's HTTP handlers publish this way, so a bus they cannot reach is answered inside the
+// deadline their own caller gave them.
+func (c *Client) PublishWithin(ctx context.Context, item contracts.Envelope) error {
+	_, err := c.PublishReportingDuplicateWithin(ctx, item)
 	return err
 }
 
@@ -772,17 +800,28 @@ func (c *Client) Publish(item contracts.Envelope) error {
 // have landed, so the very publish that put the message on the subject can come
 // back a duplicate.
 func (c *Client) PublishReportingDuplicate(item contracts.Envelope) (bool, error) {
-	if usesCoreTransport(item.Topic) {
-		return false, c.PublishCore(item)
-	}
-	return c.publishJetStream(item)
+	ctx, cancel := context.WithTimeout(context.Background(), publishBound)
+	defer cancel()
+	return c.PublishReportingDuplicateWithin(ctx, item)
 }
 
-// publishJetStream publishes item to the notification stream. The MsgId, where the envelope earns
-// one, is the dedupe key and the topic together, because one upstream event can be published on
-// several topics under one key - a GitHub comment that mentions the trigger is published on its
-// mention topic beside its comment topic - and each of those must be retained.
-func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
+// PublishReportingDuplicateWithin publishes as PublishReportingDuplicate does, reporting the same
+// duplicate verdict over the same two transports, with ctx as the whole publish's bound instead of
+// publishBound.
+func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contracts.Envelope) (bool, error) {
+	if usesCoreTransport(item.Topic) {
+		return false, c.publishCoreTo(ctx, item.Topic, item)
+	}
+	return c.publishJetStream(ctx, item)
+}
+
+// publishJetStream publishes item to the notification stream within ctx's bound. The MsgId, where
+// the envelope earns one, is the dedupe key and the topic together, because one upstream event can
+// be published on several topics under one key - a GitHub comment that mentions the trigger is
+// published on its mention topic beside its comment topic - and each of those must be retained.
+// The acknowledgement wait is still taken from publishAcknowledgementClock, the seam a test uses to
+// expire that bound without spending it.
+func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) (bool, error) {
 	if err := checkSubject(item.Topic); err != nil {
 		return false, err
 	}
@@ -790,7 +829,7 @@ func (c *Client) publishJetStream(item contracts.Envelope) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := c.publishAcknowledgementClock.WithTimeout(ctx, remainingPublishBound(ctx))
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return false, err
@@ -823,8 +862,18 @@ func (c *Client) PublishCore(item contracts.Envelope) error {
 // (publishConfirmed), so a nil error means it did: a publish NATS denies (a permissions violation
 // of a per-client grant), a flush that fails and a publish the server cannot be shown to have
 // accepted all return an error. The subject can differ from item.Topic when an authoritative
-// router forwards an envelope while retaining its original topic for the recipient.
+// router forwards an envelope while retaining its original topic for the recipient. It bounds
+// itself at publishBound; a caller with a deadline of its own reaches the same publish through
+// PublishWithin.
 func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
+	ctx, cancel := context.WithTimeout(context.Background(), publishBound)
+	defer cancel()
+	return c.publishCoreTo(ctx, subject, item)
+}
+
+// publishCoreTo is PublishCoreTo under ctx: ctx is the whole publish's bound, so it is both what
+// the wait for a reconnect ends with and the window publishConfirmed flushes and confirms within.
+func (c *Client) publishCoreTo(ctx context.Context, subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err
 	}
@@ -832,7 +881,7 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, remainingPublishBound(ctx))
 	defer cancel()
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
