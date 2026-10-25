@@ -2,83 +2,83 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-92",
-  "completed": "2026-10-25T02:05:00Z",
+  "completed": "2026-10-25T03:55:00Z",
+  "round": "the reviewer's changes-requested round at a1a3a38f89a6, plus the two adjacent fixes the stream lead and the architect queued",
   "proof": [
     {
-      "criterion": "The name a person gave the session is what the plugin registers.",
-      "surface": "The committed dist/envoy-channel.js registering with a real Envoy listener built from this tree, against a real nats-server with JetStream, the name recorded by the committed dist/session-hook.js from a SessionStart payload.",
-      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (case 1), then the listener's own GET /v1/sessions",
-      "observed": "The listener holds \"eeny meeny\" for session smoke-title-0001, the name the SessionStart payload carried, alone and with no short id after it.",
-      "headSha": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
-      "negativeControl": "The same recorded name against main@origin's dist/envoy-channel.js (the script's last case): it registered \"probe-project smoke-ti\", the folder-and-short-id fallback, and not \"eeny meeny\"."
+      "criterion": "The ten browser rows this change broke pass again, and nothing else in the suite moved (reviewer finding 1).",
+      "surface": "Dispatch's own browser suite in a real Chromium, run in this pod against the shared PostgreSQL 17.11 with pgvector the tester left on the issue volume (/legion/scratch/dispatch-e2e-rig/pg17) and the Playwright browsers in /legion/scratch/cache/ms-playwright. The whole chromium project, not a -g filter: a layout change touches every row, which is how the ten failures got past the first round's two filtered runs.",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e PATH=<pg17>/bin:$PATH LD_LIBRARY_PATH=<pg17 libs> bunx playwright test --config e2e/playwright.config.ts --project chromium --project iphone --project chromium-plain-http",
+      "observed": "The chromium project ran to completion: 721 passed, 0 failed, from e2e/activity.e2e.ts to e2e/writes.e2e.ts. All eight locators the reviewer named are green — keyboard-agents-pin.e2e.ts:173, :223, :272, :322, :361, :396, :542 and keyboard-agents-picker.e2e.ts:835 — and so is the new row, agents.e2e.ts:1717. The run was cut at the command's 58-minute cap partway through the iphone project with 801 passed and 0 failed overall; the iphone and chromium-plain-http remainder for every spec that touches this change is the next proof entry.",
+      "headSha": "1e510bb95874db89c4efcb891c92e8d2483bf141",
+      "negativeControl": "The same eight rows at the previous head, in CI run 40148254772: each a 30 s locator timeout, because row.getByText('box-1 · /srv/silent') named a string the row above md no longer renders. The before-leg run at 4a134cac6ddb failed three other rows and none of these, so the base was clean and the diff was the cause."
     },
     {
-      "criterion": "A later rename replaces it, without restarting the session.",
-      "surface": "The same live run: the already-registered channel server, with a UserPromptSubmit payload run through the committed dist/session-hook.js while it is up.",
-      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (case 2), then GET /v1/sessions",
-      "observed": "The listener held \"eeny meeny\" and then held \"miny moe\" within the heartbeat that followed the hook run, with no restart of the channel server.",
-      "negativeControl": "Case 3 of the same run, below: a payload with no session_title moves the registered title off the chosen name, so the heartbeat is reading the record each time rather than latching the first value it saw.",
-      "headSha": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5"
+      "criterion": "The phone layout and the plain-HTTP origin are unaffected by the locator and breakpoint changes.",
+      "surface": "The same rig, the iphone project (390x664) and chromium-plain-http, over every spec that touches the Agents page, the phone layout or the shell.",
+      "command": "the same playwright invocation with --project=iphone --project=chromium-plain-http and the thirteen specs e2e/agents.e2e.ts, agents-search, keyboard-agents, keyboard-agents-pin, keyboard-agents-picker, phone, phone-conversation, layout, polish, shell, workspace, plain-http-origin, plain-http-proxy",
+      "observed": "98 passed, 0 failed, in 5.7 minutes.",
+      "headSha": "1e510bb95874db89c4efcb891c92e8d2483bf141",
+      "negativeControl": "The same specs' chromium rows in the first run are the control for the locator change itself: the fix is one attribute selector, and the rows that exercise it failed at the previous head and pass here."
     },
     {
-      "criterion": "A session nobody named keeps today's fallback, its tmux pane or folder and eight characters of its session id.",
-      "surface": "The same live run, with a UserPromptSubmit payload carrying no session_title, which is how Claude Code says the session has no custom title.",
-      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (case 3), then GET /v1/sessions",
-      "observed": "The listener holds \"probe-project smoke-ti\" — the project directory's name and the first eight characters of the session id — exactly what the base bundle registers for the same session.",
-      "headSha": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
-      "negativeControl": "Cases 1 and 2 of the same run: with a name recorded, the same session registers that name instead, so the fallback is not simply all this build can produce."
+      "criterion": "The UserPromptSubmit hook no longer costs every user prompt ~115 ms (reviewer finding 2).",
+      "surface": "The committed bundles, run as Claude Code runs them, in this pod.",
+      "command": "wc -c on the built files, then three runs each of `bun dist/session-title-hook.js` with a UserPromptSubmit payload on stdin, against a bare `bun` script and against the old shared bundle",
+      "observed": "dist/session-title-hook.js is 5,369 bytes against dist/session-hook.js's 811,441, and a grep of the built file finds no zod, DispatchClient, session-settings or ky. Timings: the new hook 62 / 70 / 62 ms, a bare `bun` script 65 / 65 / 66 ms, the old shared bundle 163 / 167 / 183 ms. The hook now costs bare Bun start-up plus nothing measurable, against the reviewer's measured ~115 ms of overhead.",
+      "headSha": "1e510bb95874db89c4efcb891c92e8d2483bf141",
+      "negativeControl": "The old shared bundle, measured in the same loop on the same machine, still takes 163-183 ms: the difference is the entrypoint's module graph and not the machine."
     },
     {
-      "criterion": "A session's Dispatch writes carry the same name a person reads on the Agents page.",
-      "surface": "The dispatch command's attribution file, which the channel server stamps as it registers: <DISPATCH_STATE_DIR>/sessions/<id>/title.",
-      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh (the stamp case), then cat of that file",
-      "observed": "After the rename, /tmp/claude-session-title.*/dispatch-state/sessions/smoke-title-0001/title holds \"miny moe\", the same string the listener holds for that session.",
-      "headSha": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
-      "negativeControl": "The script fails the case if the file is missing or holds anything else; before the rename the same path held the earlier title, so the file follows the registration rather than being written once."
-    },
-    {
-      "criterion": "A 64-character name shows in full at a laptop's width, the directory shrinks to its last segment with the whole path on hover, and a phone keeps the whole path.",
-      "surface": "Dispatch's own browser suite in a real Chromium, both profiles (chromium 1280x720, iphone 390x664), run by the dispatch job of the Legion Envoy and Contracts workflow. An issue pod has no Postgres, so packages/dispatch/e2e/run-server.sh cannot start the suite here; the deployment instructions' before-and-after pair therefore comes from two pushes on this pull request, as the plan's order of work sets out.",
-      "command": "run 40143159250 (the dispatch job at head 4a134cac6ddb, the browser row alone) for the before leg; run 40148254772 (the same job at head b790a592c539) for the after leg",
-      "observed": "Before: both profiles failed the new row, e2e/agents.e2e.ts 'an agent row shows the whole session name at every width, and shortens its directory only where a hover can show the path', each with 'SPAN: line clamp none, ellipsis, SPAN: 544x20 in 204x20' at unclipped.ts:43 — the name's own span ellipsised, 544 pixels of text in a 204-pixel box. After: the same row runs at this head as run 40148254772, which GitHub still showed queued when this phase completed; the implementer does not wait for, watch or poll CI, and the daemon reads every settlement itself. The tester and the reviewer read that run on GitHub.",
-      "headSha": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
-      "negativeControl": "The before leg is itself the control: the identical row, in both profiles, against the same tree without the page change, failing on the ellipsis the change removes. That run also failed [iphone] e2e/phone.e2e.ts:393 'an inline link keeps its line…', the row dispatch://INFRA-95 exists to fix, which passes and fails on unchanged code and is not this change's."
+      "criterion": "The chosen name still registers, a rename still replaces it, an unnamed session still keeps the fallback, and the dispatch command still carries the same name — after the title helpers moved module and the title file gained its suffix.",
+      "surface": "The committed dist/session-hook.js, the new dist/session-title-hook.js and dist/envoy-channel.js against a real nats-server with JetStream and an Envoy listener built from this tree, every title read back through the listener's own GET /v1/sessions.",
+      "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh",
+      "observed": "PASS, all four cases: the listener held \"eeny meeny\", then \"miny moe\" after the UserPromptSubmit payload went through the new separate bundle, then \"probe-project smoke-ti\" when the name was taken away, and the dispatch command's stamp held \"miny moe\".",
+      "headSha": "1e510bb95874db89c4efcb891c92e8d2483bf141",
+      "negativeControl": "The script's own last case: the same recorded name against main@origin's dist/envoy-channel.js registered the folder-and-short-id fallback and not the chosen name."
     }
   ],
+  "reviewFindings": [
+    "1 (blocking) — fixed. Both specs clicked the row's directory purely as somewhere-on-the-row and named it by its whole text. They now use the row's own [data-agent-dir] handle; pinFromRow's `place` parameter had no other reader and is gone. Proven by the two runs above.",
+    "2 (blocking) — fixed. hooks/session-title-hook.ts is a bundle entrypoint of its own (scripts/build.ts BUNDLE_ENTRYPOINTS, hooks.json's UserPromptSubmit entry), and the title-file helpers moved to the zod-free src/session-state.ts so nothing in that graph reaches zod, the Dispatch client or session-settings. 5,369 bytes and bare-Bun start-up, measured above. The hook validates its payload by hand and keeps the silent-stdout, always-exit-0 contract its tests pin.",
+    "3 (blocking) — fixed. envoy-channel-server.ts runs the three sweeps in one loop, each awaited with a .catch that writes one stderr line, in the shape of the syncRegisteredInterests call above it; the comment says why startup must survive housekeeping.",
+    "4 (minor) — fixed. README.md's 'more than one line' clause is gone, and AGENTS.md carried the same wrong claim and is corrected: a multi-line name is put on one line and registered, which tests/session-title.test.ts pins.",
+    "5 (minor, reviewer left it to me) — taken. The row now asks one question, Tailwind's md itself: MD_VIEWPORT_QUERY, (min-width: 768px), beside the existing viewport queries, so the predicate the row renders by and the md: classes it renders with cannot disagree on a fractional width. The prop is mdViewport.",
+    "6 (minor, hardening) — taken. sessionTitleFile returns titles/<encoded id>.txt, so a session id of '.' or '..' names a file inside the directory as roleStateFile's .json already did. One helper for the writer and every reader; the tests name the new path rather than being loosened.",
+    "Fast-follow — done in this round rather than deferred, as the architect asked: pruneStaleSessionHandoffs and pruneStaleSessionTitles are one pruneStateDirectory(directory, isStale) in src/session-state.ts, with liveness and age as its two predicates and the role sweep as its third caller.",
+    "Threads — the reviewer reports none on the pull request, mine or a bot's, and there are none to answer or resolve."
+  ],
   "filesChanged": [
-    "packages/claude-envoy/src/session-identity.ts — sessionTitleFile/writeChosenTitle/removeChosenTitle/readChosenTitleSync and pruneStaleSessionTitles with SESSION_TITLE_MAX_AGE_MS (thirty days)",
-    "packages/claude-envoy/src/session-title.ts — the ChosenTitle source, read on every call, between ENVOY_SESSION_TITLE and the tmux-or-folder fallback; the three injected seams gathered into SessionTitleSources",
-    "packages/claude-envoy/src/envoy-channel-server.ts — the chosen-title reader over CLAUDE_PLUGIN_DATA, and pruneStaleSessionTitles beside the handoff prune",
-    "packages/claude-envoy/hooks/session-hook.ts — session_title on OpenAsksInput, the shared recordChosenTitle, and the new silent always-exit-0 session-title mode",
-    "packages/claude-envoy/hooks/hooks.json — the UserPromptSubmit entry, timeout 5",
-    "packages/claude-envoy/dist/envoy-channel.js, packages/claude-envoy/dist/session-hook.js — the committed bundle, rebuilt",
-    "packages/claude-envoy/scripts/smoke-session-title.sh — the live smoke this handoff's first four proofs ran",
-    "packages/claude-envoy/tests/session-title.test.ts, session-identity.test.ts, open-asks-hook.test.ts, session-title-hook.test.ts (new), envoy-channel-handoff.test.ts, hooks-timeout.test.ts, dispatch-first-hook.test.ts",
+    "packages/dispatch/e2e/keyboard-agents-pin.e2e.ts, keyboard-agents-picker.e2e.ts — the directory clicked by [data-agent-dir]; pinFromRow loses its dead parameter",
+    "packages/dispatch/web/src/features/shell/useDialog.ts — MD_VIEWPORT_QUERY, Tailwind's md itself",
+    "packages/dispatch/web/src/features/agents/AgentsPage.tsx — the row renders by that one predicate (prop mdViewport)",
+    "packages/dispatch/AGENTS.md — the Agents-row paragraph names the new query and prop",
+    "packages/claude-envoy/hooks/session-title-hook.ts (new) — the UserPromptSubmit hook, its own entrypoint, hand-written payload check",
+    "packages/claude-envoy/hooks/session-hook.ts — back to two modes",
+    "packages/claude-envoy/hooks/hooks.json, scripts/build.ts — the new bundle and the entry that runs it",
+    "packages/claude-envoy/src/session-state.ts (new) — writeAtomicStateFile, pruneStateDirectory, writtenLongAgo, STATE_FILE_MAX_AGE_MS, the title-file helpers and recordChosenTitle, free of zod by design",
+    "packages/claude-envoy/src/session-identity.ts — the role half, importing from session-state, plus pruneStaleSessionRoles",
+    "packages/claude-envoy/src/envoy-channel-server.ts — the three sweeps, each best-effort",
+    "packages/claude-envoy/scripts/smoke-session-title.sh — the title case runs the new bundle",
+    "packages/claude-envoy/tests/ — session-state's helpers, the role-prune row, the title path row, the hook's four refusal rows, the whole args array pinned in hooks-timeout, and the queryTmux row measuring inside the child",
     "packages/claude-envoy/AGENTS.md, README.md, CHANGELOG.md",
-    "packages/dispatch/web/src/features/agents/AgentsPage.tsx — the name takes the row's width and wraps at every width; the directory carries data-agent-dir, shortens to its last segment from md with the whole path as its title, and keeps the whole path below md; one useMediaQuery(PHONE_VIEWPORT_QUERY) for the whole list",
-    "packages/dispatch/e2e/agents.e2e.ts — the new browser row",
-    "packages/dispatch/e2e/phone.e2e.ts — the agent-row ellipsis assertion deleted",
-    "packages/dispatch/AGENTS.md"
+    "packages/claude-envoy/dist/ — rebuilt, including the new dist/session-title-hook.js"
   ],
   "trickyParts": [
-    "CLAUDE_PLUGIN_DATA is read for the chosen-title reader through configuredValue, not through pluginStateDirectory(): that helper throws when the variable is unset and is deliberately called after the Envoy-off early return, so reusing or moving it would turn a session with Envoy off and no plugin data into a crash.",
-    "readChosenTitleSync is synchronous and swallows every error on purpose. The registration path reads it inside a (sessionId) => string, and the title is cosmetic: a failed read must leave the session on its fallback name rather than fail the registration that carries it.",
-    "The new UserPromptSubmit hook must stay silent on stdout and exit 0 whatever happens, malformed input included, because Claude Code adds such a hook's stdout to the model's context and reads its exit code 2 as a block of the user's prompt. The dispatcher in hooks/session-hook.ts was restructured so this mode's JSON.parse is inside its own guard while the two older modes keep failing loudly on a payload that is not JSON.",
-    "The hook writes the chosen name untrimmed and uncleaned; src/session-title.ts's existing oneLine/visible pair is the one place that cleans and judges it, so a blank, invisible or multi-line name falls through to the fallback by the same rule every other source follows.",
-    "An agent row's heading no longer uses TruncatedText at all: the component exists for text that ellipsises inside a flex container, and this name never does. packages/dispatch/AGENTS.md's list of its hosts was corrected accordingly."
+    "The point of the separate hook bundle is the module graph, not the file list: an ESM entrypoint evaluates everything it imports before it reads argv, so a mode check could never have saved the cost. src/session-identity.ts imports zod for its role schema, which is why the title helpers had to move out of it rather than simply be imported from the new hook.",
+    "pruneStateDirectory's predicate takes the entry's full path and may be async, so the liveness rule reads the pid from the basename and the age rule stats the file. rm is recursive and forced, which covers both shapes the three directories hold (a sessions/<pid> directory, a titles/ or roles/ file).",
+    "Title files are titles/<id>.txt with no read of the old suffix-less name: a clean cutover. A machine whose installed bundle is older than the channel server, or the reverse, shows the fallback title until the next prompt after both sides are the new build, and the record is cosmetic and self-healing."
   ],
   "deviations": [
-    "The architect overruled plan B1 and gap finding F4 after the plan was approved (Envoy message on 2026-10-24T23:22:06Z): the name wraps on a phone too, not only at a laptop's width. Built that way — the heading has no width cap and no clamp at any width.",
-    "Following from that, packages/dispatch/e2e/phone.e2e.ts:757-761 was deleted rather than narrowed to the iphone profile, as the architect directed: narrowing it would re-pin the ellipsis this change removes. The phone assertion for the row now lives in the new agents.e2e.ts row, which asserts the whole name and the whole path on that profile.",
-    "The plan's order of work says to complete the phase only at the green head. The role's hard rule — push, then complete, never wait for, watch or poll CI — governs: the after-leg run (40148254772) is named in the handoff and the pull request body with its state as GitHub showed it at completion, and the daemon reads its settlement itself.",
-    "The simplify pass applied four of six findings and so moved the head; the package checks and the live plugin run above were re-run on the applied head, b790a592c539. The two skipped findings and why are in the pull request's Thermo line."
+    "The architect's first instruction kept pruneStaleSessionHandoffs out of the shared sweep; its later one (01:49) converged with the reviewer's fast-follow and asked for one pruneStateDirectory with liveness and age as predicates. Built the later way, so nothing is left for a fast-follow.",
+    "SESSION_TITLE_MAX_AGE_MS is renamed STATE_FILE_MAX_AGE_MS, since the titles and the roles now share the thirty-day policy.",
+    "The whole browser suite was run in this pod for the chromium project only (721 rows, complete). The iphone project's remainder was cut by the command's own 58-minute cap and then re-run for the thirteen specs that touch this change (98 rows); the webkit, webkit-iphone, firefox and firefox-download-navigation projects cannot run here at all — Playwright's host validation names the missing system libraries (libgtk-4, the gstreamer set, libflite and the rest) and this container has no root. CI covers those four projects, and the one row of this change's concern that runs in them, keyboard-agents-picker.e2e.ts:835, is fixed by an engine-independent attribute selector."
   ],
   "openQuestions": [
-    "Plan A4, reported rather than asserted, as the architect accepted on 2026-10-24T23:22:06Z: a Legion Claude pane's name lands on its first prompt, not at launch. The daemon seeds a fresh pane with '/rename Legion <role> · <KEY>' as a user message (packages/daemon/internal/claudebridge/bridge.go:196-199), so the UserPromptSubmit hook sees the custom title on the pane's next prompt — the daemon's first task — and the pane reads as 'Legion implementer · INFRA-92' from then on. That a slash command arriving on stream-json input renames the session is Claude Code's own behaviour, which no test here covers and no pod here can run.",
-    "Plan decision 9, unchanged behaviour recorded so the next phase does not read it as a regression: a session whose Envoy or inbound messages are off registers nothing, so it stamps its title once at startup and a later rename does not reach its Dispatch attribution. That is today's behaviour for every title and is not this change's to fix."
+    "The queryTmux bound row is honest now and still red about a third of full-suite runs in a Legion pod, and my earlier diagnosis — which I gave the architect and which the first round's handoff carried — was wrong. Item 7 made the child time its own queryTmux call, with Bun's start-up and the import excluded, and the failures persisted at 5018, 5019, 5023, 5025 and 5042 ms: the inner call really does run the stub's whole five-second sleep. The cause is the runtime, not the harness: a bare `Bun.spawnSync({cmd: ['sleep','5'], timeout: 1000, killSignal: 'SIGKILL'})` in this container returns 1004 ms/SIGKILL, 1003 ms/SIGKILL, 1004 ms/SIGKILL, 5006 ms/exit 0 — I reproduced that myself, Bun 1.3.14 on linux 4.19.0-gvisor. So execFileSync's timeout, which is the only thing bounding queryTmux, is delivered unreliably under gVisor, and on a host where the kill misses a hung tmux would hold the channel server's startup for as long as tmux hangs rather than one second. CI's ubuntu runners are green on the row. Making the bound real needs a design decision outside this round — queryTmux bounding itself, which means building a shell command string from the TMUX socket and pane and so a quoting surface argv-based execFile does not have today, or the pane lookup becoming async — and it is reported to the architect rather than decided here."
   ],
   "discoveredComplexity": [
-    "packages/claude-envoy's own suite has a row that is flaky in a Legion issue pod under load: 'queryTmux is bounded even by a tmux that ignores SIGTERM' (tests/session-title.test.ts) measured 5.1-5.2 s against its 3 s bound on two runs and passed on five others, including three consecutive clean runs at the final head. It exercises execFileSync's timeout killing a SIGTERM-ignoring child; neither queryTmux nor that row is touched by this change.",
-    "The before-leg CI run also failed [iphone] e2e/phone.e2e.ts:393 'an inline link keeps its line and grows its hit box without covering its neighbours'. That is the row dispatch://INFRA-95 exists to fix — it passes and fails on the same code — and the plan's Risks section names INFRA-95 as editing other rows of the same two files; whichever pull request lands second forward-merges its base and re-runs the suite."
+    "The browser rig is reproducible in a pod and the tester left most of it on the issue volume: PostgreSQL 17.11 with pgvector unpacked under /legion/scratch/dispatch-e2e-rig/pg17 (its data directory must be the caller's own, in its container's /tmp), the Playwright browser cache at /legion/scratch/cache/ms-playwright, and a warm Go module cache at /legion/go/mod. A pod is roughly three times slower than CI at this suite: the chromium project alone took about 50 minutes here against CI's 42 for everything.",
+    "Three of the four Playwright projects CI runs cannot run in a worker pod at all, for want of system libraries no agent can install. Any future round that must prove a WebKit or Firefox behaviour locally needs that gap closed first."
   ]
 }
