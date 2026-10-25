@@ -234,9 +234,9 @@
   runs, as its own plugin reported it (envoy-client's `machineID()`), rather than whichever
   listener happened to register it. Sessions on separate machines registering through one shared
   listener previously all showed that listener's own `machine_id` as their machine. `machine_id`
-  still names the listener that owns the session's delivery (`store.Registry.Match`), and `host`
-  is where that listener reaches a session on a serving port, unless the session is on its own
-  machine and it has a host bridge (the next entry); `host` is carried on `POST
+  still names the listener that owns the session's delivery (`store.Registry.Match`), the only
+  listener that delivers to it (the next entry), and `host` is where that listener reaches a
+  session on a serving port, unless it has a host bridge. `host` is carried on `POST
   /v1/interests/subscribe` (`subscribeBody.Host`, every subscribe and heartbeat), stored on the
   session entry (`session.SessionEntry.Host`), and returned from `GET /v1/sessions` and `GET
   /v1/roles/<role>`, falling back to `machine_id` (`SessionEntry.HostOrMachine`) for a session
@@ -267,13 +267,19 @@
   `host:Listener` and `aws:WebhookListener` and by `envoy-infra render webhook-listener-env
   --subscribe-all-topics`; left unset, every existing rendering is unchanged.
 
-  A listener reaches a session on a serving port by one address rule: at
-  `ENVOY_HOST_BRIDGE` when the session is on the listener's own machine (`machine_id` empty or the
-  listener's) and the bridge is set, otherwise at the registration's recorded `host` when it is
-  not empty, otherwise at `host.docker.internal` for its own machine and at the machine id for
-  another (`session.Deliverer.hostFor`, an IPv6 literal bracketed). A listener without a bridge
-  used to dial `host.docker.internal` for every session on its machine, whatever host it recorded,
-  so a serving port bound to loopback alone was never reached and every delivery to it failed.
+  Only the owning listener delivers to a session on a serving port: the listener whose machine id
+  the session's `machine_id` names, or any listener when it is empty. It reaches the session at
+  `ENVOY_HOST_BRIDGE` when the bridge is set, otherwise at the registration's recorded `host` when
+  it is not empty, otherwise at `host.docker.internal` (`session.Deliverer.hostFor`, an IPv6
+  literal bracketed). A listener without a bridge used to dial `host.docker.internal` for every
+  session on its machine, whatever host it recorded, so a serving port bound to loopback alone was
+  never reached and every delivery to it failed. Another listener's session is now that listener's
+  to deliver: this one requests nothing and answers the message with no delivery and no NAK
+  (`session.ErrWrongMachine`), where it used to dial the session at the owning listener's machine
+  id. Every listener on the bus reads each inbox message from its own durable, so a second
+  listener that could reach the session would deliver the same message again; the owner always
+  has the message. A session registered through a listener that cannot reach its port is reached
+  by nobody.
   Since the recorded host now goes into the delivery URL, `POST
   /v1/interests/subscribe` with `port` above 0 refuses a non-empty `host` that is neither an IP
   literal nor a plain host name (letters, digits, `_`, `.`, `-`; `session.ValidHost`) with
