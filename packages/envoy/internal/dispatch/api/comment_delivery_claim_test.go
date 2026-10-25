@@ -18,6 +18,8 @@ func TestMentionDeliveryPersistsPendingBeforeSendAndRetryCompletesIt(t *testing.
 	pendingDuringSend := "not observed"
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -103,6 +105,8 @@ func TestConcurrentMentionRetryResolvesNewAttemptUnderLock(t *testing.T) {
 			holder := roleHolder
 			mu.Unlock()
 			_, _ = w.Write([]byte(`{"role":"reviewer","holder":"` + holder + `","title":"reviewer","capabilities":["steer"]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -209,6 +213,8 @@ func TestAbandonedMentionAttemptIsResumedUnderItsOriginalIdempotencyKey(t *testi
 	keys := []string{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -300,6 +306,8 @@ func TestStrandedMentionAttemptIsResolvedRatherThanFailedUnsent(t *testing.T) {
 	keys := []string{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":

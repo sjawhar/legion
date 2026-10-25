@@ -171,6 +171,13 @@ func TestTargetedMessageDeliveryRetriesAndAcceptsOnlyTargetReplies(t *testing.T)
 	sent := []map[string]any{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			if !live {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"no live session s1"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","roles":[],"capabilities":["aside","btw","steer"],"last_seen":42}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			if !live {
 				_, _ = w.Write([]byte(`[]`))
@@ -437,6 +444,10 @@ func TestTargetedMessageRecordsCapabilityAndListenerFailures(t *testing.T) {
 	sendCalls := 0
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"session_id": "s1", "title": "planner", "capabilities": capabilities,
+			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_ = json.NewEncoder(w).Encode([]map[string]any{{
 				"session_id": "s1", "title": "planner", "capabilities": capabilities,
@@ -702,6 +713,8 @@ func TestAgentTargetedMessagesRequireHumanAndKeepTheirOwnConversation(t *testing
 	sendStatus := http.StatusOK
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["aside","btw","steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["aside","btw","steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -801,6 +814,10 @@ func TestAgentTargetedMessagesRequireHumanAndKeepTheirOwnConversation(t *testing
 func TestAgentConversationReplyStaysInThatAgentsConversation(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["aside","btw","steer"]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s2":
+			_, _ = w.Write([]byte(`{"session_id":"s2","title":"reviewer","capabilities":["aside","btw","steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["aside","btw","steer"]},{"session_id":"s2","title":"reviewer","capabilities":["aside","btw","steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -891,6 +908,13 @@ func sessionListener(t *testing.T, live *bool, sent *[]map[string]any) *httptest
 	t.Helper()
 	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			if !*live {
+				w.WriteHeader(http.StatusNotFound)
+				_, _ = w.Write([]byte(`{"error":"no live session s1"}`))
+				return
+			}
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","roles":[],"capabilities":["aside","btw","steer"],"last_seen":42}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			if !*live {
 				_, _ = w.Write([]byte(`[]`))
@@ -1327,6 +1351,8 @@ func TestTargetedMessageAttemptIsPendingAcrossItsSend(t *testing.T) {
 	envelopeDuringSend := "not observed"
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -1438,6 +1464,8 @@ func TestStrandedMessageAttemptIsResumedRatherThanDeliveredTwice(t *testing.T) {
 	listenerState.delivered = map[string]struct{}{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -1558,6 +1586,8 @@ func TestSendThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(t *testing
 	listenerState.delivered = map[string]struct{}{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -1685,6 +1715,8 @@ func TestSendThatFailedBeforeLandingStillDeliversOnRetry(t *testing.T) {
 	listenerState.delivered = map[string]struct{}{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -1762,6 +1794,8 @@ func TestRetryInAnotherModeSupersedesTheStrandedAttempt(t *testing.T) {
 			}
 			listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+					_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer","btw","aside"]}`))
 				case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 					_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer","btw","aside"]}]`))
 				case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/planner":
@@ -1859,6 +1893,8 @@ func TestRetryInAnotherModeSupersedesTheStrandedAttempt(t *testing.T) {
 func TestASupersededAttemptIsNotSettledAgainByItsOriginalSender(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer","btw"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer","btw"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -2002,6 +2038,8 @@ func TestReplyDuringASendStillRecordsTheDeliveryReceipt(t *testing.T) {
 	replied := 0
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -2083,6 +2121,8 @@ func TestReplyDuringASendThatErrorsStillRecordsTheOwedReceiptAsSent(t *testing.T
 	replied := 0
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -2151,6 +2191,8 @@ func TestErrorReplyDuringASendLeavesOneReceiptAgreeingWithTheAttempt(t *testing.
 	replied := 0
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -2233,6 +2275,8 @@ func TestAMessageSenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testi
 	answerTheSend := false
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -2358,6 +2402,10 @@ func TestAResumedRoleMessageKeepsItsOriginalRecipient(t *testing.T) {
 			_ = json.NewEncoder(w).Encode(map[string]any{
 				"role": "reviewer", "holder": roleHolder, "title": roleHolder, "capabilities": []string{"steer"},
 			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s2":
+			_, _ = w.Write([]byte(`{"session_id":"s2","title":"reviewer","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]},` +
 				`{"session_id":"s2","title":"reviewer","capabilities":["steer"]}]`))
@@ -2472,6 +2520,8 @@ func issueMessageRows(t *testing.T, handler http.Handler, issueKey string) []mes
 func TestIssueMessageListCarriesEachRootWithItsThreadAndDeliveries(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","roles":[],"capabilities":["aside","btw","steer"],"last_seen":42}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","dir":"/w/legion","machine_id":"m1","roles":[],"capabilities":["aside","btw","steer"],"last_seen":42}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":

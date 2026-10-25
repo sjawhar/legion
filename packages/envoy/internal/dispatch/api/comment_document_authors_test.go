@@ -25,6 +25,14 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 	sends := map[string]int{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/session-writer":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"session_id": "session-writer", "title": "writer", "capabilities": []string{"btw", "steer"},
+			})
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/session-editor":
+			_ = json.NewEncoder(w).Encode(map[string]any{
+				"session_id": "session-editor", "title": "editor", "capabilities": []string{"btw", "steer"},
+			})
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_ = json.NewEncoder(w).Encode([]map[string]any{
 				{"session_id": "session-writer", "title": "writer", "capabilities": []string{"btw", "steer"}},

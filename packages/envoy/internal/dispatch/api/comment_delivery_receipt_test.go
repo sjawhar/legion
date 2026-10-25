@@ -19,6 +19,10 @@ func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
 	t.Run("different sessions", func(t *testing.T) {
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+				_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s2":
+				_, _ = w.Write([]byte(`{"session_id":"s2","title":"reviewer","capabilities":["steer"]}`))
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]},{"session_id":"s2","title":"reviewer","capabilities":["steer"]}]`))
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -49,6 +53,8 @@ func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
 	t.Run("role and direct mention share a session", func(t *testing.T) {
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+				_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/reviewer":
@@ -82,6 +88,8 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 	sent := []map[string]any{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -154,6 +162,8 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPending(t *testing.T) {
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -227,6 +237,8 @@ func TestASenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testing.T) {
 	answerTheSend := false
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -343,6 +355,8 @@ func TestReplyDuringAMentionRetrySendStillRecordsTheDeliveryReceipt(t *testing.T
 	replies := []int{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -417,6 +431,8 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 	}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":

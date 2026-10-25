@@ -27,6 +27,8 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 	listenerState.delivered = map[string]struct{}{}
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			_, _ = w.Write([]byte(`{"session_id":"s1","title":"planner","capabilities":["steer"]}`))
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
 			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -103,7 +105,7 @@ func TestCommentMentionThatLandedThenMissedTheReceiptIsNotDeliveredTwiceOnRetry(
 func TestResolutionTimeoutDoesNotClaimTheMessageMayHaveLanded(t *testing.T) {
 	held := make(chan struct{})
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method == http.MethodGet && r.URL.Path == "/v1/sessions" {
+		if r.Method == http.MethodGet && (r.URL.Path == "/v1/registry/s1" || r.URL.Path == "/v1/sessions") {
 			<-held
 			return
 		}
