@@ -68,15 +68,17 @@ database variable: a password goes in the URL itself, URL-escaped, and on Amazon
 needs none ([Signing in to RDS by IAM token](#signing-in-to-rds-by-iam-token)).
 
 A secret owned by a service rather than a person needs that service registered.
-`BROKER_SERVICES` lists each service with the Kubernetes service account its pods run as,
+`BROKER_SERVICES` lists each service with the Kubernetes service accounts its pods run as,
 whitespace-separated `name=<service account>` entries, for example
 `BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:legion-worker` for the Legion daemon's
-worker pods.
+worker pods. A service whose pods run as several accounts gets one entry for each, for example
+`legion-daemon=system:serviceaccount:legion:legion-worker legion-daemon=system:serviceaccount:legion:legion-controller`.
 
 A pod gets the service's agent-tier secrets at once when two things hold: a machine login for the
-listed service enrolled it, and its projected token proved that service account. Every other
-session is denied them. For the same reason each account is bound to one service: the broker
-refuses to start, naming both services, if `BROKER_SERVICES` binds one account to two of them.
+listed service enrolled it, and its projected token proved one of that service's accounts. Every
+other session is denied them. For the same reason each account is bound to one service: the broker
+refuses to start, naming both services, if `BROKER_SERVICES` binds one account to two of them. It
+also refuses, naming the account, an account given twice for the same service.
 
 The account must be one the service's pods name. The broker refuses to start, naming the entry,
 if `BROKER_SERVICES` binds a namespace's `default` account
