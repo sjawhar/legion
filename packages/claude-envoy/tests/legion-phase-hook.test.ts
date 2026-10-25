@@ -546,6 +546,47 @@ test("a workspace recreated again, after a launch that recreated nothing, is tol
   // Three launches, each of which may wait out `waitFor`'s own 5 s deadline.
 }, 20_000)
 
+test("the architect notice a resumed worker's reminder earns names what the worker last said before its relaunch", async () => {
+  const before = await harness({
+    record: recorded("open", 0),
+    claim: implementer,
+    env: { LEGION_STALL_ARCHITECT_AFTER: "3" },
+  })
+  let carried: string
+  try {
+    expect(
+      await before.endpoint.handle({ event: "Stop", lastAssistantMessage: "Pushed the change." }),
+    ).toEqual({ decision: "block", reason: REMINDER })
+    expect(
+      await before.endpoint.handle({
+        event: "Stop",
+        lastAssistantMessage: "Still pushing the change.",
+      }),
+    ).toEqual({})
+    await waitFor(async () => before.inbox.length === 1, "the timer's reminder")
+    carried = JSON.stringify(await before.record())
+  } finally {
+    await before.close()
+  }
+
+  // The relaunch: the same record, no task re-sent, so the resume reminder is the third
+  // unanswered one and earns the architect notice.
+  const after = await harness({
+    record: carried,
+    claim: implementer,
+    env: { LEGION_STALL_ARCHITECT_AFTER: "3" },
+  })
+  try {
+    after.boot()
+    await waitFor(async () => after.published.length === 1, "the architect notice")
+    const notice = after.published[0]
+    expect(notice?.message).toContain("Still pushing the change.")
+    expect(JSON.parse(String(notice?.payload)).lastMessage).toBe("Still pushing the change.")
+  } finally {
+    await after.close()
+  }
+})
+
 test("a launcher that recreated nothing sends no notice and records no key", async () => {
   const { record, inbox, boot, close } = await harness({
     record: recorded("closed", 0),
