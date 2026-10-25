@@ -99,12 +99,14 @@ catch up), and on the finding asks roles opened on their own issues while no con
 1. Read it with `dispatch read`. Reopen it when its `Status:` is `done`, and assign it when its
    `Assignee:` says `unassigned` and a person is known, both as the skill's "Daily report" says.
 2. Take each open ask: `dispatch open-asks --project <PROJECT>` lists every unanswered ask of the
-   project, with no cap, each line naming its issue. Follow those on the report issue, and file at
-   once each whose question opens `Clear defect from `. One on another issue whose question opens
-   `Finding from ` or `Clear defect from ` is a role's own-issue ask, which its architect holds
-   acceptance on. File a clear defect. Move a finding that needs a decision: ask it again on the
-   report issue, the same question, options and `--ref`, then reply `Moved dispatch://<REPORT
-   KEY>/ask/<new id>` under the old ask. Resolve the old ask either way.
+   project, with no cap, each line naming its issue. It leaves out an ask on a closed issue
+   (`asks.go`'s `listOpenAsks` takes `i.closed_at is null`), which is why an architect holds a
+   held issue open for one. Follow those on the report issue, and file at once each whose question
+   opens `Clear defect from `. One on another issue whose question opens `Finding from ` or
+   `Clear defect from ` is a role's own-issue ask, which its architect holds acceptance on. File a
+   clear defect. Move a finding that needs a decision: ask it again on the report issue, the same
+   question, options and `--ref`, then reply `Moved dispatch://<REPORT KEY>/ask/<new id>` under the
+   old ask. Resolve the old ask either way.
 3. List the answered asks still waiting on you, which no `dispatch` command lists:
    `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/asks?state=answered&thread=1" | jq -c '[.[] | select(any(.options[]; .label == "Do not file" or .label == "Admit it")) | .answer.at as $t | select([.thread.replies[]? | select(.author.kind == "session" and .created_at > $t and (.body | test("^(Filed dispatch://|Admitted dispatch://|Not filed:|Not admitted:)")))] | length == 0) | {id, question, answer}]'`.
    Run the same for each issue `dispatch issues --project <PROJECT>` shows in `needs_review`,

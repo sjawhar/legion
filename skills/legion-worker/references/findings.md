@@ -80,8 +80,9 @@ of these that holds, so a person sees it and the controller finds it when it ret
    a comment first. Then publish the ask's reference to your tree's architect (`skill://legion-worker`,
    the escalation paragraph). An architect holds its own. The architect holds your issue's
    acceptance until a controller has taken the ask (`skill://legion-architect`, "Acceptance and the
-   merge"), so your issue cannot close and hide it, and the controller files or moves it when it
-   returns.
+   merge"). That hold is what keeps the ask readable: an open ask on a closed issue drops out of
+   the controller's own listing (`asks.go`'s `listOpenAsks` takes `i.closed_at is null`), so an
+   issue that closed over one hides it for good.
 3. **Your own issue is closed too** (Dispatch refuses the ask `409 ISSUE_CLOSED`, as on a
    production check): reopen the report issue, or create it when a search finds none, as
    `skill://legion-controller`'s "Daily report" spells it. Then post the evidence there and ask

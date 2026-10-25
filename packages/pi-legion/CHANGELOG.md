@@ -167,7 +167,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   the role's own issue when the report issue is missing or closed, its reference sent to the
   tree's architect, whose acceptance (`legion-architect`, section 6) waits until the ask is
   resolved or answered with the controller's `Filed`/`Not filed` reply under it, so the issue
-  cannot close and hide it; and, when the role's own issue is closed too (a production check),
+  cannot close and hide it, since the controller's own project listing drops an open ask on a
+  closed issue (`asks.go`'s `listOpenAsks` takes `i.closed_at is null`); and, when the role's own
+  issue is closed too (a production check),
   the report issue, which the role reopens or creates. Every finding ask's question opens
   `Finding from <role>`, or `Clear defect from <role>` for a clear defect, which is how the
   acceptance and the controller find one. At every start the controller's catch-up
