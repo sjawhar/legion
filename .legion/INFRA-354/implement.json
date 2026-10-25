@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-354",
+  "completed": "2026-10-25T07:52:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2185",
+  "codeHead": "8b53654d4545988b8880e4f627aa11c593964572",
+  "proof": [
+    {
+      "criterion": "Line 1 and line 4: two accounts may name the same service, and the broker starts on that configuration (the start-up path, not the parser alone).",
+      "surface": "The real compiled broker (go build ./cmd/broker at the head) started by hand against a Postgres Job and ClusterIP Service in the cluster, with a fake secrets file holding SERVICE_KEY owned by example-service.",
+      "command": "BROKER_SERVICES=\"example-service=system:serviceaccount:example:example-worker-a example-service=system:serviceaccount:example-other:example-worker-b\" plus main_test.go's productionEnv, BROKER_FAKE_SECRETS_FILE and the cluster database; then GET /healthz and POST /v1/secrets/SERVICE_KEY/reread. Transcript: https://github.com/sjawhar/legion/pull/2185#issuecomment-6395081749 section 1.",
+      "observed": "broker listening addr=127.0.0.1:40581; GET /healthz 200; reread {\"name\":\"SERVICE_KEY\",\"served\":true}; no owner-tag-malformed line in the boot log. The one-account-per-service configuration the deployment runs today also starts and serves the secret.",
+      "headSha": "8b53654d4545988b8880e4f627aa11c593964572",
+      "negativeControl": "The base binary (5c182bd16f0a) with the same environment exits 1 before listening: BROKER_SERVICES must give each service once, got \"example-service=system:serviceaccount:example-other:example-worker-b\"."
+    },
+    {
+      "criterion": "Line 2: a configuration naming one account twice is still refused, with a message naming the account.",
+      "surface": "The real compiled broker started by hand, as above.",
+      "command": "BROKER_SERVICES=\"example-service=<A> example-service=<A>\" and, separately, \"example-service=<A> other-service=<A>\". Transcript: same comment, section 1.",
+      "observed": "Both exit 1 before listening: 'BROKER_SERVICES names the service account system:serviceaccount:example:example-worker-a twice for \"example-service\"; each account proves one service, so name it once' and '... for both \"example-service\" and \"other-service\"; ...'.",
+      "headSha": "8b53654d4545988b8880e4f627aa11c593964572",
+      "negativeControl": "The same run with the two accounts distinct (A and B for example-service) starts and serves the secret."
+    },
+    {
+      "criterion": "Line 3 and line 1: a pod under any of a service's accounts obtains that service's secrets, each recognised by its own subject; a pod under none of them does not, and gets no approval path.",
+      "surface": "The real compiled broker driven over HTTP by the repository's real-process harness: a local OpenID Connect issuer, real projected pod tokens, a token login, three pod enrollments, and the cluster Postgres.",
+      "command": "cd packages/envoy && go test ./cmd/broker -run TestOneServicesTwoAccountsEachGetItsSecret -v -count=1 (BROKER_TEST_DATABASE_URL naming the cluster Postgres). Transcript: same comment, section 2.",
+      "observed": "Pods A and B: POST /v1/requests answered state granted, decision automatic, record_id null, approver null; POST /v1/grants/{id}/values answered SERVICE_KEY=service-value. Pod C: state denied, decision deny, grant_id null, record_id null, approver null. --- PASS (7.52s).",
+      "headSha": "8b53654d4545988b8880e4f627aa11c593964572",
+      "negativeControl": "Pod C (an account no entry names) is the in-test control. Mutations in a copy outside the checkout: requester's old service-keyed lookup put back makes this test, TestAServicesSecretGoesToItsOwnPodsAlone and TestAServiceGrantStopsWhenItsServiceAccountChanges fail; Load's duplicate-service refusal put back makes this test, TestLoadReadsTheRegisteredServices and TestTheRequestMachineCarriesTheServicesByAccount fail."
+    }
+  ],
+  "localChecks": [
+    "cd packages/envoy && test -z \"$(gofmt -l .)\" && go vet ./... — exit 0.",
+    "cd packages/envoy && go test ./internal/broker/config ./internal/broker/requests ./internal/broker/api ./internal/broker/policy ./cmd/broker -count=1 with BROKER_TEST_DATABASE_URL on the cluster Postgres — all ok.",
+    "go test ./internal/broker/... ./cmd/broker/... ./cmd/broker-refgen/... ./cmd/agent-secrets/... ./brokertest/... — every package ok except internal/broker/helper and cmd/agent-secrets, which fail in this gVisor pod on SO_PEERPIDFD 'protocol not available' and terminal ioctls; TestPeerOfUnixConnIsTheDialer fails the same way at the base commit, so these are the environment, and CI's envoy-go job runs them.",
+    "go run ./cmd/broker-refgen <repo> <out under $TMPDIR> — exit 0; the BROKER_SERVICES row carries the new comment.",
+    "cd packages/daemon && go build ./... — exit 0.",
+    "bash .github/scripts/check-private-names.sh — exit 0."
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/broker/config/config.go — Config.ServiceAccounts renamed ServicesByAccount and keyed by account; the duplicate-service refusal removed; the duplicate-account refusal gains a same-service wording; the BROKER_SERVICE_LOGINS overlap check is a direct lookup.",
+    "packages/envoy/internal/broker/config/config_test.go — re-keyed expectations; new two-accounts-one-service and same-account-twice cases; the one-account-per-service and cross-service cases kept.",
+    "packages/envoy/internal/broker/requests/machine_state.go — Machine.ServicesByAccount; requester uses the guarded subject lookup.",
+    "packages/envoy/internal/broker/requests/machine_read.go — the two requester call sites and their doc comments.",
+    "packages/envoy/internal/broker/requests/machine_test.go — newFixture and TestAServiceGrantStopsWhenItsServiceAccountChanges inverted; the replacement map no longer keeps the pod's subject.",
+    "packages/envoy/internal/broker/api/request_approver_test.go — account-keyed fixture.",
+    "packages/envoy/cmd/broker/main.go — the loader's Services are the distinct values; newRequestMachine passes ServicesByAccount.",
+    "packages/envoy/cmd/broker/main_test.go — TestTheRequestMachineCarriesTheServicesByAccount pins the account-keyed map with two accounts for one service.",
+    "packages/envoy/cmd/broker/service_accounts_test.go — new real-binary test TestOneServicesTwoAccountsEachGetItsSecret.",
+    "packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md — the new rule, the field name and the rollback rule (an older broker refuses a service named twice).",
+    "docs/site/src/content/docs/broker/operate.md, concepts.md, guides/log-a-machine-in.md, docs/site/src/content/docs/dispatch/envoy.md — several accounts per service.",
+    "docs/kubernetes.md — the BROKER_SERVICES deployment prose, the controller paragraph (D7), the cluster-workload Service selector (batch.kubernetes.io/controller-uid, which admission requires) and the run record (D10)."
+  ],
+  "trickyParts": [
+    "The Go type of the map did not change, so the rename to ServicesByAccount is what made every construction site fail to compile until it was read; TestAServiceGrantStopsWhenItsServiceAccountChanges maps a different account to the service so it still fails for the right reason.",
+    "The tester needs its own Postgres: the role container has none. The sequence in docs/kubernetes.md 'Running a workload in the cluster from a role' works end to end here, but the Service must select batch.kubernetes.io/controller-uid: <Job uid> (admission refuses job-name; the doc is corrected in this pull request). The reachability label, compute-class nodeSelector and namespace come from the deployment repository's cluster-grants/testdata/build-path.yaml. Both Jobs this phase started are deleted."
+  ],
+  "deviations": [
+    "The simplify pass applied nothing: three test-only findings were skipped (a shared HTTP helper with service_login_test.go would widen the overlap with #2162; renaming the test would break the plan's commands; an unreachable addr == \"\" guard is harmless).",
+    "The cluster-workload Service selector correction in docs/kubernetes.md is outside the plan's task list; the plan's own run (G.1) found it, since the documented manifest is refused at admission."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Pull request #2162 (legion/INFRA-236), still open, changes config.go, config_test.go, main.go, main_test.go, machine_state.go, packages/envoy/AGENTS.md, operate.md and concepts.md; the conflict is named in the pull request body."
+  ]
+}
