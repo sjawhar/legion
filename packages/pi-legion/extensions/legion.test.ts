@@ -26,6 +26,12 @@ import {
   LOCAL_ENVOY_NOTICE,
   resetEnvoyPluginInterfaceForTests,
 } from "@legion/pi-shared/interface";
+import {
+  PHASE_STALL_ENTRY,
+  REMINDER,
+  reminderText,
+  restorePhaseStall,
+} from "@legion/pi-shared/phase-stall";
 import type {
   CommandContext,
   PiApi,
@@ -33,6 +39,7 @@ import type {
   SessionContext,
   ZodNumberProperty,
 } from "@legion/pi-shared/pi-types";
+import { DEFAULT_STALL_LIMITS } from "@legion/pi-shared/stall-limits";
 import { hostAgentRegistryMock, testAgentRoster } from "@legion/pi-shared/test/host-registry";
 import { logger } from "@oh-my-pi/pi-utils";
 import pkg from "../package.json";
@@ -171,6 +178,10 @@ const environmentKeys = [
   "LEGION_WORKSPACE",
   "LEGION_STATE_DIR",
   "LEGION_SLACK_CHANNELS",
+  "LEGION_STALL_REMINDER_MS",
+  "LEGION_STALL_WAITING_MS",
+  "LEGION_STALL_RESUME_MS",
+  "LEGION_STALL_ARCHITECT_AFTER",
   "HOME",
   "DISPATCH_URL",
   "DISPATCH_TOKEN",
@@ -566,6 +577,13 @@ interface ClaimPane {
   /** What `console.error` printed while `start()` ran. */
   readonly errors: string[];
   readonly intervals: (() => void)[];
+  /** Every one-shot timer the pane armed on its session context, in order: the phase reminder's.
+   * The host's own cannot be cancelled, so a test fires one by calling its callback, exactly as
+   * the host does when the delay is up. */
+  readonly timers: {
+    readonly callback: () => void | Promise<void>;
+    readonly delayMs: number;
+  }[];
   readonly tools: RegisteredTool[];
   readonly commands: RegisteredCommand[];
   readonly activeTools: string[];
@@ -695,6 +713,7 @@ async function claimPane(options: {
   // reaches Oh My Pi's own modules and runs the pane's `gh` and `dispatch`.
   setLegionCapabilityHostForTests(options.capabilityHost ?? (() => fakeCapabilityHost()));
   const intervals: (() => void)[] = [];
+  const timers: { readonly callback: () => void | Promise<void>; readonly delayMs: number }[] = [];
   const fixture = createPi({
     bindEnvoy: options.bindEnvoy,
     agentsExposed: options.agentsExposed,
@@ -720,6 +739,11 @@ async function claimPane(options: {
     setInterval: (callback) => {
       intervals.push(callback);
     },
+    // The reminder's own timer: the host's `setTimeout` cannot be cancelled, so the pane keeps
+    // every one armed and a test fires the one it means to.
+    setTimeout: (callback, delayMs) => {
+      timers.push({ callback, delayMs });
+    },
   };
   const errors: string[] = [];
   return {
@@ -730,6 +754,7 @@ async function claimPane(options: {
     exits,
     errors,
     intervals,
+    timers,
     tools: fixture.tools,
     commands: fixture.commands,
     activeTools: fixture.activeTools,
@@ -1521,6 +1546,16 @@ describe("Legion OMP extension", () => {
       stop_hook_active: false,
       signal,
     });
+    /** An assistant message that ran a real tool call, as the host hands it to `message_end`. */
+    const ranTool = {
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Reading the file." },
+          { type: "tool_use", id: "toolu_1", name: "read", input: { file_path: "main.py" } },
+        ],
+      },
+    };
     /** The session's hooks, driven as OMP drives them. */
     const session = (handlers: Map<string, Handler>, context: SessionContext) => ({
       arrives: (message: unknown) => hook(handlers, "message_start")(message, context),
@@ -1536,7 +1571,18 @@ describe("Legion OMP extension", () => {
       readonly branch?: readonly unknown[];
       /** The daemon's answer to `POST /legion/v1/handoff/complete`: success unless given. */
       readonly complete?: () => Response;
+      /** The phase the daemon's record puts REPO-43 at; `retro`, the implementer's, unless a
+       * test moves it, which is how the record check decides the reminder is no longer this
+       * role's to get. */
+      readonly phase?: string;
+      /** The daemon's whole answer to `GET /legion/v1/state`, for a daemon that does not answer
+       * with a record at all. */
+      readonly stateAnswer?: () => Response;
     }) => {
+      // Nothing in these panes reaches the architect: the notice a run of reminders earns is the
+      // real binary's case (extensions/legion-phase-stall-omp.test.ts), so the threshold is put
+      // out of every mocked pane's reach and the reminding itself is what is measured here.
+      process.env.LEGION_STALL_ARCHITECT_AFTER = "99";
       // The pane's workspace is a jj repository, as an issue workspace is: `handoff_complete`
       // finds the commit it reports there with PATH's jj. REPO-43 stands at retro, a phase that
       // writes no handoff, so the commit is the one the workspace stands on.
@@ -1554,7 +1600,7 @@ describe("Legion OMP extension", () => {
           "REPO-43": {
             key: "REPO-43",
             generation: 2,
-            phase: "retro",
+            phase: options.phase ?? "retro",
             status: "in_progress",
             repo: "acme/widgets",
             defaultBranch: "main",
@@ -1580,13 +1626,16 @@ describe("Legion OMP extension", () => {
         workspace,
         branch: options.branch,
         extraRoutes: (url) => {
-          if (url.pathname === "/legion/v1/state") return Response.json(state);
+          if (url.pathname === "/legion/v1/state") {
+            return options.stateAnswer?.() ?? Response.json(state);
+          }
           if (url.pathname === "/legion/v1/grants") {
             return Response.json({ grantId: "grant-stall", expiresAt: "2099-01-01T00:00:00Z" });
           }
           if (url.pathname === "/legion/v1/handoff/complete") {
             return options.complete?.() ?? Response.json({});
           }
+          if (url.pathname === "/legion/v1/phase/backward") return Response.json({});
           return undefined;
         },
       });
@@ -1614,8 +1663,39 @@ describe("Legion OMP extension", () => {
       continue: true,
       additionalContext: expect.stringContaining(text),
     });
+    /** Every reminder the pane steered into the session, with the options it was sent under: one
+     * per reminder a timer delivered. The first reminder of a run is `session_stop`'s own answer
+     * and steers nothing. */
+    const steered = (pane: {
+      readonly sentMessages: SentMessage[];
+      readonly sentMessageOptions: unknown[];
+    }) =>
+      pane.sentMessages.flatMap((message, i) =>
+        "customType" in message && message.customType === "legion-phase-reminder"
+          ? [{ message, options: pane.sentMessageOptions[i] }]
+          : []
+      );
+    /** One steered reminder, as `pi.sendMessage` took it: a turn starts on it. */
+    const steeredReminder = (reminder: string) => ({
+      message: { customType: "legion-phase-reminder", content: reminder, display: true },
+      options: { deliverAs: "steer", triggerTurn: true },
+    });
+    /** Fires the timer the pane armed last, as the host does once its delay is up. */
+    const fires = async (pane: ClaimPane) => {
+      const timer = pane.timers.at(-1);
+      if (timer === undefined) throw new Error("the pane armed no reminder timer");
+      await timer.callback();
+    };
+    /** The phase-stall records the pane appended to its transcript, in order: what a relaunch
+     * restores from. */
+    const recorded = (pane: ClaimPane) =>
+      pane.entries
+        .filter((entry) => entry.customType === PHASE_STALL_ENTRY)
+        .map((entry) => entry.data);
+    /** A branch holding one phase-stall record, as a resumed worker's own transcript does. */
+    const branchAt = (data: unknown) => [{ type: "custom", customType: PHASE_STALL_ENTRY, data }];
 
-    test("a turn that settles after the assignment with no handoff gets one follow-up: run the legion tool's handoff_complete, or reply WAITING", async () => {
+    test("the first settle after the assignment is answered by the run's own continuation: run the legion tool's handoff_complete, or reply WAITING", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
 
@@ -1623,7 +1703,16 @@ describe("Legion OMP extension", () => {
 
       expect(result).toEqual(followUp("handoff_complete"));
       expect(result).toEqual(followUp("WAITING"));
+      expect(result).toEqual(followUp("repeats at the end of every turn"));
       expect(result).not.toEqual(followUp("written as text"));
+      // The run's first reminder is the continuation itself: nothing is steered into the session
+      // and no timer is armed for it.
+      expect(steered(worker)).toEqual([]);
+      expect(worker.timers).toEqual([]);
+      expect(recorded(worker)).toEqual([
+        { state: "open", count: 0, reported: false },
+        { state: "open", count: 1, reported: false },
+      ]);
     });
 
     test("a turn that ends on a tool call written as text is told the call did not run", async () => {
@@ -1640,72 +1729,199 @@ describe("Legion OMP extension", () => {
       expect(result).toEqual(followUp("handoff_complete"));
     });
 
-    // A follow-up for a tool call written as text that is answered with the same call, as text,
-    // gets one more: the call it failed to make is still the next step. A third gets none, so a
-    // stall sends at most two follow-ups.
-    test("a second tool call written as text in the same stall gets one more follow-up, and a third gets none", async () => {
+    // The worker has already had the continuation and done nothing about it, so this run must
+    // settle — the daemon sees the turn end, delivers a queued task, lands a held suspension —
+    // and the reminder comes from the host's own timer instead.
+    test("the settle after the continuation arms a timer, and firing it steers one reminder that starts a turn", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
+
+      expect(await worker.settles("Still pushing.")).toBeUndefined();
+
+      expect(worker.timers.map((timer) => timer.delayMs)).toEqual([
+        DEFAULT_STALL_LIMITS.reminderMs,
+      ]);
+      expect(steered(worker)).toEqual([]);
+      await fires(worker);
+      expect(steered(worker)).toEqual([steeredReminder(REMINDER)]);
+      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 2, reported: false });
+    });
+
+    test("the reminding never stops: with nothing arriving from outside, every settle earns the next reminder", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+
+      expect(await worker.settles("Thinking about it.")).toEqual(followUp("handoff_complete"));
+      for (const text of ["Still thinking about it.", "Nearly there."]) {
+        expect(await worker.settles(text)).toBeUndefined();
+        await fires(worker);
+      }
+
+      expect(steered(worker)).toEqual([steeredReminder(REMINDER), steeredReminder(REMINDER)]);
+      expect(recorded(worker)).toEqual([
+        { state: "open", count: 0, reported: false },
+        { state: "open", count: 1, reported: false },
+        { state: "open", count: 2, reported: false },
+        { state: "open", count: 3, reported: false },
+      ]);
+    });
+
+    // The sentence a reminder leads with is the settling message's own: the call that message
+    // wrote as text is the step the worker failed to take, whether the reminder comes back as
+    // the continuation or from a timer. The next message, in plain words, earns the plain text.
+    test("a reminder for a message holding a tool call written as text leads with that sentence", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
       const textCall =
         'court\n<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>\n<parameter name="summary">Round 1 reviewed.</parameter>\n</invoke>';
 
       expect(await worker.settles(textCall)).toEqual(followUp("written as text"));
-      expect(await worker.settles(textCall)).toEqual(followUp("written as text"));
       expect(await worker.settles(textCall)).toBeUndefined();
-      expect(await worker.settles("Still here.")).toBeUndefined();
-
-      // A new inbound event starts a new stall, with its own follow-ups.
-      await worker.arrives(envoyEvent);
-      expect(await worker.settles(textCall)).toEqual(followUp("written as text"));
-    });
-
-    test("a follow-up for a text call answered in plain words, or WAITING, is the stall's last", async () => {
-      const worker = await bootStalling({});
-      await worker.arrives(assignment);
-      const textCall = '<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>';
-
-      expect(await worker.settles(textCall)).toEqual(followUp("written as text"));
+      await fires(worker);
       expect(await worker.settles("I think I already completed.")).toBeUndefined();
-      expect(await worker.settles(textCall)).toBeUndefined();
+      await fires(worker);
 
-      await worker.arrives(envoyEvent);
-      expect(await worker.settles(textCall)).toEqual(followUp("written as text"));
-      expect(await worker.settles("WAITING: the architect")).toBeUndefined();
-      expect(await worker.settles(textCall)).toBeUndefined();
+      expect(steered(worker)).toEqual([
+        steeredReminder(reminderText(textCall)),
+        steeredReminder(REMINDER),
+      ]);
+      expect(reminderText(textCall)).toContain("written as text");
     });
 
-    test("a plain stall's one follow-up answered with a text call gets none: only a text call earns the second", async () => {
-      const worker = await bootStalling({});
-      await worker.arrives(assignment);
+    // Everything that is the worker, or the daemon, doing something puts the count back to zero:
+    // the next settle is answered by the run's own continuation again, not by a timer.
+    for (const [doing, event, message] of [
+      // `message_end` may reach the handler before that message's own `message_start`, so the
+      // tool call is driven on its own: the reset does not depend on the order of the two.
+      ["a settling assistant message that ran a real tool call", "message_end", ranTool],
+      ["the daemon's assignment", "message_start", assignment],
+      ["an Envoy delivery", "message_start", envoyEvent],
+    ] as const) {
+      test(`the count starts again at zero after ${doing}`, async () => {
+        const worker = await bootStalling({});
+        await worker.arrives(assignment);
+        expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
+        expect(await worker.settles("Still pushing.")).toBeUndefined();
 
-      expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
-      expect(
-        await worker.settles(
-          '<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>'
-        )
-      ).toBeUndefined();
-    });
+        await hook(worker.handlers, event)(message, worker.context);
 
-    test("one follow-up per stall: the next settle is quiet until a new inbound event opens the next stall", async () => {
-      const worker = await bootStalling({});
-      await worker.arrives(assignment);
-      expect(await worker.settles("Done, I think.")).toEqual(followUp("handoff_complete"));
+        expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 0, reported: false });
+        expect(await worker.settles("Back at it.")).toEqual(followUp("handoff_complete"));
+      });
+    }
 
-      expect(await worker.settles("Still thinking about it.")).toBeUndefined();
-
-      await worker.arrives(envoyEvent);
-      expect(await worker.settles("Read the notice.")).toEqual(followUp("handoff_complete"));
-    });
-
-    test("a WAITING reply gets no follow-up, and none comes until a new inbound event", async () => {
+    test("a WAITING reply buys the quiet wait, and the reminder comes again when it is over", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
 
       expect(await worker.settles("Pushed.\nWAITING: CI on the pull request")).toBeUndefined();
-      expect(await worker.settles("Nothing new yet.")).toBeUndefined();
 
-      await worker.arrives(envoyEvent);
-      expect(await worker.settles("CI passed.")).toEqual(followUp("handoff_complete"));
+      // The wait armed is the WAITING one, not the reminder's, and nothing is steered until it
+      // is over.
+      expect(worker.timers.map((timer) => timer.delayMs)).toEqual([DEFAULT_STALL_LIMITS.waitingMs]);
+      expect(steered(worker)).toEqual([]);
+      expect(recorded(worker).at(-1)).toEqual({ state: "waiting", count: 0, reported: false });
+
+      await fires(worker);
+
+      expect(steered(worker)).toEqual([steeredReminder(REMINDER)]);
+      // What the worker is told once its wait is over: the reminding repeats, rather than this
+      // being the last it hears until something arrives.
+      expect(REMINDER).toContain("This reminder repeats at the end of every turn");
+      expect(REMINDER).not.toContain("until a new event arrives");
+      // The wait is over, so the phase is open again and the reminder is counted.
+      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 1, reported: false });
+    });
+
+    test("a resumed worker's open phase is reminded by a timer, carrying the count it restored", async () => {
+      // The daemon relaunched the worker with --resume: a fresh process whose only memory is the
+      // branch, which holds two reminders nothing was done about.
+      const resumed = await bootStalling({
+        branch: branchAt({ state: "open", count: 2, reported: false }),
+      });
+
+      expect(resumed.timers.map((timer) => timer.delayMs)).toEqual([DEFAULT_STALL_LIMITS.resumeMs]);
+      await fires(resumed);
+
+      expect(steered(resumed)).toEqual([steeredReminder(REMINDER)]);
+      expect(recorded(resumed)).toEqual([{ state: "open", count: 3, reported: false }]);
+    });
+
+    test("a resume whose turn started before its timer fired is reminded by nothing", async () => {
+      const resumed = await bootStalling({
+        branch: branchAt({ state: "open", count: 2, reported: false }),
+      });
+
+      // Whatever started the turn — the daemon re-sending the task it interrupted, the worker's
+      // own first reply — every timer armed before it is stale.
+      await resumed.arrives({
+        message: { role: "assistant", content: [{ type: "text", text: "Picking it up." }] },
+      });
+      await fires(resumed);
+
+      expect(steered(resumed)).toEqual([]);
+      expect(recorded(resumed)).toEqual([]);
+    });
+
+    // `quiet` is what the build now in the pods records for an open phase nothing has been
+    // reminded about, so a session resumed on one is reminded rather than left alone.
+    test("a resume on the state the deployed build wrote stands at an open phase with nothing counted", async () => {
+      const branch = branchAt({ state: "quiet" });
+      expect(restorePhaseStall(branch)).toEqual({ state: "open", count: 0 });
+
+      const resumed = await bootStalling({ branch });
+
+      expect(resumed.timers.map((timer) => timer.delayMs)).toEqual([DEFAULT_STALL_LIMITS.resumeMs]);
+      // The count came back at zero, so the next settle is answered by the run's continuation.
+      expect(await resumed.settles("Picking it up again.")).toEqual(followUp("handoff_complete"));
+    });
+
+    test("a record whose phase is no longer this role's silences the reminder", async () => {
+      // The shape of a worker that completed its phase from the shell instead of the tool: the
+      // daemon has moved REPO-43 on, and the reviewer, not this implementer, works it now.
+      const worker = await bootStalling({ phase: "reviewing" });
+      await worker.arrives(assignment);
+
+      expect(await worker.settles("I think I already completed.")).toBeUndefined();
+      expect(steered(worker)).toEqual([]);
+      expect(worker.timers).toEqual([]);
+      // Nothing was put in front of the worker, so nothing is counted.
+      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 0, reported: false });
+    });
+
+    test("a daemon that does not answer the record check reminds all the same: the check fails open", async () => {
+      // An unreachable daemon is exactly when a stalled worker must still be nudged.
+      const worker = await bootStalling({
+        stateAnswer: () => Response.json({ error: "the daemon is restarting" }, { status: 503 }),
+      });
+      await worker.arrives(assignment);
+
+      expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
+      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 1, reported: false });
+    });
+
+    test("a request_backward_move closes the phase too: the next settle sends nothing", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+
+      const result = await worker.legionTool.execute(
+        "call-backward",
+        {
+          op: "request_backward_move",
+          to: "implementing",
+          reason: "the plan named the wrong file",
+        },
+        undefined,
+        undefined,
+        worker.context
+      );
+
+      expect(result).toEqual({ content: [{ type: "text", text: "{}" }], details: {} });
+      expect(await worker.settles("Asked for the move.")).toBeUndefined();
+      expect(steered(worker)).toEqual([]);
+      expect(worker.timers).toEqual([]);
+      expect(recorded(worker).at(-1)).toEqual({ state: "closed", count: 0, reported: false });
     });
 
     test("a successful handoff_complete posts the completion with a fresh grant and the commit found in the pane, and closes the phase; an inbound event does not reopen it, the next assignment does", async () => {
@@ -1740,6 +1956,8 @@ describe("Legion OMP extension", () => {
         },
       ]);
       expect(await worker.settles("Reported.")).toBeUndefined();
+      expect(steered(worker)).toEqual([]);
+      expect(worker.timers).toEqual([]);
 
       // After its phase a worker stays to answer other roles' questions over Envoy.
       await worker.arrives(envoyEvent);
@@ -1751,8 +1969,8 @@ describe("Legion OMP extension", () => {
 
     // A person's Send or Aside from Dispatch's Agents page reaches the session as its own user
     // turn (extensions/envoy.ts), a user message exactly like the daemon's assignment. It is an
-    // inbound event, as its Envoy card was before: it does not open a phase, and it wakes a stall
-    // that already had its follow-up or a WAITING reply.
+    // inbound event, as its Envoy card was before: it does not open a phase, and it starts the
+    // count of a phase that has been reminded, or had a WAITING reply, again.
     const personsMessage = {
       message: {
         role: "user",
@@ -1772,7 +1990,7 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("a person's direct message wakes a stall that had its WAITING reply, as its card did", async () => {
+    test("a person's direct message ends the wait a WAITING reply bought, as its card did", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
       expect(await worker.settles("WAITING: CI on the pull request")).toBeUndefined();
@@ -1780,6 +1998,9 @@ describe("Legion OMP extension", () => {
       noteInjectedUserTurn("ses_stall", "Where is the dashboard?", "m-1");
       await worker.arrives(personsMessage);
       expect(await worker.settles("It is at /dash.")).toEqual(followUp("handoff_complete"));
+      // The wait's own timer was armed before that turn, so it is stale and reminds nobody.
+      await fires(worker);
+      expect(steered(worker)).toEqual([]);
     });
 
     test("the same words arriving again as a user message are the daemon's, not the person's", async () => {
@@ -1794,9 +2015,9 @@ describe("Legion OMP extension", () => {
 
     // A person's `/skill:<name>` sent from Dispatch runs as typed input, and the host submits it as
     // its `skill-prompt` custom message, tagged with the Dispatch message, where a plain Send is a
-    // user message. It is the person's message all the same: it wakes a stall that had its WAITING
-    // reply, as their Send does.
-    test("a person's /skill: wakes a stall that had its WAITING reply, as their Send does", async () => {
+    // user message. It is the person's message all the same: it ends the wait a WAITING reply
+    // bought, as their Send does.
+    test("a person's /skill: ends the wait a WAITING reply bought, as their Send does", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
       expect(await worker.settles("WAITING: CI on the pull request")).toBeUndefined();
@@ -1849,13 +2070,14 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Reported.")).toEqual(followUp("handoff_complete"));
     });
 
-    test("the Envoy extension's own notice (its session-id-changed notice) does not re-arm a quiet stall", async () => {
+    test("the Envoy extension's own notice (its session-id-changed notice) counts for nothing", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
       expect(await worker.settles("Done, I think.")).toEqual(followUp("handoff_complete"));
 
       // A branch re-mints the worker's session id, and the Envoy extension steers its notice into
-      // the session: the session's own doing, not an event from outside.
+      // the session: the session's own doing, not an event from outside, so the count stands and
+      // the next settle is answered by a timer rather than a second continuation.
       await worker.arrives({
         message: {
           ...envoyEvent.message,
@@ -1864,6 +2086,7 @@ describe("Legion OMP extension", () => {
         },
       });
       expect(await worker.settles("Noted the new session id.")).toBeUndefined();
+      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 1, reported: false });
 
       await worker.arrives(envoyEvent);
       expect(await worker.settles("Read the answer.")).toEqual(followUp("handoff_complete"));
@@ -1911,6 +2134,8 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Booted.")).toBeUndefined();
       await worker.arrives(envoyEvent);
       expect(await worker.settles("Read the notice.")).toBeUndefined();
+      expect(steered(worker)).toEqual([]);
+      expect(worker.timers).toEqual([]);
     });
 
     test("a settle the host aborted sends nothing and leaves the stall unanswered", async () => {
@@ -1920,6 +2145,7 @@ describe("Legion OMP extension", () => {
       aborted.abort();
 
       expect(await worker.settles("Interrupted.", aborted.signal)).toBeUndefined();
+      expect(worker.timers).toEqual([]);
       expect(await worker.settles("Done.")).toEqual(followUp("handoff_complete"));
     });
 
@@ -1940,29 +2166,39 @@ describe("Legion OMP extension", () => {
       await resumedClosed.arrives(envoyEvent);
       expect(await resumedClosed.settles("Answered the question.")).toBeUndefined();
 
-      // A worker relaunched after its first text-call follow-up keeps that stall's second.
-      const textCall = '<invoke name="legion">\n<parameter name="op">handoff_complete</parameter>';
-      const afterTextCall = await bootStalling({});
-      await afterTextCall.arrives(assignment);
-      await afterTextCall.settles(textCall);
-      const resumedTextCall = await bootStalling({ branch: afterTextCall.entries });
-      expect(await resumedTextCall.settles(textCall)).toEqual(followUp("written as text"));
-      expect(await resumedTextCall.settles(textCall)).toBeUndefined();
+      // A worker relaunched after a reminder carries its count: the next settle arms a timer
+      // rather than asking for a second continuation.
+      const afterReminder = await bootStalling({});
+      await afterReminder.arrives(assignment);
+      await afterReminder.settles("Pushed.");
+      const resumedCounting = await bootStalling({ branch: afterReminder.entries });
+      expect(await resumedCounting.settles("Still pushing.")).toBeUndefined();
+      expect(resumedCounting.timers.map((timer) => timer.delayMs)).toEqual([
+        DEFAULT_STALL_LIMITS.resumeMs,
+        DEFAULT_STALL_LIMITS.reminderMs,
+      ]);
+
+      await fires(resumedCounting);
+      expect(steered(resumedCounting)).toEqual([steeredReminder(REMINDER)]);
     });
 
-    test("a sub-architect is never nudged", async () => {
+    test("a sub-architect is never reminded", async () => {
       const subArchitect = await bootStalling({ role: "architect", issue: "REPO-43" });
       await subArchitect.arrives(assignment);
 
       expect(await subArchitect.settles("Waves released.")).toBeUndefined();
+      expect(steered(subArchitect)).toEqual([]);
+      expect(subArchitect.timers).toEqual([]);
     });
 
-    test("a root architect is never nudged", async () => {
+    test("a root architect is never reminded", async () => {
       const pane = await bootPane({ role: "architect", issue: "REPO-42", sessionId: "ses_stall" });
       const root = session(pane.handlers, pane.context);
       await root.arrives(assignment);
 
       expect(await root.settles("Spec posted.")).toBeUndefined();
+      expect(steered(pane)).toEqual([]);
+      expect(pane.timers).toEqual([]);
       const legionTool = pane.tools.find((tool) => tool.name === "legion");
       await expect(
         legionTool?.execute(
@@ -1983,7 +2219,7 @@ describe("Legion OMP extension", () => {
       });
     });
 
-    test("the controller is never nudged", async () => {
+    test("the controller is never reminded", async () => {
       const controller = await launchedController({ sessionId: "ses_controller_nudge" });
       const context = controller.context("ses_controller_nudge");
       await hook(controller.handlers, "session_start")({}, context);
@@ -1991,6 +2227,7 @@ describe("Legion OMP extension", () => {
       await pane.arrives(assignment);
 
       expect(await pane.settles("Admitted REPO-43.")).toBeUndefined();
+      expect(steered(controller)).toEqual([]);
     });
 
     /** Answers every request as the Envoy listener does, so a session with no daemon never
@@ -2010,7 +2247,7 @@ describe("Legion OMP extension", () => {
       return requests;
     };
 
-    test("a session with no Legion environment is never nudged", async () => {
+    test("a session with no Legion environment is never reminded", async () => {
       const requests = listenerOnly("ses_plain");
       const fixture = createPi();
       legionExtension(fixture.pi);
@@ -2020,11 +2257,12 @@ describe("Legion OMP extension", () => {
       await plain.arrives(assignment);
 
       expect(await plain.settles("Here is the answer.")).toBeUndefined();
+      expect(steered(fixture)).toEqual([]);
       expect(fixture.entries.filter((entry) => entry.customType.startsWith("legion"))).toEqual([]);
       expect(requests.filter((request) => request.path.startsWith("/legion/"))).toEqual([]);
     });
 
-    test("a task subagent of a phase worker is never nudged", async () => {
+    test("a task subagent of a phase worker is never reminded", async () => {
       const { childFile } = await createSubagentTranscriptPaths();
       const pane = await claimPane({
         role: "implementer",
@@ -2036,6 +2274,8 @@ describe("Legion OMP extension", () => {
       await subagent.arrives(assignment);
 
       expect(await subagent.settles("Found the file.")).toBeUndefined();
+      expect(steered(pane)).toEqual([]);
+      expect(pane.timers).toEqual([]);
       expect(daemonRequests(pane.requests)).toEqual([]);
     });
   });
@@ -2290,6 +2530,9 @@ interface LaunchedController {
   readonly secretsDir: string;
   readonly requests: DaemonRequest[];
   readonly sentUserMessages: string[];
+  /** Every `pi.sendMessage` the controller's process made, with each call's options beside it. */
+  readonly sentMessages: SentMessage[];
+  readonly sentMessageOptions: unknown[];
   readonly exits: number[];
   readonly tools: RegisteredTool[];
   readonly commands: RegisteredCommand[];
@@ -2460,6 +2703,8 @@ async function launchedController(options: {
     secretsDir,
     requests,
     sentUserMessages: fixture.sentUserMessages,
+    sentMessages: fixture.sentMessages,
+    sentMessageOptions: fixture.sentMessageOptions,
     exits,
     tools: fixture.tools,
     commands: fixture.commands,
