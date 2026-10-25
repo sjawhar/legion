@@ -40,6 +40,7 @@ import { dispatchMarkPlugins, remarkDispatchMarks, dispatchMarkHandler } from '.
 import remarkInlineLinks from 'remark-inline-links';
 import { remarkSoftBreakAsLine, remarkSoftBreakAsSpace } from './dispatch-soft-breaks.js';
 import { remarkContainerDirectives } from './lib-remark-directive-plugin.js';
+import { linkedImageSchemas, remarkLinkedImages } from './editor/schema/linked-image';
 
 /**
  * What a single newline inside a paragraph (a CommonMark soft break) becomes. `'space'`, the
@@ -99,6 +100,8 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
 
   const plugins = [
     ...commonmarkSchema,
+    // A linked image keeps its link as attributes of the image (./editor/schema/linked-image.ts).
+    ...linkedImageSchemas,
     ...gfmSchema,
     // Frontmatter must be registered after commonmark so `---` parses as YAML.
     ...frontmatterSchema,
@@ -140,7 +143,11 @@ export async function createHeadlessProof(options: HeadlessProofOptions = {}): P
       // as nothing, as CommonMark reads them; the schema has no node for an unresolved reference,
       // so without this the parse throws and the whole body falls back to its literal source.
       // The live editor's commonmark preset installs the same plugin on its own import parser.
-      .use(remarkInlineLinks);
+      .use(remarkInlineLinks)
+      // A link around one whole image becomes that image carrying the link; after the references
+      // above are resolved and the dispatch-mark spans are built, so a linked image inside an Ask
+      // span is read the same way.
+      .use(remarkLinkedImages);
     // remark leaves a soft break as a "\n" inside its text node; the policy either joins the
     // lines with a space or splits them around a `break` node, which the commonmark preset's
     // hardbreak parser takes.

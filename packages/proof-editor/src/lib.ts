@@ -94,6 +94,7 @@ import { recordMarkHistoryPlugin } from './record-mark-history';
 import { editorHighlightsPlugin, pulseHighlight, setActiveHighlights } from './editor-highlights';
 import { removeRecordMark, retypeMark as retypeRecordMark } from './record-mark-retype';
 import type { RetypeOutcome } from './record-mark-retype';
+import { linkedImageSchemas, remarkLinkedImagesPlugin } from './editor/schema/linked-image';
 
 export type { MarkAction, SelectionBarActionKind, PopoverActionKind } from './dispatch-marks';
 export type { RetypedMark, RetypeRefusal, RetypeOutcome } from './record-mark-retype';
@@ -316,6 +317,10 @@ export async function createProofEditor(
     // Register remark plugins for proof marks and dispatchAsk parsing
     .use(remarkProofMarksPlugin)
     .use(remarkDispatchMarksPlugin)
+    // A linked image keeps its link as attributes of the image; the transform runs after
+    // commonmark's remark-inline-links and the dispatch-mark spans (./editor/schema/linked-image.ts).
+    .use(linkedImageSchemas)
+    .use(remarkLinkedImagesPlugin)
     // Register contexts
     .use(heatmapCtx)
     .use(agentCursorCtx)
