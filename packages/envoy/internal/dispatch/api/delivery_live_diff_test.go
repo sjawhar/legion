@@ -950,8 +950,8 @@ func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 		"snapshot.json":  held.snapshot("timeline-1", 41, &snapshotAt),
 		"delta.json":     delta,
 		"after.json":     next.snapshot("timeline-1", 42, &deployedAt),
-		"heartbeat.json": deliveryLiveHeartbeat,
-		"error.json": DeliveryLiveError{
+		"heartbeat.json": liveHeartbeat,
+		"error.json": LiveError{
 			Type: "error", Sub: "timeline-1", Code: "DELIVERY_NOT_CONFIGURED",
 			Message: "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
 		},

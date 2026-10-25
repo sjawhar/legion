@@ -10,9 +10,9 @@ import (
 // parseDeliveryLiveView resolves a subscribed view as the matching GET route reads its query, or
 // answers the error frame refusing it: INVALID_FRAME for a view of no known shape, INVALID_QUERY
 // for one the route would refuse.
-func parseDeliveryLiveView(view DeliveryLiveView) (deliveryLiveSpec, *DeliveryLiveError) {
-	invalid := func(code, message string) (deliveryLiveSpec, *DeliveryLiveError) {
-		refusal := deliveryLiveRefusal("", code, message)
+func parseDeliveryLiveView(view DeliveryLiveView) (deliveryLiveSpec, *LiveError) {
+	invalid := func(code, message string) (deliveryLiveSpec, *LiveError) {
+		refusal := liveRefusal("", code, message)
 		return deliveryLiveSpec{}, &refusal
 	}
 	spec := deliveryLiveSpec{kind: view.Kind}

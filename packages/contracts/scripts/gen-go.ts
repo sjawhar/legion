@@ -8,6 +8,10 @@ import {
   DOCUMENT_SCHEMA_CLOSE_CODE,
   DOCUMENT_SCHEMA_CLOSE_REASON,
   ISSUE_TITLE_MAX,
+  LIVE_SOCKET_MAX_AGE_CLOSE,
+  LIVE_SOCKET_MAX_AGE_MS,
+  LIVE_SOCKET_MAX_SUBSCRIPTIONS,
+  LIVE_SOCKET_MIN_AGE_MS,
   MAX_BROADCAST_RECIPIENTS,
   MAX_ISSUE_BLOCKERS,
   MAX_ISSUE_PAGE_LIMIT,
@@ -176,6 +180,17 @@ const ProjectNameMax = ${PROJECT_NAME_MAX}
 // reading of it cannot drift apart.
 const DocumentSchemaCloseCode = ${DOCUMENT_SCHEMA_CLOSE_CODE}
 const DocumentSchemaCloseReason = ${JSON.stringify(DOCUMENT_SCHEMA_CLOSE_REASON)}
+
+// LiveSocketMaxAgeClose is the close code Dispatch ends a live socket with once the socket reaches
+// its age, a random point in [LiveSocketMinAge, LiveSocketMaxAge), and LiveSocketMaxSubscriptions
+// the most subscriptions one live socket holds. Generated from LIVE_SOCKET_MAX_AGE_CLOSE,
+// LIVE_SOCKET_MIN_AGE_MS, LIVE_SOCKET_MAX_AGE_MS and LIVE_SOCKET_MAX_SUBSCRIPTIONS in
+// packages/contracts so the server's close and limit and the dashboard's reading of them cannot
+// drift apart.
+const LiveSocketMaxAgeClose = ${LIVE_SOCKET_MAX_AGE_CLOSE}
+const LiveSocketMinAge = ${LIVE_SOCKET_MIN_AGE_MS} * time.Millisecond
+const LiveSocketMaxAge = ${LIVE_SOCKET_MAX_AGE_MS} * time.Millisecond
+const LiveSocketMaxSubscriptions = ${LIVE_SOCKET_MAX_SUBSCRIPTIONS}
 
 func NowMillis() int64 {
 	return time.Now().UnixMilli()

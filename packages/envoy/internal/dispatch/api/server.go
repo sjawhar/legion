@@ -95,19 +95,24 @@ type Deps struct {
 	// row either way (files.BackfillRows moves them).
 	Files files.Store
 	// Lifetime bounds work a handler starts and does not wait for, and every event stream and
-	// delivery socket: it is the process's own context, cancelled when the server is shutting
-	// down, so a deploy stops a broadcast's remaining deliveries instead of leaving goroutines
-	// behind, and ends each open stream (streamEvents, streamAgentConversation) and closes each
-	// delivery socket with 1012 so http.Server.Shutdown is not held for its whole budget by a
-	// connection that never goes idle. The delivery hub runs on it, and GET /ws/delivery is
-	// mounted only with one. Nil means unbounded, which is what a test gets.
+	// live socket: it is the process's own context, cancelled when the server is shutting down,
+	// so a deploy stops a broadcast's remaining deliveries instead of leaving goroutines behind,
+	// and ends each open stream (streamEvents, streamAgentConversation) and closes each live
+	// socket with 1012 so http.Server.Shutdown is not held for its whole budget by a connection
+	// that never goes idle. The delivery hub runs on it, and GET /ws/live is mounted only with
+	// one. Nil means unbounded, which is what a test gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
-	// its caller again, a document socket and a delivery socket resolve their caller again
-	// (whileCallerResolves), each closing once the caller no longer resolves, and a delivery
-	// socket pings its page and sends it a heartbeat frame.
+	// its caller again, a document socket and a live socket resolve their caller again
+	// (whileCallerResolves), each closing once the caller no longer resolves, and a live socket
+	// pings its page and sends it a heartbeat frame.
 	StreamHeartbeat time.Duration
+	// LiveSocketAge is how long a GET /ws/live socket lives before it closes with 4001 (max age),
+	// drawn as it opens. Nil draws it uniformly from [contracts.LiveSocketMinAge,
+	// contracts.LiveSocketMaxAge), so the sockets a deploy opened together do not all end
+	// together; a test returns a fixed age.
+	LiveSocketAge func() time.Duration
 }
 
 // defaultStreamHeartbeat is StreamHeartbeat when DepsInput leaves it zero.
@@ -243,10 +248,13 @@ type server struct {
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
-	// with no Lifetime (register), which mounts no GET /ws/delivery.
+	// with no Lifetime (register), which mounts no GET /ws/live.
 	deliveryHub *deliveryHub
-	// deliverySockets is every open GET /ws/delivery socket, which the test hook drops.
-	deliverySockets deliverySocketSet
+	// liveSockets is every open GET /ws/live socket, which the test hooks close.
+	liveSockets liveSocketSet
+	// liveKinds starts a live socket's subscriptions to the views beside the delivery views, by
+	// kind (live_subscriptions.go); a kind it does not hold is refused.
+	liveKinds map[string]liveKind
 	// eventRelay is the live feed every open SSE connection reads (INFRA-66), on every server
 	// register mounts: it starts its listening connection on the first connection to subscribe.
 	eventRelay *eventStreamRelay
@@ -287,12 +295,13 @@ type queryer interface {
 // document websocket refuses one in the actor its bearer names (refuseUnstorableActor).
 //
 // With a Lifetime, the server holds the delivery hub (LEGION-690), which starts its goroutines on
-// the first subscription and runs them until Lifetime ends, and mounts GET /ws/delivery beside the
+// the first subscription and runs them until Lifetime ends, and mounts GET /ws/live beside the
 // document websocket, under the same wrappers; a server without one (a test's) has neither, so
 // nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
 // open SSE connection reads and which starts its own listening connection on the first of them,
-// also on Lifetime. The returned wait blocks until the hub, every delivery socket and the relay
-// have ended. Call it only after Lifetime has been cancelled and before the database pool closes.
+// also on Lifetime. The returned wait blocks until the hub, every live socket (and every
+// subscription it ran) and the relay have ended. Call it only after Lifetime has been cancelled
+// and before the database pool closes.
 //
 // That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
 // which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
@@ -305,10 +314,11 @@ func Register(mux *http.ServeMux, deps Deps) func() {
 	return s.waitBackground
 }
 
-// waitBackground waits for every delivery socket, then for the hub's goroutines and the relay's.
+// waitBackground waits for every live socket and the subscriptions it ran, then for the hub's
+// goroutines and the relay's.
 func (s *server) waitBackground() {
 	if s.deliveryHub != nil {
-		s.deliverySockets.wait()
+		s.liveSockets.wait()
 		s.deliveryHub.wait()
 	}
 	s.eventRelay.wait()
@@ -317,7 +327,7 @@ func (s *server) waitBackground() {
 // register is Register, answering the server it mounted, whose delivery hub and event stream
 // relay a test waits out before its database closes.
 func register(mux *http.ServeMux, deps Deps) *server {
-	s := &server{deps: deps}
+	s := &server{deps: deps, liveKinds: map[string]liveKind{}}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})
@@ -334,8 +344,8 @@ func register(mux *http.ServeMux, deps Deps) *server {
 		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP)))))
 	}
 	if s.deliveryHub != nil {
-		const pattern = "/ws/delivery"
-		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveDeliverySocket))))
+		const pattern = "/ws/live"
+		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveLiveSocket))))
 	}
 	return s
 }

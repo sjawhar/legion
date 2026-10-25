@@ -176,7 +176,7 @@ func TestSIGTERMWhileAWriteWaitsOnALockCommitsItAndAnswersBeforeExit(t *testing.
 	}
 }
 
-// A delivery socket is hijacked from net/http, so HTTP shutdown does not wait for it. Production
+// A live socket is hijacked from net/http, so HTTP shutdown does not wait for it. Production
 // shutdown must wait for the socket handler and the delivery hub after cancelling Lifetime, before
 // it closes the database pool they use.
 func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
@@ -194,11 +194,11 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 	handler, waitDelivery := routes.New(appCtx)
 	server := httptest.NewServer(handler)
 	defer server.Close()
-	conn, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws/delivery", http.Header{
+	conn, response, err := gws.DefaultDialer.Dial("ws"+strings.TrimPrefix(server.URL, "http")+"/ws/live", http.Header{
 		"Authorization": {"Bearer agent-token"},
 	})
 	if err != nil {
-		t.Fatalf("open the delivery socket: %v (%v)", err, response)
+		t.Fatalf("open the live socket: %v (%v)", err, response)
 	}
 	defer conn.Close()
 	if err := conn.WriteJSON(map[string]any{"type": "subscribe", "sub": "pipeline", "view": map[string]string{"kind": "pipeline"}}); err != nil {
@@ -242,7 +242,7 @@ func TestShutdownWaitsForDeliveryWorkBeforeClosingThePool(t *testing.T) {
 		t.Fatal("shutdown did not return after delivery work ended")
 	}
 	if _, _, err := conn.ReadMessage(); !gws.IsCloseError(err, gws.CloseServiceRestart) {
-		t.Fatalf("the delivery socket ended with %v, want 1012", err)
+		t.Fatalf("the live socket ended with %v, want 1012", err)
 	}
 	if _, err := database.Pool.Exec(context.Background(), "select 1"); err == nil {
 		t.Fatal("shutdown left the pool open")

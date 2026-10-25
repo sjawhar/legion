@@ -85,13 +85,19 @@ type testServerOptions struct {
 	// deployment with no bucket does.
 	files files.Store
 	// lifetime is the server's Deps.Lifetime, on which Register builds the delivery hub GET
-	// /ws/delivery serves and the event stream relay every SSE connection reads. Nil is the
-	// test's own context (t.Context()), which ends before the cleanups that wait those
-	// goroutines out; a test that stops the server before it ends (the socket's) passes one it
-	// can cancel itself. It must end by the test's end, so derive it from t.Context().
+	// /ws/live serves and the event stream relay every SSE connection reads. Nil is the test's
+	// own context (t.Context()), which ends before the cleanups that wait those goroutines out;
+	// a test that stops the server before it ends (the socket's) passes one it can cancel
+	// itself. It must end by the test's end, so derive it from t.Context().
 	lifetime context.Context
 	// streamHeartbeat replaces the event streams' and the sockets' fifteen-second heartbeat.
 	streamHeartbeat time.Duration
+	// liveSocketAge is the server's Deps.LiveSocketAge: nil draws each socket's age as
+	// production does.
+	liveSocketAge func() time.Duration
+	// liveKinds adds view kinds to the ones a live socket serves beside the delivery views, or
+	// replaces them, before any socket opens.
+	liveKinds map[string]liveKind
 }
 
 // headerIdentity is the test header identity that records each named person in the database.
@@ -191,12 +197,14 @@ func newRegisteredTestServer(t *testing.T, options testServerOptions) (http.Hand
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
+	deps.LiveSocketAge = options.liveSocketAge
 	mux := http.NewServeMux()
 	served := register(mux, deps)
+	maps.Copy(served.liveKinds, options.liveKinds)
 	t.Cleanup(served.eventRelay.wait)
 	if served.deliveryHub != nil {
 		t.Cleanup(served.deliveryHub.wait)
-		t.Cleanup(served.deliverySockets.wait)
+		t.Cleanup(served.liveSockets.wait)
 	}
 	return mux, database, deps, served
 }

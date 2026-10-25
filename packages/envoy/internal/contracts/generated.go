@@ -218,6 +218,17 @@ const ProjectNameMax = 80
 const DocumentSchemaCloseCode = 4409
 const DocumentSchemaCloseReason = "DOC_SCHEMA"
 
+// LiveSocketMaxAgeClose is the close code Dispatch ends a live socket with once the socket reaches
+// its age, a random point in [LiveSocketMinAge, LiveSocketMaxAge), and LiveSocketMaxSubscriptions
+// the most subscriptions one live socket holds. Generated from LIVE_SOCKET_MAX_AGE_CLOSE,
+// LIVE_SOCKET_MIN_AGE_MS, LIVE_SOCKET_MAX_AGE_MS and LIVE_SOCKET_MAX_SUBSCRIPTIONS in
+// packages/contracts so the server's close and limit and the dashboard's reading of them cannot
+// drift apart.
+const LiveSocketMaxAgeClose = 4001
+const LiveSocketMinAge = 1800000 * time.Millisecond
+const LiveSocketMaxAge = 3600000 * time.Millisecond
+const LiveSocketMaxSubscriptions = 64
+
 func NowMillis() int64 {
 	return time.Now().UnixMilli()
 }

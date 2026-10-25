@@ -15,44 +15,54 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
-// The delivery hub's side of GET /ws/delivery (LEGION-690). The socket keeps no view state of its
-// own. It hands each subscribe and unsubscribe frame to the hub (Subscribe, Unsubscribe), calls
-// Close however it ends, and writes every frame the hub sends it through its deliveryLiveConn.
+// The delivery hub's side of GET /ws/live (LEGION-690). The socket keeps no view state of its own.
+// It hands each subscribe frame for a delivery view and each unsubscribe of one to the hub
+// (Subscribe, Unsubscribe), calls Close however it ends, and writes every frame the hub sends it
+// through its deliveryLiveConn.
 
 // deliveryLiveConn is one socket as the hub sees it. Send queues one frame (a DeliveryLiveSnapshot,
-// DeliveryLiveDelta, DeliveryLiveFreshness or DeliveryLiveError) and never blocks: false means the
+// DeliveryLiveDelta, DeliveryLiveFreshness or LiveError) and never blocks: false means the
 // socket's queue is full, and the socket then closes itself (1013), so the page reconnects and
 // resumes.
 type deliveryLiveConn interface {
 	Send(frame any) bool
 }
 
-// Subscribe answers one subscribe frame on conn. A view the matching GET route would refuse is an
-// INVALID_QUERY error frame naming the sub, a malformed view or a resume seq that is not a decimal
-// change position INVALID_FRAME. Otherwise conn's sub follows the view from now on: it is answered
-// a snapshot, or, on a resume, the delta against the revisions the page holds (a snapshot when the
-// page applied nothing since before the oldest kept change, OldestChangeSeq() - 1), and later only
-// the deltas. While delivery is not configured the sub is told DELIVERY_NOT_CONFIGURED once and
-// stays open, and the settings' first save answers its snapshot. A sub id conn already holds is
-// replaced.
-func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame DeliveryLiveSubscribe) {
+// deliverySubscription is a subscribe frame for a delivery view as the socket hands it to the hub,
+// its resume decoded as a delivery view's.
+type deliverySubscription struct {
+	Sub    string
+	View   DeliveryLiveView
+	Resume *DeliveryLiveResume
+}
+
+// Subscribe answers one subscribe frame on conn, and reports whether conn's sub now follows the
+// frame's view. A view the matching GET route would refuse is an INVALID_QUERY error frame naming
+// the sub, a malformed view or a resume seq that is not a decimal change position INVALID_FRAME,
+// and a sub id conn already holds is then left as it was. Otherwise conn's sub follows the view
+// from now on: it is answered a snapshot, or, on a resume, the delta against the revisions the page
+// holds (a snapshot when the page applied nothing since before the oldest kept change,
+// OldestChangeSeq() - 1), and later only the deltas. While delivery is not configured the sub is
+// told DELIVERY_NOT_CONFIGURED once and stays open, and the settings' first save answers its
+// snapshot. A sub id conn already holds is replaced.
+func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame deliverySubscription) bool {
 	if frame.Sub == "" {
-		conn.Send(deliveryLiveRefusal("", "INVALID_FRAME", "a subscribe frame names its sub"))
-		return
+		conn.Send(liveRefusal("", "INVALID_FRAME", "a subscribe frame names its sub"))
+		return false
 	}
 	spec, refusal := parseDeliveryLiveView(frame.View)
 	if refusal != nil {
 		refusal.Sub = frame.Sub
 		conn.Send(*refusal)
-		return
+		return false
 	}
 	h.start()
 	var held *DeliveryLiveRevs
 	if frame.Resume != nil {
 		seq, err := strconv.ParseInt(frame.Resume.Seq, 10, 64)
 		if err != nil || seq < 0 {
-			conn.Send(deliveryLiveRefusal(frame.Sub, "INVALID_FRAME", "resume.seq must be a decimal change position"))
-			return
+			conn.Send(liveRefusal(frame.Sub, "INVALID_FRAME", "resume.seq must be a decimal change position"))
+			return false
 		}
 		// Read before the hub's lock, which no database read is made under.
 		oldest, err := delivery.OldestChangeSeq(h.readContext(), h.server.deps.Store.Pool)
@@ -94,6 +104,7 @@ func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame DeliveryLiveSubscri
 	default:
 		h.markDirtyLocked(view, now, deliveryCauseSubscribe)
 	}
+	return true
 }
 
 // Unsubscribe drops conn's sub; a view's last sub drops the view.
@@ -103,8 +114,8 @@ func (h *deliveryHub) Unsubscribe(conn deliveryLiveConn, sub string) {
 	h.dropLocked(conn, sub)
 }
 
-// Close drops every sub conn holds. The socket calls it however it ends: shutdown (1012), its
-// caller no longer resolving (1008), a full queue (1013), a read error.
+// Close drops every sub conn holds. The socket calls it however it ends: its age (4001), shutdown
+// (1012), its caller no longer resolving (1008), a full queue (1013), a read error.
 func (h *deliveryHub) Close(conn deliveryLiveConn) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -402,8 +413,8 @@ func (h *deliveryHub) catchUpNow() {
 }
 
 // deliveryLiveRefusal is the error frame refusing sub with code.
-func deliveryLiveRefusal(sub, code, message string) DeliveryLiveError {
-	return DeliveryLiveError{Type: "error", Sub: sub, Code: code, Message: message}
+func liveRefusal(sub, code, message string) LiveError {
+	return LiveError{Type: "error", Sub: sub, Code: code, Message: message}
 }
 
 func timeOrZero(t *time.Time) time.Time {

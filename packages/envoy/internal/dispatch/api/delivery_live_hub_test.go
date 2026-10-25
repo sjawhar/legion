@@ -294,10 +294,10 @@ func (c *fakeLiveConn) delta(t *testing.T, within time.Duration, sub string) Del
 	return delta
 }
 
-func (c *fakeLiveConn) refusal(t *testing.T, within time.Duration, sub, code string) DeliveryLiveError {
+func (c *fakeLiveConn) refusal(t *testing.T, within time.Duration, sub, code string) LiveError {
 	t.Helper()
 	frame := c.next(t, within, code+" for "+sub)
-	refusal, ok := frame.(DeliveryLiveError)
+	refusal, ok := frame.(LiveError)
 	if !ok || refusal.Sub != sub || refusal.Code != code {
 		raw, _ := json.Marshal(frame)
 		t.Fatalf("frame = %s, want %s for %s", raw, code, sub)
@@ -329,8 +329,9 @@ func livePipelineView(at *time.Time) DeliveryLiveView {
 	return DeliveryLiveView{Kind: deliveryLivePipeline, At: &s}
 }
 
-func subscribeFrame(sub string, view DeliveryLiveView) DeliveryLiveSubscribe {
-	return DeliveryLiveSubscribe{Type: "subscribe", Sub: sub, View: view}
+// subscribeFrame is a subscribe frame for a delivery view as the socket hands it to the hub.
+func subscribeFrame(sub string, view DeliveryLiveView) deliverySubscription {
+	return deliverySubscription{Sub: sub, View: view}
 }
 
 // seedHubSettings writes the delivery settings the hub tests run under.

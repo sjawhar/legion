@@ -10,17 +10,24 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
 )
 
-// The Go mirror of packages/contracts/src/dispatch-api.ts's DeliveryLive* frames: what an open
-// Delivery or Pipeline page and Dispatch send each other over GET /ws/delivery (LEGION-690). A
-// page subscribes to a view; Dispatch answers a snapshot (the matching GET route's body and a
-// revision per key), then only deltas: list items by id, map entries by key, counts two levels
-// deep, and the other fields whole.
+// The Go mirror of packages/contracts/src/dispatch-api.ts's Live* and DeliveryLive* frames: what an
+// open page and Dispatch send each other over GET /ws/live, the page's one live socket. A page
+// subscribes to views by kind. A delivery view (LEGION-690) is answered a snapshot (the matching
+// GET route's body and a revision per key), then only deltas: list items by id, map entries by
+// key, counts two levels deep, and the other fields whole. The events view is the event feed,
+// event by event, and the agent view one session's live conversation.
 
-// The three views a page can subscribe to, by the GET route each mirrors.
+// The three delivery views a page can subscribe to, by the GET route each mirrors.
 const (
 	deliveryLiveTimeline = "timeline"
 	deliveryLiveMeasures = "measures"
 	deliveryLivePipeline = "pipeline"
+)
+
+// The two views beside the delivery views: the event feed, and one session's live conversation.
+const (
+	liveEventsView = "events"
+	liveAgentView  = "agent"
 )
 
 // DeliveryLiveWindow is a window by preset (7, 14, 28 or 84 days), whose end stays at the
@@ -60,23 +67,39 @@ type DeliveryLiveRevChanges struct {
 	Fields map[string]string                        `json:"fields,omitempty"`
 }
 
-// DeliveryLiveSubscribe names a view; Resume, from a reconnecting page, carries its last applied
-// change (a decimal seq) and what it holds, and Dispatch answers the delta.
-type DeliveryLiveSubscribe struct {
-	Type   string              `json:"type"`
-	Sub    string              `json:"sub"`
-	View   DeliveryLiveView    `json:"view"`
-	Resume *DeliveryLiveResume `json:"resume,omitempty"`
+// LiveView is one view a subscription follows: a delivery view, by DeliveryLiveView's fields; the
+// events view, by its kind alone; or an agent view, which names the session it watches.
+type LiveView struct {
+	DeliveryLiveView
+	SessionID *string `json:"session_id,omitempty"`
 }
 
-// DeliveryLiveResume is a reconnecting page's last applied change and its revisions.
+// LiveSubscribe starts the subscription Sub names, following View, in place of any the socket
+// already holds under Sub, of whatever kind. Resume, from a reconnecting page, is its view's kind's:
+// a DeliveryLiveResume for a delivery view, an EventsLiveResume for the events view, and none for
+// an agent view. It stays raw until the socket has read the view's kind, and is then decoded as
+// that kind's alone, so a resume of another kind's shape is refused.
+type LiveSubscribe struct {
+	Type   string          `json:"type"`
+	Sub    string          `json:"sub"`
+	View   LiveView        `json:"view"`
+	Resume json.RawMessage `json:"resume,omitempty"`
+}
+
+// DeliveryLiveResume is a reconnecting page's last applied change and its revisions: a delivery
+// view's resume, from which Dispatch answers the delta.
 type DeliveryLiveResume struct {
 	Seq  string           `json:"seq"`
 	Revs DeliveryLiveRevs `json:"revs"`
 }
 
-// DeliveryLiveUnsubscribe drops one subscription.
-type DeliveryLiveUnsubscribe struct {
+// EventsLiveResume is the events view's resume: the decimal id of the last event the page applied.
+type EventsLiveResume struct {
+	Since string `json:"since"`
+}
+
+// LiveUnsubscribe drops one subscription, of any kind.
+type LiveUnsubscribe struct {
 	Type string `json:"type"`
 	Sub  string `json:"sub"`
 }
@@ -124,24 +147,61 @@ type DeliveryLiveFreshness struct {
 	Stale     []string                       `json:"stale"`
 }
 
-// DeliveryLiveError refuses a frame or a subscription, by the code the matching GET route would
-// answer (INVALID_QUERY, DELIVERY_NOT_CONFIGURED) or the socket's own (INVALID_FRAME).
-type DeliveryLiveError struct {
+// LiveEventsStart opens every events subscription, before any LiveEventFrame: Since is the decimal
+// id the subscription starts after, the page's resume clamped to the feed's head, or the head when
+// the page sent none.
+type LiveEventsStart struct {
+	Type  string `json:"type"`
+	Sub   string `json:"sub"`
+	Since string `json:"since"`
+}
+
+// LiveEventFrame is one event of the feed: its decimal id and the event's JSON, the bytes the
+// event stream's data line carries.
+type LiveEventFrame struct {
+	Type  string          `json:"type"`
+	Sub   string          `json:"sub"`
+	ID    string          `json:"id"`
+	Event json.RawMessage `json:"event"`
+}
+
+// LiveAgentFrame is one message of a session's agent stream: Event names it ("responder",
+// "replay" or "frame"), and Data is the session's own JSON, which Dispatch relays and never parses.
+type LiveAgentFrame struct {
+	Type  string          `json:"type"`
+	Sub   string          `json:"sub"`
+	Event string          `json:"event"`
+	Data  json.RawMessage `json:"data"`
+}
+
+// LiveEnded says Dispatch ended the subscription Sub: it fell behind ("behind"), or the relay
+// dropped its viewer ("dropped"). The page subscribes it again at once.
+type LiveEnded struct {
+	Type   string `json:"type"`
+	Sub    string `json:"sub"`
+	Reason string `json:"reason"`
+}
+
+// LiveError refuses a frame or a subscription, by the code the matching GET route would answer
+// (INVALID_QUERY, DELIVERY_NOT_CONFIGURED) or the socket's own (INVALID_FRAME,
+// TOO_MANY_SUBSCRIPTIONS). Sub names the subscription it refuses, and is empty for a frame
+// Dispatch could not read a sub from.
+type LiveError struct {
 	Type    string `json:"type"`
 	Sub     string `json:"sub,omitempty"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
 }
 
-// DeliveryLiveHeartbeat goes out every StreamHeartbeat beside the socket's control ping and carries
+// LiveHeartbeat goes out every StreamHeartbeat beside the socket's control ping and carries
 // nothing: a browser never shows a ping to the page's script, so this frame is how an open page
 // tells a quiet socket from a dead one.
-type DeliveryLiveHeartbeat struct {
+type LiveHeartbeat struct {
 	Type string `json:"type"`
 }
 
-// deliveryLiveHeartbeat is the one heartbeat frame.
-var deliveryLiveHeartbeat = DeliveryLiveHeartbeat{Type: "heartbeat"}
+// liveHeartbeat is the one heartbeat frame.
+var liveHeartbeat = LiveHeartbeat{Type: "heartbeat"}
 
 // deliveryLiveClasses sorts one body kind's top-level JSON fields into how a delta sends them.
 // Every field is in exactly one class (TestEveryResponseFieldHasOneClass), so a field added to a
