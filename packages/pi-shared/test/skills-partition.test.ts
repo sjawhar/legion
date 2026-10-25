@@ -48,6 +48,28 @@ test("a package this repository does not ship has no partition", () => {
   expect(() => stageSkills("@sjawhar/pi-shared")).toThrow("unknown plugin package");
 });
 
+// Every `skill://<name>` a shipped skill or a daemon prompt names, bare or with a path, must be a
+// skill one of the two plugins ships. A bare name escapes the link guard (skills-guard.ts checks
+// only `skill://<name>/<path>`), so a skill could tell its reader to load one nothing ships. Code
+// fences are examples and are skipped.
+test("every skill:// name a shipped skill or a daemon prompt uses is a shipped skill", () => {
+  const shipped = new Set([...envoySkills, ...legionSkills]);
+  const roots = [envoy, legion, path.join(REPO_ROOT, "packages/daemon/internal/prompts")];
+  const missing = roots.flatMap((root) =>
+    readdirSync(root, { recursive: true })
+      .map(String)
+      .filter((file) => file.endsWith(".md"))
+      .flatMap((file) => {
+        const text = readFileSync(path.join(root, file), "utf8").replace(/```[\s\S]*?```/g, "");
+        return [...text.matchAll(/skill:\/\/([a-z0-9](?:[a-z0-9._-]*[a-z0-9])?)/g)]
+          .map(([, name]) => name)
+          .filter((name) => !shipped.has(name))
+          .map((name) => `${file}: skill://${name}`);
+      })
+  );
+  expect(missing).toEqual([]);
+});
+
 // .github/workflows/release.yaml names each plugin's skills twice more: in the `changes` filter
 // that decides whether the plugin builds (`skills/<name>/**`), and in the version step that decides
 // whether a commit releases it (`--patch-path skills/<name>/` and the positional `skills/<name>/`).

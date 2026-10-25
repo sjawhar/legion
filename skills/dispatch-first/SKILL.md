@@ -10,7 +10,7 @@ Dispatch holds the open issues, their specs and people's answers. A duplicate is
 ## Search before you act
 
 - Before you plan, file an issue, ask, post a finding or start work, run `dispatch search`.
-- Each query word must match, so each added word loses hits. Use two or three words: the thing and what is wrong with it. Never paste a draft.
+- Each query word must match. Use two or three words: the thing and what is wrong with it. Never paste a draft.
 
 ```bash
 dispatch search --query 'broadcast send order'
@@ -22,7 +22,7 @@ dispatch search --query 'reviewer threads OR review comments'
 
 ## What to do with what you find
 
-`dispatch issue` and `dispatch ask` also search. A hit in the result's `advice.suggestions` is a hit you found.
+`dispatch issue` and `dispatch ask` also search. Treat a hit in `advice.suggestions` as yours to read.
 
 - **Work already tracked:** put the finding on that issue. File a new issue only when no hit covers the work, and cite the nearest one you ruled out (`dispatch://KEY`).
 - **Question already decided:** the answered ask is the record. Cite it (`dispatch://KEY/ask/<id>`). Do not ask again.
@@ -34,7 +34,7 @@ dispatch search --query 'reviewer threads OR review comments'
 
 A person does not watch your chat. Reach them through an ask, an ask block or an approval request.
 
-- The moment a person blocks your work, open a `dispatch ask` for it. A blocker that is not an open ask does not exist for them. A Legion phase worker sends it to its architect instead. Before you say you wait on a person, run `dispatch open-asks`.
+- The moment a person blocks your work, open an ask: an ask block for a design question its document records, else `dispatch ask`. A blocker that is not an open ask does not exist for them. A Legion phase worker sends it to its architect instead. Before you say you wait on a person, run `dispatch open-asks`.
 - Record every request you accept in Dispatch before you start it: an issue, or a line in your issue's record. Before you end a turn, read that record. Each item is done, in progress, or an open ask. Never drop one.
 
 ## Which skill to read
