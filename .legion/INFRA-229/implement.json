@@ -2,8 +2,32 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-229",
-  "completed": "2026-10-25T09:05:00Z",
+  "completed": "2026-10-25T09:40:00Z",
   "proof": [
+    {
+      "criterion": "Review round 1, finding 2: the live proof's retained transcript never discloses the database credential, whatever form the DSN takes.",
+      "surface": "scripts/e2e/merged-root-waits.sh run end to end against the booted daemon (run, through the -tags e2e harness) on PostgreSQL 16.4 and nats-server 2.10.22, with its evidence directory kept.",
+      "command": "TMPDIR=/legion/scratch/tmp LEGION_TEST_PG_DSN='postgres://postgres@127.0.0.1:54332/postgres?sslmode=disable&password=SENTINELpw229' LEGION_E2E_NATS_BIN=/legion/scratch/bin/nats-server MERGED_ROOT_WAITS_EVIDENCE_DIR=/legion/scratch/tmp/mrw-r3 bash scripts/e2e/merged-root-waits.sh; grep -rl SENTINELpw229 /legion/scratch/tmp/mrw-r3 | wc -l",
+      "observed": "'merged root waits e2e: PASS in 31s', all seven steps ok; prerequisites printed 'go go1.27.1, store LEGION_TEST_PG_DSN (set; not printed)'; 0 files in the evidence directory contain the sentinel.",
+      "headSha": "5986a4bd64b2b0c5f0715dee7d9f912c40c33c15",
+      "negativeControl": "The round-0 line's scrubber, sed 's#://[^@/]*@#://<credential>@#', applied to the same DSN printed the sentinel password (grep -c: 1)."
+    },
+    {
+      "criterion": "Review round 1, finding 3: step 4 of the live proof waits for the close's Dispatch done write instead of reading it once.",
+      "surface": "The same run.",
+      "command": "the same command",
+      "observed": "step4: 'read back: the Dispatch stand-in took the close's done write for TESTE758FCE03D37-1' after testwait.Eventually, then 'ok step4-the-childs-merge-closes-the-root'.",
+      "headSha": "5986a4bd64b2b0c5f0715dee7d9f912c40c33c15",
+      "negativeControl": "Not a behaviour change in the daemon, a wait in the driver: the step still fails if no done write arrives (testwait.Eventually fails the test at its deadline), as the round-1 control with the guard removed showed for the step-7 state."
+    },
+    {
+      "criterion": "Review round 1, finding 4: pullRequest.state is the enum open, merged or closed in the strict state contract.",
+      "surface": "@legion/contracts' LegionStateResponse, the strict parser pi-shared's daemon client and claude-envoy's bundle apply to GET /legion/v1/state, run over the Go golden the daemon's projection writes (packages/contracts/fixtures/daemon-api/state.json).",
+      "command": "bun <throwaway script> parsing state.json with LegionStateResponse, then the same with one pullRequest.state set to 'draft'; bun run --cwd packages/claude-envoy check-dist",
+      "observed": "golden: true; check-dist: 'dist/ and legion/ match a fresh build'.",
+      "headSha": "5986a4bd64b2b0c5f0715dee7d9f912c40c33c15",
+      "negativeControl": "state='draft' refused: 'issues.LEGION-207.pullRequest.state: Invalid option: expected one of \"open\"|\"merged\"|\"closed\"'."
+    },
     {
       "criterion": "The root closes only after its last open child is done or parked, and closes the moment that child leaves: a pull request opened from a waiting merged root's branch is new work and does not erase the merge the root waits to close on (the tester's round-1 failure).",
       "surface": "The Legion daemon itself: run, the function legion start calls, booted through the daemon package's whole-daemon harness (-tags e2e) on a real PostgreSQL 16.4 and a native nats-server 2.10.22, with the real store and migrations, HTTP API, claim supervision, openWorkflow, JetStream consumers and outbox lanes. The opened arrives as GitHub's own pull-request envelope on ENVOY_NOTIFICATIONS; every assertion is a read of GET /legion/v1/state or of what the daemon posted to the Dispatch stand-in; step 7 also waits for the daemon's processed_events row of the envelope so its window starts with the event applied.",
@@ -30,6 +54,10 @@
     }
   ],
   "filesChanged": [
+    "scripts/e2e/merged-root-waits.sh, scripts/e2e/README.md — the DSN is never printed (review finding 2)",
+    "packages/daemon/internal/daemon/merged_root_waits_live_test.go — step 4 waits for the Dispatch done write (finding 3)",
+    "packages/contracts/src/legion-api.ts, packages/claude-envoy/dist/envoy-channel.js — pullRequest.state is z.enum(open, merged, closed), bundle regenerated (finding 4)",
+    "PR body — ## Contract change census (finding 1), CI and Threads lines",
     "packages/daemon/internal/workflow/pullrequest.go — pullRequestOpened records no other pull request from the branch of an issue that awaits its merge (awaitsMerge) while its recorded pull request is merged, and logs it; doc comment says why the guard is scoped to that state (an issue set back to todo reruns and its new pull request replaces the merged one)",
     "packages/daemon/internal/workflow/merge_close_test.go — the tester's TestANewPullRequestFromAWaitingRootsBranchLeavesItsMergeStanding: its slot assertion replaced by the linger_close outbox row (see deviations)",
     "packages/daemon/internal/admit/finished_root_test.go — TestAMergedRootWaitsForItsChildrenAndClosesWhenTheLastLeaves opens pull request #2 from the waiting root's branch through the real admission, asserts #1 stays merged, and after the close asserts the slot freed and the check open on #1 at merge-1",
