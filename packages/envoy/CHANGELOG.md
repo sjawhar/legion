@@ -1125,6 +1125,14 @@
 
 ### Fixed
 
+- A Dispatch reference read no longer fails while the database holds an edge a newer build wrote.
+  `GET /api/v1/references` (`?to=` and `?from=`) and `GET /api/v1/artifacts/{id}/references`
+  answered `500` on a row whose other end is a node kind the running build does not know, which a
+  person saw as "Referenced by unavailable." and an agent's `dispatch read` as one `unavailable`
+  row; the build now leaves that edge out and lists every edge it knows. The `referenced_by_count`
+  of an issue and of every ask leaves it out too, so a count is the number of rows its panel lists,
+  and a document's `outgoing` no longer lists a target of a kind no client reads. A build that adds
+  a node kind to the graph can therefore roll out while the older build still serves reads.
 - `GET /v1/registry/<session_id>` is the listener's authoritative answer about one session, so a
   session that is working is no longer read as gone while a listener's session cache refills. The
   read goes through that cache to the session bucket: a 200 carries the same body a row of `GET
