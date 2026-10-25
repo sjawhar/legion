@@ -2,51 +2,48 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-25T09:20:00Z",
+  "completed": "2026-10-25T11:45:00Z",
   "proof": [
     {
-      "criterion": "Round 3 finding 1 — one refused call moves a breaker key once, and two ask blocks of one write that start alike are two things, so no pass arrives after a single refusal.",
-      "surface": "The gate driven end to end with fake models in askgate.test.ts, which counts the model calls each sequence makes, over the reviewer's own case (a doc-edit inserting #first and #second carrying one question).",
-      "command": "cd packages/pi-envoy && bun test extensions/askgate/",
-      "observed": "The first refusal carries no second-refusal warning, the second send is reviewed (two more model calls), and only the third goes out as outcome \"breaker\" with no model call — through both callers, the rules path that maps the matches and the charter path that maps every ask of the call. Two unidentified asks that open alike are still one thing, so the loop the opening key exists for still ends on its third attempt.",
-      "headSha": "34920d4b1caa90dc7d84faedda408ab1e7c9ed47",
-      "negativeControl": "Run against the code as it stood: both halves out fails three of the four new tests, the dedupe alone fails one (two no-id asks that open alike counted twice), the id key alone fails one (#second passed after #first was refused twice)."
+      "criterion": "The reviewed change is unchanged by the forward merge, so the reviewer's approval of 8674f047219cf487b985c5ea11b6850551617d3e holds at the new head.",
+      "surface": "The unchanged-diff fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md, computed at the approved head and at the merged head, and the two diffs themselves.",
+      "command": "base=$(gh pr view 2161 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json'); jj -R \"$LEGION_WORKSPACE\" diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, for <head> = 8674f047219cf487b985c5ea11b6850551617d3e and ed71442efb596491a3b08fad9679fdd7b1ff2169; then a line-by-line diff of the two outputs.",
+      "observed": "ecad3d1a2a7e7897810630dc164d9f7db3239862d79bbf54802e6a87549dc03d at both heads, and the two diffs are byte-identical: 0 lines differing over the 58 files they touch.",
+      "headSha": "ed71442efb596491a3b08fad9679fdd7b1ff2169",
+      "negativeControl": "The same comparison run against the first merge attempt, built on the older main 14571f6f4aea, gave the same hash and the same 0 differing lines, so the result is the merge's property and not one main's state happened to produce."
     },
     {
-      "criterion": "Round 3 finding 2 — the unjudged path leaves a real trace in Dispatch when nobody judged an ask, proven on the live surface rather than on a unit fake.",
-      "surface": "Production Dispatch and a nested headless Oh My Pi session on this branch's build in this Legion pod, with the pod's real Claude model, on the unassigned scratch issue dispatch://INFRA-373.",
-      "command": "dispatch artifact --issue INFRA-373 --name probe.md --path probe-plain.md (twice, from gated sessions), then `dispatch artifact --issue INFRA-373 --name probe-md --content-file -` to make a second document whose name is the first's slug, then from the gated session `env … LEGION_ISSUE=INFRA-373 OMP_ASKGATE=block OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" -p \"Run exactly this command … dispatch artifact --issue INFRA-373 --name probe-md --path /tmp/proof/probe-asks.md\"`, whose every opener carries an id.",
-      "observed": "The reference answers to two documents, artifactByReference throws a plain Error, readDocument answers \"failed\", the id filter empties the list, and Dispatch holds the record {\"ruleOutcome\":\"unjudged\",\"ruleAsksPartial\":true,\"ruleAsksCut\":0,\"decision\":\"allow\",\"outcome\":\"verdict\",\"verdictMode\":\"block\",\"ruleLatencyMs\":79,\"charterLatencyMs\":7753,…} at dispatch://INFRA/artifact/askgate-decisions-01a17249-8138-77e3-bda7-400da3630a57-md. The reader read the day back: {\"calls\":11,\"refusals\":10,\"overrides\":1,\"errors\":0,\"cut\":3,\"partial\":1,\"unjudged\":1}.",
-      "headSha": "34920d4b1caa90dc7d84faedda408ab1e7c9ed47",
-      "negativeControl": "The same record's `decision: \"allow\"` is the control for the module's contract — its own failure refused nothing, the charter deciding alone — and a 79 ms rules latency against a 7,753 ms charter call shows no model was asked. The reader's line read 0 in all three earlier rounds, so the 1 is this record and not the line printing."
+      "criterion": "The one conflicting path keeps both sides, so neither the Go server test's reading nor AskGate's scanner loses its binding to the shared decision-block table.",
+      "surface": "The Go test the server and this change share, run against a real test handler.",
+      "command": "cd packages/envoy && go test ./internal/dispatch/api/ -run 'TestDocumentEditAdvice|TestWriteAdvice' -count=1; gofmt -l internal/dispatch/api",
+      "observed": "ok, with main's three new TestWriteAdvice cases and its rawAdviceFields helper running beside this change's decisionBlockInsert type and readDecisionBlockInserts helper; gofmt reports nothing.",
+      "headSha": "ed71442efb596491a3b08fad9679fdd7b1ff2169",
+      "negativeControl": "The resolution was first left with the conflict's trailing marker in place, and the package failed to build (expected declaration, found '>>'), so the passing run is of a file the compiler actually read."
     },
     {
-      "criterion": "The README no longer promises a cap the code does not hold.",
-      "surface": "The repository's own text beside the measurements the reviewer and I made.",
-      "command": "Read of packages/pi-envoy/README.md 349-353 against describeAsks' own comment and the measured counts (111 asks 32,858 bytes, 200 asks 34,181, 300 asks of about 1 KB 51,383).",
-      "observed": "The bullet now says the request aims to keep the list within 32 KiB, never leaves an ask out or cuts one below its start and its end to hold the bound, and that a write of over a hundred ask blocks makes a longer request.",
-      "headSha": "34920d4b1caa90dc7d84faedda408ab1e7c9ed47",
-      "negativeControl": "The bound itself is unchanged, which the suite's list-size assertions still hold at 32 KiB for every call under that size."
+      "criterion": "The merged head carries no red of its own, and the skills guard that was main's red passes.",
+      "surface": "The repository's own checks at the merged head, and GitHub's runs on it.",
+      "command": "cd packages/pi-legion && bun test src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist; cd packages/pi-envoy && bun run typecheck && bun run build && bun test; bunx biome check .; gh run list --commit ed71442efb596491a3b08fad9679fdd7b1ff2169",
+      "observed": "The skills guard 10 pass 0 fail (skills/legion-architect/SKILL.md is 33,651 bytes at main 56ba79b8cf6d, under the 51,200 limit, after sjawhar/legion#2192 moved its Wake routing table to a reference); check-dist reports dist/ and legion/ match a fresh build; the pi-envoy suite 1,254 tests 0 fail; typecheck, build and biome clean. GitHub started all five workflows on the merged head and the pull request reads MERGEABLE, where the approved head had no run at all.",
+      "headSha": "ed71442efb596491a3b08fad9679fdd7b1ff2169",
+      "negativeControl": "At the earlier merge, built on main 14571f6f4aea, the same guard failed on one entry, legion-architect/SKILL.md at 51,256 bytes — main's own break, confirmed with `jj file show -r main@origin` before anything of this change touched it, which is why that merge was held unpushed rather than pushed with a red that would have read as ours."
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/extensions/askgate/askgate-core.ts — askIdentity keys a block ask on its id as well as its opening; Breaker.revised deduplicates at its own boundary.",
-    "packages/pi-envoy/extensions/askgate/askgate.test.ts — four regressions: the reviewer's case through both callers, the no-id opening key, the dedupe alone and the id key alone.",
-    "packages/pi-envoy/README.md — the list bound says what the code does."
+    "packages/envoy/internal/dispatch/api/write_advice_test.go — the one conflicting path, resolved keeping both sides.",
+    "No other file: the merge commit ed71442efb596491a3b08fad9679fdd7b1ff2169 brings main 56ba79b8cf6d into the branch and changes nothing of this change's own diff."
   ],
   "trickyParts": [
-    "The reviewer's recipe for making the de-duplication read fail does not work as written: two uploads of one name give one document at version 2, because the server matches an upload to an existing artifact of that exact name, and an upload of that name under another content type is refused. The ambiguity is reached instead through artifactByReference's other branch — a second document whose name is the first document's slug — which is what this round's live run used.",
-    "The id key had to leave two unidentified asks that open alike as one thing, or an agent rewording only an ask's tail would loop for ever; the key is the id and the opening, never the id alone."
+    "A conflicting pull request gets no CI at all: GitHub starts no `on: pull_request` run while it conflicts, so the approved head carried no checks and READY would have been refused. The merge is what restores them.",
+    "The merge was built twice. The first, on main 14571f6f4aea, was held unpushed because main carried its own skills-guard break, which would have put a red required job on this head and sent the issue back to implementing for someone else's reason; it was rebuilt on main 56ba79b8cf6d once that was fixed."
   ],
   "deviations": [
-    "The round-3 fixture dispatch://INFRA-365 was closed after the tester released it, so this round's live run uses a new unassigned fixture, dispatch://INFRA-373.",
-    "No simplify pass: one per pull request, run in the first implementing round."
+    "This round changes no behaviour and writes no new test: it is the forward merge the conflict procedure licenses, and the fingerprint shows the reviewed change untouched."
   ],
   "openQuestions": [
-    "sjawhar/legion#2159 is still open and this branch carries its commits; the architect watches it and the plan's \"when #2159 merges\" step runs before the review round that approves the head."
+    "sjawhar/legion#2159 is still open and this branch carries its commits; the architect watches it and the plan's \"when #2159 merges\" step runs before the merge into main."
   ],
   "discoveredComplexity": [
-    "Every finding of rounds 1 to 3 has been one fault: something quietly deciding an ask is not judged while the record still reads as judged and clean. This round's was multiplicity — one refusal counted twice because two asks collapsed to one key — and the remedy that closes it, keying a block on its id, is also what the reviewer had filed as a separate minor.",
-    "A path whose whole purpose is to leave a trace when nobody judged an ask could not be left on a unit case, and reaching it live took a correction to how Dispatch stores a re-uploaded document. That correction is itself worth keeping: an upload of an existing name versions that document and never makes a second one."
+    "The merge's conflicting path is the seam between the Go server test and the shared decision-block table, which is exactly the file where losing a side would quietly unpin one of the two parsers this change binds together. A conflict there is worth resolving by hand every time rather than by taking either side whole."
   ]
 }
