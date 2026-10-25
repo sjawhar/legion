@@ -65,13 +65,21 @@ function dispatch(
     const answered = routes(target.pathname, init);
     if (answered !== undefined) return answered;
     if (method === "POST" && target.pathname.endsWith("/artifacts")) {
-      const form = init.body as FormData;
+      // The client sends a form encoded once, so every attempt of the write carries its bytes. Bun
+      // decodes a part's type from its file name, so the type is read from the part as sent.
+      const sent = new Uint8Array(init.body as Uint8Array);
+      const form = await new Response(sent, {
+        headers: init.headers as Record<string, string>,
+      }).formData();
       const upload = form.get("file") as File;
+      const partType = /name="file"; filename="[^"]*"\r\nContent-Type: ([^\r\n]+)/.exec(
+        new TextDecoder("latin1").decode(sent)
+      );
       const name = String(form.get("name"));
       const slug = name.toLowerCase().replace(/[^a-z0-9]+/g, "-");
       const number = (versions.get(slug) ?? 0) + 1;
       versions.set(slug, number);
-      uploads.push({ path: target.pathname, name, type: upload.type, size: upload.size });
+      uploads.push({ path: target.pathname, name, type: partType?.[1] ?? "", size: upload.size });
       return json({ artifact: { slug, name }, version: { number } });
     }
     if (method === "POST") {

@@ -508,6 +508,54 @@ describe("renderInbound dispatch events", () => {
     }
   });
 
+  // The reply settles the delivery attempt, so it is a write like any other: one key for the
+  // reply, asked again under it when Dispatch is briefly down, and Dispatch's refusal carried as
+  // its own error.
+  test("posts a delivery reply as one keyed write, asked again under its key", async () => {
+    const keys: Array<string | null> = [];
+    let answers = 0;
+    const server = Bun.serve({
+      port: 0,
+      fetch: (request) => {
+        keys.push(request.headers.get("Idempotency-Key"));
+        answers += 1;
+        if (answers === 1)
+          return Response.json({ code: "UNAVAILABLE", error: "down" }, { status: 503 });
+        if (answers === 2) return Response.json({ reply: { id: "reply-1" } });
+        return Response.json(
+          { code: "ATTEMPT_ANSWERED", error: "already answered" },
+          { status: 409 }
+        );
+      },
+    });
+    const delivery: DispatchDelivery = {
+      resource: "message",
+      id: "message-1",
+      attempt: 2,
+      mode: "btw",
+      replyPath: "/api/v1/messages/message-1/reply",
+      replyFields: {},
+      issueKey: null,
+      body: "status?",
+    };
+    const config = { url: `http://127.0.0.1:${server.port}`, token: "reply-token" };
+
+    try {
+      await postDeliveryReply(config, reader, delivery, { body: "green" });
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toBeString();
+      expect(keys[1]).toBe(keys[0] as string);
+
+      await expect(postDeliveryReply(config, reader, delivery, { body: "again" })).rejects.toThrow(
+        expect.objectContaining({ code: "ATTEMPT_ANSWERED", status: 409 })
+      );
+      expect(keys).toHaveLength(3);
+      expect(keys[2]).not.toBe(keys[0] as string);
+    } finally {
+      server.stop(true);
+    }
+  });
+
   test("renders an issue-less targeted BTW with a reply address and an issue-less reply hint", () => {
     const frame = JSON.parse(targetedDispatchPayload) as {
       event: { issue_key: string | null; payload: { issue_key: string | null; target: string } };

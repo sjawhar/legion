@@ -36245,6 +36245,11 @@ var MAX_ISSUE_PAGE_LIMIT = 250;
 var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
+var IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+var IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
+var IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+var IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+var IDEMPOTENCY_LEASE_MS = 60 * 1000;
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 var SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
 var IssueDeployedEventPayloadSchema = exports_external.strictObject({
@@ -38249,6 +38254,601 @@ function commandsHelp() {
 `);
 }
 
+// ../envoy-client/src/dispatch-http.ts
+class DispatchServiceError extends Error {
+  code;
+  status;
+  candidates;
+  current;
+  mismatches;
+  name = "DispatchServiceError";
+  fromDispatch = true;
+  constructor(code, status, message, candidates, current, mismatches) {
+    super(message);
+    this.code = code;
+    this.status = status;
+    this.candidates = candidates;
+    this.current = current;
+    this.mismatches = mismatches;
+  }
+}
+
+class DispatchGatewayError extends DispatchServiceError {
+  answer;
+  advice;
+  fromDispatch = false;
+  transient;
+  mayHaveReachedDispatch;
+  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
+    super(`HTTP_${status}`, status, message);
+    this.answer = answer;
+    this.advice = advice;
+    this.transient = transientStatus(status);
+    this.mayHaveReachedDispatch = reachesDispatch(status);
+  }
+}
+
+class DispatchWriteUnsettledError extends Error {
+  last;
+  attempts;
+  name = "DispatchWriteUnsettledError";
+  constructor(last, attempts) {
+    const answer = last instanceof DispatchGatewayError ? last.answer : `${last.code}: ${last.message}`;
+    const why = last.code === IDEMPOTENCY_KEY_IN_FLIGHT ? "Dispatch was still running an earlier attempt of the write" : "an earlier attempt of the write may have reached Dispatch";
+    super(`${answer} (the last of ${attempts} attempts), and ${why}, so it may or may not have ` + "taken effect: check whether it did before retrying it.", { cause: last });
+    this.last = last;
+    this.attempts = attempts;
+  }
+}
+
+class DispatchAnswerNotKeptError extends Error {
+  status;
+  name = "DispatchAnswerNotKeptError";
+  constructor(status, message) {
+    super(`${IDEMPOTENCY_ANSWER_NOT_KEPT}: ${message}`);
+    this.status = status;
+  }
+}
+function asErrorShape(value) {
+  return typeof value === "object" && value !== null ? value : {};
+}
+function isJson(response) {
+  return response.headers.get("content-type")?.includes("application/json") ?? false;
+}
+var DISPATCH_TOOL_DEADLINE_MS = 60000;
+function requestSignal(signal) {
+  const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
+  return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
+var DISPATCH_WRITE_RETRY = {
+  pausesMs: [1000, 2000, 4000, 8000],
+  withinMs: 30000
+};
+function pauseFor(ms, signal) {
+  const { promise: promise2, resolve, reject } = Promise.withResolvers();
+  if (signal.aborted) {
+    reject(signal.reason);
+    return promise2;
+  }
+  const stop = () => {
+    clearTimeout(timer);
+    reject(signal.reason);
+  };
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", stop);
+    resolve();
+  }, ms);
+  signal.addEventListener("abort", stop, { once: true });
+  return promise2;
+}
+function retryAfterMs(response) {
+  const value = response.headers.get("Retry-After")?.trim() ?? "";
+  if (/^\d+$/.test(value))
+    return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
+}
+async function writeAnswer(response) {
+  const { status } = response;
+  if (status >= 500)
+    return { response, again: true, reached: true };
+  if (status === 408 || status === 429)
+    return { response, again: true, reached: false };
+  if (status !== 409)
+    return { response, again: false, reached: false };
+  const text = await response.text();
+  let code;
+  if (isJson(response)) {
+    try {
+      code = asErrorShape(JSON.parse(text)).code;
+    } catch {
+      code = undefined;
+    }
+  }
+  const running = code === IDEMPOTENCY_KEY_IN_FLIGHT;
+  return {
+    response: new Response(text, {
+      status,
+      statusText: response.statusText,
+      headers: response.headers
+    }),
+    again: running,
+    reached: running
+  };
+}
+function whyNotAPage(answer) {
+  if (typeof answer === "string") {
+    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
+  }
+  let what;
+  if (Array.isArray(answer)) {
+    what = `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
+  } else if (answer === null || typeof answer !== "object") {
+    what = answer === null ? "null" : `a ${typeof answer}`;
+  } else {
+    const fields = answer;
+    const lacking = [
+      ...Array.isArray(fields.issues) ? [] : ["an issues array"],
+      ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
+    ];
+    if (lacking.length === 0)
+      return;
+    what = `an object without ${lacking.join(" or ")}`;
+  }
+  return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
+}
+var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
+function gatewayAdvice(method, status) {
+  if (!transientStatus(status)) {
+    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
+  }
+  if (method === "GET")
+    return "a retry may succeed";
+  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
+}
+function transientStatus(status) {
+  return status >= 500 || status === 408 || status === 429;
+}
+function reachesDispatch(status) {
+  return status >= 500;
+}
+var REDACTED = "[redacted]";
+var EXCERPT_SCAN_LIMIT = 64 * 1024;
+var BEARER_PIECE = 8;
+function redactBearer(text, bearer) {
+  if (bearer === "")
+    return text.slice(0, EXCERPT_SCAN_LIMIT);
+  const length = Math.min(BEARER_PIECE, bearer.length);
+  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
+  const covered = new Uint8Array(scanned.length);
+  const pieces = new Set;
+  for (let at = 0;at + length <= bearer.length; at++)
+    pieces.add(bearer.slice(at, at + length));
+  for (const piece of pieces) {
+    let found = scanned.indexOf(piece);
+    while (found !== -1) {
+      covered.fill(1, found, found + length);
+      found = scanned.indexOf(piece, found + 1);
+    }
+  }
+  let redacted = "";
+  let kept = 0;
+  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
+    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
+    const end = covered.indexOf(0, start);
+    kept = end === -1 ? scanned.length : end;
+  }
+  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
+}
+function excerpt(text, token) {
+  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
+  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
+}
+
+class DispatchClient {
+  token;
+  fetchImpl;
+  writeRetry;
+  #baseUrl;
+  #resolvedIssues = new Map;
+  #signal;
+  constructor(baseUrl, token, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
+    this.token = token;
+    this.fetchImpl = fetchImpl;
+    this.writeRetry = writeRetry;
+    this.#baseUrl = baseUrl.replace(/\/+$/, "");
+    this.#signal = requestSignal(signal);
+  }
+  async issue(input) {
+    return this.#json("POST", ["api", "v1", "issues"], input);
+  }
+  async resolveIssue(issueReference) {
+    return this.#resolveIssue(issueReference);
+  }
+  async listIssuePage(options, page) {
+    const path = ["api", "v1", "issues"];
+    const query = { ...options, limit: page.limit, offset: page.offset };
+    const answer = await this.#json("GET", path, undefined, query);
+    const refusal = whyNotAPage(answer);
+    if (refusal === undefined)
+      return answer;
+    throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
+  }
+  async listProjectArtifacts(project, unlinked = false) {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
+  }
+  async projectArtifact(project, input) {
+    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
+  }
+  async getProjectArtifact(project, slug) {
+    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
+  }
+  async agentArtifact(sessionId, input) {
+    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
+  }
+  async getAgentArtifact(sessionId, slug) {
+    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
+  }
+  async getIssueArtifact(issue2, slug) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue2),
+      "artifacts",
+      slug
+    ]);
+  }
+  async search(query, options = {}) {
+    return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
+  }
+  async getIssue(issue2) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2)]);
+  }
+  async updateIssue(issue2, input) {
+    return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue2)], input);
+  }
+  async claimIssue(issue2, input = {}) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "claim"], input);
+  }
+  async releaseIssueClaim(issue2, input = {}) {
+    return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue2), "claim"], input);
+  }
+  async getIssueEvents(issue2, after = 0, limit = 200) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "events"], undefined, { after, limit });
+  }
+  async read(issueReference) {
+    const issueKey = await this.#resolveIssue(issueReference);
+    const issue2 = await this.getIssue(issueKey);
+    const events = await this.getIssueEvents(issueKey, Math.max(0, issue2.last_seq - 10), 10);
+    return { issue: issue2, events };
+  }
+  async ask(issue2, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "asks"], input);
+  }
+  async openAsks(sessionID, since) {
+    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, {
+      author_session: sessionID,
+      ...since === undefined ? {} : { since }
+    });
+  }
+  async openAsksForProject(project) {
+    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
+  }
+  async listAgents() {
+    return this.#json("GET", ["api", "v1", "agents"]);
+  }
+  async whoami() {
+    return this.#json("GET", ["api", "v1", "whoami"]);
+  }
+  async createProject(input) {
+    return this.#json("POST", ["api", "v1", "projects"], input);
+  }
+  async listProjects() {
+    return this.#json("GET", ["api", "v1", "projects"]);
+  }
+  async syncArchitectureSource(project) {
+    return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
+  }
+  async getArchitectureSource(project) {
+    try {
+      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
+    } catch (error48) {
+      if (error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "SOURCE_NOT_FOUND") {
+        return null;
+      }
+      throw error48;
+    }
+  }
+  async resolveAsk(id, input) {
+    return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
+  }
+  async requestApproval(artifactID, input) {
+    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
+    return { ...answer.payload, recorded: answer.status === 201 };
+  }
+  async editAsk(id, input) {
+    return this.#json("PATCH", ["api", "v1", "asks", id], input);
+  }
+  async comment(issue2, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], input);
+  }
+  async listIssueAsks(issue2, state) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "asks"], undefined, state === undefined ? undefined : { state });
+  }
+  async getArtifactAsks(id, state) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "asks"], undefined, state === undefined ? undefined : { state });
+  }
+  async artifactAsk(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
+  }
+  async suggest(issue2, input) {
+    const { replace_with, ...comment } = input;
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], {
+      ...comment,
+      suggestion: { replace_with }
+    });
+  }
+  async getArtifactComments(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
+  }
+  async artifactComment(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
+  }
+  async artifactSuggest(id, input) {
+    const { replace_with, ...comment } = input;
+    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
+      ...comment,
+      suggestion: { replace_with }
+    });
+  }
+  async message(issue2, input) {
+    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "messages"], input);
+  }
+  async messageReply(id, input, options = {}) {
+    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
+  }
+  async deliveryReply(resource, id, input) {
+    const collection = resource === "message" ? "messages" : "comments";
+    await this.#json("POST", ["api", "v1", collection, id, "reply"], input);
+  }
+  async getMessage(issue2, id) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue2),
+      "messages",
+      id
+    ]);
+  }
+  async getMessageThread(id, session) {
+    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
+  }
+  async acceptMessageDelivery(id, attempt, input) {
+    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
+  }
+  async artifact(issue2, input) {
+    return this.#upload(["api", "v1", "issues", await this.#resolveIssue(issue2), "artifacts"], input);
+  }
+  async getArtifact(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id]);
+  }
+  async docRead(id, version2) {
+    return version2 === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version2)]);
+  }
+  async fileVersion(id, version2) {
+    const url2 = this.#url(["api", "v1", "artifacts", id, "versions", String(version2)]);
+    const response = await this.#send("GET", url2, undefined, "*/*");
+    if (!response.ok)
+      return this.#response("GET", url2, response);
+    return {
+      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
+      bytes: new Uint8Array(await response.arrayBuffer())
+    };
+  }
+  async artifactBlocks(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
+  }
+  async docEdit(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
+  }
+  async nameArtifactVersion(id, input) {
+    return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
+  }
+  async getArtifactEvents(id, after = 0, limit = 200) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "events"], undefined, { after, limit });
+  }
+  async getArtifactReferences(id) {
+    return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
+  }
+  async getAsk(id) {
+    return this.#json("GET", ["api", "v1", "asks", id]);
+  }
+  async followAsk(id, sessionId, actor) {
+    await this.#json("PUT", ["api", "v1", "asks", id, "followers", sessionId], { actor });
+  }
+  async unfollowAsk(id, sessionId, actor) {
+    await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
+  }
+  async getComment(id) {
+    return this.#json("GET", ["api", "v1", "comments", id]);
+  }
+  async resolveComment(id, actor) {
+    return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
+  }
+  async getComments(issue2, artifact) {
+    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], undefined, artifact ? { artifact } : undefined);
+  }
+  async getIssueReferences(issue2) {
+    return this.#json("GET", [
+      "api",
+      "v1",
+      "issues",
+      await this.#resolveIssue(issue2),
+      "references"
+    ]);
+  }
+  async getReferences(query) {
+    return this.#json("GET", ["api", "v1", "references"], undefined, {
+      ..."to" in query ? { to: query.to } : { from: query.from },
+      ...query.kind === undefined || query.kind.length === 0 ? {} : { kind: query.kind.join(",") },
+      ...query.since === undefined ? {} : { since: query.since }
+    });
+  }
+  async#resolveIssue(issueReference) {
+    if (!issueReference.includes("#"))
+      return issueReference;
+    let resolved = this.#resolvedIssues.get(issueReference);
+    if (!resolved) {
+      resolved = this.#json("GET", ["api", "v1", "issues", "resolve"], undefined, {
+        ref: issueReference
+      }).then((resolution) => resolution.key);
+      this.#resolvedIssues.set(issueReference, resolved);
+    }
+    try {
+      return await resolved;
+    } catch (error48) {
+      this.#resolvedIssues.delete(issueReference);
+      throw error48;
+    }
+  }
+  async#json(method, path, body, query) {
+    return (await this.#jsonAnswer(method, path, body, query)).payload;
+  }
+  async#jsonAnswer(method, path, body, query) {
+    const url2 = this.#url(path, query);
+    const response = await this.#send(method, url2, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" });
+    return { status: response.status, payload: await this.#response(method, url2, response) };
+  }
+  async#upload(path, input) {
+    if ("content" in input)
+      return this.#json("POST", path, input);
+    const form = new FormData;
+    form.set("name", input.name);
+    if (input.summary !== undefined)
+      form.set("summary", input.summary);
+    if (input.actor !== undefined)
+      form.set("actor", JSON.stringify(input.actor));
+    form.set("file", input.file, input.name);
+    return this.#form("POST", path, form);
+  }
+  async#form(method, path, form) {
+    const url2 = this.#url(path);
+    const encoded = new Response(form);
+    const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
+    const content = new Uint8Array(await encoded.arrayBuffer());
+    const response = await this.#send(method, url2, { content, type });
+    return this.#response(method, url2, response);
+  }
+  async#send(method, url2, body, accept = "application/json") {
+    const headers = {
+      Accept: accept,
+      Authorization: `Bearer ${this.token}`
+    };
+    if (body !== undefined)
+      headers["Content-Type"] = body.type;
+    const init = {
+      method,
+      headers,
+      signal: this.#signal,
+      ...body === undefined ? {} : { body: body.content }
+    };
+    if (method !== "POST" && method !== "PATCH")
+      return this.fetchImpl(url2, init);
+    headers[IDEMPOTENCY_KEY_HEADER] = crypto.randomUUID();
+    const { pausesMs, withinMs, pause = pauseFor, now = () => performance.now() } = this.writeRetry;
+    const started = now();
+    let reached = false;
+    for (let attempt = 1;; attempt++) {
+      let answer;
+      let thrown;
+      try {
+        answer = await writeAnswer(await this.fetchImpl(url2, init));
+        if (!answer.again)
+          return answer.response;
+        reached ||= answer.reached;
+      } catch (error48) {
+        const name = error48 instanceof Error || error48 instanceof DOMException ? error48.name : "";
+        if (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")
+          throw error48;
+        thrown = error48;
+        reached = true;
+      }
+      const scheduled = pausesMs[attempt - 1];
+      const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
+      if (scheduled === undefined || now() - started + wait > withinMs) {
+        if (answer === undefined)
+          throw thrown;
+        return this.#unsettled(method, url2, answer.response, reached, attempt);
+      }
+      await answer?.response.body?.cancel().catch(() => {
+        return;
+      });
+      await pause(wait, this.#signal);
+    }
+  }
+  async#unsettled(method, url2, response, reached, attempts) {
+    const refusal = await this.#response(method, url2, response).catch((error48) => error48);
+    if (reached && refusal instanceof DispatchServiceError) {
+      const landedAlone = refusal instanceof DispatchGatewayError ? refusal.mayHaveReachedDispatch : refusal.status >= 500;
+      if (!landedAlone)
+        throw new DispatchWriteUnsettledError(refusal, attempts);
+    }
+    throw refusal;
+  }
+  #url(path, query) {
+    const url2 = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
+    if (query) {
+      for (const [name, value] of Object.entries(query)) {
+        if (typeof value === "string" || typeof value === "number") {
+          url2.searchParams.set(name, String(value));
+        } else if (Array.isArray(value)) {
+          for (const item of value)
+            url2.searchParams.append(name, String(item));
+        }
+      }
+    }
+    return url2.toString();
+  }
+  async#response(method, url2, response) {
+    const text = await response.text();
+    let payload = text;
+    if (text && isJson(response)) {
+      try {
+        payload = JSON.parse(text);
+      } catch {
+        payload = text;
+      }
+    }
+    if (!response.ok) {
+      const error48 = asErrorShape(payload);
+      if (typeof error48.error === "string") {
+        throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
+      }
+      const quoted = excerpt(text, this.token);
+      let body;
+      if (quoted !== "") {
+        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
+      } else if (text === "") {
+        body = "an empty body";
+      } else {
+        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
+        const size = Buffer.byteLength(text).toLocaleString("en-US");
+        body = `a body of ${size} bytes and no readable text${within}`;
+      }
+      const reasonPhrase = excerpt(response.statusText, this.token);
+      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
+      throw new DispatchGatewayError(response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
+    }
+    const replay = asErrorShape(payload);
+    if (replay.code === IDEMPOTENCY_ANSWER_NOT_KEPT && typeof replay.error === "string") {
+      throw new DispatchAnswerNotKeptError(response.status, replay.error);
+    }
+    return payload;
+  }
+}
+
 // ../envoy-client/src/dispatch-owner.ts
 function documentLabel(project, slug) {
   return `${project}/${slug}`;
@@ -38424,19 +39024,12 @@ function dispatchReplyPath(resource, id) {
   return `/api/v1/${collection}/${encodeURIComponent(id)}/reply`;
 }
 async function postDeliveryReply(config2, sessionId, delivery, result) {
-  const response = await fetch(`${config2.url}${dispatchReplyPath(delivery.resource, delivery.id)}`, {
-    method: "POST",
-    headers: { Authorization: `Bearer ${config2.token}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
-      actor: { kind: "session", id: sessionId },
-      attempt: delivery.attempt,
-      ...delivery.replyFields,
-      ...result
-    })
+  await new DispatchClient(config2.url, config2.token).deliveryReply(delivery.resource, delivery.id, {
+    actor: { kind: "session", id: sessionId },
+    attempt: delivery.attempt,
+    ...delivery.replyFields,
+    ...result
   });
-  if (!response.ok) {
-    throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
-  }
 }
 function expectsLaneReceipt(frame) {
   return frame.reply !== undefined && frame.reply !== "" && frame.subject === frame.directSubject && frame.envelopeTopic !== undefined && frame.envelopeTopic !== frame.directSubject;
@@ -39155,474 +39748,6 @@ async function resolveOrigin(env, exec, cwd) {
       origin.pane = paneId;
   }
   return origin;
-}
-
-// ../envoy-client/src/dispatch-http.ts
-class DispatchServiceError extends Error {
-  code;
-  status;
-  candidates;
-  current;
-  mismatches;
-  name = "DispatchServiceError";
-  fromDispatch = true;
-  constructor(code, status, message, candidates, current, mismatches) {
-    super(message);
-    this.code = code;
-    this.status = status;
-    this.candidates = candidates;
-    this.current = current;
-    this.mismatches = mismatches;
-  }
-}
-
-class DispatchGatewayError extends DispatchServiceError {
-  answer;
-  advice;
-  fromDispatch = false;
-  transient;
-  mayHaveReachedDispatch;
-  constructor(status, answer, advice, message = `${answer}, so ${advice}.`) {
-    super(`HTTP_${status}`, status, message);
-    this.answer = answer;
-    this.advice = advice;
-    this.transient = transientStatus(status);
-    this.mayHaveReachedDispatch = reachesDispatch(status);
-  }
-}
-function asErrorShape(value) {
-  return typeof value === "object" && value !== null ? value : {};
-}
-function isJson(response) {
-  return response.headers.get("content-type")?.includes("application/json") ?? false;
-}
-var DISPATCH_TOOL_DEADLINE_MS = 60000;
-function requestSignal(signal) {
-  const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
-  return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
-}
-function whyNotAPage(answer) {
-  if (typeof answer === "string") {
-    return `text that is not a JSON page, ${GATEWAY_PAGE}, so a retry may succeed.`;
-  }
-  let what;
-  if (Array.isArray(answer)) {
-    what = `a bare array of ${answer.length} entries, the unpaged listing, which means that Dispatch ` + "is older than sjawhar/legion#1612 or that change has regressed";
-  } else if (answer === null || typeof answer !== "object") {
-    what = answer === null ? "null" : `a ${typeof answer}`;
-  } else {
-    const fields = answer;
-    const lacking = [
-      ...Array.isArray(fields.issues) ? [] : ["an issues array"],
-      ...["total", "limit", "offset"].filter((name) => typeof fields[name] !== "number").map((name) => `a numeric ${name}`)
-    ];
-    if (lacking.length === 0)
-      return;
-    what = `an object without ${lacking.join(" or ")}`;
-  }
-  return `${what}. Retrying will not help: the same request gets the same answer until that ` + "Dispatch is upgraded or fixed.";
-}
-var GATEWAY_PAGE = "which looks like a proxy or gateway page rather than Dispatch's own answer";
-function gatewayAdvice(method, status) {
-  if (!transientStatus(status)) {
-    return "a retry gets the same answer until the Dispatch URL, or whatever answers in its place, is fixed";
-  }
-  if (method === "GET")
-    return "a retry may succeed";
-  return reachesDispatch(status) ? "the write may or may not have reached Dispatch: check whether it took effect before retrying it" : "the write did not reach Dispatch, and a retry may succeed";
-}
-function transientStatus(status) {
-  return status >= 500 || status === 408 || status === 429;
-}
-function reachesDispatch(status) {
-  return status >= 500;
-}
-var REDACTED = "[redacted]";
-var EXCERPT_SCAN_LIMIT = 64 * 1024;
-var BEARER_PIECE = 8;
-function redactBearer(text, bearer) {
-  if (bearer === "")
-    return text.slice(0, EXCERPT_SCAN_LIMIT);
-  const length = Math.min(BEARER_PIECE, bearer.length);
-  const scanned = text.slice(0, EXCERPT_SCAN_LIMIT + length - 1);
-  const covered = new Uint8Array(scanned.length);
-  const pieces = new Set;
-  for (let at = 0;at + length <= bearer.length; at++)
-    pieces.add(bearer.slice(at, at + length));
-  for (const piece of pieces) {
-    let found = scanned.indexOf(piece);
-    while (found !== -1) {
-      covered.fill(1, found, found + length);
-      found = scanned.indexOf(piece, found + 1);
-    }
-  }
-  let redacted = "";
-  let kept = 0;
-  for (let start = covered.indexOf(1);start !== -1; start = covered.indexOf(1, kept)) {
-    redacted += `${scanned.slice(kept, start)}${REDACTED}`;
-    const end = covered.indexOf(0, start);
-    kept = end === -1 ? scanned.length : end;
-  }
-  return `${redacted}${scanned.slice(kept, EXCERPT_SCAN_LIMIT)}`.slice(0, EXCERPT_SCAN_LIMIT);
-}
-function excerpt(text, token) {
-  const plain = redactBearer(text, token.trim()).replace(/<(script|style)\b[^<>]*>(?:[\s\S]*?<\/\1\s*>|[\s\S]*$)/gi, " ").replace(/<[^<>]*>/g, " ");
-  return textHead(plain.replace(/(\bauthorization["']?\s*[:=]\s*["']?(?:(?:bearer|basic|digest|token)\s+)?)[^\s"'<>,;]+/gi, `$1${REDACTED}`).replace(/(\bbearer\s+)[^\s"'<>,;]+/gi, `$1${REDACTED}`));
-}
-
-class DispatchClient {
-  token;
-  fetchImpl;
-  #baseUrl;
-  #resolvedIssues = new Map;
-  #signal;
-  constructor(baseUrl, token, fetchImpl = fetch, signal) {
-    this.token = token;
-    this.fetchImpl = fetchImpl;
-    this.#baseUrl = baseUrl.replace(/\/+$/, "");
-    this.#signal = requestSignal(signal);
-  }
-  async issue(input) {
-    return this.#json("POST", ["api", "v1", "issues"], input);
-  }
-  async resolveIssue(issueReference) {
-    return this.#resolveIssue(issueReference);
-  }
-  async listIssuePage(options, page) {
-    const path = ["api", "v1", "issues"];
-    const query = { ...options, limit: page.limit, offset: page.offset };
-    const answer = await this.#json("GET", path, undefined, query);
-    const refusal = whyNotAPage(answer);
-    if (refusal === undefined)
-      return answer;
-    throw new Error(`GET ${this.#url(path, query)} asked for a page ({issues, total, limit, offset}) and got ` + refusal);
-  }
-  async listProjectArtifacts(project, unlinked = false) {
-    return this.#json("GET", ["api", "v1", "projects", project, "artifacts"], undefined, unlinked ? { unlinked: "true" } : undefined);
-  }
-  async projectArtifact(project, input) {
-    return this.#upload(["api", "v1", "projects", project, "artifacts"], input);
-  }
-  async getProjectArtifact(project, slug) {
-    return this.#json("GET", ["api", "v1", "projects", project, "artifacts", slug]);
-  }
-  async agentArtifact(sessionId, input) {
-    return this.#upload(["api", "v1", "agents", sessionId, "artifacts"], input);
-  }
-  async getAgentArtifact(sessionId, slug) {
-    return this.#json("GET", ["api", "v1", "agents", sessionId, "artifacts", slug]);
-  }
-  async getIssueArtifact(issue2, slug) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue2),
-      "artifacts",
-      slug
-    ]);
-  }
-  async search(query, options = {}) {
-    return this.#json("GET", ["api", "v1", "search"], undefined, { q: query, ...options });
-  }
-  async getIssue(issue2) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2)]);
-  }
-  async updateIssue(issue2, input) {
-    return this.#json("PATCH", ["api", "v1", "issues", await this.#resolveIssue(issue2)], input);
-  }
-  async claimIssue(issue2, input = {}) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "claim"], input);
-  }
-  async releaseIssueClaim(issue2, input = {}) {
-    return this.#json("DELETE", ["api", "v1", "issues", await this.#resolveIssue(issue2), "claim"], input);
-  }
-  async getIssueEvents(issue2, after = 0, limit = 200) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "events"], undefined, { after, limit });
-  }
-  async read(issueReference) {
-    const issueKey = await this.#resolveIssue(issueReference);
-    const issue2 = await this.getIssue(issueKey);
-    const events = await this.getIssueEvents(issueKey, Math.max(0, issue2.last_seq - 10), 10);
-    return { issue: issue2, events };
-  }
-  async ask(issue2, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "asks"], input);
-  }
-  async openAsks(sessionID, since) {
-    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, {
-      author_session: sessionID,
-      ...since === undefined ? {} : { since }
-    });
-  }
-  async openAsksForProject(project) {
-    return this.#json("GET", ["api", "v1", "asks", "open"], undefined, { project });
-  }
-  async listAgents() {
-    return this.#json("GET", ["api", "v1", "agents"]);
-  }
-  async whoami() {
-    return this.#json("GET", ["api", "v1", "whoami"]);
-  }
-  async createProject(input) {
-    return this.#json("POST", ["api", "v1", "projects"], input);
-  }
-  async listProjects() {
-    return this.#json("GET", ["api", "v1", "projects"]);
-  }
-  async syncArchitectureSource(project) {
-    return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
-  }
-  async getArchitectureSource(project) {
-    try {
-      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
-    } catch (error48) {
-      if (error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "SOURCE_NOT_FOUND") {
-        return null;
-      }
-      throw error48;
-    }
-  }
-  async resolveAsk(id, input) {
-    return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
-  }
-  async requestApproval(artifactID, input) {
-    const answer = await this.#jsonAnswer("POST", ["api", "v1", "artifacts", artifactID, "approval-requests"], input);
-    return { ...answer.payload, recorded: answer.status === 201 };
-  }
-  async editAsk(id, input) {
-    return this.#json("PATCH", ["api", "v1", "asks", id], input);
-  }
-  async comment(issue2, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], input);
-  }
-  async listIssueAsks(issue2, state) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "asks"], undefined, state === undefined ? undefined : { state });
-  }
-  async getArtifactAsks(id, state) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "asks"], undefined, state === undefined ? undefined : { state });
-  }
-  async artifactAsk(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "asks"], input);
-  }
-  async suggest(issue2, input) {
-    const { replace_with, ...comment } = input;
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], {
-      ...comment,
-      suggestion: { replace_with }
-    });
-  }
-  async getArtifactComments(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "comments"]);
-  }
-  async artifactComment(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], input);
-  }
-  async artifactSuggest(id, input) {
-    const { replace_with, ...comment } = input;
-    return this.#json("POST", ["api", "v1", "artifacts", id, "comments"], {
-      ...comment,
-      suggestion: { replace_with }
-    });
-  }
-  async message(issue2, input) {
-    return this.#json("POST", ["api", "v1", "issues", await this.#resolveIssue(issue2), "messages"], input);
-  }
-  async messageReply(id, input, options = {}) {
-    return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
-  }
-  async getMessage(issue2, id) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue2),
-      "messages",
-      id
-    ]);
-  }
-  async getMessageThread(id, session) {
-    return this.#json("GET", ["api", "v1", "messages", id], undefined, { session });
-  }
-  async acceptMessageDelivery(id, attempt, input) {
-    return this.#json("POST", ["api", "v1", "messages", id, "deliveries", String(attempt), "accept"], input);
-  }
-  async artifact(issue2, input) {
-    return this.#upload(["api", "v1", "issues", await this.#resolveIssue(issue2), "artifacts"], input);
-  }
-  async getArtifact(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id]);
-  }
-  async docRead(id, version2) {
-    return version2 === undefined ? this.#json("GET", ["api", "v1", "artifacts", id, "text"]) : this.#json("GET", ["api", "v1", "artifacts", id, "versions", String(version2)]);
-  }
-  async fileVersion(id, version2) {
-    const url2 = this.#url(["api", "v1", "artifacts", id, "versions", String(version2)]);
-    const response = await this.fetchImpl(url2, {
-      method: "GET",
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal
-    });
-    if (!response.ok)
-      return this.#response("GET", url2, response);
-    return {
-      mime: response.headers.get("Content-Type") ?? "application/octet-stream",
-      bytes: new Uint8Array(await response.arrayBuffer())
-    };
-  }
-  async artifactBlocks(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "blocks"]);
-  }
-  async docEdit(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "edits"], input);
-  }
-  async nameArtifactVersion(id, input) {
-    return this.#json("POST", ["api", "v1", "artifacts", id, "versions"], input);
-  }
-  async getArtifactEvents(id, after = 0, limit = 200) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "events"], undefined, { after, limit });
-  }
-  async getArtifactReferences(id) {
-    return this.#json("GET", ["api", "v1", "artifacts", id, "references"]);
-  }
-  async getAsk(id) {
-    return this.#json("GET", ["api", "v1", "asks", id]);
-  }
-  async followAsk(id, sessionId, actor) {
-    await this.#json("PUT", ["api", "v1", "asks", id, "followers", sessionId], { actor });
-  }
-  async unfollowAsk(id, sessionId, actor) {
-    await this.#json("DELETE", ["api", "v1", "asks", id, "followers", sessionId], { actor });
-  }
-  async getComment(id) {
-    return this.#json("GET", ["api", "v1", "comments", id]);
-  }
-  async resolveComment(id, actor) {
-    return this.#json("POST", ["api", "v1", "comments", id, "resolve"], { actor });
-  }
-  async getComments(issue2, artifact) {
-    return this.#json("GET", ["api", "v1", "issues", await this.#resolveIssue(issue2), "comments"], undefined, artifact ? { artifact } : undefined);
-  }
-  async getIssueReferences(issue2) {
-    return this.#json("GET", [
-      "api",
-      "v1",
-      "issues",
-      await this.#resolveIssue(issue2),
-      "references"
-    ]);
-  }
-  async getReferences(query) {
-    return this.#json("GET", ["api", "v1", "references"], undefined, {
-      ..."to" in query ? { to: query.to } : { from: query.from },
-      ...query.kind === undefined || query.kind.length === 0 ? {} : { kind: query.kind.join(",") },
-      ...query.since === undefined ? {} : { since: query.since }
-    });
-  }
-  async#resolveIssue(issueReference) {
-    if (!issueReference.includes("#"))
-      return issueReference;
-    let resolved = this.#resolvedIssues.get(issueReference);
-    if (!resolved) {
-      resolved = this.#json("GET", ["api", "v1", "issues", "resolve"], undefined, {
-        ref: issueReference
-      }).then((resolution) => resolution.key);
-      this.#resolvedIssues.set(issueReference, resolved);
-    }
-    try {
-      return await resolved;
-    } catch (error48) {
-      this.#resolvedIssues.delete(issueReference);
-      throw error48;
-    }
-  }
-  async#json(method, path, body, query) {
-    return (await this.#jsonAnswer(method, path, body, query)).payload;
-  }
-  async#jsonAnswer(method, path, body, query) {
-    const headers = {
-      Accept: "application/json",
-      Authorization: `Bearer ${this.token}`
-    };
-    if (body !== undefined)
-      headers["Content-Type"] = "application/json";
-    const url2 = this.#url(path, query);
-    const response = await this.fetchImpl(url2, {
-      method,
-      headers,
-      signal: this.#signal,
-      ...body === undefined ? {} : { body: JSON.stringify(body) }
-    });
-    return { status: response.status, payload: await this.#response(method, url2, response) };
-  }
-  async#upload(path, input) {
-    if ("content" in input)
-      return this.#json("POST", path, input);
-    const form = new FormData;
-    form.set("name", input.name);
-    if (input.summary !== undefined)
-      form.set("summary", input.summary);
-    if (input.actor !== undefined)
-      form.set("actor", JSON.stringify(input.actor));
-    form.set("file", input.file, input.name);
-    return this.#form("POST", path, form);
-  }
-  async#form(method, path, body) {
-    const url2 = this.#url(path);
-    const response = await this.fetchImpl(url2, {
-      method,
-      headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body,
-      signal: this.#signal
-    });
-    return this.#response(method, url2, response);
-  }
-  #url(path, query) {
-    const url2 = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
-    if (query) {
-      for (const [name, value] of Object.entries(query)) {
-        if (typeof value === "string" || typeof value === "number") {
-          url2.searchParams.set(name, String(value));
-        } else if (Array.isArray(value)) {
-          for (const item of value)
-            url2.searchParams.append(name, String(item));
-        }
-      }
-    }
-    return url2.toString();
-  }
-  async#response(method, url2, response) {
-    const text = await response.text();
-    let payload = text;
-    if (text && isJson(response)) {
-      try {
-        payload = JSON.parse(text);
-      } catch {
-        payload = text;
-      }
-    }
-    if (!response.ok) {
-      const error48 = asErrorShape(payload);
-      if (typeof error48.error === "string") {
-        throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
-      }
-      const quoted = excerpt(text, this.token);
-      let body;
-      if (quoted !== "") {
-        body = `a body that is not Dispatch's error JSON (${JSON.stringify(quoted)})`;
-      } else if (text === "") {
-        body = "an empty body";
-      } else {
-        const within = text.length > EXCERPT_SCAN_LIMIT ? ` in its first ${EXCERPT_SCAN_LIMIT / 1024} KiB` : "";
-        const size = Buffer.byteLength(text).toLocaleString("en-US");
-        body = `a body of ${size} bytes and no readable text${within}`;
-      }
-      const reasonPhrase = excerpt(response.statusText, this.token);
-      const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
-      throw new DispatchGatewayError(response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
-    }
-    return payload;
-  }
 }
 
 // ../envoy-client/src/dispatch-picture-tools.ts
@@ -41591,7 +41716,7 @@ async function executeDispatchTool(input) {
     throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
   const pictures = checked.pictures;
-  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client2 = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");

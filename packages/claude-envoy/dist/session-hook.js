@@ -13599,6 +13599,11 @@ var MAX_ISSUE_PAGE_LIMIT = 250;
 var DEFAULT_ISSUE_PAGE_LIMIT = 50;
 var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
+var IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
+var IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
+var IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
+var IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
+var IDEMPOTENCY_LEASE_MS = 60 * 1000;
 var DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 var SEARCH_DEGRADED_EMBEDDER_UNAVAILABLE = "embedder_unavailable";
 var IssueDeployedEventPayloadSchema = exports_external.strictObject({
@@ -15216,6 +15221,28 @@ class DispatchGatewayError extends DispatchServiceError {
     this.mayHaveReachedDispatch = reachesDispatch(status);
   }
 }
+
+class DispatchWriteUnsettledError extends Error {
+  last;
+  attempts;
+  name = "DispatchWriteUnsettledError";
+  constructor(last, attempts) {
+    const answer = last instanceof DispatchGatewayError ? last.answer : `${last.code}: ${last.message}`;
+    const why = last.code === IDEMPOTENCY_KEY_IN_FLIGHT ? "Dispatch was still running an earlier attempt of the write" : "an earlier attempt of the write may have reached Dispatch";
+    super(`${answer} (the last of ${attempts} attempts), and ${why}, so it may or may not have ` + "taken effect: check whether it did before retrying it.", { cause: last });
+    this.last = last;
+    this.attempts = attempts;
+  }
+}
+
+class DispatchAnswerNotKeptError extends Error {
+  status;
+  name = "DispatchAnswerNotKeptError";
+  constructor(status, message) {
+    super(`${IDEMPOTENCY_ANSWER_NOT_KEPT}: ${message}`);
+    this.status = status;
+  }
+}
 function asErrorShape(value) {
   return typeof value === "object" && value !== null ? value : {};
 }
@@ -15226,6 +15253,62 @@ var DISPATCH_TOOL_DEADLINE_MS = 60000;
 function requestSignal(signal) {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
+var DISPATCH_WRITE_RETRY = {
+  pausesMs: [1000, 2000, 4000, 8000],
+  withinMs: 30000
+};
+function pauseFor(ms, signal) {
+  const { promise: promise2, resolve, reject } = Promise.withResolvers();
+  if (signal.aborted) {
+    reject(signal.reason);
+    return promise2;
+  }
+  const stop = () => {
+    clearTimeout(timer);
+    reject(signal.reason);
+  };
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", stop);
+    resolve();
+  }, ms);
+  signal.addEventListener("abort", stop, { once: true });
+  return promise2;
+}
+function retryAfterMs(response) {
+  const value = response.headers.get("Retry-After")?.trim() ?? "";
+  if (/^\d+$/.test(value))
+    return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
+}
+async function writeAnswer(response) {
+  const { status } = response;
+  if (status >= 500)
+    return { response, again: true, reached: true };
+  if (status === 408 || status === 429)
+    return { response, again: true, reached: false };
+  if (status !== 409)
+    return { response, again: false, reached: false };
+  const text = await response.text();
+  let code;
+  if (isJson(response)) {
+    try {
+      code = asErrorShape(JSON.parse(text)).code;
+    } catch {
+      code = undefined;
+    }
+  }
+  const running = code === IDEMPOTENCY_KEY_IN_FLIGHT;
+  return {
+    response: new Response(text, {
+      status,
+      statusText: response.statusText,
+      headers: response.headers
+    }),
+    again: running,
+    reached: running
+  };
 }
 function whyNotAPage(answer) {
   if (typeof answer === "string") {
@@ -15299,12 +15382,14 @@ function excerpt(text, token) {
 class DispatchClient {
   token;
   fetchImpl;
+  writeRetry;
   #baseUrl;
   #resolvedIssues = new Map;
   #signal;
-  constructor(baseUrl, token, fetchImpl = fetch, signal) {
+  constructor(baseUrl, token, fetchImpl = fetch, signal, writeRetry = DISPATCH_WRITE_RETRY) {
     this.token = token;
     this.fetchImpl = fetchImpl;
+    this.writeRetry = writeRetry;
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
   }
@@ -15457,6 +15542,10 @@ class DispatchClient {
   async messageReply(id, input, options = {}) {
     return this.#json("POST", ["api", "v1", "messages", id, "reply"], input, options.followUp === true ? { follow_up: "true" } : undefined);
   }
+  async deliveryReply(resource, id, input) {
+    const collection = resource === "message" ? "messages" : "comments";
+    await this.#json("POST", ["api", "v1", collection, id, "reply"], input);
+  }
   async getMessage(issue2, id) {
     return this.#json("GET", [
       "api",
@@ -15484,11 +15573,7 @@ class DispatchClient {
   }
   async fileVersion(id, version2) {
     const url2 = this.#url(["api", "v1", "artifacts", id, "versions", String(version2)]);
-    const response = await this.fetchImpl(url2, {
-      method: "GET",
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal
-    });
+    const response = await this.#send("GET", url2, undefined, "*/*");
     if (!response.ok)
       return this.#response("GET", url2, response);
     return {
@@ -15566,19 +15651,8 @@ class DispatchClient {
     return (await this.#jsonAnswer(method, path, body, query)).payload;
   }
   async#jsonAnswer(method, path, body, query) {
-    const headers = {
-      Accept: "application/json",
-      Authorization: `Bearer ${this.token}`
-    };
-    if (body !== undefined)
-      headers["Content-Type"] = "application/json";
     const url2 = this.#url(path, query);
-    const response = await this.fetchImpl(url2, {
-      method,
-      headers,
-      signal: this.#signal,
-      ...body === undefined ? {} : { body: JSON.stringify(body) }
-    });
+    const response = await this.#send(method, url2, body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" });
     return { status: response.status, payload: await this.#response(method, url2, response) };
   }
   async#upload(path, input) {
@@ -15593,15 +15667,69 @@ class DispatchClient {
     form.set("file", input.file, input.name);
     return this.#form("POST", path, form);
   }
-  async#form(method, path, body) {
+  async#form(method, path, form) {
     const url2 = this.#url(path);
-    const response = await this.fetchImpl(url2, {
-      method,
-      headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body,
-      signal: this.#signal
-    });
+    const encoded = new Response(form);
+    const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
+    const content = new Uint8Array(await encoded.arrayBuffer());
+    const response = await this.#send(method, url2, { content, type });
     return this.#response(method, url2, response);
+  }
+  async#send(method, url2, body, accept = "application/json") {
+    const headers = {
+      Accept: accept,
+      Authorization: `Bearer ${this.token}`
+    };
+    if (body !== undefined)
+      headers["Content-Type"] = body.type;
+    const init = {
+      method,
+      headers,
+      signal: this.#signal,
+      ...body === undefined ? {} : { body: body.content }
+    };
+    if (method !== "POST" && method !== "PATCH")
+      return this.fetchImpl(url2, init);
+    headers[IDEMPOTENCY_KEY_HEADER] = crypto.randomUUID();
+    const { pausesMs, withinMs, pause = pauseFor, now = () => performance.now() } = this.writeRetry;
+    const started = now();
+    let reached = false;
+    for (let attempt = 1;; attempt++) {
+      let answer;
+      let thrown;
+      try {
+        answer = await writeAnswer(await this.fetchImpl(url2, init));
+        if (!answer.again)
+          return answer.response;
+        reached ||= answer.reached;
+      } catch (error48) {
+        const name = error48 instanceof Error || error48 instanceof DOMException ? error48.name : "";
+        if (this.#signal.aborted || name === "AbortError" || name === "TimeoutError")
+          throw error48;
+        thrown = error48;
+        reached = true;
+      }
+      const scheduled = pausesMs[attempt - 1];
+      const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
+      if (scheduled === undefined || now() - started + wait > withinMs) {
+        if (answer === undefined)
+          throw thrown;
+        return this.#unsettled(method, url2, answer.response, reached, attempt);
+      }
+      await answer?.response.body?.cancel().catch(() => {
+        return;
+      });
+      await pause(wait, this.#signal);
+    }
+  }
+  async#unsettled(method, url2, response, reached, attempts) {
+    const refusal = await this.#response(method, url2, response).catch((error48) => error48);
+    if (reached && refusal instanceof DispatchServiceError) {
+      const landedAlone = refusal instanceof DispatchGatewayError ? refusal.mayHaveReachedDispatch : refusal.status >= 500;
+      if (!landedAlone)
+        throw new DispatchWriteUnsettledError(refusal, attempts);
+    }
+    throw refusal;
   }
   #url(path, query) {
     const url2 = new URL(`${path.map((segment) => encodeURIComponent(segment)).join("/")}`, `${this.#baseUrl}/`);
@@ -15646,6 +15774,10 @@ class DispatchClient {
       const reasonPhrase = excerpt(response.statusText, this.token);
       const reason = reasonPhrase === "" ? "" : ` ${reasonPhrase}`;
       throw new DispatchGatewayError(response.status, `${method} ${url2} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`, gatewayAdvice(method, response.status));
+    }
+    const replay = asErrorShape(payload);
+    if (replay.code === IDEMPOTENCY_ANSWER_NOT_KEPT && typeof replay.error === "string") {
+      throw new DispatchAnswerNotKeptError(response.status, replay.error);
     }
     return payload;
   }
@@ -17749,7 +17881,7 @@ async function executeDispatchTool(input) {
     throw new ToolInputError(input.tool, checked.problems);
   const ownerArguments = checked.owner;
   const pictures = checked.pictures;
-  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+  const dispatchClient = () => new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client2 = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");

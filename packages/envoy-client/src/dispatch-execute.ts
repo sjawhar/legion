@@ -72,6 +72,7 @@ import {
   DispatchClient,
   DispatchGatewayError,
   DispatchServiceError,
+  type DispatchWriteRetry,
   type GraphReferencesQuery,
 } from "./dispatch-http";
 import {
@@ -156,6 +157,8 @@ export interface ExecuteDispatchToolInput {
   readonly signal?: AbortSignal;
   readonly env?: ExecutorEnvironment;
   readonly fetchImpl?: typeof fetch;
+  /** How each write asks Dispatch again under its key (`DISPATCH_WRITE_RETRY` unless set). */
+  readonly writeRetry?: DispatchWriteRetry;
   readonly exec?: ExecFn;
   /** The topics the session's Envoy subscriptions hold, or null when they cannot be read (Envoy
    *  off, or no answer from its listener); called only by a write that would name its owner as
@@ -2490,8 +2493,10 @@ function dispatchAnswered(error: unknown, status: number): error is DispatchServ
 /**
  * Whether a write that failed with `error` may have taken effect anyway. Only an answer sent
  * before the write could apply proves it did not: Dispatch's own refusal (a 4xx), or a gateway's
- * answer that never reached Dispatch (`mayHaveReachedDispatch`). Dispatch's own 5xx can come after
- * it committed, and a timeout or a transport error says nothing either way.
+ * answer that never reached Dispatch (`mayHaveReachedDispatch`), which the client throws as such
+ * only when no earlier attempt of the write may have reached Dispatch either. Dispatch's own 5xx
+ * can come after it committed, and a timeout, a transport error or a `DispatchWriteUnsettledError`
+ * (an earlier attempt may have reached Dispatch) says nothing either way.
  */
 function writeMayHaveLanded(error: unknown): boolean {
   if (error instanceof DispatchGatewayError) return error.mayHaveReachedDispatch;
@@ -2640,7 +2645,7 @@ export async function executeDispatchTool(
   // A factory, not one instance: the constructor starts the request deadline, and the main
   // path resolves the origin (a subprocess) before it needs a client.
   const dispatchClient = (): DispatchClient =>
-    new DispatchClient(configUrl, configToken, fetchImpl, input.signal);
+    new DispatchClient(configUrl, configToken, fetchImpl, input.signal, input.writeRetry);
   if (input.tool === "dispatch_open_asks") {
     const client = dispatchClient();
     const project = optionalString(ownerArguments.args, "project");

@@ -49,6 +49,11 @@ import type {
   Version,
   WhoamiResponse,
 } from "@legion/contracts";
+import {
+  IDEMPOTENCY_ANSWER_NOT_KEPT,
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENCY_KEY_IN_FLIGHT,
+} from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
 
@@ -114,6 +119,52 @@ export class DispatchGatewayError extends DispatchServiceError {
   }
 }
 
+/**
+ * A write none of whose attempts got a definitive answer, where the last attempt's refusal alone
+ * would say the write never took effect (a gateway's 408 or 429, a rate limit of Dispatch's own) or
+ * names an earlier attempt Dispatch was still running (`409 KEY_IN_FLIGHT`), while an attempt may
+ * have reached Dispatch: one that failed in transport or got a 5xx, or that running one. So the
+ * write may or may not have taken effect, and this is deliberately no `DispatchServiceError`, which
+ * a caller reads as a refusal Dispatch decided. `last` (also the `cause`) is that last refusal.
+ */
+export class DispatchWriteUnsettledError extends Error {
+  override readonly name = "DispatchWriteUnsettledError";
+
+  constructor(
+    readonly last: DispatchServiceError,
+    readonly attempts: number
+  ) {
+    const answer =
+      last instanceof DispatchGatewayError ? last.answer : `${last.code}: ${last.message}`;
+    const why =
+      last.code === IDEMPOTENCY_KEY_IN_FLIGHT
+        ? "Dispatch was still running an earlier attempt of the write"
+        : "an earlier attempt of the write may have reached Dispatch";
+    super(
+      `${answer} (the last of ${attempts} attempts), and ${why}, so it may or may not have ` +
+        "taken effect: check whether it did before retrying it.",
+      { cause: last }
+    );
+  }
+}
+
+/**
+ * A write Dispatch had already run, answered on a repeat under its key with the first answer's
+ * status and no resource, since that answer was larger than Dispatch keeps
+ * (`IDEMPOTENCY_ANSWER_NOT_KEPT`). The write took effect, so this is no refusal: whoever made it
+ * reads what it wrote. `status` is the first answer's.
+ */
+export class DispatchAnswerNotKeptError extends Error {
+  override readonly name = "DispatchAnswerNotKeptError";
+
+  constructor(
+    readonly status: number,
+    message: string
+  ) {
+    super(`${IDEMPOTENCY_ANSWER_NOT_KEPT}: ${message}`);
+  }
+}
+
 function asErrorShape(value: unknown): DispatchServiceErrorShape {
   return typeof value === "object" && value !== null ? (value as DispatchServiceErrorShape) : {};
 }
@@ -158,6 +209,107 @@ export const DISPATCH_TOOL_DEADLINE_MS = 60_000;
 function requestSignal(signal: AbortSignal | undefined): AbortSignal {
   const deadline = AbortSignal.timeout(DISPATCH_TOOL_DEADLINE_MS);
   return signal === undefined ? deadline : AbortSignal.any([signal, deadline]);
+}
+
+/**
+ * How a write asks Dispatch again under its key while its attempts get no definitive answer:
+ * `pausesMs` is the wait before each retry in turn, so the write makes at most one attempt more than
+ * it has entries, and no retry starts once `withinMs` has passed since the first attempt began. An
+ * answer's `Retry-After` longer than the scheduled pause is waited instead. `pause` and `now` are
+ * the timer and the monotonic clock, which a test replaces.
+ */
+export interface DispatchWriteRetry {
+  readonly pausesMs: readonly number[];
+  readonly withinMs: number;
+  /** Waits `ms`, or rejects with the signal's reason once it aborts. */
+  readonly pause?: (ms: number, signal: AbortSignal) => Promise<void>;
+  readonly now?: () => number;
+}
+
+/**
+ * At most five attempts, 1, 2, 4 and 8 s apart, none starting more than 30 s after the first: a
+ * write whose every attempt fails at once settles in about 15 s, a `Retry-After` can stretch that
+ * to the 30 s bound, and all of it sits inside the call's 60 s deadline, so a Dispatch that is down
+ * holds the `dispatch` command, and the session waiting on it, for no longer.
+ */
+export const DISPATCH_WRITE_RETRY: DispatchWriteRetry = {
+  pausesMs: [1_000, 2_000, 4_000, 8_000],
+  withinMs: 30_000,
+};
+
+function pauseFor(ms: number, signal: AbortSignal): Promise<void> {
+  const { promise, resolve, reject } = Promise.withResolvers<void>();
+  if (signal.aborted) {
+    reject(signal.reason);
+    return promise;
+  }
+  const stop = (): void => {
+    clearTimeout(timer);
+    reject(signal.reason);
+  };
+  const timer = setTimeout(() => {
+    signal.removeEventListener("abort", stop);
+    resolve();
+  }, ms);
+  signal.addEventListener("abort", stop, { once: true });
+  return promise;
+}
+
+/** The wait an answer's `Retry-After` asks for, in delta-seconds or as an HTTP date; 0 for none. */
+function retryAfterMs(response: Response): number {
+  const value = response.headers.get("Retry-After")?.trim() ?? "";
+  if (/^\d+$/.test(value)) return Number(value) * 1_000;
+  const at = Date.parse(value);
+  return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
+}
+
+/** A request body encoded once, so every attempt of a write sends the bytes the first one did. */
+interface EncodedBody {
+  readonly content: string | Uint8Array<ArrayBuffer>;
+  readonly type: string;
+}
+
+/** One attempt's answer to a write, as the retry loop reads it. */
+interface WriteAnswer {
+  /** The answer to hand on, its body still unread. */
+  readonly response: Response;
+  /** Whether it is no definitive answer, so the write asks again under its key. */
+  readonly again: boolean;
+  /** Whether this attempt, or one Dispatch was still running, may have reached Dispatch. */
+  readonly reached: boolean;
+}
+
+/**
+ * Whether one attempt's answer to a write is definitive. It is not after a 5xx (a gateway's, or
+ * Dispatch's own, which Dispatch never stores under the key), a 408 or 429 (a gateway's timeout,
+ * or a rate limit), or Dispatch's `409 KEY_IN_FLIGHT` (an earlier attempt still runs under the
+ * key); any other answer, a 2xx or a refusal, is. Only a 409's body is read here, for its code, so
+ * that answer is handed on rebuilt from what was read.
+ */
+async function writeAnswer(response: Response): Promise<WriteAnswer> {
+  const { status } = response;
+  if (status >= 500) return { response, again: true, reached: true };
+  if (status === 408 || status === 429) return { response, again: true, reached: false };
+  if (status !== 409) return { response, again: false, reached: false };
+  const text = await response.text();
+  let code: unknown;
+  if (isJson(response)) {
+    try {
+      code = asErrorShape(JSON.parse(text)).code;
+    } catch {
+      code = undefined;
+    }
+  }
+  const running = code === IDEMPOTENCY_KEY_IN_FLIGHT;
+  return {
+    response: new Response(text, {
+      status,
+      statusText: response.statusText,
+      headers: response.headers,
+    }),
+    again: running,
+    reached: running,
+  };
 }
 
 /**
@@ -313,7 +465,11 @@ function excerpt(text: string, token: string): string {
   );
 }
 
-/** JSON HTTP client for Dispatch's native-tool API. */
+/**
+ * JSON HTTP client for Dispatch's native-tool API. Every request goes through `#send`, where each
+ * write (POST or PATCH) carries an `Idempotency-Key` of its own and asks again under it as
+ * `writeRetry` paces it.
+ */
 export class DispatchClient {
   readonly #baseUrl: string;
   readonly #resolvedIssues = new Map<string, Promise<string>>();
@@ -323,7 +479,8 @@ export class DispatchClient {
     baseUrl: string,
     readonly token: string,
     readonly fetchImpl: typeof fetch = fetch,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    readonly writeRetry: DispatchWriteRetry = DISPATCH_WRITE_RETRY
   ) {
     this.#baseUrl = baseUrl.replace(/\/+$/, "");
     this.#signal = requestSignal(signal);
@@ -651,6 +808,20 @@ export class DispatchClient {
     );
   }
 
+  /**
+   * `POST /api/v1/{messages|comments}/{id}/reply` as the session a targeted delivery reached: its
+   * reply to that delivery attempt, or why it could not honour it (`postDeliveryReply`, whose
+   * body names the session as `actor` and the `attempt`).
+   */
+  async deliveryReply(
+    resource: "message" | "comment",
+    id: string,
+    input: Readonly<Record<string, unknown>>
+  ): Promise<void> {
+    const collection = resource === "message" ? "messages" : "comments";
+    await this.#json("POST", ["api", "v1", collection, id, "reply"], input);
+  }
+
   async getMessage(issue: string, id: string): Promise<MessageRead> {
     return this.#json("GET", [
       "api",
@@ -717,11 +888,7 @@ export class DispatchClient {
    * answers a file with its bytes under its own MIME type, never a JSON envelope. */
   async fileVersion(id: string, version: number): Promise<ArtifactFileVersion> {
     const url = this.#url(["api", "v1", "artifacts", id, "versions", String(version)]);
-    const response = await this.fetchImpl(url, {
-      method: "GET",
-      headers: { Accept: "*/*", Authorization: `Bearer ${this.token}` },
-      signal: this.#signal,
-    });
+    const response = await this.#send("GET", url, undefined, "*/*");
     if (!response.ok) return this.#response<never>("GET", url, response);
     return {
       mime: response.headers.get("Content-Type") ?? "application/octet-stream",
@@ -832,18 +999,12 @@ export class DispatchClient {
     body?: unknown,
     query?: object
   ): Promise<{ readonly status: number; readonly payload: T }> {
-    const headers: Record<string, string> = {
-      Accept: "application/json",
-      Authorization: `Bearer ${this.token}`,
-    };
-    if (body !== undefined) headers["Content-Type"] = "application/json";
     const url = this.#url(path, query);
-    const response = await this.fetchImpl(url, {
+    const response = await this.#send(
       method,
-      headers,
-      signal: this.#signal,
-      ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-    });
+      url,
+      body === undefined ? undefined : { content: JSON.stringify(body), type: "application/json" }
+    );
     return { status: response.status, payload: await this.#response<T>(method, url, response) };
   }
 
@@ -858,15 +1019,104 @@ export class DispatchClient {
     return this.#form("POST", path, form);
   }
 
-  async #form<T>(method: string, path: readonly string[], body: FormData): Promise<T> {
+  /**
+   * A multipart write. The form is encoded here, once: every encoding of a `FormData` draws a new
+   * boundary, and a retry whose bytes differ from its first attempt's is a different request to
+   * Dispatch, which refuses a key reused for one (`422 KEY_REUSED`).
+   */
+  async #form<T>(method: string, path: readonly string[], form: FormData): Promise<T> {
     const url = this.#url(path);
-    const response = await this.fetchImpl(url, {
-      method,
-      headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
-      body,
-      signal: this.#signal,
-    });
+    const encoded = new Response(form);
+    const type = encoded.headers.get("Content-Type") ?? "multipart/form-data";
+    const content = new Uint8Array(await encoded.arrayBuffer());
+    const response = await this.#send(method, url, { content, type });
     return this.#response<T>(method, url, response);
+  }
+
+  /**
+   * The one request function: every call the client makes goes through here. A read, a PUT or a
+   * DELETE goes once. A write (POST or PATCH) carries an `Idempotency-Key` minted here for this
+   * call alone, so all its attempts are one intent to Dispatch, which runs it once and answers a
+   * repeat with the answer it stored, while two calls are two writes. Each attempt sends the same
+   * encoded body. While an attempt gets no definitive answer (`writeAnswer`, or a transport failure)
+   * the write asks again under its key, paced by `writeRetry`, and the first definitive answer is
+   * the call's: a 2xx, a replay of one included, or a refusal. The call's deadline and its caller's
+   * cancellation end the attempts at once, whether a fetch or a pause is under way.
+   */
+  async #send(
+    method: string,
+    url: string,
+    body?: EncodedBody,
+    accept = "application/json"
+  ): Promise<Response> {
+    const headers: Record<string, string> = {
+      Accept: accept,
+      Authorization: `Bearer ${this.token}`,
+    };
+    if (body !== undefined) headers["Content-Type"] = body.type;
+    const init: RequestInit = {
+      method,
+      headers,
+      signal: this.#signal,
+      ...(body === undefined ? {} : { body: body.content }),
+    };
+    if (method !== "POST" && method !== "PATCH") return this.fetchImpl(url, init);
+    headers[IDEMPOTENCY_KEY_HEADER] = crypto.randomUUID();
+    const { pausesMs, withinMs, pause = pauseFor, now = () => performance.now() } = this.writeRetry;
+    const started = now();
+    let reached = false;
+    for (let attempt = 1; ; attempt++) {
+      let answer: WriteAnswer | undefined;
+      let thrown: unknown;
+      try {
+        answer = await writeAnswer(await this.fetchImpl(url, init));
+        if (!answer.again) return answer.response;
+        reached ||= answer.reached;
+      } catch (error) {
+        // A deadline or a cancellation is the caller's limit, never a reason to ask again.
+        const name = error instanceof Error || error instanceof DOMException ? error.name : "";
+        if (this.#signal.aborted || name === "AbortError" || name === "TimeoutError") throw error;
+        thrown = error;
+        reached = true;
+      }
+      const scheduled = pausesMs[attempt - 1];
+      const wait = Math.max(
+        scheduled ?? 0,
+        answer === undefined ? 0 : retryAfterMs(answer.response)
+      );
+      if (scheduled === undefined || now() - started + wait > withinMs) {
+        if (answer === undefined) throw thrown;
+        return this.#unsettled(method, url, answer.response, reached, attempt);
+      }
+      await answer?.response.body?.cancel().catch(() => undefined);
+      await pause(wait, this.#signal);
+    }
+  }
+
+  /**
+   * What a write throws once it stops asking with no definitive answer: the last attempt's refusal
+   * as `#response` reads it, unless that refusal alone would say the write never took effect while
+   * an attempt may have reached Dispatch (`reached`), when it is a `DispatchWriteUnsettledError`.
+   * `#response` throws for every status `writeAnswer` asks again after.
+   */
+  async #unsettled(
+    method: string,
+    url: string,
+    response: Response,
+    reached: boolean,
+    attempts: number
+  ): Promise<never> {
+    const refusal: unknown = await this.#response(method, url, response).catch(
+      (error: unknown) => error
+    );
+    if (reached && refusal instanceof DispatchServiceError) {
+      const landedAlone =
+        refusal instanceof DispatchGatewayError
+          ? refusal.mayHaveReachedDispatch
+          : refusal.status >= 500;
+      if (!landedAlone) throw new DispatchWriteUnsettledError(refusal, attempts);
+    }
+    throw refusal;
   }
 
   #url(path: readonly string[], query?: object): string {
@@ -893,7 +1143,9 @@ export class DispatchClient {
    * from Dispatch, so it is a `DispatchGatewayError` naming the request (method, URL and query;
    * the token travels in a header, never the URL), the status and reason phrase, a one-line
    * plain-text excerpt of the body (or, when none of what the excerpt reads is text, the body's
-   * size), and what asking again can do for that method and status.
+   * size), and what asking again can do for that method and status. A 2xx carrying Dispatch's
+   * `IDEMPOTENCY_ANSWER_NOT_KEPT` is a repeated write's replay with no resource in it: the write
+   * ran, and it is a `DispatchAnswerNotKeptError` rather than a payload of the wrong shape.
    */
   async #response<T>(method: string, url: string, response: Response): Promise<T> {
     const text = await response.text();
@@ -936,6 +1188,10 @@ export class DispatchClient {
         `${method} ${url} answered ${response.status}${reason} with ${body}, ${GATEWAY_PAGE}`,
         gatewayAdvice(method, response.status)
       );
+    }
+    const replay = asErrorShape(payload);
+    if (replay.code === IDEMPOTENCY_ANSWER_NOT_KEPT && typeof replay.error === "string") {
+      throw new DispatchAnswerNotKeptError(response.status, replay.error);
     }
     return payload as T;
   }

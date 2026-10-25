@@ -29,6 +29,7 @@ import { encode } from "@toon-format/toon";
 import { z } from "zod";
 import { askAnswerText, textHead } from "./ask-answer";
 import { commandLine } from "./dispatch-command";
+import { DispatchClient } from "./dispatch-http";
 import { dispatchChildRef, dispatchDocumentRef, dispatchIssueRef } from "./dispatch-owner";
 import { pictureAddresses } from "./dispatch-pictures";
 
@@ -105,7 +106,9 @@ function dispatchReplyPath(resource: DispatchDelivery["resource"], id: string): 
 /**
  * Answers a targeted Dispatch delivery on the sender's behalf: the reply body when the
  * host delivered it, or the error when it could not (so the sender sees the attempt fail
- * instead of waiting on a reply that never comes). A plain fetch with no deadline of its own.
+ * instead of waiting on a reply that never comes). A write through `DispatchClient`, so it
+ * carries a key of its own, is asked again under it while Dispatch gives no definitive answer,
+ * and throws Dispatch's refusal as a `DispatchServiceError`.
  */
 export async function postDeliveryReply(
   config: { readonly url: string; readonly token: string },
@@ -113,22 +116,12 @@ export async function postDeliveryReply(
   delivery: DispatchDelivery,
   result: { readonly body?: string; readonly error?: string }
 ): Promise<void> {
-  const response = await fetch(
-    `${config.url}${dispatchReplyPath(delivery.resource, delivery.id)}`,
-    {
-      method: "POST",
-      headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
-      body: JSON.stringify({
-        actor: { kind: "session", id: sessionId },
-        attempt: delivery.attempt,
-        ...delivery.replyFields,
-        ...result,
-      }),
-    }
-  );
-  if (!response.ok) {
-    throw new Error(`Dispatch reply failed: ${response.status} ${await response.text()}`);
-  }
+  await new DispatchClient(config.url, config.token).deliveryReply(delivery.resource, delivery.id, {
+    actor: { kind: "session", id: sessionId },
+    attempt: delivery.attempt,
+    ...delivery.replyFields,
+    ...result,
+  });
 }
 
 /**

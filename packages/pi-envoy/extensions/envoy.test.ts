@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, describe, expect, jest, mock, spyOn, test } from "bun:test";
 import { createHash } from "node:crypto";
 import {
   chmodSync,
@@ -766,6 +766,7 @@ async function bootDirectSession(
   const accepts: {
     readonly path: string;
     readonly authorization: string | null;
+    readonly key: string | null;
     readonly body: unknown;
   }[] = [];
   const posts: string[] = [];
@@ -779,6 +780,7 @@ async function bootDirectSession(
       if ((init?.method ?? "GET") === "POST" && url.pathname.endsWith("/accept")) {
         accepts.push({
           authorization,
+          key: new Headers(init?.headers).get("Idempotency-Key"),
           body: JSON.parse(init?.body?.toString() ?? "null"),
           path: url.pathname,
         });
@@ -882,6 +884,28 @@ async function bootDirectSession(
     replied,
     replies,
   };
+}
+
+/**
+ * Settles `pending` on the test's clock (`jest.useFakeTimers`, on for the call), moving it a
+ * second at a time: a write Dispatch keeps failing is asked again under its key until the
+ * accept's 10 s bound, and those pauses and that bound pass at once rather than in real time.
+ */
+async function onTestClock<T>(pending: () => Promise<T>): Promise<T> {
+  jest.useFakeTimers();
+  try {
+    let settled = false;
+    const watched = pending().finally(() => {
+      settled = true;
+    });
+    for (let second = 0; second < 60 && !settled; second++) {
+      for (let flush = 0; flush < 50 && !settled; flush++) await Promise.resolve();
+      jest.advanceTimersByTime(1_000);
+    }
+    return await watched;
+  } finally {
+    jest.useRealTimers();
+  }
 }
 
 function response(body: unknown): Response {
@@ -8412,6 +8436,8 @@ describe("envoy OMP extension", () => {
       expect(accepts).toEqual([
         {
           authorization: "Bearer dispatch-token",
+          // The accept is a write, so it carries an Idempotency-Key of its own.
+          key: expect.stringMatching(/^[A-Za-z0-9._:-]{1,128}$/),
           body: { actor: { id: "ses_delivery", kind: "session" } },
           path: `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
         },
@@ -8464,29 +8490,34 @@ describe("envoy OMP extension", () => {
     }
 
     // Only Dispatch's 200 makes a turn: whatever it refuses, and whatever keeps it from answering,
-    // keeps the card, and the session posts nothing and injects nothing.
-    for (const [name, answer] of [
-      ["another frame already took it", { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 }],
-      ["a later attempt superseded it", { code: "ACCEPT_SUPERSEDED", status: 409 }],
-      ["it names another session's attempt", { code: "ACCEPT_FORBIDDEN", status: 403 }],
-      ["it is no direct message to this session", { code: "ACCEPT_NOT_DIRECT", status: 409 }],
-      ["a session wrote it", { code: "ACCEPT_NOT_WRITTEN_BY_PERSON", status: 409 }],
-      ["its attempt is a BTW", { code: "ACCEPT_NOT_ASIDE_OR_STEER", status: 409 }],
-      ["Dispatch refuses the session's token", { code: "UNAUTHORIZED", status: 401 }],
-      ["Dispatch predates the accept route", { status: 404 }],
-      ["Dispatch fails", { status: 500 }],
-      ["the accept never reaches Dispatch", { reject: "fetch failed" }],
+    // keeps the card, and the session posts nothing and injects nothing. A failure that can clear
+    // (a 5xx, a transport failure) is asked again under the accept's one key, at 0, 1, 3 and 7 s,
+    // until the accept's 10 s bound cuts the next pause; a refusal is the answer at once.
+    for (const [name, answer, attempts] of [
+      ["another frame already took it", { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 }, 1],
+      ["a later attempt superseded it", { code: "ACCEPT_SUPERSEDED", status: 409 }, 1],
+      ["it names another session's attempt", { code: "ACCEPT_FORBIDDEN", status: 403 }, 1],
+      ["it is no direct message to this session", { code: "ACCEPT_NOT_DIRECT", status: 409 }, 1],
+      ["a session wrote it", { code: "ACCEPT_NOT_WRITTEN_BY_PERSON", status: 409 }, 1],
+      ["its attempt is a BTW", { code: "ACCEPT_NOT_ASIDE_OR_STEER", status: 409 }, 1],
+      ["Dispatch refuses the session's token", { code: "UNAUTHORIZED", status: 401 }, 1],
+      ["Dispatch predates the accept route", { status: 404 }, 1],
+      ["Dispatch fails", { status: 500 }, 4],
+      ["the accept never reaches Dispatch", { reject: "fetch failed" }, 4],
       // A 200 that carries no stored body has nothing to inject.
-      ["Dispatch accepts it without the stored body", { accepted: true, body: null }],
-    ] as const satisfies readonly (readonly [string, AcceptAnswer])[]) {
+      ["Dispatch accepts it without the stored body", { accepted: true, body: null }, 1],
+    ] as const satisfies readonly (readonly [string, AcceptAnswer, number])[]) {
       test(`stays a card when ${name}`, async () => {
         const { accepts, agent, delivered, fixture, posts, recordedWhenDelivered } =
           await bootDirectSession(`direct-accept-refused-${name}`, { accept: () => answer });
 
-        agent.push(directDispatchEnvelope("steer", `direct-accept-refused-${name}`));
-        await delivered(1);
+        await onTestClock(() => {
+          agent.push(directDispatchEnvelope("steer", `direct-accept-refused-${name}`));
+          return delivered(1);
+        });
 
-        expect(accepts).toHaveLength(1);
+        expect(accepts).toHaveLength(attempts);
+        expect(new Set(accepts.map((accept) => accept.key)).size).toBe(1);
         expect(fixture.userMessages).toEqual([]);
         expect(fixture.deliveries.map((delivery) => delivery.customType)).toEqual([
           "envoy-message",
@@ -8496,6 +8527,28 @@ describe("envoy OMP extension", () => {
         expect(recordedWhenDelivered).toEqual([1]);
       });
     }
+
+    // A failure that can clear is no answer: the accept asks again under its key, and Dispatch's
+    // answer to the retry decides, so a Send whose first answer was lost is still the person's turn.
+    test("is the user's turn when the accept's first attempt fails in transport and its retry is accepted", async () => {
+      const { accepts, agent, delivered, fixture } = await bootDirectSession(
+        "direct-accept-retried",
+        { accept: (count) => (count === 1 ? { reject: "fetch failed" } : { accepted: true }) }
+      );
+
+      await onTestClock(() => {
+        agent.push(directDispatchEnvelope("steer", "direct-accept-retried"));
+        return delivered(1);
+      });
+
+      expect(accepts.map((accept) => accept.path)).toEqual([
+        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+      ]);
+      expect(accepts[1]?.key).toBe(accepts[0]?.key as string);
+      expect(fixture.deliveries).toEqual([]);
+      expect(fixture.userMessages).toEqual([{ content: DIRECT_MESSAGE_BODY, options: undefined }]);
+    });
 
     // The ways a session could otherwise make a person's message a fresh user turn (Deep's
     // reviews of #1592): Dispatch refuses the first three, and the session itself the rest.
@@ -8576,24 +8629,29 @@ describe("envoy OMP extension", () => {
     });
 
     test("a person's retry of a Send that arrived as a card is a user turn", async () => {
+      // Dispatch stays unreachable through the first attempt's four tries, so that Send is a card.
       const { accepts, agent, delivered, fixture } = await bootDirectSession(
         "direct-carded-retry",
         {
           accept: (count) =>
-            count === 1 ? { reject: "fetch failed" } : { accepted: true, delivery: "aside" },
+            count <= 4 ? { reject: "fetch failed" } : { accepted: true, delivery: "aside" },
         }
       );
 
-      agent.push(directDispatchEnvelope("steer", "direct-carded-retry-1"));
-      await delivered(1);
+      await onTestClock(() => {
+        agent.push(directDispatchEnvelope("steer", "direct-carded-retry-1"));
+        return delivered(1);
+      });
       // The person's retry is an attempt of its own, which the session has not delivered.
       agent.push(directDispatchEnvelope("aside", "direct-carded-retry-2", { attempt: 2 }));
       await delivered(2);
 
       expect(accepts.map((accept) => accept.path)).toEqual([
-        `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`,
+        ...Array<string>(4).fill(`/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/1/accept`),
         `/api/v1/messages/${DIRECT_MESSAGE_ID}/deliveries/2/accept`,
       ]);
+      // The person's retry is a write of its own, under a key of its own.
+      expect(accepts[4]?.key).not.toBe(accepts[0]?.key as string);
       expect(fixture.deliveries).toHaveLength(1);
       expect(fixture.userMessages).toEqual([
         { content: DIRECT_MESSAGE_BODY, options: { deliverAs: "aside" } },
