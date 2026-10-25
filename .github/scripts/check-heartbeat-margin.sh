@@ -34,6 +34,14 @@
 #      only the heartbeat arm is checked, because `bootTimeout` is deployment configuration this
 #      check cannot see. A daemon window narrower than the record lifetime reports a live
 #      controller gone.
+#   4. The daemon's other copy of the interval (`pluginHeartbeat`,
+#      packages/daemon/internal/daemon/notice_exceptions.go) equals the TypeScript one as well.
+#      That file is read because the constant is a real delay and not a comment: it is
+#      `noticeReholdDelays[1]`, so the second re-hold of a notice the listener could not forward
+#      goes one pane heartbeat after the first, and the schedule the daemon's own test derives
+#      from those delays moves with it. A copy that drifts re-sends that notice at the wrong
+#      distance - too soon, before a relaunched pane has registered, or too late, holding the
+#      architect's notice past the window it could have been caught in.
 #
 # What this check cannot see:
 #
@@ -66,6 +74,7 @@ SETTINGS_FILE = "packages/envoy-client/src/envoy-settings.ts"
 TRANSPORT_FILE = "packages/envoy-client/src/transport.ts"
 REGISTRY_FILE = "packages/envoy/internal/session/registry.go"
 LIVENESS_FILE = "packages/daemon/internal/controller/liveness.go"
+NOTICE_FILE = "packages/daemon/internal/daemon/notice_exceptions.go"
 
 # A plain decimal, with the digit separators the language writes: TypeScript writes these
 # constants `100_000`, so an underscore between digit runs is accepted and removed before the
@@ -97,6 +106,9 @@ DAEMON_HEARTBEAT_PATTERN = rf"^\s*const\s+Heartbeat\s*=\s*{GO_DURATION}\s*(?://.
 WINDOW_FACTOR_PATTERN = (
     rf"^\s*return\s+max\(\s*bootTimeout\s*,\s*({DECIMAL})\s*\*\s*Heartbeat\s*\)\s*(?://.*)?$"
 )
+# The daemon's second copy of the refresh interval, one member of the const block it is declared
+# in and the second of `noticeReholdDelays`.
+PLUGIN_HEARTBEAT_PATTERN = rf"^\s*pluginHeartbeat\s*=\s*{GO_DURATION}\s*(?://.*)?$"
 
 MILLIS = {"Second": 1_000, "Minute": 60_000}
 # A record that expires unless refreshed is renewed at a third of its lifetime, so two whole
@@ -196,6 +208,7 @@ settings_lines = load(SETTINGS_FILE)
 transport_lines = load(TRANSPORT_FILE)
 registry_lines = load(REGISTRY_FILE)
 liveness_lines = load(LIVENESS_FILE)
+notice_lines = load(NOTICE_FILE)
 
 heartbeat = millis(SETTINGS_FILE, settings_lines, HEARTBEAT_CONST, HEARTBEAT_PATTERN)
 timeout = millis(TRANSPORT_FILE, transport_lines, TIMEOUT_CONST, TIMEOUT_PATTERN)
@@ -206,6 +219,7 @@ daemon_heartbeat = duration(LIVENESS_FILE, liveness_lines, "Heartbeat", DAEMON_H
 window_factor = millis(
     LIVENESS_FILE, liveness_lines, "LivenessWindow's heartbeat multiple", WINDOW_FACTOR_PATTERN
 )
+plugin_heartbeat = duration(NOTICE_FILE, notice_lines, "pluginHeartbeat", PLUGIN_HEARTBEAT_PATTERN)
 
 # One listener call: every attempt's timeout, plus one retry delay between each pair of them.
 call_budget = attempts.value * timeout.value + max(attempts.value - 1, 0) * retry_delay.value
@@ -265,6 +279,20 @@ if daemon_heartbeat.value != heartbeat.value:
         f"copy of {HEARTBEAT_CONST} and has no independent value",
     )
 
+if plugin_heartbeat.value != heartbeat.value:
+    problem(
+        NOTICE_FILE,
+        plugin_heartbeat.line,
+        f"the daemon's pluginHeartbeat is {plugin_heartbeat.value} ms ({plugin_heartbeat.site}) "
+        f"while the interval panes actually refresh at is {heartbeat.value} ms ({heartbeat.site}): "
+        f"pluginHeartbeat is noticeReholdDelays[1], so the second re-hold of a notice the "
+        f"listener could not forward goes that far after the first - too soon and the copy is "
+        f"spent before a relaunched pane has registered, too late and the architect's notice "
+        f"waits past the window it could have been caught in - and the schedule the daemon's own "
+        f"test derives from those delays moves with it. Set pluginHeartbeat to "
+        f"{heartbeat.value} ms - it is a copy of {HEARTBEAT_CONST} and has no independent value",
+    )
+
 if daemon_window < lifetime.value:
     problem(
         LIVENESS_FILE,
@@ -300,6 +328,7 @@ print(
     f"record lifetime {lifetime.value} ms "
     f"({lifetime.site}); the daemon's Heartbeat {daemon_heartbeat.value} ms "
     f"({daemon_heartbeat.site}) matches and its window {window_factor.value} x Heartbeat = "
-    f"{daemon_window} ms ({window_factor.site}) covers that lifetime"
+    f"{daemon_window} ms ({window_factor.site}) covers that lifetime; its pluginHeartbeat "
+    f"{plugin_heartbeat.value} ms ({plugin_heartbeat.site}) matches too"
 )
 PY

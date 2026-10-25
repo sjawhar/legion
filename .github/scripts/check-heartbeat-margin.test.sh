@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Tests for `check-heartbeat-margin.sh`: the interval a pane refreshes its Envoy registration at
-# leaves a margin inside the lifetime the listener keeps a session record for, the Legion daemon's
-# copy of that interval agrees and its staleness window covers that lifetime, and the check refuses
+# leaves a margin inside the lifetime the listener keeps a session record for, both of the Legion
+# daemon's copies of that interval agree with it - `Heartbeat`, whose staleness window must cover
+# that lifetime, and `pluginHeartbeat`, which is `noticeReholdDelays[1]` - and the check refuses
 # any tree it cannot read unambiguously. The failure it stops is a silent one — a live pane's
 # record expires and every other agent is told there is no live session for it — so the suite pins
 # the exit status and the wording the author of a drift has to act on, including that the third
@@ -27,22 +28,23 @@ trap 'rm -rf "$work"' EXIT
 source "$script_dir/test-lib.sh"
 
 # fixture <name> [heartbeat-ms] [pass-deadline-floor-ms] [timeout-ms] [retry-delay-ms] [attempts]
-#         [record-lifetime] [daemon-heartbeat] [window-heartbeats]: a tree that passes — three
-# refresh intervals plus one listener call, and the worst case between registrations, both inside
-# the record lifetime, the daemon's copy of the interval equal to the TypeScript one and its
-# window covering that lifetime. The pass-deadline floor is written because the real file declares
-# one; the check must not read it.
+#         [record-lifetime] [daemon-heartbeat] [window-heartbeats] [plugin-heartbeat]: a tree that
+# passes — three refresh intervals plus one listener call, and the worst case between
+# registrations, both inside the record lifetime, both of the daemon's copies of the interval
+# equal to the TypeScript one and its window covering that lifetime. The pass-deadline floor is
+# written because the real file declares one; the check must not read it.
 # Echoes its root.
 fixture() {
   local root="$work/$1" heartbeat=${2:-40_000} deadline=${3:-12_000} timeout=${4:-2_000}
   local retry=${5:-400} attempts=${6:-2} lifetime=${7:-3 * time.Minute}
-  local daemon_heartbeat=${8:-40 * time.Second} window=${9:-5}
+  local daemon_heartbeat=${8:-40 * time.Second} window=${9:-5} plugin=${10:-40 * time.Second}
   if [ -e "$root" ]; then
     echo "  FAIL: the fixture name '$1' is already taken by an earlier case" >&2
     return 1
   fi
   mkdir -p "$root/.github/scripts" "$root/packages/envoy-client/src" \
-    "$root/packages/envoy/internal/session" "$root/packages/daemon/internal/controller"
+    "$root/packages/envoy/internal/session" "$root/packages/daemon/internal/controller" \
+    "$root/packages/daemon/internal/daemon"
   ln -s "$check_script" "$root/.github/scripts/check-heartbeat-margin.sh"
   cat > "$root/packages/envoy-client/src/envoy-settings.ts" <<TS
 export const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
@@ -83,6 +85,18 @@ func LivenessWindow(bootTimeout time.Duration) time.Duration {
     return max(bootTimeout, $window*Heartbeat)
 }
 GO
+  cat > "$root/packages/daemon/internal/daemon/notice_exceptions.go" <<GO
+package daemon
+
+// The plugin heartbeats every pluginHeartbeat (DEFAULT_HEARTBEAT_MS,
+// packages/envoy-client/src/envoy-settings.ts).
+const (
+    listenerSessionTTL = 7 * time.Minute
+    pluginHeartbeat    = $plugin
+)
+
+var noticeReholdDelays = [...]time.Duration{20 * time.Second, pluginHeartbeat, listenerSessionTTL + time.Minute}
+GO
   echo "$root"
 }
 
@@ -104,8 +118,8 @@ check "names the worst case as two intervals and one call, with the deadline bou
   "$(contains "$out" 'the worst case between registrations - two intervals and one such call, the pass deadline bounding neither - is 84400 ms')"
 check "names the record lifetime and its site" \
   "$(contains "$out" 'both inside the session record lifetime 180000 ms (packages/envoy/internal/session/registry.go:4)')"
-check "names the daemon's heartbeat and window with their sites" \
-  "$(contains "$out" "daemon's Heartbeat 40000 ms (packages/daemon/internal/controller/liveness.go:5) matches and its window 5 x Heartbeat = 200000 ms (packages/daemon/internal/controller/liveness.go:8) covers that lifetime$")"
+check "names the daemon's heartbeat, window and second copy with their sites" \
+  "$(contains "$out" "daemon's Heartbeat 40000 ms (packages/daemon/internal/controller/liveness.go:5) matches and its window 5 x Heartbeat = 200000 ms (packages/daemon/internal/controller/liveness.go:8) covers that lifetime; its pluginHeartbeat 40000 ms (packages/daemon/internal/daemon/notice_exceptions.go:7) matches too$")"
 check "the pass-deadline floor is not quoted anywhere" \
   "$(is "$(contains "$out" 'PASS_DEADLINE')" false)"
 
@@ -130,7 +144,7 @@ check "and no longer tells the maintainer not to widen either number" \
 check "counts the problem" "$(contains "$out" '::error::1 problem(s)')"
 
 echo "case: three intervals past the record lifetime"
-root=$(fixture renewals 50_000 12_000 2_000 400 2 '2 * time.Minute' '50 * time.Second' 3)
+root=$(fixture renewals 50_000 12_000 2_000 400 2 '2 * time.Minute' '50 * time.Second' 3 '50 * time.Second')
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names both numbers and both sites" \
@@ -178,6 +192,20 @@ check "says what breaks in production" \
 check "names the remedy" \
   "$(contains "$out" 'Set Heartbeat to 40000 ms')"
 
+echo "case: the daemon's second copy of the interval drifted from the TypeScript one"
+root=$(fixture plugin-copy 40_000 12_000 2_000 400 2 '3 * time.Minute' '40 * time.Second' 5 '41 * time.Second')
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names both numbers and both sites" \
+  "$(contains "$out" "the daemon's pluginHeartbeat is 41000 ms (packages/daemon/internal/daemon/notice_exceptions.go:7) while the interval panes actually refresh at is 40000 ms (packages/envoy-client/src/envoy-settings.ts:4)")"
+check "names the delay it is" \
+  "$(contains "$out" 'pluginHeartbeat is noticeReholdDelays\[1\]')"
+check "says what breaks" \
+  "$(contains "$out" "the schedule the daemon's own test derives from those delays moves with it")"
+check "names the remedy" \
+  "$(contains "$out" 'Set pluginHeartbeat to 40000 ms')"
+check "and nothing else fails with it" "$(contains "$out" '::error::1 problem(s)')"
+
 echo "case: the daemon's staleness window short of the record lifetime"
 root=$(fixture daemon-window 40_000 12_000 2_000 400 2 '3 * time.Minute' '40 * time.Second' 3)
 run_check "$root"
@@ -199,7 +227,7 @@ check "reads 180 * time.Second as 180000 ms" \
   "$(contains "$out" 'inside the session record lifetime 180000 ms (packages/envoy/internal/session/registry.go:4)')"
 
 echo "case: a daemon heartbeat written in minutes"
-root=$(fixture heartbeat-minutes 60_000 12_000 2_000 400 2 '4 * time.Minute' '1 * time.Minute' 4)
+root=$(fixture heartbeat-minutes 60_000 12_000 2_000 400 2 '4 * time.Minute' '1 * time.Minute' 4 '1 * time.Minute')
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "reads 1 * time.Minute as 60000 ms, equal to the TypeScript 60_000" \
@@ -332,7 +360,7 @@ out=$("$check_script" 2>&1)
 status=$?
 set -e
 check "exits 0" "$(is "$status" 0)"
-check "reports both margins and the daemon's agreement" \
-  "$(contains "$out" '^3 refresh intervals of .* (packages/envoy-client/src/envoy-settings.ts:.*) plus one listener call .* are .*, and the worst case between registrations - two intervals and one such call, the pass deadline bounding neither - is .*; both inside the session record lifetime .* (packages/envoy/internal/session/registry.go:.*) covers that lifetime$')"
+check "reports both margins and the daemon's agreement on both of its copies" \
+  "$(contains "$out" '^3 refresh intervals of .* (packages/envoy-client/src/envoy-settings.ts:.*) plus one listener call .* are .*, and the worst case between registrations - two intervals and one such call, the pass deadline bounding neither - is .*; both inside the session record lifetime .* (packages/envoy/internal/session/registry.go:.*) covers that lifetime; its pluginHeartbeat .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches too$')"
 
 summary "check-heartbeat-margin.sh"
