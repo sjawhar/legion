@@ -560,6 +560,17 @@
 
 ### Changed
 
+- **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
+  ServiceAccount token, read from `--account-token-file` (default
+  `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
+  missing or empty file exits 1 naming it, before any request. `scripts/dev-broker.sh` starts
+  `dev-oidc-issuer`, a new local stand-in for a cluster's ServiceAccount token issuer (the Go
+  tests' `internal/oidc/oidctest` served on a loopback port), and its broker trusts it, lists
+  `system:serviceaccount:example-ns:example-dispatch` as its caller `dispatch` and turns the token
+  exchange on for `system:serviceaccount:example-ns:example-worker`; the issuer keeps both tokens in
+  the workdir and rewrites each before it lapses, and the script exports
+  `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, so devrelay approves records and machine logins locally
+  again. The Dispatch e2e harness's broker token is `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.
 - `DISPATCH_APP_PEM_B64` takes the GitHub App's private key as a plain PEM, as GKE SecretSync
   copies it from Secret Manager, or as the base64 of a PEM, as before: a value holding `-----BEGIN`
   is the PEM itself and any other is base64-decoded. Dispatch parses the key when it loads the

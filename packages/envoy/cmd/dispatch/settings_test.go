@@ -507,7 +507,8 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 
 	// brokerReceived is the call the secrets broker DISPATCH_AGENT_SECRETS_URL names receives, as
 	// "<method> <request URI> <Authorization>", when a signed-in human lists the credential
-	// requests awaiting them, with token as DISPATCH_AGENT_SECRETS_TOKEN.
+	// requests awaiting them, with token in the file DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE
+	// names.
 	brokerReceived := func(t *testing.T, token string) string {
 		t.Helper()
 		received := make(chan string, 1)
@@ -516,7 +517,10 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			_, _ = w.Write([]byte(`{"requests":[]}`))
 		}))
 		defer broker.Close()
-		boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": broker.URL, "DISPATCH_AGENT_SECRETS_TOKEN": token})
+		boot := resolveWith(t, map[string]string{
+			"DISPATCH_AGENT_SECRETS_URL":                broker.URL,
+			"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": writeFile(t, "account-token", token),
+		})
 		request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
 		response := httptest.NewRecorder()
 		routerFor(t, boot, routes.AppContextOptions{}).ServeHTTP(response, request)
@@ -1183,14 +1187,15 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			refusedWith(t, map[string]string{"DISPATCH_OIDC_ISSUER": "https://issuer.example"}, "DISPATCH_OIDC_AUDIENCE")
 		},
 		"DISPATCH_AGENT_SECRETS_URL": func(t *testing.T) {
-			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/", "DISPATCH_AGENT_SECRETS_TOKEN": "t"}); boot.AgentSecretsURL != "https://broker.example" {
+			tokenFile := writeFile(t, "account-token", "account-token")
+			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/", "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": tokenFile}); boot.AgentSecretsURL != "https://broker.example" {
 				t.Errorf("AgentSecretsURL = %q", boot.AgentSecretsURL)
 			}
-			refusedWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/v1", "DISPATCH_AGENT_SECRETS_TOKEN": "t"}, "DISPATCH_AGENT_SECRETS_URL")
+			refusedWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example/v1", "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": tokenFile}, "DISPATCH_AGENT_SECRETS_URL")
 			// The broker the router relays credential requests to; without one it has none, and the
 			// pending list answers null.
 			t.Run("router", func(t *testing.T) {
-				if got := brokerReceived(t, "ui-token"); !strings.HasPrefix(got, "GET /v1/pending?approver=alice ") {
+				if got := brokerReceived(t, "account-token"); !strings.HasPrefix(got, "GET /v1/pending?approver=alice ") {
 					t.Errorf("the broker DISPATCH_AGENT_SECRETS_URL names received %q, want alice's pending list", got)
 				}
 				request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
@@ -1201,28 +1206,27 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 				}
 			})
 		},
-		"DISPATCH_AGENT_SECRETS_TOKEN": func(t *testing.T) {
+		"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": func(t *testing.T) {
 			broker := map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example"}
-			refusedWith(t, broker, "DISPATCH_AGENT_SECRETS_TOKEN")
-			broker["DISPATCH_AGENT_SECRETS_TOKEN"] = " bare-token "
-			if boot := resolveWith(t, broker); boot.AgentSecretsToken != "bare-token" {
-				t.Errorf("bare: AgentSecretsToken = %q", boot.AgentSecretsToken)
+			refusedWith(t, broker, "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE")
+			broker["DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"] = " /var/run/secrets/broker/token "
+			if boot := resolveWith(t, broker); boot.AgentSecretsTokenFile != "/var/run/secrets/broker/token" {
+				t.Errorf("AgentSecretsTokenFile = %q, want the trimmed path", boot.AgentSecretsTokenFile)
 			}
-			broker["DISPATCH_AGENT_SECRETS_TOKEN_FILE"] = writeFile(t, "token", "  file-token\n")
-			if boot := resolveWith(t, broker); boot.AgentSecretsToken != "file-token" {
-				t.Errorf("both: AgentSecretsToken = %q, want the file's", boot.AgentSecretsToken)
-			}
+			// The path is never read at boot: the client reads it on each call, since the kubelet
+			// rewrites a projected token in place.
 			missing := filepath.Join(t.TempDir(), "missing")
-			broker["DISPATCH_AGENT_SECRETS_TOKEN_FILE"] = missing
-			refusedWith(t, broker, "DISPATCH_AGENT_SECRETS_TOKEN_FILE")
-			// Without a broker URL the token is never read, so an unreadable file refuses nothing.
-			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_TOKEN_FILE": missing}); boot.AgentSecretsToken != "" {
-				t.Errorf("no broker: AgentSecretsToken = %q", boot.AgentSecretsToken)
+			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_URL": "https://broker.example", "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": missing}); boot.AgentSecretsTokenFile != missing {
+				t.Errorf("AgentSecretsTokenFile = %q, want the path a boot does not read", boot.AgentSecretsTokenFile)
 			}
-			// The bearer the broker receives on the router's relay.
+			// Without a broker URL nothing is required and no client is built.
+			if boot := resolveWith(t, map[string]string{"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": missing}); boot.AgentSecretsTokenFile != "" {
+				t.Errorf("no broker: AgentSecretsTokenFile = %q", boot.AgentSecretsTokenFile)
+			}
+			// The bearer the broker receives on the router's relay: the file's trimmed contents.
 			t.Run("router", func(t *testing.T) {
-				if got := brokerReceived(t, " ui-token "); !strings.HasSuffix(got, " Bearer ui-token") {
-					t.Errorf("the broker received %q, want Authorization Bearer ui-token", got)
+				if got := brokerReceived(t, " account-token\n"); !strings.HasSuffix(got, " Bearer account-token") {
+					t.Errorf("the broker received %q, want Authorization Bearer account-token", got)
 				}
 			})
 		},
@@ -1451,5 +1455,46 @@ func sharedAgentTokenListReachesTheAPIAndTheDocumentWebsocket(t *testing.T) {
 		if strings.Contains(logged.String(), token) {
 			t.Errorf("the log holds the token %q", token)
 		}
+	}
+}
+
+// TestACredentialPageWithAnUnreadableAccountTokenDoesNotBlameTheBroker: Dispatch's boot no longer
+// reads the file DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE names, so a wrong path or an empty file
+// boots, and only the first credential page finds it out. That call never reaches the broker, so
+// the answer must not be AGENT_SECRETS_UNAVAILABLE, the code that tells an operator the broker is
+// unreachable: what is wrong is Dispatch's own credential, which the operator fixes in Dispatch's
+// deployment, not in the broker's.
+func TestACredentialPageWithAnUnreadableAccountTokenDoesNotBlameTheBroker(t *testing.T) {
+	for name, tokenFile := range map[string]string{
+		"a path that does not exist": filepath.Join(t.TempDir(), "missing"),
+		"an empty file":              writeFile(t, "account-token", "\n"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			called := false
+			broker := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				called = true
+				_, _ = w.Write([]byte(`{"requests":[]}`))
+			}))
+			defer broker.Close()
+			boot := resolveWith(t, map[string]string{
+				"DISPATCH_AGENT_SECRETS_URL":                broker.URL,
+				"DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE": tokenFile,
+			})
+			request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
+			response := httptest.NewRecorder()
+			routerFor(t, boot, routes.AppContextOptions{}).ServeHTTP(response, request)
+			if called {
+				t.Fatal("the broker was called with no token Dispatch could read")
+			}
+			var answer struct {
+				Code string `json:"code"`
+			}
+			if err := json.Unmarshal(response.Body.Bytes(), &answer); err != nil {
+				t.Fatalf("GET /api/v1/credential-requests answered %d %s, which is not a JSON error", response.Code, response.Body.String())
+			}
+			if answer.Code == "AGENT_SECRETS_UNAVAILABLE" {
+				t.Fatalf("GET /api/v1/credential-requests = %d %s: the broker was never called, so the answer must name Dispatch's own unreadable ServiceAccount token, not an unreachable broker", response.Code, response.Body.String())
+			}
+		})
 	}
 }
