@@ -1156,16 +1156,22 @@ client timeout (`internal/dispatch/envoy/client.go`), and production runs one Di
 a pool of `store.sharedPoolSize` connections, so a call made inside a transaction holds one of
 them - and the rows it locked - until the listener answers; that many concurrent ones empty the
 pool and stall every unrelated request, which a listener restart alone is enough to cause. A
-read (`Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing held; the
-transaction then re-reads under its own lock whatever the resolution depended on and decides
-with the resolution only while the locked row still agrees, taking it once more when it does
-not and answering a conflict after that. `api/envoy_resolve.go` owns that loop
+read (`Session`, `Sessions`, `Role`, `Interest`, `ListInterests`) is resolved first, with nothing
+held; the transaction then re-reads under its own lock whatever the resolution depended on and
+decides with the resolution only while the locked row still agrees, taking it once more when it
+does not and answering a conflict after that. `api/envoy_resolve.go` owns that loop
 (`resolveThenLock`, `errStaleResolution`), the delivery read every send resolves through
 (`resolveDeliveryTarget`) and the settle half (`settleDeliveryAttempt`, `attemptClaim`,
 `claimLapsed`, `deliveryOutcome`, `receiptError`); its callers are `api/comment_create.go`
 (the mention and route resolution behind `suppress_route`), `api/comment_delivery.go` and
 `api/message_delivery.go` (a delivery's recipient, its claim and its settle) and
-`api/issue_claim.go` (the holder's liveness, on both the claim and the release route). A write -
+`api/issue_claim.go` (the holder's liveness, on both the claim and the release route). Three of
+those decisions now read one session by id rather than scanning the live list: a comment mention's
+`session:` target, each selected recipient of a broadcast (`resolveBroadcastSessions`, eight reads
+in flight under one five-second budget) and whether an issue's claim holder is still working
+(`fetchLiveSessions`). A list is one listener's cache of the session registry, so only the
+per-session read tells a session that ended from one that cache has not refilled yet, and a read
+that did not answer refuses the request `503` rather than reporting the session gone. A write -
 `Envoy.Send`, `Unsubscribe` - runs after a commit, never inside: the attempt is committed first,
 sent, and settled by a second short transaction, so a process that dies in between leaves a
 record of the attempt rather than losing it.
@@ -1920,10 +1926,10 @@ served. `/healthz`, `/metrics` and the webhook routes are served to any `Host`.
 | `/v1/roles/set` | POST | Claims a role for a live session and registers its role topic. Last-claim-wins by default. With `"soft": true` the claim lands only if the role is unheld, already this session's, held by a session that is no longer live, or held by the declared `previous_session_id` (the id a fork/branch continues); any other live holder answers `409 {error, role, holder}` and nothing changes. |
 | `/v1/interests/subscribe` | POST | Persists session topics, route metadata, optional delivery `capabilities`, and `host` (where the session process actually runs, as the client's `machineID()` reports it — distinct from `machine_id`, always the registering listener's own machine, which keeps its routing meaning); registrations without capabilities persist `[]`, and one without `host` (an older plugin) falls back to `machine_id` on every read. The response can include `warnings` when a GitHub repository has no retained events, and when a GitHub topic's token after its owner and name is not one of `contracts.GithubTopicKinds` or a wildcard. When a kind follows the extra tokens, or the name holds an empty token, the name was spelled with its dot, and the warning names the spelling Envoy publishes (`notifications.github.acme.site.io.pr.7.>` → `acme.site_io`). Otherwise the warning says the token is not a GitHub topic kind and names the kinds (`notifications.github.acme.widgets.checks.>`). |
 | `/v1/interests/unsubscribe` | POST | Removes the supplied topics and returns them in `removed`. |
-| `/v1/sessions` | GET | Lists live sessions; optional case-sensitive substring filters are `dir` and `title`. Rows include `roles`, `capabilities`, `last_seen`, `machine_id` (the registering listener's own machine; routing stays keyed on this) and `host` (the session's real machine, falling back to `machine_id` for a session whose plugin predates the field). |
+| `/v1/sessions` | GET | Lists live sessions; optional case-sensitive substring filters are `dir` and `title`. Rows include `roles`, `capabilities`, `last_seen`, `machine_id` (the registering listener's own machine; routing stays keyed on this) and `host` (the session's real machine, falling back to `machine_id` for a session whose plugin predates the field). The rows come from this listener's cache of the session registry, and a list cannot be made authoritative key by key: while that cache refills, a working session is simply missing from it, and a caller cannot tell that from a session that ended. A caller holding one session id asks `/v1/registry/<session_id>` instead. |
 | `/v1/interests/` | GET | Lists persisted interests. |
 | `/v1/interests/<session_id>` | GET, DELETE | Gets or removes a session's persisted interests. |
-| `/v1/registry/<session_id>` | GET | Gets a live session registry entry. |
+| `/v1/registry/<session_id>` | GET | The authoritative answer for one session: is it live, and how is it named? The read goes through this listener's cache to the session bucket, so a session the cache does not hold yet — the bucket was recreated and the watcher is still refilling it, or another listener registered the session — is still found. A 200 carries the same body a row of `GET /v1/sessions` does (`session_id`, `machine_id`, `host`, `dir`, `port`, `title`, `capabilities`, `self_subscribed`, `topics`, `roles`, `updated_at`, `last_seen`). It refuses three ways: a 413 naming its size or a 400 naming the key for an id NATS would refuse as a KV key, `404 {"error":"no live session <id>"}` only when the bucket holds no key for it, and `503 {"error":"envoy: the message bus did not answer: <reason>"}` with `Retry-After: 1` for a read that did not answer — never a session a caller may take for ended. |
 | `/v1/sessions/<session_id>` | DELETE | Removes a live session registration. |
 
 `send` and `publish` accept optional `in_reply_to`, `supersedes`, `urgency`,
