@@ -309,9 +309,11 @@ interface Logged {
   error?: string;
 }
 /** What the CLI logs for a call when the fixture says nothing else: each `dispatch` command the
- * call ran, as a success, when the call exited 0 and its output shows no refusal line. The CLI
- * logs no `--help` or `--dry-run` call, and no refusal of its own arguments (dispatch-cli.ts
- * runDispatchCli). A fixture whose call the CLI logged otherwise names its lines. */
+ * call ran, as a success, when the call exited 0 and its output shows no refusal line, and no
+ * `--help` or `--dry-run` call. A refused call logs nothing by default. The CLI logs a refusal too
+ * when the call knows its session (dispatch-cli.ts runDispatchCli): under the command's tool, or
+ * under `dispatch` for a command it cannot name. A fixture that models such a call names its lines,
+ * and one that leaves them out models a call that knew no session. */
 const loggedRun = (command: string, exit: number, text: string): Logged[] =>
   exit !== 0 || cliRefusals(text).length > 0
     ? []
@@ -1077,6 +1079,45 @@ specRun("spec-writing-head-58", {
     finish
   ),
 });
+// A usage refusal the CLI both prints and logs (an unknown command, under tool `dispatch`), after a
+// skill read earlier in the same call. The ledger line and the printed refusal are one refusal:
+// counted once, at the command, so the read before it is no read between it and its fix.
+const unknownCommand =
+  "dispatch: unknown command frobnicate; the commands are: issue, issue-update, claim, ask, edit-ask, resolve-ask, resolve-comment, follow, comment, suggest, message, doc-edit, doc-read, request-approval, artifact, read, search, issues, project, projects, architecture-sync, open-asks, whoami\nRun dispatch --help.";
+const usageRefused = (name: string) =>
+  sh(
+    "x15",
+    `cat ${path.join(runs, name, "home", "skills", "dispatch", "SKILL.md")}; dispatch frobnicate`,
+    2,
+    `# Dispatch\n${unknownCommand}`,
+    [{ tool: "dispatch", error: unknownCommand }]
+  );
+// Fixed by the next spec write, with no skill read between.
+specRun("spec-writing-head-59", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    usageRefused("spec-writing-head-59"),
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// Never fixed: one refusal block, not two.
+specRun("spec-writing-head-60", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish,
+    usageRefused("spec-writing-head-60")
+  ),
+});
 // A refusal fixed by a later call that reads a skill file after its dispatch command: that read
 // comes after the fix.
 const laterSkill = path.join(
@@ -1692,6 +1733,19 @@ test("refusals: a refusal in an eval cell's output counts when the CLI logged no
   expect(row).toContain(`    ${noHost.trim()}`);
   expect(row).toContain("no later dispatch call succeeded");
   expect(scoresOf("spec-writing-head-58")).toEqual(allPass);
+});
+
+// Catches: a usage refusal the CLI prints and logs counted twice, once from the output and once from
+// the ledger, where the ledger copy, attributed to the call alone, counts the call's earlier skill
+// read as a read between the refusal and its fix.
+test("refusals: a usage refusal the CLI prints and logs is one refusal, at its command", () => {
+  expect(scoresOf("spec-writing-head-59")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-59")).not.toContain("refused call:");
+  expect(scoresOf("spec-writing-head-60")).toEqual({ ...allPass, refusals: "false" });
+  const row = rowOf("spec-writing-head-60");
+  expect(row.split("refused call:")).toHaveLength(2);
+  expect(row).toContain("refused call: dispatch frobnicate (dispatch, logged at ");
+  expect(row).toContain("no later dispatch call succeeded");
 });
 
 test("refusals: a run whose CLI ledger is missing is a rig error naming the file", () => {

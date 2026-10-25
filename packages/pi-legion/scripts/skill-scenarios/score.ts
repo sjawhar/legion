@@ -1084,10 +1084,12 @@ type LedgerLine = z.infer<typeof LedgerLine>;
 /** The run's dispatch CLI ledger: `results.jsonl` in the CLI's state directory for the session the
  * transcript's header names, under the run's HOME (rig.sh base_env sets no other state directory).
  * The CLI logs every call it ran, refused or not, whatever the shell did with its output: a pipe,
- * `$(…)`, a loop or another program (Python's subprocess.run) hides nothing from it. It logs no
- * refusal of a command's own arguments (`dispatch <command> was not called`, exit 1, when the
- * parse refuses it), no usage refusal (`dispatch: …`, exit 2), and no `--help` or `--dry-run`
- * call. A run with no ledger is the rig's fault: its CLI kept no record where the rig reads it. */
+ * `$(…)`, a loop or another program (Python's subprocess.run) hides nothing from it. A refusal the
+ * CLI makes before the call reaches Dispatch is logged too whenever the call knows its session: a
+ * refusal of a command's own arguments (`dispatch <command> was not called`, exit 1) under its
+ * tool, and a usage refusal (`dispatch: …`, exit 2) under its tool, or under `dispatch` when the
+ * CLI could not name the command. It logs no `--help` call and no dry run that passed. A run with
+ * no ledger is the rig's fault: its CLI kept no record where the rig reads it. */
 function ledgerOf(runDir: string, session: string): LedgerLine[] {
   const state = { XDG_STATE_HOME: path.join(runDir, "home", ".local", "state") };
   const file = path.join(sessionDirectory(state, session), "results.jsonl");
@@ -1149,15 +1151,23 @@ function refusalBlocks(
   }));
   const logged = new Set<number>();
   for (const call of calls) {
-    // The commands of the call the CLI can have logged: no `--help`, no `--dry-run`, and no command
-    // whose output shows a usage refusal (`dispatch: …`), which the CLI never logs.
+    // The commands of the call the CLI logged: every one but `--help`, and a `--dry-run` only when
+    // its argument check refused it. A usage refusal (`dispatch: …`) is logged too, under tool
+    // `dispatch` when the CLI could not name the command, so the ledger line and the printed
+    // refusal are one refusal and match here.
     const candidates = ops.flatMap((op, place) =>
       op.kind === "dispatch" &&
       op.step.id === call.step.id &&
       op.call.flag("help") === undefined &&
-      op.call.flag("dry-run") === undefined &&
-      cliRefusals(op.refusal ?? "")[0]?.command !== null
-        ? [{ place, tool: toolOf(op.call), refused: op.refusal !== undefined }]
+      (op.call.flag("dry-run") === undefined || op.refusal !== undefined)
+        ? [
+            {
+              place,
+              tool: toolOf(op.call),
+              refused: op.refusal !== undefined,
+              usage: cliRefusals(op.refusal ?? "")[0]?.command === null,
+            },
+          ]
         : []
     );
     let next = 0;
@@ -1166,7 +1176,8 @@ function refusalBlocks(
       const found = candidates.findIndex(
         (candidate, index) =>
           index >= next &&
-          candidate.tool === entry.line.tool &&
+          (candidate.tool === entry.line.tool ||
+            (entry.line.tool === "dispatch" && candidate.usage)) &&
           (entry.line.error !== undefined || !candidate.refused)
       );
       const candidate = candidates[found];
