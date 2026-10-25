@@ -2,78 +2,84 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-184",
-  "completed": "2026-10-25T03:40:00Z",
+  "completed": "2026-10-25T04:55:00Z",
   "proof": [
     {
-      "criterion": "A1 (R1). Three sessions post twice each on one issue. The write response to the sixth post reports two writes for its own session (the `session_writes_since_human` field), and the `dispatch` command prints no cadence line at all; the same run on the commit before the change reports six and prints \"Stop posting here until a human replies.\"",
+      "criterion": "A1 (R1). Three sessions post twice each on one issue. The write response to the sixth post reports two writes for its own session, and the `dispatch` command prints no cadence line; the same run on the commit before the change reports six and prints \"Stop posting here until a human replies.\"",
       "surface": "The `dispatch` command an agent runs (this branch's CLI, packages/pi-envoy/dist/dispatch.js), against two Dispatch servers started by packages/dispatch/e2e/run-server.sh on a real Postgres 17 with pgvector: port 8777 built from this change, port 8778 built from the commit before it (7bf2759c6e17), each on its own database.",
-      "command": "bash /tmp/infra-184/prove.sh (section A1): six `dispatch message` runs with three values of DISPATCH_SESSION_ID (a1-one, a1-two, a1-three), interleaved so the sixth is a1-three's second, then `jq -r 'select(.tool==\"dispatch_message\")|.details.advice.session_writes_since_human' <state>/sessions/a1-three/results.jsonl | tail -1`",
-      "observed": "The sixth run printed only `Posted message ea1eab7e-752b-4347-8523-1350b71677c1 (dispatch://PRF-1/message/...)` and recorded session_writes_since_human = 2, its own two posts. No cadence line.",
-      "headSha": "ab149a97d9f0670e69974040409ca1becc3a2023",
-      "negativeControl": "The identical six-post sequence against the pre-change server recorded session_writes_since_human = 6 and printed `Posted. You've sent 6 messages on PRF-3 with no human response. Stop posting here until a human replies.` — the miscount this issue fixes, reproduced live."
+      "command": "bash /tmp/infra-184/prove.sh (section A1): six `dispatch message` runs with three values of DISPATCH_SESSION_ID, interleaved so the sixth is the third session's second, then `jq -r 'select(.tool==\"dispatch_message\")|.details.advice.session_writes_since_human' <state>/sessions/a1-three/results.jsonl | tail -1`",
+      "observed": "The sixth run printed only its `Posted message …` line and recorded session_writes_since_human = 2, its own two posts. No cadence line.",
+      "headSha": "5d69dae59b4260f4f2fee42e9bada45fe0a6a214",
+      "negativeControl": "The identical six-post sequence against the pre-change server recorded 6 and printed `Posted. You've sent 6 messages on PRF-1 with no human response. Stop posting here until a human replies.`"
     },
     {
       "criterion": "A2 (R1). Negative control: one session posts 6 times with no human event. Its last answer carries \"Stop posting\".",
       "surface": "The same branch `dispatch` command against the server built from this change on port 8777.",
       "command": "bash /tmp/infra-184/prove.sh (section A2): six `dispatch message` runs, all with DISPATCH_SESSION_ID=a2-solo, on a fresh issue with no human event.",
-      "observed": "The sixth run printed `Posted. You've sent 6 messages on PRF-2 with no human response. Stop posting here until a human replies.` and recorded session_writes_since_human = 6: a session's own cadence is still counted and still told.",
-      "headSha": "ab149a97d9f0670e69974040409ca1becc3a2023",
-      "negativeControl": "A1's run on the same server: six posts split over three sessions produced no cadence line and a count of 2, so the line fires on a session's own posts and on nothing else."
+      "observed": "The sixth run printed `Posted. You've sent 6 messages on PRF-2 with no human response. Stop posting here until a human replies.` and recorded 6.",
+      "headSha": "5d69dae59b4260f4f2fee42e9bada45fe0a6a214",
+      "negativeControl": "A1's run on the same server: six posts split over three sessions produced no cadence line and a count of 2."
     },
     {
       "criterion": "A3 (R2), the claim and release half. A claim on an issue that carries `legion`, one that carries `Legion`, and one whose parent carries it, none of them name `issue-update`; nor does releasing a claim on them.",
-      "surface": "The same branch `dispatch` command against the server built from this change on port 8777, on four issues created through the command itself: PRF-3 (label `legion`), PRF-4 (label `Legion`), PRF-6 (no label, parent PRF-5 labelled `legion`), PRF-7 (label `infra`).",
-      "command": "bash /tmp/infra-184/prove.sh (section A3 part 1): `dispatch claim --issue <KEY>` then `dispatch claim --issue <KEY> --release` for each of the four, each run's stdout asserted both ways — it must not match `issue-update`, and it must match the sentence naming Legion as the mover, so the check cannot pass on empty output.",
+      "surface": "The same branch `dispatch` command against the server built from this change on port 8777, on four issues created through the command itself (label `legion`, label `Legion`, a child of a labelled parent, and an issue labelled `infra`).",
+      "command": "bash /tmp/infra-184/prove.sh (section A3 part 1): `dispatch claim --issue <KEY>` then `--release` for each, each run's stdout asserted both ways — it must not match `issue-update`, and it must match the sentence naming Legion as the mover.",
       "observed": "All three Legion-owned issues answered, on both routes, `… Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone.` and named `issue-update` nowhere.",
-      "headSha": "ab149a97d9f0670e69974040409ca1becc3a2023",
-      "negativeControl": "PRF-7, with no `legion` label on it or above it, still answered `… a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.` on the claim and `… — move it yourself if that is no longer where the work is.` on the release, byte for byte today's text."
+      "headSha": "5d69dae59b4260f4f2fee42e9bada45fe0a6a214",
+      "negativeControl": "The unlabelled issue still answered `… move it to in_progress with dispatch issue-update when you start …` on the claim and `… — move it yourself if that is no longer where the work is.` on the release, byte for byte today's text."
     },
     {
-      "criterion": "A3 (R2), the triage half. A comment on a triage issue carrying the label, and on a triage issue whose parent carries it, prints nothing about triage, and the advice that write recorded shows the issue in triage with Legion owning its status, so an absent line cannot be mistaken for absent advice. Negative control: the same comment on a triage issue with no such label prints \"is still in triage\" and its advice shows Legion does not own that status. Each comment is that session's first write on that issue.",
-      "surface": "The same branch `dispatch` command against the server built from this change on port 8777, on three triage issues: PRF-8 (label `legion`), PRF-10 (no label, parent PRF-9 labelled `legion`), PRF-11 (label `infra`). Each row runs under its own DISPATCH_SESSION_ID and its own DISPATCH_STATE_DIR, so the comment is that session's first write on that issue — the line shows once per issue per session and the command keeps that memory on disk (packages/envoy-client/src/dispatch-session-state.ts).",
-      "command": "bash /tmp/infra-184/prove.sh (section A3 part 2): `dispatch comment --issue <KEY> --body \"first write by <session>\"` per row, then `jq -r 'select(.tool==\"dispatch_comment\")|.details.advice.issue_status' …` and the same for `.details.advice.legion_managed_status` from that session's results.jsonl.",
-      "observed": "PRF-8 recorded issue_status=triage legion_managed_status=true and printed `Posted comment 804a2880-4849-44b8-ad5b-e4a733fe7d9f` and nothing else. PRF-10, the child of a labelled parent, recorded issue_status=triage legion_managed_status=true and likewise printed only its comment id. Both assertions are positive as well as negative: the advice proves the write was advised and the issue was in triage, so the missing line is the fix and not a missing answer.",
-      "headSha": "ab149a97d9f0670e69974040409ca1becc3a2023",
-      "negativeControl": "PRF-11, a triage issue with no `legion` label on it or above it, recorded issue_status=triage legion_managed_status=false and printed `PRF-11 is still in triage — nobody can see its development status. See the \"dispatch\" skill, \"Issue status is yours to move\".` The same comment on a labelled triage issue against the server built from the commit before the change printed that line too, so the line's absence is this change and not the fixture."
+      "criterion": "A3 (R2), the triage half. A comment on a triage issue carrying the label, and on a triage issue whose parent carries it, prints nothing about triage, and the advice that write recorded shows the issue in triage with Legion owning its status. Negative control: the same comment on a triage issue with no such label prints \"is still in triage\" and its advice shows Legion does not own that status. Each comment is that session's first write on that issue.",
+      "surface": "The same branch `dispatch` command against the server built from this change on port 8777, on three triage issues, each row under its own DISPATCH_SESSION_ID and DISPATCH_STATE_DIR so the comment is that session's first write on that issue (the line shows once per issue per session and the command keeps that memory on disk, packages/envoy-client/src/dispatch-session-state.ts).",
+      "command": "bash /tmp/infra-184/prove.sh (section A3 part 2): `dispatch comment --issue <KEY> --body \"first write by <session>\"` per row, then `jq` over that session's results.jsonl for `.details.advice.issue_status` and `.details.advice.legion_managed_status`.",
+      "observed": "The labelled issue and the child of a labelled parent each recorded issue_status=triage legion_managed_status=true and printed their comment id and nothing else.",
+      "headSha": "5d69dae59b4260f4f2fee42e9bada45fe0a6a214",
+      "negativeControl": "The unlabelled triage issue recorded issue_status=triage legion_managed_status=false and printed `PRF-11 is still in triage — nobody can see its development status. See the \"dispatch\" skill, \"Issue status is yours to move\".` The same comment on a labelled triage issue against the pre-change server printed that line too, so the absence is this change and not the fixture."
     },
     {
-      "criterion": "A4 (R3). `dispatch doc-edit --issue <KEY> --ops-json-file -` with no artifact edits the spec, and reaches the same document as `--artifact spec`. Negative control: on an issue that also carries an uploaded plan.md, `--artifact plan.md` still edits that document and leaves the spec alone.",
+      "criterion": "A4 (R3). `dispatch doc-edit --issue <KEY> --ops-json-file -` with no artifact edits the spec, and reaches the same document as `--artifact spec`. Negative control: `--artifact plan.md` still edits that document and leaves the spec alone.",
       "surface": "The same branch `dispatch` command against the server built from this change on port 8777, on an issue created with a spec and carrying an uploaded plan.md.",
-      "command": "bash /tmp/infra-184/prove.sh (section A4): `dispatch doc-edit --issue <KEY> --ops-json-file -` with no `--artifact`, then `dispatch doc-read --issue <KEY> --artifact spec`, then a second edit with `--artifact spec`, then one with `--artifact plan.md`, then `dispatch doc-read --issue <KEY>`.",
-      "observed": "The no-artifact edit applied and minted spec version 2; `--artifact spec` read the new text back; the following `--artifact spec` edit minted version 3, so both reached one artifact. This is the command `skills/legion-architect/SKILL.md:114` shows, which was refused before.",
-      "headSha": "ab149a97d9f0670e69974040409ca1becc3a2023",
-      "negativeControl": "`--artifact plan.md` minted plan.md version 2 while the spec stayed at version 3 with its own text; `--project PRF` with no artifact is still refused, `Exactly one of issue and project is required; with project, artifact names the document.`"
+      "command": "bash /tmp/infra-184/prove.sh (section A4): the no-artifact edit, `doc-read --artifact spec`, a second edit with `--artifact spec`, one with `--artifact plan.md`, then `doc-read` of the spec.",
+      "observed": "The no-artifact edit applied and minted spec version 2; `--artifact spec` read the new text back; the following `--artifact spec` edit minted version 3, so both reached one artifact.",
+      "headSha": "5d69dae59b4260f4f2fee42e9bada45fe0a6a214",
+      "negativeControl": "`--artifact plan.md` minted plan.md version 2 while the spec stayed at version 3 with its own text; `--project PRF` with no artifact is still refused."
+    },
+    {
+      "criterion": "Review round 1's own two clauses of R2, which had no unit case and which the reviewer asked be locked: an issue two or more links below a labelled issue, and the label written in a case other than `legion` or `Legion`.",
+      "surface": "The same branch `dispatch` command against the server built from this change on port 8777, on a fresh chain: PRF-13 labelled `legion` → PRF-14 (no label) → PRF-15 (no label, two links below the label), and PRF-16 labelled `LEGION`. Both the claim result and the triage line were driven, each comment under its own session and state directory.",
+      "command": "The ad-hoc run recorded in this round's report: `dispatch claim --issue PRF-15` and `--issue PRF-16`, then `dispatch comment` on each under a fresh session, with `jq` over the recorded advice.",
+      "observed": "PRF-15, two links below the label, answered `… Legion's daemon moves this issue's status on an issue it runs …` on the claim and recorded issue_status=triage legion_managed_status=true on the comment, printing no triage line. PRF-16, labelled `LEGION`, answered the same on both. So the recursion and the case-insensitive match are proven on the real surface as well as by the new unit rows in write_advice_test.go and issue_claim_test.go.",
+      "headSha": "5d69dae59b4260f4f2fee42e9bada45fe0a6a214",
+      "negativeControl": "A3's unlabelled rows in the same run: an issue with no `legion` label on it or above it answers `issue-update` on the claim and still prints the triage line, so the two new rows are not a vacuous `true` everywhere."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/write_advice.go — `writeAdvice.LegionManagedStatus *bool` (omitted when nil), resolved in `computeWriteAdvice` through the claim routes' own `legionManagedStatus` helper, inside the advice's existing bounded savepoint and only when the issue's status is `triage`; `computeWriteAdvice` now takes that status and owns `IssueStatus`",
-    "packages/envoy/internal/dispatch/api/issue_claim.go — the helper's depth-cap comment corrected: a claim never reaches a chain deeper than the cap, a write's advice does, and there it answers \"not managed\" and the line prints",
-    "packages/envoy/internal/dispatch/model/model.go — `IssueStatusTriage`, the one spelling of the status the advice reads, referenced by `IssueStatuses`",
-    "packages/envoy/internal/dispatch/api/write_advice_test.go — the answer on a labelled issue, on `Legion`, on a child of a labelled parent and on an unlabelled issue; the field omitted on a human write and on a write past triage; `rawAdviceFields`, one raw-advice read at its four call sites",
-    "packages/envoy/internal/dispatch/api/issue_claim_test.go — `claimLabelledIssueKey` becomes `labelledIssueKey`, the one labelled-issue seed both test files use",
-    "packages/contracts/src/dispatch-api.ts — `WriteAdvice.legion_managed_status?: boolean`, documented as resolved only where it decides a line",
-    "packages/envoy-client/src/dispatch-execute.ts — `renderAdvice` prints no triage line when the field is true, and the memo is left unmarked for a line that was never printed",
-    "packages/envoy-client/src/__tests__/dispatch-advice.test.ts — the line dropped on `true`, still printed on `false`, and still available to an issue that later leaves Legion's hands",
-    "packages/envoy/AGENTS.md — the advice paragraph and the query note carry the new field, when it is resolved, and what the walk costs",
-    "skills/dispatch/references/issues.md — the two lines that documented the triage advice gain the Legion exception `skills/dispatch/SKILL.md` already carries",
+    "packages/envoy/internal/dispatch/api/suggestions_test.go — `TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails` opens both its asks as a session, the only actor that reaches the advice queries, so the armed failure hook fires again and the suggestions-only fallback is exercised",
+    "packages/envoy/internal/dispatch/api/write_advice_test.go — a grandchild row and a `LEGION` row on the advice table",
+    "packages/envoy/internal/dispatch/api/issue_claim_test.go — the same two rows on the claim table, `claimedIssue.LegionManagedStatus` now `*bool` so a test tells omitted from false, and `TestClaimSurvivesAFailingLegionLabelWalk`",
+    "packages/envoy/internal/dispatch/api/issue_claim.go — `claimLegionManagedStatus` runs the walk in a savepoint of the claim's transaction, logs a failure once and answers nil; `claimApplied.legionManagedStatus` and `claimAnswer.LegionManagedStatus` are `*bool` with `omitempty`; the comment that claimed the row lock holds an issue's ancestors is corrected",
+    "packages/envoy/internal/dispatch/api/issue_parent.go — `legionLabel`, `legionManagedStatusSQL` and `legionManagedStatus` moved here beside `parentDepthCap`, whose doc comment now lists this walk among the recursive issue walks it bounds; the helper's doc says what the caller's lock does and does not hold still",
+    "packages/envoy/internal/dispatch/api/write_advice.go — the non-session guard's comment no longer names a service actor, which `bearerSessionActor` refuses, and says why the guard is on the kind; the cross-file pointer the move made redundant is gone",
+    "packages/contracts/src/dispatch-api.ts — `ClaimedIssue.legion_managed_status` optional, documented as absent from an older Dispatch or a failed walk and read as not Legion-managed",
+    "packages/envoy-client/src/dispatch-execute.ts — the claim result reads the field `=== true`",
+    "packages/envoy-client/src/__tests__/dispatch-execute.test.ts — a claim answer that omits the field renders today's wording on both routes",
     "packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js — rebuilt (`bun run build`, verified with `bun run check-dist`)"
   ],
   "trickyParts": [
-    "The field is a pointer, omitted when nil, and that is load-bearing twice: a non-session write is answered before the savepoint and runs no query, and a write past triage runs no walk. A plain bool would serialise `false` in both cases and state, wrongly, that Legion does not own the status. Two Go tests read the advice as raw JSON for exactly that reason — a typed decode cannot tell an omitted field from a false one.",
-    "Each proof comment is its session's first write on its issue. The triage line shows once per issue per session and the command keeps that memory on disk (packages/envoy-client/src/dispatch-session-state.ts), so a second comment in one session would show no line whatever the server answered, and a proof written that way would pass with the feature broken.",
-    "The client is checked with `!== true`, not `=== false`: the field is absent on every write the server did not resolve it for, and an absent field must keep the line."
+    "The failed walk has to run in a savepoint, not merely be logged: a failed statement aborts the transaction it ran in, so on the claim's own transaction a logged-and-ignored failure would still have turned the claim's COMMIT into a rollback. `claimLegionManagedStatus` opens a nested `tx.Begin`, the same device `writeAdvice` uses to keep a write whose advice query failed. `TestClaimSurvivesAFailingLegionLabelWalk` proves it: without the savepoint the claim is gone.",
+    "That test forces the failure by swapping the package-level `legionManagedStatusSQL` var for a statement Postgres refuses and restoring it in `t.Cleanup`. The package's advice hook (`newFailingAdviceHandler`) fires from `computeWriteAdvice` alone and cannot reach `claimWrite`, and a production hook that exists only for a test has no business in the claim path. No test in this package calls `t.Parallel()`, so the swap cannot reach another test.",
+    "The vacuous suggestions test is the second instance of one defect: a non-session early return silently disarms every advice-failure test whose actor is a user. The first (`TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails`) was found by running the whole package; this one was found by the reviewer. The evidence either way is the `dispatch: write advice omitted … query=session_writes_since_human` warning `logAdviceError` emits — its absence is what makes such a test vacuous."
   ],
   "deviations": [
-    "The committed plan (`.legion/INFRA-184/plan.json`, reaffirmed for generation 3) records departure 2: \"a fourth wrong text, out of scope here\". Spec version 5 overturned that departure and brought the triage advice into R2, and version 6 settled how. The plan was not rewritten, so a reader must not take its departure 2 as the current scope; the spec is.",
-    "The spec's Acceptance names `packages/dispatch/e2e/run-server.sh` as the server, which is the plan's own recorded departure from `bun run dispatch:local`; this round used it.",
-    "The Postgres this round's Go suite ran against was initialised with `--locale-provider=icu --icu-locale=en-US` rather than the plan's `--locale=C`, because the api package's rank test refuses to run on a byte-order database and says so itself (rank_test.go:317). Nothing in the product changed for it."
+    "The committed plan (`.legion/INFRA-184/plan.json`, reaffirmed for generation 3) records departure 2, \"a fourth wrong text, out of scope here\". Spec version 5 overturned it and version 6 settled how, so the plan's departure 2 is not the current scope; the spec is.",
+    "The spec's Acceptance names `packages/dispatch/e2e/run-server.sh` as the server, which is the plan's own recorded departure from `bun run dispatch:local`.",
+    "The Postgres the Go suite ran against was initialised with `--locale-provider=icu --icu-locale=en-US` rather than the plan's `--locale=C`, because the api package's rank test refuses to run on a byte-order database (rank_test.go:317). Nothing in the product changed for it.",
+    "The reviewer's named fast-follow — moving the Legion helpers to `issue_parent.go` — was done in this round at the architect's direction rather than deferred, so the pull request's `Fast-follow:` line is `none`."
   ],
-  "openQuestions": [
-    "Considered and not done, reported to the architect: a freshly created issue is always in triage, and the client suppresses the triage line for `dispatch_issue`, so a session's issue creation resolves `legion_managed_status` for an answer nothing reads. Gating that away needs the route or the tool at `computeWriteAdvice`, which the server does not have, and would leave the same wart for `dispatch issue-update --status triage`. The spec's rule — resolve it where the issue is in triage — is the one the server can state truthfully, so it stands.",
-    "The architect's call the plan named is settled and unchanged: the field is `legion_managed_status` and the label name is hard-coded as `legion` in packages/envoy (issue_claim.go, `legionLabel`), the way the daemon hard-codes its own copy (packages/daemon/internal/dispatch/types.go:53, `LegionLabel`)."
-  ],
+  "openQuestions": [],
   "discoveredComplexity": [
-    "The write advice's savepoint cost measured on this rig: the bounded-history test (5,000 seeded events) still passes with a 23.6 ms round trip against its own 2 s bound, and the whole `internal/dispatch/api` package is green. The walk is one recursive parent-chain query bounded by `parentDepthCap`, each step a primary-key lookup on `issues (key)`.",
-    "The depth cap is reachable from the advice path where it was not from the claim path, because a claim loads the issue first and `loadIssue` refuses a chain deeper than 32. The answer there is \"not managed\" and the line prints, which is the safe direction: the reader is told something true of an issue Legion is not running."
+    "Decided, not open (the architect ruled at 2026-10-25T04:28Z): a freshly created issue is always in triage and the client suppresses the triage line for `dispatch_issue`, so a session's `dispatch issue` resolves `legion_managed_status` for an answer nothing reads. No route gate: gating it needs the route or the tool inside `computeWriteAdvice`, which the server does not have, and it would still fire for `dispatch issue-update --status triage` — one skipped primary-key chain walk on a create is not worth a rule the server cannot hold. The rule that stands is the spec's: resolve the answer where the issue is in triage.",
+    "The field is now three-valued on both surfaces and absent means the same thing in both: not asked (a write past triage, a non-session actor) or not answered (a failed walk). Every reader must compare it `=== true`; a `=== false` would invert on a mid-rollout server.",
+    "`envoy-go` is not in `main`'s required set and flaked on `stale_room_eviction_test.go`, a timing test in a package this change does not touch. The re-run of run 40158679659 at the code head `e630167afe10` settled green (21 passed, 0 failed), confirming the flake; `envoy-go-race` had passed the same package at the same head all along."
   ]
 }
