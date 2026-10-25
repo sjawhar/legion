@@ -77,7 +77,7 @@ func (issuePod) claimToken(project, issue string, role claim.Role) (claim.Token,
 
 // prepare refuses a spec with no repository, which the workspace is provisioned from, and resolves
 // the workspace's place on the issue's volume. A resume of a session kept on the volume
-// (sessionInDatabase) expects the volume to hold what it left; a session kept in the database
+// (SessionOnIssueVolume) expects the volume to hold what it left; a session kept in the database
 // expects nothing of the volume, so a resume on a new one provisions its workspace from the
 // issue's pushed branch and continues. A lost volume a resume expected is workspace-init's loud
 // refusal rather than a quiet fresh agent.
@@ -91,7 +91,7 @@ func (issuePod) prepare(l *launch) error {
 		return err
 	}
 	l.workspace = working.Dir
-	l.expectVolume = l.resumeFile != "" && !l.sessionInDatabase()
+	l.expectVolume = l.resumeFile != "" && SessionOnIssueVolume(l.sessionsInDatabase, l.resumeFile)
 	return nil
 }
 
@@ -222,23 +222,25 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 }
 
 // provision is what a new issue pod needs before it starts: it reads whether workspace-init must
-// find the issue's volume holding retained sessions (for a claim whose sessions live on that
-// volume rather than in the database, sessionInDatabase), mints the provisioning token for the
-// repository's owner, makes sure the repository has its cache (EnsureRepositoryCache: one a sweep
-// has not made yet is made now), since a fresh feed comes from that cache alone, waits until the
-// cache's Service is its own (awaitCacheService), since the fetch presents the cache's token at
-// that Service's name, and writes the token to the pod's init-only provisioning Secret with the
-// cache's bearer token. It waits on no other pod, the cache's included: the fetch waits for the
-// cache to be ready itself, and the issue's clone lives on the issue's own volume, which no other
-// pod mounts. A cache that cannot be made, or whose Service is not its own by the boot timeout,
-// fails the launch, with nothing written: the fetch could fill no fresh feed without it.
+// find the issue's volume holding retained sessions — whether any claim of the issue, whichever
+// role's launch makes the pod, recorded a session the volume keeps (SessionOnIssueVolume: every
+// session under file storage, a Claude Code transcript alone under a session database) — mints
+// the provisioning token for the repository's owner, makes sure the repository has its cache
+// (EnsureRepositoryCache: one a sweep has not made yet is made now), since a fresh feed comes from
+// that cache alone, waits until the cache's Service is its own (awaitCacheService), since the
+// fetch presents the cache's token at that Service's name, and writes the token to the pod's
+// init-only provisioning Secret with the cache's bearer token. It waits on no other pod, the
+// cache's included: the fetch waits for the cache to be ready itself, and the issue's clone lives
+// on the issue's own volume, which no other pod mounts. A cache that cannot be made, or whose
+// Service is not its own by the boot timeout, fails the launch, with nothing written: the fetch
+// could fill no fresh feed without it.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
-	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" && !l.sessionInDatabase() {
-		sessions, err := r.store.IssueHasSessions(ctx, r.project, l.spec.Issue)
+	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" {
+		files, err := r.store.IssueSessionFiles(ctx, r.project, l.spec.Issue)
 		if err != nil {
 			return fmt.Errorf("read its issue's retained sessions: %w", err)
 		}
-		l.expectVolume = sessions
+		l.expectVolume = slices.ContainsFunc(files, func(file string) bool { return SessionOnIssueVolume(l.sessionsInDatabase, file) })
 	}
 	owner := l.spec.Repository.Owner()
 	minting, cancel := call(ctx)

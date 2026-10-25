@@ -9,7 +9,7 @@ import "testing"
 
 // The claim is released as a tree close releases it — with its process where one runs, with no
 // locator where none does — and retires with no session and no recorded loss, in memory and in the
-// store, so IssueHasSessions of its issue reads nothing from it.
+// store, so IssueSessionFiles of its issue reads nothing from it.
 func TestAnIssueCloseRetiresTheClaimAndDropsItsSessionWithoutALostWorkspace(t *testing.T) {
 	for _, state := range []ClaimState{StateRegistered, StateReady, StateWorking, StateIdle, StateSuspended} {
 		t.Run(string(state), func(t *testing.T) {

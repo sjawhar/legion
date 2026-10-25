@@ -130,19 +130,22 @@ func readClaims(ctx context.Context, q claimQuerier) ([]supervise.Claim, error) 
 	return claims, nil
 }
 
-// IssueHasSessions is whether any stored claim of issue, retained and retired roles included,
-// recorded a session: the issue's volume must then already hold its clone and that session, so a
-// new role of the issue may be the first to notice the volume holding another role's session
-// disappeared. A session another issue of the same tree recorded is on that issue's own volume and
-// does not count.
-func (s *Store) IssueHasSessions(ctx context.Context, project, issue string) (bool, error) {
-	var exists bool
-	err := s.pool.QueryRow(ctx, `select exists (select 1 from claims where project = $1 and issue = $2 and session_file <> '')`,
-		project, issue).Scan(&exists)
+// IssueSessionFiles are the session files the stored claims of issue recorded, retained and
+// retired roles included, in claim order. Those the issue's volume keeps
+// (sandbox.SessionOnIssueVolume) must still be on it, beside its clone, so a new role of the issue
+// may be the first to notice the volume holding another role's session disappeared. A session
+// another issue of the same tree recorded is on that issue's own volume and is not among them.
+func (s *Store) IssueSessionFiles(ctx context.Context, project, issue string) ([]string, error) {
+	rows, err := s.pool.Query(ctx, `select session_file from claims where project = $1 and issue = $2 and session_file <> '' order by token`,
+		project, issue)
 	if err != nil {
-		return false, fmt.Errorf("read retained sessions of issue %s: %w", issue, err)
+		return nil, fmt.Errorf("read retained sessions of issue %s: %w", issue, err)
 	}
-	return exists, nil
+	files, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("read retained sessions of issue %s: %w", issue, err)
+	}
+	return files, nil
 }
 
 // ClaimIssue is the issue the claim of token is on, from the daemon's own claims and nothing a pane

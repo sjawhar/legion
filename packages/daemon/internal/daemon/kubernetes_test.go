@@ -1075,3 +1075,25 @@ func TestTheBootLogNamesTheDerivedProbeBudgetOnlyWhenItIsDerived(t *testing.T) {
 		})
 	}
 }
+
+// A lost issue volume takes the sessions it kept and no other: under session_store postgres the
+// machines are told a Claude Code transcript lived on it and an Oh My Pi session, in the table, did
+// not, so the Oh My Pi siblings of a lost Claude transcript resume theirs. Under pvc, and under
+// tmux, every session is kept on the volume (nil).
+func TestTheMachinesAreToldWhichSessionsALostVolumeTakes(t *testing.T) {
+	transcript := "/legion/scratch/state/tester/claude/projects/--legion-workspaces-sjawhar-legion-legion-1--/9f1c2d3e-4a5b-4c6d-8e7f-0a1b2c3d4e5f.jsonl"
+	omp := "/home/legion/.omp/profiles/legion/agent/sessions/--legion-workspaces-sjawhar-legion-legion-1--/2026-10-08T12-00-00-000Z_0001.jsonl"
+	if sessionOnVolume(config.Config{Runtime: config.Runtime{Name: "tmux"}}) != nil {
+		t.Error("a tmux daemon's machines are told of sessions kept off the volume, want every session on it")
+	}
+	pvc := config.Config{Runtime: config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{}}}
+	if sessionOnVolume(pvc) != nil {
+		t.Error("a session_store pvc daemon's machines are told of sessions kept off the volume, want every session on it")
+	}
+	postgres := config.Config{Runtime: config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{SessionDSNSecret: "SESSION_DSN"}}}
+	onVolume := sessionOnVolume(postgres)
+	if onVolume == nil || !onVolume(transcript) || onVolume(omp) {
+		t.Fatalf("under session_store postgres the transcript is on the volume: %t, the Oh My Pi session: %t; want true, false",
+			onVolume != nil && onVolume(transcript), onVolume != nil && onVolume(omp))
+	}
+}

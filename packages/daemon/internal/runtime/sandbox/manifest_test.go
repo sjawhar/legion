@@ -2075,11 +2075,10 @@ func TestARecordedSessionIsHeldToItsHarnesssRule(t *testing.T) {
 }
 
 // SessionOnVolume moves an Oh My Pi session file's recorded path onto a mounted volume and refuses
-// a Claude Code transcript with a line naming it: the one-off copy that path is computed for
-// (`legion sessions import`) fills Oh My Pi's session table, which holds no session of a
-// transcript, and a Claude claim's session stays on the volume its role's own Claude Code reads it
-// from. A pane's transcript, under the daemon's state directory rather than a pod's volume, is
-// refused alike: the check is told no configuration directory and reads the shape itself.
+// a Claude Code transcript, naming it, as it refuses every file a pod keeps outside its sessions
+// directory: a pod role's transcript and a pane's, under the daemon's state directory, alike. The
+// one-off copy that path is computed for (`legion sessions import`) refuses a transcript itself,
+// in its own words, before it asks (cmd/legion's importSession).
 func TestSessionOnVolumeRefusesAClaudeTranscript(t *testing.T) {
 	const root = "/mnt/tree"
 	onVolume, err := SessionOnVolume(resumeSession, root)
@@ -2092,8 +2091,26 @@ func TestSessionOnVolumeRefusesAClaudeTranscript(t *testing.T) {
 		"/var/lib/legion/claude/legion-legion-legion-208-tester/projects/--cwd--/" + claudeTranscriptID + ".jsonl",
 	} {
 		if _, err := SessionOnVolume(file, root); err == nil ||
-			!strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), "Claude Code transcript") {
-			t.Errorf("SessionOnVolume(%s) = %v, want a refusal naming it a Claude Code transcript", file, err)
+			!strings.Contains(err.Error(), file) || !strings.Contains(err.Error(), "cannot be resumed on this runtime") {
+			t.Errorf("SessionOnVolume(%s) = %v, want a refusal naming it as no file of the pod's sessions directory", file, err)
+		}
+	}
+}
+
+// Whether a recorded session lives on its issue's volume is the store's and the recorded path's
+// alone: under file storage every session does, and under a session database a Claude Code
+// transcript alone — a pod role's or a pane's — since the table holds every Oh My Pi session.
+func TestSessionOnIssueVolumeFollowsTheStoreAndTheTranscript(t *testing.T) {
+	transcripts := []string{
+		claudeTranscript(claim.RoleTester),
+		"/var/lib/legion/claude/legion-legion-legion-208-tester/projects/--cwd--/" + claudeTranscriptID + ".jsonl",
+	}
+	for _, file := range append([]string{resumeSession}, transcripts...) {
+		if !SessionOnIssueVolume(false, file) {
+			t.Errorf("under file storage %s is not on the issue's volume, want it there", file)
+		}
+		if got, want := SessionOnIssueVolume(true, file), file != resumeSession; got != want {
+			t.Errorf("under a session database %s on the issue's volume: %t, want %t", file, got, want)
 		}
 	}
 }

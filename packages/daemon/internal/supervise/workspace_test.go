@@ -1,9 +1,11 @@
 package supervise
 
-// A claim's session lives on its issue's volume. When workspace-init finds that volume lost — no
-// clone and no session file, exit 3 — the session is gone, and resuming it would fail the same way
-// on every attempt. That one fact is the exception to the same-agent rule: the claim relaunches as
-// a fresh session, and the issue's other claims drop the sessions the same volume held.
+// A claim's session lives on its issue's volume, unless the runtime keeps it elsewhere
+// (Deps.SessionOnVolume: an Oh My Pi session under a session database). When workspace-init finds
+// that volume lost — no clone and no session file, exit 3 — the session on it is gone, and resuming
+// it would fail the same way on every attempt. That one fact is the exception to the same-agent
+// rule: the claim relaunches as a fresh session, and the issue's other claims drop the sessions the
+// same volume held; a session kept elsewhere is resumed as before.
 
 import (
 	"testing"
@@ -18,9 +20,17 @@ const lostDetail = "the issue's volume was lost: pod legion-legion-208-architect
 // told records every claim the machine reports its issue's volume lost for.
 func resumedHarness(t *testing.T, c Claim) (*harness, *[]Claim) {
 	t.Helper()
+	return resumedHarnessOn(t, c, nil)
+}
+
+// resumedHarnessOn is resumedHarness whose machine is told which sessions the issue's volume
+// keeps (Deps.SessionOnVolume).
+func resumedHarnessOn(t *testing.T, c Claim, onVolume func(file string) bool) (*harness, *[]Claim) {
+	t.Helper()
 	h := newHarnessOf(t, c)
 	var told []Claim
 	h.deps.VolumeLost = func(c Claim) { told = append(told, c) }
+	h.deps.SessionOnVolume = onVolume
 	h.start(h.store.load(h.token))
 	h.reach(StateSuspended)
 	h.must(RequestResume{Claim: h.token})
@@ -198,4 +208,90 @@ func TestFreshRoleReportsLossOfAnotherRolesIssueSessions(t *testing.T) {
 	}
 	h.wantBudgets(Budgets{})
 	h.wantState(StateLaunching)
+}
+
+// Under a session database (Deps.SessionOnVolume) the issue's volume never held an Oh My Pi
+// session: it is in the table. A resume whose own workspace-init found the volume lost therefore
+// keeps its session and resumes it again at once, on the workspace the next init recreates,
+// charging nothing, and still tells the daemon, since the issue's other claims may have kept a
+// session on that volume — a Claude Code transcript.
+func TestAWorkspaceLostGoneResumesASessionTheVolumeNeverHeld(t *testing.T) {
+	var asked []string
+	h, told := resumedHarnessOn(t, rootClaim(), func(file string) bool {
+		asked = append(asked, file)
+		return false
+	})
+	dead := h.locator()
+	generation := h.generation()
+
+	h.goneWithWorkspaceLost(lostDetail)
+
+	resumes := h.wantCalls("Resume", 2)
+	if again := resumes[1]; again.Spec.ResumeSessionFile != sessionFile || again.Spec.Generation != generation+1 ||
+		again.Previous == nil || *again.Previous != dead {
+		t.Errorf("relaunched %+v after %+v, want the recorded session %s resumed at generation %d after the lost process",
+			again.Spec, again.Previous, sessionFile, generation+1)
+	}
+	h.wantCalls("Spawn", 1)
+	h.wantState(StateLaunching)
+	h.wantBudgets(Budgets{})
+	if c := h.claim(); c.Session != session || c.SessionFile != sessionFile || c.WorkspaceLost {
+		t.Errorf("claim %+v, want its session kept and no loss recorded: the volume never held it", c)
+	}
+	if len(asked) == 0 || asked[0] != sessionFile {
+		t.Errorf("asked whether %q lived on the volume, want %s", asked, sessionFile)
+	}
+	if len(*told) != 1 || (*told)[0].Token != rootToken || (*told)[0].Issue != "LEGION-208" {
+		t.Errorf("told %+v, want the root's lost volume reported once", *told)
+	}
+}
+
+// A claim of the issue that runs no process, told the issue's volume was lost, drops its session
+// only when the volume held it (Deps.SessionOnVolume): a Claude Code transcript under a session
+// database. An Oh My Pi session there is in the table, so the claim keeps it, records no loss, and
+// its next launch, across a restart too, resumes it rather than start fresh.
+func TestAClaimDropsOnlyASessionTheLostVolumeHeld(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		onVolume bool
+	}{
+		{"a session the volume held", true},
+		{"a session the volume never held", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newHarness(t)
+			var asked []string
+			h.deps.SessionOnVolume = func(file string) bool {
+				asked = append(asked, file)
+				return tc.onVolume
+			}
+			h.start(h.store.load(h.token))
+			h.reach(StateSuspended)
+
+			h.must(IssueVolumeLost{Claim: testToken})
+
+			if len(asked) != 1 || asked[0] != sessionFile {
+				t.Errorf("asked whether %q lived on the volume, want %s once", asked, sessionFile)
+			}
+			kept := h.claim()
+			if dropped := kept.Session == "" && kept.SessionFile == "" && kept.WorkspaceLost; dropped != tc.onVolume {
+				t.Errorf("claim %+v: session dropped and workspace lost %t, want %t", kept, dropped, tc.onVolume)
+			}
+			if !tc.onVolume && (kept.Session != session || kept.SessionFile != sessionFile || kept.WorkspaceLost) {
+				t.Errorf("claim %+v, want its session kept with no loss recorded", kept)
+			}
+			h.restart()
+			h.must(RequestResume{Claim: testToken})
+			last := h.rt.Calls()[len(h.rt.Calls())-1]
+			switch {
+			case tc.onVolume && (last.Method != "Spawn" || last.Spec.ResumeSessionFile != ""):
+				t.Errorf("the relaunch was %s %+v, want a fresh spawn", last.Method, last.Spec)
+			case !tc.onVolume && (last.Method != "Resume" || last.Spec.ResumeSessionFile != sessionFile):
+				t.Errorf("the relaunch was %s %+v, want the session %s resumed", last.Method, last.Spec, sessionFile)
+			}
+			if built := h.specs.last(t); built.WorkspaceLost != tc.onVolume {
+				t.Errorf("the relaunch was built for %+v, want a lost workspace %t", built, tc.onVolume)
+			}
+		})
+	}
 }

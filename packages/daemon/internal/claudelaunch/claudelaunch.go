@@ -18,7 +18,6 @@ import (
 	"fmt"
 	"path/filepath"
 	"regexp"
-	"strings"
 )
 
 // Paths are the absolute paths a Claude Code agent command names, each resolved by the caller: the
@@ -95,21 +94,37 @@ func NewSessionID() string {
 	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// transcript is a transcript Claude Code writes: `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<session>.jsonl`.
+// transcript is the name of a transcript Claude Code writes, `<session>.jsonl`, its one group the
+// session id.
 var transcript = regexp.MustCompile(`^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
 
+// Transcript is the session id of file when file is a transcript Claude Code writes —
+// `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<session>.jsonl`, wherever that configuration directory is —
+// and ok false for any other path. A pod keeps a role's configuration directory on the issue's
+// volume and a tmux pane the claim's under the daemon's state directory, and a reader of a recorded
+// session is told neither, so the shape is the whole test: no Oh My Pi session file, named for a
+// timestamp and a counter, has it.
+func Transcript(file string) (session string, ok bool) {
+	if filepath.Base(filepath.Dir(filepath.Dir(file))) != "projects" {
+		return "", false
+	}
+	match := transcript.FindStringSubmatch(filepath.Base(file))
+	if match == nil {
+		return "", false
+	}
+	return match[1], true
+}
+
 // ResumeSession is the session id a recorded transcript continues, refusing a recorded session
-// that is not a transcript of the claim's own Claude Code directory: an Oh My Pi session, recorded
-// before the role's backend changed, which `--resume` could not continue.
+// that is not a transcript (Transcript) of the claim's own Claude Code directory: an Oh My Pi
+// session, recorded before the role's backend changed, which `--resume` could not continue.
 func ResumeSession(configDir, file string) (string, error) {
-	rel, err := filepath.Rel(filepath.Join(configDir, "projects"), file)
-	parts := strings.Split(rel, string(filepath.Separator))
-	if err != nil || len(parts) != 2 || parts[0] == ".." {
+	if filepath.Dir(filepath.Dir(file)) != filepath.Join(configDir, "projects") {
 		return "", fmt.Errorf("the recorded session %s is not a Claude Code transcript under %s: the role's backend changed since it was recorded", file, configDir)
 	}
-	match := transcript.FindStringSubmatch(parts[1])
-	if match == nil {
+	session, ok := Transcript(file)
+	if !ok {
 		return "", fmt.Errorf("the recorded session %s is not named for a Claude Code session id", file)
 	}
-	return match[1], nil
+	return session, nil
 }

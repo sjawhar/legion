@@ -291,8 +291,14 @@ type Deps struct {
 	Identity func(ctx context.Context, role claim.Role, issue string) (runtime.GitIdentity, error)
 	// VolumeLost is told of a claim whose issue's volume was found lost as it relaunches that claim
 	// fresh, so the daemon can tell the issue's other claims (IssueVolumeLost): their sessions were
-	// on the same volume. nil tells no one.
+	// on the same volume, those of them it kept (SessionOnVolume). nil tells no one.
 	VolumeLost func(c Claim)
+	// SessionOnVolume is whether the session a claim recorded at file lived on its issue's volume,
+	// so that the volume's loss took it: under the Kubernetes runtime's session database
+	// (`session_store: postgres`) a Claude Code transcript alone, Oh My Pi's sessions being in the
+	// table (sandbox.SessionOnIssueVolume). A session that lived elsewhere survives the loss, and
+	// its claim resumes it on the recreated workspace. nil keeps every session on the volume.
+	SessionOnVolume func(file string) bool
 	// PhaseHolds says whether issue is still in phase: the workflow enqueues a task for the phase
 	// its issue was in, and the outbox refuses to start a role for a phase the issue has left
 	// (daemon/outbox.go), so a delivery queued before the phase moved on is that same staleness
@@ -1024,15 +1030,28 @@ func (m *Machine) died(ctx context.Context, observation runtime.Observation) err
 // as a fresh session that recreates its workspace from the issue's branch, and the agent that
 // registers next is the session it resumes from then on. The volume ended the process, not the
 // launch, so no launch failure is charged; the fresh launch has no session to find missing, so it
-// cannot end this way again. The daemon is told first: the issue's other claims kept their sessions
-// on that volume.
+// cannot end this way again. A session that did not live on the volume (keptOffVolume) survives
+// the loss: the claim keeps it and resumes it, uncharged, on the workspace the volume's next init
+// recreates. The daemon is told first either way: the issue's other claims may have kept their
+// sessions on that volume.
 func (m *Machine) relaunchFresh(ctx context.Context) error {
-	m.log.Warn("supervise: the issue's volume was lost with the session; relaunching a fresh session", "session", m.claim.Session)
-	m.loseSession()
+	if m.keptOffVolume() {
+		m.log.Warn("supervise: the issue's volume was lost; the session was not on it, so the relaunch resumes it on a recreated workspace",
+			"session", m.claim.Session, "sessionFile", m.claim.SessionFile)
+	} else {
+		m.log.Warn("supervise: the issue's volume was lost with the session; relaunching a fresh session", "session", m.claim.Session)
+		m.loseSession()
+	}
 	if m.deps.VolumeLost != nil {
 		m.deps.VolumeLost(copyClaim(m.claim))
 	}
 	return m.launch(ctx)
+}
+
+// keptOffVolume is whether the claim records a session that did not live on its issue's volume
+// (Deps.SessionOnVolume), which that volume's loss leaves where it is.
+func (m *Machine) keptOffVolume() bool {
+	return m.claim.SessionFile != "" && m.deps.SessionOnVolume != nil && !m.deps.SessionOnVolume(m.claim.SessionFile)
 }
 
 // loseSession drops the session the claim recorded, which lived on an issue's volume since lost:

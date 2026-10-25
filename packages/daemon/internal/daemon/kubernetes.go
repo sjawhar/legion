@@ -382,6 +382,19 @@ func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []s
 	return nil
 }
 
+// sessionOnVolume is supervise.Deps.SessionOnVolume for cfg: under the Kubernetes runtime's
+// session database (runtime.kubernetes.session_store postgres) a recorded session lived on its
+// issue's volume only when it is a Claude Code transcript, Oh My Pi's being in the table
+// (sandbox.SessionOnIssueVolume), so a lost volume drops the transcripts alone. Nil otherwise,
+// which keeps every session on the volume: a pvc store's, and a tmux pane's, whose volume is
+// never found lost.
+func sessionOnVolume(cfg config.Config) func(file string) bool {
+	if k := cfg.Runtime.Kubernetes; k == nil || k.SessionDSNSecret == "" {
+		return nil
+	}
+	return func(file string) bool { return sandbox.SessionOnIssueVolume(true, file) }
+}
+
 // newSecretsLogin is the daemon's agent-secrets login as the machines' Enroller: it constructs the
 // client from runtime.kubernetes.agent_secrets and starts it at boot on a background context, so
 // the daemon logs in with its own projected ServiceAccount token (token_file) and keeps logging in

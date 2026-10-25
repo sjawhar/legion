@@ -57,9 +57,10 @@ type ProvisionTokens interface {
 // Store is the durable state the runtime reads: the daemon's store (store.Store), or a test's
 // fake.
 type Store interface {
-	// IssueHasSessions is whether any stored claim of issue, retired ones included, recorded a
-	// session: the issue's volume must then already hold the issue's clone and that session.
-	IssueHasSessions(ctx context.Context, project, issue string) (bool, error)
+	// IssueSessionFiles are the session files the stored claims of issue recorded, retired ones
+	// included: those the issue's volume keeps (SessionOnIssueVolume) must still be on it, beside
+	// the issue's clone.
+	IssueSessionFiles(ctx context.Context, project, issue string) ([]string, error)
 	// TreeLive is whether tree's lifecycle is open, or its cleanup reserved and unconfirmed: the
 	// tree's issue Sandboxes are then its cleanup's alone, never the orphan sweep's.
 	TreeLive(ctx context.Context, project, tree string) (bool, error)

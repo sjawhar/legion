@@ -13,6 +13,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/legion/daemon/internal/claudelaunch"
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime/sandbox"
 	"github.com/sjawhar/legion/daemon/internal/store"
@@ -174,13 +175,13 @@ func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Wri
 
 // missingSessions are the claims of the list, every tree's, that record a session the table does
 // not hold: under SQL storage each would fail every launch until it is copied or marked lost. A
-// Claude Code transcript (sandbox.ClaudeSessionRefusal) is none of them: the table never holds
-// one, and a Claude claim resumes from its transcript on the volume whatever session_store says,
-// so it is neither missing nor a claim to mark lost.
+// Claude Code transcript (claudelaunch.Transcript) is none of them: the table never holds one, and
+// a Claude claim resumes from its transcript on the volume whatever session_store says, so it is
+// neither missing nor a claim to mark lost.
 func missingSessions(ctx context.Context, conn *pgx.Conn, claims []importedClaim) ([]importedClaim, error) {
 	var missing []importedClaim
 	for _, c := range claims {
-		if c.SessionFile == "" || sandbox.ClaudeSessionRefusal(c.SessionFile) != nil {
+		if c.SessionFile == "" || transcriptRefusal(c.SessionFile) != nil {
 			continue
 		}
 		_, found, err := ompsessions.Written(ctx, conn, c.SessionFile)
@@ -253,7 +254,7 @@ func runSessionsMarkLost(ctx context.Context, args []string, stdout, stderr io.W
 		return 1
 	}
 	for _, c := range claims {
-		if refusal := sandbox.ClaudeSessionRefusal(c.SessionFile); refusal != nil {
+		if refusal := transcriptRefusal(c.SessionFile); refusal != nil {
 			fmt.Fprintf(stdout, "%s not marked lost: %v\n", c.Token, refusal)
 		}
 	}
@@ -364,12 +365,9 @@ type importedSession struct {
 
 // importSession copies the session recorded at file into the table: read at file itself, or from
 // the tree volume mounted at treeVolume when one is given, with the file's modification time. It
-// refuses a Claude Code transcript (sandbox.ClaudeSessionRefusal) wherever it would read it, and
-// for the same reason that SessionOnVolume refuses one: this copy moves Oh My Pi file sessions
-// into Oh My Pi's table, which holds no session of a transcript, and a Claude claim's session
-// stays on the volume its role's own Claude Code reads it from.
+// refuses a Claude Code transcript (transcriptRefusal) wherever it would read it.
 func importSession(ctx context.Context, conn *pgx.Conn, file, treeVolume string) (importedSession, error) {
-	if err := sandbox.ClaudeSessionRefusal(file); err != nil {
+	if err := transcriptRefusal(file); err != nil {
 		return importedSession{}, err
 	}
 	source := file
@@ -393,4 +391,15 @@ func importSession(ctx context.Context, conn *pgx.Conn, file, treeVolume string)
 		return importedSession{}, err
 	}
 	return importedSession{Outcome: outcome, Summary: ompsessions.Summarize(content)}, nil
+}
+
+// transcriptRefusal refuses file as a Claude Code transcript (claudelaunch.Transcript), and is nil
+// for every other path: this command moves Oh My Pi file sessions into Oh My Pi's table, which
+// holds no session of a transcript, and a Claude claim's session stays on the volume its role's
+// own Claude Code reads it from, so neither the copy nor mark-lost touches one.
+func transcriptRefusal(file string) error {
+	if _, ok := claudelaunch.Transcript(file); !ok {
+		return nil
+	}
+	return fmt.Errorf("the recorded session %s is a Claude Code transcript, not an Oh My Pi session file: Oh My Pi's session table holds no session of it, and it stays on the volume its role's pod reads it from", file)
 }

@@ -179,12 +179,13 @@ type launch struct {
 	resumeFile string
 	// expectVolume is an issue pod's workspace-init input (initEnvironment), which the issue pod
 	// sets itself (issuePod.prepare, issuePod.provision): whether the issue's volume must already
-	// hold the clone or a retained session, which only sessions kept on the volume can say.
+	// hold the clone or a retained session, which only sessions kept on the volume can say
+	// (SessionOnIssueVolume).
 	expectVolume bool
-	// sessionsInDatabase is whether the runtime keeps every session in a database
-	// (Options.SessionDSNKey) rather than as files on the volume: then no recorded session says
+	// sessionsInDatabase is whether the runtime keeps Oh My Pi's sessions in a database
+	// (Options.SessionDSNKey) rather than as files on the volume: then no Oh My Pi session says
 	// anything about what the volume holds, so neither an issue pod's workspace-init nor the
-	// controller's is held to one.
+	// controller's is held to one, and a Claude Code transcript alone is (SessionOnIssueVolume).
 	sessionsInDatabase bool
 	// cacheURL is the address of the issue's repository's cache (cacheURL, set by
 	// issuePod.provision), which its fetch container is told (fetchEnvironment).
@@ -226,13 +227,12 @@ type claudeInputs struct {
 // agent command, its launcher file and three of its variables are the Claude lane's.
 func (l launch) runsClaude() bool { return runtime.Of(l.spec.Backend) == runtime.BackendClaude }
 
-// sessionInDatabase is whether the launch's recorded session lives in the session database rather
-// than as a file on the volume every replacement pod mounts: the runtime keeps Oh My Pi's sessions
-// there (Options.SessionDSNKey, sessionsInDatabase) and the role is not a Claude Code one. A
-// Claude claim's session is a transcript on the issue's volume whatever `session_store` says
-// (claudeConfigDir, under the role's state home on that volume), so it is on the volume either
-// way. Everything that asks what the volume must hold, and what Oh My Pi is told about its store,
-// asks this.
+// sessionInDatabase is whether the launch's own Oh My Pi keeps its session in the session
+// database: the runtime keeps Oh My Pi's sessions there (Options.SessionDSNKey,
+// sessionsInDatabase) and the role is not a Claude Code one, whose session is a transcript on the
+// issue's volume whatever `session_store` says (claudeConfigDir, under the role's state home on
+// that volume). What the role's launcher and its Oh My Pi are told of the store asks this
+// (mainEnvironment); what the volume must hold asks the recorded path (SessionOnIssueVolume).
 func (l launch) sessionInDatabase() bool { return l.sessionsInDatabase && !l.runsClaude() }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
@@ -369,31 +369,27 @@ func validateSessionPath(file string) error {
 	return nil
 }
 
-// ClaudeSessionRefusal refuses file as a Claude Code transcript —
-// `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<uuid>.jsonl`, wherever that configuration directory is: a
-// pod keeps the role's on the issue's volume (claudeConfigDir) and a tmux pane the claim's under
-// the daemon's state directory (tmux.ClaudeConfigDir), and this check is told neither. It is nil
-// for every other path. Oh My Pi's session table holds no session of a transcript and its resume
-// reads no such file, so the one-off copy into that table refuses one and leaves it on the volume
-// where its role's own Claude Code reads it: SessionOnVolume and `legion sessions import`
-// (cmd/legion/sessions.go). The shape is the whole test — the file's own three parents are that
-// configuration directory, so asking claudelaunch.ResumeSession about them asks whether the path
-// has the shape at all, and no Oh My Pi session file, named for a timestamp and a counter, has it.
-func ClaudeSessionRefusal(file string) error {
-	if _, err := claudelaunch.ResumeSession(filepath.Dir(filepath.Dir(filepath.Dir(file))), file); err != nil {
-		return nil
+// SessionOnIssueVolume is whether a claim's recorded session, file, lives on its issue's volume,
+// so that the volume's loss takes it with it, under a runtime that keeps Oh My Pi's sessions in a
+// database when sessionsInDatabase (Options.SessionDSNKey, `session_store: postgres`): every
+// session when it keeps them as files, and otherwise a Claude Code transcript alone
+// (claudelaunch.Transcript), which Claude Code writes under the role's state home on that volume
+// whatever the store. The recorded path is the fact, not the role that recorded it, so the launch
+// that makes an issue's pod reads it of every claim of the issue (issuePod.provision), and the
+// daemon's supervision of every claim a lost volume reaches (supervise.Deps.SessionOnVolume).
+func SessionOnIssueVolume(sessionsInDatabase bool, file string) bool {
+	if !sessionsInDatabase {
+		return true
 	}
-	return fmt.Errorf("the recorded session %s is a Claude Code transcript, not an Oh My Pi session file: Oh My Pi's session table holds no session of it, and it stays on the volume its role's pod reads it from", file)
+	_, transcript := claudelaunch.Transcript(file)
+	return transcript
 }
 
 // SessionOnVolume is where a recorded Oh My Pi session file sits on a tree or controller volume
 // mounted at root: an agent's sessions directory is the volume's SessionsSubPath, so a session's
-// path below the one is its path below the other. It refuses a Claude Code transcript
-// (ClaudeSessionRefusal) and any other session file no pod keeps there (validateSessionPath).
+// path below the one is its path below the other. It refuses any session file no pod keeps there
+// (validateSessionPath), a Claude Code transcript among them.
 func SessionOnVolume(file, root string) (string, error) {
-	if err := ClaudeSessionRefusal(file); err != nil {
-		return "", err
-	}
 	if err := validateSessionPath(file); err != nil {
 		return "", err
 	}
@@ -988,10 +984,10 @@ func (r *Runtime) LaunchBound() time.Duration {
 // every tmux pane is told (runtime/tmux/spawn.go, panePairs), then the operator's
 // (runtime.kubernetes.pod), then the spec's own, then one `<NAME>_FILE` pointer per secret into
 // the generation's private launcher directory, then one per providers secret into the providers
-// mount, then, under a session database (Options.SessionDSNKey) and for an Oh My Pi role alone,
-// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming its mounted URL, which a pod
-// created before the store was set does not mount: Oh My Pi refuses to start on an unreadable URL
-// file, so that generation fails rather than keeping files. None of them repeats another: the
+// mount, then, under a session database (Options.SessionDSNKey), OMP_SESSION_STORAGE=sql for an
+// Oh My Pi role alone and OMP_SESSION_SQL_DSN_FILE naming its mounted URL for every role, which a
+// pod created before the store was set does not mount: Oh My Pi refuses to start on an unreadable
+// URL file, so that generation fails rather than keeping files. None of them repeats another: the
 // runtime refuses a spec naming one of its own (runtimeOwned), and the daemon an operator's
 // variable naming one of the runtime's or a spec's. The temporary directory, XDG homes and tool
 // caches are the issue volume's (roleEnvironment) — the issue's scratch and its Go caches, which
@@ -1002,7 +998,7 @@ func (r *Runtime) LaunchBound() time.Duration {
 // no directory of the issue's volume leads PATH. The GIT_CONFIG pairs are the GitHub credential
 // of every git the role runs, in the issue's clone or outside it (gitCredentialEnv). A Claude
 // Code role, and no other, is also told Claude Code's own three (claudelaunch.Environment,
-// runsClaude), and is told neither of Oh My Pi's two session variables whatever the store.
+// runsClaude), and is never told OMP_SESSION_STORAGE whatever the store.
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -1064,15 +1060,21 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	env = append(env, r.providersPointers()...)
 	// Oh My Pi's own two variables, which place the session in the database whose URL the mounted
 	// key holds (providers); with none, the pod baseline keeps it a file (internal/podsafety). A
-	// session that lives on the volume instead (sessionInDatabase) is told neither: the role
-	// launcher's existence check stats the file it is asked to resume unless OMP_SESSION_STORAGE
-	// is sql (internal/launcher's sessionWritten), so withholding these two is what sends the
-	// launcher down its file branch and onto a Claude role's transcript. Nothing on the wire says
-	// so: a Backend on shimwire.LauncherStart would decide nothing this environment does not
-	// already decide, and an image whose launcher predates such a field would ignore it silently,
-	// since shimwire.Decode sets no DisallowUnknownFields.
+	// session that lives on the volume instead (sessionInDatabase) is never told
+	// OMP_SESSION_STORAGE: the role launcher's existence check stats the file it is asked to
+	// resume unless that is sql (internal/launcher's sessionWritten), so withholding it is what
+	// sends the launcher down its file branch and onto a Claude role's transcript. Nothing on the
+	// wire says so: a Backend on shimwire.LauncherStart would decide nothing this environment does
+	// not already decide, and an image whose launcher predates such a field would ignore it
+	// silently, since shimwire.Decode sets no DisallowUnknownFields. The URL file's pointer is
+	// every role's under a session database, a Claude role's too: the providers volume mounts the
+	// URL for the whole pod, and the shim's --provider-env-dir export skips a file only while its
+	// `_FILE` pointer is set (shim.ReadProviderEnv), so without it the database's URL, password and
+	// all, would land in Claude Code's environment and every command it runs.
 	if l.sessionInDatabase() {
 		add(ompsessions.StorageVariable, ompsessions.SQLStorage)
+	}
+	if l.sessionsInDatabase {
 		add(ompsessions.DSNFileVariable, ProvidersDir+"/"+sessionDSNFile)
 	}
 	return env

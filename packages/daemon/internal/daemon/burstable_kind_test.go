@@ -162,8 +162,8 @@ func burstableLiveSpec(project, issue string, token claim.Token, bootToken, prom
 // controller claim stored.
 type firstLaunchStore struct{}
 
-func (firstLaunchStore) IssueHasSessions(context.Context, string, string) (bool, error) {
-	return false, nil
+func (firstLaunchStore) IssueSessionFiles(context.Context, string, string) ([]string, error) {
+	return nil, nil
 }
 
 func (firstLaunchStore) TreeLive(context.Context, string, string) (bool, error) { return true, nil }

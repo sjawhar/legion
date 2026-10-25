@@ -25,8 +25,10 @@ import (
 // account alone, never for want of a live tree.
 type liveTrees struct{ unretired claim.Token }
 
-func (liveTrees) IssueHasSessions(context.Context, string, string) (bool, error) { return false, nil }
-func (liveTrees) TreeLive(context.Context, string, string) (bool, error)         { return true, nil }
+func (liveTrees) IssueSessionFiles(context.Context, string, string) ([]string, error) {
+	return nil, nil
+}
+func (liveTrees) TreeLive(context.Context, string, string) (bool, error) { return true, nil }
 func (liveTrees) IssueRunsElsewhere(context.Context, string, string, string) (string, error) {
 	return "", nil
 }

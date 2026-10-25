@@ -904,11 +904,11 @@ type sessionsFailingStore struct {
 	err    error
 }
 
-func (s *sessionsFailingStore) IssueHasSessions(ctx context.Context, project, issue string) (bool, error) {
+func (s *sessionsFailingStore) IssueSessionFiles(ctx context.Context, project, issue string) ([]string, error) {
 	if s.failed.CompareAndSwap(false, true) {
-		return false, s.err
+		return nil, s.err
 	}
-	return s.fakeStore.IssueHasSessions(ctx, project, issue)
+	return s.fakeStore.IssueSessionFiles(ctx, project, issue)
 }
 
 // outageTokens refuses its next installation token, once, as a GitHub outage would.

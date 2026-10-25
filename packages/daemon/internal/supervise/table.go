@@ -108,8 +108,8 @@ type Timer struct {
 }
 
 // IssueVolumeLost is another claim of the claim's issue finding the issue's volume lost (its
-// workspace-init found neither the clone nor its session): whatever session this claim recorded
-// was on that volume, and is gone with it. The daemon sends it to the issue's other claims.
+// workspace-init found neither the clone nor its session): a session this claim recorded on that
+// volume (Deps.SessionOnVolume) is gone with it. The daemon sends it to the issue's other claims.
 type IssueVolumeLost struct{ Claim claim.Token }
 
 // StalePlugin is a re-adopted claim found still speaking a plugin contract this daemon does not,
@@ -534,7 +534,7 @@ func fillTable(t *builder) {
 		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed, StateRetired)
 
 	// The issue's volume, found lost by another claim of the issue.
-	t.row(onVolumeLost, "the issue's volume was lost: drop the session it held", sessionLost, nil,
+	t.row(onVolumeLost, "the issue's volume was lost: drop the session it held, if it held one", sessionLost, nil,
 		slices.Concat(processless, booting)...)
 	t.ignore(onVolumeLost, "the agent registered, so its session is on the volume its process runs on",
 		StateRegistered, StateReady, StateWorking, StateIdle)
@@ -983,13 +983,19 @@ func noTurn(m *Machine, ctx context.Context, _ Event) error {
 
 func spawn(m *Machine, ctx context.Context, _ Event) error { return m.revive(ctx) }
 
-// sessionLost is another claim of the issue finding the issue's volume lost: the session this claim
-// recorded was on it, so the claim drops it and its next launch is a fresh session that recreates
-// its workspace — never a resume that finds the session missing (beside a clone another claim may
-// already have recreated) and fails until its budget runs out. A claim with no session has nothing
-// to drop.
+// sessionLost is another claim of the issue finding the issue's volume lost: a session this claim
+// recorded there went with it, so the claim drops it and its next launch is a fresh session that
+// recreates its workspace — never a resume that finds the session missing (beside a clone another
+// claim may already have recreated) and fails until its budget runs out. A claim with no session
+// has nothing to drop, and one whose session the volume never held (keptOffVolume: under a session
+// database, an Oh My Pi session in the table) keeps it and resumes it on the recreated workspace.
 func sessionLost(m *Machine, ctx context.Context, _ Event) error {
 	if m.claim.Session == "" && m.claim.SessionFile == "" {
+		return nil
+	}
+	if m.keptOffVolume() {
+		m.log.Info("supervise: the issue's volume was lost; the session was not on it, so the next launch resumes it",
+			"session", m.claim.Session, "sessionFile", m.claim.SessionFile)
 		return nil
 	}
 	m.log.Warn("supervise: the issue's volume the session lived on was lost; the next launch is a fresh session", "session", m.claim.Session)

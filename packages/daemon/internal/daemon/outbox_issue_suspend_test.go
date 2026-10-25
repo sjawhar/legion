@@ -649,8 +649,8 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	if got := storedClaim(planner.Token); got.State != supervise.StateRetired || got.Session != "" || got.SessionFile != "" || got.WorkspaceLost || got.Locator != nil {
 		t.Fatalf("done child's planner after the close = %+v, want retired with no session, no loss and no locator", got)
 	}
-	if sessions, err := st.IssueHasSessions(ctx, "legion", done.Key); err != nil || sessions {
-		t.Fatalf("IssueHasSessions(%s) = %t, %v after the close, want false", done.Key, sessions, err)
+	if sessions, err := st.IssueSessionFiles(ctx, "legion", done.Key); err != nil || len(sessions) != 0 {
+		t.Fatalf("IssueSessionFiles(%s) = %q, %v after the close, want none", done.Key, sessions, err)
 	}
 	if got := storedClaim(architect.Token); got.State != supervise.StateWorking || got.Session != "saved-architect" {
 		t.Fatalf("root architect after the child's close = %+v, want it working with its session", got)

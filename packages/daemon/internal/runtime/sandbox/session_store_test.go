@@ -10,6 +10,7 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
@@ -199,9 +200,9 @@ func TestAResumeUnderASessionDatabaseExpectsNothingOfTheVolume(t *testing.T) {
 }
 
 // A new issue pod's workspace-init expects the issue's volume when a claim of the issue kept a
-// session there; under a session database no claim keeps one there, and the issue's sessions are
-// not even read.
-func TestANewPodUnderASessionDatabaseIsNotHeldToItsIssuesSessions(t *testing.T) {
+// session there; under a session database an Oh My Pi session is kept in the table, so one
+// recorded holds the volume to nothing.
+func TestANewPodUnderASessionDatabaseIsNotHeldToItsIssuesOhMyPiSessions(t *testing.T) {
 	for _, tc := range []struct {
 		store  string
 		key    string
@@ -212,7 +213,7 @@ func TestANewPodUnderASessionDatabaseIsNotHeldToItsIssuesSessions(t *testing.T) 
 	} {
 		t.Run(tc.store, func(t *testing.T) {
 			store := newFakeStore()
-			store.sessions[rootSpec(t).Issue] = true
+			store.sessions[rootSpec(t).Issue] = []string{resumeSession}
 			g := newRig(t, nil, withOptions(func(o *Options) { o.Store, o.SessionDSNKey = store, tc.key }))
 			g.spawn(rootSpec(t))
 			pod := g.pod(SandboxName(rootToken))
@@ -227,13 +228,17 @@ func TestANewPodUnderASessionDatabaseIsNotHeldToItsIssuesSessions(t *testing.T) 
 	}
 }
 
-// A Claude Code role is told neither of Oh My Pi's session variables, whatever the store: its
-// session is a Claude Code transcript on the issue's volume, which that database holds no session
-// of, and its role launcher stats the file it is asked to resume only while OMP_SESSION_STORAGE is
-// not sql (internal/launcher's sessionWritten), so withholding them is what sends the launcher
-// onto the transcript. An Oh My Pi role of the same deployment is told both under a session
-// database and neither without one.
-func TestAClaudeWorkerIsToldNeitherOhMyPiSessionVariable(t *testing.T) {
+// A Claude Code role is never told OMP_SESSION_STORAGE, whatever the store: its session is a
+// Claude Code transcript on the issue's volume, which that database holds no session of, and its
+// role launcher stats the file it is asked to resume only while OMP_SESSION_STORAGE is not sql
+// (internal/launcher's sessionWritten), so withholding it is what sends the launcher onto the
+// transcript. Under a session database it is told OMP_SESSION_SQL_DSN_FILE all the same, as an Oh
+// My Pi role of the pod is: the providers volume mounts the database's URL for the whole pod, and
+// the shim exports a providers file into the agent's environment unless its `_FILE` pointer is
+// set, so without the pointer the URL, password and all, would reach Claude Code and every
+// command it runs. An Oh My Pi role of the same deployment is told both under a session database
+// and neither without one.
+func TestAClaudeWorkerIsToldTheSessionDatabasesURLFileAndNotItsStore(t *testing.T) {
 	for _, tc := range []struct {
 		store string
 		key   string
@@ -250,25 +255,37 @@ func TestAClaudeWorkerIsToldNeitherOhMyPiSessionVariable(t *testing.T) {
 			}
 			claude := envOf(workerOf(t, r, claudeResumeSpec(t)))
 			omp := envOf(workerOf(t, r, workerSpec(t)))
+			if value, set := claude["OMP_SESSION_STORAGE"]; set {
+				t.Errorf("a Claude worker is told OMP_SESSION_STORAGE=%q, want it never told", value)
+			}
+			if got, want := claude["OMP_SESSION_SQL_DSN_FILE"], map[bool]string{true: ProvidersDir + "/OMP_SESSION_SQL_DSN"}[tc.key != ""]; got != want {
+				t.Errorf("a Claude worker is told OMP_SESSION_SQL_DSN_FILE=%q, want %q", got, want)
+			}
 			for _, name := range sessionStoreVariables {
-				if value, set := claude[name]; set {
-					t.Errorf("a Claude worker is told %s=%q, want neither of Oh My Pi's session variables", name, value)
-				}
 				if _, set := omp[name]; set != (tc.key != "") {
 					t.Errorf("an Oh My Pi worker is told %s: %t, want %t", name, set, tc.key != "")
+				}
+			}
+			if tc.key == "" {
+				return
+			}
+			for _, pair := range providersExported(t, claude) {
+				if strings.Contains(pair, "secret@") {
+					t.Errorf("a Claude worker's shim exports the session database's URL into its environment: %q", pair)
 				}
 			}
 		})
 	}
 }
 
-// A Claude claim's resume expects the issue's volume under a session database too: its transcript
-// is on that volume whatever session_store says, so a volume that was lost is workspace-init's
-// loud refusal rather than a quiet fresh agent. An Oh My Pi claim's resume under the same store
-// expects nothing of it, since its session is in the table. The same holds for a new Claude pod
-// that resumes nothing: the issue's retained sessions are read and hold it to the volume, where
-// under that store an Oh My Pi one is not held to them at all (issuePod.provision).
-func TestAClaudeClaimExpectsItsVolumeUnderASessionDatabase(t *testing.T) {
+// Under a session database an issue pod's workspace-init expects the issue's volume by what the
+// issue's claims recorded, whichever role's launch makes the pod: a Claude Code transcript is on
+// that volume whatever session_store says, so a volume that was lost is workspace-init's loud
+// refusal rather than a fresh clone that hides the loss from the Claude claim's resume, which
+// would then fail to find its transcript until its budget ran out. An Oh My Pi session is in the
+// table and holds the volume to nothing. A resuming Claude claim expects its own transcript's
+// volume (issuePod.prepare), and a resuming Oh My Pi one nothing of its own.
+func TestAnIssuesTranscriptHoldsItsPodToTheVolumeWhicheverRoleMakesIt(t *testing.T) {
 	opts := testOptions()
 	opts.SessionDSNKey = "SESSION_DSN"
 	r, err := configure(opts)
@@ -284,27 +301,48 @@ func TestAClaudeClaimExpectsItsVolumeUnderASessionDatabase(t *testing.T) {
 	if init := envOf(containerNamed(t, podOf(t, r, ompResume), initContainer)); init["LEGION_EXPECT_ISSUE_VOLUME"] != "" {
 		t.Errorf("a resuming Oh My Pi claim's workspace-init is told LEGION_EXPECT_ISSUE_VOLUME=%q, want nothing: its session is in the table", init["LEGION_EXPECT_ISSUE_VOLUME"])
 	}
-	for _, tc := range []struct {
-		backend string
-		spec    runtime.SpawnSpec
-		expect  bool
+	launches := map[string]func(t *testing.T, g *rig) error{
+		"a new Claude role": func(t *testing.T, g *rig) error {
+			g.launcher(workerToken)
+			_, err := g.r.Spawn(g.ctx, claudeWorkerSpec(t))
+			return err
+		},
+		"a new Oh My Pi role": func(t *testing.T, g *rig) error {
+			g.launcher(workerToken)
+			_, err := g.r.Spawn(g.ctx, workerSpec(t))
+			return err
+		},
+		"a resuming Oh My Pi role": func(_ *testing.T, g *rig) error {
+			g.launcher(workerToken)
+			_, err := g.r.Resume(g.ctx, nil, ompResume)
+			return err
+		},
+	}
+	for _, recorded := range []struct {
+		name   string
+		files  []string
+		expect bool
 	}{
-		{"claude", claudeWorkerSpec(t), true},
-		{"omp", workerSpec(t), false},
+		{"a Claude claim's transcript", []string{resumeSession, claudeTranscript(claim.RoleTester)}, true},
+		{"Oh My Pi sessions alone", []string{resumeSession}, false},
 	} {
-		t.Run(tc.backend, func(t *testing.T) {
-			store := newFakeStore()
-			store.sessions[tc.spec.Issue] = true
-			g := newRig(t, nil, withOptions(func(o *Options) { o.Store, o.SessionDSNKey = store, "SESSION_DSN" }))
-			g.spawn(tc.spec)
-			pod := g.pod(SandboxName(workerToken))
-			if pod == nil {
-				t.Fatal("the worker's issue pod was not created")
-			}
-			init := envOf(containerNamed(t, pod.Spec, initContainer))
-			if _, set := init["LEGION_EXPECT_ISSUE_VOLUME"]; set != tc.expect {
-				t.Errorf("the new pod's workspace-init expects the issue's volume: %t, want %t", set, tc.expect)
-			}
-		})
+		for name, launch := range launches {
+			t.Run(recorded.name+"/"+name, func(t *testing.T) {
+				store := newFakeStore()
+				store.sessions[workerSpec(t).Issue] = recorded.files
+				g := newRig(t, nil, withOptions(func(o *Options) { o.Store, o.SessionDSNKey = store, "SESSION_DSN" }))
+				if err := launch(t, g); err != nil {
+					t.Fatal(err)
+				}
+				pod := g.pod(SandboxName(workerToken))
+				if pod == nil {
+					t.Fatal("the worker's issue pod was not created")
+				}
+				init := envOf(containerNamed(t, pod.Spec, initContainer))
+				if _, set := init["LEGION_EXPECT_ISSUE_VOLUME"]; set != recorded.expect {
+					t.Errorf("with %q recorded, the new pod's workspace-init expects the issue's volume: %t, want %t", recorded.files, set, recorded.expect)
+				}
+			})
+		}
 	}
 }
