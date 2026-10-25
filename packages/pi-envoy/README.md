@@ -225,6 +225,26 @@ the `dispatch` command resolves it in and reviews its text, as for `--content-fi
 judges an upload against content failure 10 alone: a plan or a report is long by nature. An upload
 of any other file is not reviewed. A `task` subagent is not reviewed.
 
+**The command forms.** The gate reads a write that stands alone, and a write with these things
+around it:
+
+- `\`-newline continuations, and `2>&1`, `>/dev/null` or `2>` to a file on the write
+- a later stage of its pipeline that holds no `dispatch` word (`| head -3`, `| tail -1`)
+- literal `NAME=value` words and one `timeout <duration>` before its program, and a file as its
+  stdin (`< q.md`)
+- before it, joined by `&&`, `;` or a newline: `cd <path>`, `export NAME=value`, read-only
+  commands (`wc`, `cat`, `ls`, `grep`, `head`, `[` …) and `dispatch` calls that do not write
+  (`claim`, `read`, `issue-update` …)
+- after it: any command that holds no second write
+- `$NAME` in the write when an earlier command of the call sets NAME to a literal, and a `~/`
+  path to `dispatch`
+
+The dry run keeps the `cd`, the assignments, the prefixes and the stdin, and leaves out the rest.
+The gate refuses, before anything in the call runs, a write after a command that can change a file
+or the text (`python3`, `sed -i`, `cat > f`, `make`), with a command or process substitution, sent
+to the background with `&`, beside a second write, or with a variable the call does not set. The
+refusal tells the agent to send the write again on its own.
+
 **The switch.** AskGate runs in each session that has Dispatch on, unless the session's envoy.json
 turns it off. Write this top-level section beside `dispatch`:
 

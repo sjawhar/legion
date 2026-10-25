@@ -302,7 +302,7 @@ describe("mode and model role (plan tests c-g)", () => {
   });
   test("(g) a dispatch write the gate cannot read is refused the same way when neither role resolves", async () => {
     const g = bind({ env: { OMP_ASKGATE: "warn" }, roles: {} });
-    const result = await g.bash("u", "dispatch comment --issue X-1 --body b | cat");
+    const result = await g.bash("u", "cd $X && dispatch comment --issue X-1 --body b");
     expect(result?.block).toBe(true);
     expect(result?.reason).toContain("modelRoles.default");
     expect(g.entries).toMatchObject([{ decision: "revise", outcome: "no-model-role" }]);
@@ -1125,23 +1125,14 @@ console.log(JSON.stringify(args, null, 2));
   });
   test("a scoped dispatch write the gate cannot read is refused before it runs, in every mode, with the resend reason", async () => {
     const compound = [
-      "dispatch ask --issue X-1 --question q; echo",
-      "dispatch ask --issue X-1 --question q && make",
-      "dispatch ask --issue X-1 --question q 2>&1 | tail -3",
-      `${ASK}\necho done`,
       "cd $X && dispatch ask --issue X-1 --question q",
-      "cd a && cd b && dispatch ask --issue X-1 --question q",
-      "dispatch ask --issue X-1 --question q | cat",
       "cd ~/x && dispatch ask --issue X-1 --question q",
       "cd /tmp/* && dispatch ask --issue X-1 --question q",
       'cd "$HOME" && dispatch ask --issue X-1 --question q',
       "cd -P /tmp && dispatch ask --issue X-1 --question q",
       "cd /tmp || dispatch ask --issue X-1 --question q",
-      "cd /tmp; dispatch ask --issue X-1 --question q",
       "cd && dispatch ask --issue X-1 --question q",
-      "dispatch ask --issue X-1 --question q 2>&1 >/dev/null",
-      "dispatch ask --issue X-1 --question q 2>/dev/null",
-      "dispatch ask --issue X-1 --question q 2>&1; echo",
+      "make && dispatch ask --issue X-1 --question q",
       "cat > /tmp/q.md <<EOF\nShould it wait?\nEOF\ndispatch ask --issue X-1 --question-file /tmp/q.md",
       'cd ~/x && FOO=1 timeout 30 dispatch comment --issue X-1 --body "$(cat note.md)"',
       'dispatch issue --project P --title t --spec "$SPEC"',
@@ -1160,7 +1151,7 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.dryRuns).toHaveLength(0);
       expect(g.calls).toHaveLength(0);
       expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual([
-        ...Array(18).fill(["dispatch_ask", "unreadable", "revise"]),
+        ...Array(9).fill(["dispatch_ask", "unreadable", "revise"]),
         ["dispatch_comment", "unreadable", "revise"],
         ["dispatch_issue", "unreadable", "revise"],
         ["dispatch_doc_edit", "unreadable", "revise"],
@@ -1207,6 +1198,212 @@ console.log(JSON.stringify(args, null, 2));
       );
     }
   });
+  // The forms around one scoped write that the gate reads (`compositeScoped`): each changes only what
+  // the dry run also runs, or nothing the write sends.
+  test("a backslash-newline continuation is read as a blank, as bash reads it", async () => {
+    const g = bind({ env: STUB, cwd: work });
+    const command = `dispatch ask --issue X-1 \\\n  --question-file - <<'EOF'\n${QUESTION}EOF`;
+    expect(await g.bash("c1", command)).toBeUndefined();
+    expect(g.dryRuns.map((r) => r.script)).toEqual([
+      `dispatch ask --dry-run --issue X-1 \\\n  --question-file - <<'EOF'\n${QUESTION}EOF`,
+    ]);
+    expect(g.calls[0].user).toContain(
+      JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2)
+    );
+    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "verdict" }]);
+  });
+  test("the write's output redirects and the later stages of its pipeline are left out of its dry run", async () => {
+    const g = bind({ env: STUB, cwd: work });
+    const plain = "dispatch comment --dry-run --issue X-1 --body hi";
+    const fed = "dispatch comment --dry-run --issue X-1 --body-file - <<'EOF'\nhi\nEOF";
+    const cases: Array<[string, string]> = [
+      ["dispatch comment --issue X-1 --body hi 2>/dev/null", plain],
+      ["dispatch comment --issue X-1 --body hi >/dev/null 2>&1", plain],
+      ["dispatch comment --issue X-1 --body hi > out.txt 2> err.txt", plain],
+      ["dispatch comment --issue X-1 --body hi 2>&1 | head -3 | cut -c1-80", plain],
+      ["dispatch comment --issue X-1 --body-file - <<'EOF' 2>/dev/null\nhi\nEOF", fed],
+      ["dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1 | tail -1\nhi\nEOF", fed],
+    ];
+    for (const [index, [command]] of cases.entries())
+      expect(await g.bash(`o${index}`, command)).toBeUndefined();
+    expect(g.dryRuns.map((r) => r.script)).toEqual(cases.map(([, script]) => script));
+    expect(g.entries.map((e) => e.outcome)).toEqual(Array(cases.length).fill("verdict"));
+  }, 30_000);
+  test("literal assignments and one timeout before the write's program are kept in its dry run", async () => {
+    const g = bind({ env: STUB, cwd: work });
+    expect(
+      await g.bash(
+        "p1",
+        "DISPATCH_HOST=omp FOO='a b' timeout 60 dispatch comment --issue X-1 --body hi 2>&1 | tail -1"
+      )
+    ).toBeUndefined();
+    expect(
+      await g.bash("p2", "timeout 1.5m dispatch comment --issue X-1 --body hi")
+    ).toBeUndefined();
+    expect(g.dryRuns.map((r) => r.script)).toEqual([
+      "DISPATCH_HOST=omp FOO='a b' timeout 60 dispatch comment --dry-run --issue X-1 --body hi",
+      "timeout 1.5m dispatch comment --dry-run --issue X-1 --body hi",
+    ]);
+    expect(g.entries.map((e) => e.outcome)).toEqual(["verdict", "verdict"]);
+  });
+  test("a cd, literal assignments, read-only commands and dispatch reads before the write are read; the dry run keeps the cd and the assignments", async () => {
+    fs.mkdirSync(path.join(work, "pre"), { recursive: true });
+    fs.writeFileSync(path.join(work, "pre", "note.txt"), "Body from pre.");
+    const g = bind({ env: STUB, cwd: work });
+    const plain = "dispatch comment --dry-run --issue X-1 --body hi";
+    const cases: Array<[string, string]> = [
+      [
+        "cd pre && wc -c note.txt && dispatch message --issue X-1 --body-file note.txt",
+        "cd pre >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt",
+      ],
+      [
+        "export A=1 B=~/two && C=3\ndispatch comment --issue X-1 --body hi",
+        "export A=1 B=~/two && C=3\ndispatch comment --dry-run --issue X-1 --body hi",
+      ],
+      [
+        "cat pre/note.txt | grep -c Body >/dev/null; ls pre 2>&1 | head -1; [ -s pre/note.txt ] && dispatch comment --issue X-1 --body hi",
+        plain,
+      ],
+      [
+        "dispatch read --issue X-1 >/dev/null; dispatch issue-update --issue X-1 --status in_progress 2>&1 | head -2\ndispatch comment --issue X-1 --body hi",
+        plain,
+      ],
+    ];
+    for (const [index, [command]] of cases.entries())
+      expect(await g.bash(`s${index}`, command)).toBeUndefined();
+    expect(g.dryRuns.map((r) => r.script)).toEqual(cases.map(([, script]) => script));
+    expect(g.calls[0].user).toContain('"body": "Body from pre."');
+    expect(g.entries.map((e) => e.outcome)).toEqual(Array(cases.length).fill("verdict"));
+  }, 30_000);
+  test("statements after the write run once it has posted, and are read unless they hold a write", async () => {
+    const g = bind({ env: STUB, cwd: work });
+    expect(
+      await g.bash(
+        "a1",
+        "dispatch comment --issue X-1 --body hi && make; echo done > log.txt\nsleep 1 | cat"
+      )
+    ).toBeUndefined();
+    expect(g.dryRuns.map((r) => r.script)).toEqual([
+      "dispatch comment --dry-run --issue X-1 --body hi",
+    ]);
+    expect(g.entries).toMatchObject([{ tool: "dispatch_comment", outcome: "verdict" }]);
+  });
+  test("a variable an earlier statement sets to a literal, a ~/ program path and a backslash-quoted name are read; the dry run keeps the assignment", async () => {
+    const g = bind({ env: { ...STUB, HOME: work }, cwd: work });
+    /** The shell's braced expansion of ISSUE, `${ISSUE}`, written without a JavaScript template's look. */
+    const bracedIssue = `$${"{"}ISSUE}`;
+    const cases: Array<[string, string]> = [
+      [
+        `D=${bin}/dispatch; $D comment --issue X-1 --body hi | tail -1`,
+        `D=${bin}/dispatch; $D comment --dry-run --issue X-1 --body hi`,
+      ],
+      [
+        `export ISSUE=X-1\ndispatch comment --issue "${bracedIssue}" --body hi`,
+        `export ISSUE=X-1\ndispatch comment --dry-run --issue "${bracedIssue}" --body hi`,
+      ],
+      [
+        "~/bin/dispatch comment --issue X-1 --body hi",
+        "~/bin/dispatch comment --dry-run --issue X-1 --body hi",
+      ],
+      [
+        "\\dispatch comment --issue X-1 --body hi",
+        "\\dispatch comment --dry-run --issue X-1 --body hi",
+      ],
+    ];
+    for (const [index, [command]] of cases.entries())
+      expect(await g.bash(`v${index}`, command)).toBeUndefined();
+    expect(g.dryRuns.map((r) => r.script)).toEqual(cases.map(([, script]) => script));
+    expect(g.calls[1].user).toContain('"issue": "X-1"');
+    expect(g.entries.map((e) => e.outcome)).toEqual(Array(cases.length).fill("verdict"));
+  }, 30_000);
+  test("a literal file as the write's stdin is read and kept in its dry run", async () => {
+    fs.writeFileSync(path.join(work, "q.md"), QUESTION);
+    const g = bind({ env: STUB, cwd: work });
+    expect(
+      await g.bash("i1", "dispatch ask --issue X-1 --question-file - < q.md 2>&1")
+    ).toBeUndefined();
+    expect(g.dryRuns.map((r) => r.script)).toEqual([
+      "dispatch ask --dry-run --issue X-1 --question-file - < q.md",
+    ]);
+    expect(g.calls[0].user).toContain(
+      JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2)
+    );
+  });
+  test("the dry run of a write after a dispatch claim and before a | head runs neither", async () => {
+    const g = bind({
+      env: STUB,
+      cwd: work,
+      dryRun: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({ issue: "X-1", body: "hi" }),
+        stderr: "",
+        timedOut: false,
+      }),
+    });
+    expect(
+      await g.bash(
+        "d1",
+        "dispatch claim --issue X-1 2>&1 | head -2; dispatch comment --issue X-1 --body hi 2>&1 | head -3"
+      )
+    ).toBeUndefined();
+    expect(g.dryRuns.map((r) => r.script)).toEqual([
+      "dispatch comment --dry-run --issue X-1 --body hi",
+    ]);
+    expect(g.entries).toMatchObject([{ tool: "dispatch_comment", outcome: "verdict" }]);
+  });
+  const STILL_REFUSED: Array<[string, string, string]> = [
+    [
+      "a program that may write the file the write reads",
+      "python3 - <<'EOF'\nopen('ops.json', 'w').write('[]')\nEOF\ndispatch doc-edit --issue X-1 --artifact spec --ops-json-file ops.json",
+      "dispatch_doc_edit",
+    ],
+    [
+      "sed -i on the spec file before it is sent",
+      "sed -i 's/a/b/' spec.md && dispatch issue --project P --title t --spec-file spec.md",
+      "dispatch_issue",
+    ],
+    [
+      "a here-document written to the file the write reads",
+      "cat > q.md <<'EOF'\nShould it wait?\nEOF\ndispatch ask --issue X-1 --question-file q.md",
+      "dispatch_ask",
+    ],
+    [
+      "a write sent to the background",
+      "dispatch comment --issue X-1 --body hi &",
+      "dispatch_comment",
+    ],
+    [
+      "two writes in one call",
+      "dispatch comment --issue X-1 --body one; dispatch comment --issue X-1 --body two",
+      "dispatch_comment",
+    ],
+    [
+      "a command substitution in the write",
+      'dispatch ask --issue X-1 --question "Checked at $(date -u +%H:%MZ): ship it?"',
+      "dispatch_ask",
+    ],
+    [
+      "a command substitution in an assignment the write uses",
+      'Q=$(cat q.md); dispatch ask --issue X-1 --question "$Q"',
+      "dispatch_ask",
+    ],
+    [
+      "a process substitution as the write's stdin",
+      "dispatch issue --project P --title t --spec-file - < <(cat spec.md)",
+      "dispatch_issue",
+    ],
+  ];
+  for (const [form, command, tool] of STILL_REFUSED)
+    test(`still refused before anything runs, in every mode: ${form}`, async () => {
+      for (const mode of ["warn", "block"]) {
+        const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
+        const result = await g.bash("r", command);
+        expect(result?.block).toBe(true);
+        expect(result?.reason).toContain("Nothing in the call ran");
+        expect(g.dryRuns).toHaveLength(0);
+        expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
+      }
+    });
   test("a compound command whose dispatch sends nothing, or names dispatch only as text, is not refused", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
     for (const command of [
@@ -1223,7 +1420,7 @@ console.log(JSON.stringify(args, null, 2));
     expect(g.entries).toHaveLength(0);
   });
   test("a halt or a session the gate would skip lets a compound write run", async () => {
-    const compound = "dispatch comment --issue X-1 --body b | cat";
+    const compound = "cd $X && dispatch comment --issue X-1 --body b";
     const elsewhere = bind({
       env: { OMP_ASKGATE: "block" },
       primary: { provider: "openai-codex", id: "gpt-5.5" },
@@ -1289,28 +1486,24 @@ console.log(JSON.stringify(args, null, 2));
       "cd bin >/dev/null && ./dispatch ask --dry-run --issue X-1 --question q",
     ]);
     expect(g.calls[0].user).toContain('"body": "The run finished."');
-    // A literal path joined to another command gets the plain resend reason: the path is not why.
-    const piped = await g.bash("piped", `${bin}/dispatch comment --issue X-1 --body hi | tail -1`);
-    expect(piped?.block).toBe(true);
-    expect(piped?.reason).toContain("send that `dispatch comment` again on its own:");
-    expect(piped?.reason).not.toContain("Here ");
+    // A literal path in a call AskGate cannot read gets the plain resend reason: the path is not why.
+    const joined = await g.bash("joined", `cd $X && ${bin}/dispatch comment --issue X-1 --body hi`);
+    expect(joined?.block).toBe(true);
+    expect(joined?.reason).toContain("send that `dispatch comment` again on its own:");
+    expect(joined?.reason).not.toContain("Here ");
     expect(g.entries.map((e) => [e.toolCallId, e.tool, e.outcome, e.decision])).toEqual([
       ["abs", "dispatch_message", "verdict", "allow"],
       ["rel", "dispatch_comment", "verdict", "allow"],
       ["quoted", "dispatch_comment", "verdict", "allow"],
       ["cd", "dispatch_ask", "verdict", "allow"],
-      ["piped", "dispatch_comment", "unreadable", "revise"],
+      ["joined", "dispatch_comment", "unreadable", "revise"],
     ]);
   });
   test("a dispatch write called by a path the shell expands is refused, in every mode, its reason naming what AskGate cannot read", async () => {
+    // A `~/` path and a backslash-quoted `\dispatch` are read (the variable test above); these are not.
     const expanded: Array<[string, string]> = [
-      [
-        "~/.local/plugins/node_modules/@sjawhar/pi-envoy/bin/dispatch message --issue X-1 --body hi",
-        "`~`",
-      ],
       ["$HOME/bin/dispatch comment --issue X-1 --body hi", "`$`"],
       ["/opt/*/bin/dispatch comment --issue X-1 --body hi", "`*`"],
-      ["\\dispatch ask --issue X-1 --question q", "`\\`"],
       ["~/x/$V/dispatch ask --issue X-1 --question q", "`~` and `$`"],
     ];
     for (const mode of ["warn", "block"]) {
@@ -1327,13 +1520,11 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.dryRuns).toHaveLength(0);
       expect(g.calls).toHaveLength(0);
       expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual(
-        [
-          "dispatch_message",
-          "dispatch_comment",
-          "dispatch_comment",
-          "dispatch_ask",
-          "dispatch_ask",
-        ].map((tool) => [tool, "unreadable", "revise"])
+        ["dispatch_comment", "dispatch_comment", "dispatch_ask"].map((tool) => [
+          tool,
+          "unreadable",
+          "revise",
+        ])
       );
     }
   });
@@ -1341,7 +1532,6 @@ console.log(JSON.stringify(args, null, 2));
     /** The shell's braced expansion of D, `${D}`, written without a JavaScript template's look. */
     const bracedD = `$${"{"}D}`;
     const viaExpansion: Array<[string, string, string]> = [
-      [`D=${bin}/dispatch; $D comment --issue X-1 --body y | tail -1`, "dispatch_comment", "`$`"],
       ["$D comment --issue X-1 --body y", "dispatch_comment", "`$`"],
       [`${bracedD} message --issue X-1 --body y`, "dispatch_message", "`$`"],
       ['"$D" ask --issue X-1 --question q', "dispatch_ask", "`$`"],
@@ -1437,7 +1627,7 @@ console.log(JSON.stringify(args, null, 2));
     const g = bind({ env: STUB, cwd: work });
     const result = await g.bash(
       "r",
-      "cd /tmp; dispatch request-approval --issue X-1 --summary-file s.md"
+      "make && dispatch request-approval --issue X-1 --summary-file s.md"
     );
     expect(result?.block).toBe(true);
     expect(result?.reason).toContain("send that `dispatch request-approval` again on its own");
@@ -1596,7 +1786,7 @@ console.log(JSON.stringify(args, null, 2));
     }
     // Ten real dry runs, each a bun process: past bun's 5 s default on a loaded host.
   }, 30_000);
-  test("a 2>&1 after the here-document opener runs as written and is left out of the dry-run; no other redirect is read there", () => {
+  test("a 2>&1 after the here-document opener runs as written and is left out of the dry-run", () => {
     const after = core.scopedCommand(
       "dispatch comment --issue X-1 --body-file - <<'EOF' 2>&1\nhi\nEOF"
     );
@@ -1604,12 +1794,6 @@ console.log(JSON.stringify(args, null, 2));
     expect(after?.dryRunScript).toBe(
       "dispatch comment --dry-run --issue X-1 --body-file - <<'EOF'\nhi\nEOF"
     );
-    expect(
-      core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' 2>/dev/null\nhi\nEOF")
-    ).toBeUndefined();
-    expect(
-      core.scopedCommand("dispatch comment --issue X-1 --body-file - <<'EOF' | tail\nhi\nEOF")
-    ).toBeUndefined();
   });
   test("a revise of a command that names a file says the file was read before the rest of its batch ran", async () => {
     const NOTE =
@@ -1819,14 +2003,15 @@ console.log(JSON.stringify(args, null, 2));
       ).toBeUndefined();
       expect(g.entries).toHaveLength(0);
     });
-    test("a markdown upload joined to other commands is refused as unreadable, as any scoped write is", async () => {
+    test("a markdown upload piped into a reader is reviewed, the pipe left out of its dry run", async () => {
       const g = bind({ env: STUB, cwd: work });
-      const result = await g.bash(
-        "u7",
-        "dispatch artifact --issue DSP-1 --name brief.md --path brief.md | cat"
+      expect(
+        await g.bash("u7", "dispatch artifact --issue DSP-1 --name brief.md --path brief.md | cat")
+      ).toBeUndefined();
+      expect(g.dryRuns[0].script).toBe(
+        "dispatch artifact --dry-run --issue DSP-1 --name brief.md --path brief.md"
       );
-      expect(result?.block).toBe(true);
-      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "unreadable" }]);
+      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "verdict" }]);
     });
     // What Dispatch stores as a markdown document: an upload of inline text (`--content`,
     // `--content-file`), whatever its name, or a `--path` file the CLI sends as text/markdown (its
@@ -1862,7 +2047,6 @@ console.log(JSON.stringify(args, null, 2));
         'dispatch artifact --issue DSP-1 --name "$NAME" --path shot.png',
         "dispatch artifact --issue DSP-1 --name $NAME --path shot.png",
         'dispatch artifact --issue DSP-1 --name shot.png --path "$F"',
-        "dispatch artifact --issue DSP-1 --name-file name-png.txt --path shot.png | cat",
       ];
       for (const mode of ["warn", "block"]) {
         const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
