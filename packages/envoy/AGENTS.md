@@ -1283,8 +1283,9 @@ Yjs transaction, and re-derives the selected cells' mark set inside Yjs before a
 waits behind the row lock or is observed as open; a newly committed anchor changes the mark snapshot
 and refuses the deletion; an unaccounted mark with no committed ask/comment row fails closed.
 
-References form one graph. Mentions (`dispatch://` refs and same-origin dashboard URLs in a
-document version, ask question, comment body, or issue message) are derived on every write into
+References form one graph. Mentions (`dispatch://` refs, same-origin dashboard URLs, and the
+issue keys and `#<question id>`s written bare that resolve, in a document version, ask question,
+comment body, or issue message) are derived on every write into
 `refs` by `refs.ReplaceCounted`, which reconciles rather than rewrites: an edge that survives keeps its
 `created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right
 after the source's event is appended, in the same transaction). Structural relations stay in the
@@ -1301,7 +1302,8 @@ descendant through `blocked_by`. Artifact targets are addressed by
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
-exists, and refuses to run without `dispatch.server_url`. A document mention's backlink excerpt -
+exists and clearing each source's `refs_owed` row as it re-indexes it, and refuses to run without
+`dispatch.server_url`. A document mention's backlink excerpt -
 the block holding the target's first mention, its id the `#b-<id>` jump and its markdown cut to
 480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
 `excerpt_version`, migration 0092) when the mention is indexed, cut from a render of the version's
@@ -1311,14 +1313,17 @@ its own render (`pmdoc.RenderWithBlockOffsets`; `renderTreeWithOffsets`,
 offsets together to `refs.MentionExcerpts` and `refs.RecordExcerpts` (`writeVersionTx`, and an
 upload's and a seeded spec's `docs.Service.IndexDocumentReferences`, which take the transaction's
 recorded rendering from the ledger), so the route reads no document and no write renders its tree
-for the excerpts (LEGION-531). An edit, a named version, a seed, a rebuild and a settlement render
+for the excerpts (LEGION-531). `refs.MentionExcerpts(markdown, blocks, serverURL, resolver)` reads
+the mentions through the document's `refs.NewResolver` and returns an error from it, so a bare key
+or `#id` gets the block it is written in. An edit, a named version, a seed, a rebuild and a settlement render
 the tree once; an upload that changes the document renders it twice, as it did before excerpts -
 `ReplaceText`'s render of the replacement, which is the stored markdown, and `applyLive`'s render
 of the fork - and its excerpts are cut from `applyLive`'s render only when the two agree. A null
 `excerpt_version` marks a mention owed an excerpt: every row 0092 found, each one `rebuild-refs`
-inserts, and every mention of an upload whose replacement left the document as it was, the one
-version write that records no rendering (`refs.ClearExcerpts`, which keeps the payload the row
-holds for the reconciliation but sets its version null). `cmd/dispatch` runs
+inserts, every mention of an upload whose replacement left the document as it was, the one
+version write that records no rendering, and every mention of a document the reference re-index
+(below) reads whose rendering is not its version's markdown (`refs.ClearExcerpts`, which keeps the
+payload the row holds for the reconciliation but sets its version null). `cmd/dispatch` runs
 `docs.Service.RunReferenceExcerptReconciliation`, which reads owed rows through the partial index
 `refs_excerpt_drift` (an empty index once it has caught up), stores one batch of 20 documents per
 tick, every 2 s while a batch is full and every five minutes after, and for the hour after its
@@ -1360,11 +1365,17 @@ A mention's source is the node whose text holds it, never the issue that text be
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
 issue's own `child_of`, `blocked_by` and `affects` edges, and the cited node's `?to=` backlink names the spec.
-Where a reference in text ends, and what it names, is one rule with two readers: `text.ExtractAt`,
-which every write indexes through, and the dashboard's `composerReferences` (`refs/routes.ts`,
-scanning with `referenceSpans` and parsing with `referenceRouteFromHref`), behind its reference
-pills, unfurl cards and linked text. `DISPATCH_TEXT_REFERENCES` in `@legion/contracts`, whose
-JSON copy is `text/testdata/dispatch-text-references.json`, is the table both are tested against,
+Where a reference in text ends, and what it names, is one rule with two readers: `text.Mentions`,
+which every write indexes through (`text.ExtractAt`'s `dispatch://` and dashboard references, plus
+each bare key and `#id` its `text.Resolver` names), and the dashboard's `textReferences`
+(`refs/routes.ts`, scanning address spans with `referenceSpans` and parsing them with
+`referenceRouteFromHref`), which the renderers, `composerReferences` (the composer's reference
+pills), the unfurl cards and the document editors' reference titles read. `text.Extract` and
+`text.ExtractAt` stay for `GET /api/v1/references`' `?to=`/`?from=` parser, which never accepts a
+bare key. `DISPATCH_TEXT_REFERENCES` in `@legion/contracts`, whose
+JSON copy is `text/testdata/dispatch-text-references.json`, is the table both are tested against
+(a row's `issues` and `questions` are what its resolver answers, its `links` what a renderer
+links where that differs from what the server indexes),
 so a change to the rule changes both readers and the table: `**dispatch://KEY**`,
 `` `dispatch://KEY` `` and `[dispatch://KEY](dispatch://KEY)` (how a document stores
 `<dispatch://KEY>`) all mention `KEY`, though the dashboard shows the code span as code, not a
@@ -1376,6 +1387,30 @@ NUL, so a decoded NUL would fail the write and stop `rebuild-refs` at the body h
 browser normalizes a URL and net/url does not (host case, a default port, dot segments, a
 backslash), the two still differ, and so does how many U+FFFD stand for the invalid UTF-8 in a
 query's item id, an id no item has.
+
+A bare key and a `#id` are mentions only as what they resolve to when the source is written
+(`refs.NewResolver`, built in the write's transaction): a key only when its issue exists (one
+`key = any($1)` select per write, only when a candidate exists), a `#id` only as the question the
+text's document declares under that id. That document is `refs.ScopeOf` (a version's document; an
+ask's block, anchor or owning document, else its issue's spec; a comment's anchor or owning
+document, else its ask's or thread parent's scope, else its issue's spec; an issue message's
+spec; a direct message none), and the question map is `refs.QuestionMap` (each `:::ask{#id}` line
+of the latest version, to the ask settlement made for it or a copy's `copied_from` ask; plain
+selects and a scan of directive lines, never `loadAskBlocks`, which locks rows).
+`refs.ScopeSources` is the inverse (`TestScopeOfAndScopeSourcesAgree`), and
+`GET /api/v1/references/questions?kind=&id=` serves both to the dashboard so it resolves `#id` by
+the same rule. Text the rule has not read is owed in `refs_owed` (migrations 0117-0122): triggers
+on `comments`, `asks`, `messages` and `artifact_versions` enqueue a source when what the index
+reads of it changes, and a document as a `scope` when its question map may have changed; 0122
+seeds every stored source. `refs.ReplaceCounted` deletes its own source's row in the write's
+transaction, so only a write an earlier release made stays owed. `docs.Service.RunReferenceReindex`
+drains the queue under the `reference-reindex` lease (`duty.Exclusive`): batches of 200, 2 s apart
+while a batch is full and every 30 s otherwise; each source in its own transaction that claims its
+row (`refs.ClaimOwed`, `for update skip locked`), reads it (`refs.LoadSource`) and reconciles it
+(`refs.Reindex`, edges dated at the source's own write time, no `source_seq`, no event), a
+document storing its excerpts in that transaction; a `scope` row owes every source of that scope
+whose text may cite a `#id` (`refs.ScopeCitations`). `packages/envoy/cmd/dispatch/README.md`
+(Reference graph) has the grammar and how a rolling update converges.
 
 The live document holds the tree as the browser editor holds it (`pmdoc.Update`, `pmdoc.Read`).
 That editor builds each node it loads with its schema, so an attribute the live document lacks

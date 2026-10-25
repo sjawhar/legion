@@ -136,8 +136,23 @@ id. Opening it scrolls to that block and highlights it briefly.
 
 Anything in Dispatch can be linked with a `dispatch://` reference: `dispatch://CORE-12` for an
 issue, `dispatch://CORE-12/spec` for its spec, and similar forms for documents, asks, comments, and
-messages. In a document or a comment, a reference shows as a link titled with what it points to.
-Rest the pointer on a link, or focus it with the keyboard, to see a preview card.
+messages. Two shorter forms link too:
+
+- **An issue key on its own**, such as `CORE-12`, links to that issue once Dispatch finds it. The
+  key has to stand alone: `see CORE-12.` and `(CORE-12)` link, while `CORE-12/spec`, `CORE-12.5`
+  and `xCORE-12` do not. A key for an issue that does not exist stays plain text.
+- **`#` and a question's id**, such as `#q2`, links to the question block of that id in the same
+  document: in the document's own text, or in a question, comment or reply on it. On an issue, its
+  comments and messages count as being on its spec. A copied question block links to the
+  original question.
+
+A reference shows as a link titled with what it points to: an issue as its key and title, a
+document as its name, a question as its text, a comment or message as its words. In the document
+editor and in past versions the title is drawn in the reference's place while the text stays as
+you wrote it; in the editor, put the cursor on the title to see and edit that text. Rest the
+pointer on a link, or focus it with the keyboard, to see a preview card. A comment, reply or
+message that is nothing but references shows a card for each one, in the margin, the Inbox and
+the Conversation.
 
 Every issue, document, and ask has a **Referenced by** list of what links to it. A document page
 shows the list open; an issue shows it in its header.

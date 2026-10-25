@@ -370,7 +370,7 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Six periodic maintenance loops run once per period across the processes, not once per process.
+- Seven periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -600,7 +600,11 @@ and the partial index `refs_excerpt_drift` over the rows whose `excerpt_version`
 stored excerpt `GET /api/v1/references` answers a document mention with, which every version write
 fills and the reference-excerpt reconciliation fills for every row stored before it
 (`packages/envoy/AGENTS.md`). On the 2026-10-10 production dump the reconciliation's first pass
-filled 7,498 mentions of 2,150 documents in 248 s at `GOMAXPROCS=2`. Its census answers `0`.
+filled 7,498 mentions of 2,150 documents in 248 s at `GOMAXPROCS=2`. Its census answers `0`. An
+excerpt is cut at the mentions the index reads (`refs.MentionExcerpts` takes the document's
+`refs.NewResolver`), so a bare issue key or `#id` gets the block it is written in; a document the
+reference re-index reads again stores its excerpts in the transaction that re-indexes it
+(Reference graph, below).
 
 Migration `0094_issue_links` creates `issue_links`, the issues each issue waits on through
 `blocked_by`, and its target index, and re-states the `graph_edges` view with the `blocked_by` arm.
@@ -662,6 +666,24 @@ container before it starts the new one. When a deploy fails, the auto-deployer s
 image and confirms the stop before it reads the schema, and when the schema has moved past the one
 the previous image runs against, it refuses to start that image again and exits `1` for a forward
 recovery.
+
+Migrations `0117_refs_owed` through `0122_refs_owed_seed` build `refs_owed`, the reference sources
+owed a re-index by the rules that read a bare issue key and a `#<question id>` (Reference graph,
+below). `0117` creates the table, one row per `(kind, id)` with kinds `artifact`, `ask`, `comment`,
+`message` and `scope`, and `refs_owed_enqueue`, which inserts a row or re-dates the one already
+owed. `0118` to `0121` each add one trigger, on `comments`, `asks`, `messages` (a row with an
+issue) and `artifact_versions` (a version holding markdown); each is its own migration, so its
+transaction holds that one table's `SHARE ROW EXCLUSIVE` alone: a write to it waits behind the
+migration and a read does not. `0122` then seeds a row for every source already stored (each
+document with a markdown version, each ask, each comment and each issue message, `on conflict do
+nothing`, so a row a trigger wrote meanwhile stays as it is), under `ACCESS SHARE` on the tables it
+reads, writing only `refs_owed`: about 4,600 rows on production (763 documents, 929 asks, 2,916
+comments and messages, counted 2026-10-24). The triggers are live before the seed reads, so a
+write landing between the two is owed either way. All six censuses answer `0`: `0117` creates new
+objects, `0118` to `0121` add triggers that refuse and rewrite no row, and `0122` writes only the
+table `0117` creates. A server of the release before them keeps working as it did; its writes fire
+the triggers, it never clears the rows they make, and they stay owed until this release's drain
+re-indexes them.
 
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
@@ -841,22 +863,101 @@ predates a subcommand cannot boot and migrate when a deployment asks it for one.
 
 ## Reference graph
 
-Mentions (`dispatch://` references and same-origin dashboard URLs) in document versions, ask
-questions, comment bodies, and issue messages are indexed into `refs` on every write; migration
-`0032_refs_provenance` gives each edge a `kind`, `created_at`, and `source_seq` (the `events.id`
-that introduced it), and creates the `graph_edges` view, which unions those mentions with the
-structural relations already stored on the node tables (`child_of`, `attached_to`, `anchored_to`,
-`owned_by`, `replies_to`, `followed_by`). `GET /api/v1/references?to=<ref>` lists everything that
-points at a node and `?from=<ref>` everything it points to, cross-project. The migration refuses
-to run when an ask or comment anchor carries a non-uuid `artifact_id`.
+Mentions in document versions, ask questions, comment bodies, and issue messages are indexed into
+`refs` on every write; migration `0032_refs_provenance` gives each edge a `kind`, `created_at`, and
+`source_seq` (the `events.id` that introduced it), and creates the `graph_edges` view, which
+unions those mentions with the structural relations already stored on the node tables
+(`child_of`, `attached_to`, `anchored_to`, `owned_by`, `replies_to`, `followed_by`).
+`GET /api/v1/references?to=<ref>` lists everything that points at a node and `?from=<ref>`
+everything it points to, cross-project. The migration refuses to run when an ask or comment
+anchor carries a non-uuid `artifact_id`.
+
+A write reads its text's mentions with `text.Mentions` (`internal/dispatch/text/mentions.go`),
+asking a resolver built for that source in the write's transaction (`refs.NewResolver`) what a
+bare key or `#id` names. A mention is one of four forms:
+
+- a `dispatch://` reference;
+- a same-origin dashboard URL;
+- a bare issue key, `CORE-12`, stored as the edge `dispatch://CORE-12` makes, only when that issue
+  exists in the write's transaction (one `select key from issues where key = any($1)` per write,
+  run only when the text holds a key). A key is `[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*` that stands
+  alone. It starts at the start of the text, after whitespace (or a numeric character reference
+  to whitespace, such as `&#32;`, which stored markdown writes at a mark's edge), or after one of
+  `(` `[` `"` `'` `*` `_` `>` `` ` `` `~` `|`. It ends at the end of the text or before a character
+  that is not a letter, a digit, `-`, `/`, `#` or `@`, and a `.` `,` `:` `;` `_` `*` or `~` there
+  ends it only when no letter or digit follows that character. So `CORE-12's`, `CORE-12.` and
+  `_CORE-12_` mention CORE-12, and `CORE-12abc`, `CORE-12-3`, `CORE-12/spec`, `CORE-12#q1` and
+  `CORE-12.5` mention nothing. A key the write finds no issue for is not stored; the source's next
+  write, or `rebuild-refs`, stores it once the issue exists;
+- a `#<question id>`, `#q2`, stored as the edge of the ask that question names, when the question
+  map of the document the text belongs to holds that id. The id is the longest run of
+  `[A-Za-z0-9_-]` after the `#`, which starts where a key may; when no question holds the whole
+  run, the run without its trailing `_` and `-` is tried, so `_see #q2_` mentions q2. `{#q2}` (the
+  declaration itself), `owner/repo#1` and `https://x/#q2` are no candidates.
+
+Nothing inside a `dispatch://` or `http(s)://` address is read as a key or `#id` of its own. The
+server parses no markdown, so a mention in a code span, a code block or a link's destination is
+indexed, though the dashboard links none of them inside code or a link.
+
+The question map of a document (`refs.QuestionMap`) is each `:::ask{#id}` line of its latest
+version, to the ask settlement made for that block on that document, or, for a copied block, to
+the original ask its `copied_from` names, so a `#id` citing a copy is an edge to the original. A
+block settlement has not made an ask for yet is absent. It reads the directive lines without
+parsing the document and takes no lock. The document a text belongs to is `refs.ScopeOf`:
+
+- a document version: that document;
+- an ask: the document its block is on, else the one it is anchored to, else the one that owns
+  it, else its issue's spec;
+- a comment: the document it is anchored to, else the one that owns it, else, for a reply to an
+  ask, that ask's document, else, for a reply in a thread, its parent's (so its thread root's),
+  else its issue's spec;
+- an issue message: its issue's spec;
+- a direct message: none. It is not indexed, and the dashboard reads only bare keys in it.
+
+`refs.ScopeSources` is the inverse, every source whose scope is one document, and a test holds the
+two to agreeing on every shape above (`TestScopeOfAndScopeSourcesAgree`).
+
+Text is re-indexed with no command run through `refs_owed` (migrations `0117` to `0122`, above):
+every source stored before this rule, every source a server of an earlier release writes while a
+rolling update runs, and the sources whose `#id` a document's new question names. Its triggers
+owe a comment when its body or what decides its scope changes (`reply_to`, its anchor's
+document, `artifact_id`, `ask_id`, `issue_key`); an ask when its question or what decides its
+scope changes, and, when it is made or its `block_id` or block document changes, its block's
+document as a `scope`; an issue message when it is written or its body changes; and, for each
+version holding markdown, its document as an `artifact` and as a `scope`. `refs.ReplaceCounted`,
+which every indexing write goes through, deletes its own source's row at the end of the write's
+transaction, so a write this release indexes is not owed again; an earlier release never deletes
+one, so its writes stay owed. `docs.Service.RunReferenceReindex` drains the queue under the
+`reference-reindex` lease (`duty.Exclusive`): one batch of 200 rows per tick, oldest first, 2 s
+apart while a batch comes back full and every 30 s otherwise. Each source is re-indexed in a
+transaction of its own that claims its row (`for update skip locked`; a row a landing write holds
+waits for the next tick), reads the stored text and reconciles the source's edges; a source that
+is gone loses its edges, and a document also stores its mentions' excerpts in that transaction. A
+`scope` row owes, in its place, every source in that document's scope whose text may cite a
+`#id`, which is how a `#q2` written before settlement made q2's ask (another question of the same
+edit saying "see #q2") is stored once the ask exists. An edge the drain adds is dated at the
+source's own write time (an ask's or comment's latest edit, else its creation; a message's or a
+version's creation), so old text does not sort as new under "Referenced by", and like a
+`rebuild-refs` edge it carries no `source_seq` and appends no event. A source it cannot re-index
+is logged at ERROR (`dispatch: reference re-index left a source owed for a later tick`) and stays
+owed; each tick that re-indexes any logs `dispatch: re-indexed owed references` with `sources=<n>`.
+
+**A rolling update converges.** While a server of the release before `0117` runs beside this one,
+it indexes what it writes by its own rules, which read no bare key or `#id`, and leaves the row its
+write's trigger made; this release's drain re-indexes that source at a later tick. The drain runs
+for as long as the triggers fire, so once no server older than this release is running and the
+queue is drained, the graph matches the stored text.
 
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
 ```
 
-reparses every source and reconciles the index with the text (surviving edges keep their
-provenance, edges of deleted sources are removed) and prints
-`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N`. It reads
+reparses every source by the same rules and reconciles the index with the text (surviving edges
+keep their provenance, an edge it adds is dated at its source's write time, edges of deleted
+sources are removed) and prints
+`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N`. Each source's
+transaction first deletes its `refs_owed` row, then reads the source, so the drain does not
+re-index it again and a write landing after the delete stays owed. It reads
 `dispatch.server_url` from the envoy config the same way the server does and refuses an empty
 value: dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
 
@@ -993,6 +1094,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)). |
 | `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
 | `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
+| `/api/v1/references/questions?kind=&id=` | GET | cookie, trusted header, or bearer | What a `#<question id>` in one text names, by the rule the reference index stores it by: `kind` (`artifact`, `ask`, `comment` or `message`) and `id` (its uuid) name the text. Answers `{document, questions}`: `document` is the `dispatch://` reference of the document the text belongs to (`refs.ScopeOf`), and `questions` that document's question blocks (`refs.QuestionMap`), ordered by block id, each `{block_id, ask}` with its ask's `dispatch://` reference; a copied block names the original ask. A direct message, which belongs to no document, is `200` with a null `document` and no questions. Plain reads, no lock, cross-project like `/api/v1/references`. `400 INVALID_KIND` / `INVALID_ID` (not a uuid); `404 NOT_FOUND` for a text that does not exist. |
 | `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. `repo` (`owner/name`) is the issue's own repository and must be mapped to its project: `400 INVALID_ISSUE` when it is not `owner/name`, `400 REPO_NOT_MAPPED` when it is not mapped. A title over 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after trimming) is `400 CAP_EXCEEDED` before the duplicate check. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (weighed as Element weights below lists) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |
 | `/api/v1/issues/{key}` | PATCH | cookie, trusted header, or bearer | Update an issue's `title`, `status`, `priority`, `labels` (or `labels_add`, which adds to the labels the issue holds when the write commits; not with `labels`), `route`, `external_links`, `parent`, `rank`, `assignee`, `components` or `repo` (`null` clears it); `AGENTS.md` gives each field's rules. A title is trimmed, and one over 1,000 characters is `400 CAP_EXCEEDED`, as on creation. `expected_sequence` makes the write conditional: `409 ISSUE_CHANGED` when the issue's last event is no longer that sequence. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. A quote mark carries the ask's id and who asked, which no rendering shows and every load of the document builds: the marks a document's comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors, and a quote anchor that would leave them past it and carrying more is `413 CAP_EXCEEDED`, naming the bound and both sizes. |
