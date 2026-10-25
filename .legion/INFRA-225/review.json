@@ -2,61 +2,24 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-225",
-  "completed": "2026-10-25T15:36:00Z",
-  "round": 1,
-  "decision": "changes_requested",
-  "reviewedCodeHead": "4929b7b8e6c39f5e9570d35a4351c8452d7e36e0",
-  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title. CI head (newest pull_request run) 4929b7b8; its check-runs at 15:31Z: lint, typecheck, test, pr-title success; dispatch still in_progress (not required). compare 4929b7b8...0d02cc10 is .legion/ only.",
+  "completed": "2026-10-25T17:44:00Z",
+  "round": 2,
+  "decision": "approved",
+  "reviewedCodeHead": "286583d0109f4e210a3104f64a6964397eb66b52",
+  "scope": "Narrowed by the architect to round 1's important finding, its six minor fixes and the Contract change census, against spec v13's acceptance lines.",
+  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title. CI head (newest pull_request run) 286583d010: lint, typecheck, test success; pr-title success (one earlier run cancelled, superseded). compare 286583d010...0d670451 changes only .legion/.",
   "critical": 0,
-  "important": 2,
-  "minor": 6,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/api/architect.go:543-592",
-      "description": "release_children's started/held are read back from records the request has not written: a child released from triage/backlog/icebox (the normal path; only SetStatus todo is sent, the record arrives later with Dispatch's event) is in neither list, so a blocked one answers held: []; a parked child (record at done) released again is answered started though nothing started. Breaks spec acceptance 'the answer names the children started and the children waiting'. Reproduced with a throwaway test over the package's own releaseHarness against Postgres 17: backlog child blocked on an in_progress issue -> {\"released\":[\"LEGION-209\"],\"started\":[],\"held\":[]}; parked child -> started:[\"LEGION-210\"]. Every existing test and the driven proof set the child todo first."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "No '## Contract change census': the PR makes admission.blocked and the release answer's started/held required in the plugin's strict schemas under contract 37 (a process-boundary change); INFRA-229's census convention (docs/solutions/legion/a-contract-census-...-INFRA-229.md) applies."
-    },
-    {
-      "severity": "minor",
-      "file": "skills/legion-controller/SKILL.md:259 and skills/legion-controller/references/admission.md:10",
-      "description": "Free-slot formula (cap - active - waiting) and 'takes the next free slot by itself' no longer hold: slotFree now leaves blocked waiting roots out (admit.go:263-274), so the controller cannot confirm the slot-free wake the daemon sends."
-    },
-    {
-      "severity": "minor",
-      "file": "AGENTS.md:214-218,228-230",
-      "description": "Lifecycle text omits the second exemption (a tree Legion takes back after it finished and lingered starts whatever its links say; blockers.Exempt TakenBack), required by spec acceptance 59/63, and claims `legion state` reports the slot free, which the CLI does not print."
-    },
-    {
-      "severity": "minor",
-      "file": "skills/legion-architect/SKILL.md:268",
-      "description": "Inserted clause puts the never-started waiting child inside a sentence saying its phase, gate, phase records and PR are carried and its catch-up says handed_over/carried; readmit with carry=false resets it to admitted, carries none of them and writes no HandedOverRoot (admit.go:700-758)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/intake/intake_test.go:327",
-      "description": "Re-pointed test now flips an existing key's value instead of adding a key the fixture lacks, so it no longer encodes 'Dispatch may add fields a deployed daemon does not read' (spec acceptance line 65)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/pi-legion/CHANGELOG.md, packages/claude-envoy/CHANGELOG.md",
-      "description": "No [Unreleased] entry for daemon API contract 37, where contracts 34-36 each have one warning that an older plugin refuses the state."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/contracts/src/legion-api.test.ts:358,381",
-      "description": "Comments say 'Contract 36' for fields that are contract 37."
-    }
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "roundOneFindings": {
+    "releaseAnswer": "Fixed in 286583d0: held is judged from the blockers in Dispatch's view the request read (blockers.UnfinishedOf against the mirror), started only for a first phase this request began (startedByRelease over records read before the writes). Tests cover a blocked and a free backlog child, a parked child released again, and the started predicate's table; the driven proof covers both event orderings.",
+    "census": "Present, with an immediate-refusal rollout (boot gate, probe-image, 409 STALE_PLUGIN_CONTRACT). Reviewer re-ran its three searches at 286583d0: every changed hit is listed; unlisted hits are all unaffected (no literal contract number outside version.go, version.json and the two manifests at 37; no other strict parser of the state or release answer) and are recorded in the PR body's census as the reviewer's addendum.",
+    "minors": "Controller free-slot rule and admission.md row, AGENTS.md's two exemptions and slot wording, architect skill's never-started hand-over sentence, intake test adding an absent field, contract-37 CHANGELOG entries, and the Contract 37 comments: all fixed; claude-envoy copies byte-identical."
+  },
+  "acceptedRisks": [
+    "A blocker that closes between the request's Dispatch read and its todo write: the answer names the child held, it starts at once, and the architect hears phase-finished rather than child-status (architect's ruling).",
+    "Same class, found by the thermonuclear pair at 286583d0: a running child a person moved to backlog (with a late unfinished blocker) and the architect released before the daemon consumed that backlog event — the old running record makes the answer omit the child from held, though the todo event then re-enters and holds it. Visible in admission.blocked; requires two Dispatch writes inside event lag. Reported to the architect."
   ],
-  "verified": [
-    "Exemption sites agree (CarriesRun, Exempt, WaitsOn, Holdable, promotion skip, slotFree, Blocked, enterChild, advanceAdmittedTree, StartUnblockedChildren, settleUnfinished, transition, readmit, 0052 backfill); traced child-ran->todo->held->handed-over, root reopened in linger, root after linger, never-started child, root backlog round trip: none wrongly exempt or held.",
-    "DaemonAPIVersion 37 at version.go, version.json, pi-legion and claude-envoy package.json, claude-envoy dist; main still at 36; migrations 0051/0052 free on main.",
-    "child-status row for a waiting child is in skills/legion-architect/references/wake-routing.md; generated claude-envoy copies byte-identical.",
-    "The two deliberately changed tests in 4929b7b8 follow production changes (ChildUnblockedNotice empty-waited reason; enterChild's ran parameter dropped)."
-  ],
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 4929b7b8: both CHANGES on the release_children answer."
+  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality on the round delta at 286583d0: both CHANGES on the stale-running-record race above, which the reviewer judged the same event-lag class as the architect's accepted race; cleanup: WaveReleaseResponse's doc comment (architect.go:45-55) still says 'read back from records'."
 }
