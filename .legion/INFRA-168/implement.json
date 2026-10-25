@@ -2,73 +2,51 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-168",
-  "completed": "2026-10-25T08:05:00Z",
+  "completed": "2026-10-25T09:20:00Z",
   "proof": [
     {
-      "criterion": "Round 2 finding 1 — a clipped ask keeps the sentence each rule reads, so a clip can no longer make a call record ruleOutcome \"none\" for an ask nobody judged.",
-      "surface": "A real `dispatch doc-edit --ops-json-file` from a nested headless Oh My Pi session on this branch's build, in this Legion pod, with the pod's real Claude model, against production Dispatch and the unassigned scratch issue dispatch://INFRA-365.",
-      "command": "env -u LEGION_WORKSPACE -u LEGION_ROLE LEGION_ISSUE=INFRA-365 OMP_ASKGATE=block OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" -p \"Run exactly this command … dispatch doc-edit --issue INFRA-365 --artifact spec --ops-json-file /tmp/proof/ops-two.json\", and the same with ops-thirty.json (two 9 KB ask blocks, and thirty 1 KB ask blocks, each ending \"My recommendation is to keep the schedule exactly as it is.\").",
-      "observed": "The two-block edit was refused naming both asks (#pad1 and #pad2), 2 of 2 where the reviewer measured 0 of 2; the charter's own reason in the same refusal shows the clip fired (\"Each copy is cut off at 'parquet f'\"), so the match came from a clipped body's tail. The thirty-block edit was refused naming the first five with `25 more new ask(s) in this call match a rule too`, 30 of 30 where the reviewer measured 0 of 30.",
-      "headSha": "9bdbb4a66ad900090899e3960116f91331b7cd9e",
-      "negativeControl": "The unit pin of the same three rows was run against the code as it stood and failed there, each body ending in the elision marker rather than the recommendation."
+      "criterion": "Round 3 finding 1 — one refused call moves a breaker key once, and two ask blocks of one write that start alike are two things, so no pass arrives after a single refusal.",
+      "surface": "The gate driven end to end with fake models in askgate.test.ts, which counts the model calls each sequence makes, over the reviewer's own case (a doc-edit inserting #first and #second carrying one question).",
+      "command": "cd packages/pi-envoy && bun test extensions/askgate/",
+      "observed": "The first refusal carries no second-refusal warning, the second send is reviewed (two more model calls), and only the third goes out as outcome \"breaker\" with no model call — through both callers, the rules path that maps the matches and the charter path that maps every ask of the call. Two unidentified asks that open alike are still one thing, so the loop the opening key exists for still ends on its third attempt.",
+      "headSha": "34920d4b1caa90dc7d84faedda408ab1e7c9ed47",
+      "negativeControl": "Run against the code as it stood: both halves out fails three of the four new tests, the dedupe alone fails one (two no-id asks that open alike counted twice), the id key alone fails one (#second passed after #first was refused twice)."
     },
     {
-      "criterion": "Round 2 finding 4 — an ask's #id can no longer take the list's budget from the asks a rule would read, and the 32 KiB bound holds for every input the server accepts.",
-      "surface": "The same nested session and production Dispatch, with a document the server accepts (both parsers create both asks).",
-      "command": "The same invocation with /tmp/proof/ops-bigid.json: one block carrying a 32,000-character #id and one real ask ending \"My recommendation is to keep it exactly as it is.\"",
-      "observed": "Refused naming the real ask — `The ask block #realask that starts 'The nightly export runs at 02:00 UTC and takes about 40 minu' matches the rule \"no change\"` — where before that id emptied every other ask's body and no rule could fire for any of them.",
-      "headSha": "9bdbb4a66ad900090899e3960116f91331b7cd9e",
-      "negativeControl": "The unit pins measure the other half: the list stays inside ASKS_MAX_BYTES at a 64,000-character id, where the reviewer measured 64,126 bytes, and both fail against the code as it stood."
+      "criterion": "Round 3 finding 2 — the unjudged path leaves a real trace in Dispatch when nobody judged an ask, proven on the live surface rather than on a unit fake.",
+      "surface": "Production Dispatch and a nested headless Oh My Pi session on this branch's build in this Legion pod, with the pod's real Claude model, on the unassigned scratch issue dispatch://INFRA-373.",
+      "command": "dispatch artifact --issue INFRA-373 --name probe.md --path probe-plain.md (twice, from gated sessions), then `dispatch artifact --issue INFRA-373 --name probe-md --content-file -` to make a second document whose name is the first's slug, then from the gated session `env … LEGION_ISSUE=INFRA-373 OMP_ASKGATE=block OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" -p \"Run exactly this command … dispatch artifact --issue INFRA-373 --name probe-md --path /tmp/proof/probe-asks.md\"`, whose every opener carries an id.",
+      "observed": "The reference answers to two documents, artifactByReference throws a plain Error, readDocument answers \"failed\", the id filter empties the list, and Dispatch holds the record {\"ruleOutcome\":\"unjudged\",\"ruleAsksPartial\":true,\"ruleAsksCut\":0,\"decision\":\"allow\",\"outcome\":\"verdict\",\"verdictMode\":\"block\",\"ruleLatencyMs\":79,\"charterLatencyMs\":7753,…} at dispatch://INFRA/artifact/askgate-decisions-01a17249-8138-77e3-bda7-400da3630a57-md. The reader read the day back: {\"calls\":11,\"refusals\":10,\"overrides\":1,\"errors\":0,\"cut\":3,\"partial\":1,\"unjudged\":1}.",
+      "headSha": "34920d4b1caa90dc7d84faedda408ab1e7c9ed47",
+      "negativeControl": "The same record's `decision: \"allow\"` is the control for the module's contract — its own failure refused nothing, the charter deciding alone — and a 79 ms rules latency against a 7,753 ms charter call shows no model was asked. The reader's line read 0 in all three earlier rounds, so the 1 is this record and not the line printing."
     },
     {
-      "criterion": "Round 2 finding 3 — the breaker's counter and its pass agree on the same refused thing, and the documented loop still ends.",
-      "surface": "The same nested session and production Dispatch: one `dispatch ask` sent three times on one target.",
-      "command": "env … OMP_ASKGATE=block … -p \"Run these three commands, in this order, once each … dispatch ask --issue INFRA-365 --question '…My recommendation is to keep it exactly as it is…' …\"",
-      "observed": "Two refusals naming the no-change rule, then `Third attempt after two refusals of this call on its target: sent without review and recorded.` and the ask opened (b5d1b381-f908-4727-8705-e6fe635d1be1), retracted in the same run.",
-      "headSha": "9bdbb4a66ad900090899e3960116f91331b7cd9e",
-      "negativeControl": "The reviewer's two cases are pinned as unit tests that fail against the code as it stood: an ask refused once being passed on its next send under a note about two refusals, and a target whose refusals named an ask never passing a call that opens none."
-    },
-    {
-      "criterion": "Round 2 finding 2 — a call the gate let through unjudged leaves a row saying so, never silence.",
-      "surface": "The rules check driven with a Dispatch client that refuses the de-duplication read, through the gate's own fakes, and the live report that prints the new count.",
-      "command": "cd packages/pi-envoy && bun test extensions/askgate/ scripts/askgate-report.test.ts; then `bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-25T07:19:48Z` against production Dispatch.",
-      "observed": "An upload whose read failed and whose every opener carries an #id now answers the new outcome `unjudged` with ruleAsksPartial, makes no model call, refuses nothing, and is written to the Dispatch record; the live report prints its line, `rules calls that judged none of their asks: 0 (pod 0, machine 0)`, beside the cut and partial counts.",
-      "headSha": "9bdbb4a66ad900090899e3960116f91331b7cd9e",
-      "negativeControl": "A call that opens no new ask at all is pinned as still returning undefined and writing no rules fields and no record — the distinction the fix rests on; and the test the reviewer named now counts the model walk's calls (0) rather than asserting silence."
-    },
-    {
-      "criterion": "The acceptance lines still hold at the head these fixes made, and the day's counts read back through Dispatch alone.",
-      "surface": "The same nested sessions against production Dispatch, and the report over the project's decision documents.",
-      "command": "The no-change `dispatch ask` in warn mode and the untried-access ask in block mode on INFRA-365; then `bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-25T07:19:48Z`.",
-      "observed": "Both asks were refused with the rule and the fix named. The window's counts: 6 sessions, 7 rules calls, 7 refusals (6 no_change, 1 untried_access), 1 override, 0 errors, 2 rules calls with asks cut, 0 judged on part of their asks, 0 that judged none, every one source pod.",
-      "headSha": "9bdbb4a66ad900090899e3960116f91331b7cd9e",
-      "negativeControl": "The breaker's third send, which the gate let through on the same surface in the same mode, is the control: the refusals are the rules' and not the gate refusing every call."
+      "criterion": "The README no longer promises a cap the code does not hold.",
+      "surface": "The repository's own text beside the measurements the reviewer and I made.",
+      "command": "Read of packages/pi-envoy/README.md 349-353 against describeAsks' own comment and the measured counts (111 asks 32,858 bytes, 200 asks 34,181, 300 asks of about 1 KB 51,383).",
+      "observed": "The bullet now says the request aims to keep the list within 32 KiB, never leaves an ask out or cuts one below its start and its end to hold the bound, and that a write of over a hundred ask blocks makes a longer request.",
+      "headSha": "34920d4b1caa90dc7d84faedda408ab1e7c9ed47",
+      "negativeControl": "The bound itself is unchanged, which the suite's list-size assertions still hold at 32 KiB for every call under that size."
     }
   ],
   "filesChanged": [
-    "packages/pi-envoy/extensions/askgate/text.ts — clipMiddle and escapedHead, a middle clip that splits no character and no entity.",
-    "packages/pi-envoy/extensions/askgate/rules-check.ts — describeAsks clips in the middle, bounds an ask's id at 128 bytes and floors each ask's text; readAsks and runRulesCheck tell \"no new ask\" from \"the read failed, so none was judged\", which answers the new outcome unjudged.",
-    "packages/pi-envoy/extensions/askgate/askgate-core.ts — the breaker counts refusals per thing (each new ask a call opens, or the call as a whole), with covers(), Revise and count() gone; the warning and the pass are about the same thing.",
-    "packages/pi-envoy/extensions/askgate/decision-record.ts and packages/pi-envoy/scripts/askgate-report.ts — the unjudged outcome through the record and both report modes, with its own count.",
-    "packages/pi-envoy/README.md, CHANGELOG.md and the askgate-core header — the stale 8 KiB and left-out-ask sentences replaced by what the code does, the new outcome and the new counts.",
-    "The tests beside each: askgate.test.ts, decision-record.test.ts, askgate-report.test.ts."
+    "packages/pi-envoy/extensions/askgate/askgate-core.ts — askIdentity keys a block ask on its id as well as its opening; Breaker.revised deduplicates at its own boundary.",
+    "packages/pi-envoy/extensions/askgate/askgate.test.ts — four regressions: the reviewer's case through both callers, the no-id opening key, the dedupe alone and the id key alone.",
+    "packages/pi-envoy/README.md — the list bound says what the code does."
   ],
   "trickyParts": [
-    "A middle clip of escaped text must not cut inside a UTF-8 character or an `&…;` entity at either edge, or the clip itself could re-open a tag; the head moves back and the tail forward until both are clean.",
-    "The id can be cut where the text cannot: no rule reads the id, and the refusal names an ask by its number and its opening.",
-    "The breaker's counter is per thing while its reset stays per target, because an allow, a rebuttal or a trip sends a call on that target and so ends every loop there; clearing more than the call's own things can only cost a review, never give a pass.",
-    "One departure from the architect's literal key, stated rather than hidden: a charter refusal of a call that opens asks counts on those asks rather than on the whole-call key. With the literal key either a charter loop on one ask never ends, or two refused plain edits give a brand-new ask a free pass; the test covers both halves."
+    "The reviewer's recipe for making the de-duplication read fail does not work as written: two uploads of one name give one document at version 2, because the server matches an upload to an existing artifact of that exact name, and an upload of that name under another content type is refused. The ambiguity is reached instead through artifactByReference's other branch — a second document whose name is the first document's slug — which is what this round's live run used.",
+    "The id key had to leave two unidentified asks that open alike as one thing, or an agent rewording only an ask's tail would loop for ever; the key is the id and the opening, never the id alone."
   ],
   "deviations": [
-    "The round-2 fixture dispatch://INFRA-362 was closed after the tester released it, so this round's live runs use a new unassigned fixture, dispatch://INFRA-365.",
-    "No simplify pass: one per pull request, run in the first implementing round.",
-    "The two surfaces the reviewer left on the risk line stay there — the device path, which no Legion pod mounts, and a de-duplication read Dispatch never actually failed — both covered by unit cases, as the architect accepted."
+    "The round-3 fixture dispatch://INFRA-365 was closed after the tester released it, so this round's live run uses a new unassigned fixture, dispatch://INFRA-373.",
+    "No simplify pass: one per pull request, run in the first implementing round."
   ],
   "openQuestions": [
     "sjawhar/legion#2159 is still open and this branch carries its commits; the architect watches it and the plan's \"when #2159 merges\" step runs before the review round that approves the head."
   ],
   "discoveredComplexity": [
-    "All four findings of this round are the same fault as round 1's: a bound, a counter or a failed read quietly deciding that an ask is not judged, with the entry still reading as judged and clean. The counts added over the two rounds — asks cut, asks judged in part, asks judged not at all — are what make each of those visible to the session that reads Dispatch.",
-    "The live two-ask run shows why a unit test was not enough here: the charter check's own reason named the clip (\"Each copy is cut off at 'parquet f'\"), which is what proves the rules match came from a clipped body rather than from a body that happened to fit."
+    "Every finding of rounds 1 to 3 has been one fault: something quietly deciding an ask is not judged while the record still reads as judged and clean. This round's was multiplicity — one refusal counted twice because two asks collapsed to one key — and the remedy that closes it, keying a block on its id, is also what the reviewer had filed as a separate minor.",
+    "A path whose whole purpose is to leave a trace when nobody judged an ask could not be left on a unit case, and reaching it live took a correction to how Dispatch stores a re-uploaded document. That correction is itself worth keeping: an upload of an existing name versions that document and never makes a second one."
   ]
 }
