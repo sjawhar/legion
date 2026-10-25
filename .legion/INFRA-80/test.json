@@ -2,12 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T15:30:00Z",
+  "completed": "2026-10-25T16:20:00Z",
   "evidenceLinks": [
-    "Rounds 1-3 (moved out of the pull request body when it neared GitHub's 65,536-character limit): https://github.com/sjawhar/legion/pull/2173#issuecomment-6399449475",
+    "Rounds 1-3: https://github.com/sjawhar/legion/pull/2173#issuecomment-6399449475",
     "Round 4: https://github.com/sjawhar/legion/pull/2173#issuecomment-6397391272",
     "Round 5: https://github.com/sjawhar/legion/pull/2173#issuecomment-6398448412",
-    "Round 6: https://github.com/sjawhar/legion/pull/2173#issuecomment-6399442439"
+    "Round 6: https://github.com/sjawhar/legion/pull/2173#issuecomment-6399442439",
+    "Round 7: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400027590"
   ],
   "rounds": [
     { "round": 1, "codeHead": "a5e26319624da4107d61115c7058270a0dceb383", "verdict": "pass" },
@@ -15,76 +16,80 @@
     { "round": 3, "codeHead": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c", "verdict": "pass", "testCommit": "eb61c1a2d8b1, the tester's regression lock" },
     { "round": 4, "codeHead": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1", "verdict": "pass" },
     { "round": 5, "codeHead": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37", "verdict": "pass" },
-    {
-      "round": 6,
-      "codeHead": "2056d96c3f48",
-      "verdict": "pass",
-      "completed": "2026-10-25T15:30:00Z",
-      "what": "The architect's five items, each driven. No cluster was touched: the drain of nineteen trees was running, so a probe of a pod would have reported the window rather than the change. Every check is local or a read of GitHub, and the one piece of real-database output reused is round 5's hex listing, named where it is used."
-    }
+    { "round": 6, "codeHead": "2056d96c3f48", "verdict": "pass" },
+    { "round": 7, "codeHead": "054d4e014cf7", "verdict": "pass", "completed": "2026-10-25T16:20:00Z", "what": "The architect's four items, each driven. No cluster touched: the drain is still running." }
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 6: I reproduced the defect behind each of its two code fixes rather than reading its negative controls — reverting both providers conditions fails exactly the two cloudsql-iam subtests and no others, and I then drove the fix's consequence on the real `legion worker-shim` binary, which its own proof does not do. Its exporter claim I drove to `collect_transcripts`'s return code and read the two lines that turn that into a run failure. Its sweep claims I re-derived. Rounds 1 to 5 were each verified as those rounds record."
+    "how": "Round 7: I drove the collector's namespace separation through the real `session_copy` with the collector's own directories present rather than reading the layout; I re-ran both halves of its negative controls and went past its count by mutating one guard at a time, which attributes each control to the guard it pins; I classified its `envoy-go` claim from the run's own log and the branch's envoy footprint rather than accepting the report; and I drove the claim guard at `CheckPod` rather than reading `legionClaim`. Rounds 1 to 6 were each verified as those rounds record."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "round": 6,
-      "criterion": "A deployment on the second database kind must be able to boot: the shim and the image probe are told the providers directory only where the pod mounts it.",
-      "surface": "The sandbox package's rig for the rule, driven as a defect reproduction in an out-of-tree copy; and the **real `legion worker-shim` binary** for the consequence, which is where the defect would have been met.",
-      "command": "Revert both `if r.mountsProviders()` conditions (launcher.go's shim argv, probe.go's probe command) and run `go test ./internal/runtime/sandbox -run TestTheProvidersDirectoryIsToldWhereThePodMountsIt -v`; restore and re-run. Then `legion worker-shim --connect unix:///nonexistent.sock --boot-token-file <file> --provider-env-dir <a directory that does not exist> -- /bin/true`, and the same command without the flag.",
-      "observed": "Unfixed, exactly the two `cloudsql-iam with no provider key` subtests fail — a role's shim and the image probe, each showing `--provider-env-dir /var/run/legion/providers` in the argv with `want false` — while `cloudsql-iam with a provider key` and `postgres with no provider key` pass unchanged. Restored, all pass. On the real binary the consequence is immediate: `legion worker-shim: --provider-env-dir … is unreadable: open …: no such file or directory`, **exit 1 before it dials the daemon**. So under `cloudsql-iam` with no provider key every role's shim would have exited 1 at every launch and the deployment could not have booted.",
-      "headSha": "2056d96c3f48",
-      "negativeControl": "The same shim command with no `--provider-env-dir` proceeds to dialling and retries the daemon stream (exit 141 on my timeout), so the refusal is the directory's and not a missing socket, a missing token file or a bad argv."
+      "round": 7,
+      "criterion": "No name a pod chooses can reach a path the transcript collector owns.",
+      "surface": "The real `session_copy` extracted from `scripts/e2e/stage4b-sandbox-tree.sh` at this head, writing into `transcripts/pods` as `collect_transcripts` now does, with `transcripts/controller` and `transcripts/daemon-controller` already present and the first holding a file.",
+      "command": "Seed keys deriving `controller`, `daemon-controller`, `pods`, a `../escape.jsonl` remainder and a nested `controller/nested.jsonl`; run `session_copy` into `transcripts/pods`; walk the whole `transcripts` tree",
+      "observed": "Every derived name lands inside `transcripts/pods/` — `controller`, `daemon-controller`, `pods`, `.._escape.jsonl`, `controller_nested.jsonl` — and `transcripts/controller/keep.jsonl` is byte-unchanged. The class is closed by the destination rather than by reserved names: the traversal guard requires each written name to resolve as a direct child of the copy's own directory, and that directory is now the collector's sibling, so no name can leave it.",
+      "headSha": "054d4e014cf7",
+      "negativeControl": "The collector's own file, placed before the run and read after it: had any derived name reached a collector path, that file or its directory would have changed. Neither did."
     },
     {
-      "round": 6,
-      "criterion": "The hardened exporter's refusals fail the run, and both halves of a colliding pair are refused rather than the first one winning.",
-      "surface": "The real `collect_transcripts` and `session_copy` functions extracted from `scripts/e2e/stage4b-sandbox-tree.sh` and run with only their database call stubbed, on the hex listing a real PostgreSQL produced in round 5.",
-      "command": "`collect_transcripts` with a failing and a succeeding `session_copy`; then `session_copy` over the round-5 listing, which holds a colliding pair, with the output directory walked afterwards",
-      "observed": "`collect_transcripts` returns 1 when the copy refuses a key and 0 otherwise. The teardown turns that into `CHECK transcripts: FAIL` and a non-empty `teardown_failed`, which prints `stage 4b e2e: FAIL` (read at `:2584-2586` and `:2626-2627`; the return code is driven, those two lines are read). The colliding pair is refused in **both** directions: each key is named and names the other, `exit=1`, and the three good keys are still copied — `sub.jsonl`, `.._escape.jsonl`, `__n__code.jsonl`.",
-      "headSha": "2056d96c3f48",
-      "negativeControl": "What distinguishes this from first-come, which a single collision would otherwise look identical to: `\\n` (0x0a) sorts before `/` (0x2f), so the listing hands the newline key to the loop first and a first-come rule would have written `a_b.jsonl` from it. That file is absent."
+      "round": 7,
+      "criterion": "The unchecked-write class in the collector, and the sensitivity of the controls that pin it.",
+      "surface": "The script at this head, read for the class, and `bun test scripts/e2e/lib/stage4b-session-text.test.ts` run against copies of the script with one guard disabled at a time.",
+      "command": "Read `record_pair` whole; then run the control suite unmodified, and again with the collision arm, the empty/dot name arm and the traversal arm each disabled in turn in a copy",
+      "observed": "Every write in `record_pair` is guarded — `mkdir -p`, `printf > reviewer.jsonl`, `pair_dispatch > $agent.json`, `printf > session-stem`, each `|| return 1`, with `session_copy` already returning non-zero — and there is no fifth write in the function. The suite is 33 pass / 0 fail unmodified. Disabling the collision arm fails 6 controls, the name arm 1, the traversal arm 1: the author's 8 against 25, now attributed guard-by-guard, so every control pins a guard and every guard has at least one control.",
+      "headSha": "054d4e014cf7",
+      "negativeControl": "The mutations are the control: a suite that passed under all three would pin nothing. One of them nearly escaped me — my first attempt at the traversal mutation used an anchor that did not match, so it changed nothing and the suite passed, which reads exactly like a guard no test cares about. I verified the mutation had landed before trusting the result.",
+      "doesNotSettle": "The class is closed in `record_pair` and not in the file: `production_audit`'s `printf … >\"$evidence/run-sessions.json\"` (`:2669`) is the same shape — an unguarded write inside a function whose failure is checked, with errexit off inside it — so the write failing leaves the audit passing with its evidence missing. Pre-existing and outside this change's diff; named rather than folded into a clean report."
     },
     {
-      "round": 6,
-      "criterion": "The removed model is not taught anywhere, in both directions: nothing states the old rule, and nothing new states it wrongly.",
-      "surface": "The tree at this head.",
-      "command": "`grep -rn \"issue's own volume|volume its Sandbox owns|Sandbox-owned|owns the issue's volume\" packages/daemon docs/kubernetes.md scripts/e2e/README.md`, and the five reference texts and `names.go:18` by name",
-      "observed": "`supervise/table.go:596`, the site the reviewer found beyond its own list, is fixed. Nothing asserts a Sandbox-owned issue volume or one outliving its pod; the only matching hit is `live_lifecycle_test.go:563`, which asserts the **absence** of such a claim. All six reference sites are closed: no `only store` in the example file, the site page, `scripts/e2e/README.md` or `AGENTS.md`; no `must be postgres` or `must name session_store: postgres` in the site page; no `SessionDSNKey` in `names.go`.",
+      "round": 7,
+      "criterion": "The `envoy-go` red, classified rather than dismissed.",
+      "surface": "The lane's own log at the head where it concluded, and the branch's diff.",
+      "command": "Read the failed job's log at `2056d96c3f48`; locate the named test; compute the branch's footprint under `packages/envoy`; read `broker-multiprocess` and `envoy-go-race` at that head",
+      "observed": "`panic: test timed out after 10m0s` with `running tests: TestTwoSweepRunnersRunThePassOnceAndSkipOnce`, which is `packages/envoy/internal/dispatch/api/suggestion_outcomes_lease_test.go:47`. The branch touches no file under `packages/envoy` and nothing of its diff is in that package. At the same head `broker-multiprocess=success` and `envoy-go-race=success`, so the rounds 5-6 compile break is cured and this is a different failure: a ten-minute hang in a leased sweep the branch does not touch. Not ours.",
       "headSha": "2056d96c3f48",
-      "negativeControl": "The residue, named rather than left: four comments still say \"the issue's own volume\" — `runtime/runtime.go:87`, `workspace/stalelock.go:25`, `relaunch_test.go:966`, `repocache_test.go:811`. Each is true of the pod's own disk and asserts nothing the change removed, so the class is closed in the sense asked and these are vocabulary, not model. I say so rather than report the class clean and leave four hits for the next reader to re-derive."
+      "negativeControl": "The two sibling lanes at the same head: both green, and both would have failed on the compile break that caused the earlier red, so the red that remains is not that one."
     },
     {
-      "round": 6,
+      "round": 7,
+      "criterion": "The claim guard keeps the contract its comment states, for the claim name this change introduces.",
+      "surface": "`sandbox.CheckPod`, the exported entry the operator's pod is checked at, driven with an operator volume naming each claim shape in turn.",
+      "command": "A program calling `CheckPod` with `legion-infra-infra-80-issue`, `issue-legion-infra-controller`, `cache-legion-infra-sjawhar-legion`, `tree-legion-infra-infra-80`, `team-share` and `legion-notes`",
+      "observed": "All four Legion-shaped names are refused, the pod-owned disk's `legion-…-issue` among them, each naming the volume kind and telling the operator to name a claim of their own. `team-share` and `legion-notes` are accepted.",
+      "headSha": "054d4e014cf7",
+      "negativeControl": "`legion-notes`, which starts `legion-` and is not a disk, is accepted: the suffix half of the rule is doing work, and the guard is not refusing every name that begins with the project's prefix."
+    },
+    {
+      "round": 7,
       "criterion": "The standing acceptance surfaces, re-run at this head.",
       "surface": "The real `workspace-init` and `legion start --check-config` CLIs built from this head, and the sandbox package's rig.",
-      "command": "provision with the branch deleted from the feed; the configuration rule over four files; the five gap tests of rounds 3 and 4",
-      "observed": "Provision: exit 0, `a.txt` alone, the root holding `repos` and `workspaces` and nothing else. Configuration: the example 0, `pvc` 1, the key omitted 1, `cloudsql-iam` 0. All five gap tests pass, the lock I added in round 3 among them.",
-      "headSha": "2056d96c3f48",
-      "negativeControl": "The `pvc` and omitted-key refusals against the example's acceptance are the control pair, as round 5's run against a `legion` built from `main@origin` established that the refusal is this change's own."
+      "command": "provision with the branch deleted from the feed; the configuration rule over four files; the five gap tests",
+      "observed": "Provision exit 0 with `a.txt` alone and the root holding `repos` and `workspaces` and nothing else; the example 0, `pvc` 1, the key omitted 1, `cloudsql-iam` 0; all five gap tests pass, the round-3 lock among them.",
+      "headSha": "054d4e014cf7",
+      "negativeControl": "Round 5's run of the same configuration files against a `legion` built from `main@origin`, which answers `Config OK` to all three, establishes that the refusal is this change's own."
     }
   ],
   "ciAtCodeHead": {
-    "head": "2056d96c3f48",
-    "read": "2026-10-25T15:20:00Z",
-    "runs": [
-      "broker-multiprocess — success (it was failure at ace35f9ce9f3: the inherited break is cured at our own head, which is the measurement rather than main's tip)",
-      "envoy-go — queued; envoy-go-race — in progress: not settled, cited as running and not as green",
-      "lint, typecheck, pr-title, changes, pi-legion, pi-envoy, pi-shared, envoy-client, envoy-e2e-local — success",
-      "test, build — in progress"
-    ],
-    "note": "Read, not re-run; no lane waited for. `go vet ./cmd/broker/...` exits 0 against this head's tree, where in round 5 it named the two mismatched call sites, so the inherited compile break is cured by construction; the lanes' own conclusions are the measurement, and one of the two had not reported."
+    "head": "054d4e014cf7",
+    "read": "2026-10-25T16:14:00Z",
+    "success": "broker-multiprocess, build, changes, claude-envoy, contracts, dispatch-multiprocess, envoy-client, envoy-e2e-local, envoy-infra-go, envoy-plugin, envoy-smoke, pi-envoy, pi-legion, pi-shared, pr-title, typecheck",
+    "running": "lint, test, dispatch, dispatch-memory, envoy-go, envoy-go-race — cited as running and not as green",
+    "skipped": "attest, deploy",
+    "note": "Read, not re-run; no lane waited for. `broker-multiprocess` is success here as it was at the previous head, so the inherited compile break stays cured. `envoy-go` had not concluded at my read; whoever reads next should read it at the head they review rather than inherit a verdict, since its last conclusion was the unrelated ten-minute hang classified above."
   },
-  "bodySize": "The pull request body reached 64,125 of GitHub's 65,536 characters this round, at which point an edit is refused outright and the body stops being editable by anyone, including the merger. I moved rounds 1 to 3 of the tester block into a comment verbatim (linked above) and left a pointer, which returned it to 48,506. Nothing was lost: a comment outlives retro's removal of `.legion/`, where the handoff does not.",
-  "residualRisks": [
-    "Unchanged from round 5: the single generation counter behind the gap record; a daemon restarting inside the replacement's gap; and the stable claim name meaning a replacement pod waits on its predecessor's claim being reaped, about a second against a 120 s boot timeout.",
-    "The exporter copies what it can and fails the run, so a refused key leaves a run that failed with most evidence kept rather than a run that passed with evidence missing. That is the right trade and it is worth knowing that the two states look alike in the directory and differ only in the verdict line."
+  "observations": [
+    "Three times today a step of my own silently did nothing and its result read like a finding: `od` collapsing repeated lines to `*` (an odd-length hex that looked like corruption), a string replacement whose anchor did not match (a mutation that changed nothing and read as a guard no test pins), and an out-of-tree copy one head stale (a guard that looked unimplemented and was not). Each was caught before it was reported, by checking that the step had landed rather than that its output looked plausible. The remedy is the same in all three and is worth a line in the retro note beside `skipped` is a third answer: verify the instrument changed what it claims to change, then read what it says."
   ],
   "notReachedHere": [
-    "The seven inverted Stage 4a per-check assertions are unrun, not passing, and Stage 4b has run at no head. Unchanged this round and unchangeable from here.",
-    "Nothing this round touched the cluster: the drain of nineteen trees was running, and a probe of a pod being parked would have reported the window rather than the change."
+    "The seven inverted Stage 4a per-check assertions are unrun, not passing, and Stage 4b has run at no head. Unchanged and unchangeable from here.",
+    "Nothing this round touched the cluster: the drain of nineteen trees was still running."
+  ],
+  "residualRisks": [
+    "Unchanged from round 5: the single generation counter behind the gap record; a daemon restarting inside the replacement's gap; and the stable claim name meaning a replacement pod waits on its predecessor's claim being reaped.",
+    "The transcript collector copies what it can and fails the run. A run that failed with most evidence kept and a run that passed with evidence missing look alike in the directory and differ in the verdict line; the verdict line is now the one that moves."
   ]
 }
