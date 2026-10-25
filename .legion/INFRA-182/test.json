@@ -2,8 +2,13 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-182",
-  "completed": "2026-10-25T08:27:30Z",
-  "round": 4,
+  "completed": "2026-10-25T09:43:30Z",
+  "round": 5,
+  "roundFive": {
+    "implementerProof": "verified: its round-5 proof passed a real bus.Connect refusal through checkRefusal and showed the helper fail on a refusal carrying userinfo. I drove the three refusal tests themselves against a local nats-server requiring t7/t7: PASS at 27c99a87, FAIL with reach.go's redaction reverted, and FAIL at 5cda79023b9d's test files with the exact message envoy-go-race reported at dd2fb2b41ecf.",
+    "delta": "93b84d82e4c5 changes internal/bus/remote_nats_test.go alone; no production file differs from dd2fb2b41ecf, whose real-surface verification (round 3) stands.",
+    "ciGate": "On the architect's direction (Envoy e21b7a3c4a086a85ce752fae35acdebc) the verdict waited for both container lanes at the code head 93b84d82e4c5: run 40177636362 settled at 09:41Z with envoy-go job 121123064645 success (ok cmd/listener 163.204s, ok internal/bus 238.052s, ok internal/kvwatch 62.846s) and envoy-go-race job 121123064791 success (ok internal/bus 243.858s under -race), 0 '--- FAIL' and 0 'DATA RACE' in either log. This is the first green run of the A1-A3 container tests at any head."
+  },
   "roundFour": {
     "implementerProof": "verified: its round-4 proof (a throwaway -race test with a goroutine logging through the default slog while the capture is read) reproduced with a test of my own, four writer goroutines while TestLoggedNATSURLsCarryNoUserinfo and TestAConsumerNotActiveReportIsAWarning run in a loop for 2 s: ok at 29ebf098c578, 20 DATA RACE reports and FAIL against dd2fb2b41ecf's test files.",
     "delta": "29ebf098c578 changes three test files of internal/bus (async_error_test.go, log_url_test.go, stream_config_test.go) and nothing else under packages/; no production file differs from dd2fb2b41ecf, whose real-surface verification (round 3, the proof array below) stands."
@@ -15,6 +20,14 @@
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Review round 3 finding PRRT_kwDORFy7ds6v_r00, and acceptance A1-A3 in CI: the remote-NATS refusal tests expect the server without its userinfo and fail on any part of the credential; envoy-go and envoy-go-race are green at the code head.",
+      "surface": "CI's envoy-go and envoy-go-race jobs at 93b84d82e4c5 (the only surface with a container runtime for testnats), and the three refusal tests run from git archives of 27c99a87 and 5cda79023b9d against a local nats-server v2.11.4 listening on 0.0.0.0 with --user t7 --pass t7, in place of testnats.URL.",
+      "command": "gh run view 40177636362 --repo sjawhar/legion --json jobs ; gh run view --repo sjawhar/legion --job 121123064645 --log and --job 121123064791 --log, grep 'ok  github.com/sjawhar/envoy/(internal/bus|internal/kvwatch|cmd/listener)', '--- FAIL', 'DATA RACE'. Locally: go test -count=1 -v -run 'NATSServerThatIsNotThisMachines|Remote' ./internal/bus/ at 27c99a87; the same with reach.go's refusal reverted to strings.TrimSpace(raw); the three tests at 5cda79023b9d on a fresh server.",
+      "observed": "Run 40177636362 success; envoy-go 121123064645 success (ok cmd/listener 163.204s, ok internal/bus 238.052s, ok internal/kvwatch 62.846s), envoy-go-race 121123064791 success (ok internal/bus 243.858s), 0 FAIL and 0 DATA RACE lines. Locally at 27c99a87: TestConnectOwningStreamRefusesANATSServerThatIsNotThisMachines, TestDialRefusesANATSServerThatIsNotThisMachines, TestConnectRefusesANATSServerThatIsNotThisMachines and TestASetProxyIsRemoteReach PASS; the refusal reads 'bus: refusing a NATS server that is not this machine's: nats://10.1.12.77:4222 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)'. With the redaction reverted the Dial and Connect tests FAIL five ways each (server not named without userinfo, '@', the userinfo, user name 't7', password 't7').",
+      "headSha": "93b84d82e4c5a3221cab2d8faabd4553d65625cd",
+      "negativeControl": "The same three tests at 5cda79023b9d on a fresh server FAIL at remote_nats_test.go:56, :89 and :118: 'refusal \"bus: refusing a NATS server that is not this machine's: nats://10.1.12.77:4222 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)\" does not name both the server nats://t7:t7@10.1.12.77:4222 and the override ENVOY_ALLOW_REMOTE_NATS' - the red envoy-go-race job 121111427588 showed at dd2fb2b41ecf."
+    },
     {
       "criterion": "Review round 2 finding PRRT_kwDORFy7ds6v_jdd: package bus tests read the captured default log only behind the writer's lock, so a closed client's late ClosedCB cannot race a read in envoy-go-race; and the rewritten tests still catch a credential in the log.",
       "surface": "go test -race -ldflags=-linkmode=external with CC='zig cc' (zig 0.13.0; the pod has no C compiler) on git archives of 29ebf098c578 and dd2fb2b41ecf, with a local nats-server v2.11.4 (--user tU --pass tP) in place of testnats.URL for the one container-backed test; plus the real envoy-listener rebuilt at 29ebf098c578 against a real nats-server.",
@@ -56,7 +69,7 @@
       "negativeControl": "With the generation check removed, the stale-wait test FAILs: 'the repaired stop's wait logged 1 \"test cache watcher was not repaired\" errors, want none: [... reason:no repair within 1m0s ...]' - the permanent test catches the defect the reviewer named."
     }
   ],
-  "ci": "Read 2026-10-25T08:27Z at the code head 29ebf098c578: Legion Envoy and Contracts run 40176279896 queued (envoy-go and envoy-go-race, where the container-backed new tests run), Tests run 40176279866 queued, PR Title 40176279888 cancelled (superseded; re-runs 40176286348, 40176286758, 40176319491 queued), Docs run 40176279904 in progress, Worker Image run 40176279892 in progress. At dd2fb2b41ecf Tests, Docs and Worker Image ended success and Legion Envoy and Contracts run 40173085050 cancelled (superseded), so A1-A3's container tests have yet to finish in CI at any head. This tester waits for none of them.",
+  "ci": "Read 2026-10-25T09:42Z at the code head 93b84d82e4c5, settled: Legion Envoy and Contracts run 40177636362 success (envoy-go 121123064645 success, envoy-go-race 121123064791 success, envoy-e2e-local, envoy-smoke, envoy-infra-go and the dispatch jobs success), Tests run 40177636324 success (lint, typecheck, test), PR Title runs 40177657054, 40177657816, 40177684230 success (40177636320 cancelled, superseded), Docs run 40177636352 success, Worker Image run 40177636336 success. The handoff head 27c99a87 carries skip-checks: true.",
   "observations": [
     "Pre-existing and outside this change: /healthz runs its NATS reads (FlushTimeout, each cache's Ping, ConsumerInfo with the handle's 10 s MaxWait) inside the HTTP server's 10 s WriteTimeout, so while JetStream does not answer a request can get no response at all (curl HTTP 000 after about 10 s) rather than a 503. Seen once, on a 3-node cluster just after the node the listener was connected to was killed; the c939145e2b04 binary did the same, and the ConsumerInfo read is in main's handler too. A health check reads either as unhealthy, so no acceptance criterion is affected.",
     "natsURLWithoutUserinfo renders a URL with an '@' after its authority (tls://tok@host:4222/x@y) as what follows the last '@' ('y'), losing the host from the refusal. It is safe and the unit table pins it; such a URL is not a usable NATS URL.",
@@ -65,6 +78,7 @@
   "history": {
     "round1": "At 171bf849883c: 0 real-surface defects; 2 failures recorded against this change's own tests (TestAFailedReconnectAttemptLogsOneWarnAMinute at reconnect_err_test.go:152; three repair_test.go cases at :140, :170, :205), answered by the test-only commit c939145e2b04.",
     "round2": "At 40cdc5218694: test-only delta, real-surface smoke re-run, verdict pass.",
-    "round3": "At dd2fb2b41ecf: full real-surface round on review round 1's four fixes, 0 failures, verdict pass."
+    "round3": "At dd2fb2b41ecf: full real-surface round on review round 1's four fixes, 0 failures, verdict pass. CI later showed envoy-go-race red there on three remote_nats_test.go assertions, which round 5's head fixes.",
+    "round4": "At 29ebf098c578: test-only delta (the guarded log capture), -race check of my own, verdict pass; its container lanes were cancelled by the next push."
   }
 }
