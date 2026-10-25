@@ -429,8 +429,8 @@ test("an inline link keeps its line and grows its hit box without covering its n
     { actor: { id: "e2e-session", kind: "session" }, as: "agent" }
   );
 
-  // A message turn is 16px prose on 24px lines - the tightest pitch a body reaches - and a
-  // hard break puts two links on consecutive lines of it.
+  // A message turn is 16px prose on 24px lines - the tightest pitch a message body reaches -
+  // and a hard break puts two links on consecutive lines of it.
   await createMessage(
     issue.key,
     {
@@ -554,6 +554,13 @@ test("an inline link keeps its line and grows its hit box without covering its n
       line.probeClear,
       'the turn was left under the fixed comment composer, so the probe measured the composer - or [aria-label="Comment composer"] is gone'
     ).toBe(true);
+    // On consecutive lines of one message turn - 16px prose on 24px lines, the tightest pitch
+    // a message body reaches - the lower link's padded box starts at least two pixels below
+    // the upper link's own text, which is the margin the probe at `upperText.bottom + 1` needs.
+    expect(
+      line.lowerClearance,
+      "the lower link's padded box starts within a pixel of the upper link's own text, so the probe one pixel below that text is inside the lower link, and the padding check below would go red for the pitch rather than for the padding"
+    ).toBeGreaterThanOrEqual(2);
 
     // The same link the measurement took: the seeded one outside the ask cards. Its hit tests
     // are Playwright's own actionability check rather than an `elementFromPoint` snapshot - a
@@ -564,8 +571,8 @@ test("an inline link keeps its line and grows its hit box without covering its n
       .filter({ hasText: /^Upper line$/ });
     await expect(upperLink).toHaveCount(1);
     // On consecutive lines of one message turn - 16px prose on 24px lines, the tightest pitch
-    // a body reaches - a tap at the bottom of the upper link's own text is taken by the upper
-    // link.
+    // a message body reaches - a tap at the bottom of the upper link's own text is taken by
+    // the upper link.
     await upperLink.click({
       position: { x: line.hitX, y: line.onTextBottomY },
       timeout: 5_000,
@@ -648,14 +655,10 @@ test("an inline link keeps its line and grows its hit box without covering its n
     expect(inline.lineHeight).toBeLessThanOrEqual(28);
     // 2. Its own hit box clears the 24px WCAG 2.5.8 target.
     expect(inline.viewHeight).toBeGreaterThanOrEqual(24);
-    // 3. On consecutive lines of one message turn - 16px prose on 24px lines, the tightest
-    //    pitch a body reaches - the lower link's padding starts below the upper link's own
-    //    text.
-    expect(line.lowerClearance).toBeGreaterThanOrEqual(0);
-    // 4. A tap on the word before a wrapped link stays on the text - a claim that nothing is
+    // 3. A tap on the word before a wrapped link stays on the text - a claim that nothing is
     //    there, which a trial click cannot express, so it stays a hand-made hit test.
     expect(measured.onWord).toBe("not-a-link");
-    // 5. Two stacked links: the lower edge of the first is the first, and it never reaches the
+    // 4. Two stacked links: the lower edge of the first is the first, and it never reaches the
     //    second.
     expect(measured.onFirstLowerEdge).toBe("First choice");
     expect(measured.firstBottom).toBeLessThanOrEqual(measured.secondTop);
