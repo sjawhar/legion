@@ -264,6 +264,11 @@ func main() {
 		Settle:    boot.SettleDelay,
 	})
 	restoreDecidedWordings(ctx, documentService, decidedWordingRestoreTimeout)
+	// The asks a close or a reopen by a release older than the withdrawal left: at boot, then on an
+	// interval below. It appends events and takes no copy lock, so it runs after
+	// restoreDecidedWordings, which takes the copy lock (see below).
+	issueAskRepairDeps := api.Deps{Store: database, Docs: documentService, Events: broker}
+	repairIssueAsks(ctx, issueAskRepairDeps, issueAskRepairBootTimeout)
 	// The seed appends events, so it runs after restoreDecidedWordings, which takes the copy lock:
 	// TestCopyLockComesBeforeEveryPendingRowAndEvent reads main as one transaction.
 	if err := api.SeedRepoProjects(store.WithTransactionTracking(ctx), database, broker, boot.RepoProjects); err != nil {
@@ -340,7 +345,8 @@ func main() {
 	//     evictor (it closes the rooms resident in this process that the other process's writes
 	//     left behind the durable head, so it has to run wherever a room is resident).
 	//   - a boot one-shot already serialised by an advisory lock or idempotent: the migrations,
-	//     retirePlainRefreshTokens, restoreDecidedWordings and SeedRepoProjects above.
+	//     retirePlainRefreshTokens, restoreDecidedWordings, repairIssueAsks and SeedRepoProjects
+	//     above.
 	leases, err := database.Pool.Leases()
 	if err != nil {
 		slog.Error("dispatch: open the lease pool for the maintenance loops", "error", err)
@@ -390,6 +396,9 @@ func main() {
 	// version write stored: every mention indexed before migration 0092, and each rebuild-refs
 	// inserts (LEGION-531).
 	go documentService.RunReferenceExcerptReconciliation(ctx, leases)
+	// INFRA-158: the asks a process older than the withdrawal leaves on an issue it closes or
+	// reopens during a roll are withdrawn or restored every interval after the boot's own pass.
+	go api.RunIssueAskRepair(ctx, issueAskRepairDeps, leases)
 
 	sweeper, err := webhookSweeper(natsClient, appCfg, boot.GitHubAPIBase)
 	if err != nil {
@@ -828,6 +837,28 @@ func restoreDecidedWordings(ctx context.Context, documents *docs.Service, timeou
 				return nil, err
 			}
 			return []any{"restored", restored, "copies", copies}, nil
+		})
+}
+
+// issueAskRepairBootTimeout bounds the boot's repair of the asks of closed and reopened issues.
+// Each issue commits on its own, so a repair cut short keeps what it repaired, and the interval
+// pass (api.RunIssueAskRepair) repairs what it left.
+const issueAskRepairBootTimeout = 30 * time.Second
+
+// repairIssueAsks is the boot's repair of the asks a close or a reopen by a release older than
+// the withdrawal left (api.RepairIssueAsks), bounded by timeout: open asks on closed issues are
+// withdrawn, and withdrawn asks on open issues are restored. It sweeps only the closed issues'
+// documents marked owing a settlement within the last api.IssueAskRepairInterval, so a boot does
+// not read every closed issue's documents before it serves; the interval pass's first run sweeps
+// them all. Each issue it repairs has its own line; this logs the counts. A repair that fails or
+// runs out of time is logged and the start goes on, since api.RunIssueAskRepair repairs the rest
+// every api.IssueAskRepairInterval.
+func repairIssueAsks(ctx context.Context, deps api.Deps, timeout time.Duration) {
+	bootTask(ctx, timeout, "dispatch: repair the asks of closed and reopened issues", "dispatch: repaired the asks of closed and reopened issues",
+		func(ctx context.Context) ([]any, error) {
+			markedSince := time.Now().Add(-api.IssueAskRepairInterval)
+			repair, err := api.RepairIssueAsks(ctx, deps, &markedSince)
+			return repair.LogArgs(), err
 		})
 }
 
