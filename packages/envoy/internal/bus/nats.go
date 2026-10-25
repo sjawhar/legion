@@ -412,6 +412,24 @@ func (c *Client) SubOK() bool {
 	return connOK && subOK
 }
 
+// SubSubject is the subject the subscription this client holds on the JetStream transport actually
+// delivers on, which is what the listener compares against its durable consumer's configured
+// DeliverSubject. The registration's own subject is useless for that: registerSubscription stores
+// subject: "" for a nats.Bind registration (cmd/listener/durable.go binds with an empty subject),
+// while the subscription nats.go returns carries the consumer's configured DeliverSubject —
+// measured against a real server for INFRA-182, sub.Subject equals info.Config.DeliverSubject for
+// a nats.Bind push subscription. The empty string is the honest answer while the client is
+// replacing the subscription it holds, and the listener reads it as unbound.
+func (c *Client) SubSubject() string {
+	c.subscriptionsMu.Lock()
+	defer c.subscriptionsMu.Unlock()
+	active := c.subscriptions[jetStreamSubscription].active
+	if active == nil || !active.IsValid() {
+		return ""
+	}
+	return active.Subject
+}
+
 // ErrSubscriptionHeld is what Subscribe and SubscribeCore return for a registration on another
 // subject, or the same subject in another queue group, than the subscription the client already
 // holds on that transport. The held subscription goes on delivering; a caller that needs another

@@ -126,8 +126,8 @@ func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []li
 	if err == nil || !client.Connected() {
 		return false
 	}
-	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, nats.ErrConnectionClosed) ||
-		errors.Is(err, nats.ErrStreamNotFound) {
+	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, errDurableUnbound) ||
+		errors.Is(err, nats.ErrConnectionClosed) || errors.Is(err, nats.ErrStreamNotFound) {
 		return true
 	}
 	for _, c := range caches {
@@ -138,7 +138,12 @@ func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []li
 	return false
 }
 
+// rebuildListenerDependencies rewatches the KV caches and, when the durable probe reports the
+// consumer gone or bound elsewhere, subscribes the durable again. It reports success only once
+// the server reports this listener bound, so the probe that follows a rebuild reads a settled
+// consumer rather than the gap in which the subscription is being replaced.
 func rebuildListenerDependencies(
+	ctx context.Context,
 	client *bus.Client,
 	caches []listenerCache,
 	durableProbe func() error,
@@ -149,11 +154,18 @@ func rebuildListenerDependencies(
 		return nats.ErrConnectionClosed
 	}
 	err := rewatchListenerKVWatchers(client.Conn, caches)
-	if durableProbe == nil || !errors.Is(durableProbe(), nats.ErrConsumerNotFound) {
+	if durableProbe == nil {
+		return err
+	}
+	probeErr := durableProbe()
+	if !errors.Is(probeErr, nats.ErrConsumerNotFound) && !errors.Is(probeErr, errDurableUnbound) {
 		return err
 	}
 	if _, durableErr := startListenerSubscription(client, consumer, handler); durableErr != nil {
 		return errors.Join(err, fmt.Errorf("recreate durable consumer: %w", durableErr))
+	}
+	if boundErr := awaitDurableBound(ctx, client, consumer, durableRebindInterval, durableRebindDeadline); boundErr != nil {
+		return errors.Join(err, fmt.Errorf("rebind durable consumer: %w", boundErr))
 	}
 	return err
 }
@@ -320,9 +332,11 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // once the durable consumer binds, which during a rolling deploy waits out the task being replaced
 // while /v1 already serves; 200 "healthy" with the durable consumer's lag once every dependency
 // answers; 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a cache's
-// watcher has stopped or the durable consumer is gone; and 200 "degraded" for a transient KV failure
-// the self-health monitor and the NATS reconnect retry. A listener that mounts no GitHub webhook
-// route keeps no CI cache, and its answer carries "ci_cache": "not_applicable".
+// watcher has stopped, the durable consumer is gone, or the durable consumer is not bound to this
+// listener's subscription because it was recreated server-side and now delivers elsewhere; and 200
+// "degraded" for a transient KV failure the self-health monitor and the NATS reconnect retry. A
+// listener that mounts no GitHub webhook route keeps no CI cache, and its answer carries
+// "ci_cache": "not_applicable".
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -364,6 +378,13 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer)
 		if err != nil {
 			writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
+			return
+		}
+		// One read and no confirming second one, unlike durableProbe's: the endpoint reports the
+		// fault the moment a request finds it, and a request landing in a rebuild's own gap simply
+		// answers 503 until the next one.
+		if durableUnbound(consumerInfo, d.client) {
+			writeDependencyHealth(w, "durable consumer", errDurableUnbound, true)
 			return
 		}
 		response["num_pending"] = consumerInfo.NumPending
@@ -833,13 +854,10 @@ func main() {
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
 	// the listener. Terminal watcher/consumer failures are rebuilt immediately;
 	// after three failed recovery intervals, SIGTERM enters the bounded shutdown
-	// path and exits non-zero for Docker to replace the listener.
-	durableProbe := func() error {
-		if _, err := client.JS().ConsumerInfo(bus.Stream, consumer); errors.Is(err, nats.ErrConsumerNotFound) {
-			return err
-		}
-		return nil
-	}
+	// path and exits non-zero for Docker to replace the listener. The rebuild runs under
+	// monitorCtx, so the shutdown's monitorCancel ends a rebind still waiting for the server and
+	// the 10 s shutdown budget is never held by one.
+	probeDurable := func() error { return durableProbe(client, consumer) }
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
 	monitorDone := make(chan struct{})
 	go func() {
@@ -848,7 +866,7 @@ func main() {
 			monitorCtx,
 			logger,
 			func() error {
-				return checkSelfHealth(caches, durableProbe)
+				return checkSelfHealth(caches, probeDurable)
 			},
 			func(err error) bool {
 				return isUnrecoverableSelfHealthFailure(err, client, caches)
@@ -856,9 +874,10 @@ func main() {
 			client.Connected,
 			func() error {
 				return rebuildListenerDependencies(
+					monitorCtx,
 					client,
 					caches,
-					durableProbe,
+					probeDurable,
 					consumer,
 					jetStreamDeliveryHandler(deliveryConfig),
 				)
