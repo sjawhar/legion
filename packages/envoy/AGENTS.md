@@ -618,7 +618,8 @@ checks every load of a room against the writes its earlier instances took, and
 `TestARoomOnlyTheAPITouchesLeavesWithinTheIdleTimeout` that a room only the API touches is
 evicted and reads back what the API wrote. ygo's `CloseRoom` checks
 only the peers as well, and the service still calls it to close an issue's rooms (`SetIssueClosed`),
-for a room with an editor at `Shutdown`, and to evict one (`evictRoom`): a write that commits on a
+for a room with an editor at `Shutdown`, to evict one (`evictRoom`), and to close a room behind the
+durable head (`roomServer.closeInstance`): a write that commits on a
 room it has retired reaches the store through ygo's stranded persistence, on the committing goroutine
 (`provider/websocket/persistence.go`). A committed write's publish (`publishLiveUpdate`) is already
 durable and suppresses that append; the room's own update observer finishes its suppression slot

@@ -185,12 +185,13 @@ func (s *Service) openLiveWrite(ctx context.Context, ledger *Ledger, artifactID 
 		state := s.lockState(artifactID)
 		if state.reloading {
 			s.unlockState(artifactID, state)
-			return nil, fmt.Errorf("%w: document room %s is reloading", ErrServiceUnavailable, artifactID)
+			slog.Warn("dispatch: refuse a write on a document room closing behind the durable head", "room", artifactID)
+			return nil, fmt.Errorf("%w: room %s", errRoomReloading, artifactID)
 		}
 		if state.liveWriter == nil {
 			state.liveWriter = write
 			state.roomGeneration++
-			state.settleDeferred = s.takeOverSettlementLocked(state)
+			state.settleDeferred = state.settleDeferred || s.takeOverSettlementLocked(state)
 			s.unlockState(artifactID, state)
 			write.state = state
 			break
@@ -748,10 +749,10 @@ func (s *Service) publishLiveUpdate(room string, update []byte, version persiste
 	return nil
 }
 
-// finishLiveWrite releases write's room: its writer slot, and the settlement it suppressed,
-// which is armed again when opening the write stopped one or a settlement was asked for while
-// it was open. It drops what the write held for its transaction's operations, its fork and their
-// updates, keeping the verdict LostOps reads.
+// finishLiveWrite releases write's room: its writer slot, and the settlement it suppressed, which
+// is armed again when opening the write took one over (takeOverSettlementLocked) or a settlement
+// was asked for while it was open. It drops what the write held for its transaction's operations,
+// its fork and their updates, keeping the verdict LostOps reads.
 func (s *Service) finishLiveWrite(write *liveWrite) {
 	if write.finished {
 		return

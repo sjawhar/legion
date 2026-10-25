@@ -380,9 +380,8 @@ func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.
 //
 // The no-answer path here is the unlocked head read: the pool refuses a caller already holding
 // one of its connections (store.ErrNestedAcquire), which documentChanged meets as it would any
-// failed read. A close that closed nothing is the other way to reach no verdict; that path is
-// TestTheEvictorClosesOnlyTheRoomItFoundBehindTheHead's and
-// TestACloseOfARoomBehindTheHeadLeavesTheRoomThatReplacedIt's.
+// failed read. A close that closed nothing is the other way to reach no verdict; its re-arm is
+// asserted by the evictor row of TestACloseOfARoomBehindTheHeadLeavesTheRoomThatReplacedIt.
 func TestAStaleRoomWhoseReExaminationGetsNoAnswerIsTriedAgainAtTheNextWindow(t *testing.T) {
 	pair := newProcessPair(t)
 	evictor := newStaleRoomEvictor(pair.taskA)

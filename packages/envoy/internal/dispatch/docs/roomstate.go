@@ -68,8 +68,9 @@ type roomState struct {
 	// current one to tell a read still good from one a change since has invalidated.
 	roomGeneration uint64
 	// liveWriter is the open transaction writing this document (see liveWrite), or nil. While
-	// it is set no settlement is armed; settleDeferred records one that was stopped or asked for
-	// meanwhile, which finishing the write arms.
+	// it is set no settlement is armed; settleDeferred records one that opening the write took
+	// over (armed, fired or running) or that was asked for meanwhile, which finishing the write
+	// arms.
 	liveWriter     *liveWrite
 	settleDeferred bool
 	// settleWarming is set while a settlement loads the room it is about to settle, so that load
@@ -84,8 +85,9 @@ type roomState struct {
 	failedDone chan struct{}
 	// reloading marks a state whose room a close is about to retire because the room stands behind
 	// the durable head (reserveRoomCloseLocked): no transaction takes its writer slot from then on
-	// (openLiveWrite), until the close forgets the state with the room or, when the room it checked
-	// was retired before the close reached it, lifts the mark (closeReservedRoom).
+	// (openLiveWrite), until the close forgets the state with the room or, when the close did not
+	// close the room it checked (retired or replaced first, or the close refused), lifts the mark
+	// (closeReservedRoom).
 	reloading bool
 	// released marks a state the service has forgotten (forgetLocked), so a lookup that found it
 	// before it went takes the document's current state instead.

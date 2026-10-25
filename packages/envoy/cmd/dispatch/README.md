@@ -383,11 +383,12 @@ What the two processes share, and what each keeps to itself:
 
 **Two processes do not share a live document session.** Durable convergence is unconditional:
 every edit is appended under the document's advisory lock, Yjs updates commute, and the stored
-history is the union of them, so no edit is lost whichever process took it, and no process writes
-a version, a settlement or an ask retraction from a document state it does not hold
-(`ErrRoomBehindHead`). What is per-process is the live room: while a room is resident in one
-process it does not receive the other's updates, so presence and cursors show only the peers on
-that process. A write committed elsewhere closes the room within a notification round trip
+history is the union of them, so no edit is lost whichever process took it, no process writes a
+settlement or an ask retraction from a document state it does not hold (`ErrRoomBehindHead`), and
+a version whose room is behind the head is rendered from the stored document (`storedTree`). What
+is per-process is the live room: while a room is resident in one process it does not receive the
+other's updates, so presence and cursors show only the peers on that process. A write committed
+elsewhere closes the room within a notification round trip
 (`dispatch_doc_changed`, `docs/stale_room.go`), unless that room was evicted less than
 `staleRoomEvictInterval` (two seconds) ago, in which case its notification is refused and the
 room is re-examined when that window ends — the case the trailing write of an editing burst

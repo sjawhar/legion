@@ -975,11 +975,14 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 // at once when the last browser leaves whatever timer is armed, retrySettleSoon re-arms at a
 // fixed 10 ms, and a mark's expiry arms its own. What makes the delay enough here is that the
 // close this row measures, the evictor's (closeRoomBehindHead), stops the room's armed settle
-// timer as it reserves the room, and that the row asserts afterwards that A ran no settlement of
-// this document: one that committed or failed would have logged "dispatch: settle document", and
-// one the durable gate refused from this room behind the head would have logged a line naming
-// "its settlement found behind the durable head" (reloadRoomBehindHead logs one for every
-// outcome) - so a settlement that fired on any of those paths would be in A's output.
+// timer as it reserves the room and arms it again at A's own thirty-minute delay, and that the
+// row then excludes the settlements that could themselves have closed the room: a settlement the
+// durable gate refused from this room behind the head logs a line naming "its settlement found
+// behind the durable head" for every outcome that can close it - only a service stopping, a
+// shutdown's skip and a room already closed or failed log otherwise or not at all, and none of
+// those closes a room - and a failed one logs "dispatch: settle document". A settlement that
+// committed logs neither, and it closes no room either, so the evictor's second close
+// (requireTheSecondEviction) is still what credits the close to the window.
 //
 // The condition itself was tried first and did not hold: B was given a settle delay short enough
 // to clear the pending row before A's reconnect loaded the room, and the row asserted that row
@@ -987,8 +990,8 @@ func TestTheRefusedNotificationClosesARoomThatOwesASettlement(t *testing.T) {
 // peer appends as it syncs and arms a settlement of its own. With the wake wired that assertion
 // passed only because the window (1.88 s) beat the settle delay (2 s), which is a vacuous pass;
 // the control with the wake unwired is what exposed it. Hence this shape, and hence the
-// assertion below that no settlement of A's ran, which under a 30-minute delay is a real
-// condition rather than a race the window happens to win.
+// assertion below that A logged no settlement that could have closed this room, which under a
+// 30-minute delay is a real condition rather than a race the window happens to win.
 //
 // Its budget stays at thirty seconds, which already discriminates: with the wake unwired nothing
 // closes this room at all, so no bound is needed to tell the window from a rescuer it has none
@@ -1013,7 +1016,7 @@ func TestTheRefusedNotificationClosesARoomNoSettlementWillClose(t *testing.T) {
 	settled := pair.a.logLines("dispatch: settle document", artifactID)
 	settled = append(settled, pair.a.logLines("its settlement found behind the durable head", artifactID)...)
 	if len(settled) > 0 {
-		t.Errorf("A settled this room after all, so something other than the window could have closed it:\n%v", settled)
+		t.Errorf("A ran a settlement of this room that could have closed it, so something other than the window could have:\n%v", settled)
 	}
 }
 
