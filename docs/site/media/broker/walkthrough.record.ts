@@ -9,8 +9,8 @@
 //   t3-request.cast     the session asks for DEMO_API_KEY; the request waits for approval
 //   t4-ran.cast         recorded around b2: the waiting command receives the key as the request is
 //                       approved, and runs; then the request's status names who decided it
-//   b2-approve.webm     the request in the Inbox, its record, the approval
-//   b3-grants.webm      from the approved record to Settings, where the grant is listed
+//   b2-approve.webm     the request in the Inbox, its page on the secrets broker, the approval there
+//   b3-grants.webm      from the Inbox to Settings, where the grant is listed
 //
 // A take records every section, in this order: each depends on the one before it (the browser
 // types the code the terminal printed, the session needs the login the browser approved, the
@@ -39,7 +39,16 @@ import { fileURLToPath } from "node:url";
 import { type Browser, expect, type Locator, type Page, test } from "@playwright/test";
 
 import { signIn } from "../../../../packages/dispatch/e2e/users";
-import { agentHost, dispatch, machineLoginPath, operator, printed, reason, rigState } from "./flow";
+import {
+  agentHost,
+  broker,
+  dispatch,
+  machineLoginPath,
+  operator,
+  printed,
+  reason,
+  rigState,
+} from "./flow";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const rawDir = process.env.WALKTHROUGH_RAW_DIR ?? join(here, "walkthrough/raw");
@@ -520,21 +529,20 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
     // T3: the session asks for DEMO_API_KEY; the request waits on a person.
     tmux("send-keys", "-t", shell, "clear", "Enter");
     await sleep(500);
-    let recordId = "";
     let requestId = "";
     await terminalSection("t3-request.cast", async (mark) => {
       mark("typing");
       await type(`agent-secrets DEMO_API_KEY --reason "${reason}" -- ./check-demo-key.sh`);
       await enter();
       requestId = (await waitForScreen(printed.requestWaiting, "the pending request"))[1];
-      recordId = (await waitForScreen(printed.recordLink, "the record link"))[1];
+      await waitForScreen(printed.approvePage, "the request's page on the broker");
       mark("waiting");
       await sleep(3_000);
     });
 
     // T4, around B2: the terminal records while the operator finds the request in the Inbox, reads
-    // its record and approves it, so the cast shows the waiting command receive the key and run.
-    // Then the request's status names who decided it.
+    // it on the broker's page and approves it there, so the cast shows the waiting command receive
+    // the key and run. Then the request's status names who decided it.
     await terminalSection("t4-ran.cast", async (markTerminal) => {
       let keyShownAt = 0;
       const keyShown = waitForScreen(printed.keyReached, "the command's output", 180_000).then(
@@ -543,7 +551,10 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
           markTerminal("key");
         }
       );
-      // B2: the request in the Inbox, its record, and the approval.
+      // B2: the request in the Inbox, its page on the broker, and the approval there. The context
+      // holds no broker session yet, so the row's link passes through the rig issuer's sign-in,
+      // which signs the operator in by the record's login_hint with no page, and lands on the
+      // request's page.
       await browserSection(
         browser,
         "b2-approve.webm",
@@ -555,14 +566,15 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
           mark("inbox");
           await sleep(2_500);
           await clickVisibly(page, row);
-          await expect(dispatch.requestReason(page)).toBeVisible();
+          await expect(broker.requestReason(page)).toBeVisible();
+          await expect(broker.signedIn(page)).toBeVisible();
           mark("record");
           // Long enough to say what the page shows before the pointer moves to Approve.
           await sleep(6_000);
-          await clickVisibly(page, dispatch.approve(page));
+          await clickVisibly(page, broker.approve(page));
           mark("approve");
           markTerminal("approve");
-          await hold(dispatch.requestApproved(page));
+          await hold(broker.requestGranted(page));
         }
       );
       await keyShown;
@@ -580,11 +592,11 @@ test("record the broker walkthrough's raw footage", async ({ browser }) => {
       await sleep(3_500);
     });
 
-    // B3: from the approved record to Settings, where the grant is listed with its approver.
+    // B3: from the Inbox to Settings, where the grant is listed with its approver.
     await browserSection(browser, "b3-grants.webm", rig.dispatchUrl, async (page, hold, mark) => {
-      await page.goto(`/credentials/${recordId}`);
-      await expect(dispatch.requestApproved(page)).toBeVisible();
-      mark("record");
+      await page.goto("/");
+      await expect(dispatch.settings(page)).toBeVisible();
+      mark("inbox");
       await sleep(1_500);
       await clickVisibly(page, dispatch.settings(page));
       mark("settings");

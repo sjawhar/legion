@@ -1,10 +1,11 @@
 // docs/site/media/broker/screenshots.spec.ts
 //
-// The broker's screenshots: the Dispatch pages a person uses to approve what an agent asks the
-// broker for, taken against the rig (docs/site/media/broker/rig.sh) and its example agent
-// machine, along the flow flow.ts names. Each shot is taken only once the state it shows is
-// asserted, and the whole flow is checked end to end: the machine login's command exits 0 once
-// approved, and the approved request's command runs with the secret.
+// The broker's screenshots: the Dispatch pages a person uses to log a machine in and find what an
+// agent asks the broker for, and the broker's own page where they approve it, taken against the
+// rig (docs/site/media/broker/rig.sh) and its example agent machine, along the flow flow.ts names.
+// Each shot is taken only once the state it shows is asserted, and the whole flow is checked end
+// to end: the machine login's command exits 0 once approved, and the approved request's command
+// runs with the secret.
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,11 +14,11 @@ import { expect, test } from "@playwright/test";
 
 import { signIn } from "../../../../packages/dispatch/e2e/users";
 import { startMachineLogin, startSecretRequest, waitForOutput } from "./agent";
-import { dispatch, machineLoginPath, operator, printed, rigState } from "./flow";
+import { broker, dispatch, machineLoginPath, operator, printed, rigState } from "./flow";
 
 const assets = join(dirname(fileURLToPath(import.meta.url)), "../../public/media/broker");
 
-test("the Dispatch pages a person approves broker requests on", async ({ browser }) => {
+test("the pages a person approves broker requests on", async ({ browser }) => {
   test.setTimeout(300_000);
   const rig = rigState();
   mkdirSync(assets, { recursive: true });
@@ -29,7 +30,7 @@ test("the Dispatch pages a person approves broker requests on", async ({ browser
   await signIn(context, operator);
   const page = await context.newPage();
 
-  // The machine login: the code the machine printed, looked up and approved.
+  // The machine login: the code the machine printed, looked up and approved in Dispatch.
   const login = await startMachineLogin(rig.agentExec);
   await page.goto(machineLoginPath);
   await dispatch.codeField(page).fill(login.code);
@@ -40,18 +41,24 @@ test("the Dispatch pages a person approves broker requests on", async ({ browser
   await expect(dispatch.machineLoginApproved(page)).toBeVisible();
   expect((await login.done).code).toBe(0);
 
-  // A secret request from a session on that machine: its Inbox row, its record, its approval.
+  // A secret request from a session on that machine: its Inbox row, its page on the broker, its
+  // approval there. The operator signs in to the broker first, as one who approved anything that
+  // day has, so the row opens the page at once: the rig's issuer signs her in by the record's
+  // login_hint and returns her to the page.
   const request = await startSecretRequest(rig.agentExec);
+  await page.goto(request.approveUrl);
+  await expect(broker.signedIn(page)).toBeVisible();
   await page.goto("/");
   const row = dispatch.inboxRequest(page);
-  await expect(row).toBeVisible();
+  await expect(row).toHaveAttribute("href", request.approveUrl);
   await page.screenshot({ path: join(assets, "inbox-credential-request.png") });
   await row.click();
-  await expect(page).toHaveURL(new RegExp(`/credentials/${request.recordId}$`));
-  await expect(dispatch.requestReason(page)).toBeVisible();
+  await expect(page).toHaveURL(request.approveUrl);
+  await expect(broker.requestReason(page)).toBeVisible();
+  await expect(page.locator(`#record-${request.recordId}`)).toBeVisible();
   await page.screenshot({ path: join(assets, "credential-request.png") });
-  await dispatch.approve(page).click();
-  await expect(dispatch.requestApproved(page)).toBeVisible();
+  await broker.approve(page).click();
+  await expect(broker.requestGranted(page)).toBeVisible();
   await waitForOutput(request, printed.keyReached, "the command's output");
   await page.screenshot({ path: join(assets, "credential-request-approved.png") });
 

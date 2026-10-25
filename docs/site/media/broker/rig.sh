@@ -9,7 +9,9 @@
 #     alice@example.com at the human tier, whose value is made up, in a database of its own beside
 #     DATABASE_URL's, created and dropped by this run, trusting the ServiceAccount tokens of
 #     packages/envoy/cmd/dev-oidc-issuer, the local stand-in for a cluster's issuer, which keeps
-#     Dispatch's own token in a file and rewrites it before it lapses;
+#     Dispatch's own token in a file and rewrites it before it lapses, and signing a person in to
+#     its approval page through the same issuer, which stands in for the Workspace's identity
+#     provider and signs in the request's approver, alice@example.com, with no page to fill in;
 #   - the Dispatch e2e harness (packages/dispatch/e2e: fake Envoy, fake GitHub, run-server.sh) on
 #     DATABASE_URL, emptied, pointed at that broker; its signed-in human is `alice@example.com`;
 #   - an agent machine whose hostname is example-host-build: agent-secrets-helper (the host side of
@@ -166,12 +168,22 @@ EOF
 chmod 600 "$work/fake-secrets.json"
 # Dispatch calls the broker as its own ServiceAccount, whose token dev-oidc-issuer keeps in a file
 # Dispatch's server reads, never an argv; the broker lists that account as the caller "dispatch".
-# The issuer writes the file before it logs its URL, the issuer the broker discovers at boot.
+# The same issuer is the provider a person signs in to the broker's approval page with: the
+# broker's own client, whose secret both read from a file written under umask 077, every person's
+# hd claim naming example.com, and a sign-in that names no login_hint signing in the operator.
+# The issuer writes the token file before it logs its URL, the issuer the broker discovers at boot.
 dispatch_account="system:serviceaccount:example-ns:example-dispatch"
 broker_audience="legion-broker-pod"
+signin_client="docs-broker"
+signin_secret_file="$work/signin-client-secret"
+(umask 077 && od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$signin_secret_file")
 note "starting dev-oidc-issuer"
 start_process issuer setsid "$work/bin/dev-oidc-issuer" \
-  --token "$broker_audience=$dispatch_account=$work/dispatch-account-token"
+  --token "$broker_audience=$dispatch_account=$work/dispatch-account-token" \
+  --sign-in-client "$signin_client" \
+  --sign-in-client-secret-file "$signin_secret_file" \
+  --sign-in-domain example.com \
+  --sign-in-default "$OPERATOR"
 await_start issuer "$issuer_pid" 0 60 "dev-oidc-issuer to report its URL" \
   grep -q 'issuer listening url=' "$work/logs/issuer.log"
 issuer_url="$(sed -n 's/.*issuer listening url=\([^ ]*\).*/\1/p' "$work/logs/issuer.log" | head -n1)"
@@ -189,6 +201,10 @@ start_process broker setsid env -i PATH="$PATH" \
   BROKER_K8S_OIDC_ISSUER="$issuer_url" \
   BROKER_K8S_OIDC_AUDIENCE="$broker_audience" \
   BROKER_API_ACCOUNTS="dispatch=$dispatch_account" \
+  BROKER_SIGNIN_ISSUER="$issuer_url" \
+  BROKER_SIGNIN_CLIENT_ID="$signin_client" \
+  BROKER_SIGNIN_CLIENT_SECRET_FILE="$signin_secret_file" \
+  BROKER_SIGNIN_DOMAIN=example.com \
   BROKER_SECRETS_PREFIX="$secrets_prefix" \
   BROKER_SECRETS_KMS_KEY_ARN="$secrets_key" \
   BROKER_FAKE_SECRETS_FILE="$work/fake-secrets.json" \
@@ -260,13 +276,14 @@ cat >&2 <<EOF
 rig: ready.
 
   Dispatch    $dispatch_url  (sign in as $OPERATOR at $dispatch_url/auth/_dev/signin?login=$OPERATOR)
-  broker      $broker_url
+  broker      $broker_url  (a secret request's page, $broker_url/approve/<record>, signs you in as its approver through dev-oidc-issuer)
   agent       $agent_exec bash   (hostname $AGENT_HOST; agent-secrets-helper for $OPERATOR)
   logs        $work/logs
 
   On the agent machine: agent-secrets machine login, type its code at $dispatch_url/credentials/machine,
   then agent-secrets register --wait 10 --exec -- bash, then
-  agent-secrets DEMO_API_KEY --reason "<why>" -- ./check-demo-key.sh
+  agent-secrets DEMO_API_KEY --reason "<why>" -- ./check-demo-key.sh, and approve it on the page it
+  prints, which the Inbox's Secret request row links to.
 EOF
 
 if [ "$#" -gt 0 ]; then

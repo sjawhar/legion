@@ -1,8 +1,8 @@
 # broker
 
 The secrets broker: it enrolls agent sessions, decides their secret requests from each secret's
-owner and tier tags or by a person's approval in Dispatch, records every request and decision, and
-releases granted values.
+owner and tier tags or by a person's approval on its own approval page, where the person signs in
+to the broker, records every request and decision, and releases granted values.
 The broker's documentation, generated reference included, is the "Secrets Broker" section of the
 docs site, built from `docs/site/src/content/docs/broker/`.
 

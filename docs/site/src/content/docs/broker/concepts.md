@@ -191,7 +191,7 @@ Who gets a secret follows from those two tags alone:
 | A person's, `tier=agent` | Granted at once. | Sent to the owner for approval. |
 | A person's, `tier=human` | Sent to the owner for approval. | Sent to the owner for approval. |
 | `owner=shared`, `tier=agent` | Granted at once. | Granted at once. |
-| `owner=shared`, `tier=human` | Approved by anyone signed in to Dispatch. | Approved by anyone signed in to Dispatch. |
+| `owner=shared`, `tier=human` | Approved by anyone who signs in to the broker. | Approved by anyone who signs in to the broker. |
 | A service's, `tier=agent` | Granted at once. | Denied; no one can approve it. |
 
 A session is its owner's own when its operator is the owner: the owner approved the machine login
@@ -217,7 +217,7 @@ session, even when the grant had already ended by then
 (`packages/envoy/internal/broker/requests/machine_state.go`, `RevokeByApprover`). Each
 withheld secret is human tier to that session for as long as the session lives: every other grant
 the session got it on without asking ends with the revoked one, and the session's requests for it
-are sent to the owner for approval, or to anyone signed in to Dispatch for a shared secret, so the
+are sent to the owner for approval, or to anyone who signs in to the broker for a shared secret, so the
 session asks before it gets the secret again. Only the session's own person withholds: anyone else
 who revokes one of its grants, the person who approved it, ends that grant alone. Other sessions,
 the person's own included, still get the secrets at once.
@@ -326,8 +326,9 @@ reason of at most 400 characters. The broker evaluates every name
   rather than asking twice, and any other request naming one of its secrets, with or without
   `--ttl`, is refused `REQUEST_PENDING`, naming the pending request. The session waits for that
   request to be decided, or cancels it (`agent-secrets cancel`) and asks again. The broker's answer
-  names the approver the record names, and `agent-secrets` prints it, so the agent can tell that
-  person. The record fixes its approver when the request is made, and the request stays in that
+  names the approver the record names and the request's page on the broker (`approve_url`), and
+  `agent-secrets` prints both, so the agent can tell that person where to approve it. The record
+  fixes its approver when the request is made, and the request stays in that
   person's Inbox after the secret's tags change, though they may then be unable to approve it
   ([what an owner change does](#approvals)).
 
@@ -361,15 +362,28 @@ nothing. To end every session's automatic access to a secret, change its tags
 
 ## Approvals
 
-An approval happens in Dispatch, never in the broker. The broker holds no Dispatch credential and
-sends Dispatch nothing: Dispatch's server reads the broker's pending list and records for the
-person signed in, and when that person clicks **Approve** or **Deny**, Dispatch's server calls the
-broker as its own Kubernetes ServiceAccount, which the broker lists as a caller
-(`BROKER_API_ACCOUNTS`), with that person's email, taken from their Dispatch session. No secret
-is shared between them. The broker then checks that email against the record's approver: anyone
-else is refused `NOT_APPROVER`, whatever state the record is in. A request for a shared
+A secret request is approved on the broker's own approval page, never in Dispatch. The broker holds
+no Dispatch credential and sends Dispatch nothing: Dispatch's server reads the broker's pending list
+for the person signed in, and its Inbox lists each secret request as a link to that request's page
+on the broker, `<broker>/approve/<record>`, which the broker's answers name as `approve_url`. The
+page signs the person in to the broker itself, with OpenID Connect and the broker's own client (the
+deployment's Google Workspace, `BROKER_SIGNIN_*` in
+[Operate](/legion/broker/operate/#approval-sign-in)), only when they hold no live sign-in there,
+and brings them back to the same request. It prints the request from the broker's own record: the
+secret names, the enrollment the broker verified asked (its kind, operator, runtime and worker
+slot), the session the request names when it differs, marked as the request's own claim, the
+reason, the lifetime, the times, the approver and the state; then every other request waiting on
+that person. Each request the person may decide has **Approve** and **Deny**, and one **Approve
+all N shown** decides every request printed. A decision is posted to the broker's own origin and
+is bound to that sign-in and to the requests the page printed, so a page on another origin,
+Dispatch's among them, cannot make one, and no route a service calls decides a secret request: the
+broker refuses it `DECIDE_ON_BROKER_PAGE`, naming the page.
+
+The broker checks the signed-in person against the record's approver: anyone else gets a page
+saying who may decide it, with a link to sign in as someone else, and no buttons. A request for a
+shared
 human-tier secret, or for a shared agent-tier secret its session's operator withheld from it,
-names the approver `anyone`: it waits in every person's Inbox, any person signed in to Dispatch may
+names the approver `anyone`: it waits in every person's Inbox, anyone who signs in to the broker may
 decide it, and the
 broker records the email of whoever did. A withheld secret is its owner's to approve for that
 session even in a request that was already waiting when the operator withheld it: a request that
@@ -404,11 +418,18 @@ approved before it wherever the new tags want the secret approved for that sessi
   signed-in person may deny it. Otherwise it expires, or its session cancels it
   (`agent-secrets cancel`) and asks again.
 
-A record is decided once. A second click, a concurrent one, or one after the record expired gets
-`RECORD_TERMINAL`. A pending request nobody decides expires after 12 hours, a fixed time rather than
-a setting (`agentSecretPendingTTL` in `packages/envoy/cmd/broker/main.go`). Because the broker
-records whoever a listed caller says is approving, a listed account's token is an approval
-credential: list Dispatch's own account and nothing else.
+A record is decided once. A second click, a concurrent one, or one after the record expired changes
+nothing (`RECORD_TERMINAL`), and the page says what became of the record. A pending request nobody
+decides expires after 12 hours, a fixed time rather than
+a setting (`agentSecretPendingTTL` in `packages/envoy/cmd/broker/main.go`).
+
+A machine login is still decided in Dispatch, with its typed code
+([Machine login](#machine-login)), and a person's revoke of a grant or a machine login is still made
+through Dispatch: Dispatch's server calls the broker as its own Kubernetes ServiceAccount, which the
+broker lists as a caller (`BROKER_API_ACCOUNTS`), with that person's email from their Dispatch
+session, and the broker takes that name on Dispatch's word. A listed account's token can therefore
+approve a machine login and revoke in any person's name, though never approve a secret request:
+list Dispatch's own account and nothing else.
 
 ## The audit record
 
@@ -438,7 +459,8 @@ a grant already revoked, naming under `withheld` the secrets it withheld from th
 `launcher_credential.token_login` (a service's token login: the `credential_id`, its `service`, the
 token's `subject`, the `pod_uid` the token is bound to when it is, the login's `key_thumbprint`,
 the credential's `expires_at` and the token's own `token_expires_at`). Each row names its actor:
-`human:<email>` for a change Dispatch made for its signed-in person, `session:<enrollment id>` for
+`human:<email>` for a decision a person made on the broker's approval page or a change Dispatch
+made for its signed-in person, `session:<enrollment id>` for
 a session's own, `launcher:<credential id>` for one
 a machine login made under its own credential, a person's revoke from their machine and a
 service's token login included, or `broker`. No

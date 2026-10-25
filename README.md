@@ -67,7 +67,8 @@ built on `packages/envoy-client`.
 
 Credentials an agent asks for and a person approves. An agent runs
 `agent-secrets NAME -- <command>`, and the secret's owner and tier tags grant the request at once,
-refuse it, or send it to a person, who approves or denies it in their Dispatch Inbox. The granted
+refuse it, or send it to a person, who approves or denies it on the broker's own page, which their
+Dispatch Inbox links to. The granted
 value reaches only the session that asked, in the environment of the command it runs, so an agent
 never holds a long-lived key. Each session signs its requests with a key of its own, and every
 request, decision and use is recorded. Legion enrolls every worker pod it starts on Kubernetes when
@@ -76,7 +77,7 @@ its deployment names a broker.
 [The Secrets Broker's documentation](https://sjawhar.github.io/legion/broker/) ·
 [a walkthrough video of one request](https://sjawhar.github.io/legion/broker/walkthrough/)
 
-[![A credential request in Dispatch: the secret DEMO_API_KEY, the session that asked, a one-hour lifetime, the agent's stated reason, and Approve and Deny buttons](docs/site/public/media/broker/credential-request.png)](https://sjawhar.github.io/legion/broker/walkthrough/)
+[![The secrets broker's approval page for one secret request: the secret, the enrollment the broker verified asked, the reason, how long the grant lasts, the approver, and Approve and Deny buttons](docs/site/public/media/broker/credential-request.png)](https://sjawhar.github.io/legion/broker/walkthrough/)
 
 ## Quick start
 

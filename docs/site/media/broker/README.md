@@ -10,7 +10,7 @@ private hostname or production service is involved.
 | --- | --- |
 | `rig.sh` | Starts the whole stack and stays in the foreground, or runs a command against it (`rig.sh -- <command>`) and then stops it. |
 | `seed.ts` | Empties the Dispatch e2e database through the harness's own reset: the flow needs no workspace content. |
-| `flow.ts` | The flow both specs show, written once: what the rig hands its command, the demo's names and reason, what the agent machine prints, and the Dispatch controls a person uses. |
+| `flow.ts` | The flow both specs show, written once: what the rig hands its command, the demo's names and reason, what the agent machine prints, the Dispatch controls a person uses, and the broker's approval page. |
 | `agent.ts` | Drives the agent machine from a script, for the screenshots: a machine login, a secret request. |
 | `agent/` | What the agent machine mounts: its shell prompt and the demo command, `check-demo-key.sh`. |
 | `screenshots.sh`, `screenshots.spec.ts` | Retake the screenshots into `docs/site/public/media/broker/`. |
@@ -26,10 +26,14 @@ DATABASE_URL=<url> bash docs/site/media/broker/rig.sh
 
 It builds the broker, `dev-oidc-issuer`, `agent-secrets` and `agent-secrets-helper`; creates the
 broker's database beside `DATABASE_URL`'s; starts `dev-oidc-issuer`, the local stand-in for a
-cluster's ServiceAccount token issuer, which keeps Dispatch's own token in a file; starts the broker
+cluster's ServiceAccount token issuer, which keeps Dispatch's own token in a file, and for the
+Workspace's identity provider, serving the broker's sign-in client (whose secret the rig generates
+into its workdir) and signing in a request's approver, `alice@example.com`, with no page to fill
+in; starts the broker
 on its development secrets file, which stands in for Secrets Manager and tags `DEMO_API_KEY`
 `owner=alice@example.com`, `tier=human`, with grants lasting until their session ends, trusting
-that issuer and listing Dispatch's account as its caller; starts the Dispatch e2e harness's three
+that issuer for tokens and sign-in (`BROKER_SIGNIN_*`) and listing Dispatch's account as its
+caller; starts the Dispatch e2e harness's three
 servers on `DATABASE_URL` with the server pointed at the broker
 (`packages/dispatch/e2e/run-server.sh`'s `DISPATCH_E2E_AGENT_SECRETS_URL`, with Dispatch's token
 file in `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), and empties its database; and starts the
@@ -70,7 +74,10 @@ Dispatch signs a person in with its session cookie, which the harness server min
 sign-in route: open the sign-in address the rig prints,
 `<Dispatch>/auth/_dev/signin?login=alice@example.com`, in the browser (by `127.0.0.1`, never
 `localhost`, which the server refuses). Both specs sign in the same way, through the e2e harness's
-`signIn` (`packages/dispatch/e2e/users.ts`).
+`signIn` (`packages/dispatch/e2e/users.ts`). The broker's approval page signs a person in on its
+own: opening a request's page with no broker session goes through `dev-oidc-issuer`'s sign-in and
+back to the page, as the walkthrough's approval shows; the screenshots open the page once first,
+so the Inbox row then opens it at once.
 
 From a shell on the agent machine (`agent-exec bash`, where `agent-exec` is the script the rig
 prints, and hands a command in `BROKER_RIG_AGENT_EXEC`), the flow the walkthrough shows is:
@@ -79,6 +86,7 @@ prints, and hands a command in `BROKER_RIG_AGENT_EXEC`), the flow the walkthroug
 agent-secrets machine login                     # prints a code; approve it at /credentials/machine
 agent-secrets register --wait 10 --exec -- bash # a session, registered as an agent's session is
 agent-secrets DEMO_API_KEY --reason "Publish the docs preview for PR 42 with the demo API" -- ./check-demo-key.sh
+                                                # prints its page on the broker; approve it there
 ```
 
 ## Screenshots
@@ -87,16 +95,27 @@ agent-secrets DEMO_API_KEY --reason "Publish the docs preview for PR 42 with the
 bash docs/site/media/broker/screenshots.sh
 ```
 
-Boots the rig, approves a machine login and a secret request through Dispatch, and writes
-`machine-login.png`, `inbox-credential-request.png`, `credential-request.png`,
-`credential-request-approved.png` and `live-grants.png` into `docs/site/public/media/broker/`. Each
+Boots the rig, approves a machine login through Dispatch and a secret request on the broker's own
+page, which the Inbox row links to, and writes
+`machine-login.png`, `inbox-credential-request.png`, `credential-request.png` (the broker's page
+before approval), `credential-request-approved.png` (the same page after it) and `live-grants.png`
+into `docs/site/public/media/broker/`. Each
 shot is taken only after the state it shows is asserted, and the run fails unless the approved
 request's command ran with the secret.
+
+The current `inbox-credential-request.png`, `credential-request.png` and
+`credential-request-approved.png` were taken instead from Dispatch's browser harness, which runs
+the real broker page (`packages/dispatch/e2e/run-broker.sh`), at this config's viewport and scale,
+on a machine without the `sudo` the rig's agent machine needs; their request is a pod's request
+for the harness's `ALICE_DEPLOY_KEY`. A rig run replaces them with the `DEMO_API_KEY` request.
 
 ## The walkthrough
 
 The narrated video is `docs/site/public/media/broker/walkthrough.mp4`; its sources, the rebuild
-steps and its review are in `walkthrough/README.md`. Recording
+steps and its review are in `walkthrough/README.md`. Its take predates the broker's approval page
+and shows the approval flow from before it, until a new take records
+`walkthrough.record.ts`'s current flow (the Inbox row, then the broker's page) and its narration
+(`walkthrough/narration.json`) is revised to match. Recording
 the raw footage again:
 
 ```bash

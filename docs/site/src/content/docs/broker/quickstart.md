@@ -1,6 +1,6 @@
 ---
 title: Quickstart
-description: An agent session uses a secret with one command; the approver sees the request in Dispatch; the command runs with the value in its environment.
+description: An agent session uses a secret with one command; the approver opens the request from Dispatch and approves it on the broker's page; the command runs with the value in its environment.
 sidebar:
   order: 1
 ---
@@ -12,12 +12,12 @@ in](/legion/broker/guides/log-a-machine-in/) first and start each agent with
 `agent-secrets register --wait 10 --exec -- <agent>`.
 
 No broker yet? [Run the local stack](/legion/broker/guides/run-locally/) and log its helper in, as
-that page shows. It has no Dispatch: where step 2 says Dispatch, approve with
-`agent-secrets-devrelay`, as [approving without
-Dispatch](/legion/broker/guides/approve-a-request/#without-dispatch) shows. Every terminal output
-below is real, captured from that stack, whose two secrets are `ada@example.com`'s: `DEMO_READ_TOKEN`
+that page shows. It has no Dispatch: where step 2 opens the request from the Inbox, open the page
+the waiting line names in a browser on the same machine, and the stack's stand-in sign-in signs you
+in as the request's approver. The stack's two secrets are `ada@example.com`'s: `DEMO_READ_TOKEN`
 at the agent tier, which her own sessions get without asking, and `DEMO_API_KEY` at the human tier,
-which she approves.
+which she approves. The terminal output below was captured from that stack, except the waiting
+line, shown with placeholders for the broker's address and the record.
 
 ## 1. The agent asks
 
@@ -43,50 +43,55 @@ demo-read-token-value
 ```
 
 When it needs a person's approval, `agent-secrets` says so, with the request's id, who approves it,
-and where (the request's Dispatch page when `AGENT_SECRETS_APPROVE_URL` names Dispatch's address,
-otherwise Credential requests in the Dispatch Inbox), and waits (up to 30 minutes; set `--wait` to
+and the request's page on the broker, where they do, and waits (up to 30 minutes; set `--wait` to
 a duration such as `5m` to change that) while the approver decides:
 
 ```console
 $ agent-secrets DEMO_API_KEY --reason "Deploy the example service" -- ./deploy.sh
 agent-secrets: request 0eaf43c4-dea5-4d41-8798-c25f6be7d811 is waiting for approval; waiting up to 30m0s
-agent-secrets: waiting for ada@example.com to approve it under Credential requests in their Dispatch Inbox
+agent-secrets: waiting for ada@example.com to approve it on the secrets broker: <broker>/approve/<record>
 ```
 
 The approver is the one the broker recorded when the agent asked: the secret's owner, or, for a
-shared secret, anyone signed in to Dispatch. Tell that person, not whoever you believe owns the
+shared secret, anyone who signs in to the broker (`waiting for anyone signed in to the secrets
+broker to approve it: <url>`). Tell that person, not whoever you believe owns the
 secret: a request goes to whomever its owner tag named at the moment it was made.
 `agent-secrets request` and `agent-secrets status` print the same `waiting for …` line while the
-request waits. If that person's approval is refused `NOT_APPROVER`, something changed after the
+request waits. If that person's approval leaves it pending (the page reads `still pending; it was
+not decided`, the broker's `NOT_APPROVER`), something changed after the
 request was made ([Approvals](/legion/broker/concepts/#approvals) says what each change does).
 Usually the secret's owner changed: run `agent-secrets cancel <request id>` and ask again, and the
 new request goes to the current owner. If instead the session's operator withheld one of the names,
 the request waits on anyone, and the broker still serves that name to the session, the operator can
 approve it, so ask them. Otherwise no one can approve it: cancel it and request the names
 separately, one request per approver, leaving out any name the broker no longer serves ([approving
-a request](/legion/broker/guides/approve-a-request/#decide-it) lists every `NOT_APPROVER` case).
+a request](/legion/broker/guides/approve-a-request/#decide-it) lists every case).
 
-## 2. The approver decides in Dispatch
+## 2. The approver approves it on the broker
 
 The approver (here `ada@example.com`, the secret's owner and the operator of the machine the agent
 runs on) finds the request at the top of their Dispatch **Inbox**, under **Credential requests**: a
-**Secret request** row naming `DEMO_API_KEY` and when it was asked. Opening it shows the request's
-page:
+**Secret request** row naming `DEMO_API_KEY` and when it was asked. The row is a link to the
+request's page on the secrets broker. If they signed in to the broker within the last day (a
+sign-in lasts a day unless the deployment set it shorter) the page opens at once; otherwise the
+broker signs them in first, with their Workspace account, and comes back to the same request. The
+page prints the request from the broker's own record:
 
 | Field | What it shows |
 | --- | --- |
-| Kind | Secret request |
-| Identifiers | The secrets asked for: `DEMO_API_KEY` |
-| Enrollment | The session's kind, runtime and operator: `session · example-host-build:2150654:335907311 · ada@example.com` |
-| Lifetime | How long a grant would last: Until the session ends, or the `--ttl` the agent asked for |
+| Secrets | The secrets asked for: `DEMO_API_KEY` |
+| Requested by (verified by the broker) | The enrollment that asked: its kind, operator and runtime, and a pod's worker slot |
+| Session the request names | Shown only when the request names a session other than the enrollment's, marked as the request's own unverified claim |
+| Reason | Deploy the example service |
+| Lasts once approved | How long a grant would last: until the session ends, or the `--ttl` the agent asked for |
 | Requested, Expires | When it was asked, and when it [expires](/legion/broker/concepts/#approvals) undecided |
-| Policy version | The version of the secret policy it was decided under: the SHA-256 of every agent secret's name, owner, tier and ARN |
 | Approver | `ada@example.com` |
-| The agent's stated reason | Deploy the example service |
+| State | pending, until someone decides it |
 
-and two buttons, **Approve** and **Deny**. The broker records the decision under the login the
-approver is signed in to Dispatch as; [approving a request](/legion/broker/guides/approve-a-request/)
-covers the page in full.
+and two buttons, **Approve** and **Deny**. Other requests waiting on the same person follow it on
+the page, each with its own buttons, and **Approve all N shown** approves every one printed. The
+broker records the decision under the login the approver signed in to the broker as;
+[approving a request](/legion/broker/guides/approve-a-request/) covers the page in full.
 
 ## 3. The command runs
 
@@ -116,7 +121,7 @@ grant: be34ed2a-78e2-4457-9a75-71283a87c16b (request 7db349e6-ad3c-4f40-86d7-c6a
 
 From a session with no live grant of `DEMO_API_KEY` (a new session, or one that ran
 `agent-secrets revoke <grant id>`), the same command asks again. When the approver clicks **Deny**
-(on the local stack, `agent-secrets-devrelay deny --record <record id>`), nothing runs and
+on the request's page, nothing runs and
 `agent-secrets` exits 77:
 
 ```console

@@ -107,7 +107,8 @@ DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslm
 Dispatch signed in as a person, to prove a change to a surface only a human acts on (the Inbox and
 its snooze, the Agents page and its direct messages, a broadcast) with no production step. It is
 the end-to-end harness, left running: it builds the SPA, starts every listener the Playwright
-config starts (the fake Envoy, the plain-HTTP proxy, the fake GitHub, the fake secrets broker and
+config starts (the fake Envoy, the plain-HTTP proxy, the fake GitHub, the fake secrets broker, the
+dev OIDC issuer and the real secrets broker beside it (`e2e/run-broker.sh`), and
 `e2e/run-server.sh`) on the same ports, empties the database, seeds `e2e/workspace.ts`, checks over
 HTTP that a cookie from the dev sign-in route reads `/auth/whoami`, the Inbox, the broadcasts and
 the agents, and prints:

@@ -391,9 +391,12 @@ names its count. The full vocabulary, with the reason each call beat its alterna
 
 ## Credential requests
 
-`features/credentials/` renders the whole secrets-broker credential-request approval surface —
-directed, signature-verified, immutable-record requests the broker owns and decides; Dispatch
-relays, renders, and names the deciding human. The feature is off — the inbox section and the
+`features/credentials/` renders Dispatch's part of the secrets-broker credential-request surface —
+directed, signature-verified, immutable-record requests the broker owns and decides. Dispatch lists
+what waits on the signed-in person and links each secret request to the broker's own approval page,
+where that person, signed in to the broker, decides it; it decides no secret request itself. It
+relays a machine login's decision with the typed code, and a person's revokes, naming the deciding
+human. The feature is off — the inbox section and the
 Settings grants section hidden — whenever `DISPATCH_AGENT_SECRETS_URL` is unset on the server, and
 the SPA learns so from the pending list itself, never a separate capability flag: there it answers
 `200` with `null` (every other credential route answers `404 FEATURE_OFF`), since every page reads
@@ -410,9 +413,13 @@ mounts in `features/inbox/Inbox.tsx`, above the ask sections and outside its
 roving-focus/`ViewportAnchor` mechanism (it is not an ask row): each pending row shows a kind
 badge ("Secret request" for `agent_secret`, "Machine login" for `launcher_credential`), the
 requested identifiers, and a
-relative `Timestamp`, linking to `/credentials/:recordId` — except a machine-kind row, which links
-to `/credentials/machine` instead, since only the typed code selects a machine login (a
-direct record link can never approve a machine login) — then, below that link, the session the
+relative `Timestamp`. A secret request's line is a plain `<a href>` to the row's `approve_url`, the
+broker's page `<BROKER_PUBLIC_URL>/approve/<record>`, in the same tab, used only when it is an
+absolute `http:` or `https:` URL (`brokerPage`; anything else, a `javascript:` URL or a relative
+path, counts as absent); a row from a broker older than that page, with no `approve_url`, links
+nowhere and reads "Decided on the secrets broker." A machine-kind row links to
+`/credentials/machine` instead, since only the typed code selects a machine login (a
+direct record link can never approve a machine login) — then, below that line, the session the
 broker's `session` field names (LEGION-587: `{request, enrollment}`, either null): a live one's
 title (or its short id, untitled), folder and machine, linked to `/agents/:id/live`; a dead one's
 bare id, "isn't running"; neither reachable (the agents list hasn't answered, or Envoy is down or
@@ -421,21 +428,23 @@ alone, or both agreeing, shows one unlabeled line. A request-only id (the common
 case, which has no enrollment `session_id` of its own) shows one line with no preamble
 (`session.ts`'s `credentialSessionLines`). Both ids set and differing shows both lines: the
 enrollment's under "The session that enrolled:", since that is the one the broker verified, and
-the request's bare (`CredentialSessionLines.tsx`, shared with the record page below); never
+the request's bare (`CredentialSessionLines.tsx`, shared with `CredentialRecordFacts` below); never
 "Requested by". `pending.ts`'s
 `useCredentialRequests` is
 the one reading of that list - `listed` (empty under `null`), `loading` or `failed` - and
 the section, the Inbox's empty state, its `Blocked on you` banner and both `Needs you N` badges
 all read it, so a request one of them counts is one the section lists.
 
-`CredentialRecordPage.tsx` (`/credentials/:recordId`) and `MachineLoginPage.tsx`
-(`/credentials/machine`) share `CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
+`MachineLoginPage.tsx` (`/credentials/machine`) renders a looked-up machine login through
+`CredentialRecordFacts.tsx` (kind, identifiers, enrollment,
 a pod enrollment's worker slot when it has one, session (the same resolution the Inbox row's
 own line uses), lifetime, requested/expiry timestamps, policy
-version, approver - the broker's `anyone`, which a shared secret's request and a service's machine
-login name, reads "Anyone signed in to Dispatch" - then the agent's reason) and
+version, approver - the broker's `anyone`, which a service's machine
+login names, reads "Anyone signed in to Dispatch" - then the reason, when the record has one) and
 `CredentialDecisionButtons.tsx` (the Approve/Deny pair, shown whenever the record is `pending`).
-The broker's `enrollment.slot` (`implementer-g3`, null without one) is what tells the requests of
+Dispatch has no page for a secret request's record: `/credentials/<record>` is gone, and the
+broker's page prints that record. The broker's `enrollment.slot` (`implementer-g3`, null without
+one) is what tells the requests of
 two roles in one pod apart, since they share the pod's kind and runtime id. A record waiting on
 `anyone` is in every signed-in person's pending list, since the broker lists it for every approver,
 and any of them decides it the same way; a person's own machine login is decided by that person
@@ -447,22 +456,20 @@ you." verbatim, or, for a service's login (the record's `service` set, the Legio
 "Approving lets `<service> on <host>` start worker pods as `<service>`, not as you: no secret of
 yours reaches its pods unless you approve the request for it."; an approval made on the machine
 page reads "Approved. `<host>` can start agent sessions as you." or "Approved. `<service> on
-<host>` can start worker pods as `<service>`."; the record page renders no buttons at all for a
-machine record, pointing instead at the machine page, whose code-entry lookup is the only way to
+<host>` can start worker pods as `<service>`."; the code-entry lookup is the only way to
 decide it. A decision is one plain
-POST: a plain record's approve and deny send no body, and a machine record's approve and deny both
+POST whose approve and deny both
 send `{code}`, the code the viewer typed for that lookup (the broker requires it on either
 decision). The page never says who decides: Dispatch's server names the signed-in viewer (below),
 and the broker refuses anyone the record's rule does not admit (anyone signed in for a service's
-machine login or a shared secret naming `anyone`; otherwise its approver) with `403 NOT_APPROVER`,
+machine login; otherwise its approver) with `403 NOT_APPROVER`,
 surfaced verbatim.
 Terminal-state records (`approved`, `denied`, `expired`, `cancelled`, `revoked`) render their
-recorded decision and no buttons, on the record page and on the machine page alike, whether the
+recorded decision and no buttons, whether the
 machine page looked the login up already decided or decided it itself; every broker error
 surfaces verbatim through `ApiError`'s message, never reworded.
 
-`RevocableList.tsx` is the revocable table both lists below render through, as
-`CredentialDecisionButtons.tsx` is the decision pair both record pages share: each section hands it
+`RevocableList.tsx` is the revocable table both lists below render through: each section hands it
 its query (narrowed to the rows with `select`), its columns, its revoke call, an optional
 `window.confirm` question and what to invalidate on success. It owns the loading, failed and empty
 states and the one revoke in flight: every Revoke button is disabled while a revoke is pending, a
@@ -504,18 +511,22 @@ ServiceAccount token, both resolved in `cmd/dispatch/main.go`'s boot config, thr
 presents that token, read from the file at call time behind a 30-second cache since the kubelet
 rewrites it in place; the broker verifies it and finds Dispatch in its `BROKER_API_ACCOUNTS`. Its
 reads and the machine lookup return the broker's JSON body as `json.RawMessage`, relayed
-unmodified. The listed account's token is the approval credential: the broker takes the approving
-human from the request body on that caller's word, so Dispatch builds every decision
+unmodified, a secret request's `approve_url` included. The listed account's token is the
+credential for a machine-login decision and every revoke: the broker takes the person from the
+request body on that caller's word, so Dispatch builds every decision
 body itself. `Approve` and `Deny` take an `agentsecrets.Decision{Approver, Code}`, where `Approver`
 is always `canonicalLogin` of the `requireHuman` caller and `Code` is the only field read from the
-browser's body; any other field the browser sends, an `approver` among them, is dropped.
+browser's body; any other field the browser sends, an `approver` among them, is dropped. The broker
+decides only a machine login there: for a secret request it answers
+`403 DECIDE_ON_BROKER_PAGE` with the page's `approve_url`, which Dispatch relays verbatim like any
+answer, so an open tab from before the Inbox linked the page still learns where to go.
 `RevokeByApprover`, `MachineLogins` and `RevokeMachineLogin` send only the caller's canonical login
 as the approver. Cookie-authenticated unsafe requests
 must be same-origin (`enforceCookieOrigin` in `packages/envoy/internal/dispatch/routes/router.go`),
 so another site cannot send a decision from a signed-in human's browser.
-`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the nine `human`-auth proxy
+`packages/envoy/internal/dispatch/api/credential_requests.go` mounts the eight `human`-auth proxy
 rows every page above calls:
-`GET /api/v1/credential-requests`, `GET /api/v1/credential-requests/{id}`,
+`GET /api/v1/credential-requests`,
 `POST /api/v1/credential-requests/{id}/approve|deny`,
 `POST /api/v1/credential-requests/machine-lookup`, `GET /api/v1/credential-grants`,
 `POST /api/v1/credential-grants/{id}/revoke`, `GET /api/v1/machine-logins` and
@@ -524,19 +535,24 @@ configured client (`404 FEATURE_OFF` on a nil one), except the pending list, whi
 without a broker once its input is checked; the two `?approver=` routes accept only the
 literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own
 canonical login — the UI never asks for anyone else's list. A `*agentsecrets.Error` forwards the
-broker's exact status and body verbatim (e.g. `403 NOT_APPROVER`, `409 RECORD_TERMINAL`); a call
+broker's exact status and body verbatim (e.g. `403 NOT_APPROVER`, `409 RECORD_TERMINAL`,
+`403 DECIDE_ON_BROKER_PAGE`); a call
 that stopped at Dispatch's own token, a file missing, unreadable or empty, is
 `500 AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE`, logged with the file's path, since the broker was
 never asked; any other failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go`
 pins the decision bodies
 against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips a real broker
-(`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
-`403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
-whatever login its body names, and the value released; a shared secret's request in two people's
-lists and approved by the second; an automatic grant listed as automatic, revoked, and the same
+(`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): Dispatch's approve and
+deny of a secret request, by its approver or anyone else and whatever the browser's body names,
+each relaying `403 DECIDE_ON_BROKER_PAGE` with the record's page and deciding nothing, and the same
+request approved on the broker's page by its approver, signed in to the broker, releasing its
+value; the pending list carrying that page; a shared secret's request in two people's
+lists and approved on the broker's page by the second; an automatic grant listed as automatic,
+revoked, and the same
 session's next request for it waiting on its owner while another session still gets it at once;
-once the operator has withheld AUTO_TOKEN, another person's approval of the session's request that
-was waiting on anyone for it refused `403 NOT_APPROVER` and the operator's accepted; a person's
+once the operator has withheld AUTO_TOKEN, another person's approval on the broker's page of the
+session's request that was waiting on anyone for it deciding nothing and the operator's accepted;
+a person's
 machine login listed for the person who approved it alone, another person's revoke refused
 `403 NOT_APPROVER` whatever their body names, and the approver's revoke ending the session it
 enrolled and its launcher proofs; a person's machine login refused `403 NOT_APPROVER` to another
@@ -878,7 +894,21 @@ lists the ServiceAccount whose token `run-server.sh` hands the server by
 directory before it changes into `packages/envoy`. The broker's docs rig
 (`docs/site/media/broker/rig.sh`) sets a URL, and keeps that token with
 `packages/envoy/cmd/dev-oidc-issuer`, the local issuer its broker trusts. Playwright starts the
-fake broker only for the default, and the skill-scenarios rig sets the switch empty.
+fake broker only for the default, and the skill-scenarios rig sets the switch empty. Beside the
+fake, the default also starts a real broker and its issuer (`e2e/run-broker.sh`, two listeners:
+`dev-oidc-issuer` on `DEV_OIDC_ISSUER_PORT`, default `9025`, and `cmd/broker` on
+`REAL_BROKER_PORT`, default `9026`, built once per checkout into
+`packages/envoy/out/dispatch-e2e-broker/` under a lock, in a database of its own,
+`<DATABASE_URL's database>_broker`, dropped and created at each start). The server never reads
+it: only the browser and `e2e/broker-approval.e2e.ts`'s seeding step
+(`packages/envoy/internal/broker/brokertest/requestseed`, through `e2e/real-broker.ts`) reach it.
+That spec puts pending requests on the real broker as pods would, lists them for alice through
+the fake with the real record's `approve_url`, and proves in Chromium that the Inbox row lands on
+the broker's page with no sign-in while the broker session lives, that a lapsed session signs in
+once and returns to the same record, "Approve all 3 shown", the wrong account's switch, and that a
+page on a sibling origin cannot decide through a form post, a credentialed `fetch` or an `iframe`.
+The issuer signs a person in as the record's `login_hint` with no page to fill in, or as the one
+`queueSignIn` (its `POST /dev/sign-in-as`) named.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact
 layouts intentionally omit the remote cursor plugin because its edge widget disrupts mobile
@@ -953,8 +983,9 @@ margin ask card, open or decided, is one keyed list in the Comments tab, with `N
 item in it (the Inbox's pattern), so an answered ask moves out of the group in place, and a reply
 the reader started typing in its thread stays; the group is each card's `data-margin-section`,
 and `needsYouCards(page)` (`e2e/editor.ts`) finds the open ones.
-`e2e/fake-broker.ts` answers the broker's two UI-bearer reads, `GET /v1/pending?approver=<login>`
-(the requests seeded for that login, in the broker's row shape) and `GET /v1/grants` (always
+`e2e/fake-broker.ts` answers the broker's two account reads Dispatch's server makes,
+`GET /v1/pending?approver=<login>` (the requests seeded for that login, in the broker's row shape,
+a secret request's `approve_url` relayed as seeded) and `GET /v1/grants` (always
 empty), and 404 to every other broker route. A row seeds pending requests with
 `setPendingCredentialRequests` (`e2e/fake-broker-helpers.ts`), each naming the login it waits on,
 and `resetDatabase()` clears them with the rest. Only a run whose server reads the fake has one
@@ -1016,10 +1047,11 @@ harness-port rule lives — `README.md` and the `docs/solutions` learning point 
 restating it.
 
 `e2e/harness-ports.ts` resolves `DISPATCH_E2E_PORT` (default `8777`), `FAKE_ENVOY_PORT` (default
-`9021`), `FAKE_GITHUB_PORT` (default `9022`), `PLAIN_HTTP_PORT` (default `9023`) and
-`FAKE_BROKER_PORT` (default `9024`) once for every reader in `e2e/`, the Playwright config and the
-four Bun listeners included. An empty value means the default for all five alike, matching
-`run-server.sh`'s `${VAR:-default}` for the four ports it reads; anything that is not a port in
+`9021`), `FAKE_GITHUB_PORT` (default `9022`), `PLAIN_HTTP_PORT` (default `9023`),
+`FAKE_BROKER_PORT` (default `9024`), `DEV_OIDC_ISSUER_PORT` (default `9025`) and
+`REAL_BROKER_PORT` (default `9026`) once for every reader in `e2e/`, the Playwright config and the
+four Bun listeners included. An empty value means the default for all seven alike, matching
+`run-server.sh`'s and `run-broker.sh`'s `${VAR:-default}` for the ports they read; anything that is not a port in
 canonical decimal is
 refused naming its variable (so `1e4`, `8777.0`, `0x2249`, `+8777`, `" 8777"` and a leading-zero
 `08777` are all refused, rather than binding one port while every URL built from the raw string
@@ -1032,8 +1064,9 @@ resolution, those listeners refuse it too, not only the Playwright config.
 `e2e/playwright.config.ts` probes every port it starts before any web server starts and fails the
 run with one message listing every taken port beside its own variable, before a single spec runs.
 One table, `e2e/harness-listeners.ts`, names each listener, its command, its port's variable and
-whether a deployed run starts it; the config's probe and `webServer` read the rows it starts: all
-five ports for a local run, and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The
+whether a deployed run starts it and builds Go (`buildsGo`, which gets `goBuildBootMs`, ten
+minutes, to start listening); the config's probe and `webServer` read the rows it starts: all
+seven ports for a local run on the fake broker, and `FAKE_ENVOY_PORT` plus `PLAIN_HTTP_PORT` for a deployed run. The
 probe is `e2e/port-probe.ts`: `isPortUsed` is Playwright's own predicate, and `takenPorts` lists
 the taken ports of a set of rows, which the config and `e2e/local-instance.ts` both refuse on. The
 refusal names only the variables the run probes. Its remedies are

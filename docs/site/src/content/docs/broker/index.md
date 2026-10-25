@@ -9,7 +9,8 @@ sidebar:
 The Secrets Broker hands agent sessions the secret values they need, one request at a time, so an
 agent never holds a long-lived API key. An agent asks for a secret by name; the broker decides from
 the secret's owner and tier whether to grant it at once, refuse it, or ask a person; and the person
-approves or denies it in Dispatch. A granted value reaches only the session that asked, in the
+approves or denies it on the broker's own page, which their Dispatch Inbox links to. A granted
+value reaches only the session that asked, in the
 environment of the command it runs, and every request, decision and use is recorded. That command
 is the agent's choice and can read the value, so approve a secret only for a session you would
 trust with the value itself. The command keeps the value in its environment for as long as it runs;
@@ -30,8 +31,9 @@ it.
   place for a key to leak. With the broker, an agent session holds only a signing key of its own
   that dies with the session, and fetches a value for exactly the command that needs it.
 - **A person approves what needs approval.** Each secret's owner and tier, two tags on the secret
-  itself, say who gets it automatically and who needs a person's yes. Approving is one click in
-  Dispatch, where that person already works.
+  itself, say who gets it automatically and who needs a person's yes. The request waits in that
+  person's Dispatch Inbox, where they already work, and one click there opens its page on the
+  broker, where one more click approves it.
 - **Every grant is recorded.** Each approval rests on a signed, content-addressed record of who
   asked, for what, why, and who decided, which the broker re-verifies every time it releases a
   value.
@@ -54,10 +56,11 @@ sequenceDiagram
     alt granted at once
         Broker-->>CLI: granted
     else a person must approve
-        Broker-->>CLI: pending, and the approver its record names
+        Broker-->>CLI: pending, the approver its record names, and its page on the broker
         Dispatch->>Broker: pending requests for the person signed in
-        Person->>Dispatch: Approve
-        Dispatch->>Broker: approve, as that person's login
+        Person->>Dispatch: open the request in the Inbox
+        Dispatch-->>Person: a link to the request's page on the broker
+        Person->>Broker: Approve, signed in to the broker
         CLI->>Broker: poll until granted
     end
     CLI->>Broker: POST /v1/grants/{id}/values
@@ -77,15 +80,17 @@ container](/legion/broker/guides/run-an-agent-in-a-container/) shows a box's set
 | Secrets Broker (`envoy-broker`) | Enrolls sessions, decides each request from the secret's owner and tier, records requests and decisions, and releases granted values. | One or more identical stateless processes behind one address, beside Postgres and the secret store. |
 | `agent-secrets` | The command an agent runs to use a secret, the tool people and launchers use to log machines in and inspect sessions, the tool people list and revoke their machine logins and live grants with (`machine list`, `grant list`), and the tool people manage the secrets themselves with, under their own cloud sign-in. | Wherever agents run, and a person's own machine. |
 | `agent-secrets-helper` | A per-user daemon that holds each host agent session's key, enrolls it, and signs for it. | Each machine that runs agents directly. |
-| Dispatch | Shows people the requests they must decide and the grants they can revoke, and passes their decisions to the broker. | Dispatch's server and web app. |
+| Dispatch | Shows people the requests waiting on them, each secret request linking to its page on the broker; takes a machine login's typed code and relays the person's decision; and lists the grants people can revoke. | Dispatch's server and web app. |
 | Legion | Enrolls every worker pod it runs on Kubernetes, so a phase worker can use `agent-secrets` like any other session. | Legion's daemon. |
 
 ## How it fits with Legion and Dispatch
 
-[Dispatch](/legion/dispatch/) is where people decide: its Inbox lists **Credential requests**
-beside the asks waiting on them, its credential pages show what an agent asked for and why, and its
-Settings page lists the live grants a person can revoke. The broker holds no Dispatch credential;
-Dispatch's server calls the broker on the signed-in person's behalf.
+[Dispatch](/legion/dispatch/) is where people see what waits on them: its Inbox lists **Credential
+requests** beside the asks waiting on them, each secret request a link to its page on the broker,
+its machine-login page takes a machine's code, and its Settings page lists the live grants a person
+can revoke. A person approves a secret request on the broker's own page, signed in to the broker
+itself, never through Dispatch. The broker holds no Dispatch credential; Dispatch's server reads
+what waits on the signed-in person, and relays that person's machine-login decisions and revokes.
 
 [Legion](/legion/legion/) runs agents. When its Kubernetes runtime is configured with the broker,
 the Legion daemon logs itself in with its own Kubernetes ServiceAccount token, which no person
@@ -96,8 +101,8 @@ pod. See [how Legion, Dispatch and the broker fit together](/legion/how-it-fits/
 
 - [Quickstart](/legion/broker/quickstart/): use a secret from an agent session, and see what the
   approver sees.
-- [Walkthrough](/legion/broker/walkthrough/): a narrated video of one secret request, from the
-  agent's ask through the approval in Dispatch to the command that runs with it.
+- [Walkthrough](/legion/broker/walkthrough/): one secret request, from the agent's ask through its
+  approval on the broker's own page to the command that runs with it.
 - [Concepts](/legion/broker/concepts/): sessions, machine logins, owner and tier, grants, approvals
   and the audit record.
 - Guides: [manage a secret](/legion/broker/guides/manage-a-secret/),

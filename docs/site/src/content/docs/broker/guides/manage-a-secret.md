@@ -91,7 +91,8 @@ machine's Application Default Credentials are its own identity, and so does ever
 - **`--owner me`** writes your sign-in's email in lowercase: your Identity Center session name
   (AWS) or the Google account the write runs as (GCP: your Application Default Credentials', or
   your gcloud login's). It must be an email the broker accepts, or the command refuses before
-  writing. The broker matches it against the email a person signs in to Dispatch with, so `me`
+  writing. The broker matches it against the email a person signs in to the broker's approval page
+  with (and to Dispatch, for a machine login), so `me`
   names you where that session name or Google account is the same email. **`--owner shared`**
   makes the secret everyone's. GCP stores owner and tier as the secret's **annotations**, never
   labels, so they never collide with a label someone else applies.

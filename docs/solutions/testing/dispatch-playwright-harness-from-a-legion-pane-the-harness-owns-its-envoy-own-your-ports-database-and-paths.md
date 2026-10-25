@@ -106,10 +106,12 @@ invocations skip the probe.
 docker exec dispatch-pg createdb -U postgres dispatch_<issue>      # once
 DATABASE_URL='postgres://postgres:dispatch@127.0.0.1:55432/dispatch_<issue>?sslmode=disable' \
 DISPATCH_E2E_PORT=87NN FAKE_ENVOY_PORT=90NN FAKE_GITHUB_PORT=91NN PLAIN_HTTP_PORT=92NN FAKE_BROKER_PORT=93NN \
+DEV_OIDC_ISSUER_PORT=94NN REAL_BROKER_PORT=95NN \
   bun run e2e
 ```
 
-`DATABASE_URL` is read by the server script and by `e2e/seed.ts`. The five ports are resolved for
+`DATABASE_URL` is read by the server script, by `e2e/run-broker.sh` (whose real broker uses the
+database named beside it with `_broker` appended) and by `e2e/seed.ts`. The seven ports are resolved for
 the whole TypeScript suite by `e2e/harness-ports.ts`, the only TypeScript module that reads them
 from the environment; every other module, `e2e/seed.ts` included, reaches a harness server through
 it or through `e2e/api.ts`. So those variables move the whole harness together. Start nothing else:

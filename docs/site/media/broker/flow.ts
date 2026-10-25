@@ -2,7 +2,8 @@
 //
 // The flow the broker's screenshots and walkthrough both show, written once: what the rig hands
 // its command, the demo's names, the request's reason, what the agent machine prints that a
-// person acts on, and the Dispatch pages and controls a person uses to approve it.
+// person acts on, the Dispatch pages and controls a person uses to log the machine in and find the
+// request, and the broker's own page where they approve it.
 import type { Locator, Page } from "@playwright/test";
 
 /** The harness's signed-in human: the agent machine's operator, and the owner and so the approver
@@ -34,12 +35,13 @@ export function rigState(): RigState {
   };
 }
 
-/** What the agent machine prints: the machine login's code, a pending request's id and the
- *  Dispatch record a person decides it on, and the demo command's line once the key reached it. */
+/** What the agent machine prints: the machine login's code, a pending request's id and its page on
+ *  the broker (the whole address, then the record id it ends in), and the demo command's line once
+ *  the key reached it. */
 export const printed = {
   loginCode: /machine login code: ([A-Z0-9]{4}-[A-Z0-9]{4})/,
   requestWaiting: /request (\S+) is waiting for approval/,
-  recordLink: /\/credentials\/([0-9a-f]{64})/,
+  approvePage: /(https?:\/\/\S+\/approve\/([0-9a-f]{64}))/,
   keyReached: /DEMO_API_KEY reached this command/,
 };
 
@@ -57,14 +59,23 @@ export const dispatch = {
   approve: (page: Page): Locator => page.getByRole("button", { name: "Approve" }),
   machineLoginApproved: (page: Page): Locator =>
     page.getByText(`Approved. ${agentHost} can start agent sessions as you.`),
+  /** The Inbox's row for the request: a link to its page on the broker. */
   inboxRequest: (page: Page): Locator =>
     page.getByRole("link", { name: /Secret request.*DEMO_API_KEY/s }),
-  requestReason: (page: Page): Locator => page.getByText(reason),
-  /** The decision the record page shows once approved ("Approved just now"). The word boundary
-   *  matters: the Approve and Deny buttons' row reads "ApproveDeny", which /^approved/i matches,
-   *  so a bare prefix finds the buttons until the decision replaces them. */
-  requestApproved: (page: Page): Locator => page.getByText(/^approved\b/i),
   settings: (page: Page): Locator => page.getByRole("link", { name: "Settings" }),
   liveGrants: (page: Page): Locator =>
     page.locator("section[aria-labelledby='credential-grants-heading']"),
+};
+
+/** The broker's approval page (`<broker>/approve/<record>`) and what it shows. */
+export const broker = {
+  /** The header line naming who is signed in to the broker. */
+  signedIn: (page: Page): Locator =>
+    page.getByRole("banner").getByText(`Signed in as ${operator}.`),
+  requestReason: (page: Page): Locator => page.getByText(reason),
+  /** The record's own Approve; "Approve all N shown" is another button. */
+  approve: (page: Page): Locator => page.getByRole("button", { name: "Approve", exact: true }),
+  /** The line the page shows, under What happened, once the approval made the grant. */
+  requestGranted: (page: Page): Locator =>
+    page.locator(".outcomes").getByText(`DEMO_API_KEY: granted (approved by ${operator} at`),
 };

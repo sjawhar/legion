@@ -4,6 +4,45 @@
 
 ### Added
 
+- The secrets broker serves its own approval page, where a person approves or denies a secret
+  request signed in to the broker itself: `GET /approve/{record}` prints the request from the
+  broker's own record (the secret names, the enrollment the broker verified asked, the session the
+  request claims when it differs, labelled as its own claim, the reason, the lifetime, the times,
+  the approver and the state), then every other pending secret request the person may decide, with
+  Approve and Deny for each and one "Approve all N shown". `POST /approve` decides only records the
+  page printed, bound to the signed-in session by the page's token for an hour, from the broker's
+  exact origin (`Origin`, or `Sec-Fetch-Site: same-origin`), and answers a 303 back to the page
+  saying what became of each. With no live session the page signs the person in through OpenID
+  Connect (authorization code with PKCE S256, nonce and state, the record's approver as
+  `login_hint`) and returns to the same record (`GET /signin/callback`); `?switch=1` signs in as
+  someone else, and `POST /signin/logout` signs out. Both cookies are `__Host-` cookies, every page
+  carries a Content-Security-Policy that runs no script and frames nothing, and the stylesheet is
+  `GET /approve/assets/approve.css`. Sign-in takes four settings, set together or not at all:
+  `BROKER_SIGNIN_ISSUER`, `BROKER_SIGNIN_CLIENT_ID`, `BROKER_SIGNIN_CLIENT_SECRET_FILE` and
+  `BROKER_SIGNIN_DOMAIN` (the Workspace domain the ID token's `hd` must name); in production that
+  is a Google OAuth Web client under the Workspace's internal consent screen with the authorized
+  redirect URI `<BROKER_PUBLIC_URL>/signin/callback`. A partial set refuses to start naming the
+  missing ones; none set boots, logs `approval sign-in off`, and the page answers 503 naming the
+  four, so no person can approve a secret request. `BROKER_SIGNIN_CLIENT_SECRET` is refused: the
+  secret is read only from its file. A session lasts `BROKER_SIGNIN_SESSION_SECONDS`, default and
+  most 86400 (24 hours), from sign-in, never renewed; migration 0019 adds its `browser_sessions`
+  table, which the sweeper empties of expired rows (INFRA-314).
+- Every broker answer that names a pending secret request names its page: `approve_url`
+  (`<BROKER_PUBLIC_URL>/approve/<record>`) on each secret-request row of `GET /v1/pending`, and on
+  `POST /v1/requests` and `GET /v1/requests/{id}` while the request is pending with a record.
+  Dispatch relays it verbatim, and `agent-secrets request`, `status` and the exec form's wait print
+  it: `waiting for <approver> to approve it on the secrets broker: <url>`, or `waiting for anyone
+  signed in to the secrets broker to approve it: <url>` for a shared secret. Against a broker that
+  names no page the line names the Dispatch Inbox's Credential requests, as before. A machine
+  login's row carries none (INFRA-314).
+- `dev-oidc-issuer` can stand in for a person's sign-in provider: `--sign-in-client` and
+  `--sign-in-client-secret-file` serve code flow for one confidential client (PKCE S256 checked, an
+  ID token and no refresh token), `--sign-in-domain` sets the `hd` claim (default `example.com`),
+  and a person is signed in with no page to fill in, as the one `POST /dev/sign-in-as` queued, else
+  the request's `login_hint`, else `--sign-in-default`. `--listen` fixes its loopback address, and
+  `POST /dev/mint` mints a ServiceAccount token on demand. `scripts/dev-broker.sh` turns the local
+  broker's sign-in on through it, so a browser on the same machine approves a secret request on
+  the broker's page at the `approve_url` `agent-secrets` prints (INFRA-314).
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an
@@ -439,7 +478,8 @@
   `agent-secrets status` print, after a waiting request's id and state, a line naming that approver
   and where they decide it (`waiting for ada@example.com to approve it in Dispatch: <record page>`),
   and the exec form's wait prints the same line in place of `approve or deny it …`. `--json` prints
-  the field verbatim; exit codes are unchanged (LEGION-666).
+  the field verbatim; exit codes are unchanged (LEGION-666). (Superseded by INFRA-314's entry under
+  Added on `approve_url`: the line names the request's page on the secrets broker.)
 - The secrets broker can sign in to an Amazon RDS or Aurora database by IAM token. When
   `BROKER_DATABASE_URL` names a user and no password and its host ends in `.rds.amazonaws.com`, every
   new pooled connection, and the migration lock watch's own connection, signs in with an RDS IAM
@@ -560,6 +600,27 @@
 
 ### Changed
 
+- **Breaking:** a secret request can no longer be approved or denied through Dispatch, devrelay or
+  any other route a service calls; its approver decides it on the broker's own page, signed in to
+  the broker. `POST /v1/credential-requests/{record}/approve` and `/deny` answer an
+  `agent_secret` record `403 DECIDE_ON_BROKER_PAGE`, writing nothing, with the page in its message
+  and as `approve_url`; a machine login is decided there exactly as before, with its typed code,
+  and the approve answer no longer carries `grant_id`. `GET /v1/credential-requests/{record}` is
+  removed. Revoking a grant or a machine login still takes the person's name from the calling
+  service. Dispatch's Inbox row for a secret request is a plain link to the broker's page, or the
+  unlinked text "Decided on the secrets broker." from a broker that names none; Dispatch's
+  `/credentials/<record>` page and its `GET /api/v1/credential-requests/{id}` are gone, while the
+  machine-login page `/credentials/machine` is unchanged. Deploy the broker with its
+  `BROKER_SIGNIN_*` settings first, then Dispatch: until Dispatch is deployed, an open Dispatch
+  tab's Approve on a secret request gets the broker's 403 naming the page, and nothing is approved
+  on Dispatch's word (INFRA-314).
+- **Breaking (local development):** `agent-secrets-devrelay` has no `approve` or `deny`
+  subcommand, since the broker refuses every service route that would decide a secret request;
+  `machine-approve` decides a machine login as before. `AGENT_SECRETS_APPROVE_URL` names only the
+  machine-login page `agent-secrets machine login` prints; a pending secret request names the
+  broker's page instead. Dispatch's browser harness starts two more listeners, `dev-oidc-issuer` on
+  `DEV_OIDC_ISSUER_PORT` (default 9025) and a real broker on `REAL_BROKER_PORT` (default 9026)
+  (`e2e/run-broker.sh`), so a local run needs both ports free (INFRA-314).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
@@ -571,6 +632,8 @@
   the workdir and rewrites each before it lapses, and the script exports
   `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, so devrelay approves records and machine logins locally
   again. The Dispatch e2e harness's broker token is `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.
+  (Superseded for secret requests by INFRA-314's Breaking entry above: devrelay decides only
+  machine logins.)
 - A failed NATS reconnect attempt is logged, where it was silent: one WARN a minute per
   connection, `envoy nats reconnect attempt failed`, naming the client, the servers it was
   configured with and the error, with the first failure of an outage logged at once. nats.go

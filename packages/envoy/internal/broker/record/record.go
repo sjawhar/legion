@@ -69,8 +69,9 @@ func CanonicalLogin(login string) string {
 	return strings.ToLower(strings.TrimSpace(login))
 }
 
-// HumanActor is the audit actor of a change a person made in Dispatch: "human:" and their
-// canonical login, the person Dispatch's server vouches for from its own signed-in session.
+// HumanActor is the audit actor of a change a person made: "human:" and their canonical login,
+// the person signed in to the broker's own approval page, or, for a machine login's decision or a
+// revoke, the person Dispatch's server vouches for from its own signed-in session.
 func HumanActor(login string) string {
 	return "human:" + CanonicalLogin(login)
 }
