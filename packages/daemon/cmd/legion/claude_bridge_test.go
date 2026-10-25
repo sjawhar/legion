@@ -35,12 +35,6 @@ func TestClaudeBridgeRefusesWhatItCannotRun(t *testing.T) {
 			t.Errorf("claude-bridge %q = %d %q, want 2 naming %q and the usage", tc.args, code, stderr.String(), tc.want)
 		}
 	}
-	t.Setenv("CLAUDE_CONFIG_DIR", "relative")
-	var stdout, stderr bytes.Buffer
-	if code := run(context.Background(), []string{"legion", "claude-bridge", "--", "claude", "--resume", "s"}, &stdout, &stderr); code != 2 ||
-		!strings.Contains(stderr.String(), "CLAUDE_CONFIG_DIR must be an absolute path") {
-		t.Errorf("a relative CLAUDE_CONFIG_DIR = %d %q", code, stderr.String())
-	}
 }
 
 // A claude that cannot be started is the bridge's failure, exit 1, naming it.

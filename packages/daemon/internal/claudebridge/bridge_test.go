@@ -10,7 +10,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -40,10 +39,8 @@ func TestMain(m *testing.M) {
 // its script:
 //   - "/rename <title>": no init, an assistant line naming the title, a success result;
 //   - "hang": nothing until an interrupt;
-//   - "handoff ok" / "handoff refused": a `legion` handoff_complete call and its result;
+//   - "handoff ok": a `legion` handoff_complete call and its result;
 //   - "say <text>": an assistant message of text;
-//   - the follow-up for a tool call written as text (textToolCall + FollowUp): the last "say" text
-//     again, as a model that answers it with the same text-written call;
 //   - "inbox <text>": writes one delivery to LEGION_CLAUDE_INBOX and reads its answer;
 //   - "fail <text>": an assistant message of text, then an error_during_execution result;
 //   - anything else: an assistant message "done".
@@ -65,7 +62,7 @@ func fakeClaude() int {
 	result := func(subtype string, isError bool) {
 		emit(map[string]any{"type": "result", "subtype": subtype, "is_error": isError})
 	}
-	hanging, lastSaid := false, ""
+	hanging := false
 	reader := bufio.NewReader(os.Stdin)
 	for {
 		line, err := reader.ReadBytes('\n')
@@ -104,16 +101,13 @@ func fakeClaude() int {
 		case body == "hang":
 			hanging = true
 			continue
-		case body == "handoff ok" || body == "handoff refused":
+		case body == "handoff ok":
 			assistant(map[string]any{"type": "tool_use", "id": "tu1", "name": "mcp__legion__legion", "input": map[string]any{"op": "handoff_complete", "summary": "s"}})
 			emit(map[string]any{"type": "user", "message": map[string]any{"role": "user", "content": []map[string]any{
-				{"type": "tool_result", "tool_use_id": "tu1", "is_error": body == "handoff refused"}}}})
+				{"type": "tool_result", "tool_use_id": "tu1"}}}})
 			assistant(text("completed"))
 		case strings.HasPrefix(body, "say "):
-			lastSaid = strings.TrimPrefix(body, "say ")
-			assistant(text(lastSaid))
-		case strings.HasPrefix(body, textToolCall):
-			assistant(text(lastSaid))
+			assistant(text(strings.TrimPrefix(body, "say ")))
 		case strings.HasPrefix(body, "fail "):
 			assistant(text(strings.TrimPrefix(body, "fail ")))
 			emit(map[string]any{"type": "result", "subtype": "error_during_execution", "is_error": true,
@@ -143,7 +137,6 @@ type rig struct {
 	daemon  *io.PipeWriter
 	frames  chan map[string]any
 	record  string
-	cfg     Config
 	done    chan int
 	stopped context.CancelFunc
 }
@@ -162,7 +155,7 @@ func newRig(t *testing.T, args ...string) *rig {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
 	cfg.Stdin, cfg.Stdout, cfg.Log = inR, outW, io.Discard
-	r := &rig{t: t, daemon: inW, frames: make(chan map[string]any, 100), record: record, cfg: cfg, done: make(chan int, 1)}
+	r := &rig{t: t, daemon: inW, frames: make(chan map[string]any, 100), record: record, done: make(chan int, 1)}
 	ctx, cancel := context.WithCancel(context.Background())
 	r.stopped = cancel
 	go func() {
@@ -268,15 +261,6 @@ func (r *rig) state(id string) bool {
 	return frame["data"].(map[string]any)["isStreaming"].(bool)
 }
 
-func (r *rig) stallState() PhaseStall {
-	r.t.Helper()
-	state, err := readStall(r.cfg.StallFile)
-	if err != nil {
-		r.t.Fatal(err)
-	}
-	return state
-}
-
 const sessionID = "11111111-2222-4333-8444-555555555555"
 
 func TestAFreshSessionIsSeededBeforeTheDaemonsFirstPrompt(t *testing.T) {
@@ -319,51 +303,8 @@ func TestATurnIsOneUserMessageWhenTheHandoffSucceeds(t *testing.T) {
 	r.prompt("p1", "handoff ok")
 	r.expect("agent_start", nil)
 	r.expect("agent_end", nil)
-	if got := r.stallState(); got != StallClosed {
-		t.Errorf("the phase after a successful handoff_complete is %s, want closed", got)
-	}
 	if strings.Count(r.recorded(), `"type":"user"`) != 1 {
-		t.Errorf("a completed phase got a follow-up: %s", r.recorded())
-	}
-}
-
-// An open phase whose turn settles gets phase-stall.ts's follow-up as one more user message of the
-// same turn, once; the turn then ends quiet.
-func TestAnOpenPhaseGetsOneFollowUp(t *testing.T) {
-	r := newRig(t, "-p", "--resume", sessionID)
-	r.prompt("p1", "say all done")
-	r.expect("agent_start", nil)
-	if !r.state("g1") {
-		t.Error("isStreaming during the turn is false")
-	}
-	r.expect("agent_end", nil)
-	if got := strings.Count(r.recorded(), FollowUp); got != 1 {
-		t.Fatalf("the follow-up was sent %d times, want once: %s", got, r.recorded())
-	}
-	if got := r.stallState(); got != StallQuiet {
-		t.Errorf("the phase after its follow-up is %s, want quiet", got)
-	}
-	r.prompt("p2", "handoff refused")
-	r.expect("agent_start", nil)
-	r.expect("agent_end", nil)
-	if got := strings.Count(r.recorded(), FollowUp); got != 2 {
-		t.Errorf("a refused handoff_complete left no follow-up due: %d sent", got)
-	}
-}
-
-// A tool call written as text gets the follow-up that names it; a model that answers it with the
-// same call as text gets one more in the same turn, and the stall then goes quiet, so the turn ends
-// after two follow-ups.
-func TestATextToolCallAnsweredWithAnotherGetsOneMoreFollowUp(t *testing.T) {
-	r := newRig(t, "-p", "--resume", sessionID)
-	r.prompt("p1", `say <invoke name="legion">`)
-	r.expect("agent_start", nil)
-	r.expect("agent_end", nil)
-	if got := strings.Count(r.recorded(), jsonText(textToolCall+FollowUp)); got != 2 {
-		t.Fatalf("the text-call follow-up was sent %d times, want twice: %s", got, r.recorded())
-	}
-	if got := r.stallState(); got != StallQuiet {
-		t.Errorf("the phase after its second follow-up is %s, want quiet", got)
+		t.Errorf("a turn was more than one user message: %s", r.recorded())
 	}
 }
 
@@ -387,7 +328,7 @@ func TestAPromptDuringATurnIsRefusedBusy(t *testing.T) {
 }
 
 // An abort becomes an interrupt; its answer is Claude Code's acknowledgement, and the interrupted
-// user message's result ends the turn with no follow-up.
+// user message's result ends the turn.
 func TestAnAbortInterruptsAndEndsTheTurn(t *testing.T) {
 	r := newRig(t, "-p", "--resume", sessionID)
 	r.prompt("p1", "hang")
@@ -397,9 +338,6 @@ func TestAnAbortInterruptsAndEndsTheTurn(t *testing.T) {
 	r.expect("agent_end", nil)
 	if !strings.Contains(r.recorded(), `"subtype":"interrupt"`) {
 		t.Errorf("no interrupt reached Claude Code: %s", r.recorded())
-	}
-	if strings.Contains(r.recorded(), FollowUp) {
-		t.Errorf("an interrupted turn got the follow-up: %s", r.recorded())
 	}
 	// An abort with no turn running is answered at once.
 	r.send(shimwire.Abort{ID: "a2"})
@@ -523,7 +461,7 @@ func TestAClaudeCodeThatStopsReadingEndsTheBridge(t *testing.T) {
 	t.Cleanup(func() { _ = daemon.Close() })
 	logged := &lockedBuffer{}
 	cfg := Config{Argv: []string{"/bin/sh", "-c", "cat " + stream + "\nexec sleep 300\n"}, Env: os.Environ(),
-		SessionID: sessionID, StallFile: filepath.Join(dir, "stall.json"), Stdin: stdin, Stdout: io.Discard, Log: logged}
+		SessionID: sessionID, Stdin: stdin, Stdout: io.Discard, Log: logged}
 	done := make(chan int, 1)
 	go func() {
 		code, err := Run(context.Background(), cfg)
@@ -587,12 +525,6 @@ func inboxPathOf(t *testing.T, r *rig) string {
 	return ""
 }
 
-// jsonText is text as it appears inside a JSON string the bridge wrote.
-func jsonText(text string) string {
-	raw, _ := json.Marshal(text)
-	return strings.Trim(string(raw), `"`)
-}
-
 func TestUnknownRequestsAreRefusedByName(t *testing.T) {
 	r := newRig(t, "-p", "--resume", sessionID)
 	r.send(shimwire.Raw{Type: "steer", JSON: []byte(`{"type":"steer","id":"s1","message":"x"}`)})
@@ -620,32 +552,16 @@ func TestTheShimClosingInputEndsClaudeCode(t *testing.T) {
 	}
 }
 
-func TestTheStallStateSurvivesARelaunch(t *testing.T) {
-	r := newRig(t, "-p", "--resume", sessionID)
-	r.prompt("p1", "say done")
-	r.expect("agent_start", nil)
-	r.expect("agent_end", nil)
-	if got := r.stallState(); got != StallQuiet {
-		t.Fatalf("stall = %s, want quiet", got)
-	}
-	cfg := r.cfg
-	got, err := readStall(cfg.StallFile)
-	if err != nil || got != StallQuiet {
-		t.Fatalf("a relaunch reads %s, %v", got, err)
-	}
-}
-
 func TestConfigure(t *testing.T) {
-	base := []string{"CLAUDE_CONFIG_DIR=/state/claude/c1", "LEGION_ROLE=tester", "LEGION_ISSUE=ACME-2"}
+	base := []string{"LEGION_ROLE=tester", "LEGION_ISSUE=ACME-2"}
 	cfg, err := Configure([]string{"claude", "-p", "--session-id=" + sessionID}, base)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !cfg.Seed || cfg.SessionID != sessionID || cfg.Title != "Legion tester · ACME-2" ||
-		cfg.StallFile != "/state/claude/c1/legion-phase-stall-"+sessionID+".json" {
+	if !cfg.Seed || cfg.SessionID != sessionID || cfg.Title != "Legion tester · ACME-2" {
 		t.Errorf("Configure = %+v", cfg)
 	}
-	cfg, err = Configure([]string{"claude", "--resume", sessionID, "-p"}, []string{"CLAUDE_CONFIG_DIR=/c"})
+	cfg, err = Configure([]string{"claude", "--resume", sessionID, "-p"}, nil)
 	if err != nil || cfg.Seed || cfg.SessionID != sessionID {
 		t.Errorf("resume: %+v, %v", cfg, err)
 	}
@@ -658,218 +574,10 @@ func TestConfigure(t *testing.T) {
 		{[]string{"claude", "-p"}, base, "exactly one --session-id or --resume"},
 		{[]string{"claude", "--session-id", "a", "--resume", "a"}, base, "exactly one"},
 		{[]string{"claude", "--resume="}, base, "--resume names no session"},
-		{[]string{"claude", "--resume", "a"}, []string{"CLAUDE_CONFIG_DIR=rel"}, "CLAUDE_CONFIG_DIR must be an absolute path"},
-		{[]string{"claude", "--session-id", "a"}, []string{"CLAUDE_CONFIG_DIR=/c"}, "LEGION_ROLE and LEGION_ISSUE"},
+		{[]string{"claude", "--session-id", "a"}, nil, "LEGION_ROLE and LEGION_ISSUE"},
 	} {
 		if _, err := Configure(tc.argv, tc.env); err == nil || !strings.Contains(err.Error(), tc.want) {
 			t.Errorf("Configure(%q) = %v, want %q", tc.argv, err, tc.want)
 		}
-	}
-}
-
-// The follow-up and the phase-stall rules are pi-legion's, verbatim: an Oh My Pi worker and a Claude
-// Code worker are told the same thing. phase-stall.ts writes each text as double-quoted pieces
-// joined by `+`, which jsConstant joins back into the one string.
-func TestTheFollowUpIsPiLegions(t *testing.T) {
-	source, err := os.ReadFile("../../../pi-legion/src/phase-stall.ts")
-	if err != nil {
-		t.Fatal(err)
-	}
-	for constant, want := range map[string]string{"FOLLOW_UP": FollowUp, "TEXT_TOOL_CALL": textToolCall} {
-		if got := jsConstant(t, string(source), constant); got != want {
-			t.Errorf("phase-stall.ts's %s is\n%q\nthe bridge's is\n%q", constant, got, want)
-		}
-	}
-	for _, pattern := range []string{
-		"const WAITING_REPLY = /" + strings.TrimPrefix(waitingReply.String(), "(?m)") + "/m;",
-		"const TOOL_CALL_SHAPED = /" + toolCallShaped.String() + "/;",
-	} {
-		if !strings.Contains(string(source), pattern) {
-			t.Errorf("phase-stall.ts does not hold %q", pattern)
-		}
-	}
-}
-
-// jsConstant is the string `const <name> = "…" + "…";` builds in source: each double-quoted piece,
-// in order, while only whitespace and `+` stand between them.
-func jsConstant(t *testing.T, source, name string) string {
-	t.Helper()
-	_, rest, ok := strings.Cut(source, "const "+name+" =")
-	if !ok {
-		t.Fatalf("phase-stall.ts declares no %s", name)
-	}
-	piece := regexp.MustCompile(`^[\s+]*("(?:[^"\\]|\\.)*")`)
-	var joined strings.Builder
-	for {
-		match := piece.FindStringSubmatchIndex(rest)
-		if match == nil {
-			break
-		}
-		var s string
-		if err := json.Unmarshal([]byte(rest[match[2]:match[3]]), &s); err != nil {
-			t.Fatalf("%s piece %s: %v", name, rest[match[2]:match[3]], err)
-		}
-		joined.WriteString(s)
-		rest = rest[match[1]:]
-	}
-	return joined.String()
-}
-
-// textCallMessage is a final message holding a tool call written as text, as pi-legion's cases
-// write it.
-const textCallMessage = "court\n<invoke name=\"legion\">\n<parameter name=\"op\">handoff_complete</parameter>\n" +
-	"<parameter name=\"summary\">Round 1 reviewed.</parameter>\n</invoke>"
-
-// pi-legion's phase-stall cases (extensions/legion.test.ts), run on the bridge's state machine: after
-// an assignment, each step is an inbound event ("") or a run settling on its final message, which
-// sends the follow-up given ("" for none). A follow-up for a text-written call answered with another
-// gets one more and then none; any other answer, and a plain stall's follow-up answered with a text
-// call, ends the stall's follow-ups until the next inbound event.
-func TestStallSequencesArePiLegions(t *testing.T) {
-	textFollowUp := textToolCall + FollowUp
-	type step struct{ message, followUp string }
-	inbound := step{}
-	for name, steps := range map[string][]step{
-		"a second text call gets one more, a third none": {
-			{textCallMessage, textFollowUp}, {textCallMessage, textFollowUp}, {textCallMessage, ""}, {"Still here.", ""},
-			inbound, {textCallMessage, textFollowUp},
-		},
-		"a text call's follow-up answered in plain words or WAITING is the last": {
-			{textCallMessage, textFollowUp}, {"I think I already completed.", ""}, {textCallMessage, ""},
-			inbound, {textCallMessage, textFollowUp}, {"WAITING: the architect", ""}, {textCallMessage, ""},
-		},
-		"a plain stall's follow-up answered with a text call gets none": {
-			{"Pushed.", FollowUp}, {textCallMessage, ""},
-		},
-		"one follow-up per plain stall": {
-			{"Pushed.", FollowUp}, {"Pushed.", ""}, inbound, {"Pushed.", FollowUp},
-		},
-	} {
-		state := StallClosed.assigned()
-		for i, s := range steps {
-			if s == inbound {
-				state = state.inbound()
-				continue
-			}
-			var followUp string
-			state, followUp = state.settle(s.message)
-			if followUp != s.followUp {
-				t.Errorf("%s: step %d settling on %q sent %q, want %q", name, i, s.message, followUp, s.followUp)
-			}
-		}
-	}
-}
-
-// stallInput is one input of phase-stall.ts's stepPhaseStall, as its PhaseStallInput spells it.
-type stallInput struct {
-	Kind              string `json:"kind"`
-	LastAssistantText string `json:"lastAssistantText,omitempty"`
-}
-
-// step is the bridge's answer to in from s: the bridge's own transition for each kind phase-stall.ts
-// names.
-func (s PhaseStall) step(in stallInput) (PhaseStall, string) {
-	switch in.Kind {
-	case "assignment":
-		return s.assigned(), ""
-	case "handoff-complete":
-		return s.completed(), ""
-	case "inbound-event":
-		return s.inbound(), ""
-	}
-	return s.settle(in.LastAssistantText)
-}
-
-// The bridge's transition table is pi-legion's: every state from every input, run through
-// phase-stall.ts's own stepPhaseStall under bun, gives the bridge's next state and follow-up. Bun is
-// on PATH wherever pi-legion is tested, and on GitHub Actions' test job, where a missing one fails.
-func TestTheStallTransitionTableIsPiLegions(t *testing.T) {
-	bun, err := exec.LookPath("bun")
-	if err != nil {
-		if os.Getenv("GITHUB_ACTIONS") == "true" {
-			t.Fatal("bun is not on PATH on GitHub Actions: the Tests workflow's test job installs it before the Go tests")
-		}
-		t.Skipf("bun is not on PATH: %v", err)
-	}
-	type transition struct {
-		State PhaseStall `json:"state"`
-		Input stallInput `json:"input"`
-	}
-	var table []transition
-	for _, state := range []PhaseStall{StallClosed, StallOpen, StallTextCall, StallQuiet} {
-		for _, in := range []stallInput{
-			{Kind: "assignment"}, {Kind: "inbound-event"}, {Kind: "handoff-complete"},
-			{Kind: "settle", LastAssistantText: "Pushed."},
-			{Kind: "settle", LastAssistantText: "**WAITING** on CI"},
-			{Kind: "settle", LastAssistantText: textCallMessage},
-		} {
-			table = append(table, transition{state, in})
-		}
-	}
-	input, err := json.Marshal(table)
-	if err != nil {
-		t.Fatal(err)
-	}
-	script := `import { stepPhaseStall } from "./src/phase-stall.ts";
-const table = JSON.parse(await Bun.stdin.text());
-console.log(JSON.stringify(table.map((t) => stepPhaseStall(t.state, t.input))));`
-	cmd := exec.Command(bun, "-e", script)
-	cmd.Dir = "../../../pi-legion"
-	cmd.Stdin = strings.NewReader(string(input))
-	cmd.Stderr = os.Stderr
-	out, err := cmd.Output()
-	if err != nil {
-		t.Fatalf("bun ran phase-stall.ts's stepPhaseStall: %v (run `bun install` at the repository root first)", err)
-	}
-	var piLegion []struct {
-		State    PhaseStall `json:"state"`
-		FollowUp string     `json:"followUp"`
-	}
-	if err := json.Unmarshal(out, &piLegion); err != nil || len(piLegion) != len(table) {
-		t.Fatalf("phase-stall.ts answered %s (%v), want %d steps", out, err, len(table))
-	}
-	for i, tr := range table {
-		state, followUp := tr.State.step(tr.Input)
-		if state != piLegion[i].State || followUp != piLegion[i].FollowUp {
-			t.Errorf("%s on %+v: the bridge goes to %s sending %q, phase-stall.ts to %s sending %q",
-				tr.State, tr.Input, state, followUp, piLegion[i].State, piLegion[i].FollowUp)
-		}
-	}
-}
-
-// A relaunch reads the state the bridge last wrote, text-call included: a worker relaunched after
-// its first text-call follow-up keeps that stall's second. A file holding any other state is refused.
-func TestTheStallStateFileHoldsEveryState(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "stall.json")
-	if s, err := readStall(path); err != nil || s != StallClosed {
-		t.Errorf("no file reads %s, %v", s, err)
-	}
-	for _, state := range []PhaseStall{StallClosed, StallOpen, StallTextCall, StallQuiet} {
-		if err := writeStall(path, state); err != nil {
-			t.Fatal(err)
-		}
-		if s, err := readStall(path); err != nil || s != state {
-			t.Errorf("writing %s reads %s, %v", state, s, err)
-		}
-	}
-	if err := writeStall(path, StallTextCall); err != nil {
-		t.Fatal(err)
-	}
-	resumed, err := readStall(path)
-	if err != nil {
-		t.Fatal(err)
-	}
-	resumed, followUp := resumed.settle(textCallMessage)
-	if followUp != textToolCall+FollowUp {
-		t.Errorf("a relaunch at text-call settling on a text call sent %q", followUp)
-	}
-	if _, followUp := resumed.settle(textCallMessage); followUp != "" {
-		t.Errorf("a third text call after the relaunch sent %q", followUp)
-	}
-	if err := os.WriteFile(path, []byte(`{"state":"later"}`), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := readStall(path); err == nil || !strings.Contains(err.Error(), "not closed, open, text-call or quiet") {
-		t.Errorf("a bad state read %v", err)
 	}
 }
