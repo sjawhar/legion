@@ -1,0 +1,83 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-376",
+  "completed": "2026-10-25T10:31:57Z",
+  "plan": "dispatch://INFRA-376/artifact/plan-md",
+  "summary": "Verbatim move of skills/legion-architect/SKILL.md lines 429-457 (## Wake routing through the ready-refused row, 17,786 bytes) to skills/legion-architect/references/wake-routing.md, extracted mechanically from 14571f6f4aea; SKILL.md lines 429-458 replaced by a six-line block (heading, blank, three-line pointer to skill://legion-architect/references/wake-routing.md, blank), giving 33,651 bytes; packages/claude-envoy regenerated with bun run build; [Unreleased] ### Fixed entries in packages/pi-legion/CHANGELOG.md and packages/claude-envoy/CHANGELOG.md; one code commit, no skip-checks trailer.",
+  "tasks": [
+    "mkdir -p skills/legion-architect/references; jj file show -r 14571f6f4aea skills/legion-architect/SKILL.md | sed -n '429,457p' > skills/legion-architect/references/wake-routing.md",
+    "Replace SKILL.md lines 429-458 with: '## Wake routing', '', 'Handle every delivered wake from the table in', '`skill://legion-architect/references/wake-routing.md`: read it when a wake arrives, and follow', 'the row for that wake.', ''. Nothing else in SKILL.md changes.",
+    "cd packages/claude-envoy && bun run build; commit only legion/skills/legion-architect/SKILL.md and legion/skills/legion-architect/references/wake-routing.md; anything else check-dist reports stale goes to the architect, not into this commit.",
+    "CHANGELOG [Unreleased] ### Fixed entries: packages/pi-legion (skill over the 51,200-byte spill threshold, table moved unchanged to the reference) and packages/claude-envoy (legion/ copy regenerated with it).",
+    "One commit, push legion/INFRA-376, open the PR with 'Dispatch: INFRA-376'; docs-only, so no ce-simplify-code pass and no Thermo line."
+  ],
+  "checks": {
+    "local": [
+      "wc -c skills/legion-architect/SKILL.md < 51200; (cd packages/pi-legion && bun test src/skills-guard.test.ts) all pass",
+      "cmp <(old | sed -n '429,457p') skills/legion-architect/references/wake-routing.md -> REF-IDENTICAL",
+      "cmp of SKILL.md against main's lines 1-428 + the six-line block + main's lines 459-end -> SKILL-ONLY-MOVE",
+      "cmp of the reference against packages/claude-envoy/legion/skills/legion-architect/references/wake-routing.md; (cd packages/claude-envoy && bun run check-dist && bun test tests/legion-plugin-fresh.test.ts tests/dist-fresh.test.ts)",
+      "bunx biome check . && .github/scripts/check-private-names.sh"
+    ],
+    "oldDefinition": "old() { jj -R \"$LEGION_WORKSPACE\" file show -r 14571f6f4aea skills/legion-architect/SKILL.md; }",
+    "ci": "Tests (lint, typecheck, test), the envoy-and-contracts.yaml package jobs this path set triggers (pi-shared, pi-envoy, pi-legion, claude-envoy, envoy-plugin, with packaging and check-dist), Docs build, PR Title: all green at the head."
+  },
+  "proofSurface": {
+    "surface": "Oh My Pi in print mode reading the branch's staged pi-legion skills through a per-run --config overlay setting skills.customDirectories (no shared profile or config change); a custom-directory skill outranks the installed plugin's copy.",
+    "command": "rm -rf \"$TMPDIR/infra376/skills\" && mkdir -p \"$TMPDIR/infra376\" && bash scripts/pi-plugin-prepack.sh --stage-skills @sjawhar/pi-legion \"$TMPDIR/infra376/skills\" && printf 'skills:\\n  customDirectories:\\n    - %s\\n' \"$TMPDIR/infra376/skills\" > \"$TMPDIR/infra376/overlay.yml\" && cd \"$TMPDIR/infra376\" && omp --config \"$TMPDIR/infra376/overlay.yml\" -p --no-session --tools read \"Call the read tool once on skill://legion-architect and once on skill://legion-architect/references/wake-routing.md. Reply with one line per read: the source path the result names, then SPILLED if the result was truncated or spilled to an artifact else WHOLE, then YES if it contains the row for ready-refused else NO.\"",
+    "pass": "Both source paths under $TMPDIR/infra376/skills/legion-architect/; SKILL.md WHOLE/NO; reference WHOLE/YES.",
+    "negativeControl": "The same command before the change: the planner ran it at main 9b062abd on 2026-10-25 and Oh My Pi printed '/legion/scratch/tmp/omp-probe/skills/legion-architect/SKILL.md', 'SPILLED', 'YES' for skill://legion-architect.",
+    "tester": "Re-run the implementer's command; own proof: have Oh My Pi follow the SKILL.md pointer and quote the merge-stalled row's first sentence, compared with main's text; negative control: skill://legion-architect/references/wake-routing-missing.md must not resolve. Read CI, rerun no lane."
+  },
+  "notChanged": [
+    "packages/daemon/internal/prompts/go/architect-common.md:10 ('the pr-blocked row of skill://legion-architect's wake routing') stays true via the kept ## Wake routing heading; spec says no daemon change.",
+    "SKILL.md:278 ('as that row says', the ready-refused row) stays as written: the spec forbids rewording."
+  ],
+  "crossTree": "Open PRs editing lines inside the moved section conflict with whichever merges second: #2188 (INFRA-225, child-status row), #2163 (INFRA-251), #2131 (sami/gate-frees-slot), #2121 (INFRA-83) carry their row edits into the reference by forward merge. #2136 (infra-140-s2) creates its own references/wake-routing.md with an H1 and links (add/add); if it lands first, its reference fails this issue's unchanged-text line, and the implementer reports to the architect before merging forward.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: push, PR body template and the E2E/proof rules (references/pr-body.md), the identity check (references/default-branch-check.md), and the forward merge if a sibling PR lands first (references/conflicts-and-rewrites.md)",
+      "dispatch-first: no new issue or ask for the cross-tree conflicts; the architect owns them"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md tester rules — verify the implementer's Oh My Pi proof, add an independent one with a negative control, read CI and rerun no lane"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the review and approval of the head; references/review-threads.md for any thread; the review confirms a byte-level move only (docs-only diff, so no thermonuclear pair per references/pr-body.md's Thermo rule)"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "Proof treated test/build tooling as the whole proof surface; the repository's rules require a production-like surface and forbid the tester rerunning CI lanes.",
+        "answer": "Local checks are labelled regression locks; the proof is Oh My Pi itself reading the branch's staged skills via a per-run skills.customDirectories overlay, tried by the planner at main (SPILLED, the negative control). The tester reads CI and drives Oh My Pi independently."
+      },
+      {
+        "finding": "Task 1's redirection fails: skills/legion-architect/references/ does not exist.",
+        "answer": "Task 1 starts with mkdir -p skills/legion-architect/references."
+      },
+      {
+        "finding": "'Diff shows only the move' had no machine check, and the stated hunk count disagreed with task 2.",
+        "answer": "A byte-level cmp of SKILL.md against main's lines 1-428 + the exact six-line block + main's lines 459-end (SKILL-ONLY-MOVE), dry-run by the planner; the displayed diff is review evidence only; the hunk count is removed."
+      },
+      {
+        "finding": "The remote CI read named only lint, typecheck, test, docs; omitted envoy-and-contracts package jobs (skill guard, check-dist) and PR Title.",
+        "answer": "The CI read now names Tests, the envoy-and-contracts package jobs (pi-shared, pi-envoy, pi-legion, claude-envoy, envoy-plugin with packaging and check-dist), Docs build and PR Title."
+      },
+      {
+        "finding": "PR #2136 makes its own wake-routing.md reference (H1, links), an add/add conflict different from row edits.",
+        "answer": "The cross-tree note distinguishes it: if #2136 lands first its reference fails this issue's unchanged-text line, and the implementer reports to the architect before merging forward."
+      },
+      {
+        "finding": "Pod bun version equal to .bun-version was unverified.",
+        "answer": "Observed: bun --version printed 1.3.14, equal to .bun-version."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": []
+}
