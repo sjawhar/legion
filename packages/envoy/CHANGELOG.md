@@ -732,6 +732,12 @@
   pod in that namespace whose spec names no account runs as it and can get a token for the broker's
   audience, so the binding proves nothing about which pods are the service's. Bind each service to
   a dedicated account its pods set as `serviceAccountName` before taking this release.
+- `BROKER_SERVICES` may name one service for several accounts, one entry each, and a pod running
+  as any of them is that service's own session. Each account still proves one service, and an
+  account given twice is still refused, now naming the account and its one service when both
+  entries name the same service. Rollback: a broker before this release refuses a
+  `BROKER_SERVICES` that names a service twice at start-up (`must give each service once`), and
+  the broker is one pod, so roll the image back only together with the setting.
 - **Breaking:** a renewal (`POST /v1/enrollments/{id}/renew`) of an enrollment that has ended,
   lapsed or never existed answers `401 ENROLLMENT_NOT_LIVE` where it answered `401 PROOF_INVALID`;
   the renew route alone answers it, and every other session route still answers a not-live proof

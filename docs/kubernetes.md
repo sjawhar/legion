@@ -3922,13 +3922,14 @@ issue's pod (every role container of it alike) and the image probe's.
   with that account for `legion-daemon`, such as
   `BROKER_SERVICES=legion-daemon=system:serviceaccount:legion:legion-worker` for pods running as
   `legion-worker`, gives a secret tagged `owner=legion-daemon` to every such pod at once and to no
-  other session (the broker's concepts page, "Owner and tier"). The broker refuses to start with a
-  namespace's `default` account in `BROKER_SERVICES`, since every pod there that names no account
-  runs as it, so pods that receive service-owned secrets name a dedicated account. The daemon's own
-  ServiceAccount, which logs in, is a different account from its pods', and it is named in
-  `BROKER_SERVICE_LOGINS`, not `BROKER_SERVICES`; the broker refuses to start with an account in
-  `BROKER_SERVICE_LOGINS` that is a namespace's `default` or one `BROKER_SERVICES` binds, since
-  every pod running as it could then log in as the daemon.
+  other session (the broker's concepts page, "Owner and tier"). When the daemon's pods run as
+  several accounts, the setting names each in a `legion-daemon=` entry of its own. The broker
+  refuses to start with a namespace's `default` account in `BROKER_SERVICES`, since every pod there
+  that names no account runs as it, so pods that receive service-owned secrets name a dedicated
+  account. The daemon's own ServiceAccount, which logs in, is a different account from its pods',
+  and it is named in `BROKER_SERVICE_LOGINS`, not `BROKER_SERVICES`; the broker refuses to start
+  with an account in `BROKER_SERVICE_LOGINS` that is a namespace's `default` or one
+  `BROKER_SERVICES` binds, since every pod running as it could then log in as the daemon.
   Without the block, pods carry none of this. An older worker image is refused at
   the image probe: the block's pod variables are daemon API contract 8. A pod's agent-secrets
   volumes are fixed when it is created, so turning the block on, or changing its `audience` or
@@ -4393,12 +4394,13 @@ name and to the volume it owns. Under `runtime.kubernetes.agent_secrets` it is e
 secrets broker as an issue pod's roles are: it projects the broker's token, has a key directory of
 its own, and its shim takes the three agent-secrets flags and its agent `AGENT_SECRETS_URL` and
 `AGENT_SECRETS_KEY_DIR`. It runs as the operator's ServiceAccount (`runtime.kubernetes.pod`), the
-same account as every issue pod. The broker binds one account to each service (`BROKER_SERVICES`),
-so this shared account is what makes the controller the `legion-daemon` service's own pod: a
-controller given an account of its own would no longer be granted that service's secrets. The
-broker grants it, with no person asked, an agent secret whose owner is `legion-daemon` and whose
-tier is `agent`, which is how the operator stores `LEGION_SLACK_BOT_TOKEN`, the Slack app's bot
-token its `slack_post` replies with. Legion sets no affinity on it, so under
+same account as every issue pod, and it is the `legion-daemon` service's own pod because
+`BROKER_SERVICES` maps that account to `legion-daemon`. A service may name several accounts, so a
+controller given an account of its own keeps that service's secrets only when `BROKER_SERVICES`
+also names that account for `legion-daemon`. The broker grants it, with no person asked, an agent
+secret whose owner is `legion-daemon` and whose tier is `agent`, which is how the operator stores
+`LEGION_SLACK_BOT_TOKEN`, the Slack app's bot token its `slack_post` replies with. Legion sets no
+affinity on it, so under
 Karpenter it lands wherever the pool has room for it (on GKE Autopilot it usually gets a node of its own,
 [Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), and it is annotated `karpenter.sh/do-not-disrupt:
 "true"` and `cluster-autoscaler.kubernetes.io/safe-to-evict: "false"`: Karpenter never consolidates
