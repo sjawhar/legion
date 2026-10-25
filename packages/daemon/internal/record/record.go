@@ -451,6 +451,18 @@ type HandedOverRoot struct {
 	GateCarried bool
 }
 
+// DispatchIssueRow is one row of the daemon's mirror of Dispatch's issues: what Dispatch last
+// said about an issue of the project, whether or not the daemon records the issue itself. Seq is
+// the Dispatch sequence the observation came from, which fences the write (PutDispatchIssue), and
+// Blockers the keys the issue waits on, in Dispatch's own order.
+type DispatchIssueRow struct {
+	Key      string
+	Project  string
+	Status   string
+	Blockers []string
+	Seq      int64
+}
+
 // Store contains only transactional operations. The caller owns each transaction so intake can
 // atomically deduplicate an event, update the record, and enqueue all of its effects.
 type Store interface {
@@ -475,6 +487,14 @@ type Store interface {
 	// PutRepoNote records a note it posts.
 	RepoNote(ctx context.Context, tx pgx.Tx, issue string) (*RepoNote, error)
 	PutRepoNote(ctx context.Context, tx pgx.Tx, note RepoNote) error
+	// PutDispatchIssue writes row into the mirror of Dispatch's issues, fenced on the Dispatch
+	// sequence: a row already holding an observation at least as fresh keeps what it has, so a
+	// slower observation never overwrites a faster one. A row whose Seq is zero — a fact the
+	// daemon minted from its own record, which Dispatch never said — writes nothing at all.
+	PutDispatchIssue(ctx context.Context, tx pgx.Tx, row DispatchIssueRow) error
+	// DispatchIssues is every mirrored row of the Dispatch project key project, by key: both
+	// consumers read the whole project in one query and judge what is blocked in memory.
+	DispatchIssues(ctx context.Context, tx pgx.Tx, project string) ([]DispatchIssueRow, error)
 	Phases(ctx context.Context, tx pgx.Tx, issue string) ([]PhaseRow, error)
 	PutPhase(ctx context.Context, tx pgx.Tx, phase PhaseRow) error
 	PullRequest(ctx context.Context, tx pgx.Tx, issue string) (*PullRequest, error)
