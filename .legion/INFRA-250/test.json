@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-250",
+  "completed": "2026-10-25T09:35:05Z",
+  "headSha": "e8af3445dd2991d9d60f2bd24317a12fe9c2724d",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the A1 command on the branch and on main at c9578e115b5a in this pod (same command, -json added on both): branch 69 ok / 4 FAIL / 'rootless Docker not found' 0 / integration ok 99.1s; main 57 ok / 16 FAIL / 12 / integration FAIL 0.03s. Re-ran A3 (exit 0, PASS, 32 files in out/e2e). Recomputed A2 by a different method (a static Test/Fuzz/Benchmark/Example inventory from go list -tags under no tag and seven tags, both modules, both refs: 0 lost, 7 added, 3 moved to natslive only) and A5 (notices byte-identical on both refs, plus a leak negative control). Broke the guard myself. The implementer's proofs hold as written, with one correction: pmdoc's residue cause is the pod's 10 ms getrusage granularity, not load."
+  },
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "A3 - packages/envoy/scripts/e2e-local.sh runs the real listener binary in a worker pod the same way (the second and the concurrent run: the script must test against the NATS server it starts).",
+      "evidence": "With any NATS already answering on E2E_NATS_PORT (a server left by an earlier run, or a second run at the same time), the script's own natsd exits at once with '[FTL] Error listening on port: 127.0.0.1:14222, \"listen tcp 127.0.0.1:14222: bind: address already in use\"', wait_for_nats (scripts/e2e-local.sh, the curl INFO loop) reads the other server's INFO greeting, and the script runs the whole acceptance against that server, prints 'PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract' and exits 0, leaving ENVOY_NOTIFICATIONS and the four KV buckets in that server's store. Reproduced in this pod at e8af3445dd29 by starting out/e2e/natsd -p 14222 -js -store_dir <dir> and then bash scripts/e2e-local.sh. On main, docker run -p 14222:4222 would refuse a held port [inference from Docker's port publishing; main cannot run in a pod]. Red test: packages/envoy/scripts/e2e-local.test.sh, case 'refuses to run against a NATS server it did not start' (commit 9b4fa7896d56): a bun stand-in greets 'INFO {...}' on a free port, the driver runs with E2E_NATS_PORT set to it, and the test requires a non-zero exit whose output carries 'address already in use'. Command: cd packages/envoy && bash scripts/e2e-local.test.sh -> 'FAIL: the driver did not report that its own NATS server could not bind port <n>' after 'ERR: listener did not become healthy within 30 seconds.', exit 1. A fix that makes wait_for_nats fail when kill -0 \"$nats_pid\" fails (printing nats.log) and accept the greeting only once nats.log holds 'Server is ready' turned it green in a throwaway copy, and the full e2e-local.sh still passed there; a kill -0 check alone did not (natsd is still alive when the first greeting arrives). No CI step runs scripts/e2e-local.test.sh (grep of .github/ finds only e2e-local.sh in envoy-e2e-local), so the case locks nothing until a step runs it; envoy-e2e-local, which has go and bun, is the natural place."
+    },
+    {
+      "criterion": "A4 - the e2e-local.sh docker fallback is gone and nothing names it; and the pull request body names the residue honestly.",
+      "evidence": "packages/envoy/scripts/dev-broker.test.sh:5-7 still says it fakes docker 'the same way e2e-local.test.sh fakes `docker` - recording every docker/curl invocation to a call-log file', which this change removed from e2e-local.test.sh. And the pull request body's residue table gives internal/dispatch/pmdoc's cause as 'wall-clock ratios ... which a loaded 2-CPU pod fails'; the tests measure CPU time through getrusage (internal/cputest.Process, linear_test.go:372-413), and in this gVisor pod getrusage advances in 10 ms steps (throwaway loop over 2 s: only 10 ms and 20 ms steps), so the small input reads 0s and every failure reads '+Inf times the 0s it took'. Run alone on an idle pod (go test ./internal/dispatch/pmdoc/ -run 'TestBareURLShapesParseAndRenderLinearly|TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText|TestUpdateIsLinearInTheBlockCount' -count=1) the three still fail the same way, so load is not the cause. Both are wording fixes."
+    }
+  ],
+  "regressionLocks": [
+    {
+      "test": "packages/envoy/internal/testnats/nats_test.go TestOverlappingFreezesThawInEitherOrderWithoutPanicking (commit b4174f533467)",
+      "why": "The simplify pass's relay.freeze fix had no test: with the ownership guard removed, the committed internal/testnats suite still passed while two overlapping freezes panicked the binary with 'close of closed channel'. The new test passes at this head and panics with the guard removed."
+    }
+  ],
+  "observations": [
+    "Two overlapping freezes share one gate, so the first thaw resumes traffic while the second freeze is still held (both orders observed). No caller freezes twice and the doc comment says so; not a failure.",
+    "The guard TestNoPackageOutsideTestnatsNeedsAContainerRuntime covers only the testcontainers NATS module import and the two Docker call shapes exec.Command(\"docker\" and NewDockerClientWithOpts. It does not cover Postgres (internal/testpg) or SeaweedFS (internal/tests3), which its own comment says, and exec.CommandContext(ctx, \"docker\", ...) or testcontainers.Run(ctx, testnats.Image) in a new file pass it (both tried).",
+    "Pull request #2191 (INFRA-249) also edits packages/envoy/scripts/e2e-local.sh and scripts/README.md. A three-way merge from c9578e11 gives one textual conflict in e2e-local.sh (the rm -f list of evidence files, which both change) and none in README.md. #2191's testpg change starts no NATS and is not covered by this change's guard.",
+    "packages/daemon/internal/testnats/nats.go and packages/daemon/internal/daemon/nats_permissions_test.go still use testcontainers' NATS module; they are outside packages/envoy and outside this issue.",
+    "Running go commands in packages/envoy/infra rewrites packages/envoy/infra/go.work.sum on main and on the branch alike (pre-existing drift), and the branch suite's run added 139 lines to the root go.work.sum in this workspace; no CI lane checks either file (grep of .github/ and scripts/ for tidy/sync/verify/diff --exit-code finds nothing), and both runs' rewrites were discarded.",
+    "CI at e8af3445dd29: envoy-go-race failed on TestALoneRunnerMakesAPassOnEveryTick in internal/dispatch/api, which this change does not touch (go list -deps -test names neither testnats nor nats-server). Raised as dispatch://INFRA-49/ask/59b9feb4-b2b7-4f45-ab00-84e7d0cfd1f9; the implementer re-runs the failed job."
+  ]
+}
