@@ -2,12 +2,15 @@ package daemon
 
 import (
 	"context"
+	"maps"
+	"slices"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/admit"
+	"github.com/sjawhar/legion/daemon/internal/classify"
 	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -15,6 +18,9 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/workflow"
 )
 
+// awaitingDispatch is the Dispatch a boot catch-up reads: the issue, the design document's
+// approval, and the root's asks. ask is the one ask a test has the root carry, and asks every ask
+// it has it carry by id; the ask list is both, the named ones first.
 type awaitingDispatch struct {
 	outboxDispatch
 	issue    dispatch.Issue
@@ -29,11 +35,15 @@ func (d *awaitingDispatch) GetIssue(context.Context, string) (dispatch.Issue, er
 func (d *awaitingDispatch) Approval(context.Context, string) (dispatch.Approval, error) {
 	return d.approval, nil
 }
-func (d *awaitingDispatch) Ask(_ context.Context, id string) (dispatch.Ask, error) {
-	if ask, ok := d.asks[id]; ok {
-		return ask, nil
+func (d *awaitingDispatch) Asks(context.Context, string) ([]dispatch.Ask, error) {
+	var asks []dispatch.Ask
+	for _, id := range slices.Sorted(maps.Keys(d.asks)) {
+		asks = append(asks, d.asks[id])
 	}
-	return d.ask, nil
+	if d.ask.ID != "" {
+		asks = append(asks, d.ask)
+	}
+	return asks, nil
 }
 
 var (
@@ -109,15 +119,15 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("and name who runs the restore")}}},
 		{name: "a person's reply on the approval request", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
-				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyID: "reply-1", LastReplyBy: alice}}}},
+				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyBy: alice}}}},
 		{name: "a person's answer", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "answered", ClosedBy: alice}}},
 		{name: "a person's resolution", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "resolved", ClosedBy: alice}}},
 		{name: "a person's reply handing the open ask to the agent", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "open", WaitingOn: "agent", LastReplyID: "reply-1", LastReplyBy: alice}}},
+			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "open", WaitingOn: "agent", LastReplyBy: alice}}},
 		{name: "a person's reply under an ask a session resolved", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "resolved", ClosedBy: architectSession, LastReplyID: "reply-2", LastReplyBy: alice}}},
+			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "resolved", ClosedBy: architectSession, LastReplyBy: alice}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			waitGate := tc.gate
@@ -148,16 +158,16 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 		client   awaitingDispatch
 	}{
 		{name: "an ask still waiting on the person", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "open", WaitingOn: "human", LastReplyID: "reply-1", LastReplyBy: architectSession}}},
+			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "open", WaitingOn: "human", LastReplyBy: architectSession}}},
 		{name: "a session's resolution", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "resolved", ClosedBy: architectSession}}},
 		{name: "settlement's retraction", awaiting: record.Awaiting{Ask: "ask-root"},
 			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "resolved", ClosedBy: settler}}},
 		{name: "a session's progress note", awaiting: record.Awaiting{Ask: "ask-root"},
-			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "open", WaitingOn: "agent", LastReplyID: "reply-1", LastReplyBy: architectSession}}},
+			client: awaitingDispatch{ask: dispatch.Ask{ID: "ask-root", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "open", WaitingOn: "agent", LastReplyBy: architectSession}}},
 		{name: "an approval request a session's reply moved to the agent", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
-				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyID: "reply-1", LastReplyBy: architectSession}}}},
+				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyBy: architectSession}}}},
 		{name: "the changes request that answered an earlier wait", awaiting: record.Awaiting{GateVersion: 3},
 			gate: &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path",
 				ToldChangesMark: record.EventMark{Seq: 5, At: reviewed}},
@@ -180,8 +190,8 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 
 type unreachableAsks struct{ awaitingDispatch }
 
-func (*unreachableAsks) Ask(context.Context, string) (dispatch.Ask, error) {
-	return dispatch.Ask{}, &dispatch.TransientError{Err: context.DeadlineExceeded}
+func (*unreachableAsks) Asks(context.Context, string) ([]dispatch.Ask, error) {
+	return nil, &dispatch.TransientError{Err: context.DeadlineExceeded}
 }
 
 // A root the catch-up cannot read is skipped and logged: one bad record, here a gate wait with no
@@ -325,5 +335,151 @@ func TestCatchUpAwaitingRecoversSuccessiveReviewsAtOneVersion(t *testing.T) {
 				t.Fatalf("a wait no new review answered = %#v after the catch-up, want it still unanswered", got)
 			}
 		})
+	}
+}
+
+// A root waiting on its design gate is answered by a person's act on any ask of the root, and the
+// boot catch-up applies every one of them: the architect is the tree's only agent while it waits,
+// so a person who resolves the approval request, or answers another ask of the root, while the
+// daemon is down has answered the wait as surely as a review would have.
+func TestCatchUpAnswersWithAPersonsActOnAnyAskOfTheRoot(t *testing.T) {
+	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3}
+	for _, tc := range []struct {
+		name   string
+		client awaitingDispatch
+	}{
+		{name: "a person resolved the approval request", client: awaitingDispatch{
+			approval: dispatch.Approval{State: "draft", LatestVersion: 3},
+			ask:      dispatch.Ask{ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "resolved", ClosedBy: alice},
+		}},
+		{name: "a person answered another ask of the root", client: awaitingDispatch{
+			approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "human"},
+			asks: map[string]dispatch.Ask{
+				"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "human"},
+				"ask-question": {ID: "ask-question", IssueKey: "CAPTURE-ROOT", Kind: "question", State: "answered", ClosedBy: alice},
+			},
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := catchUpRoot(t, record.Awaiting{GateVersion: 3}, gate, &tc.client)
+			if got == nil || !got.Answered() {
+				t.Fatalf("root after the catch-up = %#v, want a person's act to have answered its gate wait", got)
+			}
+		})
+	}
+}
+
+// A version newer than the one a root waits on does not end the catch-up's read: the same
+// approval may show the person's review of that newer version, whose event the daemon missed too.
+// The version is applied, then the approval, so the root resumes with its gate open rather than
+// with a task telling it to revise a spec the person has already approved.
+func TestCatchUpAppliesTheApprovalOfANewerVersion(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := record.Issue{Key: "CAPTURE-ROOT", Tree: "CAPTURE-ROOT", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
+		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Awaiting: &record.Awaiting{GateVersion: 3}}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if err := records.PutIssue(ctx, tx, root); err != nil {
+			return err
+		}
+		return records.PutGate(ctx, tx, record.DesignGate{Issue: root.Key, ArtifactID: "artifact-root", LatestVersion: 3})
+	}); err != nil {
+		t.Fatalf("seed the awaiting root: %v", err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: time.Now}, quietLogger())
+	admission := admit.New(records, engine, 1, "CAPTURE", quietLogger())
+	client := &awaitingDispatch{
+		issue:    dispatch.Issue{Key: root.Key, LastSeq: 20},
+		approval: dispatch.Approval{State: "approved", LatestVersion: 4, Version: new(4), Seq: 20},
+	}
+	w := &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE",
+		handlers: []intake.Handler{engine, admission}, log: quietLogger()}
+	if err := w.catchUpAwaiting(ctx); err != nil {
+		t.Fatalf("catch up the awaiting root: %v", err)
+	}
+
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		got, err := records.Issue(ctx, tx, root.Key)
+		if err != nil {
+			return err
+		}
+		gate, err := records.Gate(ctx, tx, root.Key)
+		if err != nil {
+			return err
+		}
+		if got.Phase != phase.Planning || !classify.DesignGateOpen(*gate) {
+			t.Errorf("Dispatch shows version 4 approved; recovered phase=%s gate=%#v, want planning with the gate open", got.Phase, gate)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read the recovered root: %v", err)
+	}
+}
+
+// A registration whose read of Dispatch is older than the review the daemon already applied at
+// that version strands nothing: the gate keeps the review, no wait starts, and the gate seed and
+// the boot catch-up that re-read the same review leave the root where it is, with its slot.
+func TestADelayedRegistrationDoesNotStrandARootAcrossASeedAndABoot(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := record.Issue{Key: "CAPTURE-ROOT", Tree: "CAPTURE-ROOT", Project: "CAPTURE", Title: "root", Phase: phase.Admitted,
+		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets"}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if err := records.PutIssue(ctx, tx, root); err != nil {
+			return err
+		}
+		if err := records.PutSlot(ctx, tx, record.Slot{Issue: root.Key, Index: 0, AdmittedAt: time.Now()}); err != nil {
+			return err
+		}
+		return records.PutGate(ctx, tx, record.DesignGate{Issue: root.Key, ArtifactID: "artifact-root", LatestVersion: 3})
+	}); err != nil {
+		t.Fatalf("seed the admitted root: %v", err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: time.Now}, quietLogger())
+	admission := admit.New(records, engine, 1, "CAPTURE", quietLogger())
+	client := &awaitingDispatch{
+		issue: dispatch.Issue{Key: root.Key, LastSeq: 11},
+		approval: dispatch.Approval{State: "changes_requested", LatestVersion: 4, Version: new(4),
+			Reason: new("name the rollback path"), Seq: 11},
+	}
+	handlers := []intake.Handler{engine, admission}
+	runner := &outbox{pool: pool, dispatch: client, handlers: handlers}
+
+	// A version-3 seed queued earlier reads the version-4 review before the registration's own,
+	// older read applies.
+	if err := runner.seedGate(ctx, record.OutboxRow{Issue: root.Key}, record.GateSeed{ArtifactID: "artifact-root", Version: 3, Generation: 1}); err != nil {
+		t.Fatalf("seed the gate at version 3: %v", err)
+	}
+	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "review-11", intake.DispatchArtifact{Key: root.Key, ArtifactID: "artifact-root",
+		Kind: intake.DispatchArtifactChangesRequested, Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11}}, handlers...); err != nil {
+		t.Fatalf("apply the person's review: %v", err)
+	}
+	if _, err := intake.ApplyFact(ctx, pool, "api", "register-v4", intake.GateRegistered{Issue: root.Key, ArtifactID: "artifact-root",
+		Version: 4, DispatchVersion: 4, Since: record.EventMark{Seq: 10}}, handlers...); err != nil {
+		t.Fatalf("register the gate at version 4: %v", err)
+	}
+	// The version-4 seed reads that same review, and a restart catches up on the same Dispatch.
+	if err := runner.seedGate(ctx, record.OutboxRow{Issue: root.Key}, record.GateSeed{ArtifactID: "artifact-root", Version: 4, Generation: 1}); err != nil {
+		t.Fatalf("seed the gate at version 4: %v", err)
+	}
+	w := &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", handlers: handlers, log: quietLogger()}
+	if err := w.catchUpAwaiting(ctx); err != nil {
+		t.Fatalf("catch up after the restart: %v", err)
+	}
+
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		got, err := records.Issue(ctx, tx, root.Key)
+		if err != nil {
+			return err
+		}
+		if got.AwaitingPerson() && !got.Answered() {
+			t.Errorf("the review at sequence 11 reached the live handler and the seed; the registration whose read began at 10 left the root %#v, want it admitted or answered", got)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("read the root after the boot: %v", err)
 	}
 }

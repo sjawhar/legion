@@ -102,31 +102,30 @@ func (c *HTTPClient) GetIssue(ctx context.Context, key string) (Issue, error) {
 	}, nil
 }
 
-// Ask reads GET /api/v1/asks/{id}: the ask, who closed it, and the newest reply in its thread
-// (Dispatch lists the thread oldest first, as its own newest-reply rule orders it).
-func (c *HTTPClient) Ask(ctx context.Context, id string) (Ask, error) {
-	var response struct {
-		Ask     askResponse `json:"ask"`
-		Replies []struct {
-			ID     string `json:"id"`
-			Author actor  `json:"author"`
-		} `json:"replies"`
+// Asks reads GET /api/v1/issues/{key}/asks?state=all: every ask of the issue, open or closed, with
+// who closed a closed one and when, and the newest reply in its thread with its author and time
+// (Dispatch's row carries the thread's newest reply beside the ask). The boot catch-up applies
+// each act a person took on one of them as the live event would have.
+func (c *HTTPClient) Asks(ctx context.Context, key string) ([]Ask, error) {
+	var rows []askListRow
+	if err := c.request(ctx, http.MethodGet, "/api/v1/issues/"+url.PathEscape(key)+"/asks?state=all", nil, &rows); err != nil {
+		return nil, err
 	}
-	if err := c.request(ctx, http.MethodGet, "/api/v1/asks/"+url.PathEscape(id), nil, &response); err != nil {
-		return Ask{}, err
+	asks := make([]Ask, 0, len(rows))
+	for _, row := range rows {
+		ask := Ask{ID: row.ID, IssueKey: deref(row.IssueKey), Kind: row.Kind, State: row.State, WaitingOn: row.WaitingOn}
+		switch {
+		case row.State == "answered" && row.Answer != nil:
+			ask.ClosedBy, ask.ClosedAt = Actor{Kind: "user", ID: row.Answer.User}, row.Answer.At.UTC()
+		case row.State == "resolved" && row.Resolution != nil:
+			ask.ClosedBy, ask.ClosedAt = Actor(row.Resolution.Actor), row.Resolution.At.UTC()
+		}
+		if row.LastReply != nil {
+			ask.LastReplyBy, ask.LastReplyAt = Actor(row.LastReply.Author), row.LastReply.CreatedAt.UTC()
+		}
+		asks = append(asks, ask)
 	}
-	ask := Ask{ID: response.Ask.ID, IssueKey: deref(response.Ask.IssueKey), Kind: response.Ask.Kind, State: response.Ask.State, WaitingOn: response.Ask.WaitingOn}
-	switch {
-	case response.Ask.State == "answered" && response.Ask.Answer != nil:
-		ask.ClosedBy = Actor{Kind: "user", ID: response.Ask.Answer.User}
-	case response.Ask.State == "resolved" && response.Ask.Resolution != nil:
-		ask.ClosedBy = Actor(response.Ask.Resolution.Actor)
-	}
-	if count := len(response.Replies); count > 0 {
-		newest := response.Replies[count-1]
-		ask.LastReplyID, ask.LastReplyBy = newest.ID, Actor(newest.Author)
-	}
-	return ask, nil
+	return asks, nil
 }
 
 // ListRepoProjects reads GET /api/v1/settings/repo-projects: every project's repository mappings,
@@ -408,7 +407,9 @@ type claimResponse struct {
 	Actor actor `json:"actor"`
 }
 
-type askResponse struct {
+// askListRow is one row of Dispatch's issue ask list: the ask, with the newest reply in its
+// thread beside it.
+type askListRow struct {
 	ID        string  `json:"id"`
 	IssueKey  *string `json:"issue_key"`
 	Kind      string  `json:"kind"`
@@ -417,11 +418,17 @@ type askResponse struct {
 	// Answer is a person's answer: Dispatch takes one from a person alone (its answer route's
 	// requireHuman, and a review or carried approval in the reviewer's own name).
 	Answer *struct {
-		User string `json:"user"`
+		User string    `json:"user"`
+		At   time.Time `json:"at"`
 	} `json:"answer"`
 	Resolution *struct {
-		Actor actor `json:"actor"`
+		Actor actor     `json:"actor"`
+		At    time.Time `json:"at"`
 	} `json:"resolution"`
+	LastReply *struct {
+		Author    actor     `json:"author"`
+		CreatedAt time.Time `json:"created_at"`
+	} `json:"last_reply"`
 }
 
 type repoProjectResponse struct {

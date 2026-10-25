@@ -82,11 +82,15 @@ func TestGetIssueReturnsWorkflowFields(t *testing.T) {
 	}
 }
 
-// The list and the detail carry the issue's claim, which the record keeps as `<kind>:<id>`; an ask
-// detail carries whose turn an open ask waits on, who closed a closed one, and the newest reply in
-// its thread and its author, which the boot catch-up reads for a person's act it may have missed.
-func TestReadsCarryTheClaimHolderAndAnAsksTurnCloserAndNewestReply(t *testing.T) {
+// The list and the detail carry the issue's claim, which the record keeps as `<kind>:<id>`; the
+// issue's ask list carries whose turn an open ask waits on, who closed a closed one and when, and
+// the newest reply in each thread with its author and time, which the boot catch-up reads for a
+// person's act it may have missed.
+func TestReadsCarryTheClaimHolderAndEachAsksTurnCloserAndNewestReply(t *testing.T) {
 	claimed := map[string]any{"actor": map[string]any{"kind": "user", "id": "alice"}, "at": "2026-10-23T18:00:00Z"}
+	replied := time.Date(2026, 10, 23, 17, 30, 0, 0, time.UTC)
+	answered := time.Date(2026, 10, 23, 17, 45, 0, 0, time.UTC)
+	resolved := time.Date(2026, 10, 23, 17, 50, 0, 0, time.UTC)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
 		case "/api/v1/issues":
@@ -96,22 +100,25 @@ func TestReadsCarryTheClaimHolderAndAnAsksTurnCloserAndNewestReply(t *testing.T)
 			})
 		case "/api/v1/issues/LEGION-1":
 			writeJSON(t, w, map[string]any{"key": "LEGION-1", "status": "todo", "rank": "a", "claim": claimed})
-		case "/api/v1/asks/6c83cb7f-8f4e-4820-9e05-7c94fa725007":
-			writeJSON(t, w, map[string]any{"ask": map[string]any{
-				"id": "6c83cb7f-8f4e-4820-9e05-7c94fa725007", "issue_key": "LEGION-1", "kind": "question", "state": "open", "waiting_on": "agent",
-			}, "replies": []map[string]any{
-				{"id": "reply-1", "author": map[string]any{"kind": "session", "id": "session-architect"}},
-				{"id": "reply-2", "author": map[string]any{"kind": "user", "id": "alice"}},
-			}})
-		case "/api/v1/asks/answered":
-			writeJSON(t, w, map[string]any{"ask": map[string]any{
-				"id": "answered", "issue_key": "LEGION-1", "kind": "question", "state": "answered", "answer": map[string]any{"user": "alice", "selected": []string{"Yes"}},
-			}, "replies": []map[string]any{}})
-		case "/api/v1/asks/resolved":
-			writeJSON(t, w, map[string]any{"ask": map[string]any{
-				"id": "resolved", "issue_key": "LEGION-1", "kind": "question", "state": "resolved",
-				"resolution": map[string]any{"kind": "retracted", "reason": "moot", "actor": map[string]any{"kind": "system", "id": "document-settlement"}},
-			}})
+		case "/api/v1/issues/LEGION-1/asks":
+			if got := r.URL.Query().Get("state"); got != "all" {
+				t.Fatalf("ask list state = %q, want all", got)
+			}
+			writeJSON(t, w, []map[string]any{
+				{
+					"id": "6c83cb7f-8f4e-4820-9e05-7c94fa725007", "issue_key": "LEGION-1", "kind": "question", "state": "open", "waiting_on": "agent",
+					"last_reply": map[string]any{"author": map[string]any{"kind": "user", "id": "alice"}, "created_at": replied},
+				},
+				{
+					"id": "answered", "issue_key": "LEGION-1", "kind": "approval", "state": "answered",
+					"answer": map[string]any{"user": "alice", "selected": []string{"Approve"}, "at": answered},
+				},
+				{
+					"id": "resolved", "issue_key": "LEGION-1", "kind": "question", "state": "resolved",
+					"resolution": map[string]any{"kind": "retracted", "reason": "moot", "at": resolved,
+						"actor": map[string]any{"kind": "system", "id": "document-settlement"}},
+				},
+			})
 		default:
 			t.Fatalf("request = %s %s", r.Method, r.URL.Path)
 		}
@@ -133,21 +140,20 @@ func TestReadsCarryTheClaimHolderAndAnAsksTurnCloserAndNewestReply(t *testing.T)
 	if got := detail.Claim.Holder(); got != "user:alice" {
 		t.Fatalf("detail claim = %q, want user:alice", got)
 	}
-	ask, err := client.Ask(context.Background(), "6c83cb7f-8f4e-4820-9e05-7c94fa725007")
+	asks, err := client.Asks(context.Background(), "LEGION-1")
 	if err != nil {
-		t.Fatalf("read ask: %v", err)
+		t.Fatalf("read the issue's asks: %v", err)
 	}
-	if ask != (Ask{ID: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", IssueKey: "LEGION-1", Kind: "question", State: "open", WaitingOn: "agent",
-		LastReplyID: "reply-2", LastReplyBy: Actor{Kind: "user", ID: "alice"}}) {
-		t.Fatalf("ask = %#v, want the open question waiting on the agent with alice's reply newest", ask)
+	want := []Ask{
+		{ID: "6c83cb7f-8f4e-4820-9e05-7c94fa725007", IssueKey: "LEGION-1", Kind: "question", State: "open", WaitingOn: "agent",
+			LastReplyBy: Actor{Kind: "user", ID: "alice"}, LastReplyAt: replied},
+		{ID: "answered", IssueKey: "LEGION-1", Kind: "approval", State: "answered",
+			ClosedBy: Actor{Kind: "user", ID: "alice"}, ClosedAt: answered},
+		{ID: "resolved", IssueKey: "LEGION-1", Kind: "question", State: "resolved",
+			ClosedBy: Actor{Kind: "system", ID: "document-settlement"}, ClosedAt: resolved},
 	}
-	answered, err := client.Ask(context.Background(), "answered")
-	if err != nil || answered.ClosedBy != (Actor{Kind: "user", ID: "alice"}) {
-		t.Fatalf("answered ask = %#v, %v; want it closed by alice", answered, err)
-	}
-	resolved, err := client.Ask(context.Background(), "resolved")
-	if err != nil || resolved.ClosedBy != (Actor{Kind: "system", ID: "document-settlement"}) || resolved.LastReplyBy != (Actor{}) {
-		t.Fatalf("resolved ask = %#v, %v; want it closed by settlement with no reply", resolved, err)
+	if !reflect.DeepEqual(asks, want) {
+		t.Fatalf("asks = %#v, want %#v", asks, want)
 	}
 }
 

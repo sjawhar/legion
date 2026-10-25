@@ -535,38 +535,21 @@ func (w *workflowRuntime) catchUpAwaitingRoot(ctx context.Context, root awaiting
 		return nil
 	}
 	if root.issue.Awaiting.GateVersion != 0 {
-		return w.catchUpAwaitingGate(ctx, root)
+		if err := w.catchUpAwaitingGate(ctx, root); err != nil {
+			return err
+		}
 	}
-	ask, err := w.dispatch.Ask(ctx, root.issue.Awaiting.Ask)
-	if err != nil {
-		return fmt.Errorf("read ask %s for %s: %w", root.issue.Awaiting.Ask, root.issue.Key, err)
-	}
-	if ask.ID != root.issue.Awaiting.Ask || ask.IssueKey != root.issue.Key {
-		return fmt.Errorf("read ask %s for %s: Dispatch returned ask %s of %s", root.issue.Awaiting.Ask, root.issue.Key, ask.ID, ask.IssueKey)
-	}
-	// Only a person's act answers, as on the live path: the person who closed the ask (a session's
-	// or settlement's resolution is not one), or, on an ask still open or closed by anyone, a
-	// person's reply that is the thread's newest, which an open ask shows as its turn handed to the
-	// agent and a closed ask shows only in its thread.
-	switch {
-	case (ask.State == "answered" || ask.State == "resolved") && ask.ClosedBy.Person():
-		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-closed:%s:%d:%s:%s", root.issue.Key, root.issue.Generation, ask.ID, ask.State),
-			intake.DispatchAskClosed{Key: root.issue.Key, Ask: ask.ID, Kind: ask.Kind, State: ask.State, Actor: ask.ClosedBy})
-	case ask.LastReplyBy.Person() && (ask.State != "open" || ask.WaitingOn == "agent"):
-		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-reply:%s:%d:%s:%s", root.issue.Key, root.issue.Generation, ask.ID, ask.LastReplyID),
-			intake.DispatchAskReply{Key: root.issue.Key, Ask: ask.ID, WaitingOn: ask.WaitingOn, Actor: ask.LastReplyBy})
-	default:
-		return nil
-	}
+	return w.catchUpAwaitingAsks(ctx, root)
 }
 
 // catchUpAwaitingGate reads the approval of a root waiting on its design gate: a newer version,
-// whoever wrote it, moves the approval request to the agent and answers it; an approval or changes
-// request of the version it waits on answers it; and an open request a person's reply handed to the
-// agent answers it. The last is read from the request's thread, since a newer version leaves the
-// request waiting on the agent too, and only a person's reply answers. A review carries its place
-// in the issue's Dispatch event log (dispatch.Approval's Seq and At), which identifies it in the
-// gate's told record, places it against the wait's start, and names it in the fact's id.
+// whoever wrote it, moves the approval request to the agent and answers it, and an approval or
+// changes request of the version it waits on answers it. A newer version does not end the read:
+// the same approval may show the person's review of that newer version, whose own event the daemon
+// missed too, so the version event is applied and the review after it, which opens the gate rather
+// than resuming the architect to revise a spec the person has already approved. A review carries
+// its place in the issue's Dispatch event log (dispatch.Approval's Seq and At), which identifies it
+// in the gate's told record, places it against the wait's start, and names it in the fact's id.
 func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaitingRoot) error {
 	if root.gate == nil {
 		return fmt.Errorf("awaiting root %s has no design gate", root.issue.Key)
@@ -579,8 +562,10 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 	// The awaited version, not the gate's: a registration may have recorded a newer version on the
 	// gate whose own event never arrived, and that version is the answer.
 	if approval.LatestVersion > root.issue.Awaiting.GateVersion {
-		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-version:%s:%d:%d", root.issue.Key, root.issue.Generation, approval.LatestVersion),
-			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion})
+		if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-version:%s:%d:%d", root.issue.Key, root.issue.Generation, approval.LatestVersion),
+			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactVersion, Version: approval.LatestVersion}); err != nil {
+			return err
+		}
 	}
 	if approved := approval.ApprovedLatest(); approved >= root.issue.Awaiting.GateVersion {
 		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-approved:%s:%d:%d:%d", root.issue.Key, root.issue.Generation, approved, review.ID()),
@@ -594,18 +579,44 @@ func (w *workflowRuntime) catchUpAwaitingGate(ctx context.Context, root awaiting
 		return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("gate-changes:%s:%d:%d:%d", root.issue.Key, root.issue.Generation, changes, review.ID()),
 			intake.DispatchArtifact{Key: root.issue.Key, ArtifactID: root.gate.ArtifactID, Kind: intake.DispatchArtifactChangesRequested, Version: changes, Reason: reason, Mark: review})
 	}
-	if approval.State != "awaiting" || approval.WaitingOn != "agent" || approval.AskID == "" {
-		return nil
-	}
-	request, err := w.dispatch.Ask(ctx, approval.AskID)
+	return nil
+}
+
+// catchUpAwaitingAsks applies every act a person took on an ask of the root while the daemon was
+// down, as the live event would have carried it: the answer or resolution of an ask a person
+// closed, and the newest reply in a thread when a person wrote it and the ask is closed or waiting
+// on the agent (an open ask a session's reply moved carries that session as its author, and a
+// person's reply hands an open ask to the agent). What each act answers is the workflow's, as on
+// the live path: a root waiting on one of its asks is answered by an act on that ask, and one
+// waiting on its design gate by a person's act on any ask of the root, the approval request
+// included — the architect is the tree's only agent while it waits. Each act carries Dispatch's
+// time of it, so one recorded before the wait began answers nothing, and each fact's id names that
+// time, so a second catch-up of the same act is dropped as processed.
+func (w *workflowRuntime) catchUpAwaitingAsks(ctx context.Context, root awaitingRoot) error {
+	asks, err := w.dispatch.Asks(ctx, root.issue.Key)
 	if err != nil {
-		return fmt.Errorf("read approval request %s for %s: %w", approval.AskID, root.issue.Key, err)
+		return fmt.Errorf("read the asks of %s: %w", root.issue.Key, err)
 	}
-	if !request.LastReplyBy.Person() || request.WaitingOn != "agent" {
-		return nil
+	for _, ask := range asks {
+		if ask.ID == "" {
+			return fmt.Errorf("read the asks of %s: Dispatch returned an ask with no id", root.issue.Key)
+		}
+		if (ask.State == "answered" || ask.State == "resolved") && ask.ClosedBy.Person() {
+			closed := record.EventMark{At: ask.ClosedAt}
+			if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-closed:%s:%d:%s:%s:%d", root.issue.Key, root.issue.Generation, ask.ID, ask.State, closed.ID()),
+				intake.DispatchAskClosed{Key: root.issue.Key, Ask: ask.ID, Kind: ask.Kind, State: ask.State, Actor: ask.ClosedBy, Mark: closed}); err != nil {
+				return err
+			}
+		}
+		if ask.LastReplyBy.Person() && (ask.State != "open" || ask.WaitingOn == "agent") {
+			replied := record.EventMark{At: ask.LastReplyAt}
+			if err := w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-reply:%s:%d:%s:%d", root.issue.Key, root.issue.Generation, ask.ID, replied.ID()),
+				intake.DispatchAskReply{Key: root.issue.Key, Ask: ask.ID, WaitingOn: ask.WaitingOn, Actor: ask.LastReplyBy, Mark: replied}); err != nil {
+				return err
+			}
+		}
 	}
-	return w.applyAwaitingCatchUp(ctx, fmt.Sprintf("ask-reply:%s:%d:%s:%s", root.issue.Key, root.issue.Generation, request.ID, request.LastReplyID),
-		intake.DispatchAskReply{Key: root.issue.Key, Ask: request.ID, WaitingOn: request.WaitingOn, Actor: request.LastReplyBy})
+	return nil
 }
 
 func (w *workflowRuntime) applyAwaitingCatchUp(ctx context.Context, eventID string, fact intake.Fact) error {
