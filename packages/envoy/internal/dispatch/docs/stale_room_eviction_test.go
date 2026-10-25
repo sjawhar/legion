@@ -846,8 +846,8 @@ func TestAStaleRoomWithItsBrowsersAppendQueuedIsEvicted(t *testing.T) {
 		t.Fatalf("the decision left a window armed (wakeIn = %s) for a room that is gone", wake)
 	}
 
-	// Every eviction of the old instance has run, the append's failure's among them, which closes
-	// by name: a load before it would be closed under the test.
+	// Every eviction of the old instance has finished, the append's failure's among them, so the
+	// old state is forgotten and the reload's load takes a state of its own.
 	evicted, cancel := context.WithTimeout(ctx, roomWait(t))
 	pair.taskA.waitEvictions(evicted)
 	cancel()
@@ -908,6 +908,123 @@ func TestAnEvictionClosesOnlyTheInstanceItFoundBehind(t *testing.T) {
 		t.Fatalf("the decision left a window armed (wakeIn = %s) for a room at the head", wake)
 	}
 	requireRoomStillWrites(t, pair.taskA, pair.artifactID, 1)
+}
+
+// A failed room's eviction closes the failed room and nothing that replaced it. The failure
+// evicts on a goroutine of its own, and another close can take the failed instance first - here
+// the stale-room evictor's, which no longer waits for the browser append whose refusal fails a
+// stale room - after which the browser reconnects and a replacement loads at the head with a
+// state of its own. The failure's eviction, closing by name, closed that replacement under the
+// browser that had just synced with it.
+func TestAFailedRoomsEvictionLeavesTheReloadThatReplacedIt(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	ctx := context.Background()
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	failed := service.srv.GetDoc(artifactID)
+	if failed == nil {
+		t.Fatal("no room loaded, so nothing here is tested")
+	}
+	hold := make(chan struct{})
+	release := sync.OnceFunc(func() { close(hold) })
+	t.Cleanup(release)
+	service.beforeFailedEviction = func(room string) {
+		if room == artifactID {
+			<-hold
+		}
+	}
+
+	service.failRoom(artifactID, errors.New("test: the room failed"))
+	state := service.lockExistingState(artifactID)
+	if state == nil || state.failed == nil {
+		t.Fatal("the room did not fail, so nothing here is tested")
+	}
+	done := state.failedDone
+	service.unlockState(artifactID, state)
+
+	closed, err := service.evictInstance(ctx, artifactID, failed)
+	if err != nil || !closed {
+		t.Fatalf("close the failed instance first: closed=%v, %v", closed, err)
+	}
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("reload the room: %v", err)
+	}
+	reload := service.srv.GetDoc(artifactID)
+	if reload == nil || reload == failed {
+		t.Fatal("no new instance loaded, so nothing here is tested")
+	}
+
+	release()
+	select {
+	case <-done:
+	case <-time.After(roomWait(t)):
+		t.Fatal("the failed room's eviction never finished")
+	}
+	if live := service.srv.GetDoc(artifactID); live != reload {
+		t.Fatal("the failed room's eviction closed the reload that replaced it")
+	}
+	if service.roomFailed(artifactID) {
+		t.Fatal("the reload reads as failed")
+	}
+}
+
+// A settlement of an evicted room counts no failure against the room that replaced it. A
+// settlement finds its room's state by name when it retries (retrySettle), and a reload's state
+// counted its generations from zero again, so a settlement the eviction did not end, refused once
+// the room it read was gone, could find the reload standing at the very generation it was armed
+// with and count its refusal against that healthy room - three such, and the reload failed
+// (maxSettleFailures). The stale-room evictor no longer waits for a running settlement, so such a
+// settlement is one it leaves behind every time it evicts while one runs.
+func TestASettlementOfAnEvictedRoomCountsNoFailureAgainstItsReload(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	ctx := context.Background()
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+	evicted := service.lockState(artifactID)
+	before := evicted.roomGeneration
+	service.scheduleSettleLocked(artifactID, evicted)
+	stale := evicted.roomGeneration
+	service.unlockState(artifactID, evicted)
+	if stale == before {
+		t.Fatal("no settlement was armed on the room, so nothing here is tested")
+	}
+
+	if err := service.Evict(ctx, artifactID); err != nil {
+		t.Fatalf("evict the room: %v", err)
+	}
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("reload the room: %v", err)
+	}
+	// Arm the reload's settlement until its generation has reached the evicted settlement's, or
+	// passed it. Counted per state, the reload reached it; drawn from one counter, the reload's
+	// first arming is already past it.
+	reload := service.lockState(artifactID)
+	if reload == evicted {
+		service.unlockState(artifactID, reload)
+		t.Fatal("the reload kept the evicted room's state, so nothing here is tested")
+	}
+	for reload.roomGeneration < stale {
+		armed := reload.roomGeneration
+		service.scheduleSettleLocked(artifactID, reload)
+		if reload.roomGeneration == armed {
+			service.unlockState(artifactID, reload)
+			t.Fatal("no settlement was armed on the reload, so nothing here is tested")
+		}
+	}
+	service.unlockState(artifactID, reload)
+
+	service.retrySettle(artifactID, stale, ErrRoomBehindHead)
+
+	reload = service.lockState(artifactID)
+	failures, failed := reload.settleFailures, reload.failed
+	service.unlockState(artifactID, reload)
+	if failures != 0 || failed != nil {
+		t.Fatalf("the evicted room's settlement counted its refusal against the reload: %d failure(s), failed=%v", failures, failed)
+	}
 }
 
 // A cold write publishes into whatever room loaded while it ran, and holds no room cursor of its

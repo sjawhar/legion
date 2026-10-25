@@ -54,27 +54,30 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 	return r.Server.CloseRoom(room, force)
 }
 
-// closeInstance is CloseRoom for one instance of room: it closes room only while the room holds
-// doc, and reports whether it closed it. A room that has gone, or that holds another document - a
-// replacement loaded since its caller read doc, or one still loading, which GetDoc reads as nil -
-// is not doc's, and closeInstance closes nothing and reports false. CloseRoom closes by name, so
-// two closes queued on one gate for one instance, the second of which runs once the first has let
-// go, would close whatever replaced it in between (a browser's reload among them).
+// closeOwned is CloseRoom for a room its caller owns: holding the gate exclusively, it asks owns
+// whether the room under that name is still the caller's, and only then runs before (when set),
+// closes the room, and hands the close's error to after, whose error it returns; it reports
+// whether it closed the room. CloseRoom closes by name, so two closes queued on one gate for one
+// room, the second of which runs once the first has let go, would close whatever replaced the
+// room in between, a browser's reload among them. owns is what tells the second close that what
+// is there now is not its own.
 //
-// The check is made holding the gate exclusively, so no other close the service makes runs
-// between it and the close, and before runs there too, once the room is known to be doc's and
-// before ygo closes it: what before changes is changed only for a room this call closes. before
-// takes the room's state lock under the gate, the order evictRoom takes them in.
-func (r *roomServer) closeInstance(room string, doc *crdt.Doc, before func()) (bool, error) {
+// The check, before, the close and after all run holding the gate, so no other close the service
+// makes falls between them, and a close that checks after this one sees what after recorded (the
+// closed room's state forgotten, forgetEvicted). owns, before and after take the room's state
+// lock under the gate, the order CloseRoom's own flush takes them in.
+func (r *roomServer) closeOwned(room string, owns func() bool, before func(), after func(error) error) (bool, error) {
 	gate := r.acquireGate(room)
 	defer r.releaseGate(room, gate)
 	gate.Lock()
 	defer gate.Unlock()
-	if r.GetDoc(room) != doc {
+	if !owns() {
 		return false, nil
 	}
-	before()
-	return true, r.Server.CloseRoom(room, true)
+	if before != nil {
+		before()
+	}
+	return true, after(r.Server.CloseRoom(room, true))
 }
 
 // holdOpen holds doc's room open while a repair commits into it, until release. It refuses,

@@ -63,9 +63,11 @@ type roomState struct {
 	settle         *time.Timer
 	unrecorded     map[pmdoc.MarkRef]time.Time
 	durableAppends atomic.Int64
-	// roomGeneration counts this room's own in-process invalidations (a reload, a failure, a
-	// settlement's own commit): a settlement compares the value it started at against the room's
-	// current one to tell a read still good from one a change since has invalidated.
+	// roomGeneration moves at each of this room's own in-process invalidations (a reload, a
+	// failure, a settlement's own commit): a settlement compares the value it started at against
+	// the room's current one to tell a read still good from one a change since has invalidated.
+	// Every value is drawn from the service's one counter (nextRoomGeneration), so it also tells
+	// this state from any state that replaced it.
 	roomGeneration uint64
 	// liveWriter is the open transaction writing this document (see liveWrite), or nil. While
 	// it is set no settlement is armed; settleDeferred records one that was stopped or asked for
