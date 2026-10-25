@@ -2,142 +2,109 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T12:20:00Z",
-  "evidenceLink": "Round 4's runs are recorded in https://github.com/sjawhar/legion/pull/2173#issuecomment-6397391272, which survives retro's removal of .legion/. This file carries the judgements; that comment carries the transcripts.",
+  "completed": "2026-10-25T14:00:00Z",
+  "evidenceLinks": [
+    "Round 4: https://github.com/sjawhar/legion/pull/2173#issuecomment-6397391272",
+    "Round 5: https://github.com/sjawhar/legion/pull/2173#issuecomment-6398448412"
+  ],
   "rounds": [
-    { "round": 1, "codeHead": "a5e26319624da4107d61115c7058270a0dceb383", "verdict": "pass", "completed": "2026-10-25T05:45:00Z" },
-    { "round": 2, "codeHead": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1", "verdict": "pass", "completed": "2026-10-25T08:52:00Z" },
-    { "round": 3, "codeHead": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c", "verdict": "pass", "completed": "2026-10-25T11:05:00Z", "testCommit": "eb61c1a2d8b1, the tester's regression lock" },
-    { "round": 4, "codeHead": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1", "verdict": "pass", "completed": "2026-10-25T12:20:00Z", "what": "One code commit and a forward merge since round 3. The round's correctness change — a confirming read the replacement's delete overtakes answering Uncertain — was driven by reproducing the defect it fixes; the SQL-backed session reader was driven against a real PostgreSQL 16 with one case the implementer's run did not cover; and the deleted-world sweep was re-derived with its own published commands and extended to the half those commands do not reach." }
+    { "round": 1, "codeHead": "a5e26319624da4107d61115c7058270a0dceb383", "verdict": "pass" },
+    { "round": 2, "codeHead": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1", "verdict": "pass" },
+    { "round": 3, "codeHead": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c", "verdict": "pass", "testCommit": "eb61c1a2d8b1, the tester's regression lock" },
+    { "round": 4, "codeHead": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1", "verdict": "pass" },
+    {
+      "round": 5,
+      "codeHead": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+      "verdict": "pass",
+      "completed": "2026-10-25T14:00:00Z",
+      "what": "The merge of main's #2179 replaced the session-store configuration this change depends on, so every measurement at an earlier head is void and every run of this round is new at this head. The round drove the merged rule ('not pvc', not 'must be postgres'), the rewritten session_copy against a real database, and the two hazards I named before the merge."
+    }
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 4: I re-ran this round's correctness proof as a defect reproduction of my own (disabling the generation comparison rather than taking its negative control on trust), and re-ran the SQL reader's statements against a real PostgreSQL I started myself, extending them to `session_copy`'s prefix query, which its run did not cover. Its skills-guard proof I confirmed by reading the guard's own numbers at this head rather than re-running the suite. Its fingerprint proof I did not recompute: it reports the diff unchanged across a merge that touched one file of main's, and the code I tested is the code at this head. Rounds 1 to 3: each re-run independently as those rounds record, with every negative control performed by me."
+    "how": "Round 5: I rebuilt the binary from this head rather than reusing one, re-ran the configuration refusal over seven files instead of its three, and added the negative control its handoff does not carry — a `legion` built from main@origin answering `Config OK` to the same pvc and omitted-key files, which is what makes the refusal this change's own. Its session-reader proof I re-drove on a PostgreSQL of my own and extended to the rewritten session_copy, which its run does not cover at all. Its fingerprint and skills-guard proofs I did not recompute: the first reports a changed diff and says why, and the second is a byte count I read at this head. Rounds 1 to 4 were each verified as those rounds record."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "round": 4,
-      "criterion": "A confirming read the replacement's delete overtakes is Uncertain, not a final Gone that charges a death the daemon itself made.",
-      "surface": "The sandbox package's rig — the real `relaunch`, `evaluate` and `Probe` paths against a fake dynamic client — driven as a defect reproduction in an out-of-tree copy of the module.",
-      "command": "Disable the generation comparison in `evaluate` (`false && nowAt != heldAt`) and run the round's test; restore and run all five gap tests together",
-      "observed": "Without the guard: `TestAConfirmingReadTheReplacementsDeleteOvertakesIsUncertain` fails — `gone, Displaced false (no pod of sandbox legion-legion-legion-208 (operatingMode Suspended)); want Uncertain`. That is the death the daemon made, delivered as final. Restored, the five gap tests of rounds 3 and 4 pass together.",
-      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
-      "negativeControl": "My round-3 lock still fails under its own mutation (the kept name's uid comparison dropped) at this head, so the new generation guard did not subsume or swallow it; the two guards are independent."
+      "round": 5,
+      "criterion": "5. A deployment cannot keep sessions as files on a disk that dies with its pod — under the merged three-kind store, where the rule is 'not pvc' rather than 'must be postgres'.",
+      "surface": "The real `legion start --check-config` CLI built from this head, against the example with its token files, App PEMs and kubeconfig staged; and the real `sandbox.New` entry point with a pinned image, so the store check is the refusal that fires.",
+      "command": "`legion start --check-config` over seven files: the example, `pvc`, the key omitted entirely, `cloudsql-iam` with `session_database`, `cloudsql-iam` without it, `cloudsql-iam` with `session_dsn_secret`, and an unknown kind; then a program calling `sandbox.New` with the zero store, `pvc`, `postgres` and `cloudsql-iam`",
+      "observed": "The example 0. `pvc` 1 and **the key omitted entirely 1 with the same line** — the case most easily lost, since main settles an omitted key to `pvc`. **`cloudsql-iam` with `session_database` exits 0**: the rule reaches the file store and nothing else. `cloudsql-iam` without `session_database` 1 naming the instance, database and IAM login; with `session_dsn_secret` 1 as an inert key; an unknown name 1 with main's own `must be 'pvc', 'postgres' or 'cloudsql-iam'`. Through `sandbox.New`: the zero store and `pvc` refused by the store check, `postgres` and `cloudsql-iam` both past it. That guard read `opts.SessionDSNKey == \"\"` before the merge and `cloudsql-iam` carries no DSN key, so a mechanical resolution would have refused every `cloudsql-iam` deployment after the loader accepted it; the merge made it `!opts.SessionStore.InDatabase()`.",
+      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+      "negativeControl": "A `legion` built from `main@origin` (`0306bcbe1`) answers `Config OK` to the same `pvc` file, the same omitted-key file **and** the same `cloudsql-iam` file. So the refusal is this change's own, and it reaches `pvc` and the omitted key alone."
     },
     {
-      "round": 4,
-      "criterion": "The e2e harness's SQL-backed session reader, the round's blocking fix, reads what the session database holds.",
-      "surface": "A real PostgreSQL 16 started as a workload in the cluster and reached by its Service name from this pod, carrying Oh My Pi's own two tables created with the statements `internal/ompsessions/ompsessions.go` declares, driven with the exact statements `session_text` and `session_copy` run, the path bound as a parameter as `:'path'` binds it.",
-      "command": "A Go program against that database: create the tables, seed one row with two parts inserted at offset 200 then 100 and two neighbouring keys, then run the reader's statement for the key, for an absent path and for an injected path, and the copy's prefix statement for the parent's stem",
-      "observed": "The row's content, then the part at offset 100, then the one at offset 200 — start_offset order and not insert order — 117 bytes byte-for-byte identical to what was seeded, with embedded escaped quotes, a tab and the trailing newline intact. An absent path answers no row at all, which is what makes the reader fail naming the path as the old `cat` of a missing file did. `x'; DROP TABLE omp_session_files; --` matched no row and left all three rows standing. And `session_copy`'s prefix query, which the implementer's run did not cover, takes the subagent's key alone under the parent's stem — not the parent's own key, not another session's.",
-      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
-      "negativeControl": "The absent path and the injected path are the controls: each is a read that must answer nothing, and the table's row count after the injected path is the proof the parameter was never spliced.",
-      "doesNotSettle": "A reader proven against a database is not a harness proven against a pod. Neither my run nor the implementer's touches `docker exec` into the run's database container, which is the devbox's path and exists nowhere else; `claim_session_file`'s read of the claims CLI; or any of the ten-plus call sites now routed through the reader. `psql`'s own `-A -t` formatting and `:'path'` quoting are covered by the implementer's Job and by nothing of mine. Stage 4b has run at no head."
+      "round": 5,
+      "criterion": "The harness's rewritten session reader and copier, which this round's merge reshaped: the key is not a path, and no key may name a file outside the directory or another key's file.",
+      "surface": "A real PostgreSQL 16 started as a workload in the cluster, carrying Oh My Pi's own tables; the **real** listing statement run against it; and the **real** `session_copy` shell function from `scripts/e2e/stage4b-sandbox-tree.sh` run on that output with only `session_psql` and `session_text` stubbed, with the filesystem walked afterwards.",
+      "command": "Seed keys under one prefix — an ordinary one, a nested one, one with a real newline, one with non-ASCII, one whose remainder is `../escape.jsonl`, keys whose characters are escape sequences, a key equal to the prefix, remainders of `.` and `..`, and a 300-character remainder — take the real hex listing, run `session_copy`, then list the directory and read each file",
+      "observed": "Keys that derive the same name — `a/b.jsonl` and the key with a real newline, both deriving `a_b.jsonl` — are named in the refusal and **nothing is copied**. Without the collision, four files land flat; `../escape.jsonl` becomes `.._escape.jsonl` and nothing is written outside the directory; each file's content shows the **original** key reached the reader, so the derivation renames the file and never the key. Keys whose own characters are escape sequences (`lit\\x41.jsonl`, `lit\\nnot.jsonl`, `lit\\\\.jsonl`) survive the hex decode intact, so `printf '%b'` expands once and the hex transport is what makes a key holding a real newline safe at all — a one-line text listing would have split it. A key equal to the prefix and remainders of `.` and `..` are each refused by name with nothing copied. A 300-character remainder fails at the write with `File name too long` and exits 1.",
+      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+      "negativeControl": "The plain key in each run: it is copied in every case the guards do not refuse, so a refusal is the guard firing and not the function failing. And the first attempt at the 300-character case was my own fixture's fault — `od` collapses repeated lines to `*`, giving odd-length hex — which I found by checking the hex's parity before reporting anything.",
+      "doesNotSettle": "The three naming guards run before any write, so a refusal leaves nothing behind; a write failure leaves the files already written, which is a partial copy, loud and non-zero. And none of this is Stage 4b: the harness has run at no head."
     },
     {
-      "round": 4,
-      "criterion": "The deleted-world sweep's four categories, re-derived rather than read.",
-      "surface": "The tree at this head, with the four commands the pull request body publishes, every hit read; and the half those commands do not reach.",
-      "command": "The body's four greps, then `grep -n pod_exec` over the harness, then `grep -rn 'jsonl|sessionFile|ompSessionsDir' packages/daemon/internal/runtime/sandbox/live_*.go`",
-      "observed": "Sessions as files: the only `pod_exec … cat` reads of bytes left are `stage4b-sandbox-tree.sh:4651` (the operator token, not a session) and `:6140` (the recovery marker's absence assertion) — exactly the two the body says were deliberately left; every other `pod_exec` reads /proc, gh configuration, jj, ls, codegraph or omp config. Recovery vocabulary: every hit is a negative assertion — two `grep -c 'volume was lost'` counts compared for equality and the marker path used to assert absence. Stage 4a: clean, and by more than the published command — that command greps only `scripts/`, while Stage 4a's checks are the Go live tests, which I grepped too; every session mention there is a key passed as `ResumeSessionFile` or built for the absent-session refusal, and the only `cat` is `markerLines`, which reads the marker. The two documentation residues remain unfixed (see findingsNotFailures).",
-      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
-      "negativeControl": "The sweep's own commands are their control: each category's claim is a statement about what a published grep returns, and each was re-run rather than quoted. Where my reading extended the scope — the Go live harness — I say so rather than folding it into the body's claim."
+      "round": 5,
+      "criterion": "2, and the gap behaviour of rounds 3 and 4, re-verified at the merged head.",
+      "surface": "The real `workspace-init` CLI built from this head, and the sandbox package's rig.",
+      "command": "`workspace-init provision` with the branch deleted from the feed; `workspace-init controller`; and the five gap tests of rounds 3 and 4 together",
+      "observed": "Provision: exit 0, `a.txt` alone, the root holding `repos` and `workspaces` and nothing else. `workspace-init controller` exits 2. All five gap tests pass, the lock I added in round 3 among them — and the merge left that test byte-identical to the commit I pushed it in (`jj diff --from eb61c1a2d8b1` names no hunk in it).",
+      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+      "negativeControl": "Rounds 3 and 4 each showed these tests red under the mutation of the guard they pin; nothing of that changed here, and the fixture inversion this round brought (`withoutVolume` replaced by `withSupersededDisk`) left them green without touching their assertions."
     },
     {
-      "round": 4,
-      "criterion": "2 and 5 re-verified at this head, and the contract census.",
-      "surface": "The real `legion workspace-init` and `legion start --check-config` CLIs built from this head, and the tree's own contract files.",
-      "command": "`workspace-init provision` with the branch deleted from the feed; `start --check-config` on the example and two variants; `workspace-init controller`; and a read of `DaemonAPIVersion`, both plugin manifests, the regenerated fixture and the built `envoy-channel.js`",
-      "observed": "Provision: exit 0, `a.txt` alone, the root holding `repos` and `workspaces` and nothing else. Config: the example 0; `pvc` 1 with the store message; `postgres` with no `session_dsn_secret` 1 naming the key. `workspace-init controller` exits 2. The census reads 37 in all five places, so the number the census exists to carry is consistent at the head rather than at the head it was taken.",
-      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
-      "negativeControl": "The unmodified example exits 0 and `provision` runs normally in the same binary, so each refusal is its own and not a broken parser."
-    },
-    {
-      "round": 3,
-      "criterion": "The cutover's displacement window: a sibling role read while the issue has no Sandbox at all is the daemon's own end, not a death.",
-      "surface": "The package's rig, as a defect reproduction.",
-      "command": "drop the `case current == nil` arm from `evaluate`; run the two window tests; restore",
-      "observed": "Both fail without it — `read while no Sandbox of the issue exists: gone, Displaced false; want Gone and Displaced` — including the window a failed Create holds open until the issue's next launch. Both pass restored.",
-      "headSha": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c",
-      "negativeControl": "Dropping `unstrand` instead fails the test that bounds the keeping at the other end."
-    },
-    {
-      "round": 2,
-      "criterion": "1. The claim template's metadata, and the immutability the cutover rests on, on a real API server.",
-      "surface": "A real kube-apiserver v1.37 with the pinned Agent Sandbox CRD and the daemon's own goldens; re-run in round 3 with the controller goldens, which came back with no `initContainers` key at all.",
-      "command": "create the goldens; POST one with labels on the ephemeral claim template, with and without strict field validation; patch `spec.volumeClaimTemplates` onto a live Sandbox; then the cutover's patch-delete-create sequence",
-      "observed": "The rendered Sandbox is accepted unchanged. A labelled claim template is pruned — 201 with stored metadata `{}` and a `warning: 299` header, and refused outright under strict validation. `volumeClaimTemplates is immutable` on a live Sandbox. The suspension's merge patch returns 200 carrying the displaced-pod annotation in its own response, and the replacement carrying it is accepted.",
-      "headSha": "e4f7f42e55a4c4f638bbc6d36a4c2d5306091db1",
-      "negativeControl": "The strict-validation refusal is the control for the pruning, and the immutability refusal for the delete-and-create."
-    },
-    {
-      "round": 1,
-      "criterion": "1. The disk is created with its pod and deleted with it, at today's size and storage.",
-      "surface": "A real Kubernetes cluster — the build namespace this worker pod may submit Jobs to — running a pod that declares the same ephemeral claim template the issue goldens show, with the namespace's claim counter as the observation. The cluster is this deployment's; the class is the build namespace's own scratch class, not the issue volumes' class. The issue pod's volume block is byte-identical from `b650d854` to this head.",
-      "command": "apply the Job; poll the claim counter through the pod's life; read the pod's own `spec.volumes[0]` and its log; delete the Job",
-      "observed": "The counter went 0 → 1 while the pod was still Pending; the disk came up holding `lost+found` alone and took a 16 MiB write; the counter stayed at 1 after the pod Completed, so the claim's life is the pod object's; and it was back to 0 between two polls about a second apart, which is an upper bound and not a timing.",
-      "headSha": "a5e26319624da4107d61115c7058270a0dceb383",
-      "negativeControl": "The same Job with one label on that claim template was refused by the namespace's admission policy naming the rule."
-    },
-    {
-      "round": 1,
-      "criterion": "6. The upgrade half of the cutover: an issue_suspend row the running release queued must still run after the upgrade.",
-      "surface": "A real PostgreSQL 16 run as a workload in the cluster, carrying the daemon's own schema, driven by the daemon's own migration runner and enqueue path, with the payload bytes the previous release's struct produces.",
-      "command": "migrate; delete the schema_version row for 51; enqueue the two rows that release writes, one mid-retry; decode; migrate again; decode",
-      "observed": "At schema 50 the head binary refuses the releasing row — `json: unknown field \"release\"`. The upgrade applied exactly 1 migration. Both rows then decode, with attempts, next_at, last_error and created_at byte-identical, so a row mid-retry keeps its backoff.",
-      "headSha": "a5e26319624da4107d61115c7058270a0dceb383",
-      "negativeControl": "The keeping row, written without the key, decoded before the migration and was untouched by it."
-    },
-    {
-      "round": 1,
-      "criterion": "5. No code is left that reuses, repairs or inspects a disk from an earlier pod, with the stale git-lock sweep kept for the retry on the same disk.",
-      "surface": "The tree, plus the one runtime surface where a provision can still meet a non-empty disk: the kubelet restarts a failed init container in the same pod.",
-      "command": "the deletion grep, then `provision` into a root it had already provisioned after planting this issue's own production failure signature",
-      "observed": "17 hits, all history or negative assertions. With the planted bad ref, provision exits 1 in 0.98 s with `fatal: bad object refs/jj/keep/badref` — no repair, no hang, which is what leaves the pod replaceable.",
-      "headSha": "a5e26319624da4107d61115c7058270a0dceb383",
-      "negativeControl": "With four stale git locks planted instead, the same command removed each by name and exited 0."
+      "round": 5,
+      "criterion": "The pull request's own contract census, re-derived at the merged head rather than read.",
+      "surface": "The tree at this head, with the census's own nine published search commands.",
+      "command": "Each census command re-run and its count compared with the body's",
+      "observed": "Five match exactly (`IssueSuspend{` 9, `WorkspaceLost|InitFailed` 1, `WorkspaceRecoveredFrom` 0, `SuspendIssue` 25, `LEGION_EXPECT_ISSUE_VOLUME` 9). Four moved with the merge: `session_store` 104 → 134, `session_dsn_secret|SessionDSNKey|SessionDSNSecret` 93 → 64, `mark-lost` 5 → 6, and `mountsProviders` 0 → **3**. The last is the one worth naming: the census records that symbol as deleted, and `manifest.go:576,595,597` carries it again — reintroduced by main, where a pod mounts the providers Secret only when some key needs it, which `cloudsql-iam` does not. So it is a census line that has gone stale, not a deletion that came undone.",
+      "headSha": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+      "negativeControl": "The five counts that did not move are the control: the same commands, the same tree, and only the searches the merge touches moved."
     }
   ],
+  "carriedNotReRun": {
+    "what": "Round 3's real-API-server proof of the rendered pods (kube-apiserver v1.37 against the pinned Agent Sandbox CRD).",
+    "why": "The `issue` volume and the `volumeClaimTemplates` of `worker`, `root`, `resume` and `controller` are byte-identical between `c99701afc1e7` and this head, so the object the API server accepted is the object rendered now. Everything else of mine was re-run at this head."
+  },
   "coverageInventory": {
-    "note": "Round 3's inventory stands unchanged at this head: the issue pod's volume block has not moved. Its three groups, with the corrections the architect took verbatim into the acceptance sentence, are in round 3's handoff and in the pull request body.",
-    "provenWithoutACluster": "The rendered pods' shape against a real API server and the pinned CRD; a generic ephemeral claim of this shape created with its pod and reaped between two polls about a second apart, on this deployment's cluster but on the build namespace's own scratch class; the file store refused at the loader and at `sandbox.New`; provisioning onto a deleted branch; and no lost-volume line, which is proven outright because the code that emitted it is deleted.",
-    "coveredByLiveRunOne": "The Agent Sandbox controller passing a generic ephemeral pod volume through untouched, at `b650d854`, whose volume block is byte-identical to this head's.",
-    "liveOnlyAndUnproven": "The disk going when Legion's own pod goes, as the composition of two observed facts; a re-admitted issue coming back on a disk of its own, and the orphan sweep taking the swept issue's disk, each a claim uid comparison; and `kill-launcher`'s uid equality. The seven inverted Stage 4a assertions are unrun, not passing, and Stage 4b has run at no head."
+    "note": "Unchanged at this head and carried from round 3, where its three groups were agreed with the architect and taken into the acceptance sentence verbatim. The issue pod's volume block has not moved since the live run's head `b650d854`, which is what lets run #1's observation carry.",
+    "liveOnlyAndUnproven": "The disk going when Legion's own pod goes, as the composition of two observed facts; a re-admitted issue coming back on a disk of its own and the orphan sweep taking the swept issue's disk, each a claim uid comparison; and `kill-launcher`'s uid equality. The seven inverted Stage 4a assertions are unrun, not passing, and Stage 4b has run at no head."
   },
   "findingsNotFailures": [
     {
-      "what": "`scripts/e2e/README.md:965`'s `pod-baseline` row promises the stub agent's environment carries `OMP_SESSION_STORAGE=file`, while `live_operator_test.go:179-183` now requires `ompsessions.SQLStorage` — a flat contradiction in the proof's own published contract. The reviewer raised it and the setup-negative row with it; this round carried both rather than fixing them.",
-      "evidence": "Read at this head: the README row's text, and the `want` map in `live_operator_test.go` naming `ompsessions.StorageVariable: ompsessions.SQLStorage`.",
-      "verdict": "A finding to fix in this pull request, not a round failure, and consistent with my round-3 ruling on the cutover's selector sentence: no check is weakened and nothing an operator or an agent does goes wrong — what is wrong is the row a reader uses to learn what the check proves. Worth naming once more because it is the same class as round 2's three lifecycle rows, which were fixed rather than carried; carrying two of a class that was fixed twice is the inconsistency, not the rows themselves."
+      "what": "Five texts outside `docs/kubernetes.md` still tell their reader that `postgres` is the only store, which the merged loader contradicts.",
+      "evidence": "`deploy/kubernetes/daemon/legion.yaml.example:71` ('the only store'); `docs/site/src/content/docs/legion/running-legion.md:258-260` ('`session_store` must be `postgres`: it is the only store this runtime has') and `:507` ('must name `session_store: postgres` and `session_dsn_secret`'); `scripts/e2e/README.md:820-821` ('`session_store: postgres` is the only store the daemon loads'); `AGENTS.md:73` ('`runtime.kubernetes.session_store: postgres` makes the only store'). Checked against the reference: every `session_store: postgres` in `docs/kubernetes.md` is scoped to a named deployment, to the historical configuration block or to the refusal list, so the reference is clean — I read all six hits rather than counting them.",
+      "verdict": "A finding to fix in this pull request, not a round failure, consistent with my rulings on the cutover selector and the pod-baseline row: the loader accepts `cloudsql-iam`, the refusal message names the rule, and a reader who reaches the reference is told the truth. What is wrong is that the file an operator copies, and the published site page, tell them the store that holds no database password does not exist. Five edits, each a sentence."
     },
     {
-      "what": "The code commit of this round, `862a809d38df`, is authored by the **review** App (343353696+legion-reviewer) with the implement App as its committer and the implementer's session in its `Omp-Session` trailer.",
-      "evidence": "`jj log -r 862a809d38df -T 'author.email() ++ committer.email() ++ description'`: author `343353696+legion-reviewer[bot]`, committer `343353655+legion-implementer[bot]`, `Omp-Session: 01a17058-…`, the implementer's session.",
-      "verdict": "Not a failure and nothing to pin: no gate reads a code commit's author, and `handoff_complete` checks only the handoff commit's, which is the implement App's and correct. It is the shape `skill://legion-worker` warns about — a `split` or `describe` of the working-copy commit found at the turn's start, which keeps the previous role's author — and the previous role here was the reviewer, whose empty working copy the implementer inherited. Reported so the architect can have the habit corrected rather than the history rewritten; rewriting a pushed commit for attribution alone would cost more than it buys."
+      "what": "The pull request body's census bullet records `mountsProviders` as deleted; the symbol is back at `manifest.go:576,595,597`.",
+      "evidence": "`grep -rn mountsProviders packages` returns three hits at this head against the census's zero.",
+      "verdict": "Not a failure and not a deletion that came undone: main reintroduced it, where a pod mounts the providers Secret only when some key needs it and `cloudsql-iam` needs none. The census line is stale, as three of its other counts now are; it is the body's to refresh at the merged head rather than work to redo."
     },
     {
-      "what": "The implementer's four acceptance proofs are now cited in the pull request body as living in `.legion/INFRA-80/implement.json`, a path retro removes from the head that merges.",
-      "evidence": "The body's `E2E (implementer)` line at this head: 'Their commands, observations, heads and negative controls are in `.legion/INFRA-80/implement.json` on this branch and in the thread replies on this pull request, which outlive retro's removal of `.legion/`.'",
-      "verdict": "Acceptable but weakly, and worth saying rather than leaving: linking once the body passes about 48,000 characters is what the worker skill asks for, but it asks for a link to the run or the comment — artefacts that survive. The thread replies named beside the path do survive, so nothing is lost; the citation would be better if it led with them. I followed the durable form for my own round: round 4's evidence is a pull request comment, linked from the body."
+      "what": "The `scripts/e2e/README.md` `pod-baseline` row I raised in round 4 is fixed at this head (it asserts `OMP_SESSION_STORAGE=sql`), and `setup-negative` with it.",
+      "evidence": "The implementer's round-5 message names both, and the rows read that way at this head.",
+      "verdict": "Closed. Recorded so the reviewer does not re-raise it."
     }
   ],
   "ciAtCodeHead": {
-    "head": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
-    "read": "2026-10-25T12:02:00Z",
+    "head": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37",
+    "read": "2026-10-25T13:47:00Z",
     "runs": [
-      "Tests run 40190730574 — queued",
-      "Legion Envoy and Contracts run 40190730572 — queued",
-      "Worker Image run 40190730565 — in progress",
-      "Docs run 40190730584 — success",
-      "PR Title run 40190921940 — success"
+      "Tests — in progress",
+      "Legion Envoy and Contracts — in progress",
+      "Docs — success",
+      "Worker Image — success",
+      "PR Title — success"
     ],
-    "note": "Read, not re-run; no lane waited for. The required `lint`, `typecheck` and `test` are inside `Tests`, which had not settled at that read. The inherited skills-guard red is this head's to answer, the forward merge having imported main's fix; I read the guard's own numbers at this head rather than re-running the suite. Each pull request body edit starts another `PR Title` run, which is why that workflow has several queued at this head."
+    "note": "Read, not re-run; no lane waited for. These are the first runs this pull request has had on a mergeable head: every earlier head was CONFLICTING, for which GitHub computes no merge ref and runs nothing. The required `lint`, `typecheck` and `test` live inside `Tests`, which had not settled at that read."
   },
   "residualRisks": [
-    "The generation counter this round adds is one counter for every Sandbox name, so a strand or unstrand for another issue while a confirming read is out costs this read an Uncertain and a tick's delay. The code says so; the cost is bounded and the alternative, a per-name counter deleted with its record, reads the same before a strand and after its unstrand.",
-    "A daemon that restarts inside the gap a migrating replacement opens has neither the Sandbox nor the kept name, and reads those roles' ends as deaths. Unchanged from round 3, stated in the code, and covered by no test because nothing here can restart a daemon mid-launch.",
+    "The generation counter behind the gap record is one counter for every Sandbox name, so a strand or unstrand for another issue costs a concurrent confirming read an Uncertain and a tick's delay. Stated in the code; bounded.",
+    "A daemon that restarts inside the gap a migrating replacement opens reads those roles' ends as deaths. Unchanged, stated in the code, covered by no test because nothing here can restart a daemon mid-launch.",
     "An issue pod's ephemeral claim is always `<pod>-issue`, so a replacement pod created before its predecessor's claim is reaped stays Pending until it is — about a second, measured, against a 120 s boot timeout."
   ]
 }
