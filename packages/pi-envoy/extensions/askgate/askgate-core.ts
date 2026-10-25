@@ -5,12 +5,15 @@
 //
 // Scope: eight calls on the command line and six of them as devices, each recorded under one tool
 // name (dispatch_ask, …).
-//   - A `bash` call whose whole command is one `dispatch` command (`dispatchCommandHead`: the
-//     head rules of `@legion/pi-shared/shell-command`, kept here on purpose with AskGate's own
-//     additions: the program taken by a literal path to `dispatch` as well as by name, and two
-//     harmless wrappers, one leading `cd <path> &&` with a path the shell does not expand and one
-//     `2>&1` at the end of its first line, before or after a here-document opener)
-//     naming `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
+//   - A `bash` call whose whole command is the literal grammar of one `dispatch` call
+//     (`dispatchCommandHead`): `[cd <literal path> && ] dispatch <subcommand> <literal words…>
+//     [2>&1] [<<'DELIM' … DELIM]`. The program is `dispatch` by name or by a literal path. Every
+//     word is literal: outside quotes it holds only letters, digits and `._/+@%:,=-` (so no `$`,
+//     `{`, `}`, backtick, glob character, `~` or backslash), and inside double quotes no `$`,
+//     backtick or backslash. The one here-document has a quoted delimiter (`'EOF'` or `"EOF"`)
+//     and opens on the command's first line, before or after the one `2>&1`. Nothing else: no
+//     assignment, other statement, pipe, `;`, `||`, `&`, other redirect or line continuation.
+//     The subcommand is `ask`, `message`, `edit-ask`, `comment`, `doc-edit`, `request-approval` (its
 //     `summary` is what the person approves), `issue` with `--spec` or `--spec-file`, or
 //     `artifact` unless its literal `--name` and literal `--path` both show it is no markdown
 //     document (`uploadMayBeDocument`): its dry run then decides, from the name and path it
@@ -22,7 +25,7 @@
 //     `error` and the call runs (the CLI refuses arguments it cannot parse, before it sends
 //     anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
 //     reviewed. An upload given with `--path` prints the path, not the text. Every file the
-//     write posts, that path and each `--<field>-file` and the write's literal stdin, is copied
+//     write posts, that path and each `--<field>-file`, is copied
 //     into a private snapshot the gate owns before the model is asked. The gate reviews the
 //     snapshot's bytes as `content` and rewrites the call to post the snapshot, so the bytes that
 //     post are the bytes reviewed. It reads a regular file alone: a missing file, a directory, a
@@ -34,36 +37,19 @@
 //     `unreadable`, since a failed lookup is no proof that the write would fail. An upload is
 //     judged against failure 10 alone (askgate-upload.md), since a plan or a report is long by
 //     nature.
-//   - A `bash` call those head rules do not take but whose one scoped write the composite reader
-//     reads (`compositeScoped`). The reader takes a form only when it can prove that the posted
-//     bytes do not depend on anything the model did not review. Around the write: `\`-newline
-//     continuations, the write's own output redirects (`2>&1`, `>`/`2>` to a literal path), later
-//     pipeline stages that only read the write's output (`| head -3`), literal `NAME=value`
-//     prefixes and one `timeout <duration>`, and a literal file as its stdin (`< q.md`). Before
-//     it, joined by `&&`, `;` or a newline: `cd <literal path>`, literal assignments
-//     (`export A=B`), read-only commands (`wc`, `cat`, `ls`, `grep`, `head`, `[` …) and `dispatch`
-//     calls that are no reviewed write (`claim`, `read` …). After it, anything that holds no
-//     reviewed write. `$NAME` in the write counts when an earlier kept statement sets NAME to a
-//     literal. The dry run keeps the `cd` and assignment statements, the prefixes and the stdin,
-//     and drops the rest, so a dropped statement may not decide whether a kept one runs: one
-//     joined by `&&` to its neighbour, a conditional `cd`, `printf -v`, `read`, `eval`, `source`,
-//     `set`, `cd -` and the rest of the state-changing words are refused. So is a later stage that
-//     can write a file (`| cp …`, `| sed -i …`, `| tee f`), a second write, and a program or
-//     subcommand an expansion names. The call itself runs as written, but for the file snapshots.
-//   - A `bash` call that holds a scoped `dispatch` write neither reader takes — after a command
-//     that may change a file or the text (`python3 - <<'EOF' …`, `sed -i … f`, `cat > f <<EOF`,
-//     `make`), with a command or process substitution (`"$(cat note.md)"`, `< <(awk …)`), sent to
-//     the background (`&`), beside a second reviewed write, with an unquoted here-document or a
-//     variable the call does not set, or calling `dispatch` by a path the shell expands
-//     (`$HOME/…/dispatch`) — or a scoped subcommand run by a program an expansion names (`$D
-//     comment …`, `"${D}" ask …`, `$(command -v dispatch) …`), which may be `dispatch`, is
-//     refused before anything in it runs, whatever the mode, with a reason telling the agent to
-//     send that `dispatch` command again on its own; when the word that runs it is what AskGate
-//     cannot read, the reason names the characters in it and says to call `dispatch` by name
-//     (`unreadableDispatchWrite`, a scan aware of quotes, here-documents and command
-//     substitutions, for a scoped write at a command position). The entry reads `unreadable`; it
-//     never counts toward the halt. A halt, or a session the gate would skip (a primary on
-//     another provider), lets it run; a session with no model role refuses it.
+//   - A `bash` call that holds a scoped `dispatch` write in any other form — after another
+//     command, with an expansion, a redirect or a pipe, sent to the background, beside a second
+//     reviewed write, or calling `dispatch` by a path the shell expands (`$HOME/…/dispatch`) — or
+//     a scoped subcommand run by a program an expansion names (`$D comment …`, `"${D}" ask …`,
+//     `$(command -v dispatch) …`), or a `dispatch` whose subcommand an expansion names (`dispatch
+//     $SUB …`), is refused before anything in it runs, whatever the mode, with a reason that
+//     states the literal grammar and tells the agent to send that `dispatch` command again on its
+//     own; when the word that runs it or names its subcommand is what AskGate cannot read, the
+//     reason names the characters in it (`unreadableDispatchWrite`, a scan aware of quotes,
+//     here-documents and command substitutions, for a scoped write at a command position). The
+//     entry reads `unreadable`; it never counts toward the halt. A halt, or a session the gate
+//     would skip (a primary on another provider), lets it run; a session with no model role
+//     refuses it.
 //   - `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper emits
 //     with `toolName = <device>` and the validated arguments, for dispatch_ask, dispatch_message,
 //     dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue when its
@@ -393,30 +379,26 @@ export function scopedDevice(toolName: string, input: Input): boolean {
   );
 }
 
-// Where a `dispatch` command's own text ends: `headLine`, `headScan` and their helpers below start
-// from the rules `@legion/pi-shared/shell-command` applies (`dispatchCommandHead` there, which the
-// Envoy entry uses to tell a dispatch-only call), and differ from them on purpose: the gate also
-// reads a literal path to `dispatch` and the two wrappers below, and must read exactly the text
-// the command sends, while the plugin's rule only has to tell a dispatch-only call from work. So
-// the two are separate, and a change to one is checked against the other. A conservative character
-// scan, not a shell parser: whatever it cannot reason about is no `dispatch` command. Whitespace is
-// bash's blanks, space and tab, never JavaScript's `\s`, which also takes a no-break space that
-// bash reads as part of a word.
+// Where a `dispatch` command's own text ends: `headLine`, `literalWords` and their helpers below
+// start from the rules `@legion/pi-shared/shell-command` applies (`dispatchCommandHead` there,
+// which the Envoy entry uses to tell a dispatch-only call), and differ from them on purpose: the
+// gate reads only the literal grammar of one call, a literal path to `dispatch` and the two
+// wrappers below included, and must read exactly the text the command sends, while the plugin's
+// rule only has to tell a dispatch-only call from work. So the two are separate, and a change to
+// one is checked against the other. A conservative character scan, not a shell parser: whatever it
+// cannot reason about is no `dispatch` command. Whitespace is bash's blanks, space and tab, never
+// JavaScript's `\s`, which also takes a no-break space that bash reads as part of a word.
 
-/** The one here-document a command's first line may end with, opened with a quoted delimiter so
- * the shell expands nothing in its body. The second group is `-` for `<<-`, the only form under
- * which bash strips leading tabs from the delimiter line. The fourth is a `2>&1` after the opener,
- * which bash applies to the command as it would before it. */
-const HEREDOC_OPENING = /^(.*?)[ \t]*<<(-?)[ \t]*'([A-Za-z_][A-Za-z0-9_]*)'([ \t]+2>&1)?[ \t]*$/d;
+/** The one here-document a command's first line may end with, opened with a delimiter in single
+ * or double quotes so the shell expands nothing in its body. The second group is `-` for `<<-`,
+ * the only form under which bash strips leading tabs from the delimiter line. The third and fourth
+ * are the delimiter, in single or in double quotes. The fifth is a `2>&1` after the opener, which
+ * bash applies to the command as it would before it. */
+const HEREDOC_OPENING =
+  /^(.*?)[ \t]*<<(-?)[ \t]*(?:'([A-Za-z_][A-Za-z0-9_]*)'|"([A-Za-z_][A-Za-z0-9_]*)")([ \t]+2>&1)?[ \t]*$/d;
 
 /** A line of nothing but blanks, which bash runs as no command. */
 const BLANK_LINE = /^[ \t]*$/;
-
-/** Outside quotes, a `dispatch` head refuses whatever would end the command, start
- * another, expand something, redirect, start a comment (bash reads the rest of the line as one, a
- * here-document opener included) or escape a character (the shell's to interpret, so never
- * modelled here). */
-const REFUSED_UNQUOTED = "\n;&|$`<>()#\\";
 
 /** Inside double quotes bash still expands `$` and backticks and interprets `\`. */
 const REFUSED_DOUBLE_QUOTED = "$`\\";
@@ -447,7 +429,7 @@ function headLine(
     const opening = HEREDOC_OPENING.exec(head);
     if (opening === null) return undefined;
     const stripTabs = opening[2] === "-";
-    const delimiter = opening[3];
+    const delimiter = opening[3] ?? opening[4];
     const end = lines.findIndex(
       (line, index) => index > 0 && (stripTabs ? line.replace(/^\t+/, "") : line) === delimiter
     );
@@ -455,7 +437,7 @@ function headLine(
     // the last line: anything after it would run as a command.
     if (end !== lines.length - 1) return undefined;
     head = opening[1] ?? "";
-    const redirect = opening.indices?.[4];
+    const redirect = opening.indices?.[5];
     if (redirect) stderr = [lineAt + redirect[0], lineAt + redirect[1]];
   }
   const leading = /^[ \t]*/.exec(head)?.[0].length ?? 0;
@@ -472,8 +454,8 @@ function headLine(
 // `dispatch` command that change neither its words nor what it sends: one leading `cd <path> && `,
 // whose path is one word the shell does not expand, and one trailing `2>&1`.
 
-/** Characters an unquoted literal word (a `cd` path, a path to `dispatch`) may hold: none the shell
- * expands (`~`, globs, braces, `$`) or interprets (`\`). */
+/** Characters an unquoted literal word (every word of the literal grammar) may hold: none the shell
+ * expands (`~`, globs, braces, `$`), interprets (`\`) or reads as an operator. */
 const LITERAL_UNQUOTED = /^[A-Za-z0-9._/+@%:,=-]$/;
 
 /** The characters that start an expansion, unquoted or in double quotes: a program word holding
@@ -557,13 +539,13 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
   const suffix = STDERR_TO_STDOUT.exec(text);
   const head = suffix === null ? text : text.slice(0, suffix.index);
   // One `dispatch` command, called by name or by a literal path ending in it that is no
-  // assignment, whose words the shell takes as written.
+  // assignment, whose every word the shell takes as written.
   const program = scanWord(head, 0);
   if (
     program.unread.length > 0 ||
     program.value.split("/").at(-1) !== "dispatch" ||
     ASSIGNMENT.test(head) ||
-    !headScan(head)
+    !literalWords(head)
   )
     return undefined;
   const at = line.at + offset;
@@ -587,24 +569,19 @@ function hasControlCharacter(text: string): boolean {
   return false;
 }
 
-/** Whether a `dispatch` head is one command whose words the shell takes as written:
- * single quotes make every character literal, and an unterminated quote is refused. */
-function headScan(head: string): boolean {
-  let quote: '"' | "'" | undefined;
-  for (const char of head) {
-    if (quote === "'") {
-      if (char === "'") quote = undefined;
+/** Whether every blank-separated word of `text` is literal (`scanWord`): single quotes make every
+ * character literal, and an unterminated quote is refused. */
+function literalWords(text: string): boolean {
+  for (let at = 0; at < text.length; ) {
+    if (text[at] === " " || text[at] === "\t") {
+      at++;
       continue;
     }
-    if (quote === '"') {
-      if (char === '"') quote = undefined;
-      else if (REFUSED_DOUBLE_QUOTED.includes(char)) return false;
-      continue;
-    }
-    if (char === "'" || char === '"') quote = char;
-    else if (REFUSED_UNQUOTED.includes(char)) return false;
+    const word = scanWord(text, at);
+    if (word.unread.length > 0) return false;
+    at = word.end;
   }
-  return quote === undefined;
+  return true;
 }
 
 type Word = { raw: string; value: string; start?: number; end?: number };
@@ -704,8 +681,6 @@ interface FileInput {
   source: string;
   span: [number, number];
   equals: boolean;
-  /** Bash expands an unquoted leading home marker before it opens the source. */
-  expandsHome: boolean;
 }
 type UnsafeFile = { flag: string; path: string; reason: string };
 
@@ -718,13 +693,13 @@ export interface ScopedCommand {
   rebuttal?: string;
   readsFile: boolean;
   fileInputs: readonly FileInput[];
-  /** A `--field-file -` needs a quoted here-document or one literal input redirect. */
+  /** A `--field-file -` needs the call's quoted here-document. */
   stdinFileFlag?: string;
   /** `--path-file` chooses another path after the gate has no way to bind it. */
   unsafeFile?: UnsafeFile;
   /** A `dispatch artifact` upload of a markdown document, reviewed against failure 10 alone. */
   upload?: true;
-  /** A leading or retained setup `cd` changes where relative file operands resolve. */
+  /** A leading `cd` changes where relative file operands resolve. */
   changesDirectory?: true;
   /**
    * The command's own leading `cd`, if any, then `pwd -P`: run where the dry run runs, it prints
@@ -812,30 +787,18 @@ function fileInputs(
           ? undefined
           : ([word.start, word.end] as [number, number]);
     if (span === undefined) continue;
-    inputs.push({
-      flag,
-      source,
-      span,
-      equals: eq !== -1,
-      // Bash expands a leading `~/` in a word of its own, and not after `--flag=`.
-      expandsHome: eq === -1 && sourceWord.raw.startsWith("~"),
-    });
+    inputs.push({ flag, source, span, equals: eq !== -1 });
   }
   return { inputs, ...(stdinFileFlag === undefined ? {} : { stdinFileFlag }) };
 }
 
 /**
- * The `bash` command as a scoped `dispatch` call, or undefined for any other command: read by the
- * strict head rules first (`strictScoped`), else by the composite reader (`compositeScoped`), which
- * reads the common safe forms around one write. A call neither reads is no scoped call; the gate
- * then refuses it when `unreadableDispatchWrite` finds a write in it.
+ * The `bash` command as a scoped `dispatch` call, or undefined for any other command. Only the
+ * literal grammar of one call is read (`dispatchCommandHead`). A call in any other form is no
+ * scoped call; the gate then refuses it when `unreadableDispatchWrite` finds a write in it.
  */
 export function scopedCommand(command: unknown): ScopedCommand | undefined {
   if (typeof command !== "string") return undefined;
-  return strictScoped(command) ?? compositeScoped(command);
-}
-
-function strictScoped(command: string): ScopedCommand | undefined {
   const found = dispatchCommandHead(command);
   if (found === undefined) return undefined;
   const { head, at, cdEnd, end, heredoc, stderr } = found;
@@ -859,8 +822,7 @@ function strictScoped(command: string): ScopedCommand | undefined {
       ? {
           flag: files.stdinFileFlag,
           path: "-",
-          reason:
-            "reads standard input that is not a quoted here-document or a literal file redirect",
+          reason: "reads standard input that is not a quoted here-document",
         }
       : undefined);
   // The command runs as written, its wrappers included. The dry-run keeps the `cd`, with its output
@@ -888,678 +850,6 @@ function strictScoped(command: string): ScopedCommand | undefined {
     ...(upload ? { upload: true as const } : {}),
     ...(cdEnd === undefined ? {} : { changesDirectory: true as const }),
     dirScript: cdEnd === undefined ? "pwd -P" : `${command.slice(0, cdEnd)} >/dev/null && pwd -P`,
-  };
-}
-
-/**
- * A word of a call the composite reader reads: where it lies, as written, and its parts, each
- * literal text or a variable (`$NAME`, `${NAME}`). `unknown` marks a part this reader cannot know
- * (a glob, a brace, another expansion, a command substitution); `tilde` a leading unquoted `~`;
- * `bracket` an unquoted `[` that a later `]` of the same word closes into a glob.
- */
-interface CallWord {
-  raw: string;
-  start: number;
-  end: number;
-  parts: Array<string | { name: string }>;
-  unknown: boolean;
-  tilde: boolean;
-  bracket: boolean;
-}
-/** A redirect: its operator and file descriptor, its word, and a here-document's body, from the
- * newline that ends its opener's line to the end of its delimiter line. */
-interface CallRedirect {
-  op: string;
-  fd: string;
-  target?: CallWord;
-  start: number;
-  end: number;
-  heredoc?: { quoted: boolean; body: [number, number] };
-}
-interface CallStage {
-  words: CallWord[];
-  redirects: CallRedirect[];
-  substitution: boolean;
-  start: number;
-  end: number;
-}
-/** A pipeline and the separator after it: `;`, `&&`, `||`, a newline, or none at the end. */
-interface CallStatement {
-  stages: CallStage[];
-  sep: string;
-  start: number;
-  end: number;
-}
-
-/**
- * The statements of a `bash` command as bash splits them, or undefined for a shape this reader
- * does not take: a subshell or group in parentheses, `&` (background), `|&`, process substitution,
- * an unterminated quote, substitution or here-document, or a control character. Quotes, `\`-newline
- * continuations, comments and here-document bodies are read as bash reads them.
- */
-function readCall(command: string): CallStatement[] | undefined {
-  if (hasControlCharacter(command)) return undefined;
-  const n = command.length;
-  const statements: CallStatement[] = [];
-  const blank = (): CallStage => ({
-    words: [],
-    redirects: [],
-    substitution: false,
-    start: -1,
-    end: -1,
-  });
-  let stages: CallStage[] = [];
-  let stage = blank();
-  let word: CallWord | undefined;
-  let target: CallRedirect | undefined;
-  let afterPipe = false;
-  const heredocs: Array<{ redirect: CallRedirect; delimiter: string; stripTabs: boolean }> = [];
-  const extend = (from: number, to: number) => {
-    if (stage.start === -1) stage.start = from;
-    stage.end = Math.max(stage.end, to);
-    afterPipe = false;
-  };
-  const open = (at: number): CallWord => {
-    word ??= {
-      raw: "",
-      start: at,
-      end: at,
-      parts: [],
-      unknown: false,
-      tilde: false,
-      bracket: false,
-    };
-    return word;
-  };
-  const literal = (at: number, text: string, to: number) => {
-    const current = open(at);
-    const last = current.parts.at(-1);
-    if (typeof last === "string") current.parts[current.parts.length - 1] = last + text;
-    else current.parts.push(text);
-    current.end = to;
-  };
-  const endWord = (): boolean => {
-    if (word === undefined) return true;
-    const done = word;
-    word = undefined;
-    done.raw = command.slice(done.start, done.end);
-    if (target === undefined) {
-      stage.words.push(done);
-      extend(done.start, done.end);
-      return true;
-    }
-    const redirect = target;
-    target = undefined;
-    redirect.target = done;
-    redirect.end = done.end;
-    if (redirect.op === "<<" || redirect.op === "<<-") {
-      if (done.unknown || done.parts.some((part) => typeof part !== "string")) return false;
-      heredocs.push({ redirect, delimiter: done.parts.join(""), stripTabs: redirect.op === "<<-" });
-    }
-    stage.redirects.push(redirect);
-    extend(redirect.start, redirect.end);
-    return true;
-  };
-  const endStatement = (sep: string): boolean => {
-    if (!endWord() || target !== undefined) return false;
-    if (stage.start !== -1) {
-      stages.push(stage);
-      stage = blank();
-    } else if (afterPipe) return sep === "\n";
-    if (stages.length === 0) return sep === "\n";
-    statements.push({ stages, sep, start: stages[0].start, end: stages[stages.length - 1].end });
-    stages = [];
-    return true;
-  };
-  const backtick = (from: number): number | undefined => {
-    for (let k = from + 1; k < n; k++) {
-      if (command[k] === "\\") k++;
-      else if (command[k] === "`") return k;
-    }
-    return undefined;
-  };
-  const parens = (from: number): number | undefined => {
-    let depth = 0;
-    for (let k = from; k < n; k++) {
-      const ch = command[k];
-      if (ch === "\\") k++;
-      else if (ch === "'") {
-        const close = command.indexOf("'", k + 1);
-        if (close === -1) return undefined;
-        k = close;
-      } else if (ch === '"') {
-        for (k++; k < n && command[k] !== '"'; k++) if (command[k] === "\\") k++;
-        if (k >= n) return undefined;
-      } else if (ch === "`") {
-        const close = backtick(k);
-        if (close === undefined) return undefined;
-        k = close;
-      } else if (ch === "(") depth++;
-      else if (ch === ")" && --depth === 0) return k;
-    }
-    return undefined;
-  };
-  const substitution = (at: number, close: number) => {
-    const current = open(at);
-    current.unknown = true;
-    current.end = close + 1;
-    stage.substitution = true;
-  };
-  const dollar = (at: number, quoted: boolean): number | undefined => {
-    const next = command[at + 1] ?? "";
-    if (next === "(") {
-      const close = parens(at + 1);
-      if (close === undefined) return undefined;
-      substitution(at, close);
-      return close;
-    }
-    const current = open(at);
-    if (next === "{") {
-      const close = command.indexOf("}", at + 2);
-      if (close === -1) return undefined;
-      const name = command.slice(at + 2, close);
-      if (/^[A-Za-z_][A-Za-z0-9_]*$/.test(name)) current.parts.push({ name });
-      else current.unknown = true;
-      current.end = close + 1;
-      return close;
-    }
-    const name = /^[A-Za-z_][A-Za-z0-9_]*/.exec(command.slice(at + 1))?.[0];
-    if (name !== undefined) {
-      current.parts.push({ name });
-      current.end = at + 1 + name.length;
-      return at + name.length;
-    }
-    if (/^[0-9@*#?$!-]$/.test(next) || (!quoted && (next === "'" || next === '"'))) {
-      // A positional or special parameter, or $'…' and $"…": nothing this reader knows.
-      current.unknown = true;
-      current.end = at + 1;
-      return at;
-    }
-    literal(at, "$", at + 1);
-    return at;
-  };
-  const doubleQuoted = (at: number): number | undefined => {
-    open(at);
-    for (let k = at + 1; k < n; k++) {
-      const ch = command[k];
-      if (ch === '"') {
-        (word as CallWord).end = k + 1;
-        return k;
-      }
-      if (ch === "\\") {
-        const next = command[k + 1];
-        if (next === "\n") k++;
-        else if (next !== undefined && '$`"\\'.includes(next)) literal(k, next, ++k + 1);
-        else literal(k, "\\", k + 1);
-      } else if (ch === "$") {
-        const to = dollar(k, true);
-        if (to === undefined) return undefined;
-        k = to;
-      } else if (ch === "`") {
-        const close = backtick(k);
-        if (close === undefined) return undefined;
-        substitution(k, close);
-        k = close;
-      } else literal(k, ch, k + 1);
-    }
-    return undefined;
-  };
-  const redirect = (at: number): number | undefined => {
-    if (!endWord() || target !== undefined) return undefined;
-    const match = /^(\d*)(&>>|&>|>>|>\||>&|<<<|<<-|<<|<&|<>|>|<)/.exec(command.slice(at, at + 24));
-    if (match === null) return undefined;
-    const [all, fd = "", op = ""] = match;
-    let to = at + all.length;
-    // `<(…)` and `>(…)` are process substitutions.
-    if (command[to] === "(") return undefined;
-    target = { op, fd, start: at, end: to };
-    while (command[to] === " " || command[to] === "\t") to++;
-    return to - 1;
-  };
-  /** Past the bodies of the here-documents opened on the line the newline at `newline` ends. */
-  const bodies = (newline: number): number | undefined => {
-    let at = newline + 1;
-    for (const { redirect: opened, delimiter, stripTabs } of heredocs.splice(0)) {
-      const begin = at - 1;
-      for (;;) {
-        const nl = command.indexOf("\n", at);
-        const lineEnd = nl === -1 ? n : nl;
-        const line = command.slice(at, lineEnd);
-        if ((stripTabs ? line.replace(/^\t+/, "") : line) === delimiter) {
-          opened.heredoc = {
-            quoted: /['"]|\\(?!\n)/.test(opened.target?.raw ?? ""),
-            body: [begin, lineEnd],
-          };
-          at = lineEnd + 1;
-          break;
-        }
-        if (nl === -1) return undefined;
-        at = nl + 1;
-      }
-    }
-    return at - 1;
-  };
-  for (let i = 0; i < n; i++) {
-    const c = command[i];
-    const next = command[i + 1];
-    if (c === "'") {
-      const close = command.indexOf("'", i + 1);
-      if (close === -1) return undefined;
-      open(i);
-      literal(i, command.slice(i + 1, close), close + 1);
-      i = close;
-    } else if (c === '"') {
-      const close = doubleQuoted(i);
-      if (close === undefined) return undefined;
-      i = close;
-    } else if (c === "\\") {
-      if (next === undefined) return undefined;
-      if (next !== "\n") literal(i, next, i + 2);
-      i++;
-    } else if (c === " " || c === "\t") {
-      if (!endWord()) return undefined;
-    } else if (c === "#" && word === undefined) {
-      const nl = command.indexOf("\n", i);
-      i = (nl === -1 ? n : nl) - 1;
-    } else if (c === "\n") {
-      if (!endStatement("\n")) return undefined;
-      if (heredocs.length > 0) {
-        const to = bodies(i);
-        if (to === undefined) return undefined;
-        i = to;
-      }
-    } else if (c === ";") {
-      if (next === ";" || !endStatement(";")) return undefined;
-    } else if (c === "&" && next === "&") {
-      if (!endStatement("&&")) return undefined;
-      i++;
-    } else if (c === "|" && next === "|") {
-      if (!endStatement("||")) return undefined;
-      i++;
-    } else if (c === "|") {
-      if (next === "&" || !endWord() || target !== undefined || stage.start === -1)
-        return undefined;
-      stages.push(stage);
-      stage = blank();
-      afterPipe = true;
-    } else if (
-      c === "<" ||
-      c === ">" ||
-      (c === "&" && next === ">") ||
-      (word === undefined && /^\d+[<>]/.test(command.slice(i, i + 12)))
-    ) {
-      const to = redirect(i);
-      if (to === undefined) return undefined;
-      i = to;
-    } else if (c === "&" || c === "(" || c === ")") {
-      return undefined;
-    } else if (c === "$") {
-      const to = dollar(i, false);
-      if (to === undefined) return undefined;
-      i = to;
-    } else if (c === "`") {
-      const close = backtick(i);
-      if (close === undefined) return undefined;
-      substitution(i, close);
-      i = close;
-    } else {
-      const current = open(i);
-      if (c === "~" && current.start === i) current.tilde = true;
-      literal(i, c, i + 1);
-      // A glob is `*`, `?` or a bracket expression `[…]` closed in the same word; a lone `[`, the
-      // test command, is literal. A brace is read as unknown.
-      if (c === "*" || c === "?" || c === "{" || c === "}" || (c === "]" && current.bracket))
-        current.unknown = true;
-      if (c === "[") current.bracket = true;
-    }
-  }
-  if (!endWord() || target !== undefined || heredocs.length > 0) return undefined;
-  if (stage.start !== -1) stages.push(stage);
-  else if (afterPipe) return undefined;
-  if (stages.length > 0)
-    statements.push({
-      stages,
-      sep: "",
-      start: stages[0].start,
-      end: stages[stages.length - 1].end,
-    });
-  else if (["&&", "||"].includes(statements.at(-1)?.sep ?? "")) return undefined;
-  return statements;
-}
-
-/** The programs a statement before the write may run: each reads and prints, and writes no file. */
-const READ_ONLY: Record<string, true> = {
-  wc: true,
-  cat: true,
-  ls: true,
-  test: true,
-  "[": true,
-  stat: true,
-  grep: true,
-  head: true,
-  tail: true,
-  cut: true,
-  sleep: true,
-  date: true,
-  echo: true,
-  printf: true,
-  true: true,
-};
-const DURATION = /^\d+(\.\d+)?[smhd]?$/;
-
-/**
- * The composite reader: a call holding one scoped write, read when everything around it can only
- * change what the dry run also runs, or nothing the write sends. Read around the write:
- *   - `\`-newline continuations, quotes, comments and quoted here-documents;
- *   - on the write: `2>&1`, `>`/`>>`/`2>` to a literal path (`/dev/null` too), `< <literal path>`,
- *     one quoted here-document, literal `NAME=value` prefixes and one `timeout <duration>`;
- *   - later stages of the write's pipeline that pass the same read-only rule (`READ_ONLY`), so
- *     they only read the write's output and write no file;
- *   - before it, joined by `&&`, `;` or a newline: `cd <literal path>`, `export NAME=literal …`
- *     or `NAME=literal …` (a value may start with `~/`), which the dry run keeps; and, joined by
- *     `;` or a newline alone, a pipeline of read-only programs (`READ_ONLY`) with no redirect but
- *     to /dev/null, `2>&1` or from a literal path, and a `dispatch` call that is no reviewed
- *     write, with no redirect to a file, which it drops;
- *   - after it, any statement that holds no reviewed write;
- *   - `$NAME` or `${NAME}` in the write's words when an earlier kept statement assigns NAME a
- *     literal. A prefix assignment does not count: bash expands the words before it applies.
- * The dry run keeps the `cd`, `export` and assignment statements and the write's prefixes and
- * stdin, and drops the rest. A dropped statement may not decide what runs, so it is joined to its
- * neighbours by `;` or a newline alone, never `&&` or `||`. Anything else is no read, and the gate
- * refuses the call as unreadable.
- */
-function compositeScoped(command: string): ScopedCommand | undefined {
-  const statements = readCall(command);
-  if (statements === undefined) return undefined;
-  // An unquoted here-document's body expands, and its expansions may run anything.
-  for (const statement of statements)
-    for (const stage of statement.stages)
-      if (stage.redirects.some((r) => r.heredoc !== undefined && !r.heredoc.quoted))
-        return undefined;
-  // Variables the call sets to a literal before the write. Once the write is found, a later
-  // statement may set any variable (`read`, `N=$(…)`, `eval`), so the reader knows none there.
-  let vars = new Map<string, string>();
-  const wordValue = (word: CallWord | undefined): string | undefined => {
-    if (word === undefined || word.unknown) return undefined;
-    let out = "";
-    for (const part of word.parts) {
-      if (typeof part === "string") out += part;
-      else {
-        const known = vars.get(part.name);
-        if (known === undefined) return undefined;
-        out += known;
-      }
-    }
-    return out;
-  };
-  const isLiteral = (word: CallWord | undefined): word is CallWord =>
-    word !== undefined && !word.unknown && word.parts.every((part) => typeof part === "string");
-  const asWords = (list: readonly CallWord[]): Word[] | undefined => {
-    const out: Word[] = [];
-    for (const word of list) {
-      const value = wordValue(word);
-      if (value === undefined) return undefined;
-      out.push({ raw: word.raw, value, start: word.start, end: word.end });
-    }
-    return out;
-  };
-  const targetOf = (r: CallRedirect) => (isLiteral(r.target) ? wordValue(r.target) : undefined);
-  const quiet = (r: CallRedirect) => {
-    const to = targetOf(r);
-    return (
-      ((((r.op === ">" || r.op === ">>") && ["", "1", "2"].includes(r.fd)) || r.op === "&>") &&
-        to === "/dev/null") ||
-      (r.op === ">&" && r.fd === "2" && to === "1")
-    );
-  };
-  const input = (r: CallRedirect) =>
-    r.op === "<" && (r.fd === "" || r.fd === "0") && targetOf(r) !== undefined;
-  /** Where a stage's program is, past literal assignments and one `timeout <duration>`. */
-  const commandAt = (stage: CallStage): number | undefined => {
-    let at = 0;
-    while (at < stage.words.length && ASSIGNMENT.test(stage.words[at].raw)) {
-      if (!isLiteral(stage.words[at])) return undefined;
-      at++;
-    }
-    if (wordValue(stage.words[at]) === "timeout") {
-      const duration = wordValue(stage.words[at + 1]);
-      if (duration === undefined || !DURATION.test(duration)) return undefined;
-      at += 2;
-    }
-    return at;
-  };
-  /** A stage's part in the call: the write, a `dispatch` call that sends nothing reviewed, another
-   * program, or `unread` when it may be a write this reader cannot tell: a program, or an
-   * assignment before it, that is an expansion no earlier literal assignment proves. */
-  const classify = (stage: CallStage): "write" | "dispatch" | "other" | "unread" => {
-    const at = commandAt(stage);
-    if (at === undefined) return "unread";
-    const [program, name, ...flags] = stage.words.slice(at);
-    if (program === undefined) return "other";
-    const programValue = wordValue(program);
-    if (programValue === undefined) return "unread";
-    if (programValue.split("/").at(-1) !== "dispatch") return "other";
-    if (name === undefined) return "dispatch";
-    const nameValue = wordValue(name);
-    const scoped = (SCOPED_COMMANDS as readonly string[]).includes(nameValue ?? "");
-    const words = asWords(flags);
-    if (nameValue === undefined || (scoped && (words === undefined || stage.substitution)))
-      return "unread";
-    return words !== undefined && reviewedWrite(nameValue, words) ? "write" : "dispatch";
-  };
-
-  /** `printf -vNAME` is a variable assignment, including the attached form bash accepts. */
-  const printfWrites = (words: readonly Word[]) => {
-    let options = true;
-    for (const word of words.slice(1)) {
-      if (options && word.value === "--") {
-        options = false;
-        continue;
-      }
-      if (options && /^-[^-]*v/.test(word.value)) return true;
-    }
-    return false;
-  };
-  /** A later pipeline stage or dropped statement that can only read its inputs and print. */
-  const readOnlyStage = (stage: CallStage): boolean => {
-    const words = asWords(stage.words);
-    const at = commandAt(stage);
-    const program = at === undefined ? undefined : words?.[at]?.value;
-    return (
-      words !== undefined &&
-      program !== undefined &&
-      !stage.substitution &&
-      Object.hasOwn(READ_ONLY, program) &&
-      !(program === "printf" && printfWrites(words.slice(at))) &&
-      stage.redirects.every((redirect) => quiet(redirect) || input(redirect))
-    );
-  };
-  const setup: CallStatement[] = [];
-  const cds = new Set<CallStatement>();
-  let write: CallStatement | undefined;
-  let writeVars = vars;
-  for (const [index, statement] of statements.entries()) {
-    const kinds = statement.stages.map(classify);
-    if (kinds.includes("unread")) return undefined;
-    if (write !== undefined) {
-      // A second write is still a second post, even though it runs after the first one, and so is
-      // one behind a prefix (`env dispatch comment …`), which only the command scan finds.
-      if (
-        kinds.includes("write") ||
-        unreadableDispatchWrite(command.slice(statement.start, statement.end)) !== undefined
-      )
-        return undefined;
-      continue;
-    }
-    if (kinds[0] === "write") {
-      // Every pipeline stage shares the state that classified the write and must be read-only.
-      if (
-        kinds.slice(1).some((kind) => kind !== "other") ||
-        statement.stages.slice(1).some((later) => !readOnlyStage(later))
-      )
-        return undefined;
-      write = statement;
-      writeVars = vars;
-      vars = new Map();
-      continue;
-    }
-    if (kinds.includes("write") || statement.sep === "||") return undefined;
-    const [only] = statement.stages;
-    if (statement.stages.length === 1 && only.redirects.length === 0 && !only.substitution) {
-      const words = only.words;
-      const first = isLiteral(words[0]) ? wordValue(words[0]) : undefined;
-      if (first === "cd") {
-        const dir = isLiteral(words[1]) && !words[1].tilde ? wordValue(words[1]) : undefined;
-        if (words.length !== 2 || dir === undefined || dir === "" || dir.startsWith("-"))
-          return undefined;
-        setup.push(statement);
-        cds.add(statement);
-        continue;
-      }
-      const assignments = first === "export" ? words.slice(1) : words;
-      if (
-        assignments.length > 0 &&
-        assignments.every((w) => ASSIGNMENT.test(w.raw) && isLiteral(w))
-      ) {
-        for (const assignment of assignments) {
-          const text = wordValue(assignment) ?? "";
-          vars.set(text.slice(0, text.indexOf("=")), text.slice(text.indexOf("=") + 1));
-        }
-        setup.push(statement);
-        continue;
-      }
-    }
-    // The dry run drops this statement, so it may not decide whether a kept statement or the write
-    // runs: it is joined to neither the statement before it nor the one after it by `&&`.
-    if (statement.sep === "&&" || statements[index - 1]?.sep === "&&") return undefined;
-    // A statement the dry run drops may only read its inputs and print.
-    for (const [at, stage] of statement.stages.entries()) {
-      if (kinds[at] === "dispatch" && stage.redirects.every(quiet)) continue;
-      if (!readOnlyStage(stage)) return undefined;
-    }
-  }
-  if (write === undefined) return undefined;
-  vars = writeVars;
-  const stage = write.stages[0];
-  const at = commandAt(stage) ?? 0;
-  const name = stage.words[at + 1];
-  const flagWords = stage.words.slice(at + 2);
-  const flags = asWords(flagWords) ?? [];
-  const nameValue = wordValue(name) ?? "";
-  // The write's redirects: output ones the dry run drops (its stdout must be the CLI's JSON), one
-  // stdin it keeps, and nothing else.
-  const dropped: CallRedirect[] = [];
-  let stdin = 0;
-  for (const r of stage.redirects) {
-    const to = targetOf(r);
-    const output =
-      (((r.op === ">" || r.op === ">>" || r.op === ">|") && ["", "1", "2"].includes(r.fd)) ||
-        r.op === "&>" ||
-        r.op === "&>>") &&
-      to !== undefined;
-    const dup = r.op === ">&" && ["", "1", "2"].includes(r.fd) && (to === "1" || to === "2");
-    if (output || dup) dropped.push(r);
-    else if (input(r) || ((r.op === "<<" || r.op === "<<-") && r.heredoc?.quoted)) stdin++;
-    else return undefined;
-  }
-  if (stdin > 1) return undefined;
-  const { rebuttal, removed } = splitRebuttal(flags);
-  const tokens: Array<{ start: number; end: number }> = [...stage.words, ...stage.redirects].sort(
-    (a, b) => a.start - b.start
-  );
-  /** A token's text with the blanks before it. */
-  const cut = (token: { start: number; end: number }): [number, number] => [
-    tokens[tokens.indexOf(token) - 1]?.end ?? stage.start,
-    token.end,
-  ];
-  const rebuttalCuts = [...removed].map((index) => cut(flagWords[index]));
-  const edit = (
-    from: number,
-    to: number,
-    cuts: Array<[number, number]>,
-    insert?: { at: number; text: string }
-  ): string => {
-    let out = "";
-    let at = from;
-    let pending = insert;
-    for (const [a, b] of [...cuts].sort((x, y) => x[0] - y[0])) {
-      if (pending !== undefined && pending.at <= a) {
-        out += command.slice(at, pending.at) + pending.text;
-        at = pending.at;
-        pending = undefined;
-      }
-      out += command.slice(at, Math.max(at, a));
-      at = Math.max(at, b);
-    }
-    if (pending !== undefined) {
-      out += command.slice(at, pending.at) + pending.text;
-      at = pending.at;
-    }
-    return out + command.slice(at, to);
-  };
-  const separator = (sep: string) => (sep === "&&" ? " && " : sep === ";" ? "; " : "\n");
-  const kept = (statement: CallStatement) =>
-    `${command.slice(statement.start, statement.end)}${cds.has(statement) ? " >/dev/null" : ""}${separator(statement.sep)}`;
-  const heredoc = stage.redirects.find((r) => r.heredoc !== undefined)?.heredoc;
-  const upload = nameValue === UPLOAD_COMMAND;
-  const keptFlags = flags.filter((_, index) => !removed.has(index));
-  const files = fileInputs(keptFlags, upload);
-  const stdinRedirect = stage.redirects.find((redirect) => input(redirect));
-  let unsafeFile = files.unsafeFile;
-  const inputs = [...files.inputs];
-  if (files.stdinFileFlag !== undefined && unsafeFile === undefined) {
-    const source = stdinRedirect === undefined ? undefined : targetOf(stdinRedirect);
-    if (
-      stdinRedirect?.target === undefined ||
-      !isLiteral(stdinRedirect.target) ||
-      source === undefined ||
-      source === "-"
-    ) {
-      const quotedHereDocument = stage.redirects.some(
-        (redirect) => redirect.heredoc?.quoted === true
-      );
-      if (!quotedHereDocument)
-        unsafeFile = {
-          flag: files.stdinFileFlag,
-          path: "-",
-          reason:
-            "reads standard input that is not a quoted here-document or a literal file redirect",
-        };
-    } else {
-      inputs.push({
-        flag: files.stdinFileFlag,
-        source,
-        span: [stdinRedirect.target.start, stdinRedirect.target.end],
-        equals: false,
-        expandsHome: stdinRedirect.target.raw.startsWith("~"),
-      });
-    }
-  }
-  const snapshotInputs = inputs.map((file) => {
-    let removedBytes = 0;
-    for (const [from, to] of rebuttalCuts) if (to <= file.span[0]) removedBytes += to - from;
-    return {
-      ...file,
-      span: [file.span[0] - removedBytes, file.span[1] - removedBytes] as [number, number],
-    };
-  });
-  return {
-    tool: `dispatch_${nameValue.replaceAll("-", "_")}`,
-    label: `dispatch ${nameValue}`,
-    command: edit(0, command.length, rebuttalCuts),
-    dryRunScript: `${setup.map(kept).join("")}${edit(
-      stage.start,
-      stage.end,
-      [...rebuttalCuts, ...dropped.map(cut)],
-      { at: name.end, text: " --dry-run" }
-    )}${heredoc === undefined ? "" : command.slice(heredoc.body[0], heredoc.body[1])}`,
-    ...(rebuttal === undefined ? {} : { rebuttal }),
-    readsFile: snapshotInputs.length > 0,
-    fileInputs: snapshotInputs,
-    ...(unsafeFile === undefined ? {} : { unsafeFile }),
-    ...(upload ? { upload: true as const } : {}),
-    ...(cds.size === 0 ? {} : { changesDirectory: true as const }),
-    dirScript: `${setup.map(kept).join("")}pwd -P`,
   };
 }
 
@@ -1825,38 +1115,55 @@ function commandWords(command: string): Word[][] {
   return segments;
 }
 
-/** A scoped `dispatch` write the gate cannot review: the tool it calls, the command's name and,
- * when the word that runs it is not literal, whether that word calls `dispatch` by name or path
- * and the characters in it AskGate does not take as literal (only its expansions when it does not). */
+/** A scoped `dispatch` write the gate cannot review: the tool it calls, the command's name and
+ * which word AskGate could not read, with the characters in it AskGate does not take as literal. */
 export interface UnreadableCommand {
   tool: string;
   label: string;
+  /** The word that runs the write is not literal: whether it calls `dispatch` by name or by path. */
   program?: { namesDispatch: boolean; unread: string[] };
+  /** The word after `dispatch` is not literal, so the subcommand it names is unknown. */
+  subcommand?: { unread: string[] };
   /** A file the call would make Dispatch read cannot be captured safely. */
   file?: { flag: string; path: string; reason: string };
 }
 
 /**
- * A scoped `dispatch` write anywhere in a `bash` command, found at a command's position (after any
- * assignments and prefixes such as `env -u HOME --` or `timeout -s KILL 30`, each prefix's options
- * and its `--` read as its own parser reads them: `commandStart`), or a scoped subcommand run by a
- * program an expansion names (`$D comment …`, `$(command -v dispatch) ask …`), which may be
- * `dispatch`. One carrying `--dry-run` or `--help`, or a `dispatch issue` without
- * `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
+ * A scoped `dispatch` write in a `bash` command AskGate does not read: a write at a command's
+ * position (after any assignments and prefixes such as `env -u HOME --` or `timeout -s KILL 30`,
+ * each prefix's options and its `--` read as its own parser reads them: `commandStart`), a scoped
+ * subcommand run by a program an expansion names (`$D comment …`, `$(command -v dispatch) ask …`),
+ * which may be `dispatch`, or a `dispatch` whose own subcommand an expansion names (`dispatch
+ * $SUB …`), which may be a write. One carrying `--dry-run` or `--help`, or a `dispatch issue`
+ * without `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
  * `scopedCommand` could not read.
  */
 export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
   // A write names `dispatch`, or reaches it through an expansion.
   if (typeof command !== "string" || !/dispatch|[$`]/.test(command)) return undefined;
+  let unknownSubcommand: UnreadableCommand | undefined;
   for (const segment of commandWords(command)) {
     const start = commandStart(segment);
     if (start === undefined) continue;
     const [program, name, ...flags] = start.words.slice(start.at);
-    if (program === undefined || name === undefined || !reviewedWrite(name.value, flags)) continue;
+    if (program === undefined || name === undefined) continue;
     const named = program.value.split("/").at(-1) === "dispatch";
     const unread = [...new Set(scanWord(program.raw, 0).unread)];
     const expansions = unread.filter((char) => EXPANSIONS.includes(char));
     if (!named && expansions.length === 0) continue;
+    if (!reviewedWrite(name.value, flags)) {
+      // `dispatch $SUB …` may be any subcommand, a write among them.
+      const subcommand = [...new Set(scanWord(name.raw, 0).unread)].filter((char) =>
+        EXPANSIONS.includes(char)
+      );
+      if (named && subcommand.length > 0)
+        unknownSubcommand ??= {
+          tool: "dispatch_unknown",
+          label: "dispatch",
+          subcommand: { unread: subcommand },
+        };
+      continue;
+    }
     const found = {
       tool: `dispatch_${name.value.replaceAll("-", "_")}`,
       label: `dispatch ${name.value}`,
@@ -1865,7 +1172,7 @@ export function unreadableDispatchWrite(command: unknown): UnreadableCommand | u
       ? found
       : { ...found, program: { namesDispatch: named, unread: named ? unread : expansions } };
   }
-  return undefined;
+  return unknownSubcommand;
 }
 
 /** Runs `script` under bash in a process group of its own, which is killed at the limit or on the signal. */
@@ -2269,19 +1576,30 @@ function resendFlags(flag: string): { stdin: string; regular: string } {
     return { stdin: "--content-file", regular: "`--path` or `--content-file`" };
   return { stdin: flag, regular: `\`${flag}\`` };
 }
+/** The one form AskGate reads, as the refusal states it to the agent. */
+const LITERAL_GRAMMAR =
+  "AskGate reads one form only: one `dispatch` call alone, with at most one `cd <path> &&` before it, one `2>&1` after it, and one here-document opened with a quoted delimiter (`<<'EOF'`). Every word is literal: no `$`, backtick, `~`, `*`, `?`, `[`, `{`, `}` or backslash. Nothing else is in the call: no second command, no pipe, no `;`, `&&`, `||` or `&`, no assignment and no other redirect.";
 /** The refusal for a scoped `dispatch` write inside a command the gate cannot read; nothing in the call ran. */
-function renderUnreadable({ label, program, file }: UnreadableCommand): string {
+function renderUnreadable({ label, program, subcommand, file }: UnreadableCommand): string {
   if (file !== undefined) {
     const { stdin, regular } = resendFlags(file.flag);
     return `AskGate did not run this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. Nothing in the call ran.`;
   }
+  const opening =
+    subcommand === undefined
+      ? `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and in this call AskGate cannot know the text it would send.`
+      : `AskGate did not run this call: the word after \`dispatch\` holds ${characters(subcommand.unread)}, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`;
   const why =
     program === undefined
       ? ""
       : program.namesDispatch
         ? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
         : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`;
-  return `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and in this call AskGate cannot know the text it would send. AskGate reads a \`dispatch\` command called by name or by a literal path, with a \`\\\` line continuation, output redirects and later pipe stages such as \`| head\`, literal assignments and \`timeout\` before it, \`cd\`, \`export\`, read-only commands and \`dispatch\` calls that write nothing before it, any commands after it, a variable set to a literal earlier in the call, and a literal file as its standard input. It does not read a call that runs another program before the write (a script, \`sed -i\`, \`cat > f\`), a command substitution, two writes, or an unquoted here-document.${why} Nothing in the call ran. Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling `dispatch` by name"}: no pipe, no \`;\`, \`||\` or second \`&&\`, no other redirect and no other command in the same call. Text it reads from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
+  const resend =
+    subcommand === undefined
+      ? ` Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling \`dispatch\` by name"}.`
+      : " Send the `dispatch` command again with its subcommand written out.";
+  return `${opening} ${LITERAL_GRAMMAR}${why} Nothing in the call ran.${resend} Text it posts from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
 }
 
 /**
@@ -2801,10 +2119,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
 
       let executionCommand = scoped.command;
       if (scoped.fileInputs.length > 0) {
-        const relativeFile = scoped.fileInputs.find((file) => {
-          if (file.expandsHome) return false;
-          return !path.isAbsolute(file.source);
-        });
+        const relativeFile = scoped.fileInputs.find((file) => !path.isAbsolute(file.source));
         let base = cwd;
         if (relativeFile !== undefined) {
           try {
@@ -2864,11 +2179,6 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           for (const inputFile of scoped.fileInputs) {
             current = inputFile;
             source = inputFile.source;
-            if (inputFile.expandsHome) {
-              if (!/^~(?:\/|$)/.test(source))
-                throw new Error("uses a home directory AskGate cannot resolve");
-              source = source.replace(/^~/, deps.home);
-            }
             const resolved = path.isAbsolute(source) ? source : path.resolve(base, source);
             snapshot.files.push({
               input: inputFile,
