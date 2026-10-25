@@ -148,7 +148,7 @@ func TestTheBootCensusRefusesEverySandboxOfTheTreeVolumeLayout(t *testing.T) {
 			`owns a volume claim template named "tree", not "issue"`,
 		},
 		"a controller Sandbox owning no volume": {
-			withoutVolume(sandboxRunning(t, "legion-legion-controller", controller, string(claim.RoleController))), "owns no volume",
+			sandboxRunning(t, "legion-legion-controller", controller, string(claim.RoleController)), "owns no volume",
 		},
 	} {
 		t.Run(label, func(t *testing.T) {
@@ -177,8 +177,8 @@ func TestTheBootCensusPassesAnIssueSandboxOfEitherDiskShape(t *testing.T) {
 	g := newRig(t, nil)
 	g.spawn(controllerSpec(t))
 	g.spawn(rootSpec(t))
-	before := sandboxRunning(t, "legion-legion-legion-209", claimLabels(claim.RoleImplementer), workflowContainers()...)
-	now := withoutVolume(sandboxRunning(t, "legion-legion-legion-210", claimLabels(claim.RoleImplementer), workflowContainers()...))
+	before := withSupersededDisk(t, sandboxRunning(t, "legion-legion-legion-209", claimLabels(claim.RoleImplementer), workflowContainers()...))
+	now := sandboxRunning(t, "legion-legion-legion-210", claimLabels(claim.RoleImplementer), workflowContainers()...)
 	for _, object := range []*unstructured.Unstructured{before, now} {
 		if err := g.dyn.Tracker().Create(sandboxGVR, object, testNamespace); err != nil {
 			t.Fatal(err)
@@ -216,10 +216,10 @@ func TestTheBootCensusNamesEveryTreeVolumeLayoutSandboxInOneRefusal(t *testing.T
 		"legion-legion-legion-301":     "runs containers [worker], not exactly the launchers its labels name",
 	}
 	for _, object := range []*unstructured.Unstructured{
-		withoutVolume(sandboxRunning(t, "legion-legion-legion-209", claimLabels(claim.RoleImplementer), workflowContainers()...)),
-		withoutVolume(sandboxRunning(t, "legion-legion-controller-old", map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}, string(claim.RoleController))),
+		sandboxRunning(t, "legion-legion-legion-209", claimLabels(claim.RoleImplementer), workflowContainers()...),
+		sandboxRunning(t, "legion-legion-controller-old", map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}, string(claim.RoleController)),
 		withTreeVolume(t, sandboxRunning(t, "legion-legion-legion-300", claimLabels(claim.RoleArchitect), workflowContainers()...)),
-		withoutVolume(sandboxRunning(t, "legion-legion-legion-301", claimLabels(claim.RoleTester), "worker")),
+		sandboxRunning(t, "legion-legion-legion-301", claimLabels(claim.RoleTester), "worker"),
 	} {
 		if err := g.dyn.Tracker().Create(sandboxGVR, object, testNamespace); err != nil {
 			t.Fatal(err)
@@ -262,18 +262,7 @@ func workflowContainers() []string {
 // is named `tree`, the template that layout gave the tree root's Sandbox and the controller's.
 func withTreeVolume(t *testing.T, u *unstructured.Unstructured) *unstructured.Unstructured {
 	t.Helper()
-	templates, found, err := unstructured.NestedSlice(u.Object, "spec", "volumeClaimTemplates")
-	if err != nil || !found || len(templates) != 1 {
-		t.Fatalf("test setup: %s carries templates %v (%v), want the one issue template to rename", u.GetName(), templates, err)
-	}
-	template := templates[0].(map[string]any)
-	if err := unstructured.SetNestedField(template, "tree", "metadata", "name"); err != nil {
-		t.Fatal(err)
-	}
-	if err := unstructured.SetNestedSlice(u.Object, []any{template}, "spec", "volumeClaimTemplates"); err != nil {
-		t.Fatal(err)
-	}
-	return u
+	return withClaimTemplate(t, u, "tree")
 }
 
 // sandboxRunning is a Sandbox as the API would hold it, whose pod runs containers by these names.

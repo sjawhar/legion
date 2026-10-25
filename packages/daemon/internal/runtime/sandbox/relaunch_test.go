@@ -175,7 +175,7 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)
 	t.Run("suspended", func(t *testing.T) {
-		g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels))})
+		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels)})
 		loc := g.spawn(workerSpec(t))
 		expectSteps(t, steps(t, g.writes(), name), "create secret", "run", "record addresses")
 		if g.sandbox(name).UID != "uid-sandbox-kept" || loc.Sandbox.PodUID != string(g.pod(name).UID) {
@@ -184,7 +184,7 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 	})
 	t.Run("running a pod no launcher of this runtime is bound to", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{
-			withoutVolume(sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels)),
+			sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels),
 			podObject(name, "uid-pod-old", "uid-sandbox-kept", labels, runningStatus()),
 		})
 		g.suspendDelay = 50 * time.Millisecond
@@ -242,7 +242,7 @@ func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 		return spec
 	}
 	t.Run("suspended by its old tree", func(t *testing.T) {
-		g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree))})
+		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree)})
 		loc := g.spawn(orphanSpec(t))
 		if deleted := slices.ContainsFunc(g.writes(), func(a action) bool { return a.resource == "sandboxes" && a.verb == "delete" }); deleted {
 			t.Fatalf("the orphan root's launch deleted a Sandbox: %v", g.writes())
@@ -267,7 +267,7 @@ func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 		podDisk(t, pod.Spec)
 	})
 	t.Run("left running by its old tree, none of whose roles runs", func(t *testing.T) {
-		g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree))})
+		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
 		// A claim of the orphan root's own tree runs nothing the relabel would end: only a claim of
 		// another tree holds the Sandbox.
 		g.store.running["LEGION-209"] = runningClaim{tree: "LEGION-209", claim: "legion-legion-legion-209-planner:launching"}
@@ -297,7 +297,7 @@ func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 		podDisk(t, pod.Spec)
 	})
 	t.Run("still running its old tree's roles", func(t *testing.T) {
-		g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree))})
+		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
 		g.store.running["LEGION-209"] = runningClaim{tree: testTree, claim: "legion-legion-legion-209-implementer:working"}
 		g.launcher(orphan)
 		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "still runs roles (legion-legion-legion-209-implementer:working)") {
@@ -385,7 +385,7 @@ func supersededIssue(t *testing.T, options ...rigOption) *rig {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)
 	g := newRig(t, []k8sruntime.Object{
-		sandboxObject(t, name, "uid-sandbox-superseded", modeRunning, labels),
+		withSupersededDisk(t, sandboxObject(t, name, "uid-sandbox-superseded", modeRunning, labels)),
 		podObject(name, "uid-pod-old", "uid-sandbox-superseded", labels, runningStatus()),
 	}, options...)
 	g.suspendDelay = 50 * time.Millisecond
@@ -520,7 +520,7 @@ func TestAConfirmingReadTheReplacementsDeleteOvertakesIsUncertain(t *testing.T) 
 	name := SandboxName(workerToken)
 	sibling := sandboxLocator(otherToken, "uid-pod-old")
 	g := newRig(t, []k8sruntime.Object{
-		sandboxObject(t, name, "uid-sandbox-superseded", modeSuspended, claimLabels(claim.RoleTester)),
+		withSupersededDisk(t, sandboxObject(t, name, "uid-sandbox-superseded", modeSuspended, claimLabels(claim.RoleTester))),
 	}, withoutController())
 	var armed, overtaken atomic.Bool
 	g.dyn.PrependReactor("get", "sandboxes", func(a k8stesting.Action) (bool, k8sruntime.Object, error) {
@@ -616,6 +616,9 @@ func TestTheNameAReplacementKeptForItsGapGoesOnceTheReplacementCarriesIt(t *test
 	name := SandboxName(workerToken)
 	g := supersededIssue(t)
 	loc := g.spawn(workerSpec(t))
+	if s := g.sandbox(name); s == nil || s.UID == "uid-sandbox-superseded" {
+		t.Fatal("the launch left the issue no Sandbox or kept uid-sandbox-superseded, want the replacement it created in its place")
+	}
 	if named := g.sandbox(name).Annotations[displacedAnnotation]; named != "uid-pod-old" {
 		t.Fatalf("the replacement names %q as the pod the daemon replaced, want uid-pod-old", named)
 	}
@@ -660,7 +663,7 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 		Data: map[string][]byte{provisionTokenKey: []byte("ghs_old")},
 	}
 	g := newRig(t, []k8sruntime.Object{
-		withoutVolume(sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels)),
+		sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels),
 		podObject(name, "uid-pod-dead", "uid-sandbox-kept", labels, corev1.PodStatus{
 			Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(workerContainer, 137, "Error")},
 		}),
@@ -776,7 +779,7 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 func TestASuspendedSandboxsInstallingResumeReplacesAndInstallsNothing(t *testing.T) {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)
-	g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels))})
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels)})
 	g.launcher(workerToken)
 	spec := workerSpec(t)
 	spec.ResumeSessionFile, spec.Plugins = resumeSession, &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}

@@ -896,12 +896,14 @@ func (g *rig) sent(token claim.Token) []shimwire.Frame {
 	return slices.Clone(g.commands[token])
 }
 
-// sandboxObject is a Sandbox as the API would hold it, for a test's starting state: one owning the
-// `issue` claim template, which is the controller's Sandbox as this runtime makes it and an issue's
-// as the release before the pod-owned disk made it, and carrying a resourceVersion, as every object
-// the API serves does. A test that needs the issue Sandbox this runtime now makes, or the
-// tree-volume layout's child, which owned no volume either, drops the template itself
-// (withoutVolume).
+// sandboxObject is a Sandbox as the API would hold it, for a test's starting state: an issue
+// Sandbox as this runtime makes it, owning no claim template, since its disk is its own pod's
+// generic ephemeral volume (issuePod.diskSource), and carrying a resourceVersion, as every object
+// the API serves does. The project controller's Sandbox, which this runtime does give the `issue`
+// template its working root is on, no test starts from: a test that needs one launches it
+// (controllerSpec). A test of the cutover from the release before the pod-owned disk opts into
+// that release's issue Sandbox by name (withSupersededDisk); one of the tree-volume layout's root
+// or controller, into that layout's template (withTreeVolume).
 func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]string, conditions ...metav1.Condition) *unstructured.Unstructured {
 	t.Helper()
 	s := sandbox{
@@ -910,10 +912,7 @@ func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]strin
 			Name: name, Namespace: testNamespace, UID: types.UID(uid), Labels: labels, Generation: 2, ResourceVersion: "1",
 			CreationTimestamp: metav1.NewTime(time.Date(2026, 9, 23, 11, 0, 0, 0, time.UTC)),
 		},
-		Spec: sandboxSpec{
-			OperatingMode: mode, PodTemplate: podTemplate{Metadata: podMetadata{Labels: labels}},
-			VolumeClaimTemplates: []volumeClaimTemplate{{Metadata: volumeClaimMetadata{Name: issueVolume, Labels: labels}}},
-		},
+		Spec:   sandboxSpec{OperatingMode: mode, PodTemplate: podTemplate{Metadata: podMetadata{Labels: labels}}},
 		Status: sandboxStatus{Conditions: conditions},
 	}
 	u, err := encodeSandbox(s)
@@ -923,10 +922,27 @@ func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]strin
 	return u
 }
 
-// withoutVolume is u owning no claim template: the issue Sandbox this runtime makes, whose disk its
-// own pod carries, and the tree-volume layout's child, which mounted its tree root's volume.
-func withoutVolume(u *unstructured.Unstructured) *unstructured.Unstructured {
-	unstructured.RemoveNestedField(u.Object, "spec", "volumeClaimTemplates")
+// withSupersededDisk is u as the release before the pod-owned disk made an issue's Sandbox: owning
+// the one `issue` claim template, so the claim outlived every pod of the issue. It exists for the
+// cutover alone — the boot census that names such a Sandbox rather than refusing it
+// (treeVolumeLayout) and the issue's next launch that replaces it, Sandbox and claim together
+// (supersededDisk, replaceSupersededSandbox) — and nothing else starts from this shape.
+func withSupersededDisk(t *testing.T, u *unstructured.Unstructured) *unstructured.Unstructured {
+	t.Helper()
+	return withClaimTemplate(t, u, issueVolume)
+}
+
+// withClaimTemplate is u owning one volume claim template, named name and carrying u's labels.
+func withClaimTemplate(t *testing.T, u *unstructured.Unstructured, name string) *unstructured.Unstructured {
+	t.Helper()
+	labels := map[string]any{}
+	for key, value := range u.GetLabels() {
+		labels[key] = value
+	}
+	template := map[string]any{"metadata": map[string]any{"name": name, "labels": labels}}
+	if err := unstructured.SetNestedSlice(u.Object, []any{template}, "spec", "volumeClaimTemplates"); err != nil {
+		t.Fatal(err)
+	}
 	return u
 }
 
@@ -953,6 +969,10 @@ func podObject(name, uid, ownerUID string, labels map[string]string, status core
 	}
 	return pod
 }
+
+// issueDiskName is the name Kubernetes gives the claim of an issue pod's own disk: the pod's name
+// and the volume's (issueVolume), the pod being the claim's Sandbox name (SandboxName).
+func issueDiskName(t claim.Token) string { return SandboxName(t) + "-" + issueVolume }
 
 // claimLabels are the labels an issue's shared Sandbox carries.
 func claimLabels(_ claim.Role) map[string]string {

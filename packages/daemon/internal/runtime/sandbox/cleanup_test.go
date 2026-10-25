@@ -21,14 +21,15 @@ import (
 const childIssue = "LEGION-209"
 
 // cleanupRig is a tree of two issues, LEGION-208 and its child LEGION-209, as the API holds them:
-// each issue's Sandbox and the PVC it owns, and Sandboxes the tree's cleanup must leave alone,
-// another tree's and the image probe's. Every Sandbox delete's options are recorded, and a
-// Sandbox's foreground delete removes the PVC it owns as garbage collection would.
+// each issue's Sandbox, the pod it owns and the disk that pod owns, its own generic ephemeral
+// volume (issuePod.diskSource), and Sandboxes the tree's cleanup must leave alone, another tree's
+// and the image probe's. Every Sandbox delete's options are recorded, and a Sandbox's foreground
+// delete removes its pod, and with the pod the pod's disk, as garbage collection would.
 type cleanupRig struct {
 	*rig
 	root, child, other, probe string
-	// pvcs are the volume claims the tree's issue Sandboxes own, by Sandbox name.
-	pvcs           map[string]string
+	// disks are the claims of the tree's issue pods' own disks (issueDiskName), by Sandbox name.
+	disks          map[string]string
 	sandboxDeletes map[string]metav1.DeleteOptions
 	pvcDeletes     map[string]metav1.DeleteOptions
 }
@@ -37,25 +38,29 @@ func newCleanupRig(t *testing.T) *cleanupRig {
 	t.Helper()
 	c := &cleanupRig{
 		root: SandboxName(rootToken), child: SandboxName(childToken), other: "legion-legion-legion-300", probe: "legion-probe-cleanup",
-		pvcs:           map[string]string{SandboxName(rootToken): IssueClaimName(rootToken), SandboxName(childToken): IssueClaimName(childToken)},
+		disks:          map[string]string{SandboxName(rootToken): issueDiskName(rootToken), SandboxName(childToken): issueDiskName(childToken)},
 		sandboxDeletes: map[string]metav1.DeleteOptions{}, pvcDeletes: map[string]metav1.DeleteOptions{},
 	}
-	rootSandbox := sandboxObject(t, c.root, "uid-sandbox-root", modeRunning, claimLabels(rootSpec(t).Role))
+	rootLabels := claimLabels(rootSpec(t).Role)
+	childLabels := map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: childIssue}
+	rootSandbox := sandboxObject(t, c.root, "uid-sandbox-root", modeRunning, rootLabels)
 	rootSandbox.SetResourceVersion("sandbox-rv-root")
-	childSandbox := sandboxObject(t, c.child, "uid-sandbox-child", modeRunning,
-		map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: childIssue})
+	childSandbox := sandboxObject(t, c.child, "uid-sandbox-child", modeRunning, childLabels)
 	childSandbox.SetResourceVersion("sandbox-rv-child")
 	otherSandbox := sandboxObject(t, c.other, "uid-sandbox-other", modeRunning,
 		map[string]string{labelProject: testProject, labelTree: "LEGION-300", labelIssue: "LEGION-300"})
 	probeSandbox := sandboxObject(t, c.probe, "uid-sandbox-probe", modeRunning,
 		map[string]string{labelProject: testProject, labelTree: testTree, labelIssue: testTree, labelProbe: "true"})
 	objects := []k8sruntime.Object{rootSandbox, childSandbox, otherSandbox, probeSandbox}
-	for sandbox, uid := range map[string]types.UID{c.root: "uid-sandbox-root", c.child: "uid-sandbox-child"} {
-		objects = append(objects, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
-			Name: c.pvcs[sandbox], Namespace: testNamespace, UID: "uid-pvc-" + uid, ResourceVersion: "pvc-rv-" + sandbox,
+	for sandbox, issue := range map[string]struct {
+		uid    types.UID
+		labels map[string]string
+	}{c.root: {"uid-sandbox-root", rootLabels}, c.child: {"uid-sandbox-child", childLabels}} {
+		pod := podObject(sandbox, "uid-pod-"+sandbox, string(issue.uid), issue.labels, runningStatus())
+		objects = append(objects, pod, &corev1.PersistentVolumeClaim{ObjectMeta: metav1.ObjectMeta{
+			Name: c.disks[sandbox], Namespace: testNamespace, UID: "uid-pvc-" + issue.uid, ResourceVersion: "pvc-rv-" + sandbox,
 			OwnerReferences: []metav1.OwnerReference{{
-				APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox", Name: sandbox, UID: uid,
-				Controller: new(true), BlockOwnerDeletion: new(true),
+				APIVersion: "v1", Kind: "Pod", Name: pod.Name, UID: pod.UID, Controller: new(true), BlockOwnerDeletion: new(true),
 			}},
 		}})
 	}
@@ -64,9 +69,12 @@ func newCleanupRig(t *testing.T) *cleanupRig {
 		delete := action.(k8stesting.DeleteAction)
 		options := delete.GetDeleteOptions()
 		c.sandboxDeletes[delete.GetName()] = options
-		pvc, owns := c.pvcs[delete.GetName()]
+		disk, owns := c.disks[delete.GetName()]
 		if owns && options.PropagationPolicy != nil && *options.PropagationPolicy == metav1.DeletePropagationForeground {
-			if err := c.kube.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), testNamespace, pvc); err != nil && !apierrors.IsNotFound(err) {
+			if err := c.kube.Tracker().Delete(podsGVR, testNamespace, delete.GetName()); err != nil && !apierrors.IsNotFound(err) {
+				return true, nil, err
+			}
+			if err := c.kube.Tracker().Delete(corev1.SchemeGroupVersion.WithResource("persistentvolumeclaims"), testNamespace, disk); err != nil && !apierrors.IsNotFound(err) {
 				return true, nil, err
 			}
 		}
@@ -94,9 +102,10 @@ func (c *cleanupRig) deletes() []string {
 	return out
 }
 
-// pvc is the tracker's copy of the claim Sandbox name owns, or nil once garbage collection removed it.
-func (c *cleanupRig) pvc(sandbox string) *corev1.PersistentVolumeClaim {
-	pvc, err := c.kube.CoreV1().PersistentVolumeClaims(testNamespace).Get(context.Background(), c.pvcs[sandbox], metav1.GetOptions{})
+// disk is the tracker's copy of the claim of the disk the pod of Sandbox name owns, or nil once
+// garbage collection removed it with that pod.
+func (c *cleanupRig) disk(sandbox string) *corev1.PersistentVolumeClaim {
+	pvc, err := c.kube.CoreV1().PersistentVolumeClaims(testNamespace).Get(context.Background(), c.disks[sandbox], metav1.GetOptions{})
 	if err != nil {
 		return nil
 	}
@@ -104,10 +113,10 @@ func (c *cleanupRig) pvc(sandbox string) *corev1.PersistentVolumeClaim {
 }
 
 // Every issue Sandbox of the tree is deleted with foreground propagation and awaited, so garbage
-// collection removes the PVC each one owns before the Sandbox is absent; the restricted runtime
-// makes no PVC request itself. Each delete is fenced to the listed object's UID and resourceVersion,
-// so a stale cleanup cannot delete a replacement. Another tree's Sandbox and the image probe's are
-// left alone.
+// collection removes the pod each one owns, and with it the disk that pod owns, before the
+// Sandbox is absent; the restricted runtime makes no PVC request itself. Each delete is fenced to
+// the listed object's UID and resourceVersion, so a stale cleanup cannot delete a replacement.
+// Another tree's Sandbox and the image probe's are left alone.
 func TestATreeCleanupForegroundDeletesEveryIssueSandboxAndItsVolume(t *testing.T) {
 	c := newCleanupRig(t)
 	if err := c.r.CleanupTree(c.ctx, testTree); err != nil {
@@ -130,8 +139,8 @@ func TestATreeCleanupForegroundDeletesEveryIssueSandboxAndItsVolume(t *testing.T
 		if got.PropagationPolicy == nil || *got.PropagationPolicy != metav1.DeletePropagationForeground {
 			t.Fatalf("Sandbox %s delete propagation = %v, want foreground", name, got.PropagationPolicy)
 		}
-		if c.sandbox(name) != nil || c.pvc(name) != nil {
-			t.Fatalf("after the cleanup Sandbox %s is %+v and its PVC %+v, want both gone", name, c.sandbox(name), c.pvc(name))
+		if c.sandbox(name) != nil || c.disk(name) != nil {
+			t.Fatalf("after the cleanup Sandbox %s is %+v and its pod's disk %+v, want both gone", name, c.sandbox(name), c.disk(name))
 		}
 	}
 	if len(c.pvcDeletes) != 0 {
@@ -195,8 +204,8 @@ func TestATreeCleanupListsAgainAfterAConflict(t *testing.T) {
 	}
 }
 
-// A failed delete fails the cleanup, leaving that Sandbox and its volume, and the same cleanup run
-// again finishes it: the Sandboxes already gone are not asked for again.
+// A failed delete fails the cleanup, leaving that Sandbox and its pod's disk, and the same cleanup
+// run again finishes it: the Sandboxes already gone are not asked for again.
 func TestATreeCleanupThatFailedFinishesOnItsRetry(t *testing.T) {
 	c := newCleanupRig(t)
 	failed := false
@@ -210,8 +219,8 @@ func TestATreeCleanupThatFailedFinishesOnItsRetry(t *testing.T) {
 	if err := c.r.CleanupTree(c.ctx, testTree); err == nil || !strings.Contains(err.Error(), "transient Sandbox API failure") {
 		t.Fatalf("first cleanup = %v, want its transient delete failure", err)
 	}
-	if c.sandbox(c.root) == nil || c.pvc(c.root) == nil {
-		t.Fatalf("after the failure: root %+v, its PVC %+v; want both kept", c.sandbox(c.root), c.pvc(c.root))
+	if c.sandbox(c.root) == nil || c.disk(c.root) == nil {
+		t.Fatalf("after the failure: root %+v, its pod's disk %+v; want both kept", c.sandbox(c.root), c.disk(c.root))
 	}
 	var left []string
 	for _, name := range []string{c.child, c.root} {
@@ -228,8 +237,8 @@ func TestATreeCleanupThatFailedFinishesOnItsRetry(t *testing.T) {
 		t.Fatalf("retry deletes = %v, want exactly the Sandboxes the failure left, %v", got, left)
 	}
 	for _, name := range []string{c.child, c.root} {
-		if c.sandbox(name) != nil || c.pvc(name) != nil {
-			t.Fatalf("after the retry Sandbox %s is %+v and its PVC %+v, want both gone", name, c.sandbox(name), c.pvc(name))
+		if c.sandbox(name) != nil || c.disk(name) != nil {
+			t.Fatalf("after the retry Sandbox %s is %+v and its pod's disk %+v, want both gone", name, c.sandbox(name), c.disk(name))
 		}
 	}
 }
@@ -280,8 +289,8 @@ func TestATreeCleanupDeletesACarriedIssuesSandboxToo(t *testing.T) {
 				}
 			}
 			for _, name := range []string{c.child, c.root} {
-				if c.sandbox(name) != nil || c.pvc(name) != nil {
-					t.Fatalf("after the cleanup Sandbox %s is %+v and its PVC %+v, want both gone", name, c.sandbox(name), c.pvc(name))
+				if c.sandbox(name) != nil || c.disk(name) != nil {
+					t.Fatalf("after the cleanup Sandbox %s is %+v and its pod's disk %+v, want both gone", name, c.sandbox(name), c.disk(name))
 				}
 			}
 		})

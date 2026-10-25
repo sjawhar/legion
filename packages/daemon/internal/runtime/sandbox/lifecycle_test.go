@@ -362,7 +362,7 @@ func TestAnIssueSandboxReadmittedSinceItsDeleteWasDecidedStays(t *testing.T) {
 	var loc runtime.Locator
 	store := &readmittingStore{fakeStore: newFakeStore(), tree: testTree}
 	store.readmit = func() { loc = g.spawn(spec) }
-	g = newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree))},
+	g = newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree)},
 		withOptions(func(o *Options) { o.Store = store }))
 	g.dyn.PrependReactor("patch", "sandboxes", k8stesting.ObjectReaction(&versionedTracker{ObjectTracker: generationTracker{g.dyn.Tracker()}}))
 	g.dyn.PrependReactor("delete", "sandboxes", fenceSandboxDeletes(g))

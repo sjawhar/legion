@@ -1137,10 +1137,6 @@ func (r *liveRig) exec(c *liveClaim, command ...string) (string, error) {
 	return strings.TrimSpace(out), err
 }
 
-// issueDiskName is the name Kubernetes gives the claim of an issue pod's own disk: the pod's name
-// and the volume's (issueVolume), the pod being the claim's Sandbox name (SandboxName).
-func issueDiskName(t claim.Token) string { return SandboxName(t) + "-" + issueVolume }
-
 // liveDisk is one issue pod's disk as the operator reads it. Nothing is selected by a label here:
 // the disk is a generic ephemeral volume declared in the pod's own template (issuePod.diskSource),
 // and the pinned Sandbox CRD declares that template's metadata a bare object, so the API server
