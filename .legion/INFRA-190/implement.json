@@ -2,10 +2,12 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-190",
-  "completed": "2026-10-25T19:15:00Z",
+  "completed": "2026-10-25T19:30:00Z",
+  "round": 2,
+  "roundReason": "Send-back: escape a '!' that ends text before any link, with a pmdoc round-trip test (dispatch://INFRA-49/ask/748a78ad-cc44-4102-9569-25e3733eee90). Fix 358c3181be21c011dbde02610e46387d083d5a36; evidence https://github.com/sjawhar/legion/pull/2204#issuecomment-6402092124",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2204",
   "evidence": "https://github.com/sjawhar/legion/pull/2204#issuecomment-6401596447",
-  "rebaseRecheck": "rebase re-check 3562964859069a0c762adda181fc94efe89e7123 -> 2c016c99830ae38b862237576bbd571dc8632783 (forward merge of main 4ceb3aa9c5, CHANGELOG-only conflicts): fingerprint 0ef9d407ca42... unchanged, bare gates only, plus linked-images.e2e.ts chromium+iphone 16 passed on the merged tree (https://github.com/sjawhar/legion/pull/2204#issuecomment-6401828292)",
+  "rebaseRecheck": "rebase re-check 3562964859069a0c762adda181fc94efe89e7123 -> 2c016c99830ae38b862237576bbd571dc8632783 (forward merge of main 4ceb3aa9c5, CHANGELOG-only conflicts): fingerprint 0ef9d407ca42... unchanged, bare gates only, plus linked-images.e2e.ts chromium+iphone 16 passed on the merged tree (https://github.com/sjawhar/legion/pull/2204#issuecomment-6401828292). Round 2: 358c3181be21 -> 073cd8515c22a654fa1fb974cf9023f6a6788b3c (forward merge of main 7af60a22, contracts CHANGELOG conflict only): fingerprint 645de12a231a... unchanged, bare gates only (https://github.com/sjawhar/legion/pull/2204#issuecomment-6402118309)",
   "proof": [
     {
       "criterion": "A1 (R1): the spec's reproduction prints [![x](i.png)](https://u.com) for the original and for the copy read back from the Y.Doc",
@@ -47,6 +49,15 @@
       "headSha": "3562964859069a0c762adda181fc94efe89e7123",
       "negativeControl": "the same link-removing update from the read-write (new bundle) peer is applied: /text becomes ![x](i.png)"
     }
+    ,
+    {
+      "criterion": "Round 2 send-back: a '!' ending text right before a text link is escaped, so the text link round-trips (Parse(\"wow\\\\![a](u)\\n\") renders \"wow\\\\![a](u)\\n\")",
+      "surface": "the documents API of the real Go Dispatch server built from the head, on the harness Postgres; plus pmdoc Render read back by Go and by the editor's engine",
+      "command": "bash /legion/scratch/tmp/infra190/live/bang.sh /legion/workspaces/sjawhar/legion/infra-190 head (POST /api/v1/issues/LIVE-1/artifacts content \"wow\\\\![a](u)\\n\", then GET /api/v1/artifacts/<id>/text); cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run 'TestRenderEscapesABangBeforeALinksBracket|TestTheFirstSpellingEscapesABangBeforeALinksBracket'; differential.sh --base 4b01e0122f94 over the in-repo corpora and the deployment's documents export",
+      "observed": "head: HTTP 201 and /text {\"markdown\":\"wow\\\\![a](u)\\n\"}; both pmdoc tests pass; differential every GATE 0 (no churn), linked image kept 2/2",
+      "headSha": "358c3181be21c011dbde02610e46387d083d5a36",
+      "negativeControl": "base 4b01e012 server: the same POST answers HTTP 400 INVALID_MARKDOWN ('a paragraph reads back holding \"wow\", not \"wow!a\"'); the new pmdoc test against the previous head's escape.go/render_inline.go fails with Render = \"wow![a](u)\\n\", read back by Go and the engine as text plus an image"
+    }
   ],
   "filesChanged": [
     "packages/proof-editor/src/editor/schema/linked-image.ts (new): remarkLinkedImages, linkedImageSchemas (image link/linkTitle attrs, toDOM anchor, parseDOM, link-mark skip)",
@@ -75,6 +86,6 @@
     "pmdoc linearity timing tests (TestParseAndRenderAreLinearOnDelimiterAndOpenerHeavyText, TestBareURLShapesParseAndRenderLinearly, TestUpdateIsLinearInTheBlockCount) fail in this pod at base and head alike (gVisor 10 ms clock); CI runs them."
   ],
   "discoveredComplexity": [
-    "pmdoc does not escape a '!' ending text before a text link (wow![a](u) would read as an image); this change escapes it only before a linked image. Reported to the architect, not changed here."
+    "Round 2 widened the '!' escape to every link opener, including a www link the writer refuses bare after a '!' and writes as a full link (refusesWWWAfter in render_inline.go); the base server refused such a write outright (HTTP 400), so the fix also turns a refused write into a stored one."
   ]
 }
