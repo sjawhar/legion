@@ -39,6 +39,7 @@
         "repo": "acme/widgets",
         "number": 1239,
         "head": "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+        "state": "merged",
         "reviewDecision": "approved",
         "fixAttempts": 0
       },
@@ -140,6 +141,7 @@
         "repo": "acme/widgets",
         "number": 1247,
         "head": "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
+        "state": "open",
         "checksVerdict": "pending",
         "reviewDecision": "changes_requested",
         "fixAttempts": 1
@@ -296,7 +298,7 @@
     {
       "name": "network",
       "status": "withheld",
-      "detail": "dispatch://LEGION-5: reaches beyond the pod's own network: the pod is the boundary"
+      "detail": "dispatch://LEGION-5: reaches beyond the pod's own network: the pod is the boundary, except a workload a role starts where its deployment's cluster admits it, carrying the pod label that deployment's declaration names for a workload asking to be reachable, and the Service fronting that workload"
     },
     {
       "name": "operator-setup",
@@ -511,6 +513,13 @@
         "slack_channels": [
           "C0123ABCD",
           "C0123ABCE"
+        ],
+        "deploys": [
+          {
+            "repo": "sjawhar/legion",
+            "workflow": ".github/workflows/release.yaml",
+            "step": "Apply"
+          }
         ]
       },
       "WIDGETS": {
@@ -521,7 +530,8 @@
             "\\.sql$"
           ]
         },
-        "slack_channels": []
+        "slack_channels": [],
+        "deploys": []
       }
     },
     "gates": {

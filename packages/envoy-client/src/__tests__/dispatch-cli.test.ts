@@ -176,11 +176,15 @@ const olderServerIssue = {
  *  text and another token. */
 let blocksServer = { tableRows: true, editedBetweenReads: false };
 let textReads = 0;
+/** DSP-4's event log: the issue reads `last_seq` `last`, and the events route serves seq 1 to
+ *  `served` (past `last` once events were written after the issue was read), each a message, by
+ *  `after` and `limit` as Dispatch pages them. `queries` records each events request's query. */
+let eventLog = { last: 40, served: 40, queries: [] as string[] };
 
 const server = Bun.serve({
   port: 0,
   async fetch(request) {
-    const { pathname } = new URL(request.url);
+    const { pathname, search, searchParams } = new URL(request.url);
     const text = await request.text();
     const body = text === "" ? undefined : JSON.parse(text);
     requests.push({ method: request.method, path: pathname, body });
@@ -227,7 +231,41 @@ const server = Bun.serve({
     if (pathname === "/api/v1/issues/DSP-3/events") {
       return Response.json([]);
     }
-    if (pathname === "/api/v1/issues/DSP-3/references" || pathname === "/api/v1/references") {
+    if (pathname === "/api/v1/issues/DSP-4" && request.method === "GET") {
+      return Response.json({
+        ...olderServerIssue,
+        key: "DSP-4",
+        title: "A long history",
+        last_seq: eventLog.last,
+        repo: null,
+        resolved_repo: null,
+      });
+    }
+    if (pathname === "/api/v1/issues/DSP-4/events") {
+      eventLog.queries.push(search);
+      const after = Number(searchParams.get("after"));
+      const through = Math.min(after + Number(searchParams.get("limit")), eventLog.served);
+      const seqs = Array.from(
+        { length: Math.max(0, through - after) },
+        (_, index) => after + index + 1
+      );
+      return Response.json(
+        seqs.map((seq) => ({
+          id: `event-${seq}`,
+          issue_key: "DSP-4",
+          seq,
+          type: "message.created",
+          actor: human,
+          payload: { body: `Event ${seq}` },
+          created_at: "2026-10-25T00:00:00Z",
+        }))
+      );
+    }
+    if (
+      pathname === "/api/v1/issues/DSP-3/references" ||
+      pathname === "/api/v1/issues/DSP-4/references" ||
+      pathname === "/api/v1/references"
+    ) {
       return Response.json({ node: { kind: "issue", id: "DSP-3" }, edges: [], members: [] });
     }
     if (pathname === "/api/v1/issues/DSP-1" && request.method === "GET") {
@@ -305,6 +343,7 @@ beforeEach(() => {
   triage = false;
   blocksServer = { tableRows: true, editedBetweenReads: false };
   textReads = 0;
+  eventLog = { last: 40, served: 40, queries: [] };
   interests = () => Response.json({ error: "unset" }, { status: 500 });
   stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
   // Each run is its own process in production: nothing the library remembers carries over.
@@ -528,6 +567,194 @@ describe("the dispatch CLI", () => {
     expect(stderr).toBe(
       "dispatch: warning: Dispatch issue is missing resolved_repo: this Dispatch server predates repository fields, so DSP-3's repository is unknown; upgrade the server\n"
     );
+  });
+
+  // An issue read lists the issue's last 10 events unless it is asked for more: --events N lists
+  // the last N and --all-events every one, read 200 at a time, the most one events request returns.
+  describe("read --events and --all-events", () => {
+    const listed = (stdout: string) => stdout.split("\n").filter((line) => /^- #\d+ /.test(line));
+
+    test("--events 25 on an issue whose last_seq is 40 asks for the events after 15 through 40 and prints 25", async () => {
+      const { code, stdout } = await run(["read", "--issue", "DSP-4", "--events", "25"], omp);
+      expect(code, stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=15&limit=25"]);
+      const events = listed(stdout);
+      expect(events).toHaveLength(25);
+      expect(events[0]).toStartWith("- #16 message.created · human h · ");
+      expect(events.at(-1)).toStartWith("- #40 message.created · human h · ");
+    });
+
+    test("without either flag the read lists the last 10, as before", async () => {
+      const { code, stdout } = await run(["read", "--issue", "DSP-4"], omp);
+      expect(code, stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=30&limit=10"]);
+      expect(listed(stdout).map((line) => line.split(" ")[1])).toEqual(
+        Array.from({ length: 10 }, (_, index) => `#${31 + index}`)
+      );
+    });
+
+    test("--all-events and an --events count over one page read every page up to last_seq", async () => {
+      eventLog = { last: 450, served: 450, queries: [] };
+      const all = await run(["read", "--issue", "DSP-4", "--all-events"], omp);
+      expect(all.code, all.stdout).toBe(0);
+      expect(eventLog.queries).toEqual([
+        "?after=0&limit=200",
+        "?after=200&limit=200",
+        "?after=400&limit=50",
+      ]);
+      expect(listed(all.stdout).map((line) => line.split(" ")[1])).toEqual(
+        Array.from({ length: 450 }, (_, index) => `#${index + 1}`)
+      );
+
+      eventLog.queries.length = 0;
+      const last = await run(["read", "--issue", "DSP-4", "--events", "250"], omp);
+      expect(last.code, last.stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=200&limit=200", "?after=400&limit=50"]);
+      const events = listed(last.stdout);
+      expect(events).toHaveLength(250);
+      expect(events[0]).toStartWith("- #201 ");
+      expect(events.at(-1)).toStartWith("- #450 ");
+    });
+
+    test("an --events count past the issue's history lists every event through the captured last_seq", async () => {
+      const { code, stdout } = await run(["read", "--issue", "DSP-4", "--events", "500"], omp);
+      expect(code, stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=0&limit=40"]);
+      expect(listed(stdout)).toHaveLength(40);
+    });
+
+    test("events written after the issue was read are left to the next read", async () => {
+      eventLog.served = 45;
+      const last = await run(["read", "--issue", "DSP-4", "--events", "25"], omp);
+      expect(last.code, last.stdout).toBe(0);
+      expect(listed(last.stdout).at(-1)).toStartWith("- #40 ");
+      const all = await run(["read", "--issue", "DSP-4", "--all-events"], omp);
+      expect(all.code, all.stdout).toBe(0);
+      expect(listed(all.stdout)).toHaveLength(40);
+      expect(listed(all.stdout).at(-1)).toStartWith("- #40 ");
+      const oversized = await run(["read", "--issue", "DSP-4", "--events", "500"], omp);
+      expect(oversized.code, oversized.stdout).toBe(0);
+      expect(eventLog.queries).toEqual([
+        "?after=15&limit=25",
+        "?after=0&limit=40",
+        "?after=0&limit=40",
+      ]);
+      expect(listed(oversized.stdout)).toHaveLength(40);
+      expect(listed(oversized.stdout).at(-1)).toStartWith("- #40 ");
+    });
+
+    test("--all-events on an issue with no events sends no events request", async () => {
+      eventLog = { last: 0, served: 0, queries: [] };
+      const { code, stdout } = await run(["read", "--issue", "DSP-4", "--all-events"], omp);
+      expect(code, stdout).toBe(0);
+      expect(eventLog.queries).toEqual([]);
+      expect(stdout).toContain("\nEvents:\n- none\n");
+    });
+
+    test("--no-all-events beside --events keeps the count", async () => {
+      const argv = ["read", "--issue", "DSP-4", "--events", "25", "--no-all-events"];
+      const { code, stdout } = await run(argv, omp);
+      expect(code, stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=15&limit=25"]);
+    });
+
+    test("the issue's ref and its log read the same count", async () => {
+      for (const argv of [
+        ["--ref", "dispatch://DSP-4", "--events", "25"],
+        ["--ref", "dispatch://DSP-4/log", "--events", "25"],
+      ]) {
+        eventLog.queries.length = 0;
+        const { code, stdout } = await run(["read", ...argv], omp);
+        expect(code, stdout).toBe(0);
+        expect(eventLog.queries, argv.join(" ")).toEqual(["?after=15&limit=25"]);
+        expect(listed(stdout), argv.join(" ")).toHaveLength(25);
+      }
+      eventLog.queries.length = 0;
+      const log = await run(["read", "--ref", "dispatch://DSP-4/log", "--all-events"], omp);
+      expect(log.code, log.stdout).toBe(0);
+      expect(eventLog.queries).toEqual(["?after=0&limit=40"]);
+      expect(listed(log.stdout)).toHaveLength(40);
+    });
+
+    test("--help names both flags", async () => {
+      const { code, stdout } = await run(["read", "--help"], omp);
+      expect(code).toBe(0);
+      expect(stdout).toContain("\n  --events <n>\n");
+      expect(stdout).toContain("\n  --all-events\n");
+    });
+
+    // A read that lists no events would drop the count without a word, so it is refused before any
+    // request, naming what the read prints instead.
+    test("two counts, a count that is not a positive integer, or one the read would drop is refused before any request", async () => {
+      const id = "6f1d2c3b-4a5e-4f60-8b7c-9d0e1f2a3b4c";
+      const dropped = (flag: string, read: string) =>
+        `${flag} lists an issue's events, which dispatch read prints only for an issue or its dispatch://KEY/log, not for ${read}: drop ${flag}`;
+      const cases: [string[], string][] = [
+        [
+          ["--issue", "DSP-4", "--events", "5", "--all-events"],
+          "--events and --all-events both say how many events the read lists: name one, --events N for the last N or --all-events for every one",
+        ],
+        [["--issue", "DSP-4", "--events", "0"], "--events: Too small: expected number to be >=1"],
+        [["--issue", "DSP-4", "--events", "2.5"], "--events must be an integer, not 2.5"],
+        [["--message", id, "--events", "5"], dropped("--events", "a message's conversation")],
+        [
+          ["--issue", "DSP-4", "--artifact", "spec", "--all-events"],
+          dropped("--all-events", "a document summary"),
+        ],
+        [
+          ["--project", "CORE", "--artifact", "runbook", "--events", "5"],
+          dropped("--events", "a document summary"),
+        ],
+        [
+          ["--ref", "dispatch://DSP-4/spec", "--events", "5"],
+          dropped("--events", "a document summary"),
+        ],
+        [
+          ["--ref", "dispatch://CORE/artifact/runbook", "--all-events"],
+          dropped("--all-events", "a document summary"),
+        ],
+        [
+          ["--ref", "dispatch://DSP-4/children", "--events", "5"],
+          dropped("--events", "the issue's children"),
+        ],
+        [["--ref", `dispatch://DSP-4/ask/${id}`, "--events", "5"], dropped("--events", "an ask")],
+        [
+          ["--ref", `dispatch://CORE/artifact/runbook/ask/${id}`, "--events", "5"],
+          dropped("--events", "an ask"),
+        ],
+        [
+          ["--ref", `dispatch://CORE/artifact/runbook/comment/${id}`, "--all-events"],
+          dropped("--all-events", "a comment"),
+        ],
+        [
+          ["--ref", `dispatch://DSP-4/comment/${id}`, "--all-events"],
+          dropped("--all-events", "a comment"),
+        ],
+        [
+          ["--ref", `dispatch://DSP-4/message/${id}`, "--events", "5"],
+          dropped("--events", "a message's conversation"),
+        ],
+      ];
+      for (const [flags, problem] of cases) {
+        const { code, stdout } = await run(["read", ...flags], omp);
+        expect(code, flags.join(" ")).toBe(1);
+        expect(stdout, flags.join(" ")).toContain(`\n- ${problem}\n`);
+      }
+      expect(requests).toEqual([]);
+    });
+
+    // The log lists events, so beside an --artifact the log ref cannot use, only the artifact is
+    // refused: dropping it, as the refusal says, reads the log with the count.
+    test("an --artifact beside dispatch://KEY/log is refused alone, keeping the count", async () => {
+      const { code, stdout } = await run(
+        ["read", "--ref", "dispatch://DSP-4/log", "--artifact", "spec", "--events", "5"],
+        omp
+      );
+      expect(code).toBe(1);
+      expect(stdout).toContain("drop --artifact to read the ref");
+      expect(stdout).not.toContain("drop --events");
+      expect(requests).toEqual([]);
+    });
   });
 
   test("a picture is written to a file the agent opens", async () => {

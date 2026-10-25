@@ -36,6 +36,13 @@ on:
       - ".github/go-release-targets.json"
       - ".github/agent-secrets-client-targets.json"
   workflow_dispatch:
+    inputs:
+      # "Confirm the version" in release_publish sets it when its run lost its version to another
+      # run and starts this one (release-push.sh restart); a run started by hand leaves it at 0.
+      lost_races:
+        description: "How many runs before this one lost their version to another run, each starting the next (set by release_publish; leave 0)"
+        type: number
+        default: 0
 
 # Every job declares its own permissions (targets, build, docker, attest, release_build,
 # release_publish below); nothing runs under this workflow-level default, so it stays empty rather
@@ -283,9 +290,11 @@ jobs:
   # prints it and the helper's startup line carries it, which is how a restart onto a release is
   # checked. It runs outside release_publish's concurrency group, so two runs can decide the same
   # version; release_publish confirms the version against the tags inside that group before it
-  # tags, and fails when another run took it. Like build and docker, this job runs the module's
-  # code and holds no write scope and no secret: whatever that code does to this VM never meets the
-  # deploy key, the write token or the OIDC token, which release_publish holds on a VM of its own.
+  # tags, and when another run took it first, publishes nothing and sees to it that a run
+  # releases this commit ("Confirm the version"). Like build and docker, this job runs the
+  # module's code and holds no write scope and no secret: whatever that code does to this VM
+  # never meets the deploy key, the write token or the OIDC token, which release_publish holds
+  # on a VM of its own.
   # Only main releases: a workflow_dispatch from any other branch publishes its `envoy:<sha>` image
   # above and stops there.
   release_build:
@@ -385,6 +394,8 @@ jobs:
   # Moves `latest` and, when release_build decided a release, publishes it: confirms the version
   # against the tags inside the concurrency group, checks what build and release_build handed over,
   # writes SHA256SUMS, tags the commit, attests the host binaries and creates the GitHub release.
+  # When another run took the version first, it publishes nothing and sees to it that a run
+  # releases this commit ("Confirm the version").
   # It runs no Go, no bun and no built binary, only release-push.sh, git, gh, jq, sha256sum,
   # `docker buildx imagetools` and the pinned actions below, so the scopes and the deploy key it
   # holds never meet the code the build jobs run.
@@ -392,29 +403,37 @@ jobs:
     # Docker publishes immutable SHA tags in parallel; this job serializes only moving tags and
     # releases. Only main moves `latest` or cuts a `legion-envoy-v*` tag and release: a
     # workflow_dispatch from any other branch publishes its `envoy:<sha>` image above and stops
-    # there. `latest` moves whatever release_build did; the release steps run only on its success.
+    # there. `latest` moves whatever release_build did; the release steps run only on its success
+    # and once "Confirm the version" finds no other run took the version.
     needs: [build, docker, release_build]
     if: >-
       always() && github.ref == 'refs/heads/main' &&
       needs.build.result == 'success' && needs.docker.result == 'success'
     concurrency:
-      # Only one run at a time by design, and a pending run GitHub drops in favor of a newer one
-      # loses nothing: "Determine latest" below walks forward through already-published commits
-      # for `latest`, and release_build bumps the version from the last tag to HEAD, not this
-      # commit alone.
+      # One run at a time, and every run's turn comes: `queue: max` keeps up to 100 jobs pending
+      # in the group, first in, first out, where the default keeps one and cancels it for the
+      # next (docs.github.com, "Control the concurrency of workflows and jobs"). A job joins the
+      # queue when the jobs it needs end, docker last, not in commit order, so with the default an
+      # older commit's job could cancel a newer one's, leaving that commit in no release and its
+      # run merely cancelled; "Confirm the version" also leaves a commit to a later run, which must
+      # then come to its turn. "Determine latest" below walks forward through already-published
+      # commits for `latest`, and release_build bumps the version from the last tag to HEAD.
       group: release-envoy-listener
       cancel-in-progress: false
+      queue: max
     runs-on: ubuntu-24.04
     # packages: write moves the `latest` tag to the newest already-published image (`docker
     # buildx imagetools create`, below); contents: write creates and uploads the GitHub release
     # (`release-push.sh release`); id-token and attestations: write are for the agent-secrets
-    # provenance attestation. The git tag push uses the deploy key, held only by the "Tag release"
-    # step's env, not any of these scopes.
+    # provenance attestation; actions: write lists this workflow's runs and starts a new one when
+    # another run took the version (`release-push.sh restart`). The git tag push uses the deploy
+    # key, held only by the "Tag release" step's env, not any of these scopes.
     permissions:
       contents: write
       packages: write
       id-token: write
       attestations: write
+      actions: write
     # No cache is restored in a job that holds a credential.
     cache-mode: none
     steps:
@@ -556,21 +575,42 @@ jobs:
 
       # release_build decided the version outside this concurrency group, from the tags as they
       # were then. Inside it, with the tags "Determine latest" fetched, the same computation must
-      # give the same version (or the tag an earlier attempt pushed for this commit): when another
-      # run took the tag first, release-push.sh version --expect fails naming both versions and
-      # says to re-run the whole run, since re-running only the failed jobs would re-read the stale
-      # handed version. $LEGION_ENVOY_VERSION_ARGS is expanded unquoted on purpose, as in
-      # release_build.
+      # give the same version (or the tag an earlier attempt pushed for this commit), and only then
+      # do the release steps below run (`release`). When another run took the tag first,
+      # release-push.sh version --expect says so in a notice and exits 3 when nothing of this
+      # commit is left to release, or 4 when this commit is in no release yet. Either way this job
+      # publishes nothing, and on 4 release-push.sh restart sees to it that a run releases the
+      # commit: a later run on main that holds it and has not finished, or a new run it starts on
+      # main by workflow_dispatch, which decides the version again from the tags as they are then.
+      # A workflow_dispatch made with this job's GITHUB_TOKEN creates a run, unlike most events
+      # that token causes (docs.github.com, "Triggering a workflow from a workflow"), and on main
+      # that run's release_build and release_publish run as a push run's do; actions: write is
+      # what lets the token make it.
+      # Each loss means another run published a release between this run's release_build and this
+      # job, so a chain of started runs ends once releases stop landing; the bound only ends a
+      # chain a fault keeps alive: a started run gets lost_races + 1, and the one that loses with
+      # lost_races 3 fails instead of starting a fourth, naming the command a person runs.
+      # $LEGION_ENVOY_VERSION_ARGS is expanded unquoted on purpose, as in release_build.
       - name: Confirm the version
+        id: confirm
         if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
         env:
           VERSION: ${{ needs.release_build.outputs.version }}
+          GH_TOKEN: ${{ github.token }}
+          LOST_RACES: ${{ inputs.lost_races || 0 }}
         run: |
+          status=0
           # shellcheck disable=SC2086 # $LEGION_ENVOY_VERSION_ARGS is the argument list, split on purpose
-          .github/scripts/release-push.sh version legion-envoy-v --expect "$VERSION" $LEGION_ENVOY_VERSION_ARGS >/dev/null
+          .github/scripts/release-push.sh version legion-envoy-v --expect "$VERSION" $LEGION_ENVOY_VERSION_ARGS >/dev/null || status=$?
+          case $status in
+            0) echo "release=true" >> "$GITHUB_OUTPUT" ;;
+            3) ;;
+            4) .github/scripts/release-push.sh restart release-envoy-listener.yaml "$LOST_RACES" ;;
+            *) exit "$status" ;;
+          esac
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
+        if: steps.confirm.outputs.release == 'true'
         with:
           # Skip the *.dockerbuild attestation artifact uploaded automatically
           # by docker/build-push-action. It's not used by the release and has
@@ -581,7 +621,7 @@ jobs:
           merge-multiple: true
           path: assets
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
-        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
+        if: steps.confirm.outputs.release == 'true'
         with:
           name: agent-secrets-assets
           path: assets
@@ -594,7 +634,7 @@ jobs:
       # release's files.
       - name: Check the hand-over and write SHA256SUMS
         id: assets
-        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
+        if: steps.confirm.outputs.release == 'true'
         env:
           VERSION: ${{ needs.release_build.outputs.version }}
         run: |
@@ -629,7 +669,7 @@ jobs:
       # of its own, pushes the tag over SSH to GitHub's pinned host keys, and removes the key again.
       # A lightweight tag has no tagger, so no git user is configured.
       - name: Tag release
-        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
+        if: steps.confirm.outputs.release == 'true'
         env:
           TAG: ${{ steps.assets.outputs.tag }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
@@ -651,11 +691,11 @@ jobs:
       # It runs after "Tag release", so a run whose tag step refuses (the tag already names another
       # commit) leaves no attestation for archives no release carries.
       - uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
-        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
+        if: steps.confirm.outputs.release == 'true'
         with:
           subject-path: ${{ steps.assets.outputs.subjects }}
       - name: Create or update GitHub release
-        if: needs.release_build.result == 'success' && needs.release_build.outputs.skip != 'true'
+        if: steps.confirm.outputs.release == 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ steps.assets.outputs.tag }}

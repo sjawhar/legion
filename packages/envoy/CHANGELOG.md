@@ -4,6 +4,41 @@
 
 ### Added
 
+- A project's default assignee, the last step of an issue create's assignee chain: an issue created
+  with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
+  it, goes to the person the project names; nothing already filed, and no create that names an
+  assignee or `null`, changes. A default that no longer names a person who has signed in is
+  ignored rather than refused, so a create never fails on a stale one. A person sets it on the
+  Settings page through
+  `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee`
+  `{assignee}` (an email of someone who has signed in, or `null` to clear it; otherwise
+  `400 ASSIGNEE_NOT_ALLOWED`, and a body without `assignee`, or whose `assignee` is neither a
+  string nor null, is `400 INVALID_PROJECT`), which appends
+  `settings.project_default_assignee.updated`. Both routes are human-only and no agent command,
+  flag or route sets a project's default.
+- A release of a stored secret checks the policy again once it has read the store: a retag to a
+  kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
+  releases nothing and ends the grant for good, as a kind change found before the read does, so a
+  grant made while the secret was plain never returns the App key or refresh token stored once it
+  is a kind. Retag a stored secret to a kind, and store its key only after the retag exits 0,
+  printing `broker: serving NAME (kind <kind>)`.
+- A mint error names an upstream's HTTP status by its number and a failed call by its class
+  (cancelled, timed out, not resolved, not reached, a failed TLS handshake, an answer ended early,
+  or no usable HTTP answer), never Go's transport text, the reason phrase or the body, any of which
+  an upstream can fill with the credential it was sent. A Google refusal names its `error_subtype`
+  only when it is `invalid_rapt` or `rapt_required`, and `unknown` otherwise. A GitHub App
+  installation record with no positive id is skipped: no token is asked for installation 0.
+- `agent-secrets secret retag` writes against the tags it checked. On GCP it sends the annotations
+  and etag of its one read, so a write another person made in between refuses it, `another write
+  changed the secret after this retag read it`, with nothing written. On AWS, whose tag calls take
+  no condition, it reads the tags back after its write, and when another writer left a `github-app`
+  secret without owners it restores the tags it read and exits 1 naming the race: retag on AWS one
+  writer at a time.
+- `POST /v1/secrets/{name}/reread` answers `kind`, the kind the broker serves the secret as (absent
+  for a stored secret), and `agent-secrets secret retag` exits 1 when that is not the kind it wrote:
+  `the broker still sees the old tags`, since a stale metadata read serves the secret as it was, and
+  a secret served as stored releases its stored value. Store an App key or a login in a secret only
+  after its retag to that kind exits 0, printing `broker: serving NAME (kind <kind>)`.
 - A person's machine login is an OAuth 2.0 device authorization grant (RFC 8628) on the secrets
   broker's own `POST /v1/oauth/device_authorization` and `POST /v1/oauth/token`, and it refreshes
   itself. `agent-secrets machine login` prints the same code, which the person the login names
@@ -28,7 +63,9 @@
   proof within `BROKER_PROOF_SKEW_SECONDS` of the broker's clock, and spends a per-address rate
   limit bucket of its own (429 `RATE_LIMITED` with `Retry-After`). A login through the earlier
   `POST /v1/launcher-credentials` route, which cannot refresh, keeps its seven-day credential, or
-  `BROKER_LAUNCHER_CREDENTIAL_SECONDS` when that is shorter. The provider's device codes, tokens,
+  `BROKER_LAUNCHER_CREDENTIAL_SECONDS` when that is shorter (that route is removed since: see the
+  Breaking entry under Changed on serving a person's machine login only through the OAuth device
+  grant). The provider's device codes, tokens,
   DPoP proofs and nonces and its HMAC secret live in the tables migration 0016 creates. Revoking a machine (Dispatch or `agent-secrets machine revoke`) ends
   its refresh tokens too, so its helper's next refresh is refused, and the helper drops the login,
   logs `the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh
@@ -99,12 +136,29 @@
   …/release-envoy-listener.yaml@refs/heads/main --source-ref refs/heads/main
   --deny-self-hosted-runners` accepts an image only when a run on `main` built it. `latest` is a
   separate index with no attestation; pin the `<commit>` image its revision annotation names.
-- The secrets broker serves a minted secret: a GCP secret with no version tagged
-  `mint-service-account: <service account email>`, served only when `BROKER_MINT_TARGETS` lists
-  its name with that account and its owner and the secret is human-tier. Each release mints a
-  Google access token for the account, lasting the shorter of an hour and the grant's remaining
-  life, after rereading the secret (at most once per name per 30 seconds); a request for one must
-  ask for at most an hour (`400 MINT_REQUIRES_LIFETIME`).
+- The secrets broker mints releases by each secret's `kind` tag. `github-app` releases contain
+  installation tokens for every installation of the GitHub App that is not suspended and is on an
+  account the secret's `github-owners` tag lists (GitHub logins separated by spaces); a
+  `github-app` secret without that tag is refused `github-owners-missing`, and one whose list
+  holds a comma, or an entry no GitHub login can be (not starting with an ASCII letter or digit,
+  holding anything but ASCII letters, digits and hyphens, over 39 characters, or the word `none`),
+  `github-owners-malformed`,
+  since anyone can install a public App. `google-login`
+  releases contain
+  a Google access token. A kind secret holds its key or refresh
+  token as a current value, which the broker never returns, and a mint GitHub or Google refuses
+  is `502 MINT_FAILED` with their reason, logged at ERROR as `broker: mint failed` with the
+  secret's name, kind and the failure's class. `max-grant` limits a request's `--ttl`; a missing or
+  longer lifetime is `400 GRANT_REQUIRES_LIFETIME`. A grant ends for good when a release finds its
+  secret's kind changed or its lifetime over the current `max-grant` (`GRANT_NOT_LIVE`); a change
+  reverted before any release finds it leaves the grant as it was, and to end a grant, revoke it. A
+  `max-grant` set or lowered later also refuses approval of a longer pending request
+  (`NOT_APPROVER`). `BROKER_MINT_TARGETS` is removed and the broker refuses it when it is set.
+  `agent-secrets secret create` takes `--kind`, `--github-owners` and `--max-grant`, and `secret
+  retag` takes `--kind`, `--github-owners LOGINS|none` and `--max-grant DURATION|none`. A retag
+  either sets tags or removes them (`none`), in one write, so a refused write leaves the secret as
+  it was. A retag that names `none` beside another change exits 2 before it writes anything, and
+  so does a create or retag that would leave a `github-app` secret without `github-owners`.
 
 - Dispatch records which repository each issue targets. A repository mapping
   (`/api/v1/settings/repo-projects`) carries `default`, at most one per project, set from the
@@ -506,6 +560,51 @@
 
 ### Changed
 
+- **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
+  ServiceAccount token, read from `--account-token-file` (default
+  `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
+  missing or empty file exits 1 naming it, before any request. `scripts/dev-broker.sh` starts
+  `dev-oidc-issuer`, a new local stand-in for a cluster's ServiceAccount token issuer (the Go
+  tests' `internal/oidc/oidctest` served on a loopback port), and its broker trusts it, lists
+  `system:serviceaccount:example-ns:example-dispatch` as its caller `dispatch` and turns the token
+  exchange on for `system:serviceaccount:example-ns:example-worker`; the issuer keeps both tokens in
+  the workdir and rewrites each before it lapses, and the script exports
+  `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, so devrelay approves records and machine logins locally
+  again. The Dispatch e2e harness's broker token is `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.
+- A failed NATS reconnect attempt is logged, where it was silent: one WARN a minute per
+  connection, `envoy nats reconnect attempt failed`, naming the client, the servers it was
+  configured with and the error, with the first failure of an outage logged at once. nats.go
+  retries about once a second forever, so a broker that is down left no line at all in the
+  process's log, and thousands of identical lines would name the outage no better (INFRA-182).
+- A cache watcher that ends on its own logs `<cache> watcher stopped` at WARN, where it was an
+  ERROR. The ERROR is now `<cache> watcher was not repaired`, logged once with the bucket, the
+  recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, and only when a
+  repair has failed or none has run within a minute, so a stop the self-health rebuild repairs a
+  moment later no longer raises one (INFRA-182).
+- **Breaking:** once any secret with a `kind` tag holds a value, roll the secrets broker forward,
+  never back past this release. A broker before kinds reads no `kind` tag and would serve the
+  secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes
+  `mint-service-account: kind-secret` beside every kind, which every broker from
+  legion-envoy-v13.19.0 up to this release refuses as `mint-target-malformed`, and `retag --kind
+  none` removes it with the kind. A broker older than legion-envoy-v13.19.0 reads no such tag and
+  serves the value, and so does every earlier broker for a kind secret written without the tag. To
+  go back anyway, first disable every kind secret's versions.
+- **Breaking:** the secrets broker serves a person's machine login only through the OAuth device
+  grant. `POST /v1/launcher-credentials` and its poll `GET /v1/launcher-credentials/{pending}`,
+  the login helpers before legion-envoy 14 used, are gone: the POST answers `405 Method Not
+  Allowed` (Dispatch's `GET` on that path remains) and the poll `404`. Migration 0017 drops their
+  `machine_login_polls` table. A broker of the release before this one still boots on the
+  migrated database, its two removed routes answering 500. Dispatch's routes are unchanged:
+  `GET /v1/launcher-credentials`, `POST /v1/launcher-credentials/{id}/revoke-by-approver`,
+  `POST /v1/machine-logins/lookup` and the record decisions, as is the Legion daemon's
+  `POST /v1/launcher-credentials/token`. A login such a route opened and left pending is still
+  decided by its code; its machine learns nothing of it and logs in again.
+- **Breaking:** `agent-secrets-helper` answers `enroll-box` and `unenroll-box`, the ops of an
+  `agent-secrets` before legion-envoy 10, `BAD_REQUEST unknown op`; `agent-secrets enroll` and
+  `unenroll` ask only `enroll-session-key` and `unenroll-session-key`, never falling back to a
+  helper before legion-envoy 10; `agent-secrets enroll` takes no `--kind`, so `--kind box` exits 2
+  naming the flag; and `POST /v1/enrollments` refuses the kinds `host` and `box`, which only such a
+  helper sent, `400 INVALID_KIND`, where it recorded them as `session`.
 - **Breaking:** the secrets broker needs `BROKER_MACHINE_LOGIN_URL`, the absolute http(s) URL of
   Dispatch's machine-login page (`https://<dispatch>/credentials/machine`), and refuses to start
   without it. The device authorization answer's `verification_uri` names that page, where the
@@ -515,7 +614,8 @@
   broker of this release: against an earlier broker, `agent-secrets machine login` fails. Upgrade
   the broker before the helpers. The broker still serves `POST /v1/launcher-credentials` and
   `GET /v1/launcher-credentials/{pending}` for helpers from earlier releases, whose logins it never
-  refreshes.
+  refreshes. (Superseded by the Breaking entry under Changed on serving a person's machine login
+  only through the OAuth device grant: those routes are removed.)
 - `BROKER_LAUNCHER_CREDENTIAL_SECONDS` defaults to 2592000 (30 days), up from 604800 (7 days), and
   is how long a machine login lasts without a refresh: an approval mints its credential for that
   long, and each refresh moves its expiry to that long from then. Its maximum stays 2592000.
@@ -655,6 +755,12 @@
   pod in that namespace whose spec names no account runs as it and can get a token for the broker's
   audience, so the binding proves nothing about which pods are the service's. Bind each service to
   a dedicated account its pods set as `serviceAccountName` before taking this release.
+- `BROKER_SERVICES` may name one service for several accounts, one entry each, and a pod running
+  as any of them is that service's own session. Each account still proves one service, and an
+  account given twice is still refused, now naming the account and its one service when both
+  entries name the same service. Rollback: a broker before this release refuses a
+  `BROKER_SERVICES` that names a service twice at start-up (`must give each service once`), and
+  the broker is one pod, so roll the image back only together with the setting.
 - **Breaking:** a renewal (`POST /v1/enrollments/{id}/renew`) of an enrollment that has ended,
   lapsed or never existed answers `401 ENROLLMENT_NOT_LIVE` where it answered `401 PROOF_INVALID`;
   the renew route alone answers it, and every other session route still answers a not-live proof
@@ -736,7 +842,8 @@
   clients in the field keep working through the rollout in either order: the broker records an
   older helper's `host` or `box` as `session` and logs `an enrollment named a legacy kind`; this
   helper asks an older broker, which refuses `session` with `400 INVALID_KIND`, once more as
-  `host` or `box`. The broker is forward-only from this migration: a broker before it inserts
+  `host` or `box` (the broker's half is removed since: it now refuses `host` and `box` with
+  `400 INVALID_KIND`). The broker is forward-only from this migration: a broker before it inserts
   `host` and `box`, which the new constraint refuses, so roll forward rather than back.
 - **Breaking:** a grant lasts until its session ends unless its request asked for a shorter
   lifetime (`--ttl`, above); there is no fixed lifetime and no cap. `BROKER_MAX_GRANT_SECONDS`
@@ -774,7 +881,8 @@
   stderr; and `enroll --helper --kind box`, which dotfiles' agentbox passes, enrolls as before
   until dotfiles pins this release and agentbox stops passing it, while any other `--kind` exits 2
   naming the flag, as every `--kind` but `box` did before. An `enroll` without `--helper` is
-  refused for that first, whatever `--kind` it carries, as before.
+  refused for that first, whatever `--kind` it carries, as before. (Superseded by the Breaking
+  entry on `enroll-box`, `unenroll-box` and `--kind` under Changed: those fallbacks are removed.)
 - `POST /v1/enrollments` answers a pod token whose expiry has passed with `403 POD_TOKEN_EXPIRED`,
   naming when it expired (`the projected token has expired (oidc: token expired at <time>)`).
   Before, the broker answered it as `403 POD_IDENTITY_MISMATCH`, "the projected token does not
@@ -1028,19 +1136,76 @@
 
 ### Fixed
 
-- `agent-secrets secret` no longer tells a person on a machine whose Application Default
-  Credentials are its own identity (a dev box's workload identity federation credential, a
-  service account key, the metadata server's identity) to run
-  `gcloud auth application-default login`, which replaces that identity for every program that
-  uses it. A refused GCP write names where its credentials came from and their `type`, and the
-  route that leaves the machine's identity alone: `gcloud auth login --no-activate`, then the
-  command again with `GOOGLE_APPLICATION_CREDENTIALS` naming the
-  `legacy_credentials/<your email>/adc.json` that login keeps. A load that finds no credentials
-  advises the same route, one that fails while `GOOGLE_APPLICATION_CREDENTIALS` is set names that
-  variable instead of advising a sign-in, and the `--profile` refusal under the GCP store no
-  longer advises one either. A command line `create` or `set` prints for running again (`pipe the
-  value in: … < FILE`) starts with that `GOOGLE_APPLICATION_CREDENTIALS=…` when it was set, so it
-  signs in with the same file.
+- A Dispatch reference read no longer fails while the database holds an edge a newer build wrote.
+  `GET /api/v1/references` (`?to=` and `?from=`) and `GET /api/v1/artifacts/{id}/references`
+  answered `500` on a row whose other end is a node kind the running build does not know, which a
+  person saw as "Referenced by unavailable." and an agent's `dispatch read` as one `unavailable`
+  row; the build now leaves that edge out and lists every edge it knows. The `referenced_by_count`
+  of an issue and of every ask leaves it out too, so a count is the number of rows its panel lists,
+  and a document's `outgoing` no longer lists a target of a kind no client reads. A build that adds
+  a node kind to the graph can therefore roll out while the older build still serves reads.
+- `GET /v1/registry/<session_id>` is the listener's authoritative answer about one session, so a
+  session that is working is no longer read as gone while a listener's session cache refills. The
+  read goes through that cache to the session bucket: a 200 carries the same body a row of `GET
+  /v1/sessions` carries (`session_id`, `machine_id`, `host`, `dir`, `port`, `title`,
+  `capabilities`, `self_subscribed`, `topics`, `roles`, `updated_at`, `last_seen`), a 413 naming
+  its size or a 400 naming the key refuses an id NATS will not take as a KV key, `404
+  {"error":"no live session <id>"}` is only the bucket's word that it holds no key for that id,
+  and a read that did not answer is `503 {"error":"envoy: the message bus did not answer:
+  <reason>"}` with `Retry-After: 1`. Dispatch asks about the one session it holds the id of
+  instead of fetching every live session and scanning the answer, so three decisions no longer
+  turn on one listener's cache: a comment mention's `session:` target, a broadcast's recipients
+  (each selected recipient read by its own id, eight reads in flight under one five-second
+  budget, and a read that did not answer refuses the whole send `503 ENVOY_UNAVAILABLE` with
+  nothing written), and whether an issue's claim holder is still working (the claim is free only
+  on the bucket's 404; anything else is a 503, never a live session's claim taken without
+  `{"force": true}`).
+- A listener whose durable consumer was deleted and created again under it, so that the durable
+  delivers to some other subscription, reports itself unhealthy and binds the durable again
+  instead of receiving nothing while every check passed. `GET /healthz` answers `503`
+  `unhealthy` with `durable consumer unavailable: not bound to this listener's subscription`,
+  and the self-health monitor treats an unbound durable as terminal: it confirms the reading
+  with a second one, rebinds, and reports success only once the server itself reports this
+  listener bound (INFRA-182).
+- No NATS server URL the bus logs carries its userinfo: `envoy nats reconnected` and the refusal
+  of a NATS server that is not this machine's wrote the configured URL whole, and nats.go
+  authenticates with a URL's userinfo, a user name alone as a token and `user:password` as a
+  password, so `NATS_URLS=nats://user:password@host:4222` put the password in the process's log.
+  Each URL is now written without its userinfo, as `envoy nats reconnect attempt failed` writes
+  its servers (INFRA-182).
+- `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
+  but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
+  which replaces a machine's own credentials for every program that uses them. A write under
+  Google Cloud Application Default Credentials that are a machine's own identity (a dev box's
+  workload identity federation credential, a service account key, the metadata server's identity)
+  runs under the person's gcloud login where it was refused, and so does every form on a machine
+  with no Application Default Credentials: the CLI asks the first `gcloud` on `PATH` for that login
+  (`gcloud auth list`, then `gcloud auth print-access-token`), reads none of gcloud's files, and
+  leaves the machine's credentials as they are. A person's login is an account gcloud names by a
+  plain email address, never a service account or a workload or workforce identity federation
+  login (`principal://…`); where gcloud holds several, the command uses the one
+  `CLOUDSDK_CORE_ACCOUNT` names, and a command it prints for running again (`pipe the value in: …
+  < FILE`) starts with that `CLOUDSDK_CORE_ACCOUNT=…`. gcloud runs with its file logging off and
+  prints the token in its private format, so the token reaches none of gcloud's log files, and
+  with impersonation, an access token and a credential file override cleared, and a write whose
+  token Google answers as another account's is refused. A write with no person's login, or several
+  and none named, is refused before the value is read, naming `gcloud auth login` or each login,
+  and a refusal names the credentials it found by their type, never by a file. Reads under a
+  machine's own credentials, and every form under a person's own Application Default Credentials,
+  are unchanged. `GOOGLE_APPLICATION_CREDENTIALS` stays the person's own choice: a file it names
+  that cannot be loaded is refused naming that variable (the Google library's error, quoted, can
+  name the file), a machine's credentials it names are refused for a write rather than replaced,
+  and a command printed for running again starts with `GOOGLE_APPLICATION_CREDENTIALS=…`, naming
+  the file. The `--profile` refusal under the GCP store names the Google sign-in it uses instead.
+
+- A burst of device logins no longer stalls the secrets broker's database pool. Each
+  `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while
+  it recorded its request object's `jti` on a second one, so as many concurrent logins as the
+  pool had connections (the pgx default, the greater of 4 and the CPU count) waited on each other
+  until the 45 s request deadline, and every database route, `/healthz` among them, waited
+  behind them; the route needs no credential, and a `login_hint` per request slips its person
+  bucket. The `jti` is now written in the provider's transaction, so a device login holds one
+  connection, and a refused login leaves no `jti` behind.
 
 - A publish to an ad-hoc topic (`envoy_publish` to a `notifications.` topic no stream subject
   captures, such as `notifications.team.deploy-squad`) reaches its subscribers again, and is

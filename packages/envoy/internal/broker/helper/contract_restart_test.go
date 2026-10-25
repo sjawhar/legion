@@ -70,6 +70,7 @@ func TestContractALostRefreshAnswerIsRetriedInsideTheGrace(t *testing.T) {
 	lossy := &losingTokenTransport{}
 	b := &Broker{URL: first.broker.URL, OperatorFile: first.broker.OperatorFile, MachineFile: first.machineFile,
 		HTTP: &http.Client{Transport: lossy}, refreshRetry: 200 * time.Millisecond}
+	t.Cleanup(b.Close)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	if err := b.Start(ctx); err != nil {
@@ -347,6 +348,7 @@ func TestContractALostRefreshAnswerIsRedeemableUntilTheGraceEnds(t *testing.T) {
 			lossy := &losingTokenTransport{}
 			b := &Broker{URL: first.broker.URL, OperatorFile: first.broker.OperatorFile, MachineFile: first.machineFile,
 				HTTP: &http.Client{Transport: lossy}, refreshRetry: time.Hour}
+			t.Cleanup(b.Close)
 			ctx, cancel := context.WithCancel(context.Background())
 			defer cancel()
 			if err := b.Start(ctx); err != nil {

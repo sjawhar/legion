@@ -93,7 +93,7 @@ fingerprint=$(set -o pipefail; jj -R "$LEGION_WORKSPACE" diff --from "fork_point
 
 Where each role gets its two heads: the implementer — the tip before and after its own rebase;
 the tester — the head its `E2E` line names and the new head; the reviewer — the `commit_id` of
-its last submitted review (`gh api repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | {commit_id, state, user: .user.login, body}'`, whose body tells a no-fix request that answered a READY refusal from any other)
+its last submitted review (`gh api --paginate repos/{owner}/{repo}/pulls/{n}/reviews --jq '.[] | {commit_id, state, user: .user.login, body}'`, whose pages concatenate in order, so the last line is the last submitted review, and whose body tells a no-fix request that answered a READY refusal from any other)
 and the new head; the merger never computes a fingerprint — it quotes the `--summary` lines
 in READY, and the daemon holds the head to retro's commits.
 

@@ -1,13 +1,19 @@
 // Package oauthstore is the Postgres storage behind the broker's OAuth 2.0 provider
 // (authelia.com/provider/oauth2), which runs a machine login as a device authorization grant
-// (RFC 8628) with DPoP-bound (RFC 9449), rotating refresh tokens. It keeps the device codes, the
-// access and refresh token sessions, DPoP proof replay records and nonces, and the provider's
-// HMAC secret in the tables migration 0016 creates.
+// (RFC 8628) with DPoP-bound (RFC 9449), rotating refresh tokens and an RFC 8693 token exchange
+// minting Dispatch access tokens. It keeps the device codes, the access and refresh token
+// sessions, DPoP proof replay records and nonces, the provider's HMAC secret, which identity
+// holds a session name, and the exchange's replay records, in the tables migrations 0016 and
+// 0018 create.
 //
 // A stored request is the JSON of its oauth2.Request fields plus its client's id; reading it back
-// re-hydrates the client with GetClient and the session into an *oauth2.DefaultSession. Every
-// token row names the launcher credential its session's Extra["credential_id"] carries, so
-// EndCredential ends a revoked credential's tokens in the revoke's own transaction.
+// re-hydrates the client with GetClient and the session into the kind the caller hands it, an
+// *oauth2.DefaultSession or the *ExchangeSession an exchanged token runs on. Every machine
+// login's token row names the launcher credential its session's Extra["credential_id"] carries,
+// so EndCredential ends a revoked credential's tokens in the revoke's own transaction. A token
+// exchanged for a machine access token names the same credential, because the library reads the
+// subject token's session into the session the new token is issued on; one exchanged for a pod's
+// or a workflow run's token follows no login and its row names none.
 //
 // Every method runs in the transaction the context carries (WithTx, or BeginTX), and on the pool
 // when it carries none.
@@ -25,6 +31,7 @@ import (
 	"authelia.com/provider/oauth2"
 	hoauth2 "authelia.com/provider/oauth2/handler/oauth2"
 	"authelia.com/provider/oauth2/handler/rfc8628"
+	"authelia.com/provider/oauth2/handler/rfc8693"
 	"authelia.com/provider/oauth2/handler/rfc9449"
 	"authelia.com/provider/oauth2/storage"
 	"github.com/jackc/pgx/v5"
@@ -41,6 +48,7 @@ var (
 	_ hoauth2.CoreStorage            = (*Store)(nil)
 	_ hoauth2.TokenRevocationStorage = (*Store)(nil)
 	_ rfc9449.Storage                = (*Store)(nil)
+	_ rfc8693.Storage                = (*Store)(nil)
 	_ storage.Transactional          = (*Store)(nil)
 )
 
@@ -59,8 +67,8 @@ var sweepBatch = 1000
 var sweepMaxBatches = 10
 
 // sweepStatements are Sweep's statements for state deleted row by row, $1 the batch. Each
-// selects its batch by primary key through 0016's *_expires index on the predicate it sweeps by,
-// oldest first, so a table of mostly live rows is never read whole.
+// selects its batch by primary key through 0016's or 0018's *_expires index on the predicate it
+// sweeps by, oldest first, so a table of mostly live rows is never read whole.
 var sweepStatements = []struct{ what, sql string }{
 	{"device codes", `delete from oauth_device_codes where signature in (select signature from oauth_device_codes
 		where expires_at < now() - interval '1 hour' order by expires_at limit $1)`},
@@ -69,6 +77,10 @@ var sweepStatements = []struct{ what, sql string }{
 	{"DPoP nonces", `delete from oauth_dpop_nonces where nonce in (select nonce from oauth_dpop_nonces
 		where expires_at <= now() order by expires_at limit $1)`},
 	{"access tokens", `delete from oauth_access_tokens where signature in (select signature from oauth_access_tokens
+		where expires_at <= now() order by expires_at limit $1)`},
+	{"session bindings", `delete from oauth_session_bindings where session in (select session from oauth_session_bindings
+		where expires_at <= now() order by expires_at limit $1)`},
+	{"exchanged JWT ids", `delete from oauth_exchange_jtis where jti in (select jti from oauth_exchange_jtis
 		where expires_at <= now() order by expires_at limit $1)`},
 }
 
@@ -94,8 +106,9 @@ type sweepCursor struct {
 
 // Sweep deletes spent OAuth state: device codes an hour past their expiry (so a helper still
 // polling one is answered expired_token, not invalid_grant as for an unknown code), DPoP proofs
-// and nonces past theirs, access tokens past theirs, and every refresh token of a family (rows
-// sharing request_id) none of whose rows is still redeemable (active, unexpired, and in its
+// and nonces past theirs, access tokens past theirs, lapsed session bindings and the two replay
+// stores' remembered JWT ids past theirs, and every refresh token of a family (rows sharing
+// request_id) none of whose rows is still redeemable (active, unexpired, and in its
 // rotation's grace or never rotated). A family with a redeemable row keeps all its rows, so
 // replaying one of its rotated tokens still finds it and revokes the family. Each kind is
 // worked in batches of sweepBatch, each its own statements, until a batch comes up short or
@@ -161,6 +174,12 @@ type Store struct {
 	// transaction the library's reuse response runs in (RevokeRefreshToken). It must be set before
 	// the provider serves a refresh: enroll.Service.RevokeReusedCredential.
 	Reused func(ctx context.Context, tx pgx.Tx, credentialID string) error
+
+	// ExchangeSubject answers who a verified subject token is, for the token types whose subject
+	// the library cannot read off the token itself (GetSubjectForTokenExchange). The store holds
+	// no policy of its own, so the provider wiring sets this to the decision the exchange makes;
+	// it must be set before the provider serves the token-exchange grant.
+	ExchangeSubject func(ctx context.Context, request oauth2.Requester, subjectToken map[string]any) (string, error)
 
 	// sweepMu serialises Sweep's refresh walk, which reads and advances sweepAt.
 	sweepMu sync.Mutex
@@ -259,16 +278,28 @@ type storedRequest struct {
 	LastChecked time.Time                    `json:"last_checked,omitzero"`
 }
 
-// sessionOf is the request's session, which this store keeps as an *oauth2.DefaultSession.
+// sessionOf is the *oauth2.DefaultSession at the heart of the request's session, which is the
+// session itself for every grant but the exchange, and the one an *ExchangeSession carries the
+// exchange's claims around. It is what the row's own columns (its expiry, its credential) are
+// read from; the session written into the row's JSON is whichever of the two the request holds,
+// so every field each kind carries is stored and read back.
 func sessionOf(request oauth2.Requester) (*oauth2.DefaultSession, error) {
-	session, ok := request.GetSession().(*oauth2.DefaultSession)
-	if !ok || session == nil {
-		return nil, fmt.Errorf("oauthstore stores *oauth2.DefaultSession sessions, got %T", request.GetSession())
+	switch session := request.GetSession().(type) {
+	case *ExchangeSession:
+		if session != nil && session.DefaultSession != nil {
+			return session.DefaultSession, nil
+		}
+	case *oauth2.DefaultSession:
+		if session != nil {
+			return session, nil
+		}
 	}
-	return session, nil
+	return nil, fmt.Errorf("oauthstore stores *oauth2.DefaultSession and *ExchangeSession sessions, got %T", request.GetSession())
 }
 
-func flatten(request oauth2.Requester, session *oauth2.DefaultSession) (storedRequest, error) {
+// flatten is the request as a row's JSON, its session the one the request holds rather than the
+// *oauth2.DefaultSession inside it, so an exchanged token's claims survive the round trip.
+func flatten(request oauth2.Requester) (storedRequest, error) {
 	client := request.GetClient()
 	if client == nil {
 		return storedRequest{}, errors.New("oauthstore: the request names no client")
@@ -281,7 +312,7 @@ func flatten(request oauth2.Requester, session *oauth2.DefaultSession) (storedRe
 			RequestedScope:    request.GetRequestedScopes(),
 			GrantedScope:      request.GetGrantedScopes(),
 			Form:              request.GetRequestForm(),
-			Session:           session,
+			Session:           request.GetSession(),
 			RequestedAudience: request.GetRequestedAudience(),
 			GrantedAudience:   request.GetGrantedAudience(),
 			RequestedResource: request.GetRequestedResource(),
@@ -290,15 +321,27 @@ func flatten(request oauth2.Requester, session *oauth2.DefaultSession) (storedRe
 	}, nil
 }
 
-// hydrate decodes raw into stored.Request, which the caller points at the request to fill, with its
-// session decoded into session (a new *oauth2.DefaultSession when nil; any other type is an error,
-// since that is the only kind the store writes) and its client re-hydrated by id.
+// hydrate decodes raw into stored.Request, which the caller points at the request to fill, with
+// its session decoded into session (a new *oauth2.DefaultSession when nil, and otherwise either
+// kind the store writes; any other type is an error) and its client re-hydrated by id. An
+// *ExchangeSession is handed its *oauth2.DefaultSession first, so a row written from either kind
+// decodes into it.
+//
+// A row naming a client the provider does not register is a row it cannot decode, and its error
+// does not wrap GetClient's oauth2.ErrNotFound: the library reads that sentinel from a token read
+// as "no such token", and an introspection would answer a stored token it failed to read as
+// simply not live.
 func (s *Store) hydrate(ctx context.Context, raw []byte, session oauth2.Session, stored *storedRequest) error {
-	if session == nil {
+	switch typed := session.(type) {
+	case nil:
 		session = &oauth2.DefaultSession{}
-	}
-	if _, ok := session.(*oauth2.DefaultSession); !ok {
-		return fmt.Errorf("oauthstore reads *oauth2.DefaultSession sessions, got %T", session)
+	case *oauth2.DefaultSession:
+	case *ExchangeSession:
+		if typed.DefaultSession == nil {
+			typed.DefaultSession = &oauth2.DefaultSession{}
+		}
+	default:
+		return fmt.Errorf("oauthstore reads *oauth2.DefaultSession and *ExchangeSession sessions, got %T", session)
 	}
 	stored.Session = session
 	if err := json.Unmarshal(raw, stored); err != nil {
@@ -306,21 +349,28 @@ func (s *Store) hydrate(ctx context.Context, raw []byte, session oauth2.Session,
 	}
 	client, err := s.GetClient(ctx, stored.ClientID)
 	if err != nil {
-		return fmt.Errorf("stored OAuth request's client %q: %w", stored.ClientID, err)
+		return fmt.Errorf("stored OAuth request names client %q, which the provider does not register (%v)", stored.ClientID, err)
 	}
 	stored.Client = client
 	return nil
 }
 
-// credentialOf is the launcher credential id a token session's Extra names. Tokens are issued only
-// after an approval, which names the credential, so a session naming none is an error: its row
-// would hold no credential a revoke could end it by.
-func credentialOf(session *oauth2.DefaultSession) (string, error) {
-	id, ok := session.Extra[oauthwire.ExtraCredentialID].(string)
-	if !ok || id == "" {
-		return "", fmt.Errorf("oauthstore: a token session's %s is %#v, want a credential id", oauthwire.ExtraCredentialID, session.Extra[oauthwire.ExtraCredentialID])
+// credentialOf is the launcher credential id a token session's Extra names, and "" for a token
+// that follows no machine login: a token exchanged for a pod's or a workflow run's token, or an
+// asserted one, is issued against a subject token or an assertion, no credential was ever issued
+// for it, and its row holds none, which is what 0016 leaves the column nullable for. A token
+// exchanged for a machine access token carries that token's credential id over, so its row names
+// the credential and a revoke ends it. A machine login's tokens are issued only after an
+// approval, which names the credential, so a session of that client naming none is still an
+// error: its row would hold no credential a revoke could end it by.
+func credentialOf(request oauth2.Requester, session *oauth2.DefaultSession) (string, error) {
+	if id, ok := session.Extra[oauthwire.ExtraCredentialID].(string); ok && id != "" {
+		return id, nil
 	}
-	return id, nil
+	if client := request.GetClient(); client == nil || client.GetID() != oauthwire.ClientID {
+		return "", nil
+	}
+	return "", fmt.Errorf("oauthstore: a machine login's token session has %s %#v, want a credential id", oauthwire.ExtraCredentialID, session.Extra[oauthwire.ExtraCredentialID])
 }
 
 // expiry is the session's expiry for kind; a token with none (zero) never expires.
@@ -380,7 +430,7 @@ func deviceJSON(request oauth2.DeviceAuthorizeRequester) ([]byte, *oauth2.Defaul
 	if err != nil {
 		return nil, nil, err
 	}
-	flat, err := flatten(request, session)
+	flat, err := flatten(request)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -473,34 +523,41 @@ func (s *Store) InvalidateAuthorizeCodeSession(context.Context, string) error {
 	return oauth2.ErrNotFound
 }
 
-func sessionJSON(request oauth2.Requester) ([]byte, *oauth2.DefaultSession, string, error) {
+// sessionJSON is the row a token session is stored as: its JSON, the *oauth2.DefaultSession its
+// expiry is read from, and the launcher credential its row names, which is nil for a token that
+// follows no machine login.
+func sessionJSON(request oauth2.Requester) ([]byte, *oauth2.DefaultSession, any, error) {
 	session, err := sessionOf(request)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, err
 	}
-	credentialID, err := credentialOf(session)
+	credentialID, err := credentialOf(request, session)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, err
 	}
-	flat, err := flatten(request, session)
+	var credential any
+	if credentialID != "" {
+		credential = credentialID
+	}
+	flat, err := flatten(request)
 	if err != nil {
-		return nil, nil, "", err
+		return nil, nil, nil, err
 	}
 	raw, err := json.Marshal(flat)
 	if err != nil {
-		return nil, nil, "", fmt.Errorf("encode token request: %w", err)
+		return nil, nil, nil, fmt.Errorf("encode token request: %w", err)
 	}
-	return raw, session, credentialID, nil
+	return raw, session, credential, nil
 }
 
 // CreateAccessTokenSession stores an access token's session.
 func (s *Store) CreateAccessTokenSession(ctx context.Context, signature string, request oauth2.Requester) error {
-	raw, session, credentialID, err := sessionJSON(request)
+	raw, session, credential, err := sessionJSON(request)
 	if err != nil {
 		return err
 	}
 	_, err = s.db(ctx).Exec(ctx, `insert into oauth_access_tokens (signature, request_id, credential_id, request, expires_at)
-		values ($1, $2, $3, $4, $5)`, signature, request.GetID(), credentialID, raw, expiry(session, oauth2.AccessToken))
+		values ($1, $2, $3, $4, $5)`, signature, request.GetID(), credential, raw, expiry(session, oauth2.AccessToken))
 	if err != nil {
 		return fmt.Errorf("store access token: %w", err)
 	}
@@ -532,7 +589,7 @@ func (s *Store) RevokeAccessToken(ctx context.Context, requestID string) error {
 // CreateRefreshTokenSession stores a refresh token's session alongside the access token issued
 // with it.
 func (s *Store) CreateRefreshTokenSession(ctx context.Context, signature string, accessSignature string, request oauth2.Requester) error {
-	raw, session, credentialID, err := sessionJSON(request)
+	raw, session, credential, err := sessionJSON(request)
 	if err != nil {
 		return err
 	}
@@ -541,7 +598,7 @@ func (s *Store) CreateRefreshTokenSession(ctx context.Context, signature string,
 		access = accessSignature
 	}
 	_, err = s.db(ctx).Exec(ctx, `insert into oauth_refresh_tokens (signature, request_id, access_signature, credential_id, request, expires_at)
-		values ($1, $2, $3, $4, $5, $6)`, signature, request.GetID(), access, credentialID, raw, expiry(session, oauth2.RefreshToken))
+		values ($1, $2, $3, $4, $5, $6)`, signature, request.GetID(), access, credential, raw, expiry(session, oauth2.RefreshToken))
 	if err != nil {
 		return fmt.Errorf("store refresh token: %w", err)
 	}
@@ -642,6 +699,38 @@ func (s *Store) RevokeRefreshToken(ctx context.Context, requestID string) error 
 	}
 	if _, err := state.tx.Exec(ctx, `update oauth_refresh_tokens set active = false where request_id = $1 and active`, requestID); err != nil {
 		return fmt.Errorf("revoke refresh tokens: %w", err)
+	}
+	return nil
+}
+
+// ErrCredentialEnded is a launcher credential LockCredential found revoked, past its expiry, or
+// not there at all: there is no login left for a token to follow.
+var ErrCredentialEnded = errors.New("oauthstore: the launcher credential is revoked or past its expiry")
+
+// LockCredential holds launcher credential id's row lock until the transaction ctx carries ends,
+// leaving the row as it is, and reports ErrCredentialEnded for a credential revoked or past its
+// expiry. Expiry is compared with clock_timestamp(), the statement's own moment, not now(), the
+// transaction's start, so a retire that commits after the token request's transaction began still
+// ends the login for it.
+//
+// It is what keeps a token issued for the credential from stepping over its revoke: the revoke
+// (enroll.Service.RevokeCredential) locks the same row before EndCredential, so it either commits
+// first, and the lock finds no live row, or waits for the token to commit and then ends it. An
+// exchange of a machine access token takes it, because its minted token names the same
+// credential; the device code grant takes the same lock in machine.Service.Live.
+func LockCredential(ctx context.Context, credentialID string) error {
+	state, err := txOf(ctx)
+	if err != nil {
+		return err
+	}
+	var one int
+	err = state.tx.QueryRow(ctx, `select 1 from launcher_credentials
+		where id = $1 and revoked_at is null and expires_at > clock_timestamp() for no key update`, credentialID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrCredentialEnded
+	}
+	if err != nil {
+		return fmt.Errorf("lock the launcher credential: %w", err)
 	}
 	return nil
 }

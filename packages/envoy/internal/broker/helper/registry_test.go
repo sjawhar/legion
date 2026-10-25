@@ -79,6 +79,33 @@ func TestSaveAndLoadRecordsCarryNoKey(t *testing.T) {
 	}
 }
 
+// TestASaveAfterCloseWritesNothing: once Close returns, no Save writes into the records'
+// directory, so the caller that closed the registry can remove that directory while the
+// helper's goroutines are still finishing a retire or an enrollment.
+func TestASaveAfterCloseWritesNothing(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "sessions.json")
+	reg := NewRegistry(path)
+	sess, err := newSession(4242, 99, "h:4242:99", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	reg.Add(sess)
+	if err := reg.Save(); err != nil {
+		t.Fatal(err)
+	}
+	reg.Close()
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if err := reg.Save(); err != nil {
+		t.Fatalf("a Save after Close: %v; want nil, since it writes nothing", err)
+	}
+	if entries, err := os.ReadDir(dir); err != nil || len(entries) != 0 {
+		t.Fatalf("a Save after Close wrote into the directory: %v %v", entries, err)
+	}
+}
+
 func TestStateFollowsEnrollment(t *testing.T) {
 	sess, err := newSession(1, 1, "h:1:1", nil)
 	if err != nil {

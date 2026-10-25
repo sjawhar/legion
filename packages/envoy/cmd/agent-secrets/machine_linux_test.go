@@ -41,6 +41,7 @@ func tableRows(t *testing.T, stdout string) (header []string, rows [][]string) {
 func loggedInElsewhere(t *testing.T, rig *brokertest.Rig, host string) (*helper.Broker, string) {
 	t.Helper()
 	b := &helper.Broker{URL: rig.URL, OperatorFile: rig.OperatorFile, MachineFile: filepath.Join(t.TempDir(), "machine.json"), HTTP: http.DefaultClient}
+	t.Cleanup(b.Close)
 	code, err := b.Login(context.Background(), host)
 	if err != nil {
 		t.Fatalf("log %s in: %v", host, err)

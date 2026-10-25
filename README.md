@@ -16,11 +16,11 @@ Documentation: <https://sjawhar.github.io/legion/>
 ### Legion
 
 The coordinator: a Go daemon and the `legion` CLI. The daemon works the Dispatch issues labelled
-`legion`. A controller session the operator starts labels and admits the highest-priority `todo`
-issue whenever a slot frees; you can also label an issue yourself. Each admitted issue gets an
-architect, which writes the spec, splits the work and asks you what only you can answer. Once you
-approve the spec, the daemon runs the phase workers in turn: planner, implementer, tester, reviewer
-and merger. Each agent is an [Oh My Pi](https://github.com/sjawhar/oh-my-pi) session, in a tmux
+`legion`: you label an issue yourself, or ask the controller session the operator starts to label
+it for you, and an agent that finds a problem outside its issue asks you before anything is filed.
+Each admitted issue gets an architect, which writes the spec, splits the work and asks you what
+only you can answer. Once you approve the spec, the daemon runs the phase workers in turn: planner,
+implementer, tester, reviewer and merger. Each agent is an [Oh My Pi](https://github.com/sjawhar/oh-my-pi) session, in a tmux
 pane on one host or in an [Agent Sandbox](https://github.com/kubernetes-sigs/agent-sandbox)
 pod on Kubernetes, and each phase commits a handoff under `.legion/` on the issue branch for a
 restarted agent to recover from. The daemon writes the issue's status back to Dispatch as it moves
@@ -148,9 +148,13 @@ go -C packages/envoy test ./...                      # Envoy, Dispatch's server 
 ```
 
 Envoy's Go tests start NATS in Docker, and the tests that need a Postgres read its address from the
-environment. The repository's conventions and each part's commands are in `AGENTS.md` at the root
-and in the `AGENTS.md` beside most packages; `skills/AGENTS.md` covers the skills. The documentation
-site's [contributing page](https://sjawhar.github.io/legion/contributing/) covers writing its pages.
+environment (`LEGION_TEST_PG_DSN` for the daemon's). On a host without Docker, the daemon's NATS
+tests use a running nats-server with JetStream instead when `LEGION_TEST_NATS_URL` (its client URL)
+and `LEGION_TEST_NATS_MONITOR_URL` (its monitoring endpoint) are both set, one package at a time
+(`go test -p 1`). The repository's conventions and each part's commands are in `AGENTS.md` at the
+root and in the `AGENTS.md` beside most packages; `skills/AGENTS.md` covers the skills. The
+documentation site's [contributing page](https://sjawhar.github.io/legion/contributing/) covers
+writing its pages.
 
 ## License
 

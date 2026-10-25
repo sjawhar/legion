@@ -45,12 +45,11 @@ func RemoveStaleGitLocks(workspace Workspace, now time.Time, log func(string)) e
 
 // RemoveStaleFeedLocks removes every git lock file in the bare repository gitDir, a feed: the
 // `<file>.lock` a fetch killed mid-update leaves beside a ref, packed-refs, HEAD or the shallow
-// file, which blocks every later update of that file. Objects are never touched: the issue's clone
-// borrows them through objects/info/alternates. Each removal is logged with the lock's path and
-// age, and a lock it cannot remove is an error naming it. A feed's only writer is Fetch, called by
-// one process at a time: a pod's workspace-fetch, its first init container and the one container
-// that mounts the feed writable, or the repository cache's process under its write lock, so no
-// lock there is held by anyone when Fetch starts.
+// file, which blocks every later update of that file. Objects are never touched. Each removal is
+// logged with the lock's path and age, and a lock it cannot remove is an error naming it. A feed's
+// only writer is Fetch, called by one process at a time: a pod's workspace-fetch, its first init
+// container and the one container that mounts the feed writable, or the repository cache's process
+// under its write lock, so no lock there is held by anyone when Fetch starts.
 func RemoveStaleFeedLocks(gitDir string, now time.Time, log func(string)) error {
 	return removeLocksUnder(gitDir, "", now, log, "a feed's only writer is the fetch now starting")
 }

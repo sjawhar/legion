@@ -34,6 +34,7 @@ func TestTheHelperLogsEveryChangeOfTheLauncherCredential(t *testing.T) {
 	operator := operatorFile(t, "ada@example.com")
 	b := &Broker{URL: f.srv.URL, OperatorFile: operator, MachineFile: machineFilePath(t), HTTP: f.srv.Client(),
 		Log: slog.New(slog.NewJSONHandler(&out, nil))}
+	t.Cleanup(b.Close)
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 
 	f.mu.Lock()

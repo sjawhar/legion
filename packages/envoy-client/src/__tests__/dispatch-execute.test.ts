@@ -562,7 +562,7 @@ describe("executeDispatchTool", () => {
     expect(await problemsOf("dispatch_doc_read", { ref: documentAsk })).toEqual([
       `ref ${documentAsk} names an ask on CORE/runbook-md; dispatch doc-read would act on CORE/runbook-md and drop the ask: read it with dispatch read, or name CORE/runbook-md with project CORE and artifact runbook-md`,
     ]);
-    // suggest and doc-edit act on a document, so an issue-owned link's hint names one.
+    // suggest still requires an artifact, so an issue-owned link's hint names one.
     expect(
       await problemsOf("dispatch_suggest", {
         ref: ask,
@@ -571,6 +571,15 @@ describe("executeDispatchTool", () => {
       })
     ).toEqual([
       `ref ${ask} names an ask on DSP-42; dispatch suggest would act on DSP-42 and drop the ask: read it with dispatch read, or name DSP-42 with issue DSP-42 and artifact <the document's slug>`,
+    ]);
+    // doc-edit edits the issue's primary document, so its hint names the issue alone.
+    expect(
+      await problemsOf("dispatch_doc_edit", {
+        ref: ask,
+        ops: [{ op: "replace", find: "old line", with: "new line" }],
+      })
+    ).toEqual([
+      `ref ${ask} names an ask on DSP-42; dispatch doc-edit would act on DSP-42 and drop the ask: read it with dispatch read, or name DSP-42 with issue DSP-42`,
     ]);
   });
 
@@ -1887,6 +1896,7 @@ describe("executeDispatchTool", () => {
         key: "DSP-1",
         status: "todo",
         claim: method === "POST" ? claim : null,
+        legion_managed_status: false,
       });
     };
     const run = (args: Record<string, unknown>) =>
@@ -1918,6 +1928,87 @@ describe("executeDispatchTool", () => {
     expect(calls[1]?.pathname).toBe("/api/v1/issues/DSP-1/claim");
     expect(released.text).toContain("DSP-1: claim released");
     expect(released.details).toMatchObject({ issue: "DSP-1", claim: null });
+  });
+
+  test("dispatch_claim on an issue Legion runs tells nobody to move its status", async () => {
+    const claim = {
+      actor: { kind: "session", id: "session-one" },
+      at: "2026-09-24T06:00:00Z",
+    };
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      return response({
+        key: "DSP-1",
+        status: "todo",
+        claim: method === "POST" ? claim : null,
+        legion_managed_status: true,
+      });
+    };
+    const run = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    // The Legion daemon owns the status of an issue it runs: a status this session writes is
+    // undone, so neither answer may send it to issue-update.
+    const claimed = await run({ issue: "DSP-1" });
+    expect(claimed.text).toContain(
+      "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
+    );
+    expect(claimed.text).not.toContain("issue-update");
+
+    const released = await run({ issue: "DSP-1", release: true });
+    expect(released.text).toContain(
+      "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone"
+    );
+    expect(released.text).not.toContain("issue-update");
+  });
+
+  test("dispatch_claim reads an omitted legion_managed_status as not Legion-managed", async () => {
+    const claim = {
+      actor: { kind: "session", id: "session-one" },
+      at: "2026-09-24T06:00:00Z",
+    };
+    // An older Dispatch, or a failed label walk on this one, answers without the field; the
+    // claim stands and the wording is the one every client had before the field existed.
+    const fetchImpl = async (_url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      return response({
+        key: "DSP-1",
+        status: "todo",
+        claim: method === "POST" ? claim : null,
+      });
+    };
+    const run = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_claim",
+        args,
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        sessionId: "session-one",
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const claimed = await run({ issue: "DSP-1" });
+    expect(claimed.text).toContain("move it to in_progress with dispatch issue-update");
+    expect(claimed.text).not.toContain("Legion's daemon");
+
+    const released = await run({ issue: "DSP-1", release: true });
+    expect(released.text).toContain(
+      "DSP-1: claim released; nobody is working it now. Its status is still todo — move it yourself"
+    );
+    expect(released.text).not.toContain("Legion's daemon");
   });
 
   test("a refused dispatch_claim reaches the caller with the code it must act on", async () => {
@@ -2849,6 +2940,58 @@ describe("executeDispatchTool", () => {
       method: "PATCH",
       body: expect.objectContaining({ repo: "acme/gadgets" }),
     });
+  });
+
+  test("dispatch_issue_update sends a board move only when a neighbour is named", async () => {
+    const bodies: unknown[] = [];
+    const issue = {
+      key: "ACME-1",
+      title: "Board work",
+      project: "ACME",
+      status: "todo",
+      external_links: [],
+      components: issueComponents("inherit", []),
+    };
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (new URL(String(url)).pathname === "/api/v1/projects/ACME/architecture-source") {
+        return sourceNull();
+      }
+      const method = init?.method ?? "GET";
+      if (method === "PATCH") bodies.push(JSON.parse(String(init?.body)));
+      return response({ ...issue, status: method === "PATCH" ? "testing" : "todo" });
+    };
+    const run = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_issue_update",
+        args: { issue: "ACME-1", ...args },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const above = await run({ before: "ACME-2" });
+    expect(bodies.at(-1)).toEqual(expect.objectContaining({ rank: { before: "ACME-2" } }));
+    expect(above.text).toContain("rank -> before ACME-2");
+    const below = await run({ after: "ACME-2" });
+    expect(bodies.at(-1)).toEqual(expect.objectContaining({ rank: { after: "ACME-2" } }));
+    expect(below.text).toContain("rank -> after ACME-2");
+    const between = await run({ before: "ACME-2", after: "ACME-3" });
+    expect(bodies.at(-1)).toEqual(
+      expect.objectContaining({ rank: { before: "ACME-2", after: "ACME-3" } })
+    );
+    expect(between.text).toContain("rank -> after ACME-3, before ACME-2");
+    // The regression: a rank with neither neighbour ranks the issue last in its project, so an
+    // ordinary update must carry no rank key at all.
+    await run({ status: "testing" });
+    expect(bodies.at(-1)).not.toHaveProperty("rank");
+    // An empty neighbour is a field like any other on purpose: the tool sends it so the server
+    // answers `rank neighbor must name another issue`. A falsy or trimming guard in the executor
+    // would drop the key instead and turn that refusal into a silent no-move.
+    await run({ before: "" });
+    expect(bodies.at(-1)).toEqual(expect.objectContaining({ rank: { before: "" } }));
   });
 
   // A Dispatch server from before the repository fields that took the write anyway answers
@@ -5963,6 +6106,47 @@ describe("executeDispatchTool", () => {
       summary: "Record final wording",
       precondition: { document: "sha256:current-document" },
     });
+  });
+
+  test("edits the issue's primary document when no artifact names another", async () => {
+    const requests: Array<{ url: string; init: RequestInit }> = [];
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      const request = { url: String(url), init: init ?? {} };
+      requests.push(request);
+      const path = new URL(request.url).pathname;
+      if (path === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          primary_artifact_id: "artifact-42",
+          artifacts: [
+            { id: "artifact-7", slug: "notes", name: "notes.md", primary: false },
+            { id: "artifact-42", slug: "spec", name: "spec.md", primary: true },
+          ],
+        });
+      }
+      if (path === "/api/v1/artifacts/artifact-42/edits") {
+        return response({ applied: 1, version: null, token: "sha256:after-edit" });
+      }
+      throw new Error(`unexpected request: ${path}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_doc_edit",
+      args: {
+        issue: "DSP-42",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      },
+      cwd: "/workspace",
+      host: "omp",
+      sessionId: "session-42",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.details).toEqual({ issue: "DSP-42", applied: 1, token: "sha256:after-edit" });
+    expect(requests[1]?.url).toContain("/api/v1/artifacts/artifact-42/edits");
   });
 
   test("says nothing changed and names the operations that changed nothing", async () => {

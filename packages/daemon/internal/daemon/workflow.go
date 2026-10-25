@@ -285,15 +285,17 @@ func (w *workflowRuntime) wakeOutbox(issue string, kind record.OutboxKind) {
 
 // engineConfig is the workflow engine's configuration from the daemon's, the review App's bot
 // login from its boot lease and the daemon's own build: its own project's merge_queue_role is the
-// role the merger's READY is published to, and the repository the binary is built from is the one
-// whose open production checks a build is compared against — only for a release build, one with
-// a revision, since nothing else names a commit a merge could be in; a build with none compares
-// nothing, Dispatch's start included.
+// role the merger's READY is published to, its own project's deploys are the workflows whose runs
+// wake its production checks, and the repository the binary is built from is the one whose open
+// production checks a build is compared against — only for a release build, one with a revision,
+// since nothing else names a commit a merge could be in; a build with none compares nothing,
+// Dispatch's start included.
 func engineConfig(cfg config.Config, reviewAppLogin string, build Build) workflow.Config {
+	project := cfg.Projects[cfg.Project]
 	engine := workflow.Config{
 		Project: cfg.Project, DesignGate: cfg.Gates.Design, ReviewRoundCap: cfg.ReviewRoundCap,
 		MaxFixAttempts: cfg.MaxFixAttempts, Linger: cfg.Linger, ProductionCheckBound: cfg.ProductionCheckBound,
-		ReviewAppLogin: reviewAppLogin, MergeQueueRole: cfg.Projects[cfg.Project].MergeQueueRole,
+		ReviewAppLogin: reviewAppLogin, MergeQueueRole: project.MergeQueueRole, Deploys: project.Deploys,
 	}
 	if build.Revision != "" {
 		engine.BuiltFrom = build.Repository
@@ -580,7 +582,7 @@ func (w *workflowRuntime) applyTerminal(ctx context.Context, c supervise.Claim, 
 	case supervise.StateReady:
 		fact = intake.ClaimReady{Issue: c.Issue, Role: c.Role, Launch: c.Generation}
 	case supervise.StateFailed:
-		fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role}
+		fact = intake.ClaimFailed{Issue: c.Issue, Role: c.Role, Reason: c.Failure}
 	default:
 		return fmt.Errorf("claim %s has non-terminal workflow state %s", c.Token, state)
 	}
@@ -845,9 +847,9 @@ const firstControllerTick = time.Minute
 
 // tickController applies a ControllerTick fact once shortly after the runtime starts
 // (firstControllerTick, or the interval when that is shorter) and then every controllerWake, so
-// admission wakes the controller even when no event arrives: a walk that found nothing, the last
-// tree finishing, a tree waiting on a refused root claim, or a quiet day would otherwise leave the
-// controller idle and the daily report unposted until the next wake. Each tick's event id is its
+// admission wakes the controller even when no event arrives: the last tree finishing, a tree
+// waiting on a refused root claim, or a quiet day would otherwise leave the controller idle and the
+// daily report unposted until the next wake. Each tick's event id is its
 // own (the project, this boot, and the tick's time), since processed_events is shared by every
 // project's daemon. A failed apply is logged, and the next tick tries again.
 func (w *workflowRuntime) tickController(ctx context.Context) {

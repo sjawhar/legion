@@ -40,7 +40,11 @@ const (
 	// maxInputChars bounds one text's length before it is sent. The model's context is generous
 	// (128k tokens) but an unbounded document would pay to embed far more than a search result
 	// ever shows; this is a generous multiple of the 4,000-character snippet window search.go
-	// already uses, not a tight limit.
+	// already uses, not a tight limit. It bounds one text in runes (text.HeadRunes), while
+	// DISPATCH_BODY_MAX in packages/contracts/src/dispatch-tools.ts caps a comment, comment-edit
+	// and message body in UTF-16 units, which are never fewer than a text's runes; so a body at
+	// that cap reaches the embedder whole only while DISPATCH_BODY_MAX <= maxInputChars, and
+	// .github/scripts/check-body-embed-limit.sh fails the build when it does not.
 	maxInputChars = 32000
 )
 

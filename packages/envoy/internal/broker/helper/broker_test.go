@@ -550,6 +550,7 @@ func machineFilePath(t *testing.T) string {
 func loggedInBroker(t *testing.T, f *fakeBroker, operator string) *Broker {
 	t.Helper()
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, operator), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
+	t.Cleanup(b.Close)
 	if _, err := b.Login(context.Background(), "helper-host"); err != nil {
 		t.Fatalf("login: %v", err)
 	}
@@ -575,6 +576,7 @@ func waitFor(t *testing.T, cond func() bool) {
 func TestLoginHoldsTheKeyAndEnrollSignsLauncherProofs(t *testing.T) {
 	f := newFakeBroker(t) // records the login request object; issues on the first poll
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
+	t.Cleanup(b.Close)
 	code, err := b.Login(context.Background(), "example-host-devbox")
 	if err != nil || !regexp.MustCompile(`^[A-Z2-9]{4}-[A-Z2-9]{4}$`).MatchString(code) {
 		t.Fatalf("code %q err %v", code, err)
@@ -608,6 +610,7 @@ func TestNoCredentialAndExpiredCredentialBothNameTheLoginCommand(t *testing.T) {
 	t.Setenv("HOME", home)
 	f := newFakeBroker(t)
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
+	t.Cleanup(b.Close)
 	sess, _ := newSession(1, 1, "h:1:1", nil)
 
 	if _, _, err := b.Enroll(context.Background(), sess); err == nil || !strings.Contains(err.Error(), "agent-secrets machine login") {
@@ -762,6 +765,7 @@ func TestALoginPendingWhenTheCredentialIsRefusedReportsItsOwnOutcome(t *testing.
 func TestDeniedAndExpiredLoginsSurfaceTheirState(t *testing.T) {
 	f := newFakeBroker(t)
 	b := &Broker{URL: f.srv.URL, OperatorFile: operatorFile(t, "ada@example.com"), MachineFile: machineFilePath(t), HTTP: f.srv.Client()}
+	t.Cleanup(b.Close)
 
 	f.mu.Lock()
 	f.loginOutcome = "denied"

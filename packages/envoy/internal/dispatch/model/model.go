@@ -1396,9 +1396,14 @@ type Route struct {
 	ID   string
 }
 
+// IssueStatusTriage is the status every issue is created in: nobody has decided yet whether the
+// work is wanted. It is named because a write's advice reads it (api.computeWriteAdvice resolves
+// who owns the status only there), and one spelling is better than two.
+const IssueStatusTriage = "triage"
+
 // IssueStatuses is the canonical Legion issue lifecycle.
 var IssueStatuses = []string{
-	"triage",
+	IssueStatusTriage,
 	"icebox",
 	"backlog",
 	"todo",

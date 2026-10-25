@@ -2,6 +2,41 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A session refreshes its Envoy registration every 90 s rather than every 120 s: the listener
+  expires a session record 300 s after its last write, and three refresh attempts plus one whole
+  listener call's budget (10 250 ms: two 5 000 ms attempts and the 250 ms retry delay between
+  them) fit inside that lifetime — 3 × 90 000 + 10 250 = 280 250 ms — so two whole refreshes may
+  fail and the third still completes before a live session's record is dropped.
+
+### Added
+
+- `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
+  the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so
+  the move rides along with any other change in the same call, and the printed result gains
+  `rank -> before KEY`, `rank -> after KEY`, or `rank -> after KEY, before KEY`. It sends a `rank`
+  key only when at least one neighbour is named: a `rank` with neither is not a no-op, since the
+  server ranks the issue last in its project, so an ordinary status update would otherwise drop its
+  issue to the bottom of the board. The flags follow from the tool's schema, so the command itself
+  needed no change (INFRA-188).
+
+- `ENVOY_PASS_DEADLINE_MS` resolves `passDeadlineMs`, the bound on one task of the pi-envoy
+  plugin's serial queues, so a task that never settles cannot hold the next heartbeat tick, session
+  event or Legion claim behind it. A finite value above 0 is used, floored at 25 ms; anything else
+  falls back to `MIN_PASS_DEADLINE_MS`, 30 s, which the exported constant is named for: it is a
+  floor, not a default, since the resolved deadline is never shorter than the resolved
+  `heartbeatMs` either, and an explicit `ENVOY_PASS_DEADLINE_MS` below the heartbeat is raised to
+  it. A deadline inside one tick would abandon every pass before the next tick, so the heartbeat's
+  `healing` latch — and the registration backstop that runs under it, which keeps a pane with a
+  wedged pass registered — would be false at every tick and the backstop would never post. A
+  caller that wants a short deadline shortens `ENVOY_HEARTBEAT_MS` with it. A raise is reported
+  rather than applied in silence: an explicit `ENVOY_PASS_DEADLINE_MS` that is usable and shorter
+  than the resolved heartbeat comes back as `passDeadlineRaisedFrom`, the value it named, and the
+  session's start notice (`sessionSettings`' `notice`, which pi-envoy shows at `session_start`)
+  names that value beside the deadline in force. The field reports that one raise: the 25 ms
+  interval floor and the timer's ceiling are applied in silence and are not reported by it.
+
 ### Fixed
 
 - The `dispatch` command logs a refusal it makes before the call reaches Dispatch (an unknown
@@ -85,6 +120,10 @@
 
 ### Changed
 
+- `dispatch whoami` under the shared token says an issue you create without an assignee takes its
+  parent's assignee, else the project's default assignee, else nobody, rather than calling it
+  unassigned: a project whose default a person set on the Settings page is the create chain's last
+  step.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions say what an Oh My Pi session keeps:
   unsubscribe keeps the subscriptions another plugin holds for the session's role, and a move to a
   different role is refused while any are held. A host without such subscriptions behaves as
@@ -204,6 +243,15 @@
   It reads the CLI's output as a transcript holds it, so a refusal counts when a pipe hid the
   CLI's exit. A warning, the note that the session's state was not written, and the notice of a
   file that is not read are not refusals. pi-legion's skill-scenario scorer reads refusals with it.
+- `dispatch read --events N` lists an issue's last N events and `--all-events` every one, on an
+  issue read and on its `dispatch://KEY/log`; without either the read lists the last 10, as before.
+  `DispatchClient.read` takes `{ events: N | "all" }` (`IssueReadOptions`; `DEFAULT_ISSUE_READ_EVENTS`
+  when absent) and reads the newest N with `GET /api/v1/issues/{key}/events`, 200 to a request,
+  the most one request may ask for. Both flags together, or either beside a read that lists no
+  events (a document summary, an ask, a comment, a message's conversation, the issue's children),
+  are refused before any request, naming what the read prints instead. An agent that audits who
+  asked what and which ask was answered reads it with the command, not the events API by hand. A
+  `dispatch://KEY/children` read reads only the issue, no longer its last 10 events.
 - `dispatch issue --repo <owner/name>` and `dispatch issue-update --repo` (`''` clears) set the
   repository an issue targets, and `dispatch read` prints a `Repository:` line: `owner/name (own)`,
   `owner/name (inherited or project default)`, or `none`. Against a Dispatch server older than the

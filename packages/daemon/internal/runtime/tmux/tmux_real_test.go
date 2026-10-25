@@ -433,8 +433,7 @@ func (c *stubConn) awaitEvent(t *testing.T, want string) {
 // rig is one test's private tmux server, daemon, stream stub, and runtime.
 type rig struct {
 	t            *testing.T
-	dir          string
-	tmuxDir      string
+	dir          string // the server's TMUX_TMPDIR as well as the rig's files
 	stateDir     string
 	rolePrompt   string
 	instructions string
@@ -453,14 +452,16 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 	requireTmux(t)
 	r := &rig{t: t}
 	r.legion, r.omp = standins(t)
+	// The directory is the server's TMUX_TMPDIR itself, with no subdirectory: tmux binds
+	// <TMUX_TMPDIR>/tmux-<uid>/legion-<project>, and a unix socket path holds at most 107 bytes,
+	// so every byte above that socket counts against a long TMPDIR.
 	dir, err := os.MkdirTemp("", "lgt")
 	if err != nil {
 		t.Fatal(err)
 	}
 	r.dir = dir
-	r.tmuxDir = filepath.Join(dir, "tmux")
 	r.stateDir = filepath.Join(dir, "state")
-	for _, d := range []string{r.tmuxDir, r.stateDir, filepath.Join(dir, "roles")} {
+	for _, d := range []string{r.stateDir, filepath.Join(dir, "roles")} {
 		if err := os.MkdirAll(d, 0o700); err != nil {
 			t.Fatal(err)
 		}
@@ -478,7 +479,7 @@ func newRig(t *testing.T, adjust ...func(*Options)) *rig {
 			r.environ = append(r.environ, entry)
 		}
 	}
-	r.environ = append(r.environ, "TMUX_TMPDIR="+r.tmuxDir, "LEGION_STANDIN_PLUGIN_CONTRACT="+strconv.Itoa(api.DaemonAPIVersion))
+	r.environ = append(r.environ, "TMUX_TMPDIR="+dir, "LEGION_STANDIN_PLUGIN_CONTRACT="+strconv.Itoa(api.DaemonAPIVersion))
 	r.project = "t" + randomHex(t, 4)
 	watchdog := armOrphanWatchdog(t, "legion-"+r.project, r.environ)
 	r.daemon = newFakeDaemon()
@@ -1157,7 +1158,7 @@ func TestRealTmuxSplitsIntoTheIssueWindow(t *testing.T) {
 // that cannot confirm its process gone is an error, never a success.
 func TestRealTmuxUncertainOnABrokenSocket(t *testing.T) {
 	r := newRig(t, func(o *Options) { o.CommandTimeout = time.Second })
-	socketDir := filepath.Join(r.tmuxDir, fmt.Sprintf("tmux-%d", os.Getuid()))
+	socketDir := filepath.Join(r.dir, fmt.Sprintf("tmux-%d", os.Getuid()))
 	if err := os.MkdirAll(socketDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
