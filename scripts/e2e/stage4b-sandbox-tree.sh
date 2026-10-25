@@ -6025,7 +6025,8 @@ first_look_claims=$(issue_claim_states "$tree1" | paste -sd ',' -)
 # ISSUE_CLOSED), and the fixture's instructions say a check task waits for no targeted message. The
 # smoke repository is neither the deploy repository nor a Legion production, so the look's verdict is
 # pending: the check stays open with its first look reported, and the daemon suspends the
-# implementer's claim, session kept, and the issue's Sandbox with its volume, so the pod goes. Its
+# implementer's claim, session kept, and deletes the issue's Sandbox, which takes the pod and the
+# pod's own disk with it, since that Sandbox owns no volume of its own. Its
 # report is the observation, read from the daemon's state below.
 # The smoke main's cleanup is the fixture's teardown, not the workflow under test. It stays inside
 # this checkpoint, so a STAGE4B_UNTIL=done run still cleans the smoke main, and smoke_main_cleaning

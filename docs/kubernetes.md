@@ -5134,7 +5134,7 @@ and the git credential entries every role container is told
 a tree, an issue or a checkout. Its system prompt is the controller's role
 prompt, a part saying it runs headless in a pod, the daemon's `Design gate policy:` line, the
 project's repositories sentence, the project's `Slack channels:` line after it when `slack_channels` names any, and the deployment
-instructions. Both its containers, the init container and the launcher, carry the
+instructions. Its one container, the launcher, carries the
 controller's reservation — `runtime.kubernetes.resources.controller` where the file sets a field,
 the daemon's default of 1 CPU and 4Gi otherwise — as request and limit alike unless the file sets a
 lower `cpu_request` or `memory_request`, so at the default the pod is `Guaranteed`, never the class
@@ -5162,7 +5162,8 @@ before enabling issue pods
 **Reaching it.** Nobody types into the pod. A person reaches the controller through Dispatch (a
 message to its session on the Agents page, a reply to its ask, a mention) or Envoy, and reads its
 session with `kubectl -n <namespace> logs legion-<project>-controller -c controller` (its launcher's
-log, which carries the shim's and Oh My Pi's) or its transcript on the volume. A Send from the
+log, which carries the shim's and Oh My Pi's) or its session in the session database, where every
+session is a row rather than a file on any volume. A Send from the
 Agents page is answered in the conversation that page shows. Wakes reach it as they reach the
 operator's controller: it subscribes to `notifications.legion.<project>.controller` once it holds
 the role.

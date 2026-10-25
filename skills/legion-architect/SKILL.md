@@ -415,9 +415,10 @@ workflow is recorded and the root stays in `awaiting_merge` — nothing suspende
 and workers kept — until the last of them is done or parked, when it closes. One `pr-merged`
 notice names what it waits for and none follows as they depart, so read the pull request on
 GitHub. A child's close reaches you as `child-closed`: the daemon retires five of its six claims
-and suspends its implementer, session kept and the issue's Sandbox deleted with its pod, since it still
-owes the production check handed to it at the merge — work after the close that holds no pod while
-it waits for the deploy (`skill://legion-worker/references/merge-gate.md`, *The production check
+and leaves the implementer running, since it still owes the production check handed to it at the
+merge. Its pod stays for that first look; the issue's Sandbox goes with the pod only when a look
+reports `pending`, and from then the check holds no pod while it waits for the deploy
+(`skill://legion-worker/references/merge-gate.md`, *The production check
 after the close*). A root's close writes `done`, frees the tree's admission slot and lingers the
 tree for `linger_hours` with every member suspended; a child still in the workflow at the linger's
 end is handed over (section 3), and the tree's close waits for a member's open check.

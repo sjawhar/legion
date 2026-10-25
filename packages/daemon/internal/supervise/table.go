@@ -1110,13 +1110,14 @@ func stop(m *Machine, ctx context.Context, _ Event) error {
 // record it still holds for that tree is exactly what TreeClosable refuses on, so it is not asked.
 func treeClose(m *Machine, ctx context.Context, _ Event) error { return m.end(ctx) }
 
-// issueClose is the workflow's close of a child issue as done, which releases the issue's Sandbox
-// and the volume it owns once every claim of the issue has retired (store.IssueSuspension's
-// release): the claim ends as a tree close ends it, and the session it recorded goes first, since it
-// lived on that volume. The claim's workspace is not lost — nothing is recovered, and a later start
-// of the issue, re-entered by a person's todo, is a fresh spawn on a volume of its own — so no
-// recorded loss outlives the close either. A release that fails changes nothing, so the close can
-// be asked again.
+// issueClose is the workflow's close of a child issue as done: it releases the claim through the
+// runtime, which under Agent Sandbox deletes the issue's Sandbox, and with it the pod and the
+// pod's own disk, since that Sandbox owns no volume (INFRA-80). The claim ends as a tree close
+// ends it, and the session it recorded goes first — the session is a row in the session database
+// rather than a file on any disk, so what is dropped is the record of which session this claim
+// held. Nothing of the workspace is recovered, and a later start of the issue, re-entered by a
+// person's todo, is a fresh spawn on a pod and a disk of its own. A release that fails changes
+// nothing, so the close can be asked again.
 func issueClose(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.release(ctx); err != nil {
 		return err

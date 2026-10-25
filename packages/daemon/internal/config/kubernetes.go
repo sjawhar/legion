@@ -1146,7 +1146,10 @@ func readSessionStore(store, dsnSecret, database *yaml.Node) (ompsessions.Store,
 			" an issue pod's disk is the pod's own ephemeral volume, deleted with the pod, so a session kept as a file on it ('pvc', also what an omitted session_store means) dies with it," +
 			" the next launch's resume fails on the missing file (internal/launcher's sessionWritten), and three such failures retire the claim")
 	default:
-		return ompsessions.Store{}, errors.New(sessionStoreKey + " must be 'pvc', 'postgres' or 'cloudsql-iam'")
+		// A name this runtime does not take is told the two it does, and not `pvc`: the kind above
+		// refuses that one by name with its own reason, and a list of accepted values that holds a
+		// refused one sends an operator who mistyped to a value the next line would refuse again.
+		return ompsessions.Store{}, errors.New(sessionStoreKey + " must be 'postgres' or 'cloudsql-iam'")
 	}
 	if dsnSecret != nil && kind != ompsessions.StorePostgres {
 		return ompsessions.Store{}, inertSessionKey(sessionDSNKey, kind)

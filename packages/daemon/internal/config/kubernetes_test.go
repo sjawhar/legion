@@ -779,9 +779,9 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: sessionStoreRefusal,
 		},
 		{
-			name: "session_store none of the three",
+			name: "session_store none of the two it takes, told neither pvc nor its own name",
 			body: kubernetesWith("    session_store: postgres\n", "    session_store: s3\n"),
-			want: "runtime.kubernetes.session_store must be 'pvc', 'postgres' or 'cloudsql-iam'",
+			want: "runtime.kubernetes.session_store must be 'postgres' or 'cloudsql-iam'",
 		},
 		{
 			name: "session_store postgres without its key",
