@@ -46,8 +46,62 @@ func TestMirrorWritesTheRowOfADispatchIssueFact(t *testing.T) {
 }
 
 // Every other kind of fact passes through the mirror untouched: it is one handler among three,
-// and only an issue event says anything about what an issue waits on.
+// and only an issue event, or the periodic turn's own re-read, says anything about what an issue
+// waits on.
 func TestMirrorWritesNothingForAnotherFactKind(t *testing.T) {
+	pool := migratedPool(t)
+	records := record.NewStore()
+	mirror := NewMirror(records, testProject)
+	inTx(t, pool, func(tx pgx.Tx) {
+		result, err := mirror.Apply(context.Background(), tx, intake.RepoMappingChanged{Project: testProject})
+		if err != nil {
+			t.Fatalf("apply the mapping change: %v", err)
+		}
+		if result.Refusal != nil {
+			t.Fatalf("the mirror refused %#v; it decides nothing", result.Refusal)
+		}
+	})
+	if got := mirrored(t, pool, records); len(got) != 0 {
+		t.Fatalf("the mirror holds %#v after a fact that is no issue event, want nothing", got)
+	}
+}
+
+// The periodic turn's re-read rides on the controller tick, and every row it observed is written
+// through the same fence an event's row takes: a view fresher than the row replaces it, and one
+// older than a row an event already wrote leaves that row exactly as it stands.
+func TestMirrorWritesEveryRowAControllerTickObserved(t *testing.T) {
+	pool := migratedPool(t)
+	records := record.NewStore()
+	mirror := NewMirror(records, testProject)
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := records.PutDispatchIssue(context.Background(), tx, record.DispatchIssueRow{
+			Key: "LEGION-900", Project: testProject, Status: "in_progress", Seq: 9}); err != nil {
+			t.Fatalf("seed a fresher event's row: %v", err)
+		}
+		result, err := mirror.Apply(context.Background(), tx, intake.ControllerTick{Observed: []intake.IssueStatus{
+			{Key: "LEGION-900", Status: "todo", Seq: 4},
+			{Key: "LEGION-901", Status: "done", Blockers: []string{"LEGION-902"}, Seq: 6},
+		}})
+		if err != nil {
+			t.Fatalf("apply the controller tick: %v", err)
+		}
+		if result.Refusal != nil {
+			t.Fatalf("the mirror refused %#v; it decides nothing", result.Refusal)
+		}
+	})
+	want := []record.DispatchIssueRow{
+		{Key: "LEGION-900", Project: testProject, Status: "in_progress", Blockers: []string{}, Seq: 9},
+		{Key: "LEGION-901", Project: testProject, Status: "done", Blockers: []string{"LEGION-902"}, Seq: 6},
+	}
+	if got := mirrored(t, pool, records); !reflect.DeepEqual(got, want) {
+		t.Fatalf("the mirror holds %#v, want %#v", got, want)
+	}
+}
+
+// A turn with nothing waiting reads nothing from Dispatch, so its tick observes nothing and
+// writes nothing: that is the tick exactly as it was before the re-read existed, which is almost
+// every turn.
+func TestMirrorWritesNothingForATickThatObservedNothing(t *testing.T) {
 	pool := migratedPool(t)
 	records := record.NewStore()
 	mirror := NewMirror(records, testProject)
@@ -61,7 +115,7 @@ func TestMirrorWritesNothingForAnotherFactKind(t *testing.T) {
 		}
 	})
 	if got := mirrored(t, pool, records); len(got) != 0 {
-		t.Fatalf("the mirror holds %#v after a fact that is no issue event, want nothing", got)
+		t.Fatalf("the mirror holds %#v after a tick that observed nothing, want nothing", got)
 	}
 }
 
