@@ -110,12 +110,19 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.Block
 //
 // Two kinds of issue are exempt. One that carries a run into a tree of its own — a handed-over
 // child, a re-admitted tree — is work already under way, which is never stopped and never
-// re-checked (record.Issue.CarriesRun). And one that has run before, in this generation or an
-// earlier one (record.Issue.TakenBack), starts again at its person's word: a tree Legion takes
-// back after it has finished and lingered, though re-admission leaves it carrying no run.
-// Everything else is checked like any other issue: a child that has been released but never
-// started, a never-started child handed over as a root of its own, and a waiting root that only
-// left the line and came back among them, since none of them has stood in a phase of its own.
+// re-checked (record.Issue.CarriesRun), by whichever door it arrives. And a tree Legion takes back
+// after it has finished and lingered starts again at its person's word, though re-admission leaves
+// it carrying no run: that is both halves at once, that it ran and that the tree coming back is its
+// own, which record.Issue.TakenBack holds. The mark is a fact about a run: the workflow writes it
+// as a phase of that run begins, re-admission keeps it when the root's own tree comes back, and
+// every other path that opens a run starts it clean — a child's re-entry into its tree, and a
+// child's hand-over to a root of its own without its run. So no issue is exempt unless the run it
+// is exempt for is the run it arrived with. Everything else is checked like any other issue: a
+// child that has been released but never started, a waiting root that only left the line and came
+// back, and a child handed over from a finished tree as a root of its own without its run, whether
+// or not it ran there, a done child a person labels as an orphan root among them. A child held at
+// phase.Admitted in its own tree is no candidate here at all: the workflow holds it, and Blocked
+// reports it, by Holdable and Unfinished, whatever its mark — and a re-entered child carries none.
 func Exempt(issue record.Issue) bool { return issue.CarriesRun() || issue.TakenBack }
 
 // WaitsOn is what issue still waits on, from rows: the issues Dispatch says it is blocked by

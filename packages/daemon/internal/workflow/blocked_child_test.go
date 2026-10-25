@@ -149,7 +149,8 @@ func TestAHeldChildStartsWhenItsLastBlockerCloses(t *testing.T) {
 // starts at the next look: left admitted, it would stand unstarted with nothing naming it, since
 // the state's `blocked` names only a child with an unfinished blocker and the edit, which changes
 // no status, is not one the engine's handling of the event acts on. It starts as a child its tree's
-// gate opened onto does, its architect told nothing it would not be told of that one.
+// gate opened onto does, and its tree's architect is told so by the same child-status notice a
+// blocker's close sends, its reason saying the links were taken off: no issue it waited on closed.
 func TestAHeldChildWhoseLinksAreTakenOffStarts(t *testing.T) {
 	pool := migratedPool(t)
 	seedHeldTree(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: new(3)})
@@ -179,8 +180,9 @@ func TestAHeldChildWhoseLinksAreTakenOffStarts(t *testing.T) {
 	}
 	assertBranchRow(t, pool, "LEGION-209", 4)
 	assertPlannerStart(t, pool, "LEGION-209")
-	if got := childStatusNotices(t, pool); len(got) != 0 {
-		t.Fatalf("child-status notices = %#v, want none: no issue it waited on closed", got)
+	want := "LEGION-209 starts planning under LEGION-208: its blocked-by links were taken off, so it waits on nothing"
+	if got := childStatusNotices(t, pool); len(got) != 1 || got[0] != want {
+		t.Fatalf("child-status notices = %#v, want one reading %q", got, want)
 	}
 }
 
@@ -324,13 +326,14 @@ func TestALingerHandsOverTheAdmittedChildThatStillWaits(t *testing.T) {
 	}
 }
 
-// An issue earns its mark (record.Issue.TakenBack) as it moves into a phase of its own, and keeps
-// it for good: through a child's re-entry into its next generation, held there by a blocker
-// without starting again, and through its root's leave into a linger. So the record a tree that
-// ran leaves for its taken-back root is already one promotion exempts (blockers.Exempt), whatever
-// re-admission later writes of its phase and generation, which never touches the mark — while a
-// member that never started carries none.
-func TestTheRunMarkIsWrittenAsAPhaseStartsAndOutlivesTheRun(t *testing.T) {
+// An issue's run earns its mark (record.Issue.TakenBack) as it moves into a phase of its own, and
+// the mark belongs to that run: a child's re-entry into its next generation in its own tree opens a
+// new run, which starts without it — held there by a blocker, it is checked like any child that
+// never ran — while the root's leave into a linger opens no run, and its record keeps it. So the record
+// a tree that ran leaves for its taken-back root is already one promotion exempts
+// (blockers.Exempt), whatever re-admission later writes of its phase and generation, which keeps
+// the mark of a root whose own tree comes back — while a member that never started carries none.
+func TestTheRunMarkIsWrittenAsAPhaseStartsAndBelongsToThatRun(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Admitted, Generation: 4, Status: "in_progress", Rank: "U",
@@ -370,8 +373,8 @@ func TestTheRunMarkIsWrittenAsAPhaseStartsAndOutlivesTheRun(t *testing.T) {
 	}
 
 	// The child that ran, in_progress as its run's status writes leave it, is set back to todo
-	// while an issue it now waits on is unfinished: its next generation is held at admitted, and
-	// still marked.
+	// while an issue it now waits on is unfinished: its next generation is a new run, held at
+	// admitted and carrying no mark, since that run has stood in no phase.
 	if _, err := pool.Exec(t.Context(), "update issues set status = 'in_progress', dispatch_status = 'in_progress' where key = 'LEGION-209'"); err != nil {
 		t.Fatalf("record the running child in_progress: %v", err)
 	}
@@ -383,8 +386,8 @@ func TestTheRunMarkIsWrittenAsAPhaseStartsAndOutlivesTheRun(t *testing.T) {
 	if err := pool.QueryRow(t.Context(), "select generation from issues where key = 'LEGION-209'").Scan(&generation); err != nil {
 		t.Fatalf("read the re-entered child's generation: %v", err)
 	}
-	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted || generation != 5 || !marked("LEGION-209") {
-		t.Fatalf("the re-entered child = %s at generation %d marked %t, want held at admitted in generation 5 and still marked",
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted || generation != 5 || marked("LEGION-209") {
+		t.Fatalf("the re-entered child = %s at generation %d marked %t, want held at admitted in generation 5 and unmarked: its new run has not run",
 			got, generation, marked("LEGION-209"))
 	}
 

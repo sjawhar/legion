@@ -68,17 +68,25 @@ type Issue struct {
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
 	HandedOver bool
-	// TakenBack is whether the issue has stood in a phase of its own — one that carries a run
-	// (CarriesRun's rule: neither phase.Admitted nor phase.Done) — in this generation or an earlier
-	// one. The workflow's transition sets it as the issue moves into such a phase
-	// (workflow.Engine.transition), the only way an issue first leaves phase.Admitted for one, and
-	// nothing clears it: an issue that ran once has run, so a new generation, a child's re-entry and
-	// a hand-over all keep it, and re-admission neither writes nor clears it. Promotion reads it
-	// because a tree that ran, taken back after it finished and lingered, starts again whatever its
-	// links say, though re-admission leaves it at phase.Admitted carrying no run. By then a root that
-	// only left the waiting line and came back, or a child handed over without ever starting, is the
-	// same shape, and only the mark, which neither has, tells it from the exempt one
-	// (blockers.Exempt).
+	// TakenBack is whether the issue's run has stood in a phase of its own — one that carries a run
+	// (CarriesRun's rule: neither phase.Admitted nor phase.Done) — as part of the tree it now roots or
+	// belongs to. It is a fact about the run, not about the issue's history. Promotion reads it
+	// because the spec exempts a tree Legion takes back after it finished and lingered: both that the
+	// issue ran and that the tree coming back is its own, since re-admission leaves such a root at
+	// phase.Admitted carrying no run, the same shape as a waiting root that only left the line and
+	// returned, or a child handed over from a finished tree as a root of its own, both of which are
+	// checked (blockers.Exempt).
+	//
+	// The workflow's transition writes the mark as the issue moves into such a phase
+	// (workflow.Engine.transition), the only way an issue first leaves phase.Admitted for one. It
+	// lasts through that phase's end and its root's leave into a linger, and re-admission keeps it
+	// when the root's own tree comes back, the work that earned it. Every other path that opens a run
+	// starts the run clean: a child's re-entry into its tree records its new generation without it
+	// (workflow.Engine.enterChild), and re-admission clears it when another tree's work reaches a root
+	// of its own without its run (admit.Admission.readmit), what that child ran being its old tree's.
+	// An orphan that carries its run keeps the mark with it, the run being its new tree's from then
+	// on. So no issue is exempt from the blocker check unless the run it is exempt for is the run it
+	// arrived with. Nothing else writes it.
 	TakenBack bool
 	// DispatchStatus is the status Dispatch showed at the newest event or boot listing applied to the
 	// record (LastDispatchSeq's), whatever the daemon has queued since: every event carries the whole

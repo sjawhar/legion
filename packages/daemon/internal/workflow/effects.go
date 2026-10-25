@@ -337,15 +337,21 @@ func ChildReenteredNotice(child, root string) record.Notice {
 	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf("%s is todo; it runs again under %s", child, root)}
 }
 
-// ChildUnblockedNotice is the notice the tree's architect is told when a child it holds starts
-// because the last Dispatch issue that child waited on closed (Engine.StartUnblockedChildren).
-// waited is every issue it waited on, in Dispatch's own order, all of them done by now. It is the
-// same child-status kind a child's leave and a re-entry are told with — the daemon's notice
-// routing sends one on a non-root child to the architect that owns it — and not phase-finished:
-// no phase of the child ended, it is beginning its first.
+// ChildUnblockedNotice is the notice the tree's architect is told whenever a child it holds for
+// blockers starts (Engine.StartUnblockedChildren), its reason saying what cleared the hold. waited
+// is every issue the child's mirror row still names, in Dispatch's own order, all of them done by
+// now: the last of them closed. Empty, the child names none any longer — a person took its
+// blocked-by links off while it waited — and the reason says that instead. A start nobody hears
+// of is the silent state the hold's report exists to remove, so neither path starts a child
+// without one. It is the same child-status kind a child's leave and a re-entry are told with —
+// the daemon's notice routing sends one on a non-root child to the architect that owns it — and
+// not phase-finished: no phase of the child ended, it is beginning its first.
 func ChildUnblockedNotice(child, root string, waited []string) record.Notice {
-	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: fmt.Sprintf(
-		"%s starts planning under %s: every issue it waited on (%s) is done", child, root, strings.Join(waited, ", "))}
+	reason := fmt.Sprintf("%s starts planning under %s: every issue it waited on (%s) is done", child, root, strings.Join(waited, ", "))
+	if len(waited) == 0 {
+		reason = fmt.Sprintf("%s starts planning under %s: its blocked-by links were taken off, so it waits on nothing", child, root)
+	}
+	return record.Notice{Kind: "child-status", Role: claim.RoleArchitect, Reason: reason}
 }
 
 func (e *Engine) lingerAt() time.Time { return e.now().Add(e.cfg.Linger) }

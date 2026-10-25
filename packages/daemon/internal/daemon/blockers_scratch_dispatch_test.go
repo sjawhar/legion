@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -15,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
@@ -34,7 +36,7 @@ import (
 // links, and every close — so every decision below is reached from an event the daemon consumed,
 // never from a fact or a row the test wrote.
 //
-// It drives the six things the feature promises, in one run over one tree of issues, because
+// It drives the ten things the feature promises, in one run over one tree of issues, because
 // each step is the state the next one starts from:
 //
 //  1. a blocked root is passed over while a slot stands free, and the roots nothing blocks take
@@ -45,11 +47,21 @@ import (
 //  3. a blocker linked to a root already in its slot does not stop it: the opening of its design
 //     gate starts it, and nothing ever names it blocked;
 //  4. a child released through release_children is held, the answer naming the issue it waits on,
-//     and starts when that issue closes;
+//     and starts when that issue closes, its tree's architect told so by a child-status notice
+//     naming the issue it waited on;
 //  5. a waiting root a person moves to backlog and back to todo is still checked, since only a tree
 //     that ran starts again when Legion takes it back, and is admitted when its blocker closes;
 //  6. a root waiting on an issue Legion keeps no record of and nobody handed to it is admitted by
-//     that issue's closing event alone, not by the controller tick that follows.
+//     that issue's closing event alone, not by the controller tick that follows;
+//  7. a held child whose blocked-by links a person takes off starts, and its tree's architect is
+//     told by a child-status notice that the links were taken off;
+//  8. a child that ran in its tree's earlier run and comes to Legion as a root of its own once
+//     that tree finishes is checked like any other root — one set back to todo and held in its
+//     tree before the tree closed, and one closed and set back to todo after;
+//  9. a tree that ran, taken back after its linger, is admitted at once whatever its links say,
+//     beside the two roots of step 8 its blocker still holds: the check exempts the tree Legion
+//     takes back and nothing else, so step 8 cannot pass by checking everything;
+//  10. the roots of step 8 are admitted when that blocker closes.
 func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	// The NATS server is taken first: testnats.URL empties it of every stream, and Dispatch's own
 	// start reconciles ENVOY_NOTIFICATIONS on it, which the daemon then consumes from.
@@ -290,6 +302,16 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	if got := state.Issues[child].Phase; got != phase.Planning {
 		t.Fatalf("the child %s left %s into %s; want its first phase, %s\nstate %s", child, phase.Admitted, got, phase.Planning, body)
 	}
+	// The tree's architect is told the child it held starts, and why: the child-status notice the
+	// daemon queued on the child, in the very transaction that started it, naming the issue it
+	// waited on.
+	notices := childStatusNotices(t, pool, child)
+	t.Logf("the child-status notices the daemon queued on %s for its tree's architect: %q", child, notices)
+	wantNotice := fmt.Sprintf("%s starts planning under %s: every issue it waited on (%s) is done", child, free, blocked)
+	if !slices.Equal(notices, []string{wantNotice}) {
+		t.Fatalf("Legion started the held child %s once %s closed and queued its tree's architect the child-status notices %q; "+
+			"want the one reading %q\nstate %s", child, blocked, notices, wantNotice, body)
+	}
 
 	// 5. A waiting root a person takes off the board and back is still checked. A root linked to the
 	// late blocker waits in line while a slot stands free; moved to backlog it leaves the line, and
@@ -418,6 +440,232 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	if _, recorded := state.Issues[outside]; recorded {
 		t.Fatalf("Legion recorded %s on its close, though nobody handed it to Legion\nstate %s", outside, body)
 	}
+
+	// 7. A held child whose blocked-by links a person takes off starts, and its tree's architect is
+	// told why. It waits on an issue someone else works, which stays unfinished until step 10: the
+	// edit that takes the link off changes no status and closes nothing, so what starts the child is
+	// the look at every held child that each event the daemon consumes runs.
+	elsewhere := createUnhandedIssue(t, baseURL, cfg.Project, "Vendor firmware upgrade")
+	setDispatchStatus(t, baseURL, elsewhere, "in_progress")
+	unlinked := createBlockersIssue(t, baseURL, cfg.Project, "Unlinked sibling task", free, []string{elsewhere})
+	setDispatchStatus(t, baseURL, unlinked, "todo")
+	settled(t, d, "record the child "+unlinked+" under "+free, func(s api.State) bool {
+		recorded, ok := s.Issues[unlinked]
+		return ok && recorded.Phase == phase.Admitted
+	})
+	status, answer = d.request(http.MethodPost, "/legion/v1/waves/release",
+		api.WaveReleaseRequest{GrantID: grant(), Issues: []string{unlinked}}, false)
+	if status != http.StatusOK {
+		t.Fatalf("release_children of %s = %d; body %s", unlinked, status, answer)
+	}
+	released = api.WaveReleaseResponse{}
+	if err := json.Unmarshal(answer, &released); err != nil {
+		t.Fatalf("decode the release of %s from %s: %v", unlinked, answer, err)
+	}
+	want = api.WaveReleaseResponse{
+		Released: []string{unlinked}, Started: []string{},
+		Held: []api.HeldChild{{Issue: unlinked, BlockedBy: []string{elsewhere}}},
+	}
+	if !reflect.DeepEqual(released, want) {
+		t.Fatalf("release_children answered %s; want %s held on %s and nothing started", answer, unlinked, elsewhere)
+	}
+	var unlinking struct {
+		BlockedBy []string `json:"blocked_by"`
+	}
+	dispatchCall(t, baseURL, http.MethodPatch, "/api/v1/issues/"+unlinked, map[string]any{"blocked_by": []string{}}, &unlinking)
+	if len(unlinking.BlockedBy) != 0 {
+		t.Fatalf("Dispatch answered the removal of %s's links with blocked_by %v", unlinked, unlinking.BlockedBy)
+	}
+	state, body = settled(t, d, "start the held child "+unlinked+" once its links were taken off", func(s api.State) bool {
+		recorded, ok := s.Issues[unlinked]
+		return ok && recorded.Phase != phase.Admitted
+	})
+	t.Logf("the held child %s started once a person took its links off, %s still unfinished:\n%s", unlinked, elsewhere, body)
+	if got := state.Issues[unlinked].Phase; got != phase.Planning {
+		t.Fatalf("the child %s left %s into %s once its links were taken off; want its first phase, %s\nstate %s",
+			unlinked, phase.Admitted, got, phase.Planning, body)
+	}
+	if waits, ok := blockedOn(state, unlinked); ok {
+		t.Fatalf("%s started and the state still lists it blocked by %v\nstate %s", unlinked, waits, body)
+	}
+	notices = childStatusNotices(t, pool, unlinked)
+	t.Logf("the child-status notices the daemon queued on %s for its tree's architect: %q", unlinked, notices)
+	wantNotice = fmt.Sprintf("%s starts planning under %s: its blocked-by links were taken off, so it waits on nothing", unlinked, free)
+	if !slices.Equal(notices, []string{wantNotice}) {
+		t.Fatalf("Legion started the held child %s once a person took its links off and queued its tree's architect the child-status "+
+			"notices %q; want the one reading %q: a start nobody hears of is the silence the hold's report exists to remove\nstate %s",
+			unlinked, notices, wantNotice, body)
+	}
+
+	// 8. A child that ran in its tree's earlier run and comes to Legion as a root of its own once
+	// that tree finishes is checked like any other root: what it ran was its old tree's work, and
+	// the tree it now roots has run nothing, so it is no tree Legion takes back. Two such children
+	// are driven, both waiting on the issue of step 7. The child of step 4, which ran planning, is
+	// moved on to in_progress, as a later phase's status write would leave it, and set back to todo
+	// while it waits on that issue: its tree's next run of it is held at admitted, and the tree's
+	// close hands it over, since its blocker outlives the tree. The child of step 7, which ran
+	// planning too, is linked to that issue and closed, and once its tree has finished a person sets
+	// it back to todo: an orphan of a finished tree. testConfig leaves the linger at zero, so a
+	// root's tree finishes as it closes. A child's planning writes no status of its own, so no write
+	// of the daemon's races the test's on either child.
+	//
+	// The roots of steps 5 and 6 finish first, so that the slots those two children and step 9's
+	// root later take stand free.
+	for _, key := range []string{returned, awaiting} {
+		awaitDispatchStatus(t, baseURL, key, "in_progress")
+		setDispatchStatus(t, baseURL, key, "done")
+	}
+	state, body = settled(t, d, "release the slots of "+returned+" and "+awaiting+" once they closed", func(s api.State) bool {
+		return !slices.Contains(s.Admission.Active, returned) && !slices.Contains(s.Admission.Active, awaiting)
+	})
+	t.Logf("the roots of steps 5 and 6 closed through Dispatch, leaving their slots free:\n%s", body)
+	checked := func(issue, when string, state api.State, body string) {
+		t.Helper()
+		if slices.Contains(state.Admission.Active, issue) {
+			t.Fatalf("Legion admitted %s %s, though %s, the issue it waits on, is not done: %s ran in its old tree's run, which is "+
+				"that tree's work, and the root of its own it became has run nothing; active = %v\nstate %s",
+				issue, when, elsewhere, issue, state.Admission.Active, body)
+		}
+		if !slices.Contains(state.Admission.Waiting, issue) {
+			t.Fatalf("Legion left %s out of the waiting line %v %s; a blocked root keeps its place\nstate %s",
+				issue, state.Admission.Waiting, when, body)
+		}
+		if waits, ok := blockedOn(state, issue); !ok || !slices.Equal(waits, []string{elsewhere}) {
+			t.Fatalf("the state's admission.blocked is %v %s; want %s named as waiting on %s\nstate %s",
+				state.Admission.Blocked, when, issue, elsewhere, body)
+		}
+		if len(state.Admission.Active) >= state.Admission.Cap {
+			t.Fatalf("Legion took all %d slots with %v %s, so its blocker was not all that held %s\nstate %s",
+				state.Admission.Cap, state.Admission.Active, when, issue, body)
+		}
+	}
+
+	// The planner the child's run launched registers, as its plugin does once its agent boots. The
+	// re-entry below suspends it, and a suspend reaching an agent still booting is held until the
+	// agent is ready; this harness boots no agent, so unregistered it would stay launching under
+	// the tree it ran in, and the cleanup of that tree, which step 9's re-admission waits on, would
+	// wait on it in turn.
+	planner, err := claim.NewToken(project, child, claim.RolePlanner)
+	if err != nil {
+		t.Fatalf("the planner claim token of %s: %v", child, err)
+	}
+	testwait.Eventually(t, "the daemon to launch the planner of "+child, func() bool {
+		for _, call := range rt.Calls() {
+			if (call.Method == "Spawn" || call.Method == "Resume") && call.Spec.Claim == planner {
+				return true
+			}
+		}
+		return false
+	})
+	registerLaunch(t, d, lastLaunch(t, rt, planner))
+
+	ran := state.Issues[child].Generation
+	setDispatchStatus(t, baseURL, child, "in_progress")
+	var relinked struct {
+		BlockedBy []string `json:"blocked_by"`
+	}
+	dispatchCall(t, baseURL, http.MethodPatch, "/api/v1/issues/"+child, map[string]any{"blocked_by": []string{elsewhere}}, &relinked)
+	if !slices.Equal(relinked.BlockedBy, []string{elsewhere}) {
+		t.Fatalf("Dispatch answered the link of %s to %s with blocked_by %v", child, elsewhere, relinked.BlockedBy)
+	}
+	setDispatchStatus(t, baseURL, child, "todo")
+	state, body = settled(t, d, "take "+child+" into a new run once a person set it back to todo", func(s api.State) bool {
+		return s.Issues[child].Generation > ran
+	})
+	t.Logf("the state once %s, which ran planning, was set back to todo while it waits on %s:\n%s", child, elsewhere, body)
+	if waits, ok := blockedOn(state, child); state.Issues[child].Phase != phase.Admitted || !ok || !slices.Equal(waits, []string{elsewhere}) {
+		t.Fatalf("Legion took %s, which ran planning in generation %d, into generation %d at %s with admission.blocked = %v; "+
+			"want its new run held at %s waiting on %s\nstate %s", child, ran, state.Issues[child].Generation,
+			state.Issues[child].Phase, state.Admission.Blocked, phase.Admitted, elsewhere, body)
+	}
+	// Dispatch refuses an edit of a closed issue, so the links the closed child of step 7 and the root
+	// of step 9 come back with are made while each still runs, which stops neither: a child already
+	// started and a root already in its slot are never re-checked (step 3).
+	for _, key := range []string{unlinked, free} {
+		dispatchCall(t, baseURL, http.MethodPatch, "/api/v1/issues/"+key, map[string]any{"blocked_by": []string{elsewhere}}, &relinked)
+		if !slices.Equal(relinked.BlockedBy, []string{elsewhere}) {
+			t.Fatalf("Dispatch answered the link of %s to %s with blocked_by %v", key, elsewhere, relinked.BlockedBy)
+		}
+	}
+	setDispatchStatus(t, baseURL, unlinked, "done")
+	settled(t, d, "record "+unlinked+" done once a person closed it", func(s api.State) bool {
+		return s.Issues[unlinked].Phase == phase.Done
+	})
+
+	setDispatchStatus(t, baseURL, free, "done")
+	state, body = settled(t, d, "hand "+child+" over as a root of its own once "+free+" closed", func(s api.State) bool {
+		return slices.Contains(s.Admission.Waiting, child) || slices.Contains(s.Admission.Active, child)
+	})
+	t.Logf("the state once %s closed and its tree finished, handing over %s, held in it on %s:\n%s", free, child, elsewhere, body)
+	checked(child, "once its finished tree handed it over", state, body)
+
+	setDispatchStatus(t, baseURL, unlinked, "todo")
+	state, body = settled(t, d, "take "+unlinked+" into its waiting line or a slot", func(s api.State) bool {
+		return slices.Contains(s.Admission.Waiting, unlinked) || slices.Contains(s.Admission.Active, unlinked)
+	})
+	t.Logf("the state once %s, closed in its finished tree, was set back to todo while it waits on %s:\n%s", unlinked, elsewhere, body)
+	checked(unlinked, "once a person set it back to todo after its tree finished", state, body)
+
+	// 9. A tree that ran, taken back after its linger, starts again whatever its links say. The root
+	// of step 3 reached planning before its tree closed in step 8, linked to the issue that still
+	// holds both roots of step 8; once the tree's close has run to its end, a person sets it back to
+	// todo. It takes a slot at once and is named in admission.blocked at no point, while the same
+	// state still names those two: the check exempts the tree Legion takes back, and nothing else.
+	//
+	// The tree's end is read off the daemon's own tree_lifecycles row, since the state shows none: a
+	// root set back to todo while its tree's cleanup is still running waits for that cleanup, and is
+	// promoted at the next fact or controller tick after it, of which this test has neither.
+	var cleaned bool
+	settled(t, d, "finish the cleanup of "+free+"'s tree", func(api.State) bool {
+		if err := pool.QueryRow(t.Context(), `select cleanup_confirmed_at is not null from tree_lifecycles where tree = $1`, free).
+			Scan(&cleaned); err != nil {
+			t.Fatalf("read the lifecycle of %s's tree: %v", free, err)
+		}
+		return cleaned
+	})
+	var namedTakenBack []api.BlockedIssue
+	setDispatchStatus(t, baseURL, free, "todo")
+	state, body = settled(t, d, "take "+free+" back once a person set it to todo", func(s api.State) bool {
+		_, named := blockedOn(s, free)
+		if named && namedTakenBack == nil {
+			namedTakenBack = s.Admission.Blocked
+		}
+		return slices.Contains(s.Admission.Active, free) || (slices.Contains(s.Admission.Waiting, free) && named)
+	})
+	t.Logf("the state once %s, a tree that ran, was taken back after its linger while it waits on %s:\n%s", free, elsewhere, body)
+	if err := pool.QueryRow(t.Context(), `select blockers from dispatch_issues where key = $1`, free).Scan(&mirrored); err != nil {
+		t.Fatalf("read the daemon's mirror of %s: %v", free, err)
+	}
+	if !slices.Equal(mirrored, []string{elsewhere}) {
+		t.Fatalf("the daemon mirrors %s as waiting on %v; want %s, the link Dispatch made before the todo\nstate %s", free, mirrored, elsewhere, body)
+	}
+	if !slices.Contains(state.Admission.Active, free) || state.Issues[free].Slot == nil {
+		t.Fatalf("Legion left %s out of a slot (active = %v, its slot %v) though it is a tree that ran, taken back after its linger, "+
+			"which starts again whatever its links say: it checked the tree it takes back against %s\nstate %s",
+			free, state.Admission.Active, state.Issues[free].Slot, elsewhere, body)
+	}
+	if namedTakenBack != nil {
+		t.Fatalf("Legion named %s, a tree that ran and was taken back after its linger, in admission.blocked = %v\nstate %s",
+			free, namedTakenBack, body)
+	}
+	for _, key := range []string{child, unlinked} {
+		if waits, ok := blockedOn(state, key); !ok || !slices.Equal(waits, []string{elsewhere}) || slices.Contains(state.Admission.Active, key) {
+			t.Fatalf("the state that admitted %s shows %s blocked by %v (named %t) and active = %v; want it still waiting on %s: only the "+
+				"tree Legion takes back is exempt\nstate %s", free, key, waits, ok, state.Admission.Active, elsewhere, body)
+		}
+	}
+
+	// 10. The issue both roots of step 8 wait on closes, a real Dispatch write, and admits them.
+	setDispatchStatus(t, baseURL, elsewhere, "done")
+	state, body = settled(t, d, "admit "+child+" and "+unlinked+" once "+elsewhere+" closed", func(s api.State) bool {
+		return slices.Contains(s.Admission.Active, child) && slices.Contains(s.Admission.Active, unlinked)
+	})
+	t.Logf("%s closed through Dispatch, so the roots it held are admitted:\n%s", elsewhere, body)
+	for _, key := range []string{child, unlinked} {
+		if waits, ok := blockedOn(state, key); ok {
+			t.Fatalf("%s is admitted and the state still lists it blocked by %v\nstate %s", key, waits, body)
+		}
+	}
 }
 
 // settled polls the daemon's state until want holds and returns it with the JSON it was read
@@ -459,26 +707,33 @@ func blockedOn(state api.State, issue string) ([]string, bool) {
 	return nil, false
 }
 
+// childStatusNotices is the reason of every child-status notice the daemon has queued on issue for
+// its tree's architect, oldest first, read off the daemon's own outbox, where a notice stands
+// until the architect's role topic takes it. Nothing in this harness answers the Envoy address the
+// notice runner publishes to, so no row is finished by a delivery while the test reads it.
+func childStatusNotices(t *testing.T, pool *pgxpool.Pool, issue string) []string {
+	t.Helper()
+	rows, err := pool.Query(t.Context(), `select payload->>'reason' from outbox
+		where kind = 'notice' and issue = $1 and payload->>'kind' = 'child-status' order by id`, issue)
+	if err != nil {
+		t.Fatalf("read the child-status notices queued on %s: %v", issue, err)
+	}
+	reasons, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		t.Fatalf("read the child-status notices queued on %s: %v", issue, err)
+	}
+	return reasons
+}
+
 // architectGrants registers the session of an architect launch with the daemon and answers a
 // fresh grant on every call, as the architect's plugin does: one grant authorises one command.
 func architectGrants(t *testing.T, d *daemon, launch runtime.SpawnSpec, tree string) func() string {
 	t.Helper()
-	session := "ses_" + string(launch.Claim)
-	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
-		BootToken: launch.BootToken, SessionID: session, OmpSessionFile: "/sessions/" + session + ".jsonl",
-		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
-	}, false)
-	if status != http.StatusOK {
-		t.Fatalf("register the architect of %s = %d; body %s", tree, status, body)
-	}
-	var registered claim.RegisterResponse
-	if err := json.Unmarshal(body, &registered); err != nil {
-		t.Fatalf("decode the architect's registration %s: %v", body, err)
-	}
+	session, secret := registerLaunch(t, d, launch)
 	return func() string {
 		t.Helper()
 		status, body := d.request(http.MethodPost, "/legion/v1/grants", api.GrantRequest{
-			SessionID: session, Secret: registered.Secret, Tree: tree, Issue: tree,
+			SessionID: session, Secret: secret, Tree: tree, Issue: tree,
 		}, false)
 		if status != http.StatusOK {
 			t.Fatalf("the architect's grant on %s = %d; body %s", tree, status, body)
@@ -489,6 +744,25 @@ func architectGrants(t *testing.T, d *daemon, launch runtime.SpawnSpec, tree str
 		}
 		return minted.GrantID
 	}
+}
+
+// registerLaunch registers the session of a claim's launch with the daemon, as the agent's plugin
+// does once the agent has booted, and answers the session and the secret the daemon gave it.
+func registerLaunch(t *testing.T, d *daemon, launch runtime.SpawnSpec) (string, string) {
+	t.Helper()
+	session := "ses_" + string(launch.Claim)
+	status, body := d.request(http.MethodPost, "/legion/v1/claims/register", claim.RegisterRequest{
+		BootToken: launch.BootToken, SessionID: session, OmpSessionFile: "/sessions/" + session + ".jsonl",
+		AgentID: "agent", PluginContract: api.DaemonAPIVersion,
+	}, false)
+	if status != http.StatusOK {
+		t.Fatalf("register the session of %s = %d; body %s", launch.Claim, status, body)
+	}
+	var registered claim.RegisterResponse
+	if err := json.Unmarshal(body, &registered); err != nil {
+		t.Fatalf("decode the registration of %s from %s: %v", launch.Claim, body, err)
+	}
+	return session, registered.Secret
 }
 
 // blockersDatabase is a Postgres database of this daemon's own, dropped when the test ends. The

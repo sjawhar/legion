@@ -669,11 +669,16 @@ func readmittable(stored record.Issue) bool {
 // merged again, and a review, acceptance or READY would otherwise rerun work already decided or
 // landed.
 //
-// The record's record.Issue.TakenBack passes through untouched. It is the workflow's mark that the
-// issue has stood in a phase of its own (workflow.Engine.transition writes it), and an arrival here
-// neither earns nor loses one: a root whose own tree ran comes back carrying it and starts again
-// whatever its links say, while a waiting root that only left the line and returned, and a child
-// handed over without ever starting, come back without it and are checked like any other root.
+// The record's record.Issue.TakenBack is the workflow's mark that the issue has stood in a phase of
+// its own (workflow.Engine.transition writes it), and promotion exempts a root carrying it as a tree
+// Legion takes back (blockers.Exempt). Only the issue's own tree coming back is that: so a root
+// whose tree ran keeps the mark here and starts again whatever its links say, while a child
+// arriving from another tree's run without its run loses it — what it ran was that tree's work, and
+// the root of its own it becomes has run nothing — and is checked like any other root, as is a
+// waiting root that only left the line and returned, which never earned one. An orphan carrying its
+// run keeps its mark with the run: that run is its new tree's from here on, and the tree it roots
+// has run when it is taken back. Nothing here writes the mark: a run is earned by running, never by
+// arriving.
 func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank string, seq int64, carry bool) error {
 	if stored.Generation == ^uint64(0) {
 		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
@@ -700,6 +705,10 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.Tree = stored.Key
 	if !orphan {
 		stored.Phase, stored.Hold, stored.ReadyPendingVersion = phase.Admitted, nil, nil
+		// Another tree's work arriving without its run: the run it had was that tree's.
+		if !claim.IsTreeRoot(stored.Key, oldTree) {
+			stored.TakenBack = false
+		}
 	}
 	stored.Generation++
 	stored.Status, stored.DispatchStatus = "todo", "todo"

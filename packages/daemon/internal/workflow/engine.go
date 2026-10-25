@@ -338,7 +338,7 @@ func (e *Engine) recordChild(ctx context.Context, tx pgx.Tx, root record.Issue, 
 	if resolution.Refusal != "" {
 		return e.refuseChild(ctx, tx, root, fact.Key, fact.ResolvedRepo, resolution)
 	}
-	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution, false)
+	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution)
 }
 
 // ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
@@ -402,7 +402,7 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
 	}
-	if err := e.enterChild(ctx, tx, *root, fact, next, Resolution{Repo: child.Repo, DefaultBranch: child.DefaultBranch, GitHubRepo: child.GitHubRepo}, child.TakenBack); err != nil {
+	if err := e.enterChild(ctx, tx, *root, fact, next, Resolution{Repo: child.Repo, DefaultBranch: child.DefaultBranch, GitHubRepo: child.GitHubRepo}); err != nil {
 		return err
 	}
 	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
@@ -410,8 +410,9 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 
 // enterChild records a todo child under root's live tree, admitted at generation on the repository
 // at names, at its default branch and with GitHub's spelling of it, and starts its planning when the
-// tree's gate is open. A re-entered child keeps the repository it was first recorded with, and the
-// mark of a run it had before (ran, its record.Issue.TakenBack), which no new run clears.
+// tree's gate is open. A re-entered child keeps the repository it was first recorded with, but not
+// the mark of a run it had before (record.Issue.TakenBack): the run this opens is a new one, which
+// has stood in no phase yet, and a blocker it now waits on holds it like any other child's.
 //
 // It is the one door every child start funnels through — the architect's release_children, a
 // person's move of a child to todo, and a rerun or reopen through ReenterChild — so it is where a
@@ -420,10 +421,10 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 // StartUnblockedChildren starts it once the last issue it waits on is done. What it waits on is
 // read from the mirror, which the blockers.Mirror handler wrote this very event's row into, in
 // this same transaction, before the engine was asked anything.
-func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution, ran bool) error {
+func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
-		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, TakenBack: ran, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status,
+		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status,
 		Repo: at.Repo, DefaultBranch: at.DefaultBranch, GitHubRepo: at.GitHubRepo}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
@@ -787,10 +788,15 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	from := issue.Phase
 	issue.Phase, issue.Hold = row.To, nil
-	// This is the one write that moves an issue into a phase of its own, so it is where the issue
-	// earns record.Issue.TakenBack: it has run. Nothing clears the mark — not the phase's end, a
-	// new generation, a re-entry or a hand-over — since an issue that ran once has run, and a tree
-	// that ran is what promotion admits whatever its links say when Legion takes it back.
+	// This is the one write that moves an issue into a phase of its own, so it is where the issue's
+	// run earns record.Issue.TakenBack: it has stood in a phase. The mark is a fact about that run,
+	// not about the issue's history. It lasts as long as the run's record does — through the phase's
+	// end and its root's leave into a linger, and into the generation re-admission opens when Legion
+	// takes that same tree back, which is the work the mark was earned by and so starts again whatever
+	// its links say. Every other path that opens a run starts it clean: a child's re-entry into its
+	// tree (enterChild) and a child handed over as a root of its own without its run
+	// (admit.Admission.readmit). The invariant: no issue is exempt from the blocker check unless the
+	// run it is exempt for is the run it arrived with.
 	if issue.CarriesRun() {
 		issue.TakenBack = true
 	}
@@ -953,12 +959,13 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 // (record.TreeLive) with its design gate open. One whose tree is still closed is the gate's, whose
 // own opening starts it.
 //
-// Such a child either waited until the last issue it named closed, which its tree's architect is
-// told (ChildUnblockedNotice), or had its links taken off while it waited: an edit that changes no
-// status, which the engine's own handling of the event does not act on, and after which the state's
-// `blocked` no longer names it. Left here, that child would stand unstarted and unreported for good;
-// it starts as a child whose tree's gate opened onto it does, and its architect hears nothing more
-// than such a child's would.
+// Such a child either waited until the last issue it named closed, or had its links taken off while
+// it waited: an edit that changes no status, which the engine's own handling of the event does not
+// act on, and after which the state's `blocked` no longer names it. Left here, that child would
+// stand unstarted and unreported for good; it starts as a child whose tree's gate opened onto it
+// does. Either way its tree's architect is told it starts (ChildUnblockedNotice), with a reason
+// saying which of the two cleared its hold: a start nobody hears of is the very silence the hold's
+// report exists to remove.
 //
 // Its caller is admission's promoteHolds, which holds both the issues and the mirror rows already,
 // so every fact, tick, hold release and boot reconcile is a look at every held child. Each tree's
@@ -987,10 +994,10 @@ func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues [
 		if len(waited) == 0 {
 			e.logOnCommit(ctx, "workflow: this child names no issue it waits on any longer, so it starts",
 				"issue", issue.Key, "tree", issue.Tree)
-			continue
+		} else {
+			e.logOnCommit(ctx, "workflow: every issue this child waited on is done, so it starts",
+				"issue", issue.Key, "tree", issue.Tree, "blockers", waited)
 		}
-		e.logOnCommit(ctx, "workflow: every issue this child waited on is done, so it starts",
-			"issue", issue.Key, "tree", issue.Tree, "blockers", waited)
 		if err := e.notice(ctx, tx, issue.Key, ChildUnblockedNotice(issue.Key, issue.Tree, waited)); err != nil {
 			return err
 		}
