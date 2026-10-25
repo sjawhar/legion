@@ -2,21 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-364",
-  "completed": "2026-10-25T17:22:48Z",
-  "round": 1,
-  "reviewedCodeHead": "28dcd7a1b4e9e05828bfd8abc5c517064725ef5c",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T17:44:54Z",
+  "round": 2,
+  "reviewedCodeHead": "f12514e89234f30662b332eaf0222338e1f41b67",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/refs/refs_test.go:380",
-      "description": "No test locks the ask referenced_by_count fix. The excludeKinds assertion excludes 'mentions', and every fixture row is a mention, so it passes with or without the node-kind filter. Mutation check on the reviewer's harness: BacklinkCounts with from_kind = any(...) applied only when excludeKinds is empty (the bug every ask read, which passes AskBacklinkExclusions = [replies_to], would then show) passes all three new Go tests. Fix: count with excludeKinds = AskBacklinkExclusions (or [replies_to]) on this fixture and require {CORE-1: 1}; keep a case that proves the exclusion itself still works."
-    }
-  ],
-  "ci": "Required set (rulesets) lint, typecheck, test, pr-title: all completed success at CI head 28dcd7a1b4e9 (Tests run 40214137601, PR Title run 40214137427); compare 28dcd7a1...6f4078b1 touches only .legion/. Legion Envoy and Contracts run 40214137452 (not required) still in progress. PR body CI line is stale (lint and test shown in progress).",
-  "thermonuclear": "deep-review: APPROVE at 28dcd7a1, no findings; code-quality: CHANGES at 28dcd7a1, the finding above. Reviewer EXPLAIN with enable_seqscan=off on the harness: issue and ask BacklinkCounts with the from_kind filter use refs_to and the structural arms' indexes, no seq scan.",
-  "threads": "0 threads on the pull request."
+  "keyFindings": [],
+  "roundOneFinding": {
+    "thread": "PRRT_kwDORFy7ds6wDTYA",
+    "disposition": "fixed in f12514e89234; accepted by the reviewer",
+    "verification": "Reviewer mutation (node-kind filter applied only when excludeKinds is empty) fails refs_test.go:386 with map[CORE-1:2 OPS-1:1]; want map[CORE-1:1]; the head passes."
+  },
+  "ci": "Required set (rulesets) lint, typecheck, test, pr-title: all completed success at CI head f12514e89234 (Tests run 40216568667, PR Title runs 40216568472 and 40216713780); compare f12514e8...19fec8bb touches only .legion/. Legion Envoy and Contracts run 40216568676 (not required) was still in progress.",
+  "thermonuclear": "At f12514e8: deep-review APPROVE, no findings; code-quality APPROVE, round-1 finding closed.",
+  "notes": [
+    "Harness hazard hit again: this round's /legion/harness/setup.sh found another container's idle postmaster on 55432, and the failed start removed its postmaster.pid, so that idle server shut itself down at 17:35:51Z. No client was connected. The reviewer then started its own server and stopped it before completing."
+  ]
 }
