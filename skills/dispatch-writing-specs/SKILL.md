@@ -29,7 +29,7 @@ Another agent can build and check the work from the spec alone. Length scales wi
 
 For each spec, ask, comment and message:
 
-- Write in `skill://asd-ste100`'s strict mode.
+- Write in ASD-STE100's strict mode.
 - State the current design, never how people reached it.
 - Link each source where the person wrote it: `dispatch://KEY/comment/<id>`, `/ask/<id>`, `/message/<id>`, or a Slack URL. With no link, state the design.
 - Write about the design, never the person. Never quote people, repeat an answered ask, or upload their words.
