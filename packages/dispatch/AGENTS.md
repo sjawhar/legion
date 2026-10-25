@@ -71,7 +71,8 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   Collapse thread let go (`useSending`'s `untilDeadline`), so a request that hangs never keeps a
   reader in front of it. Every write the page makes is keyed: `ApiClient.send` takes the key its
   caller minted for the person's one action and sends it as `Idempotency-Key` on every `POST` and
-  `PATCH` (a `PUT` and a `DELETE` are idempotent already and carry none), so Dispatch makes the
+  `PATCH` (a `PUT` and a `DELETE` are idempotent already and carry none, yet run the same loop, so
+  a dropped pin write is tried again and lands rather than being refused), so Dispatch makes the
   write once however many attempts reach it and answers a repeat with the first answer
   (`Idempotency-Replayed: ?1`). The key is minted by the caller that stands for the press, never
   by `send`, so a retry reuses it and two presses differ. `writeUnderKey`
