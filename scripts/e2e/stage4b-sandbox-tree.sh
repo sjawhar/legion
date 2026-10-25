@@ -4015,18 +4015,20 @@ for pair in "$plan_head:$(role_app planner):the planner's handoff commit" "$pr_h
   [ "$actor" = "$want" ] || fail "$what $sha on legion/$tree1 was committed by $actor, want $want"
 done
 # The planner's push touched only .legion/ (a handoff-only push): its head's message ends with two
-# empty lines and `skip-checks: true` as the last line — the one shape GitHub honours (its "Skipping
-# workflow runs": the trailer last, preceded by two empty lines; the rule's first live run wrote one
-# empty line and GitHub started both workflows) — with the pane's `Omp-Session:` trailer above it;
+# empty lines and one trailer block, the pane's `Omp-Session:` trailer then `skip-checks: true` as
+# the last line — the one shape GitHub honours (its "Skipping workflow runs": the trailers section
+# at the end, preceded by two empty lines, `skip-checks` last; the rule's first live run wrote one
+# empty line and GitHub started both workflows), and the one where git's trailer parser still
+# finds `Omp-Session:`;
 # GitHub started no check run on it, and the daemon recorded that head as the planner's completion.
 # The implementer's code head (its newest commit on the pull request touching a path outside
 # .legion/) carries no such line and has its check runs, and the daemon recorded the branch head as
 # the implementer's completion (acceptance 4a).
 plan_message=$(timeout 60 gh api "repos/$repo/commits/$plan_head" --jq .commit.message) || fail "GitHub could not read the planner's handoff commit $plan_head"
-plan_tail=$(tail -3 <<<"$plan_message" | tr '\n' '|')
-[ "$plan_tail" = "||skip-checks: true|" ] ||
-  fail "the planner's handoff commit $plan_head does not end its message with two empty lines and 'skip-checks: true' (the shape GitHub honours); its last three lines are '$plan_tail': $(tr '\n' '|' <<<"$plan_message")"
-grep -q '^Omp-Session: ' <<<"$plan_message" || fail "the planner's handoff commit $plan_head carries no Omp-Session trailer above skip-checks: $(tr '\n' '|' <<<"$plan_message")"
+plan_tail=$(tail -4 <<<"$plan_message" | sed 's/^Omp-Session: .*/Omp-Session/' | tr '\n' '|')
+[ "$plan_tail" = "||Omp-Session|skip-checks: true|" ] ||
+  fail "the planner's handoff commit $plan_head does not end its message with two empty lines and one trailer block of 'Omp-Session:' then 'skip-checks: true' (the shape GitHub honours); its last four lines are '$plan_tail': $(tr '\n' '|' <<<"$plan_message")"
+git interpret-trailers --parse <<<"$plan_message" | grep -q '^Omp-Session: ' || fail "git's trailer parser finds no Omp-Session trailer in the planner's handoff commit $plan_head: $(tr '\n' '|' <<<"$plan_message")"
 plan_checks=$(timeout 60 gh api "repos/$repo/commits/$plan_head/check-runs" --jq .total_count) || fail "GitHub could not list the check runs on $plan_head"
 [ "$plan_checks" = 0 ] || fail "GitHub started $plan_checks check run(s) on the planner's handoff-only push $plan_head"
 [ "$(role_handoff "$tree1" planner)" = "$plan_head" ] || fail "the daemon recorded the planner's completion at $(role_handoff "$tree1" planner), not the pushed head $plan_head"
@@ -4048,7 +4050,7 @@ code_message=$(timeout 60 gh api "repos/$repo/commits/$code_head" --jq .commit.m
 ! grep -qE 'skip-checks: true|\[(skip ci|ci skip|no ci|skip actions|actions skip)\]' <<<"$code_message" || fail "the implementer's code head $code_head carries a CI-skipping line: $(tr '\n' '|' <<<"$code_message")"
 code_checks() { [ "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" -gt 0 ] 2>/dev/null; }
 on_tree "$tree1" until_true 300 "a check run on the implementer's code head $code_head" code_checks
-printf 'planner handoff %s: 0 check runs, two empty lines then skip-checks: true as the last line\nimplementer code head %s: %s check runs\n' "$plan_head" "$code_head" "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" >>"$evidence/github-credential-pushes.txt"
+printf 'planner handoff %s: 0 check runs, two empty lines then one trailer block of Omp-Session: then skip-checks: true as the last line, read back by git interpret-trailers\nimplementer code head %s: %s check runs\n' "$plan_head" "$code_head" "$(timeout 60 gh api "repos/$repo/commits/$code_head/check-runs" --jq .total_count)" >>"$evidence/github-credential-pushes.txt"
 # Negative control: the real gh with a GH_CONFIG_DIR holding no files is nobody, and says so.
 if pod_exec "$gh_pod" implementer sh -c "GH_CONFIG_DIR=/nonexistent GH_TOKEN= GITHUB_TOKEN= GH_HOST= /usr/local/bin/gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login" >/dev/null 2>"$evidence/github-credential-negative.txt"; then
   fail "gh in the implementer container with GH_CONFIG_DIR=/nonexistent still answered a viewer"
