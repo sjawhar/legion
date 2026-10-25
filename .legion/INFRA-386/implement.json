@@ -2,10 +2,34 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T17:55:11Z",
+  "completed": "2026-10-25T18:32:30Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "codeHead": "90eca150f88936e46d1f354cbad83cba5f9e5236",
+  "codeHead": "9d9bcf0ecca26298410bf72945d973833fad59cc",
   "proof": [
+    {
+      "criterion": "Round 8: no stop signal (TERM, INT or HUP) reaching the trap cuts the clean-up short",
+      "surface": "this issue's role container, against the applied cluster, the page's block filled in with one fixture work line, run as the page says with TMPDIR private, stops sent to the sequence's group",
+      "command": "drive2.sh twoterm|termint|termhup (work sleep 120, stops after 'answered') and failint|failterm (work false, stop on the trap's first reading)",
+      "observed": "TERM then TERM 0.5 s (gl9tv): sequence: exit 143, nothing left; TERM then INT 0.3 s (p9lsn): sequence: exit 143, nothing left; TERM then HUP 0.3 s (kjbxm): sequence: exit 143, nothing left; one INT into a failed-step trap (v2kp2): sequence: exit 1, nothing left; one TERM into a failed-step trap (z657b): sequence: exit 1, nothing left",
+      "headSha": "9d9bcf0ecca26298410bf72945d973833fad59cc",
+      "negativeControl": "90eca150 (set -m): TERM then INT (zfm6t) and one INT into a failed-step trap (58nrb) each printed the first reading then nothing, no sequence: exit, Job/Service/pod left (removed by name)"
+    },
+    {
+      "criterion": "Round 8: SIGKILL still ends the sequence; ordinary, refused-create and 40 s-timeout runs end clean",
+      "surface": "same; the timeout run through this role's bash tool at the pushed bytes",
+      "command": "drive2.sh kill; drive2.sh plain; fill.sh neg; the filled block with work sleep 60 in the tool's foreground with a 40 s timeout, then flock <file> cat <log>",
+      "observed": "KILL (wwf4f): no trap output, Job/Service/pod left, recovery lines removed them in 1 s; plain (685dm): exit 0, nothing left; refused create: label path, No resources found, exit 1; timeout (5zvkm): call ended at 40 s, re-attach showed answered, deleted, exit 0, nothing left",
+      "headSha": "9d9bcf0ecca26298410bf72945d973833fad59cc",
+      "negativeControl": "the KILL run is the exception the page keeps: no trap ran"
+    },
+    {
+      "criterion": "Round 8: page checks; block identical to base but for the ignore line and setsid -w on the trap's kubectl",
+      "surface": "docs/kubernetes.md fetched from GitHub at the pushed head",
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=9d9bcf0ecca26298410bf72945d973833fad59cc\" -H \"Accept: application/vnd.github.raw\"; plan checks; diff <(code.sh base) <(code.sh head); hunks8.awk",
+      "observed": "pushed page identical to the checked working copy; A1 0; A2 1 x7; A3 date 4; A7 0; A8 0; comment-stripped diff: the ignore line plus setsid -w on ten kubectl lines; A5 fourteen hunks all ok; check-private-names exit 0; sweep 0",
+      "headSha": "9d9bcf0ecca26298410bf72945d973833fad59cc",
+      "negativeControl": "code hash base abe1b4cf..., head 3277ca66..."
+    },
     {
       "criterion": "Round 7: two stops 0.5 s apart finish the clean-up and print sequence: exit",
       "surface": "this issue's role container, against the applied cluster, the page's block filled in, work fixture 'sleep 120', run as the page says (flock ... setsid -f)",
@@ -221,13 +245,15 @@
     "Round 3: P1 was not re-run; no command of the block changed (comment-stripped block cmp-identical to base), and the architect ruled that no stop is re-measured.",
     "Round 4: the INFRA-232 evidence bullet's two stop placements (base 3278-3282) changed, outside the plan's A5 ranges, under the architect's round-3 ruling that a further sweep finding is fixed in the same round; P1 not re-run (no command changed).",
     "Round 5: the deliberate-stop paragraph (base 3188-3191) changed at the reviewer's request, outside the plan's A5 ranges; P1 not re-run (no command changed).",
-    "Round 7: the signal line carries set -m besides the ignore the architect named, because the ignore alone did not stop a group TERM from killing the trap's kubectl on the real block; measured and recorded."
+    "Round 7: the signal line carries set -m besides the ignore the architect named, because the ignore alone did not stop a group TERM from killing the trap's kubectl on the real block; measured and recorded.",
+    "Round 8: set -m replaced by setsid -w on each of the trap's kubectl commands (ten lines), per the architect's direction after the tester's SIGINT finding.",
+    "My own rm -f \"$TMPDIR\"/sequence.* clean-ups in rounds 1 and 7 ran in the shared TMPDIR and are the likely cause of the sequence files the tester saw removed during its runs; round 8 used a private TMPDIR."
   ],
   "openQuestions": [],
   "discoveredComplexity": [],
-  "round": 7,
-  "roundReason": "Architect's standing ruling (PR comments 6400492408, 6400601649, 6400670216, 6400709005): cleanup() ignores further INT/TERM/HUP; delete the hazard sentences; correct the body's risk line that cited only a stub.",
-  "previousCodeHead": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+  "round": 8,
+  "roundReason": "Tester's round-7 failure: with set -m a SIGINT reaching the trap still ended it and left the Job, Service and pod; architect directed: keep the ignore, drop set -m, give the trap's commands a session of their own.",
+  "previousCodeHead": "90eca150f88936e46d1f354cbad83cba5f9e5236",
   "fullDiffSweep": "Every sentence in the four hunks against base 371d6c87 was re-read against its evidence. Beyond the two clauses, three were fixed: 'deletes every Job carrying that label' became 'deletes every Job the server lists with that label'; the 0.33 s/0.35 s stops, classed 'in flight' only by their outcome, became stops 'that took this path and found a Job', with 'none of the twenty-six left a Job' and the in-flight/answered split stated as not shown; and 'a SIGKILL inside the create' became 'a SIGKILL left before its name was printed'. The rest was checked and kept (listed in the PR body).",
   "threads": [
     "PRRT_kwDORFy7ds6wDE3_ fixed, replied, resolved",
@@ -240,9 +266,9 @@
     "PRRT_kwDORFy7ds6wDNvY fixed, replied, resolved"
   ],
   "blockCommandChange": {
-    "line": "trap '' INT TERM HUP; set -m  (docs/kubernetes.md:3017, after trap - EXIT INT TERM HUP)",
+    "change": "trap '' INT TERM HUP added after trap - EXIT INT TERM HUP; each of the trap's ten kubectl commands prefixed with setsid -w; no set -m",
     "codeHashBase": "abe1b4cf246007dcaeb06de73bff62a3b372ee50b0aa8b1b0e8d77dbe076195c",
-    "codeHashHead": "798bb54b05f106be502e32c78e2e5d1126d03485c054cbe0f33f3d499c367892",
-    "why set -m": "with the ignore alone, a second TERM killed the trap's kubectl delete on the real block: kubectl (Go) does not keep an inherited SIGTERM ignore (stub: TERM rc 143 after 1 s, INT/HUP survived); set -m gives each trap command its own process group, which a group stop does not reach"
+    "codeHashHead": "3277ca66c0a8048a3d14677f928a455f9cb18cfa0b6a10ea26ee74011a8fc4bb",
+    "why": "kubectl (Go) keeps an inherited ignore of SIGINT and SIGHUP but not SIGTERM; a command in a session of its own is outside the stopped group; set -m let a SIGINT end the trap"
   }
 }
