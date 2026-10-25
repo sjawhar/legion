@@ -489,16 +489,17 @@ export default function envoyExtension(pi: PiApi): void {
   // interface's `claim` and `subscribe` refuse naming why (`requireInbound`).
   const inbound = envoy.enabled && !("off" in envoy.inbound);
   const startNotice = atStart.notice ?? "";
-  // AskGate (extensions/askgate/) reviews each Dispatch write before it posts. It runs in a session
-  // with Dispatch on at load, unless the session's envoy.json turns it off (`askgate.enabled`,
-  // read once, here). Its one `tool_call` handler registers with this factory's own handlers (after
-  // this entry's `tool_call` handler, below) and waits for the Oh My Pi modules the gate loads. A
-  // switch that cannot be read, and a gate that did not load, are said at every session start; a
-  // gate that did not load refuses each write it would review.
+  // AskGate (extensions/askgate/) reviews each Dispatch write before it posts. The session's own
+  // envoy.json is its only switch: a checkout can change Dispatch startup settings, but cannot
+  // disable a gate that a later shell command can still reach with DISPATCH_URL. Its one
+  // `tool_call` handler registers with this factory's own handlers (after this entry's handler,
+  // below) and waits for the Oh My Pi modules the gate loads. A switch that cannot be read, and a
+  // gate that did not load, are said at every session start; a gate that did not load refuses each
+  // write it would review.
   const askgateNotices: string[] = [];
   let askgateLoad: Promise<void> = Promise.resolve();
   let askgateOn = false;
-  if (atStart.dispatch.enabled && CONFIG_FILE.path !== null) {
+  if (CONFIG_FILE.path !== null) {
     const setting = askgateSetting(CONFIG_FILE.path);
     if (setting.error !== null) askgateNotices.push(setting.error);
     askgateOn = setting.enabled;

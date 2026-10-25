@@ -3583,9 +3583,15 @@ describe("envoy OMP extension", () => {
         expect(process.env.ENVOY_CONFIG_FILE).toBe(file);
         expect(fixture.tools).toEqual([]);
         expect(fixture.commands.map((command) => command.name)).not.toContain("whoami");
-        expect(notifications).toEqual([
-          `envoy: no envoy.json at ${file}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`,
-        ]);
+        // The profile's file is missing, so it does not turn AskGate off and the gate registers:
+        // its switch is the session's own file alone. Only in this workspace, which has none of Oh
+        // My Pi's own modules, does that load fail and say so.
+        expect(notifications).toHaveLength(2);
+        expect(notifications[0]).toBe(
+          `envoy: no envoy.json at ${file}: Dispatch and Envoy are off; ${old} is not read for this profile; copy or link it to ${file}, or write that file`
+        );
+        expect(notifications[1]).toContain("AskGate did not load");
+        expect(notifications[1]).toContain(`set askgate.enabled to false in ${file}`);
         expect(existsSync(marker)).toBe(false);
         // A Legion claim reaches the listener through the one accessor, which refuses it.
         await expect(
@@ -3608,6 +3614,7 @@ describe("envoy OMP extension", () => {
       writeFileSync(
         process.env.ENVOY_CONFIG_FILE ?? "",
         JSON.stringify({
+          ...ASKGATE_OFF,
           dispatch: { enabled: false },
           envoy: {
             enabled: true,
@@ -3862,7 +3869,45 @@ console.log(JSON.stringify(args));
         },
       ]);
       expect(notifications).toEqual([]);
-    });
+    }, 30_000);
+    test("astra 6: a checkout dispatch disable does not suppress the session's AskGate", async () => {
+      const checkout = mkdtempSync(join(tmpdir(), "askgate-checkout-"));
+      const originalCwd = process.cwd();
+      try {
+        mkdirSync(join(checkout, ".envoy"));
+        writeFileSync(
+          join(checkout, ".envoy", "envoy.json"),
+          JSON.stringify({ dispatch: { enabled: false } })
+        );
+        writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+        process.chdir(checkout);
+        standInHost();
+        const { default: envoyExtension } = await import("./envoy.ts?askgate-checkout-disable");
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const notifications: string[] = [];
+        const context = gateContext(notifications);
+        await fixture.handlers.get("session_start")?.({}, context);
+        process.env.DISPATCH_URL = "http://dispatch.test";
+        process.env.DISPATCH_TOKEN = "dispatch-token";
+        standInDispatch();
+
+        const result = (await fixture.handlers.get("tool_call")?.(
+          {
+            toolName: "bash",
+            toolCallId: "call-checkout-disabled",
+            input: { command: ASK },
+          },
+          context
+        )) as { block?: boolean } | undefined;
+
+        expect(result?.block).toBe(true);
+        expect(completions).toEqual([MODEL]);
+      } finally {
+        process.chdir(originalCwd);
+        rmSync(checkout, { recursive: true, force: true });
+      }
+    }, 30_000);
 
     test("(b) with askgate.enabled false the gate does not bind: the dispatch ask runs and no model is asked", async () => {
       process.env.DISPATCH_URL = "http://dispatch.test";
