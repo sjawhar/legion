@@ -1,0 +1,50 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-180",
+  "completed": "2026-10-25T14:52:00Z",
+  "round": 8,
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2166",
+  "headSha": "ce39bc6b7f9c3458de6f299102a17faab6709a52",
+  "whatThisRoundIs": "A forward merge and nothing else. The human approved spec version 16, the gate opened, and the daemon's READY submission found the pull request conflicting with main (GitHub: mergeable CONFLICTING, mergeStateStatus DIRTY, 45 ahead and 53 behind), so it ran no checks on the head at all. No product line changed; the architect's instruction (Envoy message dba95b9cd409981a001e72fcb991b1da, 2026-10-25T14:48:59Z) was to merge the bookmark forward, change nothing, and post both fingerprints. The code stays closed: every Fast-follow item on the pull request body stays there, the retro reader's escaped-entity duplicate and the assigning predicate included.",
+  "proof": [
+    {
+      "criterion": "The forward merge changed no line of the approved diff: the branch's product diff against its own fork point is identical before and after.",
+      "surface": "The unchanged-diff fingerprint of skill://legion-worker/references/conflicts-and-rewrites.md, computed in the issue workspace at both heads after a fetch.",
+      "command": "base=$(gh pr view 2166 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json') && jj -R \"$LEGION_WORKSPACE\" diff --from \"fork_point(${base}@origin | <head>)\" --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at <head> 46a0c4bc34adc98f9ad765b337ec86d855171296 and then ce39bc6b7f9c3458de6f299102a17faab6709a52",
+      "observed": "89c45be1c41e0714fafc282853c0a06d01d3ec4eb35c1e5d90734756d8aee6b8 at both heads — unchanged. One path conflicted, packages/envoy/CHANGELOG.md, where main added three ### Fixed entries beside this branch's one: both sides are kept whole, this issue's entry first, and no other line of either side was touched. Posted as the required comment, https://github.com/sjawhar/legion/pull/2166#issuecomment-6399114552.",
+      "headSha": "ce39bc6b7f9c3458de6f299102a17faab6709a52",
+      "negativeControl": "The fingerprint command prints a hash only when the base read, the fetch and the diff all succeed, and pipefail keeps a failed diff from hashing empty input; a first attempt with a mistyped head SHA printed e3b0c442…, the empty-input hash the reference says counts as changed, and was discarded rather than reported."
+    },
+    {
+      "criterion": "The merged head still delivers the words a Slack message carries, and the bare gates pass on it.",
+      "surface": "A real nats-server v2.11.4, a real envoy-listener built from the merge head, and a fake agent session subscribed to notifications.slack.> receiving over prompt_async; plus the repository's local checks for the changed paths.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && gofmt -l . && go vet ./internal/contracts/ && go test ./internal/contracts/ ./internal/webhook/ -count=1; then LISTENER=$PWD/packages/envoy/out/bin/envoy-listener NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server bash packages/envoy/out/e2e/infra180-slack-wake-rig.sh",
+      "observed": "gofmt no output, go vet clean, both packages ok, and the wake 'Summary: slack bot message in C_RIG from datadog: [Triggered] CPU load high' with \"text\":\"[Triggered] CPU load high\\nhost web-1 is at 97% for 10 minutes\". Bare gates only, which is what an unchanged fingerprint calls for; the round 6 and 7 proofs stand at their own heads and are cited there.",
+      "headSha": "ce39bc6b7f9c3458de6f299102a17faab6709a52",
+      "negativeControl": "The rig's unsigned post was refused HTTP 401 with 'wakes delivered: 1', the one wake being the signed post's."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/CHANGELOG.md — the one conflicting path, resolved by keeping both sides' ### Fixed entries whole. No other file was edited in the merge commit; everything else it carries is main's own content."
+  ],
+  "trickyParts": [
+    "The merge is made from the bookmark and the destination (jj new legion/INFRA-180 main@origin), never a rebase: a rebase rewrites every descendant of the fork point, another tree's branch stacked on it included, while the merge is a genuine fast-forward and moves nothing existing.",
+    "The merge is a code push, so its head carries no skip-checks: true line; this handoff goes in a push of its own, which does.",
+    "Retro had already removed .legion/INFRA-180/, and this implementing round writes its handoff again, so the next retro removes it again — READY refuses a head still carrying it."
+  ],
+  "deviations": [
+    "None this round: no product line changed. Every deviation the earlier rounds recorded stands as it was — blocks before attachments, the nine display names, the walk knowing rich_text by name with two exceptions, the scoped repeat comparison, and the fallback read last — each with the architect's ruling as its authority, and spec version 16 is approved."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Acceptance 2's integration lane is now proven on the exact production code being merged: the architect re-ran Legion Envoy and Contracts run 40176669854 at code head f3c3d411a87c after the retro push cancelled it, and its envoy-go job completed success. The pull request's CI line cites that completed run rather than a queued one.",
+    "GitHub counts the pull request as 7 files, +1173/-38 at the merge head: the .legion/ handoffs are added and removed inside the branch, so its diff against main no longer lists them."
+  ],
+  "localChecks": [
+    "cd packages/envoy && gofmt -l . — no output",
+    "cd packages/envoy && go vet ./internal/contracts/ — clean",
+    "cd packages/envoy && go test ./internal/contracts/ ./internal/webhook/ -count=1 — both ok at the merge head",
+    "the smoke rig at the merge head — the wake with both lines, its unsigned control refused 401"
+  ]
+}
