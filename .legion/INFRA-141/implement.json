@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-141",
-  "completed": "2026-10-25T09:40:00Z",
+  "completed": "2026-10-25T10:05:00Z",
   "proof": [
     {
       "criterion": "A1 - Cache refilling, bus reachable, on the send: a send whose session is in the store but not yet back in the cache succeeds and the message is delivered, where today the sender is told 404 no live session <id>.",
@@ -107,6 +107,14 @@
       "observed": "ok 5.684s. The push-failed message is deferred exactly once (attempt 1, window_deferrals 1), given up on delivery 2 and pushed exactly twice; a no_session_record message in the same window is deferred again at attempt 2 with window_deferrals 12 and is not given up.",
       "headSha": "78bd93bcfb85e299990375d54b4b8b2420258b3c",
       "negativeControl": "With the min(windowDeferrals, pushFailedDeferrals) line removed, the test fails: 'timed out waiting for the push-failed message to be given up'. The architect's alternative, recording the dedupe entry before the push, was declined with its reason: a dedupe entry makes the redelivery a dedupe skip, which removes the retry of a restarting peer that he ruled should exist."
+    },
+    {
+      "criterion": "The tester's one failure of round three: docs/architecture.md's unplaceable_push_failed row describes a narrower cause than the label counts, so an operator reads a dashboard label by a false description.",
+      "surface": "The documentation row against the code that emits the label, read line by line: session.Deliverer.prompt (internal/session/session.go), reasonFor (internal/session/handler.go) and the give-up switch (cmd/listener/delivery.go).",
+      "command": "cd packages/envoy && grep -rn 'did not reach' AGENTS.md docs/architecture.md CHANGELOG.md cmd/listener/*.go internal/session/*.go | grep -v _test.go; then go build ./... && go vet ./... && gofmt -l cmd internal; then ENVOY_TEST_NATS_BIN=/tmp/bin/nats-server go test ./cmd/listener ./internal/session -count=1 -skip <the container-only tests>",
+      "observed": "The row now reads 'a record named a serve port and the push did not land on it - an unreachable peer, a session process restarting, a connection refused, or a server that answered with anything but 204', which is what prompt errors on and what reasonFor maps to ReasonPushFailed. The grep found one further copy of the same overstatement that the tester did not name, HandleAgentReason's own type comment ('names why a delivery attempt did not reach the session'), corrected the same way; AGENTS.md's remaining hit is an unrelated broker sentence. Build, vet and gofmt clean; go test ./cmd/listener ok 151.452s and ./internal/session ok 7.048s; check-private-names clean.",
+      "headSha": "b60f4684894fa2d593e680d79dcd9aa2672648df",
+      "negativeControl": "The grep is the control and it is two-sided: it found the row the tester named plus one copy nobody had, and after the change it returns no hit in any file this pull request touches. The claim itself is checked against the three code sites rather than against the previous wording."
     }
   ],
   "filesChanged": [
@@ -139,7 +147,8 @@
     "GitHub reported the pull request CONFLICTING at a72cd0df2c7f409104eab9c627f1c6c7811c9676 and so ran no workflow for it. main was merged forward into 746bbb1a47aaa94ebff9a6d5d8e01782c08998ec (jj new legion/INFRA-141 \"main\"@origin, never a rebase); the one conflict was packages/envoy/CHANGELOG.md, where this branch and main each added the first entry under ## [Unreleased] / ### Changed, and both sides are kept. The unchanged-diff fingerprint is df14d99674e2a5802f87f5f332d99acbd63ec79f4a80c3833b2d74af3c03df1f before and after, posted on the pull request as https://github.com/sjawhar/legion/pull/2167#issuecomment-6393406140.",
     "Review finding 8 (Security[sandbox], Minor) asked for -a 127.0.0.1 on the local test nats-server. Making that change broke two internal/bus tests, TestConnectOwningStreamRefusesANATSServerThatIsNotThisMachines and TestConnectReachesANonLocalNATSWhenTheRunSaysSo, which dial the shared account server by a non-loopback address of the machine to prove the guard on a NATS server that is not this machine's (nats: no servers available for connection at nats://t20:t20@10.1.12.133:60527); the container backend is reachable that way because Docker publishes its port on 0.0.0.0. The exposure the finding names is closed instead by giving every account of a test binary one password drawn at random (16 bytes, hex) in place of the account's own name, so a reachable port hands an account to nothing that has not been told the password, and both remote tests keep working. The reply on the thread carries the measurement.",
     "Review round three asked that a nil deferral set be a programming error rather than a quiet second budget. listenerDeliveryHandler now panics when a config carries none. It is the first panic in cmd/listener; it was taken over a silent default and over a later nil dereference on the first deferral, because the failure it prevents - a second 64-slot budget opened by the self-health rebind - is invisible. Named to the reviewer in the thread so it can be overruled.",
-    "The interest path's own push-failure retry is unchanged and unbounded: it answers ShouldNAK with clearAttempt and is NAKed at 30 s up to MaxDeliver, so it can repeat a landed push up to twenty times. That predates this pull request (it is in the base at 116821eb) and this change neither widens nor narrows it; it is recorded on the thread and reported to the architect rather than fixed here."
+    "The interest path's own push-failure retry is unchanged and unbounded: it answers ShouldNAK with clearAttempt and is NAKed at 30 s up to MaxDeliver, so it can repeat a landed push up to twenty times. That predates this pull request (it is in the base at 116821eb) and this change neither widens nor narrows it; it is recorded on the thread and reported to the architect rather than fixed here.",
+    "Round four recorded one risk entry in the pull request body's 'Not proven / risk' section, which is the reviewer's line, at the architect's explicit instruction and marked as such: main.go's wiring of the single deferral set is reachable by no test in cmd/listener, because the startup path needs a container; the constructor's panic only stops a handler inventing a set for itself, so a future change passing a second set to the rebind's handler would be caught by nothing. dispatch://INFRA-250 makes that path reachable and the guard writable; the architect ruled it is not built here."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
