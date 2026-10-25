@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T14:35:00Z",
+  "completed": "2026-10-25T15:30:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2189",
   "proof": [
     {
@@ -148,6 +148,22 @@
       "observed": "TestEveryGatePortLiesJustBelowThisMachinesEphemeralRange reads /proc/sys/net/ipv4/ip_local_port_range itself, parsing it as the rig does and falling back to fallbackEphemeralLow where it is absent, starts one server, opens 20 gates and checks every port lies in the gatePortCount ports below the low bound. No parameter was added to StartGate, nothing was exported and no indirection introduced: the property is observed from outside, so the test cannot drift into exercising a seam instead of the behaviour. The refusal case of the band table now checks that the error names the low bound (1024) rather than asserting its %q text, which a faithful rephrase would have broken.",
       "headSha": "0d5a4bb4ea42b0efab7d4a775690c7624736a98f",
       "negativeControl": "StartGate given a fixed 20000-29999 band - the old constant, inside this pod's ephemeral range - fails the new test on all 20 gates ('a gate took port 22907, want one of the 1000 ports below 16000, the first port of this machine's ephemeral range'); reverted, it passes."
+    },
+    {
+      "criterion": "The pull request is mergeable again: main's #2191 (INFRA-249) edited packages/envoy/scripts/e2e-local.sh while this branch was in review, so GitHub showed CONFLICTING and no workflow run could start at all.",
+      "surface": "The branch itself, merged forward with jj, and the acceptance script re-driven end to end on the merged tree.",
+      "command": "jj new legion/INFRA-250 main@origin -m 'merge: resolve conflict against main@origin' ; then go vet ./... in packages/envoy and packages/envoy/infra, go build ./... in packages/daemon, bash scripts/e2e-local.sh, bash scripts/e2e-local.test.sh, shellcheck",
+      "observed": "One conflict, the evidence rm -f list, resolved by keeping both sides: #2191's registry-session-response.json and registry-missing-response.json, and this branch's nats.log, natsd binary and rm -rf nats-store. The merge commit's own diff is that one file and nothing else, and the branch's diff fingerprint is unchanged (530f09cb140042c966a4958557ad930dfad36484f1697dc1a9bcb27ec73f85ce before and after), so round 8 changed no product code. A forward merge, never a rebase, so nothing existing moved. go vet is clean in both Go modules of this change and packages/daemon builds - the check a clean textual merge does not give, and the one round 5 learned to run. The script exits 0 with PASS and 35 files; all five cases of e2e-local.test.sh pass; shellcheck clean. #2191's two registry checks now run against the in-process rig and pass: registry-session-response.json carries the live session's own row with its three topics, registry-missing-response.json is exactly {\"error\":\"no live session ses_e2e_local_never_registered\"} at 404, and out/e2e/nats.log shows nats-server 2.10.29 rather than a container - this issue's whole claim demonstrated on another issue's acceptance test.",
+      "headSha": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
+      "negativeControl": "The resolution is checked by the two things dropping either side would break: the script runs end to end (this branch's three evidence paths still cleared) and #2191's two registry assertions pass (main's two still cleared). The unchanged fingerprint is the control that the resolution changed no product line anywhere else."
+    },
+    {
+      "criterion": "Acceptance A1 restated at the merged head, because its measurement changed and repeating the old number would have been false.",
+      "surface": "The whole packages/envoy suite in this pod, the same command as round 1.",
+      "command": "cd packages/envoy && DISPATCH_TEST_NO_CONTAINERS=1 go list ./... | grep -v /integration | xargs go test -count=1",
+      "observed": "68 ok, and 'rootless Docker not found' appears once rather than zero times: in cmd/listener, where #2191's new dispatch_resolution_test.go:149 calls testpg.URL(t), and testpg.URL starts a Postgres container when DISPATCH_TEST_DATABASE_URL is unset (internal/testpg/testpg.go:46-52), as it is in a pod. So the claim this change proves is 'every NATS container dependency is removed', which is true and measured - no NATS package panics, internal/bus, internal/store, internal/testnats, cmd/natstail and the rest are ok - and the broader 'no package of this module needs a container in a pod' is false at this head, for Postgres. internal/testpg is one of the three rigs this issue's spec leaves container-backed, so closing that is this issue's shape applied to Postgres and belongs to a sibling issue; the architect has ruled it out of scope and is routing it. CI is unaffected: the envoy-go job sets DISPATCH_TEST_DATABASE_URL. The cheap fix - making testpg skip - was rejected rather than postponed: a skip would hide a real Postgres failure everywhere the variable is set, and a skip indistinguishable from a pass is the defect class this whole issue is about. Other failures at this head, all main's and all environment: cmd/agent-secrets, cmd/agent-secrets-helper and internal/broker/helper on SO_PEERPIDFD (gVisor does not implement it) and TTY-dependent prompt-job cases; internal/dispatch/pmdoc's known getrusage residue; internal/dispatch/files failed in the batch and passes alone in 0.105s, recorded as load-dependent rather than called either way.",
+      "headSha": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
+      "negativeControl": "The distinction between the two claims is itself the control: the one Docker panic was traced to its call site and its rig rather than counted, and the NATS packages were read individually in the same run to show which of the two sentences the evidence supports."
     }
   ],
   "filesChanged": [
@@ -180,7 +196,8 @@
     "ROUND 6 - packages/envoy/internal/testnats/nats_test.go: TestTheGateBandLiesBelowTheEphemeralRangeItIsGiven, a table over the text gatePorts is given, asserting the band and that it lies below the low bound in every case, and the refusal for a range too low.",
     "ROUND 7 - packages/envoy/internal/bus/stream_config_test.go: testnats.URL, Connect and the JetStream context move from the parent into each subtest, with a comment saying why.",
     "ROUND 7 - packages/envoy/internal/store/kv_test.go: the interest bucket's delete-then-create goes through testnats.RecreateKeyValue, the sweep's one other finding.",
-    "ROUND 7 - packages/envoy/internal/testnats/nats_test.go: TestEveryGatePortLiesJustBelowThisMachinesEphemeralRange, and the band table's refusal case pinned to the low bound rather than the message's text."
+    "ROUND 7 - packages/envoy/internal/testnats/nats_test.go: TestEveryGatePortLiesJustBelowThisMachinesEphemeralRange, and the band table's refusal case pinned to the low bound rather than the message's text.",
+    "ROUND 8 - packages/envoy/scripts/e2e-local.sh: the forward merge's one conflict, the evidence rm -f list, resolved keeping both #2191's two registry response files and this branch's nats.log, natsd and nats-store."
   ],
   "trickyParts": [
     "ReloadOptions refuses an Options whose Port or HTTPPort differs from the one the server was started with ('config reload not supported for HTTPPort: old=-1, new=52544'). Server.Reload therefore builds the new Options from the new configuration text and then restores Host, Port, HTTPPort, HTTPHost, StoreDir, NoSigs, ConfigFile and the JetStream flag from the options the server was started with, and never reads a port back from the running server. TestARefusedReloadAnswersWithTheServersReasonAndKeepsTheOldConfiguration pins it.",
@@ -198,7 +215,8 @@
     "scripts/e2e/lib/free-port.sh picks from 20000 up to the ephemeral low bound, so on a default Linux its span covers the gate's band there, 31768-32767, and a concurrent scripts/e2e/stage*.sh run could take a closed gate's port. Those stage scripts are devbox-only live proofs run one at a time, StartGate's retry covers the pre-bind case, and the closed-gate case fails loudly with EADDRINUSE naming the port; on gVisor that picker's span is empty (its range starts at 16000, below the picker's floor of 20000), so it cannot reach 15000-15999. Recorded in the pull request body; the architect scoped this round to the reviewer's two findings.",
     "scripts/e2e-local.sh prints 'grep: <out>/nats.log: No such file or directory' once per run, from round 2's wait_for_nats. Stderr noise; the architect ruled it rides along with a round opened for another reason, and this round's scope was the reviewer's two findings.",
     "The lock needs util-linux flock, absent from stock macOS, where the script refuses by its own prerequisite message. CI is ubuntu-24.04 and the pods are Linux. Recorded, not built.",
-    "The pull request body's 'Not proven / risk' list is the reviewer's to write; no round of mine has rewritten it."
+    "The pull request body's 'Not proven / risk' list is the reviewer's to write; no round of mine has rewritten it.",
+    "ROUND 8 - cmd/listener panics 'rootless Docker not found' in a pod at this head, from testpg's Postgres container by way of #2191's new dispatch_resolution_test.go. Out of this issue's scope (testpg is one of the three rigs the spec leaves container-backed) and reported to the architect, who is routing it as a sibling. Named here so the next reader does not rediscover it as a regression of this change."
   ],
   "discoveredComplexity": [
     "internal/dispatch/pmdoc's failures in a pod are not the plan's section 1.1 cause. A repository-root bun install (needed for scripts/e2e-local.sh anyway) fixed 'Cannot find module @legion/proof-editor'; what fails now are its parse and render linearity tests, which compare wall-clock ratios between input sizes (linear_test.go:216 and :274) and lose on a loaded 2-CPU pod. Same failure on main, so it is residue either way, but the pull request body names the real reason rather than the plan's.",
@@ -214,5 +232,5 @@
     "ROUND 6 - two lanes red at the previous code head are main's, not this branch's, and only visible because a pull request builds the merge commit: #2185 and #2162 each changed cmd/broker's startBroker and its callers without conflicting textually, so cmd/broker fails to build in every open pull request's merge while go vet ./cmd/broker/ exits 0 on this branch. A clean merge is a claim about text, for the second time on this issue.",
     "ROUND 7 - my first diagnosis of this red was the symptom: I read 'error creating store for stream', found the helper that swallows it, and proposed wrapping the create in it. The reviewer read the test instead and found that the two subtests shared the parent's account against the rig's own documented contract. A retry would have made the violation permanent and silent - the next test to hoist URL into a parent would get a slower pass instead of a failure - which is the same family as the guards this issue spent its rounds deleting. Reasoning from an error message to the nearest thing that absorbs it is treating a symptom."
   ],
-  "round": 7
+  "round": 8
 }
