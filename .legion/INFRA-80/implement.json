@@ -2,68 +2,64 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T16:20:00Z",
-  "round": "7 — review round 6's finding and its three Minors, with a delta merge of main taken immediately before the push",
+  "completed": "2026-10-25T17:10:00Z",
+  "round": "8 — review round 7's finding: the exporter's destination, the third form of one class in one file",
   "proof": [
     {
-      "criterion": "A session key, which a pod chooses, cannot reach a name the evidence collector owns — and a collector-owned directory added later needs nothing from the derivation.",
-      "surface": "The real session_copy, collect_transcripts and cleanup taken from scripts/e2e/stage4b-sandbox-tree.sh by name, with docker stubbed as psql answers and cleanup driven as the EXIT trap of a run that passed.",
+      "criterion": "A value an agent sets cannot steer where the exporter writes a file — the destination, after the key and the derived name.",
+      "surface": "The real session_copy taken from scripts/e2e/stage4b-sandbox-tree.sh by name and driven directly, with a destination of <evidence>/review-pair/.. and one session key deriving to run.json, beside a run.json the collector wrote.",
+      "command": "bash drive.sh <script>  — eval the function out of the script, stub session_psql and session_text, call it with the relocating destination, then cat the collector's run.json",
+      "observed": "At this head the call prints `their directory's name '..' is not a plain name of [A-Za-z0-9._-] other than . and .. in <evidence>/review-pair`, returns 1, and run.json still holds the collector's bytes. session_copy takes no path at all now: an area keyword whose root it resolves itself, and a stem refused unless it is a plain name, with the destination asserted to be a direct child of the resolved root before anything is listed, derived or written.",
+      "headSha": "00516adc6b344091c232c30e1d1e822e0d7cb685",
+      "negativeControl": "The same drive against the pushed script returns 0 and replaces run.json with the agent's bytes: `{\"agent\":\"bytes the collector wrote\"}` becomes `{\"agent\":\"bytes an agent chose\"}`. The suite agrees — 50 pass here, 34 fail against the pushed script."
+    },
+    {
+      "criterion": "No caller derives a path component from a value an agent sets, so the refusals are a second fence rather than the only one.",
+      "surface": "The real record_pair and the daemon-controller copy, driven through the test harness with hostile recorded session paths.",
       "command": "bun test scripts/e2e/lib/stage4b-session-text.test.ts",
-      "observed": "33 pass. Rows keyed <pod_sessions_dir>/controller and /daemon-controller are written under transcripts/pods with their own bytes, while transcripts/controller still receives the operator controller's sessions; transcripts/ holds exactly [controller, pods]. The namespaces are separated rather than the collector's names enumerated: a reserved list is an enumeration over a set that grows, and this change had already paid for one in legionClaim.",
-      "headSha": "054d4e014cf767a88a3b7a43d39cb09431e3a414",
-      "negativeControl": "Against the pushed script in a scratch copy (grep -c 'transcripts/pods' on it → 0): 8 fail, 25 pass, including `a pod's key that derives to a name of the harness's own stays among the pods' sessions`."
+      "observed": "50 pass. A recorded session file whose basename is `..`, `.` or holds a space and a newline is now recorded normally: the reviewer's subagents go in review-pair/subagents, a name the harness owns, the stem is kept in session-stem as data, and the collector's run.json is byte-unchanged. The launched controller's go in transcripts/daemon-controller/<pod>, the pod name the daemon recorded in the claim's locator, with `// \"\"` on the jq so a missing name cannot become the string `null` and name a directory.",
+      "headSha": "00516adc6b344091c232c30e1d1e822e0d7cb685",
+      "negativeControl": "The refusal tests are kept and now call session_copy directly, since the refusal is still the second fence; they fail against the pushed script, which has no anchor at all."
     },
     {
-      "criterion": "A failed copy of the operator controller's sessions fails the run instead of returning success.",
-      "surface": "The real collect_transcripts and the script's real cleanup, with the destination planted as a regular file, with its subdirectory planted as a regular file, and with the source unreadable.",
-      "command": "bun test scripts/e2e/lib/stage4b-session-text.test.ts (the three test.each cases and the cleanup case)",
-      "observed": "Each of the three makes collect_transcripts return 1 and name the controller's directory on stderr, while the pods' sessions are still copied. Driven through cleanup, the run exits 1 with the controller's failure line before `CHECK transcripts: FAIL` and the verdict `stage 4b e2e: FAIL (check transcripts, in the teardown after check controller)`.",
-      "headSha": "054d4e014cf767a88a3b7a43d39cb09431e3a414",
-      "negativeControl": "The same three cases against the pushed script return success with the controller's transcripts missing — the defect the review found, reproduced before it was fixed."
+      "criterion": "The provenance the reviewer could not trace: the launched controller's directory came from the same agent-settable value as the review pair's.",
+      "surface": "The script and the daemon's own source.",
+      "command": "grep -n 'launched_file=\\|pair_session=' scripts/e2e/stage4b-sandbox-tree.sh; read internal/api/claims.go:50-55 and internal/supervise/table.go:1003",
+      "observed": "`launched_file=$(jq -r '.sessionFile // \"\"' <<<\"$claim\")` and `pair_session=$(claim_session_file \"$tree1\" reviewer)`, which also reads `.sessionFile`. Both are the value the claims API accepts as merely non-empty and `reregister` assigns on re-registration. So the daemon-controller site was the same finding, not hardening — which is what the reviewer asked to know before the comment explaining it was written.",
+      "headSha": "00516adc6b344091c232c30e1d1e822e0d7cb685",
+      "negativeControl": "Not applicable: this is a provenance trace, and its control is that the claim's locator pod name, which the new code uses instead, is written by the runtime at launch and by no registration."
     },
     {
-      "criterion": "The guard keeps the contract it states: an operator volume naming an issue pod's own disk is refused.",
-      "surface": "The sandbox package's operator-pod table.",
-      "command": "cd packages/daemon && CGO_ENABLED=0 go test ./internal/runtime/sandbox",
-      "observed": "Green with a new row for `legion-acme-acme-7-issue`, the pod-owned disk name the guard's three prefixes did not catch. The pod's disk is named the other way round from the Sandbox-owned claims — the volume's name is the suffix — so it needs a rule of its own rather than a fourth prefix.",
-      "headSha": "054d4e014cf767a88a3b7a43d39cb09431e3a414",
-      "negativeControl": "The new row fails against the guard as it stood: three HasPrefix tests over `issue-legion-`, `cache-legion-` and `tree-legion-` match no name ending in `-issue`."
-    },
-    {
-      "criterion": "The round's work survives main moving under it, and the two inherited lanes stay cured.",
-      "surface": "The merged tree and the envoy Go module the two lanes compile.",
-      "command": "jj new @- main@origin (9 behind, no conflict); then gofmt, go build ./..., go vet ./... , go vet -tags e2e ./..., the Go suites, cd packages/envoy && go vet ./cmd/broker, bun test scripts/e2e/lib, bunx biome check ., the skills guard, check-private-names",
-      "observed": "All green at the merge head: the Go suites pass, `packages/envoy`'s `./cmd/broker` vets clean, 523 e2e-lib tests pass with the two Docker-only nats-stream failures, Biome reports no error, the skills guard 11 pass, and the private-names check reads 5,002 files.",
-      "headSha": "054d4e014cf767a88a3b7a43d39cb09431e3a414",
-      "negativeControl": "Before the merge of #2194 the same `go vet ./cmd/broker` failed with `service_account_scope_test.go:50:3: too many arguments in call to startBroker`, which is what both lanes failed on for three rounds."
+      "criterion": "The harness still does what it did, and the repository's own lanes are clean at this head.",
+      "surface": "The repository's checks.",
+      "command": "bash -n on both harnesses; bun test scripts/e2e/lib; bunx biome check .; bash .github/scripts/check-private-names.sh",
+      "observed": "540 pass in the e2e-lib suite with the two Docker-only nats-stream failures, Biome reports no error, and the private-names check reads 5,002 files. The Go module is untouched by this round and was fully green at the previous head.",
+      "headSha": "00516adc6b344091c232c30e1d1e822e0d7cb685",
+      "negativeControl": "The two nats-stream failures are the control for the suite's own health: they are the known Docker-only pair and no other test joins them."
     }
   ],
   "filesChanged": [
-    "scripts/e2e/stage4b-sandbox-tree.sh: the pods' sessions go to $evidence/transcripts/pods; the controller copy's mkdir -p and cp -R are chained and checked and reach the verdict; the daemon-controller block loses its redundant mkdir -p; record_pair's four unchecked writes each end in || return 1.",
-    "scripts/e2e/lib/stage4b-session-text.test.ts: the collision-with-a-collector-name case, the three uncopyable-controller cases, the cleanup case, and the moved stub arguments.",
-    "scripts/e2e/README.md: the evidence layout, and that a failed controller copy fails the teardown check transcripts.",
-    "packages/daemon/internal/runtime/sandbox/operatorpod.go and operatorpod_test.go: legionClaim refuses the pod-owned `legion-…-issue` name, with a table row.",
-    "docs/kubernetes.md: `legion sessions mark-lost` is recorded as gone rather than unchanged, and the cutover's linking sentence carries the no-copy-path restriction the section it links to states.",
-    "packages/daemon/internal/runtime/sandbox/manifest_test.go: a later pod reuses nothing an earlier pod downloaded; the reuse is between the role containers of one pod.",
-    "packages/daemon/internal/runtime/sandbox/relaunch.go: the relabel log line no longer says an issue Sandbox keeps a volume it does not own."
+    "scripts/e2e/stage4b-sandbox-tree.sh: session_copy takes PREFIX AREA STEM, resolves the root from the area, refuses a stem that is not a plain name, and asserts the destination is a direct child of the resolved root before listing anything; record_pair writes review-pair/subagents and keeps the stem in session-stem as data; the daemon-controller copy names its directory for the claim's pod; the review-pair consumers read the fixed directory; the comment above collect_transcripts says why the class is closed.",
+    "scripts/e2e/lib/stage4b-session-text.test.ts: the destination refusals, the relocation case, the record_pair cases with hostile recorded paths, and the existing guards re-pointed at the new signature.",
+    "scripts/e2e/README.md: the evidence layout and what a refused name does."
   ],
   "trickyParts": [
-    "Separation rather than reservation was the reviewer's proposal and the architect's ruling, and I took it without arguing it back: the collector's names are a set that grows, and the growth is always a later commit. The evidence for that is inside this change — legionClaim's three prefixes, which missed the fourth claim name this change itself introduced.",
-    "The unchecked commands are a separate defect from the collision and had to be fixed either way: separation removes the collision, it does not make an unchecked command checked.",
-    "record_pair's writes were the same defect one checkpoint over: errexit is off inside a function called as `record_pair || fail …`, so a failed write still set pair_recorded=1 and returned 0. The class search found it; the two line numbers in the review would not have."
+    "The architect's literal remedy named one constant root; session_copy has three callers with three roots, which the reviewer caught before the fix was written. The shape that serves all three is an area keyword whose root the function resolves — which also makes an unknown area a refusal rather than a new directory.",
+    "Anchoring alone would have left an agent-chosen component with the refusals as its only fence. Taking the component away as well puts them in the right order: the harness names the directory, and the refusals are what catches a mistake in that naming.",
+    "A missing pod name in the claim's locator would have become the string `null` through jq and named a directory; `// \"\"` plus a non-empty test is why it cannot."
   ],
   "deviations": [
-    "The daemon-controller copy keeps its path under transcripts/ rather than moving under pods/: it is a harness-owned directory, which is what the separation is for, and moving it would have put a collector name back among the derived ones.",
-    "The delta merge of main was taken immediately before the push, with main 9 commits ahead and no conflict, so the checks quoted here are at the pushed head rather than at an earlier one."
+    "production_audit at about :2691 is deliberately untouched: its path is a fixed literal with nothing an agent chooses in it, so it is the same shape and not the same class. The reviewer ruled it out of this change and recorded why.",
+    "My own jj handling cost a recovery this round: `jj new @-` left the round's edits in a commit off the new working copy, and the describe that followed made a divergent change. Recovered by reading the operation log, abandoning the empty pair and the divergent copy, and keeping the commit that held the diff; nothing was lost and nothing already pushed was touched."
   ],
   "openQuestions": [
-    "Stage 4b is repaired and has run at no head at all. This change rewrote its parked, released and lifecycle assertions, its delete log line and its whole transcript reader, and every reading of that harness has found a defect in it — six readings, six defects, no runs. That is the sentence the body now carries, beside the two behaviours provable only on a cluster.",
+    "Stage 4b is repaired and has run at no head at all. Seven readings of that harness have now found seven defects in it, and this round's was the third form of one class in one file — each form invisible from inside the fix for the one before it.",
     "Stage 4a's inverted checks are still unrun; the runner's revised list, marking each of 65 rows changed or unchanged, is a comment on the pull request.",
-    "shellcheck is not installed in this pod, so the scripts have bash -n and bunx biome check only."
+    "envoy-go's red is not this change's and is now a person's decision: dispatch://INFRA-49/ask/bbdfb54a-c2c3-4bc4-8afc-a3b42f957a74, answered 'So fix it' and carried to the controller. This change files nothing for it."
   ],
   "discoveredComplexity": [
-    "A reserved-name list is an enumeration over a set that grows, and the growth is someone else's later commit. Separating the two namespaces closes the class with no list and nothing to remember; this change contains both the defect and its own counter-example.",
-    "A fix can leave its own blind spot in the one place it did not reach. Round 6 made session_copy's refusals reach the verdict and left the collector's own two commands unchecked, so the exact failure the fix was for survived one line below it.",
-    "errexit is off inside a function called as `f || fail`, so every write in such a function needs its own check. Four writes in record_pair reported a pair recorded that was not."
+    "A guard measured against a value its caller chose is honest about the wrong thing. Every refusal in session_copy was correct and every one of them was measured against a destination the caller supplied, so relocating the destination defeated all of them at once without breaking any.",
+    "Each fix in this class was invisible from inside the one before it: the key-as-path fix reasoned about names, the name-collision fix reasoned about names against directories, and neither could see a hole one level up in the path. The sweep that found each was a search for the class, not for the instance.",
+    "Defence in depth has an order. A harness-chosen component with refusals behind it is stronger than an agent-chosen component with refusals in front of it, even though both refuse the same inputs today."
   ]
 }
