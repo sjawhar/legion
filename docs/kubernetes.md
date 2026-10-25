@@ -3800,6 +3800,13 @@ The daemon probes a pod by reading it and consulting the worker stream's live re
 - phase `Unknown` → **unknown**;
 - the API read failed → **alive** if the pod's stream is registered (live proof), else **unknown**.
 
+Every rule above judges the process. A process that is up and whose agent's turn has stopped
+producing events is judged by the turn watchdog instead (`internal/supervise/watchdog.go`,
+`turn_watchdog_seconds`): it asks the agent for its state, interrupts the turn, relaunches the
+claim on its own session, and tells the issue's architect only when that relaunch produces no
+ready agent. The relaunch it makes is an ordinary one, so the rules above own what happens to the
+pod it starts.
+
 `unknown` never marks anything dead by itself. A graceful stop sends the RPC `shutdown` frame over the
 registered stream, waits up to the stop timeout, then deletes the pod with that many seconds of grace
 (0 when the caller skips the graceful step) and the recorded uid as precondition, then deletes the

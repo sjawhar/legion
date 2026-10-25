@@ -64,6 +64,12 @@ github_apps:
 #                                      # (and LEGION_CLAUDE_PATH, LEGION_BUN_PATH, else PATH) in the daemon's
 #                                      # environment. Under runtime: kubernetes, as in this file, the loader
 #                                      # refuses claude: the worker image carries no Claude Code.
+# turn_watchdog_seconds:               # how long a turn of each role may produce no event before the daemon
+#   implementer: 28800                 # recovers it: it asks the process for its state, interrupts the turn,
+#   reviewer: 0                        # relaunches the claim on its own session, and reports to the issue's
+#                                      # architect when none of that brings the agent back. 0 switches it off
+#                                      # for that role. Defaults: controller 1800, implementer and reviewer
+#                                      # 21600, every other role 7200.
 
 runtime:
   kubernetes:
