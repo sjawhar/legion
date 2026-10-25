@@ -613,3 +613,60 @@ func TestUnplaceableDeferralsStopAtTheirCap(t *testing.T) {
 		}
 	})
 }
+
+// twoDeferralWindow buys two deferrals, as oneDeferralWindow buys one: the window is spent in
+// whole unplaceableRetryDelay steps, and the half-step keeps the arithmetic off the boundary.
+const twoDeferralWindow = 2*unplaceableRetryDelay + unplaceableRetryDelay/2
+
+// A redelivery gives its deferral slot back. The cap (unplaceableDeferralCap) counts the
+// messages this handler is holding deferred right now, so a slot that is taken and never
+// released is a slot gone for the life of the process: after unplaceableDeferralCap deferrals
+// the handler would defer nothing ever again, give every unplaceable message up on its first
+// delivery, and say nothing about why - the whole retry quietly stopping, which is the shape of
+// failure this issue exists to end. Nothing else pins it: the cap's own test preloads the count
+// and reads it back after one disposition, and every other unplaceable test runs with the count
+// at zero, far from the cap, so deleting the release leaves them all green.
+//
+// The run starts one slot under the cap, so the second deferral is possible only if the
+// redelivery released the first: without the release the count is already past the cap when the
+// redelivery arrives, and this message is given up at attempt 2 instead. The negative control is
+// the count itself, read at both ends - it returns to the cap after each deferral and to the
+// slot below it once the message is given up, so the message is holding exactly one slot
+// throughout and the pair cannot be produced by a handler that counts nothing.
+func TestARedeliveryGivesItsDeferralSlotBack(t *testing.T) {
+	harness := unplaceableHarness(t)
+	cfg := harness.config
+	cfg.unplaceableRetryWindow = twoDeferralWindow
+	held := &atomic.Int64{}
+	held.Store(unplaceableDeferralCap - 1)
+	cfg.deferredUnplaceable = held
+	startUnplaceableDelivery(t, harness, cfg, "ses_slot_released", 0)
+
+	waitFor(t, 30*time.Second, "the redelivery of the deferred message to be deferred again", func() bool {
+		return len(deliveryRecords(t, harness.logs.String(), "listener agent delivery deferred")) >= 2
+	})
+	logs := harness.logs.String()
+	deferrals := deliveryRecords(t, logs, "listener agent delivery deferred")
+	if len(deferrals) != 2 {
+		t.Fatalf("%d deferral lines, want exactly the two the window buys:\n%s", len(deferrals), logs)
+	}
+	if deferrals[0].Attempt != 1 || deferrals[1].Attempt != 2 {
+		t.Fatalf("the deferrals are attempts %d and %d, want 1 and 2 - the second is the redelivery the first asked for:\n%s",
+			deferrals[0].Attempt, deferrals[1].Attempt, logs)
+	}
+	if got := held.Load(); got != unplaceableDeferralCap {
+		t.Fatalf("the deferred count is %d while one message is deferred, want the cap of %d - a redelivery that took a second slot without giving the first back would read %d",
+			got, int64(unplaceableDeferralCap), int64(unplaceableDeferralCap)+1)
+	}
+	if got := len(deliveryRecords(t, logs, "listener agent delivery given up")); got != 0 {
+		t.Fatalf("%d give-up lines while the window still has a deferral left, want none:\n%s", got, logs)
+	}
+
+	waitFor(t, 30*time.Second, "the message to be given up once its deferrals are spent", func() bool {
+		return len(deliveryRecords(t, harness.logs.String(), "listener agent delivery given up")) > 0
+	})
+	if got := held.Load(); got != unplaceableDeferralCap-1 {
+		t.Fatalf("the deferred count is %d after the give-up, want the %d the run started at - a message no longer held must leave no slot behind",
+			got, int64(unplaceableDeferralCap)-1)
+	}
+}
