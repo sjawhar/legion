@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-271",
-  "completed": "2026-10-25T10:18:44Z",
-  "round": 2,
-  "headReviewed": "a6101d0cac4853883c743b573282d22b46a4afc5",
+  "completed": "2026-10-25T11:34:31Z",
+  "round": 3,
+  "headReviewed": "3f368461f61ceeb93c3e2d4f1f758702bfbb2337",
   "decision": "approved",
   "critical": 0,
   "important": 0,
@@ -12,18 +12,12 @@
   "keyFindings": [
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/launcher/launcher_test.go",
-      "description": "Fast-follow, not a gate: the session-proxy helpers and scenarios (echoUpstream, holdSessionSocket, expectHeldClosed and the external-holder tests) took the general launcher test file from 853 to 1,137 lines; they belong in a session-proxy test file of their own beside session_store_test.go."
+      "file": "docs/kubernetes.md:704",
+      "description": "Fast-follow, wording: 'the proxy's start names the generation and the instance' holds for the dialer build and the proof dial, but a socket-bind refusal names the generation and the socket (sessionproxy.go:127-129, wrapped at launcher.go:505-506). Both thermonuclear agents found it."
     }
   ],
-  "roundOneResolved": [
-    "PRRT_kwDORFy7ds6v_exS (proof dial without a deadline): fixed in 00b13caf9d26, bounded at half --stop-grace, inside the daemon's start wait (awaitRoleLauncher deadline plus terminationGrace, relaunch.go:174-178,301-341).",
-    "PRRT_kwDORFy7ds6v_exT (Close waits on copies it never closes): fixed in 523b2d19173f, drains for sessionDrain (1 s) then closes every tracked pair; pairs dialed after closing are closed in track; close_race_test.go pins it.",
-    "PRRT_kwDORFy7ds6v_exX (docs lifetime bound): fixed in 2d69ffa95092, both the stop and natural-exit cases stated.",
-    "PRRT_kwDORFy7ds6v_exZ (ValidInstance): fixed in b80c9de6821a, ParseConnName plus a whole-string round trip plus no whitespace."
-  ],
-  "residualRisk": "The 30 s resume lookup after a successful proof can outlast the daemon's start wait for a launcher that connects in the last seconds of a new pod's boot window. That budget is the same one postgres already has on main, it needs the database to fail between a successful proof and the lookup, it frees the command loop within 30 s, and the daemon's retry into the now-bound pod has the full boot-timeout budget, so the named refusal reaches it then. Both thermonuclear agents rated it Medium/Important; recorded as risk, not a finding.",
-  "ci": "Required (rulesets): lint, typecheck, test, pr-title, all completed success at a6101d0cac48 (Tests run 40179932825: lint 121128687065, typecheck 121128686983, test 121128686899; pr-title 121130049377). The handoff push above it changes only .legion/.",
-  "thermonuclear": "deep-review and code-quality at a6101d0cac48: both CHANGES on the same residual resume budget (adjudicated above); both confirm the Close race handling, the docs and ValidInstance; deep-review ran the sessionproxy, launcher, ompsessions and config suites green (race detector unavailable here: no gcc).",
-  "threads": "Four threads, all mine, each answered as accepted and resolved by the implementer."
+  "roundScope": "One code commit since the round-2 approval, 34b2b7a999e4: the CI race step in the required test job now covers internal/sessionproxy and internal/launcher; docs/kubernetes.md states what each start refusal names; the Close/Drain comments name the condition their bound holds under (every dial honours cancellation, which cloudsqlconn v1.25.4's does: refresh wait, DialContext, HandshakeContext). No code path changed.",
+  "ci": "Required (rulesets): lint, typecheck, test, pr-title, all completed success at 3f368461f61c (Tests run 40185462879; its step 'Test the concurrent packages under the race detector' success). pi-legion, not required, is red on the skills-size guard for legion-architect/SKILL.md (51,256 bytes), a file this diff does not touch, fixed on main by dispatch://INFRA-376. cac350b0 and this handoff change only .legion/.",
+  "thermonuclear": "At 3f368461/cac350b0: code-quality APPROVE, deep-review CHANGES on the docs wording alone (Minor, adjudicated as fast-follow); both confirm the cancellation claim against the connector and the race step's job and working directory.",
+  "threads": "No new threads; round 1's four remain answered and resolved."
 }
