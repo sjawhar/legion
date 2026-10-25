@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-234",
-  "completed": "2026-10-25T07:04:30Z",
+  "completed": "2026-10-25T07:35:00Z",
   "proof": [
     {
       "criterion": "A1: a role applying the Service exactly as the section publishes it gets a Service (spec finding 5); and the evidence bullet's account of the reachability check is what a run observes",
@@ -35,6 +35,14 @@
       "observed": "0 hits in each.",
       "headSha": "b5b5f61ae51c16a5d2702194aee2fd5b1b2ea1fb",
       "negativeControl": "A scratch file outside the workspace holding the label's domain: the same grep counts 1."
+    },
+    {
+      "criterion": "Round 3 (retro send-back): the INFRA-71 bullet's 'not run again since' qualifies only what no 2026-10-25 run repeated, and the Job half is no longer under it",
+      "surface": "The evidence passage at head 9d6c255b read against the 2026-10-25 run records: the implementer's two run logs (infra-234-postgres-1c9d92, infra-234-postgres-af1ede) and the tester's handoffs",
+      "command": "jj -R \"$LEGION_WORKSPACE\" diff --git -r 9d6c255b docs/kubernetes.md; grep -c 'job.batch/infra-234-postgres-1c9d92 created' run1/out.log; grep -c 'job.batch/infra-234-postgres-af1ede created' run2/out.log; a search of test.json at 52ec0249 and 5245de2a for a credential-less gate, a Job-rule breakage or a synthetic reachability case",
+      "observed": "One hunk, the INFRA-71 bullet only: the Job half (87 s / 10 s, the reason for two waits) is stated as a 2026-10-24 measurement with no qualifier; 'not run again since' now covers the credential-less gate, the deliberate breakages of the Job manifest's enforced rules, and the reachability block's three synthetic cases. Each run log shows its Job created and run through both waits on 2026-10-25 (1 hit each), so the Job half did run again; no 2026-10-25 record contains a credential-less gate, a Job-rule breakage or a synthetic reachability case (the tester's dry-run variants were of the Service), so those three stand as not re-run. The bullet's mention of the unbroken Job manifest's server-side dry run is dropped: the 2026-10-25 runs put the same manifest through admission for real.",
+      "headSha": "9d6c255bf78efaa4a67f62ef8d50caed0dd1b76b",
+      "negativeControl": "The approved head b5b5f61a headed the whole bullet 'not run again since' while listing the Job half, which both run logs show being applied and run on 2026-10-25."
     }
   ],
   "filesChanged": [
@@ -43,12 +51,14 @@
   ],
   "trickyParts": [
     "Round 1 wrote that the check answered 'on its first try', which the published block cannot show since it prints nothing per attempt; the tester measured a refused first attempt. Round 2 corrects the bullet and re-drove the sequence with one print per attempt: refused at 07:02:23.891, answered at 07:02:25.947, the listener 1.1 s after Ready.",
-    "The published Job's pod lingers Terminating for seconds after `kubectl delete job` (background cascade), so the closing listing cannot show 'nothing of it' at once; the page says what the listing shows."
+    "The published Job's pod lingers Terminating for seconds after `kubectl delete job` (background cascade), so the closing listing cannot show 'nothing of it' at once; the page says what the listing shows.",
+    "Round 3 came from the retro's fresh-eyes read: the INFRA-71 bullet's 'not run again since' covered the Job half, which the bullet above it records running again on 2026-10-25. All three evidence defects in this pull request were plausible on their own and contradicted by a neighbouring line or a run log."
   ],
   "deviations": [
     "T6 and T7 did not run: `gh pr view 2149 --repo sjawhar/legion --json state,mergedAt,mergeCommit` at 2026-10-25T06:40:53Z returned {\"mergeCommit\":null,\"mergedAt\":null,\"state\":\"OPEN\"}. Per the architect's ruling recorded in plan.md section 7, the successor is the architect's to file when #2149 merges.",
     "The plan's second bullet (INFRA-71, 2026-10-24) keeps the Job half's 87 s / 10 s and the reason there are two waits, which the plan's bullet text left out; dropping them would remove the explanation of two published lines.",
-    "The docs edits were written by the implementer directly rather than by a deep-worker subagent: prose resting on the measurements and the private-name elision held in this session, with no code in the change."
+    "The docs edits were written by the implementer directly rather than by a deep-worker subagent: prose resting on the measurements and the private-name elision held in this session, with no code in the change.",
+    "Round 3 re-runs no cluster workload: the change is one qualifier in the evidence passage, the architect directed nothing else into the round, and five full runs of the published sequence already stand across two roles (implementer 1c9d92 and af1ede; tester 8a6d92, e7ad30 and 3022f9)."
   ],
   "openQuestions": [],
   "discoveredComplexity": []
