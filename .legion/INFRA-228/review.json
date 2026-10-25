@@ -2,27 +2,22 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T16:39:57Z",
-  "round": 2,
-  "reviewedCodeHead": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T17:34:06Z",
+  "round": 3,
+  "reviewedCodeHead": "a84de1d34f9d12e65ec38adfb11a4eeb5e4ce556",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 0,
-  "roundOneFindings": "All four fixed and accepted on their threads (PRRT_kwDORFy7ds6wBhTL, PRRT_kwDORFy7ds6wBhTN, PRRT_kwDORFy7ds6wBhTO, PRRT_kwDORFy7ds6wBhTQ). My round-1 overlay probes re-run at 6c9e78b02f9b against Postgres: the fixed-session second run and the replacement pod now get 200, and another project's pod naming a lapsed session now gets 400 while the holder renews. The census is present and its rollout line accepts and announces the approval gap between the two deploys. Broker packages oauth, oauthstore, exchange, api and machine pass on Postgres here.",
-  "ci": "Required on main: lint, typecheck, test, pr-title. CI head 6c9e78b02f9b; compare to 3d56da33c49b touches only .legion/. At the read: lint, typecheck and pr-title success; test still in progress (Tests 40210525013); Legion Envoy and Contracts queued. No approval was given, so nothing waited on it.",
-  "thermonuclear": "Both run once at 3d56da33. deep-review confirmed the four round-1 fixes and found one new availability defect (accountAuth verifies before any rate limit; reproduced as 12 forged requests causing 12 JWKS fetches), which I kept. code-quality raised three structural items (one session type for every grant, one shared ServiceAccount validity check, splitting the 1,300-line multiprocess test), batched into the fast-follow.",
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/broker/api/server.go",
-      "description": "Security[authz]: the nine accountAuth routes verify the caller's token before any rate limit, so an unauthenticated flood of forged tokens naming an unknown kid makes go-oidc fetch the cluster issuer's JWKS once per request. The shared bearer they replaced needed no network, and the broker's own token-login route limits by address before verifying for exactly this reason (api/limits.go:13-21). The introspection bucket runs inside the handler, after authentication."
-    },
-    {
-      "severity": "important",
-      "file": "PR body",
-      "description": "The Change bullet's 'While both generations fix the same name, one of their two entries holds it and every other principal is refused it' is false when the name is still held by a third principal from an earlier re-point that neither entry has since exchanged over, which the tester found. Add the one qualifying clause the architect described, since a body cannot be amended after the merge."
-    }
+  "roundTwoFindings": "Both fixed. (1) authenticate spends the shared per-address account bucket before VerifyAccount on all ten accountAuth routes, and introspection charges nothing further; TestAForgedAccountTokenFloodStopsReachingTheVerifier and the introspection tests pass here on Postgres; the tester counted 400 forged requests causing 250 JWKS fetches and then 429s, where the head before the fix fetched once per request. Accepted on PRRT_kwDORFy7ds6wC8tP. (2) The rollout clause is in the body in the words I asked for.",
+  "ci": "Required on main: lint, typecheck, test, pr-title. CI head a84de1d34f9d (newest pull_request run); compare to c875f12242b5 touches only .legion/. lint, typecheck, test success (Tests 40214553379); pr-title success (40214590449). Not required and still running at the read: envoy-go, envoy-go-race, dispatch, dispatch-memory; broker-multiprocess, envoy-infra-go, envoy-smoke and envoy-e2e-local had passed.",
+  "threads": "Five threads, all answered by me and resolved by the implementer: PRRT_kwDORFy7ds6wBhTL, PRRT_kwDORFy7ds6wBhTN, PRRT_kwDORFy7ds6wBhTO, PRRT_kwDORFy7ds6wBhTQ, PRRT_kwDORFy7ds6wC8tP.",
+  "thermonuclear": "Both run once at c875f122. code-quality: the round-3 delta is sound; one minor item (split the rollout suite out of multiprocess_test.go) already on the fast-follow. deep-review: the limiter is sound with no bypass; it raised again that ordinary GitHub jobs lack job_workflow_ref, which I declined a second time with this repository's own evidence: worker-image.yaml is a direct workflow, and its attestation certificate identity, which docs/kubernetes.md verifies with --cert-identity, is the one Fulcio builds from job_workflow_ref.",
+  "keyFindings": [],
+  "notProvenCarried": [
+    "Inside one project the pods are one principal; dispatch://INFRA-382 owns that limit.",
+    "agent-secrets-helper (SO_PEERPIDFD) and rig.sh's sudo/unshare machine were not driven; their diff is token wiring only.",
+    "Once Dispatch introspects broker tokens (the child that makes Dispatch accept them), one Dispatch address's introspections and its people's approval relays share the account bucket (burst 200, 50/s per broker process); that child's cache has to keep introspection well under it."
   ],
-  "fastFollow": "Broker exchange tidy-up: the 'UI-bearer' wording and brokertest's UIToken name; one session type for every grant instead of DefaultSession beside ExchangeSession with cross-decoding; one ServiceAccount validity check shared by accountCaller and machine.Service.VerifyServiceToken; run decide once after NewAccessRequest; move TestAFixedSessionNameAcrossARollout and its helpers into a file of its own."
+  "fastFollow": "Broker exchange tidy-up: the 'UI-bearer' wording and brokertest's UIToken name; one session type for every grant; one ServiceAccount validity check shared by accountCaller and machine.Service.VerifyServiceToken; decide run once after NewAccessRequest; TestAFixedSessionNameAcrossARollout in a file of its own."
 }
