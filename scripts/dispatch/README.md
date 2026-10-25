@@ -35,6 +35,10 @@ standalone question with a blank `code` column, and a per-session table.
 A session still running an old plugin can be removed from the measurement with a repeated
 `--exclude-session <id>`. The summary prints how many asks were excluded.
 
+`--json` prints the same numbers as one JSON object on stdout and nothing else — the ask totals,
+the per-issue counts, the approval rounds, the coded standalone questions, the coding totals, the
+excluded-ask count and the per-session rows — so one day's numbers can be compared with another's.
+
 Classify each standalone question in a CSV passed with `--codes`:
 
 ```text

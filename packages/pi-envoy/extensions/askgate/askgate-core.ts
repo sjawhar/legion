@@ -128,7 +128,8 @@
 //     rules reason never feeds the charter request, and only the charter call moves the halt
 //     count. The entry adds `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleError`,
 //     `ruleModel`, `ruleLatencyMs`, `ruleTextMissing` and `ruleAsksCut`, and its `usage` and
-//     `promptBytes` sum both calls.
+//     `promptBytes` sum both calls. The two calls run side by side, so `charterLatencyMs` and
+//     `ruleLatencyMs` say what each of them cost of the gate's whole `latencyMs`.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
 // usage, the aborted one included. Every path fails open but
@@ -141,6 +142,11 @@
 // before the session is sealed. No verdict is not permission: block mode refuses either, warn mode
 // lets it go, and neither counts toward the halt. OMP_ASKGATE_DUMP names a file each gate's system
 // and user prompts are appended to, owner-only and never through a symlink.
+// A gated call whose rules check ran is also published to Dispatch (`decision-record.ts`): the
+// entry below reaches only this machine's disk, and the session that counts the rule decisions
+// over a fortnight holds a Dispatch token and nothing else. That write carries no ask text and no
+// quote, takes its own 5 s stop, never changes the decision, and leaves `recordError` on the entry
+// when it fails.
 import { createHash } from "node:crypto";
 import * as path from "node:path";
 import requestTemplate from "./askgate-request.md" with { type: "text" };

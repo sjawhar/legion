@@ -37,6 +37,19 @@
   `ruleOutcome`, `ruleModel`, `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut` and
   `target`, and `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors
   and the refusals the agent overrode.
+- AskGate publishes each rule decision to a Dispatch project document of the session's own,
+  `askgate-decisions-<session id>.md`, so a session holding a Dispatch token and nothing else can
+  count the refusals, the overrides and the rules-call errors a fortnight of sessions made. The
+  record carries the time, the session, `source` (`pod` or `machine`), the project, the call's
+  tool and target, the rule fields, the decision and the two latencies, and **no ask text and no
+  quote**. `OMP_ASKGATE_RECORD_PROJECT` names the project, else `LEGION_PROJECT` does, and with
+  neither set nothing is written. The write takes a 5 second stop of its own, never changes the
+  decision, and leaves `recordError` on the `advisor-gate` entry when it fails.
+  `scripts/askgate-report.ts --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those
+  documents back and counts them, split by `source`.
+- The `advisor-gate` entry gains `charterLatencyMs`, the charter call's own time on the clock
+  `ruleLatencyMs` uses: the two calls run side by side, and the entry's `latencyMs` alone never
+  said which of them the gate waited on.
 
 ### Fixed
 

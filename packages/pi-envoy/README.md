@@ -317,7 +317,9 @@ such target. A call that opens a new ask adds the fields of the rules check:
   `abandoned` or `shutdown`. The gate sets it on each gated call that opens a new ask and reached
   the model call.
 - `ruleModel`: the `provider/id` that answered the rules call.
-- `ruleLatencyMs`: the time of the rules check, its document read included.
+- `ruleLatencyMs`: the time of the rules check, its document read included. `charterLatencyMs` is
+  the charter check's own time on the same clock; the two calls run side by side, so each says
+  what it cost of the entry's whole `latencyMs`.
 - `ruleTextMissing`: `true` when the gate could not read the text of an ask and judged the ask
   without it.
 - `ruleError`: the error text for `error` (the provider's, or the check's own when it fails before
@@ -332,3 +334,30 @@ join each rules refusal to the next entry with the same `target`. The agent over
 when that entry's `outcome` is `rebuttal` or `breaker`. `scripts/askgate-report.ts` reports what
 the entries sent back and what they cost, the outcomes and errors of the rules check, and the
 rules refusals that the agent overrode.
+
+**The Dispatch record.** The entry above reaches only the machine the session ran on. A session
+that counts the rule decisions over a fortnight — a standing session holding a Dispatch token and
+nothing else — reads them from Dispatch instead: every gated call whose rules check ran (every
+entry with a `ruleOutcome`) is published to a Dispatch project document of the session's own,
+`askgate-decisions-<session id>.md`.
+
+- **What it carries.** The time, the session, `source` (`pod` for a Legion role's session, which
+  `LEGION_ISSUE` names, and `machine` for every other), the project, `tool`, `target`, `rule`,
+  `ruleOutcome`, `ruleError`, `ruleTextMissing`, `ruleAsksCut`, `decision`, `outcome`,
+  `verdictMode`, `ruleLatencyMs`, `charterLatencyMs` and the plugin's version. **No ask text and
+  no quote leaves the session**, so nothing a person wrote travels with the counts.
+- **Which project.** `OMP_ASKGATE_RECORD_PROJECT`, else `LEGION_PROJECT` (a Legion pod has no
+  envoy.json, so its environment is the only setting it can carry), else no record at all and no
+  Dispatch call.
+- **When.** After the decision is computed and before the call returns, with a 5 second stop. It
+  never changes the decision and never throws: a write that fails leaves `recordError` on the
+  entry and the call goes on. The session's first decision uploads the document; every later one
+  appends a fenced JSON line to it.
+- **What is lost.** A session killed between a decision and its upload loses that one record, and
+  a session that never reached a gated call writes no document. Both show in the reader's counts
+  rather than silently.
+
+`scripts/askgate-report.ts --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those
+documents and prints the day's refusals by rule, the refusals the agent overrode, and the
+rules-call error rate, each split by `source`, with the documents and lines it could not read
+counted beside them. The same script's `--sessions <dir>` mode still reports the entries on disk.
