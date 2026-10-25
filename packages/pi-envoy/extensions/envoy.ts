@@ -615,14 +615,14 @@ export default function envoyExtension(pi: PiApi): void {
   // `<topic>@<session>`: a session event that ends the role at once leaves its hold here, and the
   // next pass hands it back (`settleEndedHolds`).
   const pendingHandBacks = new Map<string, { readonly topic: string; readonly id: string }>();
-  // Holds this process gave up under a session it has left whose hand-back the listener refused,
-  // keyed by `<topic>@<session>` as `pendingHandBacks` is, so holds of one role under two sessions
-  // are two entries; each is left for the listener to reap: a claim the listener refuses naming
-  // one records no refusal, and a later pass claims again, for as long as the listener's
-  // `last_seen` for that session stands still (`lastSeen`, read at each such refusal). Once it
-  // moves, another process registers that session, which is then the newer holder. A pass that
-  // registers that session itself takes its holds back as pending hand-backs, under the host
-  // session's own id.
+  // Holds this process gave up whose hand-back the listener refused, whatever session they are
+  // under, keyed by `<topic>@<session>` as `pendingHandBacks` is, so holds of one role under two
+  // sessions are two entries. Any registration this process makes of a hold's session, in a pass
+  // or not and answered or not, first takes it back as a pending hand-back (`registerSession`);
+  // until then it is left for the listener to reap: a claim the listener refuses naming it records
+  // no refusal, and a later pass claims again, for as long as the listener's `last_seen` for that
+  // session stands still (`lastSeen`, read at each such refusal). Once it moves, another process
+  // registers that session, which is then the newer holder.
   const abandonedHolds = new Map<
     string,
     { readonly topic: string; readonly id: string; readonly lastSeen?: number }
@@ -2277,11 +2277,12 @@ export default function envoyExtension(pi: PiApi): void {
   // adopted: another process may run that session now, and a claim naming it as this pane's
   // predecessor would take the role from that live process.
   // Every hold not adopted is handed back. One the listener does not take back is abandoned
-  // (`abandonedHolds`), whatever session it is under. Under a session this process still
-  // registers, the next accepted registration makes it a pending hand-back again
-  // (`registerSession`), for the pass after to hand back; under a session it has left, it waits
-  // for the listener's reaping, since nothing heartbeats that session any more and a later try
-  // could take a hold another process made under that id. Answers whether a hold came back.
+  // (`abandonedHolds`), whatever session it is under: any registration this process makes of that
+  // session, in a pass or not and answered or not, first makes it a pending hand-back again
+  // (`registerSession`), for the pass after to hand back. Until then it waits for the listener's
+  // reaping and is never tried again: under a session this process has left, nothing heartbeats
+  // that session any more, and a later try could take a hold another process made under that id.
+  // Answers whether a hold came back.
   const settleEndedHolds = async (wanted: string | undefined, live: Fence): Promise<boolean> => {
     let restored = false;
     const failed: { readonly key: string; readonly topic: string; readonly id: string }[] = [];
