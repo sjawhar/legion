@@ -11,13 +11,13 @@ through `scripts/e2e/.shellcheckrc`.
 
 | script | proves |
 | :--- | :--- |
-| `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state` with the 20-row capability report on it (`resource-limits` open under tmux, carrying the `capabilities.decided` line to write; `pool-capacity` present, since tmux runs no probe pod), registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
+| `stage1-skeleton.sh` | `legion start` boots against a local Postgres, serves `/healthz` and `GET /legion/v1/state`, answers `legion state` with the 21-row capability report on it (`resource-limits` open under tmux, carrying the `capabilities.decided` line to write; `pool-capacity` present, since tmux runs no probe pod), registers itself in the Go daemon's own legions registry, survives a restart against the same store with its first boot time intact, and refuses an unreachable Postgres by the host it could not reach and never by the password |
 | `stage2-tmux-supervision.sh` | the Go daemon supervises real Oh My Pi sessions — the pinned build with this checkout's two plugins in an isolated profile — in its private tmux server, against a real Envoy listener and NATS: the plugin gate refuses another contract, a disabled plugin, a profile without the Envoy plugin, a missing skill, a skill only the role prompts load, and a task agent whose model role no one configured; an agent registers, holds its Envoy role and is ready; a task queued before ready runs once, its model turn through the configured route, and a retried frame starts no second turn; a killed pane resumes the same session; suspend and resume keep it; a stale hello is refused; an agent that never registers is retired at the deadline and counted; a restart re-adopts every live claim |
 | `stage4a-sandbox-runtime.sh` | the Agent Sandbox runtime (`internal/runtime/sandbox`) on the production cluster, driven through the Legion daemon's restricted identity and nothing more: the Agent Sandbox install check accepts and refuses by name; the image probe Sandbox passes; a root provisions its workspace, registers, runs under gVisor and adopts its working copy's author; every container of its pod reserves its role's cpu and memory with request equal to limit (the rig's overrides and the daemon's defaults both), the pod is `Guaranteed` with no affinity, and `nproc` and `MemTotal` inside it are the summed reservation; a second role joins the root's issue pod; suspend, resume, a same-agent refusal, a pod killed in place, and a relaunch before registration each hold; a new tree's root and child spawned at once each provision an issue pod and a volume of their own, neither able to read the other's workspace; a fresh runtime re-adopts every live pod; the orphan sweep honours its grace and takes the swept issue's volume with its Sandbox; releasing one role leaves the issue's Sandbox and volume; a launch that replaces an issue pod another role still runs in names the replaced pod on its Sandbox, and the running role is observed displaced and resumes into the new pod; and the namespace matches its snapshot. Devbox only |
 | `controller-start-tmux.sh` | the operator-launched controller on the Go daemon under tmux: `legion start --check-config` passes a real config, reporting after its OK line the two deployment capabilities a tmux file alone leaves open (secrets, resource-limits), and names the key on each broken variant, running no key command; the boot gate refuses a plugin of another contract; `legion state --config` runs no key command; `legion controller start` refuses a group-readable operator token file, claims the controller role, shows in `controllerLocator`, runs Oh My Pi interactive with the controller environment and its secret only as a file, leaves Ctrl-C to Oh My Pi, and exits with its code; `legion status` from an operator shell mints its grant with the operator bearer; a second start revokes the first's capability and grants; the controller liveness probe reads the live listener. Devbox only |
 | `dispatch-user-turns.sh` | a person's direct Send or Aside from Dispatch's conversation page reaches a real Oh My Pi session — the pinned build with this checkout's Envoy plugin in an isolated profile — as that person's own user turn, the body alone, carrying its Dispatch id as the host's tag, while a BTW stays a side question; the composer completes the session's slash commands, and a skill, a prompt template, a file command, an extension command, `/session`, `/compact`, `/new` and an unknown `/foo` each run from the page as they would at the session's terminal; a frame a session forged claiming a person wrote it, a broadcast, an issue message, a Legion role notice and a session's re-send of the person's BTW through the retry route each arrive as a card; a Send the session got as a card stays one when a frame is forged for it inside the accept's minute, while the person's retry of it is their turn; the page shows each message once; after the session restarts, a replay of the Send's own envelope and a frame forged naming a Send made while it was down, over a minute old, each inject nothing, and neither does a frame a bare bus client forges for a failed Send inside its minute; and Dispatch records only the Send, the Aside and the carded Send's retry as accepted. Devbox only |
 | `claude-backend-tmux.sh` | `worker_backends` on tmux: an implementer the daemon runs on Claude Code (`legion claude-bridge -- claude -p`) registers its Claude Code transcript as its session, takes its phase, is reminded by Claude Code's own `Stop` hook when a turn of its ends with that phase still open, completes it through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit, and, its pane killed, relaunches with `claude --resume` into the same session id, its earlier turns unchanged on disk and in its context. Devbox only |
-| `claude-backend-sandbox.sh` | `worker_backends` under `runtime: kubernetes`, on a real cluster: the implementer's pod launches and its claim registers that pod's Claude Code transcript, under the `CLAUDE_CONFIG_DIR` the launch places on the issue's volume, as its session; its container's command line holds `claude-bridge --` and `--session-id <id>`, reading its `mcp.json` from the launcher file of its own generation; it completes its phase through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit; the pod deleted, its replacement runs `claude --resume <that id>` with the transcript's earlier bytes unchanged on the volume and an earlier marker quoted back out of its context; and Claude Code's own `Stop` hook reminds it when a turn of its ends with its phase still open. Devbox only |
+| `claude-backend-sandbox.sh` | `worker_backends` under `runtime: kubernetes`, on a real cluster: the implementer's pod launches and its claim registers that pod's Claude Code transcript, under the `CLAUDE_CONFIG_DIR` the launch places on the issue's volume, as its session; its container's command line holds `claude-bridge --` and `--session-id <id>`, reading its `mcp.json` from the launcher file of its own generation; Claude Code's own `Stop` hook reminds it when a turn of its ends with its phase still open; it completes that phase through the `legion` MCP tool's `handoff_complete` with a pushed `.legion/<issue>/` handoff commit; and, the pod deleted, its replacement runs `claude --resume <that id>` with the transcript's earlier bytes unchanged on the volume and an earlier marker quoted back out of its context. Devbox only |
 | `verifiers-staging-token.sh` | `dispatch` and the Envoy listener authenticate a projected service-account token the staging EKS cluster actually minted — the right audience is accepted, the other binary's audience and a missing bearer are refused, each shared token still works, half an OIDC pair and an issuer that does not answer refuse the boot, and a refused token leaves its failure class in the log and nowhere else |
 | `burstable-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, an issue pod Legion's own loader, `sandboxOptions` and Sandbox runtime build from a `legion.yaml` giving the implementer `memory_request: 8Gi` under `memory: 32Gi` is admitted, scheduled and recorded `Burstable` with exactly that request and limit, while one from a file with no `resources` block stays `Guaranteed`; `legion start --check-config` names the Burstable role and refuses a request past its limit or that is no quantity, naming the key |
 | `controller-sweep-kind.sh` | on a throwaway kind cluster with Agent Sandbox v1.0.3 and gVisor, the project controller Legion's own loader, `sandboxOptions` and boot's Sandbox runtime factory launch from a `controller: daemon` `legion.yaml` over a real Postgres store keeps its Sandbox and volume through five orphan sweeps at grace 0 told claims read before its launch, because the store holds its claim unretired, and loses both to the first sweep once the claim is retired; the same launch and sweep on a driver whose sweep reads no claim (the sweep before the fix) deletes the launched controller's Sandbox |
@@ -735,39 +735,46 @@ Legion plugin, its `mcp.json` written by the launcher into the generation's priv
 its `CLAUDE_CONFIG_DIR` at `/legion/scratch/state/implementer/claude`, the role's own state home on
 the issue's volume. It is the first rig to run `runtime: kubernetes`, so what the tmux proof reads
 from `/proc` and a pane's own files this one reads with `kubectl exec` and `kubectl get` against
-that pod. The checks, in order:
+that pod. The checks, in order, which is the tmux proof's:
 
 - `claude-implementer-registers`: the implementer's pod launches and its claim registers that pod's
   Claude Code transcript, `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<session id>.jsonl`, as its session
-  file and the session id as its session. The container's own
-  `CLAUDE_CONFIG_DIR` is read back from the pod, and the transcript is read in the pod and is not
-  empty.
+  file and the session id as its session. `CLAUDE_CONFIG_DIR` is read back from the environment of
+  the container's Claude Code (`/proc/<pid>/environ`, through `kubectl exec`), not from the pod's
+  spec: the runtime sets only the kubelet-resolved variables on the container and carries every
+  plain `NAME=value`, this one among them, in the launcher's start command (`launchEnvironment` in
+  `packages/daemon/internal/runtime/sandbox/manifest.go`). The transcript is read in the pod and is
+  not empty.
 - `claude-pod-runs-the-bridge`: the container's command line holds `claude-bridge --` and
   `--session-id <that id>`, the process under the bridge is the image's own
   `/usr/local/bin/claude`, and the `--mcp-config` it names is a file of this generation's private
   directory, which the launcher wrote there.
+- `stop-hook-reminds-the-open-phase`: while the implementer still holds its phase — open since the
+  daemon's start task, an assignment (`packages/claude-envoy/src/legion-phase-hook.ts`), and not yet
+  completed — it is told to answer in one line of prose, to call nothing and to begin no line with
+  WAITING, so it ends a turn with that phase open and the pod's `legion` MCP server answers Claude
+  Code's `Stop` hook with `{"decision":"block","reason":…}`. The instruction is an Envoy delivery,
+  which puts an open phase's run of reminders back at zero but never reopens a closed one (the
+  `inbound-event` case of `packages/pi-shared/src/phase-stall.ts`): that is why this check runs
+  before `claude-implementer-handoff` closes the phase, never after. The transcript holds the
+  block's reason as one `Stop hook feedback` user turn carrying the reminder's own wording, "Your
+  turn ended with your Legion phase still open" (a fragment of `REMINDER` in
+  `packages/pi-shared/src/phase-stall.ts`, so a later rewording of the rest of that paragraph does
+  not break the proof silently), and an assistant turn follows that feedback, so the block carried
+  the turn on in the same session. The run moves no `LEGION_STALL_*` number.
 - `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, write and
   push its handoff, and call the `legion` tool's `handoff_complete`, it does: the daemon records the
   completion's commit, which the implement App authored and committed (read with `jj` in the pod's
   own workspace), which is on `sjawhar/legion-smoke` and which changes `.legion/<issue>/`, and the
   transcript holds the `mcp__legion__legion` call with a result that is not an error. No pull
   request is opened.
-- `pod-deleted-resumes-the-same-claude-session`: the pod deleted, the claim relaunches one
-  generation on in a pod of another uid, registers the same session id and the same session file,
-  runs `claude --resume <that id>`, and the transcript's bytes from before the deletion are
-  unchanged on the issue's volume (a `sha256sum` of its first *n* bytes, taken in each pod). The
-  resumed session, asked to quote the marker its implementation instruction carried, quotes it, so
-  the earlier turns are in its context and not only on the volume.
-- `stop-hook-reminds-the-open-phase`: told to answer in one line of prose, to call nothing and to
-  begin no line with WAITING, the implementer ends a turn with its phase open — the instruction is
-  an assignment, which opens the phase for the session's own machine
-  (`packages/claude-envoy/src/legion-phase-hook.ts`) — so the pod's `legion` MCP server answers
-  Claude Code's `Stop` hook with `{"decision":"block","reason":…}`. The transcript holds that reason
-  as one `Stop hook feedback` user turn carrying the reminder's own wording, "Your turn ended with
-  your Legion phase still open" (a fragment of `REMINDER` in
-  `packages/pi-shared/src/phase-stall.ts`, so a later rewording of the rest of that paragraph does
-  not break the proof silently), and an assistant turn follows that feedback, so the block carried
-  the turn on in the same session. The run moves no `LEGION_STALL_*` number.
+- `pod-deleted-resumes-the-same-claude-session`: the pod deleted, the claim relaunches at a later
+  generation — its `generation` in `legion claims list`, read just before the deletion, which the
+  daemon state's claim view does not carry — in a pod of another uid, registers the same session id
+  and the same session file, runs `claude --resume <that id>`, and the transcript's bytes from
+  before the deletion are unchanged on the issue's volume (a `sha256sum` of its first *n* bytes,
+  taken in each pod). The resumed session, asked to quote the marker its implementation instruction
+  carried, quotes it, so the earlier turns are in its context and not only on the volume.
 
 The image. `LEGION_E2E_IMAGE` must be the branch's own published worker image, by digest: a
 pull-request run of `.github/workflows/worker-image.yaml` publishes

@@ -247,8 +247,10 @@ jq -e --arg p "$project" \
 # row present, since the tmux runtime runs no probe pod. Both carry `source` "configuration"
 # (contract 25): under tmux, resource-limits is what the runtime alone decides and pool-capacity
 # reads that tmux runs no probe pod, so neither is boot's measurement; and no live, image or
-# withheld row carries `source` at all.
-jq -e '(.capabilities | length) == 20
+# withheld row carries `source` at all. The twenty-first row is `claude-code` (INFRA-220): the
+# worker image carries Claude Code and its Legion plugin unconditionally, so every deployment's
+# image is probed for them, this one included.
+jq -e '(.capabilities | length) == 21
   and (.capabilities | map(select(.name == "resource-limits" and .status == "open"
     and .configLine == "capabilities.decided.resource-limits: \"<reason>\""
     and .source == "configuration")) | length) == 1
@@ -257,7 +259,7 @@ jq -e '(.capabilities | length) == 20
   and (.capabilities | map(select((.name != "resource-limits" and .name != "pool-capacity"
     and .name != "secrets" and .name != "model-fallback") and has("source"))) | length) == 0' \
   "$work/state1.json" || {
-  echo "the state does not carry the 20-row capability report with resource-limits and pool-capacity's source under tmux"
+  echo "the state does not carry the 21-row capability report with resource-limits and pool-capacity's source under tmux"
   exit 1
 }
 # The daemon's resolved settings ride the same document (LEGION-791, contract 35): the value the

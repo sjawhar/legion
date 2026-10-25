@@ -9,11 +9,11 @@
 # and its `CLAUDE_CONFIG_DIR` a directory of the role's state home on the issue's volume. The proof
 # holds, in this order, that the Claude Code implementer's pod launches and its claim registers that
 # pod's Claude Code transcript as its session; that the container's command line holds
-# `claude-bridge --` and `--session-id <id>`; that it completes its phase through the `legion` MCP
-# tool's handoff_complete with a pushed `.legion/<issue>/` handoff commit; that the pod deleted, its
+# `claude-bridge --` and `--session-id <id>`; that the endless phase reminder reaches it when a turn
+# of its ends with its phase still open; that it completes its phase through the `legion` MCP tool's
+# handoff_complete with a pushed `.legion/<issue>/` handoff commit; and that, the pod deleted, its
 # replacement resumes the same Claude Code session (`--resume <id>`, the transcript's earlier bytes
-# unchanged on the issue's volume, and an earlier marker quoted back out of its context); and that
-# the endless phase reminder reaches it when a turn of its ends with its phase still open.
+# unchanged on the issue's volume, and an earlier marker quoted back out of its context).
 #
 # It is the tmux proof's rig (scripts/e2e/claude-backend-tmux.sh) on the cluster proof's cluster
 # (scripts/e2e/stage4a-sandbox-runtime.sh): scratch Postgres, NATS, Envoy listener and Dispatch from
@@ -280,6 +280,12 @@ argv_value() { awk -v flag="$2" 'prev == flag { print; exit } { prev = $0 }' <<<
 claim_session_file() {
   claims_list | jq -er --arg issue "$1" --arg role "$2" \
     '[.claims[] | select(.issue == $issue and .role == $role and .sessionFile != null and .sessionFile != "")] | last | .sessionFile'
+}
+# claim_generation ISSUE ROLE prints the claim's generation as `legion claims list` carries it: the
+# supervisor's count of the claim's launches, one more for every try, written before the try starts.
+# The daemon state's ClaimView carries none, which is why it is read here and not from claim_view.
+claim_generation() {
+  claims_list | jq -er --arg token "$(claim_token "$1" "$2")" '.claims[] | select(.token == $token) | .generation'
 }
 # claim_session_text ISSUE ROLE prints the claim's session as the pod holds it.
 claim_session_text() {
@@ -813,7 +819,10 @@ pass
 
 # Check 1. The implementer's pod launches and its claim registers a Claude Code transcript as its
 # session: the file Claude Code records under the CLAUDE_CONFIG_DIR the launch places on the issue's
-# volume, under the role's own state home, which the pod's own container says it was told.
+# volume, under the role's own state home, which the container's Claude Code says it was told. That
+# is read from the agent's own environment (pod_env), never the pod's spec: the runtime sets only the
+# kubelet-resolved variables there, and carries CLAUDE_CONFIG_DIR, like every plain NAME=value, in
+# the launcher's start command (launchEnvironment in packages/daemon/internal/runtime/sandbox).
 begin claude-implementer-registers
 wait_for_worker "$issue" implementer
 token=$(claim_token "$issue" implementer)
@@ -822,11 +831,12 @@ session=$(jq -r .session <<<"$claim")
 transcript=$(claim_session_file "$issue" implementer) || fail "the implementer's claim records no session file"
 pod=$(implementer_pod) || fail "the implementer's claim has no Sandbox locator"
 pod_uid=$(claim_pod_uid "$issue" implementer)
-generation=$(jq -r .generation <<<"$claim")
-config_dir=$(op get pod "$pod" -o json |
-  jq -r '.spec.containers[] | select(.name == "implementer") | .env[]? | select(.name == "CLAUDE_CONFIG_DIR") | .value')
+generation=$(claim_generation "$issue" implementer) || fail "legion claims list has no generation for the implementer's claim $token"
+agent_env=$(pod_env "$pod" implementer 2>&1) ||
+  fail "pod $pod has no readable agent environment in its implementer container: $(tr '\n' ' ' <<<"$agent_env" | cut -c1-300)"
+config_dir=$(sed -n 's/^CLAUDE_CONFIG_DIR=//p' <<<"$agent_env")
 [ "$config_dir" = /legion/scratch/state/implementer/claude ] ||
-  fail "the implementer container is told CLAUDE_CONFIG_DIR=${config_dir:-<unset>}, want /legion/scratch/state/implementer/claude, a directory of its role's state home on the issue's volume"
+  fail "the implementer's Claude Code is told CLAUDE_CONFIG_DIR=${config_dir:-<unset>}, want /legion/scratch/state/implementer/claude, a directory of its role's state home on the issue's volume"
 case "$transcript" in
   "$config_dir/projects/"*"/$session.jsonl") ;;
   *) fail "the implementer registered session file $transcript, want $config_dir/projects/<cwd>/$session.jsonl" ;;
@@ -856,7 +866,37 @@ note "pod $pod, container implementer: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1
 note "its MCP document is the launcher file $mcp, written into this generation's private directory"
 pass
 
-# Check 3. The phase is completed through the `legion` MCP tool, and the handoff commit is on the
+# Check 3. The endless phase reminder on the Claude Code backend (INFRA-220), which runs while the
+# implementer still holds its phase, before Check 4 completes it, as the tmux proof runs it. The
+# phase is open since the daemon's start task, which reached the session as an assignment
+# (packages/claude-envoy/src/legion-phase-hook.ts), and nothing has completed it. So a turn of the
+# implementer's that ends now settles its `Stop` hook: the pod's `legion` MCP server answers
+# `{"decision":"block","reason":<the reminder>}`, and Claude Code carries that reason into the
+# session as `Stop hook feedback` and one more turn of the same session. The instruction is what
+# makes the turn settle that way: it arrives as an Envoy delivery, which puts an open phase's run of
+# reminders back at zero but never reopens a closed one (the `inbound-event` case of
+# packages/pi-shared/src/phase-stall.ts), so it must come while the phase is still open, and the
+# reminder this settle earns is the hook's own continuation rather than a later timer's; it forbids
+# the `legion` tool, so the phase is still open when the turn ends; and it forbids a WAITING line,
+# which would buy a quiet wait in place of the block. The run moves no LEGION_STALL_* number: every
+# wait of this step is on that first reminder, which the machine hands back to the hook as the turn
+# settles. The reminded turn's own settle earns the stall's second reminder, which the server arms
+# on the default five-minute timer instead; the next step's instruction usually arrives inside that,
+# and were it not to, that reminder is the behaviour under test and the worker answers it as it
+# answered this one.
+begin stop-hook-reminds-the-open-phase
+stall_offset=$(transcript_size)
+send_agent "$issue" implementer "Claude backend sandbox proof stall operation: reply with one line of plain prose saying you are standing by for your implementation instruction, and end your turn there. Change nothing, do not call the legion tool in this turn, call no other tool either, and do not begin any line with WAITING. Legion will then remind you that your phase is not complete: answer that reminder with one more line of plain prose saying the proof will instruct you next, under these same rules — no legion tool, no other tool, no WAITING line."
+timeout_hook=report_stall_entries
+until_true 900 "the implementer's turn to end with its phase open and the reminder to reach it as Stop hook feedback" \
+  stop_hook_reminded "$stall_offset"
+until_true 600 "the blocked turn to be continued in the same session" reminded_turn_continued "$stall_offset"
+timeout_hook=
+until_true 300 "the reminded implementer's turn to end" issue_worker_state "$issue" implementer idle
+note "the implementer ended a turn with implementing still open: Claude Code carried its Stop hook's block back as Stop hook feedback naming \"$stall_reminder_needle\", and took one more turn on it"
+pass
+
+# Check 4. The phase is completed through the `legion` MCP tool, and the handoff commit is on the
 # smoke repository under .legion/<issue>/, pushed from the pod's own workspace by the implementer's
 # own App.
 begin claude-implementer-handoff
@@ -873,14 +913,19 @@ until_true 300 "the implementer's turn to end" issue_worker_state "$issue" imple
 note "handoff_complete through mcp__legion__legion recorded commit $commit, pushed to $repo under .legion/$issue/"
 pass
 
-# Check 4. The pod is deleted and the replacement resumes the same Claude Code session: the claim
+# Check 5. The pod is deleted and the replacement resumes the same Claude Code session: the claim
 # keeps its session and session file, the new container runs `--resume <id>`, the transcript's
 # earlier bytes are unchanged on the issue's volume, and the resumed session answers out of its own
-# context with a marker only its first instruction carried.
+# context with a marker only its implementation instruction carried. The relaunch is the claim's
+# generation in `legion claims list` passing the one it held when the pod was deleted, read just
+# before the deletion along with that pod's uid, so the wait and the uid check both name the
+# process the run deleted.
 begin pod-deleted-resumes-the-same-claude-session
 size=$(transcript_size)
 prefix=$(transcript_prefix_sha "$size")
 turns=$(transcript_since 0 | jq -R -s '[split("\n")[] | fromjson? | select(.type == "user" or .type == "assistant")] | length')
+generation=$(claim_generation "$issue" implementer) || fail "legion claims list has no generation for the implementer's claim $token"
+pod_uid=$(claim_pod_uid "$issue" implementer) || fail "the implementer's claim records no pod uid"
 op delete pod "$pod" --wait=false >/dev/null || fail "the operator could not delete pod $pod"
 until_true 900 "the implementer to relaunch in a replacement pod" sh -c \
   "'$work/legion' claims list --json --config '$work/legion.yaml' --operator-token-file '$work/operator-token' |
@@ -899,30 +944,9 @@ argv_has_pair "$bridge_argv" --resume "$session" ||
   fail "the relaunched claude was not started with --resume $session: $(tr '\n' ' ' <<<"$bridge_argv" | cut -c1-300)"
 [ "$(transcript_prefix_sha "$size")" = "$prefix" ] || fail "the transcript's first $size bytes changed across the relaunch"
 send_agent "$issue" implementer "Claude backend sandbox proof after a relaunch: reply with one line starting WAITING that quotes the proof marker your implementation instruction in this session carried. Change nothing and call no tool."
-until_true 600 "the resumed implementer to quote its first instruction's marker" resumed_reply_names "$size" "$marker"
-note "deleted pod $pod (uid $pod_uid, generation $generation): generation $(jq -r .generation <<<"$claim") runs claude --resume $session in pod $new_pod (uid $new_uid)"
+until_true 600 "the resumed implementer to quote its implementation instruction's marker" resumed_reply_names "$size" "$marker"
+note "deleted pod $pod (uid $pod_uid, generation $generation): generation $(claim_generation "$issue" implementer) runs claude --resume $session in pod $new_pod (uid $new_uid)"
 note "the transcript kept its $turns earlier turns ($size bytes unchanged on the issue's volume) and the resumed session quoted $marker"
-pass
-
-# Check 5. The endless phase reminder on the Claude Code backend (INFRA-220): the implementer's turn
-# ends with its phase open — the instruction it is given is an assignment, which opens the phase for
-# the session's own machine (packages/claude-envoy/src/legion-phase-hook.ts), and it forbids the
-# `legion` tool, so nothing closes it, and forbids a WAITING line, which would buy a quiet wait in
-# place of the block. The pod's `legion` MCP server answers the `Stop` hook with
-# `{"decision":"block","reason":<the reminder>}`, and Claude Code carries that reason into the
-# session as `Stop hook feedback` and one more turn of the same session. The run moves no
-# LEGION_STALL_* number: every wait here is on that first reminder, which the machine hands back to
-# the hook as the turn settles.
-begin stop-hook-reminds-the-open-phase
-stall_offset=$(transcript_size)
-send_agent "$issue" implementer "Claude backend sandbox proof stall operation: reply with one line of plain prose saying you are standing by for your next proof instruction, and end your turn there. Change nothing, do not call the legion tool in this turn, call no other tool either, and do not begin any line with WAITING. Legion will then remind you that your phase is not complete: answer that reminder with one more line of plain prose saying the proof will instruct you next, under these same rules — no legion tool, no other tool, no WAITING line."
-timeout_hook=report_stall_entries
-until_true 900 "the implementer's turn to end with its phase open and the reminder to reach it as Stop hook feedback" \
-  stop_hook_reminded "$stall_offset"
-until_true 600 "the blocked turn to be continued in the same session" reminded_turn_continued "$stall_offset"
-timeout_hook=
-until_true 300 "the reminded implementer's turn to end" issue_worker_state "$issue" implementer idle
-note "the implementer ended a turn with its phase open: Claude Code carried its Stop hook's block back as Stop hook feedback naming \"$stall_reminder_needle\", and took one more turn on it"
 pass
 
 ok=1
