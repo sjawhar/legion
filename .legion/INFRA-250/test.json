@@ -2,64 +2,29 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T10:57:10Z",
-  "round": 3,
-  "headSha": "7d38337be60f7a5ca990b80c8b2eff9fa8ea2ab0",
+  "completed": "2026-10-25T11:28:43Z",
+  "round": 4,
+  "headSha": "529a9c541aefa7a26905e2a6516ebd1a37e1ad55",
   "previousRounds": [
-    {"round": 1, "headSha": "e8af3445dd2991d9d60f2bd24317a12fe9c2724d", "verdict": "fail", "failure": "e2e-local.sh ran the acceptance against a NATS server it did not start and printed PASS (red test 9b4fa7896d56); two wording fixes. Fixed in fab0d3001b78."},
-    {"round": 2, "headSha": "fab0d3001b78", "verdict": "fail", "failure": "The guard's docker regexp missed a call whose context argument is itself a call (red test 93ec5dbfec95). Fixed in 7d38337be60f."}
+    {"round": 1, "headSha": "e8af3445dd2991d9d60f2bd24317a12fe9c2724d", "verdict": "fail", "failure": "e2e-local.sh tested against a NATS server it did not start; fixed in fab0d3001b78."},
+    {"round": 2, "headSha": "fab0d3001b78", "verdict": "fail", "failure": "guard regexp missed an inline-call context argument; fixed in 7d38337be60f."},
+    {"round": 3, "headSha": "7d38337be60f7a5ca990b80c8b2eff9fa8ea2ab0", "verdict": "pass", "proof": "A1-A5 proof array at commit 3de2323f636b."}
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "My red test TestTheDockerDriverMatchCatchesEveryContextArgument is byte-identical at 7d38337be60f to its commit 93ec5dbfec95 and passes there. I drove the guard in a git archive of 7d38337be60f with five probe files: exec.CommandContext with ctx, context.Background(), t.Context() and context.WithoutCancel(ctx) as its context, in four packages, each reported by file; a testcontainers-go/wait import is now reported as 'imports github.com/testcontainers/testcontainers-go/wait', the import itself. Removed, internal/testnats passes whole (ok 9.0s), the Freeze lock and the matcher test included. CI at 7d38337be60f: the envoy-e2e-local job ran its 'Refusal test for e2e-local.sh' step to success, its log printing all three PASS lines, the third 'PASS: refuses to run against a NATS server it did not start'."
+    "how": "The review's same-checkout fix, driven in a git archive of 529a9c541aef. (1) Two runs in one checkout: run 2, on ports of its own, exits 3 with 'ERR: another run of e2e-local.sh is using <out/e2e>; this run removed nothing.', and out/e2e/nats-store and listener.log are still there; run 1 exits 0 with PASS and 33 files of evidence. (2) Stale directory: after a finished run, flock -n out/e2e/run.lock true succeeds; with a planted listener.log 'STALE' and a junk file in nats-store, the next run exits 0 with PASS and both are gone. (3) Foreign NATS with the lock shown free first: exit 1, the script's own '[FTL] ... bind: address already in use', and the foreign server's store holds no ENVOY stream. (4) SIGINT mid-run releases the lock and leaves no natsd or listener behind, and the next run passes. bash scripts/e2e-local.test.sh passes all four cases (21 s); my two earlier cases are unchanged. Negative control: the same e2e-local.test.sh against the reviewed script from 2c75d9b561a4 fails its new case with 'FAIL: the second run did not say that another run holds .../out/e2e', and driven by hand that script's run 2 removed out/e2e/nats-store and run 1 then exited 1."
   },
-  "failed": 0,
-  "failures": [],
-  "proof": [
+  "failed": 1,
+  "failures": [
     {
-      "criterion": "A1 - every package of packages/envoy that fails today only for want of a NATS server passes in a Legion worker pod, with no container runtime and nothing fetched at run time, and no failure or skip whose reason is a NATS server.",
-      "surface": "The real packages/envoy Go suite in this INFRA-250 worker pod (gVisor, 2 CPUs, go1.27.1, no docker/podman/nerdctl/ctr, no DOCKER_HOST, no /var/run/docker.sock), on the branch and on main c9578e115b5a.",
-      "command": "cd packages/envoy && DISPATCH_TEST_NO_CONTAINERS=1 go list ./... | grep -v /integration | xargs go test -count=1 -json ; go test ./internal/integration/ -timeout 300s -count=1 (same command on both refs); round 3: go test ./internal/testnats/ -count=1 at 7d38337be60f",
-      "observed": "Branch: 69 ok, 4 FAIL, 'rootless Docker not found' 0, integration ok 99.1s; the twelve packages main fails with that panic all pass; no skip names NATS or a container but the S3 test under DISPATCH_TEST_NO_CONTAINERS=1. The four residue packages fail identically on both refs: three on the sandbox kernel (SO_PEERPIDFD) and pmdoc, whose cause is getrusage advancing in 10 ms steps under gVisor (proved by a throwaway loop and by failing alone on an idle pod). Since e8af3445dd29 no Go source outside internal/testnats/nats_test.go has changed; that package passes at 7d38337be60f (ok 9.0s).",
-      "headSha": "e8af3445dd2991d9d60f2bd24317a12fe9c2724d",
-      "negativeControl": "The same command on main at c9578e115b5a: 57 ok, 16 FAIL, 'rootless Docker not found' 12 times, integration FAIL 0.03s on the same panic."
-    },
-    {
-      "criterion": "A2 - the same suite still passes in CI with no change in what it covers, the hub-image coverage included, behind tags the pod run never compiles.",
-      "surface": "The test inventory of packages/envoy and packages/envoy/infra under no tag and each of natslive, smoke, multiprocess, memory, pulumilive, gcplive and race, on both refs; and CI at the code head.",
-      "command": "static inventory of func Test/Fuzz/Benchmark/Example names from the test files go list -tags <tag> -f '{{.TestGoFiles}} {{.XTestGoFiles}}' ./... selects, compared as sets per ref; gh run view 40182513233 --json jobs",
-      "observed": "4,475 on main, 4,482 at e8af3445dd29: 0 lost, 7 added, the three TestStartImageConfig matrix tests moved to natslive only. Rounds two and three added three more tests in internal/testnats and removed none. CI at 7d38337be60f: envoy-go's untagged unit step, its 'Test the container-backed NATS matrix (natslive)' step and the integration step all success; envoy-go-race, envoy-infra-go, envoy-smoke, dispatch-multiprocess, dispatch-memory and envoy-e2e-local success.",
-      "headSha": "7d38337be60f7a5ca990b80c8b2eff9fa8ea2ab0",
-      "negativeControl": "The comparison itself: a test lost to the tag move would show in the 'only on main' set, which is empty."
-    },
-    {
-      "criterion": "A3 - packages/envoy/scripts/e2e-local.sh runs the real listener binary in a worker pod the same way, and only against the NATS server it starts.",
-      "surface": "The acceptance script in this pod, against its own natsd and the real listener binary; and the script's refusal test in CI.",
-      "command": "cd packages/envoy && bash scripts/e2e-local.sh ; natsd -p 14222 & bash scripts/e2e-local.sh ; bash scripts/e2e-local.test.sh ; CI run 40182513233 job envoy-e2e-local step 6",
-      "observed": "Plain run exit 0, 'PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract', 32 files in out/e2e. e2e-local.test.sh: all three cases PASS here and in CI's 'Refusal test for e2e-local.sh' step at this head. Round two also showed two concurrent runs from two checkouts on one NATS port give one PASS and one refusal, with no ENVOY stream written to the server the script did not start.",
-      "headSha": "7d38337be60f7a5ca990b80c8b2eff9fa8ea2ab0",
-      "negativeControl": "A real natsd already on 14222: the script exits 1 with 'ERR: the NATS server this script started ended before it was ready.' and '[FTL] Error listening on port: 127.0.0.1:14222, \"listen tcp 127.0.0.1:14222: bind: address already in use\"'."
-    },
-    {
-      "criterion": "A4 - local.go, ENVOY_TEST_NATS_BIN and the e2e-local.sh docker fallback are gone and nothing names them; one entry point, with no helper able to bypass it.",
-      "surface": "The checkout and the guard test TestNoPackageOutsideTestnatsNeedsAContainerRuntime, broken on purpose with probe files in other packages.",
-      "command": "grep -rnE 'ENVOY_TEST_NATS_BIN|internal/testnats/local\\.go|DISPATCH_TEST_NATS_URL' outside docs/solutions and .legion ; probe files in internal/kvwatch, internal/cistore, internal/session, internal/store then go test ./internal/testnats/ -run TestNoPackageOutsideTestnatsNeedsAContainerRuntime -count=1 -v",
-      "observed": "No name left. The guard reports, by file, exec.CommandContext with ctx, context.Background(), t.Context() and context.WithoutCancel(ctx) as the context argument, and reports a testcontainers-go/wait import by that import's own path; with the probe files removed it passes.",
-      "headSha": "7d38337be60f7a5ca990b80c8b2eff9fa8ea2ab0",
-      "negativeControl": "The same probes at fab0d3001b78: the context.Background() shape passed the guard, which is what red test 93ec5dbfec95 pinned; it now passes because the guard catches it."
-    },
-    {
-      "criterion": "A5 - scripts/go-third-party-notices.sh still exits 0 and its output is byte-identical to main's.",
-      "surface": "The release's notices generator, run as the release workflows run it, on both refs.",
-      "command": "GOOS=linux GOARCH=amd64 CGO_ENABLED=0 ../../scripts/go-third-party-notices.sh <out> ./cmd/listener in packages/envoy, and ./cmd/pulumi-resource-envoy-infra ./cmd/envoy-infra in packages/envoy/infra, on c9578e115b5a and e8af3445dd29; cmp",
-      "observed": "All four exit 0; both pairs byte-identical (84,516 and 1,071,782 bytes). No go.mod, go.sum or production source has changed since e8af3445dd29.",
-      "headSha": "e8af3445dd2991d9d60f2bd24317a12fe9c2724d",
-      "negativeControl": "One production import of github.com/nats-io/nats-server/v2/server added to cmd/listener grew the listener's notices to 124,042 bytes."
+      "criterion": "The pull request is testable and mergeable at its code head: A1 ('every package that fails only for want of a NATS server passes in a pod') and A2 ('the same suite still passes in CI') hold on the code that will merge.",
+      "evidence": "GitHub reports the pull request CONFLICTING / DIRTY at head 70a8ec03be9e (gh pr view 2189 --json mergeable,mergeStateStatus), and no workflow run or check run exists for code head 529a9c541aef (gh api repos/sjawhar/legion/actions/runs?head_sha=529a9c541aefa7a26905e2a6516ebd1a37e1ad55 -> total_count 0; commits/<sha>/check-runs -> 0), so nothing in CI has judged this head. Cause: sjawhar/legion#2170 (INFRA-182, merged 2026-10-25T10:18:08Z as 9b062abdd) changed packages/envoy/internal/testnats/nats.go on main. It added StartNkeyAuthorizedContainer (which returns a *tcnats.NATSContainer) and a container-backed Gate (StartGate, Close, Open; its comment explains that a relay which accepts and then closes gives nats.go no ReconnectErrCB, so the address must have nothing listening while closed). It also added internal/bus/reconnect_err_test.go, which uses StartNkeyAuthorizedContainer, StartGate and the package-level testnats.Stop. `git merge-tree --write-tree main@origin(b543a3027939) 529a9c541aef` reports 'CONFLICT (content): Merge conflict in packages/envoy/internal/testnats/nats.go' and auto-merges everything else. Taking this branch's nats.go into that merge tree, `cd packages/envoy && go vet ./...` fails with 'internal/bus/reconnect_err_test.go:48:21: undefined: testnats.StartNkeyAuthorizedContainer'. So the forward merge has to port reconnect_err_test.go and a gate with nothing listening while closed onto the in-process rig, or A1 fails to compile internal/bus and the guard's one entry point is broken. #2170's other new tests (internal/bus/log_url_test.go, internal/kvwatch/repair_test.go, cmd/listener/durable_unbound_test.go) use only testnats.URL and RecreateKeyValue, which the branch keeps."
     }
   ],
   "observations": [
-    "pi-legion is red at 7d38337be60f on 'every staged file is under Oh My Pi's spill threshold': main's skills/legion-architect/SKILL.md is 51,256 bytes (gh api .../contents/skills/legion-architect/SKILL.md?ref=main --jq .size), which the pull request's merge commit stages. This change touches no file under skills/ or packages/pi-legion; the job is not a required check, and dispatch://INFRA-376 fixes it.",
-    "The guard is a text match. It does not see a call split across lines so that \"docker\" is on the line after exec.CommandContext( (a probe in internal/bus passed it), or a command held in a variable. No exec call in packages/ is split that way today (grep finds none), so this is a limit of the guard, not a shape the module uses.",
-    "Two overlapping Freeze calls share one gate, so the first thaw resumes traffic for both; no caller freezes twice."
+    "Adjacent, and in main's script too: e2e-local.sh exits 0 when interrupted. SIGINT or SIGTERM sent while it waits for listener health ends the run with status 0 after printing only 'waiting for listener health', because cleanup() reads rc=$? inside the trap, where it is 0. main's c9578e115b5a has the same 'cleanup() { local rc=$?' and 'trap cleanup EXIT INT TERM'. An interrupted acceptance that a caller sees as a pass is this tree's subject again. One fix: separate traps that pass 130 and 143 into cleanup. Sent to the architect, not failed here.",
+    "The new lock needs util-linux flock, which stock macOS lacks. The script now exits 3 there with 'required command is unavailable: flock'. Nothing in the repository says e2e-local.sh runs on macOS; CI is Ubuntu, and this pod has /usr/bin/flock.",
+    "If e2e-local.sh itself is killed with SIGKILL, its natsd and listener inherit the lock descriptor and outlive it, so the next run is refused with 'another run ... is using' until they are killed. They also hold the NATS port, so that run could not have passed anyway; the message is accurate in effect.",
+    "pi-legion's red is main's oversized skills/legion-architect/SKILL.md, tracked on dispatch://INFRA-376; not this change's."
   ]
 }
