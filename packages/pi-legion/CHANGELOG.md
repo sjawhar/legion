@@ -22,6 +22,9 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 - `rig.sh profile` takes the key-file model route (`LEGION_E2E_MODEL_ROUTE=key-file` with
   `LEGION_E2E_ANTHROPIC_KEY_FILE`). It refuses a work directory with a `.omp` in it or above it,
   because Oh My Pi would load that directory's plugins and not the label's.
+- `rig.sh judge-omp` runs each judge in a Docker container that sees only the judge's own
+  directory. On the gateway route, the gateway's key command runs on the host once for each judge,
+  and the container gets only its token, which is removed when the judge ends.
 
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and

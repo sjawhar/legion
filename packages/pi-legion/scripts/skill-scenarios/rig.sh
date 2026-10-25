@@ -92,8 +92,8 @@
 #
 # Operator input (no default in this repository), for `profile`, `judge` and `judge-omp`:
 #   LEGION_E2E_MODEL_ROUTE        gateway (the default) or key-file: how the agents reach Anthropic;
-#                                 a judge takes key-file only, since its container cannot run the
-#                                 gateway's key command
+#                                 on the gateway route a judge's key command runs on the host, once
+#                                 per judge, and its container gets only the token (cmd_judge_omp)
 #   LEGION_E2E_MODEL_GATEWAY_URL  gateway: the model gateway (scripts/e2e/lib/install-model-gateway.sh)
 #   LEGION_E2E_ANTHROPIC_KEY_FILE key-file: a 0600 file holding a plaintext Anthropic key
 #                                 (scripts/e2e/lib/install-key-file-model-route.sh); the key command
@@ -906,6 +906,39 @@ judge_profiles() {
   exec 9>&-
 }
 
+# gateway_key P AGENT KEYS runs the gateway profile P's key command on the host, once, and writes
+# what the judge's container needs into KEYS (0700): the token (0600), a key command that prints it
+# (anthropic-key), and the profile's models.yml with that command in place of the host's. The key
+# command serves a kept token until shortly before it expires, so a token that would expire before
+# the judge's deadline is dropped and minted once more, since the container reads only this file.
+gateway_key() {
+  local P=$1 agent=$2 keys=$3 host_command=$1/key/hawk-token token exp deadline payload
+  [ -x "$host_command" ] || fail "judge-omp: the gateway profile $P has no key command $host_command"
+  token=$("$host_command" 2>/dev/null) && [ -n "$token" ] ||
+    fail "judge-omp: the gateway's key command gave no key; see $P/key/hawk-token.log"
+  deadline=$((EPOCHSECONDS + ${SKILL_SCENARIOS_TIMEOUT:-1500}))
+  payload=${token#*.}
+  payload=${payload%%.*}
+  payload=$(printf '%s' "$payload" | tr '_-' '/+')
+  while [ $((${#payload} % 4)) != 0 ]; do payload+='='; done
+  exp=$(printf '%s' "$payload" | base64 -d 2>/dev/null | jq -r '.exp // empty | numbers | floor' 2>/dev/null) || exp=
+  if [ -n "$exp" ] && [ "$exp" -lt "$deadline" ]; then
+    rm -f -- "$P/cache/hawk-token.key"
+    token=$("$host_command" 2>/dev/null) && [ -n "$token" ] ||
+      fail "judge-omp: the gateway's key command gave no key; see $P/key/hawk-token.log"
+  fi
+  (
+    umask 077
+    mkdir -p -- "$keys"
+    printf '%s\n' "$token" >"$keys/token"
+    printf '#!/bin/sh\nexec cat /opt/key/token\n' >"$keys/anthropic-key"
+  )
+  chmod 0700 "$keys/anthropic-key"
+  sed "s#!exec $host_command\"#!exec /opt/key/anthropic-key\"#g" "$agent/models.yml" >"$keys/models.yml"
+  grep -q '!exec /opt/key/anthropic-key"' "$keys/models.yml" && ! grep -qF "$host_command" "$keys/models.yml" ||
+    fail "judge-omp: $agent/models.yml does not name the key command $host_command"
+}
+
 # cmd_judge_omp KIND DIR OUTPUT runs one fresh judge session in DIR on DIR/prompt.txt: no plugins,
 # the KIND profile's skills alone (ste: asd-ste100; bare: none), the judge's pinned model and
 # thinking level, its transcript under DIR/sessions, its output to DIR/out.txt with a last line
@@ -919,14 +952,20 @@ judge_profiles() {
 #   the pinned omp's install read-only (SKILL_SCENARIOS_JUDGE_OMP names another binary, for tests)
 #   the profile's agent directory read-only, copied into a fresh tmpfs HOME at start, where Oh My
 #     Pi writes its databases and logs; the operator's native module cache read-only
-#   the model route: its key command read-only, its call record writable, and the key file the
-#     key-file route reads read-only (the gateway route's key command runs the operator's
-#     hawk-token, which needs the operator's home and session bus: refused here)
+#   the model route, by LEGION_E2E_MODEL_ROUTE:
+#     key-file  its key command read-only, its call record writable, and the key file read-only:
+#               the command runs in the container and reads the file fresh on each call
+#     gateway   the gateway's key command runs hawk-token, which needs the operator's home and
+#               session bus, so it runs here on the host, once per judge run (gateway_key). Its token
+#               goes to an owner-only file beside DIR, with a key command that reads it and a copy of
+#               the profile's models.yml that names that command; the three are mounted read-only
+#               at /opt/key and removed when the judge ends. The gateway's host name is resolved
+#               here and passed to the container, which cannot resolve a tailnet name itself.
 # The network is Docker's default bridge, for the model's endpoint. SKILL_SCENARIOS_JUDGE_ENV adds
 # `NAME=value` words to the container's environment, for tests.
 cmd_judge_omp() {
   [ $# = 3 ] || fail "usage: rig.sh judge-omp <ste|bare> <dir> <output file name>"
-  local kind=$1 dir output=$3 skills status=0 omp P agent natives key_command record key_file h=/home/judge
+  local kind=$1 dir output=$3 skills status=0 omp P agent natives keys key_command record key_file h=/home/judge
   case $kind in ste) skills=(--skills asd-ste100) ;; bare) skills=(--no-skills) ;; *) fail "judge-omp: '$kind' is ste or bare" ;; esac
   dir=$(cd "$2" && pwd -P) || fail "judge-omp: $2 is not a directory"
   [ -f "$dir/prompt.txt" ] || fail "judge-omp: $dir has no prompt.txt"
@@ -934,23 +973,35 @@ cmd_judge_omp() {
   "" | . | .. | */* | prompt.txt | sessions | out.txt | judge-model.txt | .tmp) fail "judge-omp: '$output' is not the name of an answer file in $dir" ;;
   esac
   case "$(omp_ancestor "$dir" || true)" in "") ;; *) fail "judge-omp: $dir is under $(omp_ancestor "$dir"), whose plugins Oh My Pi would load" ;; esac
-  [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" = key-file ] ||
-    fail "judge-omp: the judge's sandbox takes the key-file model route (LEGION_E2E_MODEL_ROUTE=key-file); the gateway's key command needs the operator's home and session bus"
+  case ${LEGION_E2E_MODEL_ROUTE:-gateway} in gateway | key-file) ;; *) fail "judge-omp: LEGION_E2E_MODEL_ROUTE is '$LEGION_E2E_MODEL_ROUTE': it is gateway or key-file" ;; esac
   command -v docker >/dev/null || fail "judge-omp: docker is not on PATH; each judge runs in a container"
   judge_profiles
+  P=$work/judge-profiles/$kind
+  agent=$P/home/.omp/profiles/judge-$kind/agent
+  local route=() host ip
+  if [ "${LEGION_E2E_MODEL_ROUTE:-gateway}" = gateway ]; then
+    keys=$dir.key
+    rm -rf -- "$keys"
+    on_exit "$(printf 'rm -rf -- %q' "$keys")"
+    gateway_key "$P" "$agent" "$keys"
+    route=(-v "$keys:/opt/key:ro")
+    host=$(sed -n 's#^ *baseUrl: *https://\([^/:]*\).*#\1#p' "$agent/models.yml" | head -1)
+    ip=$(getent hosts "$host" 2>/dev/null | awk '{print $1; exit}') || ip=
+    [ -z "$ip" ] || route+=(--add-host "$host:$ip")
+  else
+    key_command=$P/model-key/anthropic-key
+    record=$P/key
+    # The key command assigns the key file's path with printf %q: read it as bash reads that line.
+    key_file=$(bash -c "$(grep -m1 '^key_file=' "$key_command")"$'\nprintf %s "$key_file"')
+    [ -f "$key_file" ] || fail "judge-omp: the key command names '$key_file', which is not a file"
+    route=(-v "$P/model-key:$P/model-key:ro" -v "$record:$record" -v "$key_file:$key_file:ro")
+  fi
   printf 'model %s\nthinking %s\n' "$judge_model" "$judge_thinking" >"$dir/judge-model.txt"
   mkdir -p "$dir/sessions"
   : >>"$dir/$output"
   omp=${SKILL_SCENARIOS_JUDGE_OMP:-$(mise where "$(<"$work/judge-profiles/pin")")/bin/omp}
   [ -x "$omp" ] || fail "judge-omp: $omp is not an executable omp"
-  P=$work/judge-profiles/$kind
-  agent=$P/home/.omp/profiles/judge-$kind/agent
   natives=$(readlink -f "$P/home/.omp/natives")
-  key_command=$P/model-key/anthropic-key
-  record=$P/key
-  # The key command assigns the key file's path with printf %q: read it as bash reads that line.
-  key_file=$(bash -c "$(grep -m1 '^key_file=' "$key_command")"$'\nprintf %s "$key_file"')
-  [ -f "$key_file" ] || fail "judge-omp: the key command names '$key_file', which is not a file"
   local extra=() word
   for word in ${SKILL_SCENARIOS_JUDGE_ENV:-}; do extra+=(-e "$word"); done
   # Pulled here, quietly, so a first run's pull progress never lands in the judge's out.txt, and a
@@ -960,19 +1011,21 @@ cmd_judge_omp() {
   docker run --rm --init --user "$(id -u):$(id -g)" --read-only \
     --tmpfs /tmp:exec,mode=1777 --tmpfs "$h:exec,uid=$(id -u),gid=$(id -g)" \
     -v "$(dirname "$omp"):/opt/omp:ro" -v "$natives:/opt/natives:ro" -v "$agent:/opt/profile:ro" \
-    -v "$P/model-key:$P/model-key:ro" -v "$record:$record" -v "$key_file:$key_file:ro" \
+    "${route[@]}" \
     -v "$dir:$dir:ro" -v "$dir/sessions:$dir/sessions" -v "$dir/$output:$dir/$output" \
     -w "$dir" -e HOME="$h" -e USER=judge -e TERM=xterm-256color -e TMPDIR=/tmp -e OMP_PROFILE="judge-$kind" \
     -e PI_NOTIFICATIONS=off -e PI_NO_TITLE=1 -e ENVOY_URL=http://127.0.0.1:1 "${extra[@]}" \
     "$judge_image" bash -c '
       a=$HOME/.omp/profiles/$OMP_PROFILE/agent
-      mkdir -p "$a" && cp /opt/profile/models.yml /opt/profile/config.yml "$a"/ || exit 125
+      mkdir -p "$a" && cp /opt/profile/config.yml "$a"/ || exit 125
+      if [ -f /opt/key/models.yml ]; then cp /opt/key/models.yml "$a"/; else cp /opt/profile/models.yml "$a"/; fi || exit 125
       if [ -d /opt/profile/skills ]; then cp -r /opt/profile/skills "$a"/ || exit 125; fi
       ln -s /opt/natives "$HOME/.omp/natives" || exit 125
       exec timeout "$1" "$2" "${@:3}"' - "${SKILL_SCENARIOS_TIMEOUT:-1500}" "/opt/omp/$(basename "$omp")" \
     -p "$(<"$dir/prompt.txt")" --no-extensions "${skills[@]}" \
     --model "$judge_model" --thinking "$judge_thinking" --session-dir "$dir/sessions" </dev/null >"$dir/out.txt" 2>&1 || status=$?
   echo "exit=$status" >>"$dir/out.txt"
+  [ -z "${keys:-}" ] || rm -rf -- "$keys"
   return "$status"
 }
 

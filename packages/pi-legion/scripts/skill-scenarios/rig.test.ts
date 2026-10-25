@@ -703,8 +703,13 @@ probe() { if "\${@:2}" >/dev/null 2>&1; then echo "probe $1 allowed"; else echo 
   probe write-sessions touch "$PWD/sessions/s.jsonl"
   probe read-skill cat "$HOME/.omp/profiles/$OMP_PROFILE/agent/skills/asd-ste100/SKILL.md"
   probe read-models cat "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml"
-  probe key-command test -x "$(sed -n 's/.*!exec \\(.*\\)"$/\\1/p' "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml" | head -1)"
+  key=$(sed -n 's/.*!exec \\(.*\\)"$/\\1/p' "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml" | head -1)
+  probe key-command test -x "$key"
+  probe gateway-base-url grep -q 'baseUrl: https://gateway.internal.example/anthropic' "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml"
+  probe token-is-jwt bash -c '[[ "$("$1")" =~ ^eyJ[A-Za-z0-9_-]*\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$ ]]' - "$key"
+  probe dbus-set test -n "\${DBUS_SESSION_BUS_ADDRESS:-}"
 } >"$PWD/answer.json"
+sleep "\${SLEEP:-0}"
 echo judged
 exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
 `,
@@ -802,6 +807,9 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
       "read-skill": "allowed",
       "read-models": "allowed",
       "key-command": "allowed",
+      "gateway-base-url": "denied",
+      "token-is-jwt": "denied",
+      "dbus-set": "denied",
     });
     expect(existsSync(path.join(dir, "new.txt"))).toBe(false);
   });
@@ -822,10 +830,9 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
     ).toBe(false);
   });
 
-  // Catches: a judge kind the rig has no profile for, a directory with no prompt, an answer file
-  // name that escapes the judge's directory or names another of its files, and the gateway route,
-  // whose key command needs the operator's home and session bus.
-  test("refuses another kind, a directory with no prompt.txt, a bad answer name and the gateway route", () => {
+  // Catches: a judge kind the rig has no profile for, a directory with no prompt, and an answer
+  // file name that escapes the judge's directory or names another of its files.
+  test("refuses another kind, a directory with no prompt.txt and a bad answer name", () => {
     expect(judge("plugins", judgeDir()).stderr.toString()).toContain("is ste or bare");
     expect(judge("ste", freshDir("judging-empty")).stderr.toString()).toContain(
       "has no prompt.txt"
@@ -835,9 +842,134 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
       expect(result.exitCode).not.toBe(0);
       expect(result.stderr.toString()).toContain("is not the name of an answer file");
     }
-    const gateway = judge("ste", judgeDir(), "answer.json", { LEGION_E2E_MODEL_ROUTE: "gateway" });
-    expect(gateway.exitCode).toBe(1);
-    expect(gateway.stderr.toString()).toContain("takes the key-file model route");
+  });
+
+  // The gateway route with the real installer and key command, and a stand-in hawk-token first on
+  // PATH that mints a JWT and counts each mint. The key command needs the operator's home and
+  // session bus, so it runs on the host; the container gets only the token it printed.
+  describe("on the gateway route", () => {
+    const gatewayWork = freshDir("judge-gateway-work");
+    mkdirSync(path.join(gatewayWork, "runs"), { recursive: true });
+    const fakeBin = freshDir("judge-gateway-bin");
+    const mints = path.join(gatewayWork, "mints.log");
+    writeFileSync(
+      path.join(fakeBin, "hawk-token"),
+      `#!/usr/bin/env bash
+printf '%s\\n' "$$" >>"$FAKE_MINT_LOG"
+payload=$(printf '{"exp":%s}' "$(($(date +%s) + 3600))" | base64 -w0 | tr '+/' '-_' | tr -d '=')
+printf 'eyJhbGciOiJub25lIn0.%s.c2ln\\n' "$payload"
+`,
+      { mode: 0o755 }
+    );
+    const gatewayJudge = (kind: string, dir: string, env: Record<string, string> = {}) =>
+      judge(kind, dir, "answer.json", {
+        PATH: `${fakeBin}:${childEnv.PATH}`,
+        SKILL_SCENARIOS_WORK: gatewayWork,
+        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${gatewayWork}`,
+        LEGION_E2E_MODEL_ROUTE: "gateway",
+        LEGION_E2E_MODEL_GATEWAY_URL: "https://gateway.internal.example/anthropic",
+        DBUS_SESSION_BUS_ADDRESS: "unix:path=/nonexistent/bus",
+        FAKE_MINT_LOG: mints,
+        ...env,
+      });
+    const mintCount = () =>
+      existsSync(mints) ? readFileSync(mints, "utf8").split("\n").filter(Boolean).length : 0;
+    function gatewayDir(): string {
+      const dir = path.join(gatewayWork, "judging", `job-${++jobs}`);
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(path.join(dir, "prompt.txt"), "Write answer.json.\n");
+      return dir;
+    }
+
+    // Catches: a gateway judge that cannot start in its container, one that gets the operator's
+    // home or session bus, one whose models.yml still names the host key command (which the
+    // container cannot run), one that mints more than once per judge run, a token the judge can
+    // read only by a path outside its mounts, and a token left on disk once the judge ends.
+    test("a gateway judge starts in the container on a token the host minted once, and the token file is gone after", () => {
+      // The first judge-omp call builds both profiles, and each install's preflight mints once.
+      // Count only a later call's mints: one judge run is one call of the key command.
+      expect(gatewayJudge("bare", gatewayDir()).exitCode).toBe(0);
+      const dir = gatewayDir();
+      const before = mintCount();
+      const result = gatewayJudge("ste", dir);
+      expect({ code: result.exitCode, stderr: result.stderr.toString() }).toEqual({
+        code: 0,
+        stderr: "",
+      });
+      expect(mintCount() - before).toBeLessThanOrEqual(1);
+      expect(recorded(dir, "env")).toEqual([
+        `PWD=${dir}`,
+        "HOME=/home/judge",
+        "OMP_PROFILE=judge-ste",
+      ]);
+      expect(Object.fromEntries(recorded(dir, "probe").map((line) => line.split(" ")))).toEqual({
+        "read-outside": "denied",
+        "read-home-ssh": "denied",
+        "list-work": "denied",
+        "read-own": "allowed",
+        "write-own-dir": "denied",
+        "write-sessions": "allowed",
+        "read-skill": "allowed",
+        "read-models": "allowed",
+        "key-command": "allowed",
+        "gateway-base-url": "allowed",
+        "token-is-jwt": "allowed",
+        "dbus-set": "denied",
+      });
+      expect(existsSync(`${dir}.key`)).toBe(false);
+      expect(readFileSync(path.join(dir, "answer.json"), "utf8")).not.toMatch(/eyJ[\w-]*\./);
+    });
+
+    // Catches: a token directory or file that others can read while the judge runs. The stand-in
+    // omp sleeps 2 s, so a watcher sees the files while they exist.
+    test("the token file is the owner's alone while the judge runs", () => {
+      const dir = gatewayDir();
+      const seen = path.join(gatewayWork, `seen-mode-${jobs}`);
+      const watcher = Bun.spawn(
+        [
+          "bash",
+          "-c",
+          'for _ in $(seq 400); do [ -f "$1/token" ] && { stat -c %a "$1" "$1/token" >"$2"; exit 0; }; sleep 0.05; done',
+          "-",
+          `${dir}.key`,
+          seen,
+        ],
+        { stdout: "ignore", stderr: "ignore" }
+      );
+      const result = gatewayJudge("bare", dir, {
+        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${gatewayWork} SLEEP=2`,
+      });
+      watcher.kill();
+      expect(result.exitCode).toBe(0);
+      expect(readFileSync(seen, "utf8").split("\n").filter(Boolean)).toEqual(["700", "600"]);
+      expect(existsSync(`${dir}.key`)).toBe(false);
+    });
+
+    // Catches: a token file left behind when the judge fails, and a failed mint that starts the
+    // judge anyway.
+    test("removes the token file when the judge fails, and starts no judge when the key command fails", () => {
+      const dir = gatewayDir();
+      writeFileSync(path.join(dir, "exit-status"), "3\n");
+      expect(gatewayJudge("bare", dir).exitCode).toBe(3);
+      expect(existsSync(`${dir}.key`)).toBe(false);
+      const refused = gatewayDir();
+      const broken = freshDir("judge-gateway-broken");
+      writeFileSync(path.join(broken, "hawk-token"), "#!/usr/bin/env bash\nexit 1\n", {
+        mode: 0o755,
+      });
+      rmSync(path.join(gatewayWork, "judge-profiles/cache"), { recursive: true, force: true });
+      for (const kind of ["ste", "bare"])
+        rmSync(path.join(gatewayWork, `judge-profiles/${kind}/cache`), {
+          recursive: true,
+          force: true,
+        });
+      const result = gatewayJudge("ste", refused, { PATH: `${broken}:${childEnv.PATH}` });
+      expect(result.exitCode).toBe(1);
+      expect(result.stderr.toString()).toContain(
+        "judge-omp: the gateway's key command gave no key"
+      );
+      expect(existsSync(path.join(refused, "answer.json"))).toBe(false);
+    });
   });
 
   // Catches: a judge profile whose built-from records an empty commit line when the rig's root is
