@@ -1,0 +1,97 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-236",
+  "completed": "2026-10-25T03:08:00Z",
+  "proof": [
+    {
+      "criterion": "A test in this repository runs two broker processes against one database and covers two concurrent refreshes of one refresh token, two concurrent device-code exchanges, a reread on one process taking effect on the other, and two processes migrating at once.",
+      "surface": "Two real cmd/broker binaries against one real Postgres database of their own (storetest.DatabaseURL, unmigrated), driven over HTTP and their own logs; both carry one BROKER_PUBLIC_URL and each client's transport is pinned to one process's bound address, which is what a load balancer does and what makes a signed record acceptable to either process.",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/broker",
+      "observed": "All six TestTwoBrokers rows PASS in 23.59 s. 1_TwoConcurrentRefreshesOfOneRefreshToken (1.11s): both processes answered the one refresh token with a token pair (the refresh grace window; the loser's shape is recorded, not pinned), the machine login still enrolled a session afterwards, no 5xx, and oauth_refresh_tokens held exactly one live row for the family. 2_TwoConcurrentDeviceCodeExchanges (1.03s): exactly one 200 with a token pair and exactly one launcher_credentials row; the loser was refused 400 invalid_grant (recorded, not pinned - the plan's D13a expected 500 server_error, so that documented finding's observed status is 400 on this path). 3_TwoProcessesMigratingAtOnce (0.82s): both processes started together on an empty database, both logged 'broker listening', both answered /healthz 200, and broker_schema_migrations held exactly the number of .up.sql files the binary embeds. 4_ARereadOnOneProcessNarrowsTheSecretOnTheOther (1.09s): after the shared fake secret store was retagged to another owner, B still granted AUTO_READ_TOKEN at once to a freshly enrolled session; POST /v1/secrets/AUTO_READ_TOKEN/reread against A answered 200, and 18 ms later B answered a freshly enrolled session 200 {\"state\":\"pending\",\"secrets\":[{\"name\":\"AUTO_READ_TOKEN\",\"decision\":\"approval\"}],\"grant_id\":null,\"approver\":\"grace@example.com\"} - an approval request to the new owner, releasing nothing. B's own reload is 5m0s, so the reload is not the explanation.",
+      "headSha": "0e10f76f7ea333e4d81229b837f14ecfe7c9bea8",
+      "negativeControl": "Row 4 carries its own control inside the row: before any reread, with the store already retagged, a freshly enrolled session on B was still granted the secret at once - the file edit alone changes nothing. Separately, the same row run against a scratch copy of cmd/broker/main.go with api.Deps.NotifyReread left nil (a Go build overlay; the repository untouched) failed: '10s and 573 asks after A reread AUTO_READ_TOKEN, B still answered a freshly enrolled session 200 {\"state\":\"granted\",\"secrets\":[{\"name\":\"AUTO_READ_TOKEN\",\"decision\":\"automatic\"}]}'. So the row depends on the fan-out and on nothing else."
+    },
+    {
+      "criterion": "A test shows the health check failing while requests are still served after SIGTERM, and the process finishing an in-flight request that outlives the old ten-second budget.",
+      "surface": "One real cmd/broker binary against a real Postgres database of its own, with a refresh grant held genuinely in flight: the test's own pgx connection holds the machine login's oauth_refresh_tokens row with select ... for update, so the grant blocks inside oauthstore.RotateRefreshToken's own for update, with no sleep in the broker. storetest.AwaitLockWaiters confirms the broker's backend is really waiting before the signal.",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 20m -v -run 'TestTwoBrokers/6' ./cmd/broker",
+      "observed": "6_ADrainingProcessFailsReadinessAndServesOn PASS (14.21s). Inside the drain window after SIGTERM, GET /healthz answered 503 with the code SHUTTING_DOWN while a fresh GET /v1/settings on a new connection still answered 200. The lock was released at T+12 s, the blocked refresh received its answer, and the test logged 'the broker exited 0 12.368s after its SIGTERM, having finished the refresh it was holding' - past the ten-second budget that used to cut it off, which the row asserts the measured time exceeds.",
+      "headSha": "0e10f76f7ea333e4d81229b837f14ecfe7c9bea8",
+      "negativeControl": "The same binary and the same route with BROKER_DRAIN_SECONDS=0 and nothing in flight: 'the control broker refused a fresh connection 1ms after its signal: Get \"http://127.0.0.1:57135/v1/settings\": EOF', where the drained process served GET /v1/settings 200 at the same point. The serving window therefore comes from the flag and not from chance."
+    },
+    {
+      "criterion": "A reread that arrives over that channel takes no token from the broker-wide reread rate limit: the pod that served the original call already paid for it.",
+      "surface": "The same two real cmd/broker binaries on one database, driven over HTTP.",
+      "command": "cd packages/envoy && go test -tags multiprocess -count=1 -timeout 20m -v -run 'TestTwoBrokers/5' ./cmd/broker",
+      "observed": "5_ANotificationSpendsNoRereadTokenOnTheReceivingPod PASS (0.01s): 'A (127.0.0.1:32284) served 4 rereads and refused the next: {\"code\":\"RATE_LIMITED\",\"error\":\"too many secret rereads; try again later\"}', and B - which had taken every one of those notifications on its listener - answered its own reread 200 at once. The burst is bounded at 20, well under the per-address bucket's burst of 30, so the 429 A stops on can only be the broker-wide bucket's.",
+      "headSha": "0e10f76f7ea333e4d81229b837f14ecfe7c9bea8",
+      "negativeControl": "A itself, in the same row: the pod that paid for its own rereads is refused the next one with 429 RATE_LIMITED, while B, which did the same number of rereads from notifications, is not. If a notification had spent B's bucket, B would have been refused too."
+    },
+    {
+      "criterion": "The reread fan-out's own mechanism: a notification reaches a peer listener, a pod drops the notification it sent itself, and an unreadable payload is dropped without a reread.",
+      "surface": "internal/broker/reread's Notifier and Listener against a real Postgres database of their own (storetest.DatabaseURL, never storetest.URL: a Postgres channel is database-wide while a schema is not), with a real LISTEN connection taken through store.Listener.",
+      "command": "cd packages/envoy && go test -count=1 ./internal/broker/reread/...",
+      "observed": "ok github.com/sjawhar/envoy/internal/broker/reread 0.801s. The round trip: a listener receives a notification another sender sent and calls the refresh function with the secret's name. Sender filtering: a notification the listener's own sender id sent reaches its session (Postgres delivers it) and is dropped, proven by FIFO delivery on the one session - the self-sent notification is sent first and only the other pod's name is refreshed.",
+      "headSha": "0e10f76f7ea333e4d81229b837f14ecfe7c9bea8",
+      "negativeControl": "An unreadable payload ('', 'not json at all', and a sender-only object) sent raw on the channel drives no refresh, and a good notification sent after them is still delivered - so the listener was alive and the channel delivering, and the drop was the payload's doing."
+    },
+    {
+      "criterion": "On SIGTERM the program fails its health check while it keeps serving, and only then stops accepting; the shutdown budget is at least the request deadline.",
+      "surface": "The compiled broker binary run by hand against the local Postgres, with the production environment cmd/broker's own tests use (BROKER_LISTEN_ADDR=127.0.0.1:0, a BROKER_FAKE_SECRETS_FILE), driven with curl.",
+      "command": "the built ./broker started with BROKER_DRAIN_SECONDS=3, then curl http://<addr>/healthz and curl http://<addr>/v1/settings before and after kill -TERM",
+      "observed": "Boot logged 'INFO broker stop budget drain=3s shutdown=60s total=63s' as its first line and 'INFO broker: listening for the other pods' secret rereads channel=broker_secret_reread' after its bind. /healthz answered 200 before the signal. After SIGTERM the log read 'INFO broker draining drain=3s'; /healthz answered 503 with {\"code\":\"SHUTTING_DOWN\",\"error\":\"the broker is shutting down and is no longer taking new traffic\"} while GET /v1/settings answered its normal 200 body, and 'INFO broker shutting down' followed 3 s later; the process exited 3021 ms after the signal. With BROKER_DRAIN_SECONDS=0 the budget line read 'drain=0s shutdown=60s total=60s' and the process exited 29 ms after its signal.",
+      "headSha": "0e10f76f7ea333e4d81229b837f14ecfe7c9bea8",
+      "negativeControl": "A second signal 0.5 s into a 10-second drain ended it at once - 'INFO broker: a second signal ended the drain early', exit 537 ms after the first SIGTERM - so the wait is the drain and not an unconditional delay."
+    },
+    {
+      "criterion": "The documentation a deployment reads carries the drain, the budget and the fan-out, and the site still builds.",
+      "surface": "The documentation site's own build, which regenerates the broker reference pages from the binaries and validates every internal link.",
+      "command": "bun run docs:build && .github/scripts/check-private-names.sh",
+      "observed": "'All internal links are valid', 43 pages built, build Complete, exit 0 - so operate.md's new 'Running more than one pod' section, its anchor and every link to it resolve. check-private-names: 'no file or path names the private deployment repository or the company, and no text names a private internal host or a Tailscale MagicDNS host (4899 files in the repository)', exit 0. go run ./cmd/broker-refgen generated BROKER_DRAIN_SECONDS's row ('| `BROKER_DRAIN_SECONDS` | `5` | whole number from 0 to 120 | ...') and the 503 SHUTTING_DOWN row on /healthz, so the docs build's own contract on BROKER_* variables and route comments holds.",
+      "headSha": "0e10f76f7ea333e4d81229b837f14ecfe7c9bea8",
+      "negativeControl": "cmd/broker-refgen fails the build on a BROKER_* name the code reads that no doc comment opens with, which is the guard the new knob had to satisfy; it exited 0 only once BROKER_DRAIN_SECONDS carried its own doc comment."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/pglisten/listener.go, listener_test.go - moved from internal/dispatch/pglisten, with a new Owner field naming the subsystem in the one line a listener logs (empty keeps the old 'dispatch:' text a deployment may alarm on)",
+    "packages/envoy/internal/dispatch/api/{delivery_live_hub.go,delivery_live_hub_intake.go,event_stream_relay.go,delivery_live_hub_test.go}, internal/dispatch/docs/{stale_room.go,stale_room_eviction_test.go}, internal/dispatch/duty/exclusive.go - the moved import path, and Owner: \"dispatch\" at the three live call sites",
+    "packages/envoy/internal/broker/config/config.go, config_test.go - BROKER_DRAIN_SECONDS (default 5, 0 to 120)",
+    "packages/envoy/internal/broker/reread/reread.go, reread_test.go - new: the channel constant, the {name, sender} payload, Notifier and Listener",
+    "packages/envoy/internal/broker/store/store.go - Listener (one hijacked connection from a one-connection pool built from the shared pool's configuration) and Close (which releases it)",
+    "packages/envoy/internal/broker/store/storetest/storetest.go - DatabaseURL, an unmigrated database of a test's own",
+    "packages/envoy/internal/broker/api/{server.go,handlers_secrets.go,limits.go,routes_table.go} - Deps.Draining and Deps.NotifyReread, the 503 SHUTTING_DOWN health answer, the fan-out call on the 200 path alone, both broker-wide reread limits halved, the per-process sentence on every limiter left as it is",
+    "packages/envoy/internal/broker/api/{api_test.go,handlers_secrets_test.go} - the drain's health answers and the fan-out's call sites against the real mux",
+    "packages/envoy/internal/broker/requests/machine_state.go - comment only: DefaultMissRereads is per process",
+    "packages/envoy/cmd/broker/main.go - the boot sender id, the listener goroutine, the notifier in Deps, the drain and its second-signal interrupt, the derived 60-second shutdown budget and the stop-budget boot log",
+    "packages/envoy/scripts/dev-broker.sh - BROKER_DRAIN_SECONDS=0 for a dev stack",
+    "packages/envoy/internal/broker/brokertest/{client.go,rig.go} - a client that drives a broker over a base URL, sharing one request body and one machine-login decision with the Rig",
+    "packages/envoy/cmd/broker/{main_test.go,multiprocess_test.go,service_login_test.go} - startBroker on internal/cmdtest, and the six two-process rows under the multiprocess tag",
+    "packages/envoy/internal/broker/e2e/e2e_test.go, internal/broker/api/api_test.go - the one P-256 key helper",
+    ".github/workflows/envoy-and-contracts.yaml - the broker-multiprocess job, and internal/pglisten in the dispatch change filter",
+    "docs/site/src/content/docs/broker/{operate.md,concepts.md,index.md,guides/manage-a-secret.md,guides/troubleshooting.md,guides/revoke-a-session.md}, packages/envoy/AGENTS.md, docs/solutions/architecture-patterns/a-liveness-probe-hangs-on-the-last-proven-round-trip-INFRA-66.md"
+  ],
+  "trickyParts": [
+    "Every broker proof and signed request object names BROKER_PUBLIC_URL + the path, never the address the client dialled (api/server.go's authenticate, api/handlers_oauth.go's atPublicURL). Two processes with different public URLs would refuse each other's records, so the two-process fixture gives both one shared BROKER_PUBLIC_URL and pins each test client's transport to one process's real address - exactly what a load balancer does in production. A tester or reviewer changing that fixture has to keep both halves.",
+    "requests.Machine.Create reuses a still-live grant for an exact name-set match against the same enrollment before it evaluates the policy at all, so a test that asks the same enrollment twice for one secret learns nothing about the policy the second time. Row 4 enrols a fresh session for every ask, which is why its poll is written the way it is.",
+    "LISTEN/NOTIFY is per database while storetest.URL isolates only a schema, and the migration advisory lock is database-wide too. Every test that touches the channel or the migration race takes storetest.DatabaseURL instead; using URL there would make tests hear each other.",
+    "The listener holds one Postgres connection outside the pool, for the life of the process, and needs a session-mode path: a transaction pooler carries no long-lived LISTEN. Confirmed with the architect against the deployment (no pooler of any kind; the path is a TLS tunnel that keeps each client connection its own session), and INFRA-240 counts the extra connection in its pool sizing.",
+    "The drain is sized to outlast EndpointSlice propagation, not a readiness probe: removal from the EndpointSlice starts at the pod's deletion timestamp, concurrently with the kubelet beginning termination. That is this plan's one recorded departure from the spec's stated mechanism, and it is why the default is 5 s rather than periodSeconds x failureThreshold.",
+    "/healthz is now a readiness probe only. A liveness probe on it would have the kubelet kill the container mid-drain. The contract is stated in routes_table.go's comment, in operate.md and in the new 'Running more than one pod' section, because the probe itself lives in another repository.",
+    "A handoff-only push carries skip-checks: true; this round's pushes carry code, so none of them does."
+  ],
+  "deviations": [
+    "The plan's D13a says the device-code race's loser receives 500 server_error. Observed on this path, repeatedly: 400 invalid_grant. Row 2 pins the invariant (exactly one exchange succeeds, exactly one launcher credential is minted) and records the loser's status without pinning it, as the plan directs; the plan's prose about which status that is, is the part that was wrong.",
+    "The plan's D3 says shutdownTimeout becomes 60 s and the process logs 'broker stop budget drain=5s shutdown=60s total=65s'. Implemented as written, with one addition the plan did not name: a second signal ends the drain at once, so an operator or a kubelet that wants the pod gone now does not wait the drain out.",
+    "The plan's W8 names storetest.DatabaseURL only; store.Close was added on top of it in the simplify pass, because the listener pool it opens was closed by nothing and leaked a pgxpool health-check goroutine per store.",
+    "The plan's D13b lists policy.MintedRecheck among the per-process guards to document. main deleted MintedRecheck and StillMinted outright in #2126 (kind-tagged secrets) while this branch was in flight; the forward merge took that deletion, so the comment and the two documentation references to 'the 30-second recheck before a minted secret's release' are gone rather than amended."
+  ],
+  "openQuestions": [
+    "None blocking. The architect confirmed the deployment's database path carries a session-mode LISTEN and that INFRA-240 will count the extra connection per pod; acceptance line 3 (merged on main, released as an image, the digest reported) is work after the merge and is reported in the production check."
+  ],
+  "discoveredComplexity": [
+    "internal/broker/helper's tests fail in this pod and in any gVisor sandbox: 'SO_PEERPIDFD: protocol not available'. That package is untouched by this change, and the failure was reproduced on the base files; it is the sandbox, not the change. CI's runners implement the option.",
+    "The repository's documentation build (bun run docs:build) regenerates the broker reference pages from the binaries and validates every internal link, so a new operator section's anchor is checked by the build rather than by review. It was run on the merged head.",
+    "GitHub reported the pull request CONFLICTING with four conflicts after #2126 and #2153 landed on main. The base was merged forward (never rebased) in one commit; three of the four are places where main deleted or replaced code this branch had edited, so the branch's own fingerprint changed by design. Both fingerprints and each resolution are recorded in a comment on the pull request."
+  ]
+}
