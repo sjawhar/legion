@@ -36,10 +36,10 @@ type HandoffCompleteRequest struct {
 	Commit  string `json:"commit,omitempty"`
 }
 
-// HandoffCompleteResponse confirms that the completion fact committed. Note is what READY's checks
-// say when READY was published without reading the head's checks - the pull request was already
-// merged, or its base requires none (readyChecks) - so the merger's answer does not read like a
-// head whose every required check was read and passed; every other completion answers none.
+// HandoffCompleteResponse confirms that the completion fact committed. Note is what READY answers
+// when it has something to say about the merge it is publishing: that the pull request was already
+// merged, so its head was published unread (readyChecks), or that a person merges this one
+// (mergeReadyPolicy's by-hand note); every other completion answers none.
 type HandoffCompleteResponse struct {
 	Note string `json:"note,omitempty"`
 }
@@ -233,7 +233,7 @@ func byHandShare(mergeNote string) string {
 //   - READY's refusals (readyChecks): NO_PULL_REQUEST, READY_PULL_REQUEST_CLOSED,
 //     READY_HEAD_CARRIES_HANDOFFS, READY_HEAD_MOVED, READY_NOT_APPROVED and READY_UNREVIEWED_CHANGE
 //     (unreviewedChange: the head is not the review round's approved head plus retro's commits),
-//     READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED, READY_DISARM_PENDING, READY_CHECKS_NOT_GREEN.
+//     READY_HEAD_CONFLICTS, READY_FILES_TRUNCATED, READY_DISARM_PENDING.
 //   - GITHUB_READ_FAILED: GitHub failed to answer a read; its failure, not the head's.
 //
 // The reads are made as the implement App, minted for the repository's owner, whose token never
@@ -261,7 +261,7 @@ func (s *server) readyNote(w http.ResponseWriter, r *http.Request, grant credent
 	if s.mergeRules != nil {
 		rules = s.mergeRules(issue.Project)
 	}
-	answer, refused := readyChecks(ctx, github, repository, rules, issue.Key, readyHead, approvedHead, pr, disarmPending)
+	answer, refused := readyChecks(ctx, github, rules, issue.Key, readyHead, approvedHead, pr, disarmPending)
 	if refused != nil {
 		refused.write(w)
 		return readyAnswer{}, false

@@ -89,7 +89,8 @@ exercise a criterion end to end, building that path is a child issue of this tre
   relationship from `--parent`. Keep the returned issue keys in ordered waves; a child is
   inert until released. Do not pass `--assignee`: the default keeps the tree's questions in one
   Inbox — under the shared token a child inherits its parent's assignee (the human who
-  answers the tree's asks); under a personal token it goes to that token's owner, whom
+  answers the tree's asks), and where no parent names one the project's default assignee, which
+  a person sets on the Settings page; under a personal token it goes to that token's owner, whom
   `dispatch whoami` names. Set it only when a human told you a specific person owns that child.
 
 A change across repositories gets one child per repository, each created with
@@ -264,11 +265,12 @@ stays out of the workflow.
 ## 3. Children complete
 
 No notice marks the last child's close as the end-game: each closure arrives as its own
-`child-closed`, and none is a reason to close the parent. Today's daemon does not order the root's
+`child-closed`. Today's daemon does not order the root's
 own phases after its children: when the design gate opens it starts every admitted issue of the
-tree, the root included, so the root's tester and reviewer can run, and the root reach `accepting`,
-before any child merges; your acceptance is where the root waits for its children (section 7). To
-get parent integration evidence against the repository's default branch your addressing line names
+tree, the root included, so the root's tester and reviewer run and the root reaches `accepting`
+before any child merges; the daemon holds it there — it refuses a `sign_off` that runs ahead of
+the issues beneath it (section 6), and a merged root's close waits for the tree (section 7).
+To get parent integration evidence against the repository's default branch your addressing line names
 after the last child merges, file the parent's integration check as a final child whose acceptance
 is every parent criterion proven on that default branch, release it with `release_children` only
 once every other child has closed, and accept the root (section 6) only after it closes. This holds
@@ -276,23 +278,21 @@ until the redesign's
 integrating phase ships (dispatch://LEGION-223). When that check's tester fails, the daemon sends
 the child back to its implementer; a failure whose fix belongs in other work becomes a new
 corrective child wave you create and release, and the tree returns to children-in-flight. Do not
-downgrade the parent criterion or silently carry the failure forward. If the root stays `done`
-through its linger with a child still in the workflow, the daemon hands that child to Legion as a
-root of its own (`todo` with the `legion` label). It carries that child's phase, gate, phase records
-and pull request into a new generation and starts the role of that phase; that root's architect
-gets a catch-up that says `handed_over` and `carried` and resumes from the phase, never
-registering its spec or asking for approval again. A child whose old root had no gate carries
-none, and its catch-up says `handed_over` without `carried`. Its workers already run their phases,
-so its architect decomposes nothing. It reads the root's phase from the catch-up (for a root
-`held`, the phase its `held` notice names). Before `awaiting_merge` it registers its spec, the gate
-its READY waits for, and starts nothing on that gate's `design-approved`; a child carried in
-`accepting` is yours to accept (section 6). In `awaiting_merge` the READY is already through, so it
-registers no spec and asks no human to approve one: the merge closes the issue, and the production
-check after it is the implementer's. `awaiting_merge` can move back: a red or
-conflicting head returns the root to `implementing` and its next READY reads the gate again, so if
-a later `ready-refused` arrives because the head was sent back, it registers then, as that row
-says. The child stays its own tree after hand-over; reopening the old root later does not take it
-back. Park a child first when its work should stop with the root.
+downgrade the parent criterion or silently carry the failure forward. A root that stays `done`
+through its linger with a child still in the workflow — a person's close now (section 7) — has
+that child handed to Legion as a root of its own (`todo` with
+the `legion` label), its phase, gate, phase records and pull request carried into a new generation
+and that phase's role started. Its architect's catch-up says `handed_over` and `carried`: it
+resumes from the phase and never registers a spec or asks for approval again. Without a gate to
+carry the catch-up says `handed_over` alone; its workers already run their phases, so it
+decomposes nothing and reads the root's phase from the catch-up (for a root `held`, the phase its
+`held` notice names). Before `awaiting_merge` it registers its spec, the gate its READY waits for,
+and starts nothing on that gate's `design-approved`; a child carried in `accepting` is yours to
+accept (section 6). In `awaiting_merge` the READY is through, so it registers none. `awaiting_merge` can
+move back — a red or conflicting head returns the root to `implementing` and its next READY reads
+the gate again — so a later `ready-refused` is when it registers, as that row says. The child
+stays its own tree; reopening the old root does not take it back. Park a child first when its
+work should stop with the root.
 
 ## 4. Integration verification
 
@@ -328,12 +328,15 @@ The reviewer's approval of the head moves the issue to `accepting` (its Dispatch
 notice with an `APPROVED` review is the cue. Read the evidence against every acceptance line of the
 spec and the plan: the tester's handoff (`.legion/<issue>/test.json` at the approved head), the PR
 body's `E2E (implementer)` and `E2E (tester)` lines, the reviewer's approval of that head by SHA
-(`gh api repos/<o>/<r>/pulls/<n>/reviews`), and, for a parent, that every child is `done`
-(section 3). Accept only when scope is fully met, integration evidence is current, corrective work
-is complete, review is clean, and no necessary work was silently deferred. Post the acceptance as a
+(`gh api --paginate repos/<o>/<r>/pulls/<n>/reviews`). Accept only when scope is fully met, integration
+evidence is current, corrective work is complete, review is clean, and no necessary work was
+silently deferred. Post the acceptance as a
 `dispatch comment` explicit about that evidence, then accept with `sign_off`, which runs only in
 `accepting` (refused `SIGNOFF_OUTSIDE_ACCEPTING` elsewhere) and moves the issue to `retro` with the
-status `retro`:
+status `retro`. The daemon keeps that order: `sign_off` is refused 409
+`SIGNOFF_CHILD_IN_WORKFLOW` while any issue beneath this one is still in the workflow, naming each
+of them; accept once the last of them is done, or take one out with `park_child`. Only what is
+*beneath* counts: a child with nothing beneath it is accepted while its own root runs.
 
 ```text
 dispatch comment --issue LEGION-40 --body-file - <<'EOF'
@@ -348,8 +351,7 @@ fails; the daemon starts that phase's role with the reason in its task and count
 as a reviewer's request for changes does. A `handoff_complete` from you in `accepting` is refused
 (`ACCEPTANCE_IS_SIGN_OFF`). CI red at the head in `accepting` returns the issue to `implementing`
 by the daemon's table, as in review. No `Production:` line is asked here: the production check is
-the implementer's after the merge closes the issue (section 7), and nothing after the merge is
-yours.
+the implementer's, after the close (section 7).
 
 The daemon keeps this order from its fixed table; you start none of its steps:
 
@@ -382,9 +384,8 @@ The daemon keeps this order from its fixed table; you start none of its steps:
    back to `reviewing`, the move's reason naming the code and what it found, so the reviewer runs a
    new round. A READY refused because the head still carries `.legion/<issue>/` goes back to
    `retro`, so the implementer's retro removes it.
-5. the merge lands under the repository's rules and closes the issue (section 7). The implementer's
-   production check follows the close, in its own session and on the pull request; you are asked
-   nothing for it, and a defect it finds is a `dispatch ask`, never an issue.
+5. the merge lands under the repository's rules and closes the issue — a root's close only once
+   the rest of its tree has left the workflow (section 7).
 
 What returns the tree to review: a changed diff — a commit above the approved head that
 touches anything outside `docs/solutions/` and the issue's `.legion/<issue>/`, or a
@@ -423,32 +424,28 @@ role topic, or its review body); the reviewer resolves none.
 
 The merge closes the issue: when GitHub reports the pull request merged while the issue is in
 `awaiting_merge` (a merge before that closes it the moment it gets there), the daemon writes
-`done`. A child's close reaches you as `child-closed`; the daemon retires five of its six claims,
-suspends its implementer with its session kept, and sets its Sandbox `Suspended` with its volume,
-because the implementer still owes the production check: handed to it in its live session at the
-merge, it is work after the close that holds no pod while it waits for the deploy
-(`skill://legion-worker/references/merge-gate.md`, *The production check after the close*). A
-root's close writes `done`, frees the tree's admission slot, and lingers the tree for
-`linger_hours` with every member suspended; a child still in the workflow at the end of the linger
-is handed over (section 3), and the tree's close waits for a member's open check.
+`done`. A root is the exception: a merge landing while another issue of its tree is still in the
+workflow is recorded and the root stays in `awaiting_merge` — nothing suspended, no linger, slot
+and workers kept — until the last of them is done or parked, when it closes. One `pr-merged`
+notice names what it waits for and none follows as they depart, so read the pull request on
+GitHub. A child's close reaches you as `child-closed`: the daemon retires five of its six claims
+and suspends its implementer, session kept and Sandbox `Suspended` with its volume, since it still
+owes the production check handed to it at the merge — work after the close that holds no pod while
+it waits for the deploy (`skill://legion-worker/references/merge-gate.md`, *The production check
+after the close*). A root's close writes `done`, frees the tree's admission slot and lingers the
+tree for `linger_hours` with every member suspended; a child still in the workflow at the linger's
+end is handed over (section 3), and the tree's close waits for a member's open check.
 
-Nothing of the check is yours: you post no sign-off after the merge and wait for no record. Its
-record lives on the pull request alone, since Dispatch refuses a write on a closed issue; a defect
-it finds is a `dispatch ask`, never an issue; and
+Nothing of the check is yours. Its record lives on the pull request alone, since Dispatch refuses
+a write on a closed issue; a defect it finds is a `dispatch ask`, never an issue; and
 `read_record` shows a closed issue's open check (`check`: the pull request, the merge commit, the
-looks, what woke the last one and when the next is due). A parent waits in `accepting` until
-every child is `done` (section 3): accepted earlier it would merge before its children, the state
-dispatch://LEGION-703 has the daemon rule out.
+looks, what woke the last one and when the next is due).
 
 ## Wake routing
 
-Handle one delivered wake by verifying the relevant live artifact and then performing the
-corresponding lifecycle procedure, which `skill://legion-architect/references/wake-routing.md`
-gives for each wake. Read it when a wake arrives. Architect-addressed wakes always reach the
-architect that owns the payload issue: a claimed child sub-architect, otherwise the nearest
-claimed ancestor, then the root. A wake about an architect role's own launch reaches the
-architect above it. `phase-finished`, worker lifecycle, child lifecycle, and design-gate wakes
-are architect-only and never go to an active phase worker.
+Handle every delivered wake from the table in
+`skill://legion-architect/references/wake-routing.md`: read it when a wake arrives, and follow
+the row for that wake.
 
 ## Escalation judgment
 
@@ -457,7 +454,9 @@ addressing` line names: a child that looks independent of the tree (the controll
 whether to re-file it as a root of its own, and does so only on their yes), capacity, and a
 cross-tree conflict. A problem outside the tree is a `dispatch ask` you open, never an issue you
 file (`skill://legion-worker/references/findings.md`). Handle everything else in the
-tree. A product, scope, or design decision that needs the human, yours or one a worker escalated,
+tree. A tool a worker cannot get is yours to schedule (`skill://legion-worker/references/tools.md`):
+the image change is a pull request against this repository, never something a worker conjures.
+A product, scope, or design decision that needs the human, yours or one a worker escalated,
 is a decision block you write (section 1 says what one does to the root spec's gate). A standalone
 human to-do may use `dispatch ask`; workers may reach the human directly with it the same way. Do not
 create a wait loop for any wake source.

@@ -353,13 +353,16 @@ session actor: `status` (a Legion lifecycle status), `title`, `labels` (replacin
 `priority` (`0` for P0 down to `3` for P3, or `null` to clear it), `route`,
 and `external_links`: a non-empty list merges into the issue's existing links by URL rather than
 replacing them, and an explicit empty list (`--clear-external-links`) clears every link instead;
-`rank`, the board's own order, is not exposed. Closing an issue (`status: "done"`)
-requires `reason`, which it posts as an issue message before the PATCH, since a closed issue
-refuses messages; a failed post sends no PATCH, and a PATCH that fails after the post names the
-posted message. The result is one line —
-`KEY: status a -> b; priority -> P1; linked <url> (N links)`, with `priority cleared` on a clear
-and `reason posted as message <id> (<ref>)` ahead of a close — and a server refusal keeps its
-`code` (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`) at the head of the thrown message.
+`before` and `after` (`--before <KEY>` / `--after <KEY>`) move the issue on its project's board —
+above that issue, below it, or between the two — and go as the server's `rank` field on the same
+PATCH only when a neighbour is named, since a `rank` with neither neighbour ranks the issue last
+in its project. Closing an issue (`status: "done"`) requires `reason`, which it posts as an issue
+message before the PATCH, since a closed issue refuses messages; a failed post sends no PATCH, and
+a PATCH that fails after the post names the posted message. The result is one line —
+`KEY: status a -> b; priority -> P1; rank -> before KEY; linked <url> (N links)`, with
+`priority cleared` on a clear and `reason posted as message <id> (<ref>)` ahead of a close — and a
+server refusal keeps its `code` (`INVALID_STATUS`, `ISSUE_CLOSED`, `EXTERNAL_LINK_TAKEN`) at the
+head of the thrown message.
 `dispatch request-approval` refuses, before it sends anything, while the version the request would
 name (the document's latest, `approval.latest_version`) holds a decision block open. It reads the
 live document's `ask` blocks (`GET /api/v1/artifacts/{id}/blocks`), then that version's markdown

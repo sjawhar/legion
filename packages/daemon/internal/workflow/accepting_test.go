@@ -250,3 +250,92 @@ func TestEveryRowOntoAcceptingLeavesTheBoardAtNeedsReview(t *testing.T) {
 		t.Fatal("no row of the table reaches accepting")
 	}
 }
+
+// seedAcceptingChild seeds an issue of LEGION-208's tree under parent, in the phase and status
+// given, as a child the architect's acceptance has to wait for.
+func seedAcceptingChild(t *testing.T, pool *pgxpool.Pool, key, parent string, at phase.Phase, status string) {
+	t.Helper()
+	seedIssue(t, pool, record.Issue{Key: key, Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "child", Parent: &parent, Phase: at, Generation: 1, Status: status, Rank: "U"})
+}
+
+// An architect accepts only once the work under it is finished: a sign-off is refused while any
+// issue beneath the signing one is still in the workflow, however deep, and the refusal names each
+// of them so the architect knows what it is waiting for. It is taken before anything is written,
+// so the issue stays in accepting and nothing is told.
+func TestSignOffIsRefusedWhileAnIssueBeneathIsInWorkflow(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		seed  func(t *testing.T, pool *pgxpool.Pool)
+		names []string
+	}{
+		{
+			name: "a child still running",
+			seed: func(t *testing.T, pool *pgxpool.Pool) {
+				seedAcceptingChild(t, pool, "LEGION-209", "LEGION-208", phase.Implementing, "in_progress")
+			},
+			names: []string{"LEGION-209"},
+		},
+		{
+			name: "a grandchild still running under a closed child",
+			seed: func(t *testing.T, pool *pgxpool.Pool) {
+				seedAcceptingChild(t, pool, "LEGION-209", "LEGION-208", phase.Done, "done")
+				seedAcceptingChild(t, pool, "LEGION-210", "LEGION-209", phase.Testing, "testing")
+			},
+			names: []string{"LEGION-210"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedAccepting(t, pool)
+			tc.seed(t, pool)
+			result, err := intake.ApplyFact(context.Background(), pool, "api", "signoff", intake.SignOff{Issue: "LEGION-208"}, testEngine(config.DesignGateRootIssues, nil), admissionStub{})
+			if err != nil || result.Refusal == nil || result.Refusal.Status != 409 || result.Refusal.Code != "SIGNOFF_CHILD_IN_WORKFLOW" {
+				t.Fatalf("sign-off = %+v, %v; want 409 SIGNOFF_CHILD_IN_WORKFLOW", result.Refusal, err)
+			}
+			for _, want := range append([]string{"park_child"}, tc.names...) {
+				if !strings.Contains(result.Refusal.Message, want) {
+					t.Fatalf("refusal %q does not say %q", result.Refusal.Message, want)
+				}
+			}
+			assertPhase(t, pool, phase.Accepting)
+			assertOutboxKinds(t, pool, []string{})
+		})
+	}
+}
+
+// A child out of the workflow holds nothing up: once it is done, or parked in backlog, the same
+// sign-off is the acceptance it always was and the issue reaches retro.
+func TestSignOffIsAcceptedOnceTheChildLeftTheWorkflow(t *testing.T) {
+	for _, tc := range []struct {
+		at     phase.Phase
+		status string
+	}{
+		{at: phase.Done, status: "done"},
+		{at: phase.Implementing, status: "backlog"},
+	} {
+		t.Run(tc.status, func(t *testing.T) {
+			pool := migratedPool(t)
+			seedAccepting(t, pool)
+			seedAcceptingChild(t, pool, "LEGION-209", "LEGION-208", tc.at, tc.status)
+			applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), intake.SignOff{Issue: "LEGION-208"})
+			assertPhase(t, pool, phase.Retro)
+		})
+	}
+}
+
+// The rule is read downward, never over the flat tree: a child with nothing beneath it is accepted
+// while its own root is still running. Read over the tree it would wait for the root, which is
+// waiting for it.
+func TestSignOffOnAChildIsAcceptedWhileItsRootRuns(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 1, Status: "in_progress", Rank: "U"})
+	seedAcceptingChild(t, pool, "LEGION-209", "LEGION-208", phase.Accepting, "needs_review")
+	seedPhase(t, pool, record.PhaseRow{Issue: "LEGION-209", Role: claim.RoleReviewer, Claim: "review-claim", HandoffCommit: "review-1", Summary: "reviewed",
+		Decision: &record.ReviewDecision{State: "approved", Head: "head"}})
+
+	applyRefusingNothing(t, pool, testEngine(config.DesignGateRootIssues, nil), intake.SignOff{Issue: "LEGION-209"})
+
+	if got := issueAt(t, pool, "LEGION-209"); got != phase.Retro {
+		t.Fatalf("the child is in phase %s, want retro", got)
+	}
+}

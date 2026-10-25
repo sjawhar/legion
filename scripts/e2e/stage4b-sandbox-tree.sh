@@ -13,9 +13,10 @@
 # `done`, through one changes-requested review round whose thread the reviewer opens, lingers, and
 # closes; while its planner holds, the driver files two children under it, each in an issue pod and
 # on a volume of its own, then closes one as done and parks the other in backlog, sets it todo again
-# so the daemon resumes its parked planner by rule, and parks it once more; two more children run
-# when it closes, one left mid-run for its linger's hand-over and one in a turn the proof human's
-# label carries into a tree of its own. Its architect is suspended from the operator shell while its
+# so the daemon resumes its parked planner by rule, and parks it once more; two more children are
+# still in the workflow when its pull request merges, so the merge is recorded and the root waits
+# in `awaiting_merge` until the proof human has parked both, the last park closing it. Its
+# architect is suspended from the operator shell while its
 # implementer completes, and stays held until the operator resumes it; in merging, every one of its
 # roles uses Oh My Pi's tools and the image's toolchain as its own App (full-agent-tools). Tree 2
 # runs through its planner beside tree 1, carrying the repository-configuration fixture, whose
@@ -26,6 +27,15 @@
 # and on (full-agent-negative), and is taken out from an operator shell (controller-walk). Tree 4 is
 # admitted once tree 3 has left, supplies a planner killed mid-turn and an implementer killed until
 # it is held, and is taken out the same way.
+# Two checkpoints are gone with INFRA-229 (mid-turn-carry and carried-child, with the setups that
+# left a child mid-run and mid-turn under a closing root): no merge closes a root while a child of
+# its tree is still in the workflow any more, and the one close that still does — a person's own,
+# in the Dispatch dashboard — is not one this driver can make, since every write it sends
+# production Dispatch names a session as its author (lib/workflow.sh), the daemon sets a live
+# root's status back when the session writing it holds no claim in the tree, and the operator's
+# `legion status` writes only todo, backlog or icebox, none of them the done a hand-over needs.
+# A finished root's hand-over of a child keeps its cover in the daemon's own tests
+# (packages/daemon/internal/admit/finished_root_test.go).
 # Between the operator's controller and tree 4, the daemon runs under `controller: daemon` and back
 # (daemon-controller-liveness). Each checkpoint prints `== <name>`, what it observed with the source
 # revision, the image digest and the two plugins' versions recorded once in `run.json`, and
@@ -190,7 +200,7 @@ stream=ENVOY_NOTIFICATIONS
 admission_cap=2
 # Tree 1's children that run at once: the two filed while its planner holds (issue-independence),
 # each in an issue pod of its own under tree 1's architect, outside the cap, which counts roots.
-# Children 3 and 4, filed at mid-run-child and mid-turn-child, run only once child 1 is released and
+# Children 3 and 4, filed at children-at-the-merge, run only once child 1 is released and
 # child 2 parked, and by then tree 2 has left its slot, so they raise no peak.
 tree1_children=2
 # The pods the run needs placed at once: the cap's roots (tree 1 and tree 2) and tree 1's children,
@@ -238,20 +248,12 @@ run_resources="${run_resources%,}}"
 unset role
 # The daemon's log texts the children's and tree 1's volumes are judged by: the release a child's
 # close as done logs (internal/runtime/sandbox/issue_suspend.go); the lost volume a resume finds
-# (internal/supervise/machine.go), which child-release requires absent, re-admission exactly once
-# for tree 1's claims (issue_lost_lines), and carried-child at most once for each of child 3's
-# (carried_child_sessions); and the prefix of the runtime's detail for the process that death ends
-# (internal/runtime/sandbox/observe.go), which pod_watch_verdict exempts. Then the texts
-# carried-child reads child 3's hand-over by: its decision (internal/workflow/linger.go handOver),
-# the outbox's drop of a status write as permanently refused (internal/daemon/outbox.go RunOnce),
-# which the hand-over must never get, and a claim's move to its issue's new tree
-# (internal/supervise/lifecycle.go Retree).
+# (internal/supervise/machine.go), which child-release requires absent and re-admission exactly
+# once for tree 1's claims (issue_lost_lines); and the prefix of the runtime's detail for the
+# process that death ends (internal/runtime/sandbox/observe.go), which pod_watch_verdict exempts.
 released_msg="sandbox runtime: released the closed issue's Sandbox and the volume it owned"
 lost_msg="supervise: the issue's volume was lost with the session; relaunching a fresh session"
 lost_detail="the issue's volume was lost: "
-handed_msg="workflow: a finished root hands its unfinished child to Legion"
-dropped_msg="outbox status write refused by Dispatch and dropped; the issue's later writes go on"
-retree_msg="supervise: the claim's issue moved to another tree"
 # How long a planner the driver has told to plan gets to finish: before its handoff it runs its two
 # model-backed plan checks, the gap analyst and up to three plan-review rounds (each a subagent
 # call), so planning takes a whole loop of its own (wait_for_phase).
@@ -304,22 +306,11 @@ pin=
 tree1=
 child1=
 child2=
+# Children 3 and 4 of tree 1 (children-at-the-merge): both are still in the workflow when tree 1's
+# pull request merges, and the proof human parks them one at a time, the last park closing the
+# merged root (done).
 child3=
-child3_phase=
-child3_status=
-# The uid of the PVC child 3 holds in tree 1 (mid-run-child), which carried-child compares with the
-# PVC the child has in its own tree.
-child3_tree1_volume=
-# Child 4 of tree 1 (mid-turn-child): its planner runs the driver's hold command, a turn in flight,
-# when tree 1 closes, and the proof human then carries it into a tree of its own (mid-turn-carry).
-# Its pod is its Sandbox's name; the Sandbox's and PVC's uids and the planner's session, read in
-# tree 1, are what mid-turn-carry holds the carried tree to. The release file ends the hold.
 child4=
-child4_pod=
-child4_sandbox_uid=
-child4_volume=
-child4_session=
-child4_release=/tmp/stage4b-mid-turn-release
 tree2=
 tree3=
 tree4=
@@ -1147,10 +1138,9 @@ projects:
 gates:
   design: "${design_gate:-off}"
 admission_cap: $admission_cap
-# The merge closes tree 1, and its linger runs from that close: done's first production-check look
-# and its suspension, the smoke main's cleanup and mid-turn-carry's release of child 4's hold (which
-# must land inside the linger) all run in it, so 30 minutes, not the 18 the earlier order's close
-# left them; close then waits for the expiry.
+# The close of tree 1 — its last child's park, after the merge — begins its linger: done's first
+# production-check look and its suspension and the smoke main's cleanup all run in it, as does
+# production-check-bound's 15 minutes, so 30 minutes; close then waits for the expiry.
 linger_hours: 0.5
 # The production check's bound (14 days by default) must come due inside the run, since its wake,
 # the check's last look, is production-check-bound's proof; and after the first look's report, since
@@ -1333,114 +1323,8 @@ left_planning() {
 }
 # issue_lost_lines ISSUE prints the daemon log's lost-volume lines (lost_msg) for the claims of
 # ISSUE, which the machine's log names by token (claim_token's issue prefix): re-admission counts
-# tree 1's, and carried-child names child 3's in its note (carried_child_sessions judges them).
+# tree 1's.
 issue_lost_lines() { log_lines "$lost_msg" | jq -c --arg c "$(claim_token "$1" "")" 'select((.claim // "") | startswith($c))'; }
-# handover_refusals LOG ISSUE counts, in the daemon log LOG, the outbox's failed attempts of ISSUE's
-# hand-over write that a Dispatch predating labels_add refused by that field's name: the
-# client's error for the write (internal/daemon/outbox.go status) wraps Dispatch's
-# `INVALID_JSON: invalid JSON body: json: unknown field "labels_add"`, and RunOnce logs each attempt
-# as a failed dispatch_status row.
-handover_refusals() {
-  jq -R -s --arg issue "$2" '[split("\n")[] | fromjson? | select(type == "object" and .msg == "outbox row failed" and .kind == "dispatch_status"
-    and ((.error // "") | contains("hand Dispatch issue " + $issue + " to Legion") and contains("unknown field \"labels_add\"")))] | length' "$1"
-}
-# handover_drops LOG ISSUE counts, in the daemon log LOG, the outbox's drops of an ISSUE status write
-# as refused for good (dropped_msg; the text is spelled here so a verdict test needs no variable).
-handover_drops() {
-  jq -R -s --arg issue "$2" '[split("\n")[] | fromjson? | select(type == "object" and .issue == $issue
-    and ((.msg // "") | startswith("outbox status write refused by Dispatch and dropped")))] | length' "$1"
-}
-# handover_ridden_out LOG ISSUE is the verdict that ISSUE's hand-over write was ridden out through a
-# Dispatch that refuses labels_add: retried at least twice on that refusal, and never dropped
-# (dispatch.PermanentRefusal). stage4b-verdict.test.ts holds it to a fabricated drop.
-handover_ridden_out() { [ "$(handover_refusals "$1" "$2")" -ge 2 ] && [ "$(handover_drops "$1" "$2")" = 0 ]; }
-# carried_child_sessions LOG PREFIX PLANNER is carried-child's verdict, from the daemon log LOG, on
-# how the carried child's planner claim PLANNER came back in the child's own tree. It holds the
-# lost-volume lines of the child's claims (tokens starting with PREFIX, claim_token's issue prefix)
-# to at most one each. Which of them log one is not fixed: once one role of an issue recorded a
-# session, every launch of the issue expects its volume (store/claims.go IssueHasSessions, whose
-# comment says a new role may be the first to find another role's session gone), so after tree 1's
-# cleanup deleted the child's volume, the new tree's fresh architect, the planner, or both find it
-# lost, in either order, whichever start runs first. It prints `fresh` when the planner's first
-# registration after its move to the new tree names another session than its last one before the
-# move, and LOG then holds that session's loss: the planner's own lost line, or its drop of the
-# session when a sibling found the volume lost (supervise/table.go sessionLost). It prints `kept`
-# when the planner came back on the same session with no loss logged for it: the child's launch
-# relabelled its Suspended Sandbox for the new tree before the cleanup took it
-# (runtime/sandbox/relaunch.go), so the volume and its sessions stayed. Any other case fails,
-# naming why: a claim that logged the loss twice, no move, no registration on either side of it, a
-# new session with no loss logged, or a loss logged for a session that came back. The messages are
-# spelled here so a verdict test needs no variable: supervise/machine.go relaunchFresh, table.go
-# sessionLost, lifecycle.go Retree and api/claims.go register.
-carried_child_sessions() {
-  local verdict
-  verdict=$(jq -R -s -r --arg prefix "$2" --arg planner "$3" \
-    --arg lost "supervise: the issue's volume was lost with the session; relaunching a fresh session" \
-    --arg dropped "supervise: the issue's volume the session lived on was lost; the next launch is a fresh session" \
-    --arg moved "supervise: the claim's issue moved to another tree" --arg registered "api: claim registered" '
-    [split("\n")[] | fromjson? | select(type == "object")] as $log
-    | [$log[] | select(.msg == $lost and ((.claim // "") | startswith($prefix))) | .claim] as $losses
-    | [$losses | group_by(.)[] | select(length > 1) | .[0]] as $twice
-    | ([$log | to_entries[] | select(.value.msg == $moved and .value.claim == $planner) | .key] | last) as $move
-    | [$log | to_entries[] | select(.value.msg == $registered and .value.claim == $planner)] as $registrations
-    | ([$registrations[] | select($move != null and .key < $move) | .value.session] | last) as $before
-    | ([$registrations[] | select($move != null and .key > $move) | .value.session] | first) as $after
-    | (($losses | index($planner)) != null or any($log[]; .msg == $dropped and .claim == $planner)) as $planner_lost
-    | if ($twice | length) > 0 then "FAIL: the issue'"'"'s volume was logged lost more than once for \($twice | join(", "))"
-      elif $move == null then "FAIL: \($planner) never moved to another tree"
-      elif $before == null then "FAIL: \($planner) registered no session before its move"
-      elif $after == null then "FAIL: \($planner) has not registered since its move"
-      elif $after != $before then
-        if $planner_lost then "fresh" else "FAIL: \($planner) came back as session \($after), not its kept \($before), with no loss of the kept one logged" end
-      elif $planner_lost then "FAIL: \($planner) logged its session \($before) lost, yet came back on it"
-      else "kept" end' "$1") || return 1
-  case $verdict in
-    fresh | kept) printf '%s\n' "$verdict" ;;
-    *)
-      printf '%s\n' "${verdict#FAIL: }" >&2
-      return 1
-      ;;
-  esac
-}
-# carried_mid_turn_ordered LOG PREFIX PLANNER ARCHITECT OLD RELEASED is mid-turn-carry's verdict,
-# from the daemon log LOG, on a child carried into a tree of its own while its planner claim PLANNER
-# still ran a turn in its old tree OLD: no role of the new tree launched while that turn ran, and the
-# turn ended on its own after the driver released it at RELEASED (an RFC 3339 UTC time). A start of
-# the new tree waited for PLANNER to stop (the outbox's `outbox row waits` line for a start of the
-# issue, whose error names the planner and OLD: daemon/outbox.go stopElsewhere, logged at INFO on a
-# row's first attempt). PLANNER's suspension landed after that wait and after RELEASED (`supervise:
-# suspended`, supervise/suspend.go), and no line says its turn was cut mid-turn (`supervise: the
-# agent's turn has not ended; suspending it mid-turn`, suspendAtTimeout, which the hold's deadline at
-# OLD's linger expiry would log). ARCHITECT's first launch (`supervise: launched`,
-# supervise/machine.go) came after that suspension. No claim of the issue (tokens starting with
-# PREFIX, claim_token's issue prefix) may have logged a Sandbox refused for still running another
-# tree's roles (runtime/sandbox/relaunch.go ensureSandbox), which a launch that did not wait meets.
-# Prints the reason and fails otherwise.
-carried_mid_turn_ordered() {
-  local verdict
-  verdict=$(jq -R -s -r --arg prefix "$2" --arg planner "$3" --arg architect "$4" --arg old "$5" --arg released "$6" '
-    def at: [(sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601), ((capture("\\.(?<f>[0-9]+)Z$").f // "0") | "0." + . | tonumber)];
-    [split("\n")[] | fromjson? | select(type == "object")] as $log
-    | ($released | at) as $releasedAt
-    | ([$log | to_entries[] | select(.value.msg == "outbox row waits" and ((.value.error // "") as $e
-        | ($e | contains("waits for ")) and ($e | contains($planner + ":")) and ($e | contains("in tree " + $old)))) | .key] | first) as $wait
-    | ([$log | to_entries[] | select(.value.msg == "supervise: suspended" and .value.claim == $planner and $wait != null and .key > $wait)] | first) as $stopped
-    | ([$log | to_entries[] | select(.value.msg == "supervise: launched" and .value.claim == $architect) | .key] | first) as $launched
-    | [$log[] | select(((.claim // "") | startswith($prefix)) and (tostring | contains("does not fit this launch of tree")))] as $refused
-    | [$log[] | select(.msg == "supervise: the agent'"'"'s turn has not ended; suspending it mid-turn" and .claim == $planner)] as $cut
-    | if ($refused | length) > 0 then "FAIL: a launch of \($refused[0].claim) met the Sandbox still running tree \($old)'"'"'s roles: \(($refused[0].error // $refused[0].msg) | tostring | .[0:300])"
-      elif ($cut | length) > 0 then "FAIL: \($planner)'"'"'s turn was cut mid-turn at \($cut[0].time) (deadline \($cut[0].deadline // "none")), not ended by the release at \($released)"
-      elif $wait == null then "FAIL: no start of the new tree waited for \($planner) to stop in tree \($old)"
-      elif $stopped == null then "FAIL: \($planner) was never suspended after the new tree'"'"'s start waited for it"
-      elif ($stopped.value.time | at) < $releasedAt then "FAIL: \($planner) was suspended at \($stopped.value.time), before the release at \($released)"
-      elif $launched == null then "FAIL: \($architect) never launched"
-      elif $launched < $stopped.key then "FAIL: \($architect) launched before \($planner) stopped in tree \($old)"
-      else "ok" end' "$1") || return 1
-  [ "$verdict" = ok ] || {
-    printf '%s\n' "${verdict#FAIL: }" >&2
-    return 1
-  }
-}
 # liveness_verdict PHASE MARK [--arg NAME VALUE]... is lib/controller-liveness-verdict.jq's verdict
 # for PHASE on the daemon log's lines after line MARK (daemon-controller-liveness).
 liveness_verdict() {
@@ -1638,8 +1522,8 @@ hold_end_charged() {
 # cannot read.
 # A pod the daemon suspended, released or closed ends without either, so it needs no match. The
 # resume that finds the issue's volume lost dies by design (the runtime's detail begins "the issue's
-# volume was lost: ", internal/runtime/sandbox/observe.go), and re-admission and carried-child judge
-# those themselves, tree 1's (issue_lost_lines) and child 3's (carried_child_sessions). A
+# volume was lost: ", internal/runtime/sandbox/observe.go), and re-admission judges those itself,
+# tree 1's (issue_lost_lines). A
 # pod the scheduler never placed is no unexplained death either:
 # the daemon retires a pod still unscheduled at its boot deadline and relaunches the claim, so a
 # death whose pod the watch saw `PodScheduled=False Unschedulable` and never `PodScheduled=True` (nor
@@ -3000,7 +2884,7 @@ refused=$(curl -sS --max-time 20 -o /dev/null -w '%{http_code}' -H "Authorizatio
 note "[dispatch] the run's bearer reads whoami as an agent session; an invalid bearer is refused 401"
 # LEGSMOKE's stale todo issues would be taken ahead of the run's own: a labelled root is admitted
 # at boot. A run that fails between the checkpoints
-# that file a child todo (mid-run-child, mid-turn-child) and the ones that take it out leaves it
+# that file a child todo (issue-independence, children-at-the-merge) and the ones that take it out leaves it
 # there, so every stale todo issue, root or child, goes to backlog.
 stale=$(dispatch_get "issues?project=$project&status=todo" | jq -r '.[].key')
 for key in $stale; do
@@ -3115,9 +2999,7 @@ cat >"$work/instructions.md" <<'EOF'
 
 This is a throwaway workflow proof on the disposable __LEGION_E2E_PROJECT__ project. A tree's root architect
 starts its tree from the daemon's `catch-up` notice as its role says: it writes the spec in the
-issue's own primary document and registers the gate, then waits; a catch-up that says `carried`
-starts nothing of the kind, since its tree was handed over mid-run with its design already
-approved, and its architect only waits. Apart from that, do not act until
+issue's own primary document and registers the gate, then waits. Apart from that, do not act until
 a targeted human Dispatch message gives the next exact proof operation. A phase worker's first
 message is the daemon's task line (`Continue <title>. Issue: <key>. Phase: <phase>.`): it names your
 phase and is not that message. Read what your role says to read, then reply WAITING and wait for
@@ -3145,10 +3027,9 @@ admits next.
 
 ## A tree's children in this proof
 
-The driver files child issues under a root itself, in `todo`, and later closes one as `done`, parks
-another in `backlog`, leaves a third mid-run when its root closes, which the daemon hands to
-Legion as a tree of its own, and labels a fourth into a tree of its own while its planner runs the
-driver's hold; each child's planner holds for the driver like every other role. A
+The driver files child issues under a root itself, in `todo`, and later closes one as `done` and
+parks the others in `backlog`, the last of them while its root waits in `awaiting_merge` for the
+rest of its tree; each child's planner holds for the driver like every other role. A
 `child-closed` or `child-status` notice of this run needs no action from the root architect: start,
 re-run, park or close nothing for it, write nothing about it, and keep waiting for the next
 targeted message.
@@ -5730,72 +5611,54 @@ note "$tree4 is held after $work_streak implementer deaths in a row with its tas
 take_out "$tree4"
 pass
 
-begin mid-run-child
-# LEGION-624's setup: a third child of tree 1, filed while tree 1 still runs, so that it is mid-run
-# when tree 1 closes. As at issue-independence, the driver files it in Dispatch and sets it todo
-# with no `legion` label; the daemon enters it under tree 1's open gate (workflow's
-# recordChildUnderLiveTree), and its planner registers from an issue pod of its own and holds for
-# the driver. It is filed this late so that it lives through no checkpoint that judges every live
-# claim of tree 1 (the restart and both address moves), and by now child 1 is released and child 2
-# parked, so no more of tree 1's children run at once than preflight sized the pool for.
-child3=$(new_child "Stage 4b proof tree 1 child 3: left mid-run when tree 1 closes, then handed to Legion as a tree of its own ($work)" "$tree1") ||
+begin children-at-the-merge
+# INFRA-229's setup: two more children of tree 1, filed while it still runs, so that both are in
+# the workflow when its pull request merges and the merge's close waits for them (done). As at
+# issue-independence, the driver files each in Dispatch and sets it todo with no `legion` label;
+# the daemon enters it under tree 1's open gate (workflow's recordChildUnderLiveTree), and its
+# planner registers from an issue pod of its own and holds for the driver. They are filed this late
+# so that they live through no checkpoint that judges every live claim of tree 1 (the restart and
+# both address moves), and by now child 1 is released and child 2 parked, so no more of tree 1's
+# children run at once than preflight sized the pool for.
+child3=$(new_child "Stage 4b proof tree 1 child 3: still in the workflow when tree 1's pull request merges ($work)" "$tree1") ||
   fail "Dispatch could not create tree 1's third child"
-on_issue "$child3" until_true 900 "planner worker on $child3, a child of $tree1, to register from an issue pod of its own" issue_worker_live "$child3" planner
-assert_claim_endpoints "$child3" planner
-child3_tree=$(claims_cli list --json | jq -r --arg issue "$child3" '[.claims[] | select(.issue == $issue and .role == "planner") | .tree] | first // ""') ||
-  fail "legion claims list could not be read for $child3's planner"
-[ "$child3_tree" = "$tree1" ] ||
-  fail "the daemon records $child3's planner claim under tree '${child3_tree:-none}', not $tree1: $(claims_cli list --json | jq -c --arg issue "$child3" '[.claims[] | select(.issue == $issue) | {role, tree, state}]')"
-daemon_state | jq -e --arg issue "$child3" '.issues[$issue] | .generation == 1 and .phase == "planning"' >/dev/null ||
-  fail "$child3 under $tree1 is $(daemon_state | jq -c --arg issue "$child3" '.issues[$issue] | {generation, phase}'), want generation 1 in planning"
-child3_pod=$(claim_sandbox "$child3" planner) || fail "$child3's planner has no Sandbox locator"
-assert_one_bound_pvc "$child3" ""
-child3_tree1_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child3's PVC ${found%% *}"
-note "[dispatch] $child3: todo under $tree1, no legion label; its planner claim records tree $child3_tree, and holds in planning in pod $child3_pod with PVC ${found%% *} (uid $child3_tree1_volume) Bound"
-pass
-
-begin mid-turn-child
-# LEGION-710's setup: a fourth child of tree 1, filed the same way as child 3, whose planner is put
-# in a turn that is still running when tree 1 closes (done sends it the hold). The carry that follows
-# (mid-turn-carry) must stop that turn's role before anything of the child's new tree launches. Its
-# Sandbox's uid, its PVC's uid and its planner's session are read here, in tree 1, so mid-turn-carry
-# can hold the carried tree to keeping all three. It runs beside child 3 and the root, no more of tree
-# 1's pods at once than issue-independence's.
-child4=$(new_child "Stage 4b proof tree 1 child 4: mid-turn when tree 1 closes, then carried into a tree of its own ($work)" "$tree1") ||
+child4=$(new_child "Stage 4b proof tree 1 child 4: the last of tree 1 to leave, whose park closes the merged root ($work)" "$tree1") ||
   fail "Dispatch could not create tree 1's fourth child"
-on_issue "$child4" until_true 900 "planner worker on $child4, a child of $tree1, to register from an issue pod of its own" issue_worker_live "$child4" planner
-assert_claim_endpoints "$child4" planner
-claim_by_token "$(claim_token "$child4" planner)" | jq -e --arg tree "$tree1" '.tree == $tree' >/dev/null ||
-  fail "the daemon records $child4's planner claim under another tree than $tree1: $(claim_by_token "$(claim_token "$child4" planner)" | jq -c '{tree, state}')"
-child4_pod=$(claim_sandbox "$child4" planner) || fail "$child4's planner has no Sandbox locator"
-child4_sandbox_uid=$(op get sandbox "$child4_pod" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child4's Sandbox $child4_pod"
-assert_one_bound_pvc "$child4" ""
-child4_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child4's PVC ${found%% *}"
-child4_session=$(issue_worker_session "$child4" planner) || fail "$child4's planner records no session"
-note "[dispatch] $child4: todo under $tree1, no legion label; its planner holds in planning in pod $child4_pod (Sandbox uid $child4_sandbox_uid, PVC ${found%% *} uid $child4_volume), session $child4_session"
+for child in "$child3" "$child4"; do
+  on_issue "$child" until_true 900 "planner worker on $child, a child of $tree1, to register from an issue pod of its own" issue_worker_live "$child" planner
+  assert_claim_endpoints "$child" planner
+  child_tree=$(claims_cli list --json | jq -r --arg issue "$child" '[.claims[] | select(.issue == $issue and .role == "planner") | .tree] | first // ""') ||
+    fail "legion claims list could not be read for $child's planner"
+  [ "$child_tree" = "$tree1" ] ||
+    fail "the daemon records $child's planner claim under tree '${child_tree:-none}', not $tree1: $(claims_cli list --json | jq -c --arg issue "$child" '[.claims[] | select(.issue == $issue) | {role, tree, state}]')"
+  daemon_state | jq -e --arg issue "$child" '.issues[$issue] | .generation == 1 and .phase == "planning"' >/dev/null ||
+    fail "$child under $tree1 is $(daemon_state | jq -c --arg issue "$child" '.issues[$issue] | {generation, phase}'), want generation 1 in planning"
+  child_pod=$(claim_sandbox "$child" planner) || fail "$child's planner has no Sandbox locator"
+  assert_one_bound_pvc "$child" ""
+  note "[dispatch] $child: todo under $tree1, no legion label; its planner claim records tree $child_tree, and holds in planning in pod $child_pod with PVC ${found%% *} Bound"
+done
 pass
 
 begin "done"
 on_tree "$tree1" wait_for_worker "$tree1" merger
-# The merge closes tree 1 (awaiting_merge and a merged pull request write done), and the daemon
-# submits the READY head's merge itself the moment it accepts READY: on a head whose `gate` check
-# has passed, the close can follow awaiting_merge by seconds. So what must be in place at the close
-# is in place before the merger's READY. The smoke main is held from here until the cleanup below
-# has emptied it (hold_smoke_main), on an open descriptor: start no background child before
-# release_smoke_main, or it inherits the descriptor and holds the smoke main past this run's
-# window; `9>&- 7>&-` does not close it: its number is allocated at runtime, not fixed. And child
-# 4's planner starts its hold, so its turn is in flight when tree 1 closes (the close's suspension
-# of it is then held for the turn, mid-turn-carry) and short enough to stay under the bash tool's
-# timeout until mid-turn-carry releases it: one shell loop polling for the release file, bounded at
-# 250 polls of 13 s (54 minutes, over the merger's READY, the merge's wait of up to 300 s, the
-# first look of the production check and its suspension, the smoke main's cleanup and
-# mid-turn-carry's steps to the release, which the linger bounds at 30 minutes from the close),
-# whose /usr/bin/sleep 13 marks it in the planner's container.
+# The merge does not close tree 1: children 3 and 4 are still in the workflow, so the daemon
+# records the merge and leaves the root in awaiting_merge — nothing suspended, no linger, no
+# Dispatch done, its admission slot and all six roles kept — and tells its architect once, naming
+# the pull request and the issues the close waits for (closeMerged and waitingForTree,
+# internal/workflow/pullrequest.go). The proof human then parks the children one at a time, and the
+# last of them closes the root (closeAwaitingRoot, internal/workflow/linger.go) exactly as the
+# merge closes a root whose tree has finished: the status done, the slot freed, the tree lingered
+# (linger_hours 0.5) with every member's claims suspended, and the production check opened on the
+# merge commit, whose first look the daemon hands the implementer in the still-live pod — its claim
+# alone comes back, resumed on its kept session, while the other five stay suspended, and the
+# root's Sandbox stays Running for the look (the look's start supersedes the linger's suspension of
+# the issue).
+# The daemon submits the READY head's merge itself the moment it accepts READY, so what must be in
+# place at the merge is in place before the merger's READY. The smoke main is held from here until
+# the cleanup below has emptied it (hold_smoke_main), on an open descriptor: start no background
+# child before release_smoke_main, or it inherits the descriptor and holds the smoke main past this
+# run's window; `9>&- 7>&-` does not close it: its number is allocated at runtime, not fixed.
 hold_smoke_main
-send_agent "$child4" planner "Stage 4b proof mid-turn hold: run exactly this as one bash tool call, with the tool's timeout at least 3600 seconds, and change nothing else: i=0; until [ -e $child4_release ] || [ \$i -ge 250 ]; do /usr/bin/sleep 13; i=\$((i+1)); done; test -e $child4_release && echo RELEASED. When it finishes, reply RELEASED and end your turn; call no other tool."
-child4_holds() { issue_worker_state "$child4" planner working && pod_runs "$child4_pod" planner "/usr/bin/sleep 13"; }
-on_issue "$child4" until_true 300 "$child4's planner to run its hold in pod $child4_pod" child4_holds
-note "$child4's planner runs its hold, a turn in flight, while tree 1 merges and closes"
 send_agent "$tree1" merger "Stage 4b proof READY operation: verify pull request #$pr_number is ready to merge and call the legion tool's handoff_complete with ready true."
 on_tree "$tree1" wait_for_phase "$tree1" awaiting_merge 900
 # READY is posted with every review thread on the pull request resolved: the implementer resolved
@@ -5825,16 +5688,52 @@ note "READY #$pr_number was posted at $ready_head with $(jq length "$evidence/re
 # The daemon submits the READY head's merge itself; await_ready_merge reads the pull request until
 # it merges and never merges it by hand.
 await_ready_merge "$repo" "$pr_number" --delete-branch
-# The merge closes tree 1: awaiting_merge and a merged pull request write done, the daemon's one
-# status write after retro. A root's close frees its slot and lingers the tree (linger_hours 0.5),
-# every member's claims suspended, and opens the production check on the merge commit, whose first
-# look the daemon hands the implementer in the still-live pod: its claim alone comes back, resumed
-# on its kept session, while the other five stay suspended, and the root's Sandbox stays Running
-# for the look (the look's start supersedes the linger's suspension of the issue).
+# The merge is recorded and the root waits for the rest of its tree (INFRA-229).
+merge_recorded() {
+  daemon_state | jq -e --arg issue "$tree1" '.issues[$issue] | .phase == "awaiting_merge" and .pullRequest.state == "merged"' >/dev/null
+}
+on_tree "$tree1" until_true 600 "the daemon to record pull request #$pr_number merged on $tree1, which stays in awaiting_merge" merge_recorded
+waiting_for=$(log_lines "workflow: a merged root's close waits for the rest of its tree" |
+  jq -r -s --arg issue "$tree1" '[.[] | select(.issue == $issue)] | last | .waitingFor // empty')
+[ "$waiting_for" = "$child3, $child4" ] ||
+  fail "the daemon logged $tree1's merged close waiting for '${waiting_for:-nothing}', want \"$child3, $child4\""
+until_true 300 "the pr-merged notice on $tree1's architect" notice_delivered "$tree1" architect "$(notice_needle pr-merged "$tree1")"
+merged_notice=$(notice_line "$tree1" architect "$(notice_needle pr-merged "$tree1")")
+for want in "#$pr_number" "$child3" "$child4"; do
+  grep -qF -- "$want" <<<"$merged_notice" ||
+    fail "the pr-merged notice on $tree1's architect does not name $want: $(cut -c1-300 <<<"$merged_notice")"
+done
+state_file merged-waiting
+jq -e --arg issue "$tree1" '(.admission.active | index($issue)) != null and .issues[$issue].check == null' "$evidence/merged-waiting.json" >/dev/null ||
+  fail "the merge freed $tree1's slot or opened its production check while its tree still ran: $(jq -c --arg issue "$tree1" '{active: .admission.active, check: .issues[$issue].check}' "$evidence/merged-waiting.json")"
+dispatch_status_is "$tree1" retro >/dev/null ||
+  fail "the board shows $tree1 $(dispatch_get "issues/$tree1" | jq -r .status) at its merge, want the retro it stands in: the done is the close's"
+lingered=$(log_lines "workflow: tree lingers" | jq -c --arg tree "$tree1" 'select(.tree == $tree)' | grep -c . || true)
+[ "$lingered" = 0 ] ||
+  fail "the daemon lingered tree $tree1 at its merge ($lingered times) while $child3 and $child4 were still in the workflow"
+merge_claims=$(issue_claim_states "$tree1" | paste -sd ',' -)
+case $merge_claims in *suspended*) fail "the merge suspended a claim of $tree1 while its tree still ran: $merge_claims" ;; esac
+note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit: the daemon recorded the merge and left $tree1 in awaiting_merge (claims $merge_claims, its slot kept, Dispatch retro, no linger, no production check), telling its architect once that the close waits for $waiting_for"
+# The children leave one at a time, and only the last park closes the root. A parked child leaves
+# the workflow (phase done) with its claims suspended and its Sandbox kept until the tree closes,
+# the path child-release took for child 2.
+for child in "$child3" "$child4"; do
+  set_status "$child" backlog
+  until_true 600 "$child to leave the workflow" issue_phase "$child" "done"
+  until_true "$phase_seconds" "$child's park to suspend its planner" issue_worker_state "$child" planner suspended
+  note "the proof human parked $child (backlog): it left the workflow and its planner is suspended"
+  [ "$child" = "$child4" ] || issue_phase "$tree1" awaiting_merge >/dev/null ||
+    fail "$tree1 left awaiting_merge on $child3's park, with $child4 still in the workflow"
+done
+# The last park closes the root, as the merge of a finished tree's root does.
 on_tree "$tree1" wait_for_phase "$tree1" "done" 900
 phase_change_logged "$tree1" awaiting_merge "done" pull_request_merged ||
   fail "the daemon log has no \"workflow: phase changed\" line moving $tree1 from awaiting_merge to done on pull_request_merged"
+closed_last=$(log_lines "workflow: a merged root closes once its last child left the workflow" | jq -c --arg issue "$tree1" 'select(.issue == $issue)' | grep -c . || true)
+[ "$closed_last" = 1 ] ||
+  fail "the daemon logged \"a merged root closes once its last child left the workflow\" for $tree1 $closed_last times, want once, at $child4's park"
 until_true 120 "the daemon's done status on the Dispatch board" dispatch_status_is "$tree1" "done"
+note "$child4's park, the last of tree 1 to leave the workflow, closed $tree1: phase changed awaiting_merge → done on pull_request_merged, and the board reads done"
 check_opened_on "$tree1" "$merge_when_clean_commit" ||
   fail "$tree1's production check reads $(daemon_state | jq -c --arg issue "$tree1" '.issues[$issue].check'), want it open on merge commit $merge_when_clean_commit at its first look, woken by the merge"
 state_file check-opened
@@ -5881,7 +5780,7 @@ assert_one_bound_pvc "$tree1" " between the looks of its production check"
 until_true 300 "the pending report to suspend the implementer's claim beside the five suspended claims of $tree1" claim_states_are "$tree1" suspended suspended
 [ -n "$(issue_worker_session "$tree1" implementer)" ] || fail "the implementer's claim lost its session at its suspension between looks"
 state_file check-look-1
-note "$repo#$pr_number merged by $merge_when_clean_by at $merge_when_clean_commit, which closed $tree1 (phase changed awaiting_merge → done on pull_request_merged; Dispatch done) and opened its production check on that commit; the close handed the implementer the first look in the live pod (claims at the look: $first_look_claims), and its pending report left the check open ($(jq -c --arg issue "$tree1" '.issues[$issue].check | {looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")), suspended its claim with its session, and parked Sandbox $root_pod Suspended with PVC ${found%% *} Bound and no pod"
+note "the close that followed $child4's park opened $tree1's production check on merge commit $merge_when_clean_commit and handed the implementer its first look in the live pod (claims at the look: $first_look_claims); its pending report left the check open ($(jq -c --arg issue "$tree1" '.issues[$issue].check | {looks, lookOpen, lastWake: .lastWake.kind, nextWakeAt}' "$evidence/check-look-1.json")), suspended its claim with its session, and parked Sandbox $root_pod Suspended with PVC ${found%% *} Bound and no pod"
 # The close is what stops the roles the tree kept live: each claim of tree 1 is suspended, its
 # session kept for a re-admission to resume, the implementer's by its look's pending report. The
 # daemon's suspension of a role in a turn waits for that turn to end, however long it takes, so the
@@ -5900,25 +5799,6 @@ timeout_hook=tree1_roles_unsuspended
 until_true 1800 "the close to suspend every role of $tree1" tree1_roles_suspended
 timeout_hook=limit_pending_blocked
 note "the close suspended the architect, planner, tester, reviewer and merger of $tree1, and its first look's pending report the implementer"
-# The close suspends every member of the tree, child 3's planner with them: child 3 is left mid-run,
-# in the phase recorded here, which carried-child requires it keep in its own tree. Its Dispatch
-# status is recorded too: the daemon writes none before testing (workflow's table), so a child left
-# in planning or implementing still shows the todo it was released in, and carried-child's path
-# depends on it. The daemon names this suspension no deadline either, so the wait is the proof's
-# turn budget (phase_seconds, lib/workflow.sh), and a planner still unsuspended when it runs out is
-# named with whether its suspension is held for a turn, as tree 1's roles are.
-child3_planner_unsuspended() {
-  note "$child3's planner not yet suspended: $(claims_cli list --json | jq -c --arg i "$child3" '[.claims[] | select(.issue == $i and .role == "planner")
-    | {state, suspensionHeld: (.suspensionHeld // false), pending: (.pending.phase // null)}]')"
-  limit_pending_blocked
-}
-timeout_hook=child3_planner_unsuspended
-until_true "$phase_seconds" "the close to suspend $child3's planner" issue_worker_state "$child3" planner suspended
-timeout_hook=limit_pending_blocked
-child3_phase=$(daemon_state | jq -er --arg issue "$child3" '.issues[$issue].phase') || fail "the daemon's state holds no phase for $child3"
-case $child3_phase in admitted | done | held) fail "$child3 is in $child3_phase when tree 1 closes, not mid-run in a phase a role works" ;; esac
-child3_status=$(dispatch_get "issues/$child3" | jq -er .status) || fail "Dispatch could not be read for $child3"
-note "the close suspended $child3's planner too, its child left mid-run in $child3_phase, Dispatch showing it $child3_status"
 # The daemon's done released the claim tree 1's architect took on its root issue (LEGION-392).
 dispatch_events "$tree1" | jq -e 'any(.[]; .type == "issue.claimed" and .actor.kind == "session")' >/dev/null ||
   fail "$tree1's events hold no issue.claimed by its architect's session"
@@ -5927,142 +5807,11 @@ until_true 120 "$tree1's root claim to be released by its done" root_claim_relea
 note "$tree1's architect claimed its root issue, and the done released the claim"
 pass
 
-begin mid-turn-carry
-# LEGION-710, on the Sandbox runtime against production Dispatch: a child carried into a tree of its
-# own while a role of its old tree is in a turn. Tree 1's close asked to suspend child 4's planner,
-# whose hold is still running, so the suspension is held for the turn's end. The proof human then
-# labels child 4, which still shows todo, as a person handing it to Legion would while tree 1
-# lingers; admission carries it as an orphan (`admission orphan`) into a tree of its own at
-# generation 2 in planning, and the close's suspend row, of generation 1, finishes without acting. A
-# carry by the linger's own hand-over would mean the linger had expired first, and the release
-# below needs the linger still running, so only the orphan carry passes. While the turn runs, the
-# new tree's starts wait for the planner to stop (daemon/outbox.go stopElsewhere), bounded at tree
-# 1's linger expiry, where its close would have ended the turn: nothing of the new tree launches, and
-# the Sandbox stays tree 1's and Running. The driver then ends the turn with the release file, inside
-# the linger, so
-# the turn ends on its own: the planner is suspended by the daemon after the release with its session,
-# never cut mid-turn by the deadline, the architect launches in the child's own tree
-# (carried_mid_turn_ordered holds the order and the turn's end, held to a fabricated refusal and a
-# fabricated cut turn here and in stage4b-verdict.test.ts), the launch relabels the Sandbox the old
-# tree left Running, keeping its uid and volume, and the planner comes back on its kept session in
-# the new tree, moved once (retree_msg), given its phase's resume task. Child 4 is then taken out, so
-# its pods go before node-release.
-child4_planner=$(claim_token "$child4" planner)
-child4_architect=$(claim_token "$child4" architect)
-child4_close_held() {
-  claim_by_token "$child4_planner" | jq -e --arg tree "$tree1" '.tree == $tree and .state == "working" and .suspensionHeld == true' >/dev/null
-}
-until_true 300 "tree 1's close to hold $child4's planner's suspension for its turn" child4_close_held
-# One read of the planner's processes can straddle the end of one of the hold's sleeps and the
-# start of the next, and so miss the hold that runs; the hold is judged by any read inside 60 s,
-# more than four of its polls. A hold not seen in that time is written to
-# mid-turn-hold-lost.txt in the evidence: the planner container's processes, the claim as
-# `legion claims` shows it, and the last lines of the agent's transcript, which say whether the
-# hold's bash call returned.
-child4_hold_lost() {
-  local view file dump=$evidence/mid-turn-hold-lost.txt
-  view=$(claim_by_token "$child4_planner" 2>&1)
-  file=$(jq -r '.sessionFile // empty' <<<"$view" 2>/dev/null)
-  {
-    echo "== $child4's planner claim"
-    printf '%s\n' "$view"
-    echo "== the planner container's processes in pod $child4_pod"
-    pod_commands "$child4_pod" planner 2>&1 | awk 'NF' | cut -c1-300
-    echo "== the last lines of its transcript (${file:-no session file recorded})"
-    [ -z "$file" ] || pod_exec "$child4_pod" planner tail -n 6 "$file" 2>&1 | cut -c1-1200
-  } | scrub >"$dump"
-  note "the hold was not seen; the planner's processes, claim and transcript tail are in $dump:"
-  sed 's/^/     /' "$dump"
-}
-timeout_hook=child4_hold_lost
-until_true 60 "$child4's planner to still run its hold in pod $child4_pod now tree 1 has closed" pod_runs "$child4_pod" planner "/usr/bin/sleep 13"
-timeout_hook=limit_pending_blocked
-note "tree 1's close holds $child4's planner's suspension for its turn, its hold still running"
-shown=$(dispatch_get "issues/$child4") || fail "Dispatch could not be read for $child4"
-[ "$(jq -r .status <<<"$shown")" = todo ] || fail "Dispatch shows $child4 $(jq -r .status <<<"$shown"), want the todo it was released in"
-labels=$(jq -c '(.labels // []) + ["legion"]' <<<"$shown")
-dispatch_human PATCH "issues/$child4" "$(jq -cn --argjson labels "$labels" '{labels: $labels}')" >/dev/null ||
-  fail "the proof human could not put the legion label on $child4"
-child4_carried() {
-  daemon_state | jq -e --arg issue "$child4" '(.issues[$issue] | .generation == 2 and .phase == "planning") and (.admission.active | index($issue)) != null' >/dev/null
-}
-until_true 600 "$child4 to become a tree of its own at generation 2 in planning, admitted into a slot" child4_carried
-orphaned=$(log_lines "admission orphan" | jq -c --arg issue "$child4" 'select(.issue == $issue)' | grep -c . || true)
-[ "$orphaned" -eq 1 ] || fail "the daemon logged \"admission orphan\" $orphaned times for $child4, want its one carry by the proof human's label inside tree 1's linger"
-carry_path="admission's orphan carry of the proof human's labelled todo"
-child4_start_waits() {
-  log_lines "outbox row waits" | jq -e -s --arg issue "$child4" --arg planner "$child4_planner" --arg old "$tree1" \
-    'any(.[]; .issue == $issue and ((.error // "") | contains($planner + ":") and contains("in tree " + $old)))' >/dev/null
-}
-until_true 300 "a start of $child4's tree to wait for its planner to stop in $tree1" child4_start_waits
-launched=$(log_lines "supervise: launched" | jq -c --arg c "$child4_architect" 'select(.claim == $c)' | grep -c . || true)
-[ "$launched" = 0 ] || fail "$child4's architect launched $launched times while its planner still ran its turn in $tree1"
-held=$(claim_by_token "$child4_planner") || fail "legion claims list holds no claim $child4_planner"
-jq -e --arg tree "$tree1" '.tree == $tree and .state == "working"' <<<"$held" >/dev/null ||
-  fail "$child4's planner while the new tree waits is $(jq -c '{tree, state}' <<<"$held"), want still working in $tree1"
-sandbox_now=$(op get sandbox "$child4_pod" -o jsonpath='{.metadata.uid} {.metadata.labels.legion\.dev/tree} {.spec.operatingMode}') ||
-  fail "the operator could not read $child4's Sandbox $child4_pod"
-[ "$sandbox_now" = "$child4_sandbox_uid $tree1 Running" ] ||
-  fail "$child4's Sandbox while its planner's turn runs is '$sandbox_now', want '$child4_sandbox_uid $tree1 Running'"
-note "$child4 is a tree of its own at generation 2 in planning, by $carry_path; its starts wait for the planner's turn, nothing of the new tree launched, and its Sandbox is still tree 1's and Running"
-# The turn must end on the release, inside tree 1's linger (linger_hours 0.5, from the merge that
-# closed it): at its expiry the new tree's hold would cut it instead, which the verdict refuses. So
-# the release goes in only with a minute of the linger left, read from the daemon's own line for
-# tree 1's linger.
-tree1_until=$(log_lines "workflow: tree lingers" | jq -r -s --arg tree "$tree1" '[.[] | select(.tree == $tree)] | last | .until // empty')
-[ -n "$tree1_until" ] || fail "the daemon logged no linger for $tree1"
-left=$(($(date -u -d "$tree1_until" +%s) - $(date -u +%s)))
-[ "$left" -ge 60 ] || fail "only ${left}s of $tree1's linger (until $tree1_until) are left at the release; mid-turn-carry needs $child4's turn to end inside it"
-released_at=$(date -u +%Y-%m-%dT%H:%M:%S.%NZ)
-pod_exec "$child4_pod" planner touch "$child4_release" || fail "the operator could not write $child4_release in $child4's planner container"
-note "the driver released $child4's hold at $released_at, ${left}s before $tree1's linger expires at $tree1_until"
-child4_role_back() {
-  claim_by_token "$1" | jq -e --arg tree "$child4" '.tree == $tree and .locator != null and (.state | IN("ready", "idle", "working"))' >/dev/null
-}
-on_issue "$child4" until_true 900 "$child4's planner to stop and come back in its own tree" child4_role_back "$child4_planner"
-on_issue "$child4" until_true 900 "$child4's architect to launch and register in its own tree" child4_role_back "$child4_architect"
-mid_turn_verdict() { carried_mid_turn_ordered "$1" "$(claim_token "$child4" "")" "$child4_planner" "$child4_architect" "$tree1" "$released_at"; }
-mid_turn_verdict "$daemon_log" || fail "$child4's new tree did not wait for its planner's released turn: $(mid_turn_verdict "$daemon_log" 2>&1)"
-# Controls: the same log with one fabricated launch of the architect refused for the Sandbox still
-# running tree 1's roles, the failure the new tree meets when it does not wait, and the same log
-# with one fabricated mid-turn stop of the planner at tree 1's linger expiry, the turn cut instead of
-# released, each fail the verdict.
-cp "$daemon_log" "$work/daemon-mid-turn-refused.log"
-jq -cn --arg claim "$child4_architect" --arg error "ensure its sandbox: sandbox $child4_pod, made for tree $tree1, does not fit this launch of tree $child4 and still runs roles; fabricated by the driver" \
-  '{time: (now | todate), level: "WARN", msg: "supervise: launch failed", claim: $claim, error: $error}' >>"$work/daemon-mid-turn-refused.log"
-expect_failure mid-turn-refused mid_turn_verdict "$work/daemon-mid-turn-refused.log"
-cp "$daemon_log" "$work/daemon-mid-turn-cut.log"
-jq -cn --arg claim "$child4_planner" --arg deadline "$tree1_until" \
-  '{time: (now | todate), level: "WARN", msg: "supervise: the agent'"'"'s turn has not ended; suspending it mid-turn", claim: $claim, by: "daemon", deadline: $deadline}' >>"$work/daemon-mid-turn-cut.log"
-expect_failure mid-turn-cut mid_turn_verdict "$work/daemon-mid-turn-cut.log"
-came_back=$(claim_by_token "$child4_planner") || fail "legion claims list holds no claim $child4_planner"
-[ "$(jq -r .session <<<"$came_back")" = "$child4_session" ] ||
-  fail "$child4's planner came back in its own tree as session $(jq -r .session <<<"$came_back"), not its kept $child4_session"
-retrees=$(log_lines "$retree_msg" | jq -c --arg c "$child4_planner" --arg from "$tree1" --arg to "$child4" 'select(.claim == $c and .from == $from and .to == $to)' | grep -c . || true)
-[ "$retrees" = 1 ] || fail "the daemon logged \"$retree_msg\" from $tree1 to $child4 for $child4_planner $retrees times, want once"
-sandbox_now=$(op get sandbox "$child4_pod" -o jsonpath='{.metadata.uid} {.metadata.labels.legion\.dev/tree}') ||
-  fail "the operator could not read $child4's Sandbox $child4_pod"
-[ "$sandbox_now" = "$child4_sandbox_uid $child4" ] ||
-  fail "$child4's Sandbox in its own tree is '$sandbox_now', want the same uid relabelled: '$child4_sandbox_uid $child4'"
-assert_one_bound_pvc "$child4" " in its own tree"
-volume_now=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child4's PVC ${found%% *}"
-[ "$volume_now" = "$child4_volume" ] || fail "$child4's PVC in its own tree is uid $volume_now, not $child4_volume, the volume it had in $tree1"
-resume4="Issue: $child4. Phase: planning. Resume the existing phase work."
-child4_resume_given() {
-  claim_session_text "$child4" planner | jq -R -s -e --arg want "$resume4" \
-    'any(split("\n")[] | fromjson? | select(.type == "message" and .message.role == "user"); .message.content | tostring | contains($want))' >/dev/null
-}
-until_true 300 "$child4's planner session to be given its phase's resume task" child4_resume_given
-note "$child4's planner was suspended by the daemon once its turn ended, before the architect's first launch; it moved from $tree1 to $child4 once and came back on its kept session $child4_session, given \"$resume4\"; the Sandbox $child4_pod kept uid $child4_sandbox_uid, relabelled $child4, and its PVC kept uid $child4_volume"
-take_out "$child4"
-note "$child4 taken out: Dispatch shows it in backlog and its tree's pods are gone"
-pass
-
 begin production-check-bound
 # The check's bound (production_check_hours 0.25: 15 minutes after the close) is its last wake: the
 # daemon starts the last look, the root's Sandbox goes Running again and its pod comes back, the
 # implementer resumed on its kept session, told look 2, woken by the bound, the last look. The wait
-# runs from here, after done and mid-turn-carry: what remains of the 15 minutes, and a bound
+# runs from here, after done: what remains of the 15 minutes, and a bound
 # deferred by a look still open when it came due (by the look's own two-hour bound) fails here by
 # name rather than hanging. The last look's pending closes the check as not_run: the implementer's
 # claim is retired, its session dropped (issue_close), the state omits the check, and the root's
@@ -6091,26 +5840,23 @@ note "the bound woke look 2 of $tree1's production check (the state at the wake:
 pass
 
 begin node-release
-# Tree 1 lingers (linger_hours 0.5, from the merge that closed it): the Sandboxes of its issues still
-# alive stay Suspended, each with its own PVC Bound, and no pod of tree 1 is left on any node a pod
-# of tree 1 ran on. No pod asks for or keeps off a node (LEGION-632): a node empties when the pods on
-# it stop, and the pool consolidates an empty node after consolidateAfter. So each such node is gone,
-# unless another pod keeps it, placed there because the pool had room: another project's (a
-# production daemon running beside the run), the run's repository cache (legion.dev/cache=true, one
-# per repository of the project, which lives as long as the daemon and is no tree's), or another
-# tree of the run's — a carried child's own tree launches at tree 1's linger expiry, which falls in
-# this wait when the production check ran long, and nothing says where it lands. Such a pod keeps
-# the node from the moment it is bound, Pending through its init containers included, and the node
-# then stays, carrying no pod of tree 1; either case passes for each node, and the note says which
-# it saw where. Every node any pod of tree 1 — the root's, its children's, the replacements the
-# fence and the stream move made, the pod the check's last look brought back — was on is read from
-# the pod watch.
+# Tree 1 lingers (linger_hours 0.5, from the close its last child's park brought on): the Sandboxes
+# of its issues still alive stay Suspended, each with its own PVC Bound, and no pod of tree 1 is
+# left on any node a pod of tree 1 ran on. No pod asks for or keeps off a node (LEGION-632): a node
+# empties when the pods on it stop, and the pool consolidates an empty node after consolidateAfter.
+# So each such node is gone, unless another pod keeps it, placed there because the pool had room:
+# another project's (a production daemon running beside the run), the run's repository cache
+# (legion.dev/cache=true, one per repository of the project, which lives as long as the daemon and
+# is no tree's), or another tree of the run's. Such a pod keeps the node from the moment it is
+# bound, Pending through its init containers included, and the node then stays, carrying no pod of
+# tree 1; either case passes for each node, and the note says which it saw where. Every node any
+# pod of tree 1 — the root's, its children's, the replacements the fence and the stream move made,
+# the pod the check's last look brought back — was on is read from the pod watch.
 # The checkpoint's own reads of tree 1's Sandboxes and volumes come first, since the nodes take up
-# to consolidateAfter and their drain each, and tree 1's linger (read from the daemon's line, as
-# mid-turn-carry reads it) may expire while they wait: at the expiry the close deletes the root's
-# and child 2's Sandboxes with their volumes and hands child 3's to its own tree, so the reads are
-# made again after the waits only while the linger still runs, and otherwise left to close and
-# carried-child, which judge that state.
+# to consolidateAfter and their drain each, and tree 1's linger (read from the daemon's own line)
+# may expire while they wait: at the expiry the close deletes every Sandbox of tree 1 with the
+# volume it owns, so the reads are made again after the waits only while the linger still runs, and
+# otherwise left to close, which judges that state.
 tree1_nodes=$(jq -r 'select(.object.kind == "Pod") | .object | select(.metadata.labels["legion.dev/tree"] == "'"$tree1"'") | .spec.nodeName // empty' "$evidence/pod-watch.json" | sort -u | grep .) ||
   fail "the pod watch saw no pod of tree 1 on a node, so there is no node whose release to wait for"
 tree1_until=$(log_lines "workflow: tree lingers" | jq -r -s --arg tree "$tree1" '[.[] | select(.tree == $tree)] | last | .until // empty')
@@ -6118,15 +5864,15 @@ tree1_until=$(log_lines "workflow: tree lingers" | jq -r -s --arg tree "$tree1" 
 # tree1_lingers: at least a minute of the linger the daemon logged for tree 1 is left, by the
 # driver's clock, so the reads that follow it end before the close starts deleting.
 tree1_lingers() { [ "$(date -u +%s)" -lt "$(($(date -u -d "$tree1_until" +%s) - 60))" ]; }
-# tree1_parked WHEN: tree 1's root, child 2 (parked) and child 3 (mid-run) each have one Sandbox,
+# tree1_parked WHEN: tree 1's root and its parked children 2, 3 and 4 each have one Sandbox,
 # Suspended, and one PVC, Bound; WHEN says when the read was made, for a failure's message.
 tree1_parked() {
   local issue
   [ "$(issue_sandbox_modes "$tree1")" = Suspended ] || fail "the root $tree1's Sandboxes are '$(issue_sandbox_modes "$tree1" | paste -sd ' ' -)' $1, want its one, Suspended"
-  for issue in "$child2" "$child3"; do
+  for issue in "$child2" "$child3" "$child4"; do
     [ "$(issue_sandbox_modes "$issue")" = Suspended ] || fail "tree 1's child $issue's Sandboxes are '$(issue_sandbox_modes "$issue" | paste -sd ' ' -)' $1, want its one, Suspended"
   done
-  for issue in "$tree1" "$child2" "$child3"; do
+  for issue in "$tree1" "$child2" "$child3" "$child4"; do
     assert_one_bound_pvc "$issue" " $1"
   done
 }
@@ -6191,27 +5937,22 @@ done
 at=$(date -u +%FT%TZ)
 if tree1_lingers; then
   tree1_parked "after tree 1's nodes were released ($releases)"
-  parked_note="the Sandboxes of $tree1, $child2 (parked) and $child3 (mid-run) are Suspended, each PVC Bound, as before the waits"
+  parked_note="the Sandboxes of $tree1 and its parked children $child2, $child3 and $child4 are Suspended, each PVC Bound, as before the waits"
 else
-  parked_note="tree 1's linger expired at $tree1_until while its nodes were waited for, so its Sandboxes and volumes are now the close's (close) and the hand-over's (carried-child) to judge; before the waits the Sandboxes of $tree1, $child2 (parked) and $child3 (mid-run) were Suspended, each PVC Bound"
+  parked_note="tree 1's linger expired at $tree1_until while its nodes were waited for, so its Sandboxes and volumes are now the close's (close) to judge; before the waits the Sandboxes of $tree1 and its parked children $child2, $child3 and $child4 were Suspended, each PVC Bound"
 fi
 note "at $at: $releases; $parked_note ($(grep -c . <<<"$tree1_nodes") nodes carried a pod of tree 1)"
 pass
 
 begin close
-# At linger expiry (30 minutes from the merge that closed tree 1, the daemon's `until` for its
-# linger, which node-release read; the expiry may already have passed while node-release waited,
-# and the reads below hold either way; the close waits while a member's production check is open,
-# which production-check-bound saw closed) the tree's cleanup
-# foreground-deletes every Sandbox of tree 1, each with the volume it owns: the root's, kept through
-# its production check, and child 2's, kept from child-release (child 1's went with its done).
-# Child 3's, left mid-run, is handed over instead: its hand-over is pending at the cleanup (production
-# Dispatch rides the write out), so the cleanup relabels its Sandbox for the child's own tree and
-# leaves it Suspended with its volume (runtime/sandbox/cleanup.go handOverSandbox); or the child's
-# own launch relabelled it first (runtime/sandbox/relaunch.go). The PVC a carried child keeps carries
-# the same issue label, so no check of child 3's PVC holds here. Its Sandbox must stop being tree
-# 1's either way (the tree label read below), and carried-child judges its volume against the uid
-# mid-run-child recorded.
+# At linger expiry (30 minutes from the close that followed tree 1's merge, the daemon's `until`
+# for its linger, which node-release read; the expiry may already have passed while node-release
+# waited, and the reads below hold either way; the close waits while a member's production check is
+# open, which production-check-bound saw closed) the tree's cleanup
+# foreground-deletes every Sandbox of tree 1, each with the volume it owns: the root's, kept
+# through its production check, child 2's, kept from child-release, and those of children 3 and 4,
+# kept from the parks that closed the root (child 1's went with its done). Every member of the tree
+# is out of the workflow, so nothing is handed over and nothing is left behind.
 # The Sandboxes are read by the tree label, which the cleanup selects them by; the PVCs by issue,
 # since a claim carries no tree label (the volume is the issue's: its tree changes on re-admission
 # and the claim is never relabelled), one read per issue of tree 1 that still owned a volume.
@@ -6225,184 +5966,8 @@ tree_gone() {
     out=$(issue_pvcs "$issue") && [ -z "$out" ] || return 1
   done
 }
-until_true 1500 "tree 1 to close at linger expiry" tree_gone "$tree1" "$tree1" "$child2"
-note "tree 1 has no Sandbox or pod left: the root's and $child2's Sandboxes and the volumes they owned are deleted, and $child3's Sandbox is no longer tree 1's"
-pass
-
-begin carried-child
-# LEGION-624's hand-over, on the Sandbox runtime against production Dispatch. Tree 1 stayed done
-# through its linger, so its expiry handed child 3, left mid-run under it, to Legion (workflow's
-# settleUnfinished): one durable fence, and one status row writing the child todo with the `legion`
-# label (labels_add) at the sequence the daemon read (expected_sequence). Which path completes it
-# depends on production Dispatch's version, which the checkpoint probes first, and on the Dispatch
-# status done recorded for child 3.
-# (a) A Dispatch that knows labels_add takes the hand-over PATCH, and either consumer may complete
-# the hand-over: the outbox, right after its write (outbox consumeHandover), or admission, on that
-# write's own labelled event (`admission hand-over`), whichever reaches the fence first.
-# One that predates the field refuses the write by its name (400 INVALID_JSON); the daemon rides the
-# refusal out (dispatch.PermanentRefusal): the outbox retries the row and never drops it as refused
-# for good (handover_ridden_out, held to a fabricated drop here and in stage4b-verdict.test.ts), and
-# child 3 stays tree 1's, at generation 1, unlabelled, in the status done recorded.
-# (b) On that old Dispatch the proof human then puts the label on child 3 and leaves its status alone,
-# as a person handing it to Legion would. A child left in planning or implementing shows todo, so
-# that label makes a labelled todo event of its own. Either consumer may take it, and both are
-# correct: admission takes the event as an orphan and carries it (admit's applyObservation:
-# started, so carried), deleting the fence, and the row's next attempt finds no fence and finishes
-# without writing; or, when the row's backed-off retry reads the labelled todo before intake has
-# applied that event, the outbox consumes the hand-over itself (outbox consumeHandover, then
-# admit's consumeHandover). Both end with the child carried, its fence gone, no todo written by the
-# daemon, and the row finished, which (b) asserts; it names the consumer by its one log line,
-# `admission orphan` or `admission hand-over` with `via: outbox`, and fails on both or neither. A
-# child left later shows its phase's status, and the daemon's write for it would carry
-# expected_sequence, which the old Dispatch refuses too; it waits for a Dispatch that knows both
-# fields, so that case is BLOCKED here. The labelled, non-todo write and its consumption keep their
-# unit coverage (TestAHandOverWriteIsConsumedWithoutWaitingForItsEvent,
-# TestAPersonMoveBetweenTheHandOverReadAndPatchStands): they share consumeHandover with the path the
-# new Dispatch takes.
-# Either way child 3 becomes a tree of its own at generation 2, in the phase tree 1's close left it
-# in, and takes a free slot. Its planner's claim, retired with its session by that close, is
-# re-pointed to the new tree (retree_msg). Its new architect runs in child 3's own issue pod, under
-# the new tree's label, and is told the tree is carried. Once both have registered, the planner has
-# come back one of two ways (carried_child_sessions): fresh, on a new volume, after tree 1's
-# cleanup deleted the old one; or on its kept session and volume, when the child's launch
-# relabelled its Sandbox before the cleanup took it. Either way its session is given its phase's
-# resume task. On the fresh way, any of child 3's roles may be the one that finds the volume lost
-# (store/claims.go:128-132): the lost-volume lines may name the architect, the planner, or both, in
-# either order, each at most once. Tree 1's lifecycle row says its cleanup confirmed.
-# (c) Child 3 is taken out, so its pods go and re-admission finds a free slot.
-child3_planner=$(claim_token "$child3" planner)
-handed=$(log_lines "$handed_msg" | jq -c --arg issue "$child3" 'select(.issue == $issue)')
-handed_count=$(grep -c . <<<"$handed" || true)
-[ "$handed_count" = 1 ] || fail "the daemon logged \"$handed_msg\" for $child3 $handed_count times at tree 1's linger expiry, want once"
-[ "$(jq -r .phase <<<"$handed")" = "$child3_phase" ] ||
-  fail "the daemon handed $child3 over from phase $(jq -r .phase <<<"$handed"), not the $child3_phase tree 1's close left it in"
-# The probe: a PATCH with labels_add of an issue key no project numbers ($project-0). Dispatch
-# decodes the body before it looks the issue up, so one that predates the field refuses it by name,
-# and one that knows it answers 404. Nothing is written either way.
-probe_code=$(curl -sS --max-time 20 -o "$work/labels-add-probe.json" -w '%{http_code}' -X PATCH -H "@$work/dispatch-human-header" \
-  -H 'content-type: application/json' --data "$(jq -cn --arg id "$dispatch_actor" '{labels_add: [], actor: {kind: "session", id: $id}}')" \
-  "$(dispatch_url)/api/v1/issues/$project-0") || blocked "production Dispatch could not be reached to probe for labels_add"
-if [ "$probe_code" = 400 ] && grep -qF 'unknown field \"labels_add\"' "$work/labels-add-probe.json"; then
-  dispatch_knows_labels_add=no
-elif [ "$probe_code" = 404 ]; then
-  dispatch_knows_labels_add=yes
-else
-  blocked "production Dispatch answered the labels_add probe $probe_code: $(head -c 300 "$work/labels-add-probe.json")"
-fi
-note "production Dispatch answered a labels_add PATCH of $project-0 with $probe_code: it $([ "$dispatch_knows_labels_add" = yes ] && echo knows || echo predates) labels_add"
-child3_carried() {
-  claims_cli list --json | jq -e --arg issue "$child3" '[.claims[] | select(.issue == $issue and .role == "planner")] | length == 1 and .[0].tree == $issue' >/dev/null &&
-    daemon_state | jq -e --arg issue "$child3" --arg phase "$child3_phase" \
-      '(.issues[$issue] | .generation == 2 and .phase == $phase) and (.admission.active | index($issue)) != null' >/dev/null
-}
-daemon_todo_writes() {
-  dispatch_events "$child3" | jq --arg daemon "legion-daemon:$project" '[.[] | select(.type == "issue.updated" and .payload.status == "todo" and .actor.id == $daemon)] | length'
-}
-if [ "$dispatch_knows_labels_add" = yes ]; then
-  until_true 600 "$child3 to become a tree of its own at generation 2 in $child3_phase, admitted into a slot" child3_carried
-  dispatch_events "$child3" | jq -e --arg daemon "legion-daemon:$project" \
-    'any(.[]; .type == "issue.updated" and .actor.id == $daemon and .payload.status == "todo" and ((.payload.labels // []) | map(ascii_downcase) | index("legion")) != null)' >/dev/null ||
-    fail "$child3's events hold no todo with the legion label written by legion-daemon:$project: the outbox's hand-over PATCH did not land"
-  refusals=$(handover_refusals "$daemon_log" "$child3")
-  [ "$refusals" = 0 ] || fail "a Dispatch that knows labels_add refused $child3's hand-over write $refusals times by that field"
-  carry_path="the daemon's hand-over PATCH, consumed by whichever reached the fence first: the outbox after its write, or admission on the write's event"
-  note "(a) production Dispatch took $child3's hand-over PATCH (todo with the legion label, written by legion-daemon:$project), and the hand-over was consumed"
-else
-  child3_refused_twice() { [ "$(handover_refusals "$daemon_log" "$child3")" -ge 2 ]; }
-  until_true 600 "the outbox to retry $child3's hand-over write after production Dispatch refuses labels_add" child3_refused_twice
-  drops=$(handover_drops "$daemon_log" "$child3")
-  [ "$drops" = 0 ] ||
-    fail "the daemon dropped $child3's hand-over write as refused for good: $(log_lines "$dropped_msg" | jq -c --arg issue "$child3" 'select(.issue == $issue)' | head -1 | cut -c1-300)"
-  handover_ridden_out "$daemon_log" "$child3" || fail "the verdict does not find $child3's hand-over write ridden out, though it was retried and not dropped"
-  # Control: the same log with one fabricated drop of child 3's write fails the verdict.
-  cp "$daemon_log" "$work/daemon-handover-dropped.log"
-  jq -cn --arg msg "$dropped_msg" --arg issue "$child3" \
-    '{time: (now | todate), level: "ERROR", msg: $msg, row: 0, issue: $issue, status: 400, code: "INVALID_JSON", error: "fabricated by the driver"}' >>"$work/daemon-handover-dropped.log"
-  expect_failure handover-dropped handover_ridden_out "$work/daemon-handover-dropped.log" "$child3"
-  refusals=$(handover_refusals "$daemon_log" "$child3")
-  refused=$(log_lines "outbox row failed" | jq -r --arg issue "$child3" 'select((.error // "") | contains("hand Dispatch issue " + $issue + " to Legion")) | .error' | tail -1)
-  shown=$(dispatch_get "issues/$child3") || fail "Dispatch could not be read for $child3"
-  jq -e --arg status "$child3_status" '.status == $status and ((.labels // []) | map(ascii_downcase) | index("legion")) == null' <<<"$shown" >/dev/null ||
-    fail "Dispatch shows $child3 $(jq -c '{status, labels}' <<<"$shown") while its hand-over write is refused, want $child3_status and unlabelled"
-  daemon_state | jq -e --arg issue "$child3" --arg phase "$child3_phase" '.issues[$issue] | .generation == 1 and .phase == $phase' >/dev/null ||
-    fail "$child3 is $(daemon_state | jq -c --arg issue "$child3" '.issues[$issue] | {generation, phase}') while its hand-over write is refused, want tree 1's, generation 1 in $child3_phase"
-  note "(a) production Dispatch refused $child3's hand-over write $refusals times and the outbox retried it, never dropping it (its last error: $(cut -c1-200 <<<"$refused")); Dispatch shows $child3 $child3_status and unlabelled, and the daemon keeps it in tree 1 at generation 1 in $child3_phase"
-  [ "$child3_status" = todo ] ||
-    blocked "$child3 shows $child3_status, not todo: the daemon's hand-over write for a labelled child carries expected_sequence, which this production Dispatch refuses too, so its hand-over waits for a Dispatch that knows labels_add and expected_sequence"
-  labels=$(jq -c '(.labels // []) + ["legion"]' <<<"$shown")
-  dispatch_human PATCH "issues/$child3" "$(jq -cn --argjson labels "$labels" '{labels: $labels}')" >/dev/null ||
-    fail "the proof human could not put the legion label on $child3"
-  until_true 600 "$child3 to become a tree of its own at generation 2 in $child3_phase, admitted into a slot" child3_carried
-  fences=$(db_value "select count(*) from handovers where issue = '$child3'") || fail "the daemon's database could not be read for $child3's hand-over fence"
-  [ "$fences" = 0 ] || fail "$child3's hand-over fence is still recorded ($fences rows) after it was carried"
-  writes=$(daemon_todo_writes) || fail "Dispatch's events could not be read for $child3"
-  [ "$writes" = 0 ] || fail "legion-daemon:$project wrote $child3 todo $writes times, though the proof human's label set it todo"
-  orphaned=$(log_lines "admission orphan" | jq -c --arg issue "$child3" 'select(.issue == $issue)' | grep -c . || true)
-  consumed=$(log_lines "admission hand-over" | jq -c --arg issue "$child3" 'select(.issue == $issue and .via == "outbox")' | grep -c . || true)
-  case "$orphaned $consumed" in
-    "1 0") carry_path="admission's orphan carry of the proof human's labelled todo, which deleted the fence" ;;
-    "0 1") carry_path="the outbox's own consumption, its backed-off retry having read the labelled todo before intake applied it" ;;
-    *) fail "the daemon logged \"admission orphan\" $orphaned times and \"admission hand-over\" via the outbox $consumed times for $child3 after the proof human labelled it, want exactly one consumer once" ;;
-  esac
-  note "(b) the proof human labelled $child3, which still showed todo: it was carried by $carry_path; its fence is gone, and the daemon wrote it no todo"
-fi
-handover_row_gone() {
-  [ "$(db_value "select count(*) from outbox where kind = 'dispatch_status' and issue = '$child3' and payload->>'handOver' = 'true'")" = 0 ]
-}
-until_true 300 "$child3's hand-over row to finish in the outbox" handover_row_gone
-retree=$(log_lines "$retree_msg" | jq -c --arg c "$child3_planner" --arg from "$tree1" --arg to "$child3" 'select(.claim == $c and .from == $from and .to == $to)')
-retrees=$(grep -c . <<<"$retree" || true)
-[ "$retrees" = 1 ] || fail "the daemon logged \"$retree_msg\" from $tree1 to $child3 for $child3_planner $retrees times, want once"
-on_issue "$child3" until_true 900 "$child3's planner to register again in its own tree" issue_worker_live "$child3" planner
-assert_claim_endpoints "$child3" planner
-on_issue "$child3" until_true 900 "$child3's architect to register in its own tree" issue_worker_live "$child3" architect
-assert_claim_endpoints "$child3" architect
-# Both roles have registered, so every launch of child 3 that found its volume lost has logged it.
-came_back=$(carried_child_sessions "$daemon_log" "$(claim_token "$child3" "")" "$child3_planner" 2>&1) ||
-  fail "$child3's planner in its own tree: $came_back"
-lost3=$(issue_lost_lines "$child3" | jq -s -c 'map(.claim)')
-resume="Issue: $child3. Phase: $child3_phase. Resume the existing phase work."
-child3_resume_given() {
-  claim_session_text "$child3" planner | jq -R -s -e --arg want "$resume" \
-    'any(split("\n")[] | fromjson? | select(.type == "message" and .message.role == "user"); .message.content | tostring | contains($want))' >/dev/null
-}
-child3_pod=$(claim_sandbox "$child3" architect) || fail "$child3's architect has no Sandbox locator"
-planner_pod=$(claim_sandbox "$child3" planner) || fail "$child3's planner has no Sandbox locator"
-[ "$planner_pod" = "$child3_pod" ] || fail "$child3's architect and planner run in pods $child3_pod and $planner_pod, want one issue pod"
-tree_label=$(op get sandbox "$child3_pod" -o jsonpath='{.metadata.labels.legion\.dev/tree}') || fail "the operator could not read $child3's Sandbox $child3_pod"
-[ "$tree_label" = "$child3" ] || fail "$child3's Sandbox $child3_pod carries tree label '$tree_label', want $child3"
-assert_one_bound_pvc "$child3" " in its own tree"
-child3_volume=$(op get pvc "${found%% *}" -o jsonpath='{.metadata.uid}') || fail "the operator could not read $child3's PVC ${found%% *}"
-# Child 3's hand-over is pending from tree 1's linger expiry until it is consumed, and its record
-# names its own tree after, so tree 1's cleanup always finds child 3 belonging to another tree and
-# hands its Sandbox over rather than deleting it (runtime/sandbox/cleanup.go handOverSandbox). The
-# planner must therefore come back on its kept session and volume; a fresh one means the cleanup
-# took the carried child's volume.
-case $came_back in
-  fresh)
-    fail "$child3's planner came back as a fresh session on PVC uid $child3_volume (the lost-volume lines of $child3's claims: $lost3); want its kept session on uid $child3_tree1_volume, which tree 1's cleanup hands over rather than deletes"
-    ;;
-  kept)
-    [ "$child3_volume" = "$child3_tree1_volume" ] ||
-      fail "$child3's planner came back on its kept session, yet its PVC ${found%% *} is uid $child3_volume, not $child3_tree1_volume, the volume it had in $tree1"
-    handed=$(log_lines "sandbox runtime: handed a carried issue's sandbox over to its new tree, keeping its volume" |
-      jq -c --arg sandbox "$child3_pod" 'select(.sandbox == $sandbox)' | grep -c . || true)
-    came_back_note="came back on its kept session and volume (uid $child3_volume), its Sandbox relabelled for $child3 by $([ "$handed" -ge 1 ] && echo "tree 1's cleanup" || echo "its own launch, before tree 1's cleanup")"
-    ;;
-esac
-# Either way admission starts the planner in its new tree with its phase's resume task (admit's
-# startMidPhaseMembers, workflow.ResumeTask), so both ways must show it.
-until_true 300 "$child3's planner session to be given its phase's resume task" child3_resume_given
-came_back_note+=" and was given \"$resume\""
-catchup_carried() { notice_line "$child3" architect "$(notice_needle catch-up "$child3")" | grep -qE 'carried[^A-Za-z0-9]{0,4}true'; }
-until_true 300 "$child3's architect to be given a catch-up that says carried" catchup_carried
-confirmed=$(db_value "select cleanup_confirmed_at is not null from tree_lifecycles where project = '$run_label' and tree = '$tree1'") ||
-  fail "the daemon's database could not be read for tree 1's lifecycle"
-[ "$confirmed" = t ] || fail "tree 1's lifecycle row shows its cleanup unconfirmed ('$confirmed') once $child3 runs in its own tree"
-note "$child3 is a tree of its own at generation 2 in $child3_phase, admitted, by $carry_path; its hand-over row is gone"
-note "$child3_planner moved from $tree1 to $child3 once and $came_back_note; the architect runs beside it in pod $child3_pod (tree label $child3, PVC ${found%% *} Bound) and was told the tree is carried; tree 1's cleanup is confirmed"
-take_out "$child3"
-note "(c) $child3 taken out: Dispatch shows it in backlog and its tree's pods are gone"
+until_true 1500 "tree 1 to close at linger expiry" tree_gone "$tree1" "$tree1" "$child2" "$child3" "$child4"
+note "tree 1 has no Sandbox or pod left: the Sandboxes of the root, $child2, $child3 and $child4 and the volumes they owned are deleted"
 pass
 
 begin re-admission
@@ -6418,15 +5983,15 @@ pod=$(issue_pod "$tree1")
 recovered=$(pod_exec "$pod" architect cat "/legion/workspaces/$repo/${tree1,,}/.legion/$tree1/workspace-recovered.json")
 jq -e --arg b "legion/$tree1" 'tostring | contains($b)' <<<"$recovered" >/dev/null || fail "the recovery marker does not name legion/$tree1: $recovered"
 # Counted per issue, and stricter than counting tree 1's own lines alone: in this run only tree 1's
-# and child 3's volumes are deleted while their claims stay resumable (tree 1's at its close, its
-# claims suspended for this re-admission; child 3's at the same close, its claim moved to its own
-# tree at carried-child, which counted its one loss). Every other issue's volume either survives
-# or goes with claims that are closed for good, so a lost-volume line for any other claim is a
+# volume is deleted while its claims stay resumable (at its close, its claims suspended for this
+# re-admission). Children 3 and 4 were parked before the close, so their claims are suspended and
+# nothing resumes them to find their volumes gone. Every other issue's volume either survives or
+# goes with claims that are closed for good, so a lost-volume line for any other claim is a
 # defect, not noise, and fails here.
 lost=$(issue_lost_lines "$tree1" | wc -l)
 [ "$lost" = 1 ] || fail "the daemon reported $tree1's volume lost $lost times, want exactly once"
-others=$(log_lines "$lost_msg" | jq -c --arg a "$(claim_token "$tree1" "")" --arg b "$(claim_token "$child3" "")" 'select((.claim // "") | (startswith($a) or startswith($b)) | not)')
-[ -z "$others" ] || fail "the daemon reported a lost volume for claims of neither $tree1 nor $child3: $(head -3 <<<"$others" | cut -c1-300 | tr '\n' ' ')"
+others=$(log_lines "$lost_msg" | jq -c --arg a "$(claim_token "$tree1" "")" 'select((.claim // "") | startswith($a) | not)')
+[ -z "$others" ] || fail "the daemon reported a lost volume for claims of another issue than $tree1: $(head -3 <<<"$others" | cut -c1-300 | tr '\n' ' ')"
 note "the daemon logged \"$lost_msg\" once for $tree1, then a fresh session whose workspace holds .legion/$tree1/workspace-recovered.json naming legion/$tree1"
 pass
 

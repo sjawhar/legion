@@ -386,6 +386,41 @@ describe("Dispatch write advice", () => {
     expect(second.details.advice).toEqual(rawAdvice);
   });
 
+  test("drops the triage pointer when Legion owns the issue's status", async () => {
+    const rawAdvice = advice({ issue_status: "triage", legion_managed_status: true });
+    const result = await executeWrite(
+      "dispatch_message",
+      { issue: "DSP-42", body: "First" },
+      rawAdvice
+    );
+
+    expect(result.text).toBe(
+      `Posted message message-1 (dispatch://DSP-42/message/message-1) ${issueSuffix}`
+    );
+    expect(result.details.advice).toEqual(rawAdvice);
+    // The memo stays unmarked, so the line is still available if the issue leaves Legion's hands.
+    const later = await executeWrite(
+      "dispatch_message",
+      { issue: "DSP-42", body: "Second" },
+      advice({ issue_status: "triage" })
+    );
+    expect(later.text).toContain("is still in triage");
+  });
+
+  // The absent case is the rest of this file's fixtures, which carry no field and print the line.
+  test("renders the triage pointer when legion_managed_status is false", async () => {
+    const rawAdvice = advice({ issue_status: "triage", legion_managed_status: false });
+    const result = await executeWrite(
+      "dispatch_message",
+      { issue: "DSP-42", body: "First" },
+      rawAdvice
+    );
+
+    expect(result.text).toEndWith(
+      'DSP-42 is still in triage — nobody can see its development status. See the `dispatch` skill, "Issue status is yours to move".'
+    );
+  });
+
   test("caps open-ask pointers at two and truncates questions to 80 characters", async () => {
     const rawAdvice = advice({
       your_open_asks: [

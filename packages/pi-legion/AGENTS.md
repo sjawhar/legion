@@ -369,10 +369,11 @@ there; `pending` is refused on a phase completion) and `summary` alone, no hando
 the daemon refuses it with `CHECK_NOT_OPEN`, `CHECK_LOOK_NOT_OPEN` or `CHECK_VERDICT_REQUIRED`
 (`packages/daemon/internal/api/handoff.go`). The daemon reads no
 handoff file and no branch head: it refuses `HANDOFF_NOT_NEW` (the commit is the one the role
-reported for its previous phase) and, for the merger's `ready: true`, runs READY's checks on the
-pull request's head, each refusal named in the merger's role prompt
+reported for its previous phase) and, for the merger's `ready: true`, reads the pull request's
+head on GitHub and refuses a packet the workflow must not take on, each refusal named in the
+merger's role prompt
 (`packages/daemon/internal/prompts/go/merger.md`); a refusal changed nothing, and the answer's
-`note` is what READY's checks said when they read no head, or the by-hand note
+`note` is the already-merged sentence, for a pull request merged before READY, or the by-hand note
 (`MANUAL_MERGE_REQUIRED:`) for a pull request a person merges. The
 operation mints its grant in-process and posts it with the request; nothing is written to the
 pane. A predecessor's handoff is read with `read` from the issue workspace. GitHub is the pane's

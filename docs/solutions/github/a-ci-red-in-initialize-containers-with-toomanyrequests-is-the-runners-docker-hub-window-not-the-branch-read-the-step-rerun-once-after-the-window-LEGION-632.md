@@ -26,6 +26,16 @@ related_issues:
   request's runs of that hour. Read `legion gh -- run view <id> --json jobs --jq '.jobs[] | …steps[]
   | select(.conclusion=="failure") | .name'` and `--log-failed | grep toomanyrequests` and name the
   cause in the PR body's `CI` line, so the reviewer and merger read the red for what it is.
+
+  **Superseded 2026-10-23 (dispatch://INFRA-83):** only the clause that names the cause in the PR
+  body's `CI` line is gone: the body carries no `CI:` line
+  (`skills/legion-worker/references/pr-body.md`), and no role records a check result for a later
+  step to trust — the tester and the reviewer each read CI on GitHub at the head they are judging
+  and record none of it (the reviewer's own four GitHub reads are in
+  `skills/legion-worker/references/merge-gate.md`), so the reviewer and the merger read the red for
+  what it is by reading the failed step and its `toomanyrequests` line themselves at that head.
+  Everything else stands: read which step failed before re-running, the two `legion gh` reads
+  above, the one-re-run-per-interval cadence owned by one role below, and the mirror as the fix.
 - Do not re-run on a loop. The limit is a rolling window per address and every failed pull counts
   against it, so each re-run inside the window extends the hold for everyone; the cadence that
   worked was one `legion gh -- run rerun <id> --failed` no earlier than an hour after the first

@@ -282,8 +282,9 @@ and the person it names, are:
 Each `curl` in this skill and its references reads `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`, which
 `legion controller start` sets only when `controller.yaml` names `dispatch_url`. A read that fails
 or prints no JSON array admits nothing and acts on nothing, and an assignment that does not print
-the issue with its new `assignee` leaves it unassigned (`400 ASSIGNEE_NOT_ALLOWED` names an email
-nobody has signed in to Dispatch with). Name either, with its first line, in your summary.
+the issue with its new `assignee` leaves the issue's assignee as the read showed it
+(`400 ASSIGNEE_NOT_ALLOWED` names an email nobody has signed in to Dispatch with). Name either,
+with its first line, in your summary.
 
 ## Daily report (Go daemon)
 
@@ -307,9 +308,11 @@ EOF
 legion({ op: "set_status", issue: "<report KEY>", status: "icebox" })
 ```
 
-With no person known, leave out `--assignee`. While the issue's `Assignee:` says `unassigned`,
-each report opens with one sentence asking a person to take the issue from its header, since its
-asks reach only the Inbox's `Unassigned` filter.
+With no person known, leave out `--assignee`: the issue then goes to your token's owner, or, under
+the shared token, to the project's default assignee when a person set one on the Settings page, and
+is otherwise unassigned. While the issue's `Assignee:` says `unassigned`, each report opens with
+one sentence asking a person to take the issue from its header, since its asks reach only the
+Inbox's `Unassigned` filter.
 
 Each time you read it, keep it answerable. `Status: done` means someone closed it: Dispatch
 refuses an ask or a message there (`409 ISSUE_CLOSED`) and hides its open asks, so reopen it with
@@ -443,8 +446,10 @@ themselves: an issue reaches Legion only when a person hands it over
    is promised only when the `Design gate policy:` line of your system prompt, which
    whoever launched you writes from the daemon's own configuration, says
    `gates.design: root-issues`. Under `gates.design: off` nobody approves a design, so drop "and
-   its design approval" (and "or its design approval") from the sentence. An unassigned root
-   still runs; its architect's asks reach no default Inbox list, only the `Unassigned` filter.
+   its design approval" (and "or its design approval") from the sentence. Take the line from the
+   read, never from how the issue was created: an issue filed with no assignee still lands on the
+   project's default assignee where a person set one. An unassigned root still runs; its
+   architect's asks reach no default Inbox list, only the `Unassigned` filter.
 
 ## Architect escalation
 

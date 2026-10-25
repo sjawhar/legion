@@ -36,8 +36,11 @@ Three facts govern every thread, whoever opened it.
     it accepted to the implementer, who resolves them. List the pull request's threads:
 
     ```bash
-    gh api graphql -f query='query($o:String!,$r:String!,$n:Int!){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100){nodes{id isResolved comments(last:1){nodes{author{login} body}}}}}}}' -F o=<owner> -F r=<repo> -F n=<number>
+    gh api graphql --paginate -f query='query($o:String!,$r:String!,$n:Int!,$endCursor:String){repository(owner:$o,name:$r){pullRequest(number:$n){reviewThreads(first:100,after:$endCursor){pageInfo{hasNextPage endCursor} nodes{id isResolved comments(last:1){nodes{author{login} body}}}}}}}' -F o=<owner> -F r=<repo> -F n=<number>
     ```
+
+    `--paginate` follows the thread pages, which it prints as one JSON object per page, so add
+    `--slurp` when you want a single document; `comments(last:1)` needs no paging of its own.
 
     Reply on each thread you answer, then tell the implementer the node ids of exactly the threads
     you accepted — a bot's findings you adjudicated — never one you have not read: an

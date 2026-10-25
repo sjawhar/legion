@@ -9,6 +9,7 @@ import type {
   AskRead,
   AskUrgency,
   BlockPath,
+  ClaimedIssue,
   Comment,
   CommentRead,
   CreateArtifactInput,
@@ -265,8 +266,13 @@ function renderAdvice(
     );
   }
 
+  // The advice is dropped, not reworded, on a Legion-managed issue: the Legion daemon moves such
+  // an issue out of triage itself when it releases it, so asking the session to move the status
+  // asks it to do the one thing the daemon undoes. The memo is marked inside the block, so a key
+  // whose line was never printed can still be told later if it leaves Legion's hands.
   if (
     advice.issue_status === "triage" &&
+    advice.legion_managed_status !== true &&
     tool !== "dispatch_issue" &&
     !(tool === "dispatch_issue_update" && opts.setsStatus === true) &&
     !triageAdviceShown.has(key)
@@ -514,6 +520,12 @@ function componentsChange(input: IssueComponentsInput, after: IssueComponents): 
 
 const architectureComponentsAction =
   'Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
+
+/** What both claim results say when the server answers `legion_managed_status`: on an issue
+ *  Legion runs, only its daemon writes the status. One copy, since the claim and the release
+ *  must say the same thing. */
+const LEGION_OWNS_STATUS =
+  "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone.";
 
 /**
  * Guidance only: creation already succeeded, so an unavailable source lookup must not turn this
@@ -1014,11 +1026,12 @@ function innerRefProblem(
   }
   if (tool === "dispatch_read" || tool === "dispatch_ask") return undefined;
   const owner = refOwnerName(ref);
-  // suggest and doc-edit act on a document, so naming an issue alone would be refused in turn.
-  const documentTool = tool === "dispatch_suggest" || tool === "dispatch_doc_edit";
+  // suggest acts on a document and still requires an artifact, so an issue-owned link's hint
+  // names one; doc-edit takes an issue alone and edits its primary document.
+  const suggestTool = tool === "dispatch_suggest";
   const ownerArguments =
     ref.owner.kind === "issue"
-      ? `issue ${ref.owner.issue}${documentTool ? " and artifact <the document's slug>" : ""}`
+      ? `issue ${ref.owner.issue}${suggestTool ? " and artifact <the document's slug>" : ""}`
       : `project ${ref.owner.project} and artifact ${ref.artifact}`;
   const fix =
     tool === "dispatch_comment" && ref.kind === "ask"
@@ -2680,7 +2693,7 @@ export async function executeDispatchTool(
     // A Dispatch that predates verified service tokens omits the field entirely.
     const service = identity.kind === "agent" ? (identity.service ?? null) : null;
     const unowned =
-      "no owner, so issues you create without an assignee are unassigned (or inherit their parent's).";
+      "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
     return {
       text:
         owner !== null
@@ -2807,7 +2820,8 @@ export async function executeDispatchTool(
         ];
         const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
         // Dispatch picks the assignee when the call names none (the creating person, the personal
-        // token's owner, or the parent's), so the line says whom it answered.
+        // token's owner, the parent's, or the project's default), so the line says whom it
+        // answered.
         const assigned =
           created.assignee === undefined
             ? ""
@@ -2851,6 +2865,8 @@ export async function executeDispatchTool(
       const parent = optionalString(args, "parent");
       const components = optionalComponents(args, "components");
       const repo = optionalString(args, "repo");
+      const rankBefore = optionalString(args, "before");
+      const rankAfter = optionalString(args, "after");
       const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? (args.labels as string[]) : undefined;
       const blockedBy = Array.isArray(args.blocked_by) ? (args.blocked_by as string[]) : undefined;
@@ -2896,6 +2912,15 @@ export async function executeDispatchTool(
           : requestedLinks.length === 0
             ? []
             : [...before.external_links, ...newLinks.map((url) => ({ url }))];
+      // A rank with neither neighbour is not a no-op: the server ranks the issue last in its
+      // project. So an ordinary update sends no rank key at all.
+      const rank =
+        rankBefore === undefined && rankAfter === undefined
+          ? undefined
+          : {
+              ...(rankBefore === undefined ? {} : { before: rankBefore }),
+              ...(rankAfter === undefined ? {} : { after: rankAfter }),
+            };
       let after: Advised<Issue>;
       try {
         after = await client.updateIssue(issueKey, {
@@ -2909,6 +2934,7 @@ export async function executeDispatchTool(
           ...(components === undefined ? {} : { components }),
           ...(repo === undefined ? {} : { repo: repo === "" ? null : repo }),
           ...(sentLinks === undefined ? {} : { external_links: sentLinks }),
+          ...(rank === undefined ? {} : { rank }),
           actor,
         });
       } catch (error) {
@@ -2948,6 +2974,14 @@ export async function executeDispatchTool(
         ...(priority === undefined
           ? []
           : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`]),
+        ...(rank === undefined
+          ? []
+          : [
+              `rank -> ${[
+                ...(rankAfter === undefined ? [] : [`after ${rankAfter}`]),
+                ...(rankBefore === undefined ? [] : [`before ${rankBefore}`]),
+              ].join(", ")}`,
+            ]),
         ...(requestedLinks === undefined
           ? []
           : [
@@ -2999,7 +3033,7 @@ export async function executeDispatchTool(
     case "dispatch_claim": {
       const issueKey = issue();
       const release = optionalBoolean(args, "release") ?? false;
-      let after: Issue;
+      let after: ClaimedIssue;
       try {
         after = release
           ? await client.releaseIssueClaim(issueKey, { actor })
@@ -3010,20 +3044,30 @@ export async function executeDispatchTool(
         throw refusalWithCode(error);
       }
       const held = after.claim;
+      // On an issue Legion runs, only its daemon writes the status: a status this session sets
+      // is undone, so the result says who owns it rather than asking for a move.
+      // An absent field (an older Dispatch, or a failed label walk) reads as not managed.
+      const legionManaged = after.legion_managed_status === true;
       // A release answers with the claim cleared or it does not answer at all: the server
       // refuses a release the caller may not make (409 ISSUE_CLAIMED, naming the live holder),
       // and loads the issue inside the releasing transaction. So there is no "released but
       // still claimed" state to render here.
       let text: string;
       if (release) {
-        text = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status} — move it yourself if that is no longer where the work is.`;
+        const released = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status}`;
+        text = legionManaged
+          ? `${released}; ${LEGION_OWNS_STATUS}`
+          : `${released} — move it yourself if that is no longer where the work is.`;
       } else {
         if (held === null) {
           // A successful claim always answers with the claim in place; anything else is a
           // server that no longer matches this contract, worth saying rather than papering over.
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
-        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
+        const claimed = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}`;
+        text = legionManaged
+          ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop.`
+          : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
         text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
@@ -3507,7 +3551,7 @@ export async function executeDispatchTool(
       };
     }
     case "dispatch_doc_edit": {
-      const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
+      const resolved = await resolveDocument(documentOwner(), optionalString(args, "artifact"));
       const ops = args.ops as EditOp[];
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;
