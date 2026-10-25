@@ -44,6 +44,7 @@ export function AgentRuntimeThread({
   placeholder,
   replayCount,
   resetKey,
+  sendDisabled,
   sessionId,
   stored,
   viewer,
@@ -61,6 +62,9 @@ export function AgentRuntimeThread({
    *  (`useAgentStream`'s `replays`). */
   replayCount: number;
   resetKey: string;
+  /** Holds the composer's Send while true (a switch waiting for the session's answer); what the
+   *  person types stays theirs to edit. */
+  sendDisabled: boolean;
   sessionId: string;
   stored: readonly MessageRead[];
   /** The signed-in human's login: their own messages read as theirs, every other one names its
@@ -139,6 +143,7 @@ export function AgentRuntimeThread({
     // is the identity: `conversation.ts` is the one place the session's wire shape is read.
     convertMessage: (message: ThreadMessageLike) => message,
     isRunning: isRunning(conversation),
+    isSendDisabled: sendDisabled,
     messages,
     onNew,
   });

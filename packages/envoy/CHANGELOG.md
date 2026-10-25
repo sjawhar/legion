@@ -4,6 +4,19 @@
 
 ### Added
 
+- Dispatch's conversation view (`/agents/<id>/live`) shows the model and thinking level an Oh My
+  Pi session runs now, from the `settings` frame pi-envoy publishes, before any turn runs on them
+  and within about 20 seconds of a change made anywhere else (INFRA-195). Where the session runs
+  `/model` and `/effort` from Dispatch, each is a native picker in the header: the model picker
+  lists every model the session can use, grouped by provider, and the thinking picker the levels
+  `/effort` offers. A pick is the person's own Send of `/model <provider/id>` or `/effort <level>`,
+  always as Send and stored under their name; while it waits for the session's answer the pickers
+  and Send are disabled, and the line under the header quotes the session's reply, or says no
+  answer came within 30 seconds or that the message could not reach the session. The header
+  changes only when the session reports the new value. A session on an older pi-envoy shows the
+  last turn's model and asks to be restarted on a newer one; a session whose Oh My Pi cannot tell
+  its settings, or that runs neither built-in from Dispatch, says so. No route changes: an agent's
+  token is still refused on `POST /api/v1/agents/{id}/messages` (`403 HUMAN_ONLY`).
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an

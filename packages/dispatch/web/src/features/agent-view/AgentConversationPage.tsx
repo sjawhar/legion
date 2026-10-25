@@ -5,8 +5,6 @@ import { Link, useParams } from "react-router-dom";
 
 import { api } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
-import { pillClassName } from "../../components/Pill";
-import { TruncatedText } from "../../components/TruncatedText";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -25,7 +23,9 @@ import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { AgentRuntimeThread } from "./AgentRuntimeThread";
-import { currentModel, sessionCommands } from "./conversation";
+import { sessionCommands, sessionSettingsView } from "./conversation";
+import { SessionSettings } from "./SessionSettings";
+import { type SwitchRequest, switchCommand, useSessionSwitch } from "./use-session-switch";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";
 
 /** What the live dot says about the relay, and how it reads to a screen reader. */
@@ -75,9 +75,10 @@ export function AgentConversationPage(): ReactNode {
   useDocumentTitle(label);
 
   const { conversation, replays, responding, status } = useAgentStream(sessionId);
-  // The model the session is currently running (LEGION-548), next to its title: the most recent
-  // assistant turn's own report, nothing guessed for a client that never sends one.
-  const model = currentModel(conversation);
+  // The model and thinking level the session runs now (INFRA-195), next to its title: what its
+  // newest `settings` frame reports, or, for a session that reports none, the most recent
+  // assistant turn's own model (LEGION-548), nothing guessed for a client that never sends one.
+  const settings = sessionSettingsView(conversation, responding, replays);
   const modes = deliveryModes(agent?.capabilities ?? []);
   // The human's pick holds only while the session still offers it: the session list loads after
   // the page, and a pick the session does not advertise would be refused.
@@ -104,6 +105,9 @@ export function AgentConversationPage(): ReactNode {
   const stored = useQuery(agentMessagesQuery(sessionId));
   useMarkRepliesRead(sessionId, stored.data);
   const viewer = useQuery(whoAmIQuery()).data;
+  // The header's switch, one at a time; while one waits for the session's answer neither picker
+  // nor Send takes another, so this page's next prompt reaches the session after the switch.
+  const sessionSwitch = useSessionSwitch(sessionId, stored.data);
   // One per message of this viewer's the session accepted, which takes the thread back to its
   // live end (`use-live-follow.ts`). Bumped after the write lands and never on a refusal: the
   // reason renders above the transcript, where a reader who has scrolled back can read it
@@ -132,6 +136,26 @@ export function AgentConversationPage(): ReactNode {
     },
     [mode, queryClient, sessionId]
   );
+  // A pick is the person's own Send of what they would type at the session's terminal, always as
+  // a Send whatever the composer's mode is: a BTW is a side question the session answers, not
+  // input it runs. It is stored under the person's name like any Send, which is the record of who
+  // switched the session and to what.
+  const { run: runSwitch } = sessionSwitch;
+  const onPick = useCallback(
+    async (request: SwitchRequest) => {
+      setSendError(null);
+      try {
+        await runSwitch(request, () =>
+          api.createAgentMessage(sessionId, { body: switchCommand(request), delivery: "steer" })
+        );
+        setOwnSendCount((previous) => previous + 1);
+        await queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
+      } catch (error) {
+        setSendError(error instanceof Error ? error.message : "could not reach the session");
+      }
+    },
+    [queryClient, runSwitch, sessionId]
+  );
   const presence = STATUS[status];
 
   // The shell hands this route the viewport below its header as a flex column; the page takes
@@ -144,13 +168,12 @@ export function AgentConversationPage(): ReactNode {
           ← Agents
         </Link>
         <h1 className={`min-w-0 truncate text-lg font-semibold ${textPrimaryOnCanvas}`}>{label}</h1>
-        {model === undefined ? null : (
-          <span className={`${pillClassName("label")} max-w-56`} data-testid="agent-session-model">
-            <TruncatedText className="min-w-0" title={model}>
-              {model}
-            </TruncatedText>
-          </span>
-        )}
+        <SessionSettings
+          onPick={(request) => void onPick(request)}
+          pending={sessionSwitch.pending}
+          status={sessionSwitch.status}
+          view={settings}
+        />
         <span className="flex items-center gap-1.5">
           <span
             aria-hidden="true"
@@ -222,9 +245,14 @@ export function AgentConversationPage(): ReactNode {
           empty={emptyText(responding)}
           onNew={onNew}
           ownSendCount={ownSendCount}
-          placeholder={`Message ${label} — delivered as ${MODE_LABELS[mode]}${commands === undefined ? "" : ", / for commands"}…`}
+          placeholder={
+            sessionSwitch.pending
+              ? "Waiting for the session to answer the switch…"
+              : `Message ${label} — delivered as ${MODE_LABELS[mode]}${commands === undefined ? "" : ", / for commands"}…`
+          }
           replayCount={replays}
           resetKey={sessionId}
+          sendDisabled={sessionSwitch.pending}
           sessionId={sessionId}
           stored={stored.data ?? []}
           viewer={viewer?.kind === "user" ? viewer.login : undefined}
