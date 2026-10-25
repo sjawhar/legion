@@ -13601,6 +13601,7 @@ var ASK_TURNS = ["human", "agent"];
 var DELIVERY_CAPABILITIES = ["aside", "btw", "steer"];
 var IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
 var IDEMPOTENCY_KEY_IN_FLIGHT = "KEY_IN_FLIGHT";
+var IDEMPOTENCY_KEY_COMMITTED = "KEY_COMMITTED";
 var IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
 var IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
 var IDEMPOTENCY_LEASE_MS = 60 * 1000;
@@ -15235,11 +15236,14 @@ class DispatchWriteUnsettledError extends Error {
   }
 }
 
-class DispatchAnswerNotKeptError extends Error {
+class DispatchWriteLandedError extends Error {
+  code;
   status;
-  name = "DispatchAnswerNotKeptError";
-  constructor(status, message) {
-    super(`${IDEMPOTENCY_ANSWER_NOT_KEPT}: ${message}`);
+  name = "DispatchWriteLandedError";
+  constructor(code, status, method, url2) {
+    const lost = code === IDEMPOTENCY_ANSWER_NOT_KEPT ? "Dispatch kept no copy of its answer, which was too large" : "its answer was lost on the way back";
+    super(`${method} ${url2} was made, but ${lost} (${code}), so this command cannot print what it ` + "made: read it back with `dispatch read`, or with the matching list for something it created.");
+    this.code = code;
     this.status = status;
   }
 }
@@ -15798,6 +15802,9 @@ class DispatchClient {
     if (!response.ok) {
       const error48 = asErrorShape(payload);
       if (typeof error48.error === "string") {
+        if (response.status === 409 && error48.code === IDEMPOTENCY_KEY_COMMITTED) {
+          throw new DispatchWriteLandedError(error48.code, response.status, method, url2);
+        }
         throw new DispatchServiceError(error48.code ?? `HTTP_${response.status}`, response.status, error48.error, error48.candidates, error48.current, error48.mismatches);
       }
       const quoted = excerpt(text, this.token);
@@ -15817,7 +15824,7 @@ class DispatchClient {
     }
     const replay = asErrorShape(payload);
     if (replay.code === IDEMPOTENCY_ANSWER_NOT_KEPT && typeof replay.error === "string") {
-      throw new DispatchAnswerNotKeptError(response.status, replay.error);
+      throw new DispatchWriteLandedError(replay.code, response.status, method, url2);
     }
     return payload;
   }
@@ -17977,7 +17984,11 @@ async function executeDispatchTool(input) {
       throw new Error("issue or project is required");
     return owner;
   };
-  const postWithPictures = (text, limit, owner2, upload) => textWithPictures(input.tool, text, pictures, limit, owner2, upload, actor);
+  const postWithPictures = (text, limit, owner2, upload) => textWithPictures(input.tool, text, pictures, limit, owner2, (picture) => upload(picture).catch((error48) => {
+    if (!(error48 instanceof DispatchWriteLandedError))
+      throw error48;
+    throw new Error(`${error48.message} That was a picture uploaded before this call's own write, so nothing else was written: run the call again, which uploads it as its next version.`, { cause: error48 });
+  }), actor);
   const writePictures = (resolved, text, limit) => {
     if (resolved?.owner.kind === "project") {
       const { project } = resolved.owner;
@@ -18087,6 +18098,9 @@ async function executeDispatchTool(input) {
             ref: dispatchChildRef(dispatchIssueRef(issueKey), "message", message.id)
           };
         } catch (error48) {
+          if (error48 instanceof DispatchWriteLandedError) {
+            throw new Error(`${error48.message} That was the closing reason, so the close was not sent: read the issue's messages for it, then close with a reason that points at it, since retrying this call posts its reason again.`, { cause: error48 });
+          }
           const told = writeMayHaveLanded(error48) ? "the reason may or may not have been posted, and the close was not sent: read the issue's messages before retrying, since retrying this call posts its reason again" : "the reason was not posted, so the close was not sent";
           if (error48 instanceof DispatchServiceError)
             throw refusalWithCode(error48, told);
@@ -18112,6 +18126,8 @@ async function executeDispatchTool(input) {
           actor
         });
       } catch (error48) {
+        if (error48 instanceof DispatchWriteLandedError)
+          throw error48;
         const taken = dispatchAnswered(error48, 500) && newLinks.length > 0 ? `one of ${newLinks.join(", ")} may already be linked from another issue (a URL links exactly one issue)` : "";
         if (closingNote === undefined)
           throw refusalWithCode(error48, taken);

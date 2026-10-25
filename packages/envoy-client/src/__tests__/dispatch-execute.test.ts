@@ -23,7 +23,12 @@ import {
   positionText,
   resolveIssueDocumentId,
 } from "../dispatch-execute";
-import { DISPATCH_WRITE_RETRY, DispatchClient, type DispatchWriteRetry } from "../dispatch-http";
+import {
+  DISPATCH_WRITE_RETRY,
+  DispatchClient,
+  DispatchWriteLandedError,
+  type DispatchWriteRetry,
+} from "../dispatch-http";
 import { followedAsk } from "../dispatch-subscribe";
 import { ToolInputError } from "../tool-input-errors";
 import { fakeSearchResponse } from "./fake-search-response";
@@ -3722,6 +3727,38 @@ describe("executeDispatchTool", () => {
         ...Array<string>(attempts).fill("PATCH"),
       ]);
     }
+  });
+
+  // KEY_COMMITTED says a write landed and its answer was lost. On the close's own PATCH, the call's
+  // last write, that is the call's landing, which the CLI reports as done; on the closing reason,
+  // a step before it, the close was never sent, so the call fails and says the reason is there.
+  test("dispatch_issue_update reads KEY_COMMITTED as a landing on the close, and a failure on the reason", async () => {
+    const committed = () =>
+      refusal(409, "KEY_COMMITTED", "the write landed and its answer was lost");
+    const closed = closingServer({
+      message: () => response({ id: "message-7", issue_key: "ACME-175" }),
+      patch: committed,
+    });
+    const landing = await closeCall(closed.fetchImpl).catch((error: unknown) => error);
+    expect(landing).toBeInstanceOf(DispatchWriteLandedError);
+    expect(closed.requests.map(({ method }) => method)).toEqual(["GET", "POST", "PATCH"]);
+
+    const reasoned = closingServer({
+      message: committed,
+      patch: () => {
+        throw new Error("the close must not be sent");
+      },
+    });
+    const failure = await closeCall(reasoned.fetchImpl).catch((error: unknown) => error);
+    expect(failure).not.toBeInstanceOf(DispatchWriteLandedError);
+    expect((failure as Error).message).toBe(
+      "POST http://dispatch.test/api/v1/issues/ACME-175/messages was made, but its answer was " +
+        "lost on the way back (KEY_COMMITTED), so this command cannot print what it made: read it " +
+        "back with `dispatch read`, or with the matching list for something it created. That was " +
+        "the closing reason, so the close was not sent: read the issue's messages for it, then " +
+        "close with a reason that points at it, since retrying this call posts its reason again."
+    );
+    expect(reasoned.requests.map(({ method }) => method)).toEqual(["GET", "POST"]);
   });
 
   // A close whose last attempt alone says it never reached Dispatch (a gateway's 429), or that

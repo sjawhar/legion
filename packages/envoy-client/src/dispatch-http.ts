@@ -51,6 +51,7 @@ import type {
 } from "@legion/contracts";
 import {
   IDEMPOTENCY_ANSWER_NOT_KEPT,
+  IDEMPOTENCY_KEY_COMMITTED,
   IDEMPOTENCY_KEY_HEADER,
   IDEMPOTENCY_KEY_IN_FLIGHT,
 } from "@legion/contracts";
@@ -149,19 +150,32 @@ export class DispatchWriteUnsettledError extends Error {
 }
 
 /**
- * A write Dispatch had already run, answered on a repeat under its key with the first answer's
- * status and no resource, since that answer was larger than Dispatch keeps
- * (`IDEMPOTENCY_ANSWER_NOT_KEPT`). The write took effect, so this is no refusal: whoever made it
- * reads what it wrote. `status` is the first answer's.
+ * A write Dispatch made whose answer is gone, so the caller cannot be shown what it made: a repeat
+ * under its key answered `409 IDEMPOTENCY_KEY_COMMITTED` (the write landed before its answer was
+ * lost, and Dispatch will not run it again) or a 2xx carrying `IDEMPOTENCY_ANSWER_NOT_KEPT` (its
+ * first answer was larger than Dispatch keeps). The write took effect, so this is no refusal and
+ * deliberately no `DispatchServiceError`; it is never asked again. Its message is the one line a
+ * session reads: what was made, that its answer was lost, and to read it back.
  */
-export class DispatchAnswerNotKeptError extends Error {
-  override readonly name = "DispatchAnswerNotKeptError";
+export class DispatchWriteLandedError extends Error {
+  override readonly name = "DispatchWriteLandedError";
 
   constructor(
+    /** `IDEMPOTENCY_KEY_COMMITTED` or `IDEMPOTENCY_ANSWER_NOT_KEPT`. */
+    readonly code: string,
+    /** The status Dispatch answered with: the 409, or the first answer's own 2xx. */
     readonly status: number,
-    message: string
+    method: string,
+    url: string
   ) {
-    super(`${IDEMPOTENCY_ANSWER_NOT_KEPT}: ${message}`);
+    const lost =
+      code === IDEMPOTENCY_ANSWER_NOT_KEPT
+        ? "Dispatch kept no copy of its answer, which was too large"
+        : "its answer was lost on the way back";
+    super(
+      `${method} ${url} was made, but ${lost} (${code}), so this command cannot print what it ` +
+        "made: read it back with `dispatch read`, or with the matching list for something it created."
+    );
   }
 }
 
@@ -1232,9 +1246,9 @@ export class DispatchClient {
    * from Dispatch, so it is a `DispatchGatewayError` naming the request (method, URL and query;
    * the token travels in a header, never the URL), the status and reason phrase, a one-line
    * plain-text excerpt of the body (or, when none of what the excerpt reads is text, the body's
-   * size), and what asking again can do for that method and status. A 2xx carrying Dispatch's
-   * `IDEMPOTENCY_ANSWER_NOT_KEPT` is a repeated write's replay with no resource in it: the write
-   * ran, and it is a `DispatchAnswerNotKeptError` rather than a payload of the wrong shape.
+   * size), and what asking again can do for that method and status. A write Dispatch made whose
+   * answer is gone — `409 IDEMPOTENCY_KEY_COMMITTED`, or a 2xx carrying
+   * `IDEMPOTENCY_ANSWER_NOT_KEPT` — is a `DispatchWriteLandedError`, neither a refusal nor a payload.
    */
   async #response<T>(method: string, url: string, response: Response): Promise<T> {
     const text = await response.text();
@@ -1249,6 +1263,9 @@ export class DispatchClient {
     if (!response.ok) {
       const error = asErrorShape(payload);
       if (typeof error.error === "string") {
+        if (response.status === 409 && error.code === IDEMPOTENCY_KEY_COMMITTED) {
+          throw new DispatchWriteLandedError(error.code, response.status, method, url);
+        }
         throw new DispatchServiceError(
           error.code ?? `HTTP_${response.status}`,
           response.status,
@@ -1280,7 +1297,7 @@ export class DispatchClient {
     }
     const replay = asErrorShape(payload);
     if (replay.code === IDEMPOTENCY_ANSWER_NOT_KEPT && typeof replay.error === "string") {
-      throw new DispatchAnswerNotKeptError(response.status, replay.error);
+      throw new DispatchWriteLandedError(replay.code, response.status, method, url);
     }
     return payload as T;
   }

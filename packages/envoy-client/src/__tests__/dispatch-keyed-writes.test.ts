@@ -2,15 +2,16 @@ import { beforeEach, describe, expect, test } from "bun:test";
 import {
   type CommentWriteResponse,
   IDEMPOTENCY_ANSWER_NOT_KEPT,
+  IDEMPOTENCY_KEY_COMMITTED,
   IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_KEY_PATTERN,
 } from "@legion/contracts";
 import {
   DISPATCH_WRITE_RETRY,
-  DispatchAnswerNotKeptError,
   DispatchClient,
   DispatchGatewayError,
   DispatchServiceError,
+  DispatchWriteLandedError,
   type DispatchWriteRetry,
   DispatchWriteUnsettledError,
   forgetKeyedLayerMemory,
@@ -521,26 +522,47 @@ describe("DispatchClient's writes", () => {
     expect(await (form.get("file") as Blob).text()).toBe("# Spec");
   });
 
-  // A replay whose first answer was larger than Dispatch keeps carries the first status and no
-  // resource. The write ran, so it is no refusal; the session is told to read what it wrote.
-  test("a replay without its kept answer says the write ran and to read what it wrote", async () => {
-    const notKept =
-      "Dispatch ran this request and answered 201, but its answer was larger than the 1048576 " +
-      "bytes a key keeps, so it is not replayed: read what the request wrote to see it";
-    const { fetchImpl, sent } = scripted([
-      new TypeError("fetch failed"),
-      json({ code: IDEMPOTENCY_ANSWER_NOT_KEPT, error: notKept }, 201, {
-        "Idempotency-Replayed": "?1",
-      }),
-    ]);
+  // A write Dispatch made whose answer is gone is no refusal: a replay of a first answer larger
+  // than Dispatch keeps (2xx ANSWER_NOT_KEPT), or 409 KEY_COMMITTED (the write landed before its
+  // answer was lost, and Dispatch will not run it again). It is never asked again, and its one line
+  // says what was made and to read it back.
+  test("a write whose answer is gone is a landing, never resent", async () => {
+    const url = "http://dispatch.test/api/v1/issues/DSP-1/comments";
+    for (const [answer, code, status, lost] of [
+      [
+        json({ code: IDEMPOTENCY_ANSWER_NOT_KEPT, error: "not kept" }, 201, {
+          "Idempotency-Replayed": "?1",
+        }),
+        IDEMPOTENCY_ANSWER_NOT_KEPT,
+        201,
+        "Dispatch kept no copy of its answer, which was too large",
+      ],
+      [
+        refusal(409, IDEMPOTENCY_KEY_COMMITTED, "the write landed and its answer was lost"),
+        IDEMPOTENCY_KEY_COMMITTED,
+        409,
+        "its answer was lost on the way back",
+      ],
+    ] as const) {
+      const { fetchImpl, sent } = scripted([
+        refusal(503, "UNAVAILABLE", "database unavailable"),
+        answer,
+        json(posted, 201),
+      ]);
+      const { retry, pauses } = pacing();
 
-    const error = await failure(client(fetchImpl, pacing().retry).comment("DSP-1", comment));
+      const error = await failure(client(fetchImpl, retry).comment("DSP-1", comment));
 
-    expect(sent).toHaveLength(2);
-    expect(error).toBeInstanceOf(DispatchAnswerNotKeptError);
-    expect(error).not.toBeInstanceOf(DispatchServiceError);
-    expect(error).toEqual(expect.objectContaining({ status: 201 }));
-    expect(error.message).toBe(`${IDEMPOTENCY_ANSWER_NOT_KEPT}: ${notKept}`);
+      expect(sent).toHaveLength(2);
+      expect(pauses).toEqual([1_000]);
+      expect(error).toBeInstanceOf(DispatchWriteLandedError);
+      expect(error).not.toBeInstanceOf(DispatchServiceError);
+      expect(error).toEqual(expect.objectContaining({ code, status }));
+      expect(error.message).toBe(
+        `POST ${url} was made, but ${lost} (${code}), so this command cannot print what it made: ` +
+          "read it back with `dispatch read`, or with the matching list for something it created."
+      );
+    }
   });
 
   test("the production pacing is five attempts within 30 s", () => {
