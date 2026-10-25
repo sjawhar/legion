@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-229",
+  "completed": "2026-10-25T08:39:00Z",
+  "round": 1,
+  "reviewedCodeHead": "e284417df7e29b875905cdd41c32a39828860e12",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "PR #2180 body (anchored at packages/daemon/internal/workflow/engine.go:734)",
+      "description": "No `## Contract change census`. The PR adds a refusal (409 SIGNOFF_CHILD_IN_WORKFLOW on POST /legion/v1/signoff) and makes a field required at a package boundary (`pullRequest.state` in the strict `legionPullRequestView`, contract 35 -> 36). The census must list its search commands and every hit with a disposition: sign_off callers (packages/pi-legion/src/tools.ts:245, packages/pi-shared/src/daemon-client.ts:318, the three architect prompts, scripts/e2e/stage3-devbox-workflow.sh:887/919, scripts/e2e/stage4b-sandbox-tree.sh:4264, scripts/e2e/stage3-4b13b-acceptance.sh:1011) and state readers (packages/contracts/src/legion-api.ts:158, packages/pi-shared/src/daemon-client.ts LegionStateResponse, packages/claude-envoy/dist/envoy-channel.js, the state/version fixtures and Go golden); and a rollout line: the refusal is immediate, naming the defect it closes (children stranded under a lingering tree, 409 TREE_LINGERING on INFRA-221) and the approved spec v15 that directs it, and the field rides the contract bump's boot-gate refusal."
+    },
+    {
+      "severity": "important",
+      "file": "scripts/e2e/merged-root-waits.sh:71",
+      "description": "Security[secret]: prints LEGION_TEST_PG_DSN into the retained transcript (transcript_to at :35) after masking only URL userinfo; a pgx DSN with `?password=` or keyword `password=` is printed verbatim, so a quoted proof transcript discloses the database credential. Print no DSN (or only parser-derived host/port/database). ASVS v5.0.0-16.2.5."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/daemon/merged_root_waits_live_test.go:769",
+      "description": "Step 4 reads r.board.wrote(r.parent, \"done\") once, right after waiting on the projected state and the architect's suspension. The Dispatch status write is delivered on the board lane, independent of the lifecycle lane that suspends (record/outbox.go), so a correct daemon can fail the proof on timing. Wait with testwait.Eventually, as step 6 does for retro at :560."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/contracts/src/legion-api.ts:158",
+      "description": "`state` is documented as open|merged|closed but declared nonEmptyString; every other finite domain in this file is z.enum (e.g. :132, :230, :348). Declare z.enum([\"open\", \"merged\", \"closed\"]) and regenerate the claude-envoy bundle."
+    }
+  ],
+  "verified": {
+    "ci": "Required set (rulesets): lint, typecheck, test, pr-title. CI head a828af781acc (newest pull_request runs; compare a828af7...e284417d is .legion/ only): lint success, typecheck success, pr-title success (run 40176433746), test in_progress (Tests run 40176403700) at 08:37Z. The PR body's CI line still says queued and is stale.",
+    "threads": "0 review threads on the pull request (gh api graphql).",
+    "e2e": "E2E (implementer) and E2E (tester) both present, each with surface, command, observation, head and negative control. Plan departure D1 (run booted through the e2e harness rather than the legion binary) judged acceptable: real store, migrations, HTTP API, JetStream and outbox lanes, facts entering only through production transports.",
+    "thermonuclear": "thermonuclear-deep-review at e284417d: CHANGES (the DSN print, Medium); lifecycle exits, waiting-root event handling, boot/notice de-duplication, openBeneath termination and contract consumers traced clean. thermonuclear-code-quality at e284417d: CHANGES (step 4 Dispatch race; state enum)."
+  }
+}
