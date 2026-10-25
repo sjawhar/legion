@@ -42,14 +42,16 @@ func (s *server) listProjectArchitectureSources(w http.ResponseWriter, r *http.R
 		return
 	}
 	key := r.PathValue("key")
-	if err := s.deps.Store.Pool.QueryRow(r.Context(), "select key from projects where key = $1", key).Scan(new(string)); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
 	sources, err := querySources(r.Context(), s.deps.Store.Pool, `where project_key = $1 order by id`, key)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	if len(sources) == 0 {
+		if err := s.deps.Store.Pool.QueryRow(r.Context(), "select key from projects where key = $1", key).Scan(new(string)); err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	WriteJSON(w, http.StatusOK, sources)
 }
@@ -60,16 +62,7 @@ func querySources(ctx context.Context, q queryer, tail string, args ...any) ([]m
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	sources := []model.ArchitectureSource{}
-	for rows.Next() {
-		source, err := architecture.ScanSource(rows)
-		if err != nil {
-			return nil, err
-		}
-		sources = append(sources, source)
-	}
-	return sources, rows.Err()
+	return pgx.CollectRows(rows, func(row pgx.CollectableRow) (model.ArchitectureSource, error) { return architecture.ScanSource(row) })
 }
 
 // putArchitectureSource adds the repository in the path as a source of the project, or changes

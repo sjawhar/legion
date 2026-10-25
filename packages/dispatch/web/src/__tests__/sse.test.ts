@@ -143,7 +143,7 @@ function mainEventQueryKeys(event: Event, signedInLogin?: string): (readonly unk
     }
     return [
       architectureSourcesQuery().queryKey,
-      // The project's source list, renamed from the single source's ["architecture-source", p].
+      // The project's own source list (projectArchitectureSourcesQuery).
       ["architecture-sources", event.project],
       ["components", event.project],
       ["architecture", event.project],

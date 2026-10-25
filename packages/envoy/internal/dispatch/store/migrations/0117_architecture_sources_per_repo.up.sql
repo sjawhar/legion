@@ -39,3 +39,6 @@ alter table components add column source_id bigint not null default 0;
 alter table components alter column source_id drop default;
 alter table components add constraint components_source_fkey
   foreign key (project_key, source_id) references architecture_sources (project_key, id) on delete cascade;
+-- The foreign key's cascade, the importer's per-source delete and the per-source count read a
+-- source's components; without this index each scans every component of the project.
+create index components_source on components (project_key, source_id);

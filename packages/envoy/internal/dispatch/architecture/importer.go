@@ -186,7 +186,7 @@ func (i *Importer) Sync(ctx context.Context, project, repo string) (model.Archit
 	ctx, cancel := context.WithTimeout(parent, syncTimeout)
 	defer cancel()
 
-	source, err := i.loadSource(ctx, project+" from "+repo, `project_key = $1 and repo = $2`, project, repo)
+	source, err := i.loadSourceByRepo(ctx, project, repo)
 	if err != nil {
 		return model.ArchitectureSource{}, err
 	}
@@ -263,18 +263,30 @@ func (i *Importer) touch(ctx context.Context, source model.ArchitectureSource, c
 		return model.ArchitectureSource{}, fmt.Errorf("record architecture sync freshness: %w", err)
 	}
 	// The source moved (or vanished) mid-sync: leave the row alone.
-	updated, err = i.loadSource(ctx, source.Project, `project_key = $1 and id = $2`, source.Project, source.ID)
+	updated, err = i.reloadSource(ctx, source)
 	if err != nil {
 		return model.ArchitectureSource{}, err
 	}
 	return updated, errSourceMoved
 }
 
-// loadSource reads the one source row where (over args) names; none is
-// ErrNoSource for name.
-func (i *Importer) loadSource(ctx context.Context, name, where string, args ...any) (model.ArchitectureSource, error) {
-	source, err := ScanSource(i.store.Pool.QueryRow(ctx,
-		`select `+SourceColumns+` from architecture_sources where `+where, args...))
+// loadSourceByRepo reads the project's source from repo; none is ErrNoSource.
+func (i *Importer) loadSourceByRepo(ctx context.Context, project, repo string) (model.ArchitectureSource, error) {
+	return scanOneSource(i.store.Pool.QueryRow(ctx,
+		`select `+SourceColumns+` from architecture_sources where project_key = $1 and repo = $2`, project, repo),
+		project+" from "+repo)
+}
+
+// reloadSource re-reads source's row by its id; a deleted source is ErrNoSource.
+func (i *Importer) reloadSource(ctx context.Context, source model.ArchitectureSource) (model.ArchitectureSource, error) {
+	return scanOneSource(i.store.Pool.QueryRow(ctx,
+		`select `+SourceColumns+` from architecture_sources where project_key = $1 and id = $2`, source.Project, source.ID),
+		source.Project)
+}
+
+// scanOneSource decodes the one source row; none is ErrNoSource for name.
+func scanOneSource(row pgx.Row, name string) (model.ArchitectureSource, error) {
+	source, err := ScanSource(row)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return model.ArchitectureSource{}, fmt.Errorf("%w for %s", ErrNoSource, name)
@@ -380,7 +392,7 @@ type lockedSource struct {
 // stands plus errSourceMoved. A source deleted mid-sync is ErrNoSource.
 func (i *Importer) abortMoved(ctx context.Context, tx pgx.Tx, source model.ArchitectureSource) (model.ArchitectureSource, error) {
 	_ = tx.Rollback(ctx)
-	updated, err := i.loadSource(ctx, source.Project, `project_key = $1 and id = $2`, source.Project, source.ID)
+	updated, err := i.reloadSource(ctx, source)
 	if err != nil {
 		return model.ArchitectureSource{}, err
 	}

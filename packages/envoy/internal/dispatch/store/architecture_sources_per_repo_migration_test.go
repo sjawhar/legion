@@ -4,8 +4,6 @@ import (
 	"context"
 	"strings"
 	"testing"
-
-	"github.com/sjawhar/envoy/internal/pgmigrate"
 )
 
 // architectureSourcesPerRepoVersion is the migration that lets a project hold one architecture
@@ -147,7 +145,7 @@ func TestCensusCountsAComponentWhoseProjectHasNoSource(t *testing.T) {
 		t.Fatalf("migrate through %d: %v", architectureSourcesPerRepoVersion-1, err)
 	}
 	seedSingleSourceProject(t, store)
-	if got := architectureSourcesCensus(t, store); got != 0 {
+	if got := censusCount(t, store, architectureSourcesPerRepoVersion); got != 0 {
 		t.Fatalf("census over a project whose components have their source = %d, want 0", got)
 	}
 	if _, err := store.Pool.Exec(ctx, `
@@ -157,7 +155,7 @@ func TestCensusCountsAComponentWhoseProjectHasNoSource(t *testing.T) {
 	`); err != nil {
 		t.Fatalf("seed a component with no source: %v", err)
 	}
-	if got := architectureSourcesCensus(t, store); got != 1 {
+	if got := censusCount(t, store, architectureSourcesPerRepoVersion); got != 1 {
 		t.Fatalf("census = %d, want 1: LONE/orphan alone has no source", got)
 	}
 	if err := store.migrate(ctx, migrationsThrough(t, architectureSourcesPerRepoVersion)); err == nil {
@@ -166,17 +164,4 @@ func TestCensusCountsAComponentWhoseProjectHasNoSource(t *testing.T) {
 	if got := schemaVersion(t, store); got != architectureSourcesPerRepoVersion-1 {
 		t.Fatalf("schema version after the refusal = %d, want %d", got, architectureSourcesPerRepoVersion-1)
 	}
-}
-
-// architectureSourcesCensus takes the pre-deploy census of the migration and answers its count.
-func architectureSourcesCensus(t *testing.T, store *Store) int64 {
-	t.Helper()
-	report, err := census(context.Background(), store.Pool.Config().ConnString(), migrationsThrough(t, architectureSourcesPerRepoVersion), pgmigrate.CensusOptions{})
-	if err != nil {
-		t.Fatalf("census: %v", err)
-	}
-	if len(report.Pending) != 1 || report.Pending[0].Count == nil {
-		t.Fatalf("census did not answer one count:\n%s", reportText(report))
-	}
-	return *report.Pending[0].Count
 }

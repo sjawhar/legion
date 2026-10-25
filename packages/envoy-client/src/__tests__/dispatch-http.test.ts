@@ -976,3 +976,15 @@ test("createProject surfaces PROJECT_EXISTS as the refusal's code", async () => 
     fromDispatch: true,
   });
 });
+
+test("syncArchitectureSource refuses a repository with an empty owner or name without a request", async () => {
+  const { fetchImpl, requests } = fakeFetch([]);
+  const client = new DispatchClient("http://dispatch.test", "secret", fetchImpl);
+
+  for (const repo of ["acme/", "/infra"]) {
+    await expect(client.syncArchitectureSource("CORE", repo)).rejects.toThrow(
+      `repository must be owner/name, got ${JSON.stringify(repo)}`
+    );
+  }
+  expect(requests).toEqual([]);
+});

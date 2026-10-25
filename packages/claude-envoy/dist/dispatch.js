@@ -15416,7 +15416,7 @@ class DispatchClient {
   }
   async syncArchitectureSource(project, repo2) {
     const [owner, name, ...rest] = repo2.split("/");
-    if (owner === undefined || name === undefined || rest.length > 0) {
+    if (!owner || !name || rest.length > 0) {
       throw new Error(`repository must be owner/name, got ${JSON.stringify(repo2)}`);
     }
     return this.#json("POST", [
