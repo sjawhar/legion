@@ -2962,6 +2962,68 @@ func TestSlackDeliveredText(t *testing.T) {
 			wantText:    "Build failed\nFAIL TestFoo at line 42: want 3, got 4",
 		},
 		{
+			name: "an app's rich text beside a section block",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "Build failed",
+					"blocks": []any{
+						map[string]any{
+							"type": "section",
+							"text": map[string]any{"type": "mrkdwn", "text": "pipeline 991"},
+						},
+						map[string]any{
+							"type": "rich_text",
+							"elements": []any{map[string]any{
+								"type":     "rich_text_section",
+								"elements": []any{map[string]any{"type": "text", "text": "FAIL TestFoo at line 42: want 3, got 4"}},
+							}},
+						},
+					},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Build failed",
+			wantText:    "Build failed\npipeline 991\nFAIL TestFoo at line 42: want 3, got 4",
+		},
+		{
+			name: "an app's rich text inside an attachment",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "Nightly run",
+					"attachments": []any{map[string]any{
+						"blocks": []any{map[string]any{
+							"type": "rich_text",
+							"elements": []any{map[string]any{
+								"type":     "rich_text_section",
+								"elements": []any{map[string]any{"type": "text", "text": "3 suites failed"}},
+							}},
+						}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: Nightly run",
+			wantText:    "Nightly run\n3 suites failed",
+		},
+		{
+			name: "a rich-text block behind own words that are only whitespace",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "   ",
+					"blocks": []any{map[string]any{
+						"type": "rich_text",
+						"elements": []any{map[string]any{
+							"type":     "rich_text_section",
+							"elements": []any{map[string]any{"type": "text", "text": "words behind whitespace"}},
+						}},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: words behind whitespace",
+			wantText:    "words behind whitespace",
+		},
+		{
 			name: "a field value the words merely contain",
 			body: map[string]any{
 				"team_id": "T01234567",
