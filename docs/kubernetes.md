@@ -173,27 +173,26 @@ E: Could not open lock file /var/lib/dpkg/lock-frontend - open (13: Permission d
 E: Unable to acquire the dpkg frontend lock (/var/lib/dpkg/lock-frontend), are you root?
 ```
 
-So `apt` cannot write a system prefix in an unprivileged container. Unpacking a package's files
-under that writable `$HOME` or onto the issue's disk is a separate question — it works for some
-tools and not for others (the extraction row below) — and what rules it out is not the filesystem
-but the line the role's own skill draws (the pointer below): what the withheld `operator-setup`
-capability (`packages/daemon/internal/capabilities/capabilities.go`) names is the resolution a
-prefix leaves behind, not the unpacking. A client left where a role's later commands and its
-subagents resolve it is that capability; a prefix a test harness reaches by an absolute path, or
-through a `PATH` its own script exports around its own commands, leaves nothing else resolving
-differently once they exit and is the role's own business — which is how the Dispatch browser
-suite's rootless Postgres with pgvector is stood up in a pod today. That is a verdict about
-resolution, so it would read the same in a container that did hand a role a writable
-`/usr/local/bin`, and the room on the issue's disk does not touch it. So a role wanting a client
-of its own on its `PATH` has the image, a pinned runner, or `uv run --with` for a library. The
-five priced options and their verdicts:
+So `apt` cannot write a system prefix in an unprivileged container. Unpacking a package's files by
+hand is a separate question — it works for some tools and not for others (the extraction row below)
+— and what rules it out is not the unpacking but the test the role's own skill states, in
+`skills/legion-worker/references/tools.md` under "What the withheld capability is, and what it is
+not": an extraction under that writable `$HOME` is outside the sanctioned form whatever a role
+scopes it to, and so is a client left where the role's later commands and its subagents resolve it,
+which is the withheld `operator-setup` capability
+(`packages/daemon/internal/capabilities/capabilities.go`). A test harness's own prefix on the
+issue's disk, reached by an absolute path or through a `PATH` its own script exports around its own
+commands, passes that test and is the role's own business — which is how the Dispatch browser
+suite's rootless Postgres with pgvector is stood up in a pod today. So a role wanting a client of
+its own on its `PATH` has the image, a pinned runner, or `uv run --with` for a library. The five
+priced options and their verdicts:
 
 | option | the measurement | verdict |
 | :--- | :--- | :--- |
 | the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment. In the unit a cold launch pays — compressed image size, each read from that image's own manifest in the registry, and each image's `org.opencontainers.image.revision` read from its config blob — this branch's head, `ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision `afa29128061fc10dd6c6aa3755ba051b98b84e02`), is 24 layers and 1026.9 MiB (1,076,764,060 bytes) against the 24 layers and 1019.0 MiB (1,068,477,764 bytes) of the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`): 8,286,296 bytes, 7.9 MiB on an image of a gigabyte, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 → 335,441,703), the other 23 layers carrying 1,105 bytes between them and none of them differing by more than 3,164 bytes | **chosen** |
 | a per-issue install onto the issue's disk | the issue's disk is 49 GiB, and every cache already sits on it (`TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE`), so disk is not what rules it out | **rejected for a compiled client on a role's `PATH`**: `apt` refuses above, and leaving one unpacked where a role's later commands resolve it is the withheld `operator-setup` capability (ruling dispatch://LEGION-200), the extraction row below. Still right for a language's own package set — which is the runner row — and for a test harness's own prefix, which only its own commands resolve through |
 | a runner the image already provides, pinned and failing closed | `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one | **chosen, as documentation rather than new code**: the image already carries all three |
-| extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected as the way to get these five clients onto a role's `PATH`**: a prefix a role's later commands and its subagents resolve through is the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200), and it is fragile for exactly the client this change exists for. The same unpacking inside a test harness's own environment is a different verdict — the line is resolution, not the mechanism (`skills/legion-worker/references/tools.md`) — and it would not have got a role `psql` either way |
+| extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected as the way to get these five clients onto a role's `PATH`**: that is the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200) under the test in `skills/legion-worker/references/tools.md`, "What the withheld capability is, and what it is not", and it is fragile for exactly the client this change exists for. The same unpacking inside a test harness's own environment passes that test and is a different verdict — and it would not have got a role `psql` either way |
 | `runtime.kubernetes.setup`, the operator-set command every role container runs before its agent starts | it runs on every start of every role, six times per issue | **rejected**: it buys nothing the image does not, since it is still an unprivileged container |
 
 The forms a role types, the rule that a pin names a coordinate as well as a version, and the line
