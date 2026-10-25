@@ -13,7 +13,6 @@ import (
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
-	"github.com/testcontainers/testcontainers-go"
 )
 
 func TestMain(m *testing.M) { os.Exit(Main(m)) }
@@ -198,12 +197,17 @@ type namedTB struct {
 
 func (n namedTB) Name() string { return n.name }
 
-// ownAccountServer starts an account server of the test's own, declaring accounts accounts.
+// ownAccountServer starts an account server of the test's own, declaring accounts accounts, and
+// ends it when the test ends, whether it is a container or a local process.
 func ownAccountServer(t *testing.T, accounts int) *accountServer {
 	t.Helper()
 	server, err := startAccountServer(accounts)
 	if server != nil {
-		testcontainers.CleanupContainer(t, server.ctr)
+		t.Cleanup(func() {
+			if stop := server.host.terminate(); stop != nil {
+				t.Errorf("remove the test's account server: %v", stop)
+			}
+		})
 	}
 	if err != nil {
 		t.Fatalf("start an account server: %v", err)
@@ -240,7 +244,7 @@ func TestAServerOutOfAccountsDoublesThemWithoutDisturbingOneInUse(t *testing.T) 
 	if server.declared != 4 {
 		t.Fatalf("the server declares %d accounts after handing out its third, want 4", server.declared)
 	}
-	if want := fmt.Sprintf("nats://t3:t3@%s", server.host); third != want {
+	if want := fmt.Sprintf("nats://t3:t3@%s", server.host.endpoint()); third != want {
 		t.Fatalf("the third test's URL is %q, want %q", third, want)
 	}
 	if _, err := kv.Put("after-the-reload", []byte("1")); err != nil {

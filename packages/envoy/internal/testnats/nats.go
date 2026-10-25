@@ -81,8 +81,8 @@ func Main(m *testing.M) int {
 	mainRuns = true
 	code := m.Run()
 	if shared != nil {
-		if err := testcontainers.TerminateContainer(shared.ctr); err != nil {
-			fmt.Fprintf(os.Stderr, "remove the package's shared NATS container: %v\n", err)
+		if err := shared.host.terminate(); err != nil {
+			fmt.Fprintf(os.Stderr, "remove the package's shared NATS server: %v\n", err)
 			if code == 0 {
 				code = 1
 			}
@@ -113,8 +113,7 @@ func URL(t testing.TB) string {
 
 // accountServer is a NATS server that hands each test a JetStream account no earlier test used.
 type accountServer struct {
-	ctr  *tcnats.NATSContainer
-	host string
+	host accountHost
 
 	mu sync.Mutex
 	// declared is how many accounts the server's configuration declares, and handedOut how many of
@@ -128,6 +127,15 @@ type accountServer struct {
 // startAccountServer starts a server declaring accounts accounts. Its log carries no -DV protocol
 // trace, since a reload's outcome is read from the log.
 func startAccountServer(accounts int) (*accountServer, error) {
+	host, err := startAccountHost(accounts)
+	if err != nil {
+		return nil, err
+	}
+	return &accountServer{host: host, declared: accounts, holders: map[string]string{}}, nil
+}
+
+// startContainerHost starts the shared account server as a NATS test container.
+func startContainerHost(accounts int) (accountHost, error) {
 	ctx := context.Background()
 	ctr, err := tcnats.Run(ctx, Image,
 		testcontainers.WithCmd("-js"),
@@ -139,7 +147,7 @@ func startAccountServer(accounts int) (*accountServer, error) {
 	if err != nil {
 		return nil, errors.Join(err, testcontainers.TerminateContainer(ctr))
 	}
-	return &accountServer{ctr: ctr, host: host, declared: accounts, holders: map[string]string{}}, nil
+	return containerHost{ctr: ctr, host: host}, nil
 }
 
 // url is URL on s.
@@ -151,14 +159,14 @@ func (s *accountServer) url(t testing.TB) string {
 		return uri
 	}
 	if s.handedOut == s.declared {
-		if outcome := reload(t, s.ctr, moduleConfigPath, accountsConfig(2*s.declared)); outcome != reloaded {
+		if outcome := s.host.reload(t, accountsConfig(2*s.declared)); outcome != reloaded {
 			t.Fatalf("NATS refused %d accounts: %s", 2*s.declared, outcome)
 		}
 		s.declared *= 2
 	}
 	s.handedOut++
 	account := s.handedOut
-	uri := fmt.Sprintf("nats://t%d:t%d@%s", account, account, s.host)
+	uri := fmt.Sprintf("nats://t%d:t%d@%s", account, account, s.host.endpoint())
 	// Wait for the account to answer, after the start or the reload that declared it.
 	Connect(t, uri).Close()
 	name := t.Name()
