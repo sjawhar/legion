@@ -3,6 +3,9 @@ package pmdoc
 import (
 	"errors"
 	"fmt"
+	"io/fs"
+	"os"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"testing"
@@ -149,6 +152,139 @@ func TestAReadBackCountsNoElements(t *testing.T) {
 	if _, err := ParseRendering(strings.Repeat("a_", 1<<19)); err != nil {
 		t.Fatalf("read back a mebibyte of a_: %v", err)
 	}
+}
+
+// The document service counts a room's elements only once its rendering reaches
+// MaxDocumentElements/4 bytes, 16 KiB (docs.elementGateBytes), because a rendering smaller than
+// that cannot reach MaxDocumentElements unless some markdown shape makes more than four elements a
+// byte. This is what keeps that true: it measures every markdown file in this repository and the
+// densest shapes these tests build, the densest measured of all being empty list items at 1,421
+// elements a kibibyte (see MaxDocumentElements). A failure here says the gate is no longer safe,
+// not that the shape it found is wrong: a rendering under 16 KiB can now hold the 65,536 elements
+// one document may make, and the gate has to open lower or count every rendering.
+//
+// A file past the element limit measures nothing (MeasureDocument leaves it uncounted), so it is
+// weighed by its first 16 KiB, which is the rendering size the gate is about; a shape of that size
+// that cannot be counted at all is itself a failure, since it makes more than the limit in the
+// bytes the gate lets through unmeasured.
+func TestNoMarkdownShapeMakesMoreThanFourElementsAByte(t *testing.T) {
+	const gate = MaxDocumentElements / 4
+	// densest is the heaviest markdown a run of weigh has seen, kept for the shapes and for the
+	// repository's files apart so the margin each leaves is read on its own.
+	type densest struct {
+		elementsAByte float64
+		name          string
+	}
+	weigh := func(worst *densest, name, markdown string) {
+		t.Helper()
+		size := MeasureDocument(markdown)
+		if !size.Counted {
+			size = MeasureDocument(markdown[:min(len(markdown), gate)])
+		}
+		if !size.Counted {
+			t.Errorf("%s: %d bytes of it make more elements than one document may hold, so the gate at %d bytes is no longer safe", name, min(len(markdown), gate), gate)
+			return
+		}
+		if size.Bytes == 0 {
+			return
+		}
+		if density := float64(size.Elements) / float64(size.Bytes); density > worst.elementsAByte {
+			*worst = densest{elementsAByte: density, name: name}
+		}
+		if size.Elements > 4*size.Bytes {
+			t.Errorf("%s: %d bytes make %d elements, more than four a byte, so a rendering under the %d-byte gate can hold the %d elements one document may make",
+				name, size.Bytes, size.Elements, gate, MaxDocumentElements)
+		}
+	}
+	var densestShape, densestFile densest
+	fill := func(unit string) string { return strings.Repeat(unit, gate/len(unit)+1)[:gate] }
+	for _, shape := range []struct{ name, markdown string }{
+		{")_", fill(")_")},
+		{"a_", fill("a_")},
+		{"a_b*", fill("a_b*")},
+		{"[a", fill("[a")},
+		{"a line feed per character", fill("a\n")},
+		{"list items", fill("- a\n")},
+		{"empty list items", fill("-\n")},
+		{"the 147-byte fixture of empty list items", strings.Repeat("-\n", 73) + "-"},
+		{"hard breaks", fill("a  \n")},
+		{"headings", fill("# a\n")},
+		{"a two-column table", "| a | b |\n| - | - |\n" + fill("| x | y |\n")},
+		{"inline HTML", fill("<b>*a*</b>")},
+		{`\~a`, fill(`\~a`)},
+		{`)\_`, fill(`)\_`)},
+		{`\)\_`, fill(`\)\_`)},
+		{`\[a`, fill(`\[a`)},
+		{"&#95;a", fill("&#95;a")},
+	} {
+		weigh(&densestShape, "the shape "+shape.name, shape.markdown)
+	}
+	root := repositoryRoot(t)
+	files := 0
+	for _, file := range repositoryMarkdown(t, root) {
+		markdown, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, err := filepath.Rel(root, file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		weigh(&densestFile, name, string(markdown))
+		files++
+	}
+	if files < 100 {
+		t.Fatalf("the walk found %d markdown files in this repository, want the hundreds it holds", files)
+	}
+	t.Logf("the densest markdown weighed here is %s at %.3f elements a byte; the densest of the repository's %d markdown files is %s at %.3f",
+		densestShape.name, densestShape.elementsAByte, files, densestFile.name, densestFile.elementsAByte)
+}
+
+// repositoryRoot is the directory this repository's Go workspace sits in, found by walking up from
+// the package the test runs in.
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(root, "go.work")); err == nil {
+			return root
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			t.Fatal("no go.work above this package: the repository root is what the walk starts from")
+		}
+		root = parent
+	}
+}
+
+// repositoryMarkdown is every markdown file under root. The trees nothing in this repository wrote
+// - its dependencies, its version control, the caches each leaves - are skipped: what the guard
+// above weighs is the markdown this repository's own documents and fixtures hold.
+func repositoryMarkdown(t *testing.T, root string) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if name := entry.Name(); path != root && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(entry.Name(), ".md") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
 }
 
 // MeasureDocument counts a document as an upload's parse does: for each shape, the most units an

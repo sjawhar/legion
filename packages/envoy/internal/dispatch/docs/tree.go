@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"runtime"
 	"sync"
 	"sync/atomic"
@@ -321,6 +322,70 @@ type renderedReplica struct {
 	// markdown is the room's rendered markdown when the update observer last saw it change, or at
 	// the room's load before any update has; nil while the document is outside the schema.
 	markdown *string
+	// bytes and elements are that rendering's size, published beside it for the peer update hook
+	// to load (Service.weighPeerUpdate). The hook runs on the peer's read loop, where taking mu
+	// would put every browser in the room behind its load (AGENTS.md:527-530), so the measurement
+	// travels as two atomics rather than under the lock the rendering itself is kept under.
+	// Both are sizeUnmeasured while the room has no rendering to measure, which is a document
+	// outside the schema; elements is elementsPastCounting for a rendering whose elements
+	// goldmark stopped counting, and zero below the element gate (publishSize).
+	bytes, elements atomic.Int64
+}
+
+// sizeUnmeasured is what bytes and elements hold for a room whose document renders no markdown to
+// measure: a document outside the Proof schema, which the socket path refuses to open in the first
+// place (refuseOutsideSchema, websocket.go:176) and which a live document can still fall into
+// between two renders. The hook admits an update on such a room; the room's next render settles it.
+const sizeUnmeasured = -1
+
+// elementsPastCounting is what elements holds for a rendering goldmark stopped building: it makes
+// more elements than one document may hold, by how many is unknown (pmdoc.MeasureDocument), so it
+// weighs as past every bound the hook keeps.
+const elementsPastCounting = math.MaxInt64
+
+// elementGateBytes is the rendering at which the element half of the measurement starts being
+// counted: a quarter of the element bound in bytes, 16 KiB. Below it no markdown shape measured
+// here can reach pmdoc.MaxDocumentElements, since none makes more than four elements a byte: the
+// densest of this repository's own markdown files makes 1,421 a kibibyte, about 1.4 a byte
+// (pmdoc/elements.go:25-28), and the densest shape measured at all, a document of empty list
+// items, 3.04 a byte, which leaves the gate a margin of 1.3 rather than the three the design read
+// off the repository's files alone. TestNoMarkdownShapeMakesMoreThanFourElementsAByte is what
+// keeps that margin true, so the element count below the gate is published as zero without
+// measuring it. The gate is there because the measurement is not free: pmdoc.MeasureDocument
+// parses the rendering again, where the bytes are a len of the rendering the observer has already
+// made, and every changed keystroke on a room at or past the gate pays that parse
+// (updateChangesMarkdown).
+const elementGateBytes = pmdoc.MaxDocumentElements / 4
+
+// publishSize publishes markdown's size for the peer update hook, the rendering the caller is
+// keeping as the replica's own. A rendering the room could not read publishes no size.
+func (r *renderedReplica) publishSize(markdown *string) {
+	if markdown == nil {
+		r.bytes.Store(sizeUnmeasured)
+		r.elements.Store(sizeUnmeasured)
+		return
+	}
+	elements := int64(0)
+	if len(*markdown) >= elementGateBytes {
+		size := pmdoc.MeasureDocument(*markdown)
+		elements = int64(size.Elements)
+		if !size.Counted {
+			elements = elementsPastCounting
+		}
+	}
+	r.bytes.Store(int64(len(*markdown)))
+	r.elements.Store(elements)
+}
+
+// size is the room's last published measurement - the bytes of its rendering and the elements that
+// rendering makes - and whether it has one. It takes no lock, so a caller on the peer's read loop
+// reads a measurement as recent as the room's last update observer and holds up nobody for it. The
+// two halves are published one after the other, so a caller reading across a publication sees one
+// rendering's bytes beside the elements of the rendering before it: each half is a measurement the
+// room made, one update apart at most, which is the staleness the measurement already carries.
+func (r *renderedReplica) size() (bytes, elements int64, measured bool) {
+	bytes, elements = r.bytes.Load(), r.elements.Load()
+	return bytes, elements, bytes != sizeUnmeasured
 }
 
 // lockForUpdate takes mu for the update observer. A read only tries mu, and takes it only while
@@ -352,6 +417,7 @@ func (r *renderedReplica) observe(room string, live *crdt.Doc, onChanged func(tr
 // never its successor's.
 func (s *Service) keepReplica(live *crdt.Doc, markdown *string) *renderedReplica {
 	replica := &renderedReplica{markdown: markdown}
+	replica.publishSize(markdown)
 	listResident(&s.replicas, live, weak.Make(replica))
 	return replica
 }
@@ -470,6 +536,7 @@ func (r *renderedReplica) updateChangesMarkdown(room string, onChanged func(tree
 	markdown, tree, err := renderDocumentForUpdate(r.doc)
 	if err != nil {
 		r.markdown = nil
+		r.publishSize(nil)
 		if errors.Is(err, ErrDocOutsideSchema) {
 			slog.Warn("dispatch: updated document outside Proof schema", "room", room, "error", err)
 		} else {
@@ -481,6 +548,10 @@ func (r *renderedReplica) updateChangesMarkdown(room string, onChanged func(tree
 		return false
 	}
 	r.markdown = &markdown
+	// The rendering the hook weighs is published with the rendering itself, and an update that
+	// left the rendering as it was leaves the measurement as it was too, so no unchanged
+	// keystroke pays the element gate's parse (elementGateBytes).
+	r.publishSize(r.markdown)
 	if onChanged != nil {
 		onChanged(tree)
 	}

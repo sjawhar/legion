@@ -11,7 +11,6 @@ import (
 	"time"
 
 	"github.com/reearth/ygo/crdt"
-	ygsync "github.com/reearth/ygo/sync"
 
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 )
@@ -200,10 +199,18 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 		t.Fatalf("render the browser's document: %v", err)
 	}
 
+	// The room takes the browser's update through the service's own apply rather than over the
+	// socket. A socket weighs every update a browser sends (weighPeerUpdate) and refuses this one:
+	// it is about three megabytes against a seven-byte document, so it passes the byte bound
+	// before anything decodes it, and what it inserts is 150,000 items where an update at the
+	// bound may insert 8 KiB. No browser frame can both pass ygo's default pending queue of
+	// 100,000 items and stay under the bound, so what is under test here - the store's check of an
+	// update the room took - is driven on the path the hook does not weigh, and the case below
+	// appends the same update in a transaction.
 	t.Run("a room stores it and keeps it", func(t *testing.T) {
 		httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
 		t.Cleanup(httpServer.Close)
-		peer := connectPeer(t, httpServer.URL, artifactID, "alice")
+		connectPeer(t, httpServer.URL, artifactID, "alice")
 		waitFor(t, 10*time.Second, "the peer's room to open", func() bool {
 			return service.srv.GetDoc(artifactID) != nil
 		})
@@ -212,8 +219,15 @@ func TestTheStoreTakesOneBrowserUpdateItsRoomTook(t *testing.T) {
 		if err != nil {
 			t.Fatalf("read the document's head: %v", err)
 		}
-		if err := peer.Write(ygsync.EncodeUpdate(update)); err != nil {
-			t.Fatalf("send the browser's update: %v", err)
+		room := service.srv.GetDoc(artifactID)
+		if room == nil {
+			t.Fatal("the peer's room has gone")
+		}
+		// The room's own apply of a peer's update, as ygo makes it (sjawhar/ygo v1.51.3-sami.2,
+		// provider/websocket/peer_update.go:75-84), with the room's persistence taking what it
+		// leaves.
+		if err := crdt.ApplyUpdateV1(room, update, nil); err != nil {
+			t.Fatalf("the room refused the browser's update: %v", err)
 		}
 		// The store holds the update once a version past head declares its items: the peer's
 		// answer to the room's sync step 1, an empty update, can move the head first.

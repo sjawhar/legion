@@ -582,6 +582,10 @@ func New(deps Deps) *Service {
 	// published write's suppression slot is finished before ygo's persistence observer runs
 	// (onLoadDocument), so that persistence never waits on the publish it is running in.
 	srv.RoomIdleTimeout = roomIdleTimeout
+	// ygo reads a websocket message of up to 64 MiB without this floor, from any browser that
+	// opens a document socket. It is a floor against a client that is not the editor, not the
+	// bound on what a document may hold, which is the peer update hook's (maxMessageBytes).
+	srv.MaxMessageBytes = maxMessageBytes
 
 	service.srv = newRoomServer(srv)
 	srv.Authorize = service.authorize
@@ -591,6 +595,10 @@ func New(deps Deps) *Service {
 	srv.OnLastPeer = service.settleLastPeer
 	// ygo calls it once for every room it retires, whichever way: the idle sweep, CloseRoom.
 	srv.OnUnloadDocument = service.releaseUnloadedRoom
+	// Every update and whole-state message a read-write browser sends is weighed here before the
+	// room takes it, which is what keeps a browser from growing a document past the bound every
+	// server write obeys (weighPeerUpdate).
+	srv.OnPeerUpdate = service.weighPeerUpdate
 
 	return service
 }
