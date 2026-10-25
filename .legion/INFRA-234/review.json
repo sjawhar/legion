@@ -2,26 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-234",
-  "completed": "2026-10-25T07:28:00Z",
-  "decision": "approved",
+  "completed": "2026-10-25T07:40:00Z",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
-  "reviewedCodeSha": "b5b5f61ae51c16a5d2702194aee2fd5b1b2ea1fb",
-  "ciHead": "e3147c7f6c15dca6e182cb08a620eb10316bf0fb",
-  "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title; branch protection lists none. At e3147c7f: Tests run 40171388804 lint/typecheck/test success; PR Title run 40171604623 pr-title success; Legion Envoy and Contracts run 40171388774 success. Compare e3147c7f...5245de2a: only .legion/ files.",
-  "thermonuclear": "Not run: the diff is documentation only (docs/kubernetes.md, AGENTS.md), and the reviewer's rule gives a docs-only diff no thermonuclear pass.",
-  "verified": [
-    "The selector rule the page now states is the deployment's own: its Service admission rule requires spec.selector to be exactly batch.kubernetes.io/controller-uid equal to the single owner reference's uid, with the stated reason (a validating policy sees only the submitted object and cannot look a Job up). Read in the deployment repository's admission declaration, not quoted here.",
-    "Both E2E lines present in the PR body, each naming a role-container surface, the extracted page blocks at b5b5f61a, a fresh workload suffix, observations, and a dry-run negative control; the tester verified the implementer's proof by an independent drive.",
-    "sjawhar/legion#2149 still OPEN at review time, so T6/T7 not running matches the architect's recorded ruling (plan.md section 7).",
-    "Independent private-literal sweep: 13 candidate literals extracted from the deployment's declaration, 0 hits in the diff, the commit messages, the PR title/body/branch and the three handoffs; the same literals hit in the declaration itself (positive control). check-private-names.sh exit 0.",
-    "No other passage of the section is left contradicting the new dated bullets: the conditional gate paragraphs (2584-2605) stay true; endpoints and patch-jobs answers unchanged. The INFRA-71 learning in docs/solutions/best-practices records the 2026-10-24 matrix as a dated measurement and is history, not a claim about now."
+  "reviewedCodeSha": "9d6c255bf78efaa4a67f62ef8d50caed0dd1b76b",
+  "ciHead": "83df94e30df2efff22380f4d844f7999860fba5e",
+  "ci": "At 07:39Z on 83df94e3: Tests run 40173332511 and Legion Envoy and Contracts run 40173332325 queued; PR Title run 40173470843 pending. Not waited for: this round requests changes, which stands whatever CI says. Compare 83df94e3...0fdf0617: only .legion/.",
+  "thermonuclear": "Not run: the diff is documentation only.",
+  "previousRound": "Approved d874310f (code b5b5f61a). Retro found the INFRA-71 bullet's 'not run again since' covered the Job half, which went back through implementing (9d6c255b) and testing; this is a new round on that code.",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:2814-2816",
+      "description": "The INFRA-71 bullet still puts two items under 'not run again since' that the 2026-10-25 runs repeated, which is the same contradiction 9d6c255b fixed for the Job half. Run infra-234-postgres-1c9d92 ran the reachability block verbatim, and it printed `answered` against a listener. Runs af1ede and 3022f9 saw the first connection refused and then the retry answer, which is the refused-then-listens case, and 2799-2803 says so. Only the dropped-packets (TimeoutError) case was not run again. Fix: keep only the dropped-packets case under the qualifier, and state the other two as run on 2026-10-24 and repeated by the 2026-10-25 sequence above."
+    }
   ],
-  "keyFindings": [],
-  "threads": "No review threads on the pull request; no bot threads.",
+  "threads": "No review threads before this round; this round opens one.",
   "notProven": [
-    "Spec findings 1 and 2 (the reason clause at docs/kubernetes.md:2760-2763 and the AGENTS.md back-pointer) wait on sjawhar/legion#2149; the architect files the successor when it merges.",
+    "Spec findings 1 and 2 wait on sjawhar/legion#2149 (still OPEN at 07:39Z); the architect files the successor when it merges.",
     "The recorded gate answers are a 2026-10-25 measurement of one deployment."
   ]
 }
