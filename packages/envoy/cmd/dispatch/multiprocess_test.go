@@ -743,6 +743,42 @@ func settlementOwedFor(t *testing.T, pair *dispatchPair, artifactID string) bool
 	return owed
 }
 
+// storedHead is the version of the document's latest durable update, which is the version a room
+// of it must stand at to append anything (ErrRoomBehindHead).
+func storedHead(t *testing.T, pair *dispatchPair, artifactID string) int64 {
+	t.Helper()
+	var head int64
+	if err := pair.database.Pool.QueryRow(context.Background(),
+		`select coalesce(max(version), 0) from doc_updates where artifact_id = $1`, artifactID).Scan(&head); err != nil {
+		t.Fatalf("read the stored head of %s: %v", artifactID, err)
+	}
+	return head
+}
+
+// waitForTheReconnectsOwnUpdate waits for the head to pass before, the head the document stood at
+// when the browser reconnected, and answers how long that took. Nothing else writes this document
+// in that stretch - B's trailing write comes after it, and a settlement of A's is two seconds out
+// (the settle delay) - so the update that raises the head is the reconnecting peer's own.
+//
+// A wait that ends with nothing stored fails the row rather than letting it run on: a reconnect
+// whose update the room never takes is a construction this row no longer describes, and running
+// on would put that update back in the window where it closes the socket the row measures.
+func waitForTheReconnectsOwnUpdate(t *testing.T, pair *dispatchPair, artifactID string, before int64) time.Duration {
+	t.Helper()
+	const within = time.Second
+	opened := time.Now()
+	for {
+		if head := storedHead(t, pair, artifactID); head > before {
+			return time.Since(opened)
+		}
+		if time.Since(opened) >= within {
+			t.Fatalf("the reconnecting browser's own update was not stored within %v: the document still stands at update %d. A provider answers the room's sync step 1 with its own state, which the room appends, and this row needs that append before its trailing write, since one made after it is refused and fails the room.",
+				within, before)
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 // writeThroughRetrying503s makes one edit through the process's own API, repeating a 503 as a
 // client is told to. A write whose own room is failed or reloading is answered
 // 503 DOC_SERVICE_UNAVAILABLE, and the contract is that the caller repeats the same call
@@ -824,7 +860,20 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	if beforeReload != nil {
 		beforeReload()
 	}
+	// The reconnecting browser's own update first, and stored before the trailing write. A
+	// provider answers the room's sync step 1 with its own state (docstest.Peer.read, as
+	// y-websocket does), the room applies that update and appends it, and an append from a room
+	// standing behind the durable head is refused by the gate and fails the room
+	// (ErrRoomBehindHead, docs/stale_room.go's own account of it). So a reconnect whose update
+	// lands after the trailing write closes this socket within milliseconds of that write, by a
+	// path that is neither eviction nor settlement, and the row measures nothing it is named
+	// for: that is how this row failed 2 of 20 runs here and once in CI (dispatch://INFRA-396).
+	// Taken in order instead, the update is stored, the room stands at the head again, and the
+	// trailing write is the only thing that leaves it behind.
+	head := storedHead(t, pair, artifactID)
 	reconnected := pair.a.openEditor(t, artifactID, "middle\n")
+	stored := waitForTheReconnectsOwnUpdate(t, pair, artifactID, head)
+	t.Logf("the reconnecting browser's own update was stored %v after its socket opened", stored)
 	wrote := time.Now()
 	writeThroughRetrying503s(t, pair.b, artifactID, "middle", "after")
 	// Measured to the write's own answer, not to the moment it was begun: the notification is
@@ -863,8 +912,9 @@ func requireTheRoomClosed(t *testing.T, p *dispatchProcess, editor *docstest.Pee
 }
 
 // requireTheSecondEviction is what credits the close above to the window: editor.Ended says the
-// socket went, not who ended it, and both rows below have another path that ends it - the
-// settlement rescue's failRoomLocked for the room that owes one, an unload for either - so the
+// socket went, not who ended it, and both rows below have other paths that end it - a browser
+// append the durable gate refused (ErrRoomBehindHead), which fails the room, the settlement
+// rescue's failRoomLocked for the room that owes one, an unload for either - so the
 // close is the window's only if the evictor closed that room a second time. The first eviction
 // is asserted in burstLeavingTheRoomBehind, so the count here is two. The line is written after
 // the room has closed, so it is waited for rather than counted the moment the socket went; ten
@@ -883,7 +933,7 @@ func requireTheSecondEviction(t *testing.T, p *dispatchProcess, artifactID, what
 			t.Fatalf("%s: the evictor closed this room %d times, and the burst leaves it exactly two - the first write's and the refused notification's window - so something else wrote this document:\n%v",
 				what, evictions, p.logLines("closed a document room another process's write left behind", "room="+artifactID))
 		case time.Now().After(deadline):
-			t.Fatalf("%s: the room closed but the evictor has closed it %d time(s) in %v, not the two this burst leaves, so what closed it is some other path - the settlement rescue's failRoomLocked, or an unload - and not the window of the notification the interval refused.\nThis room's evictions, then the closes and the head reads that failed:\n%v\n%v\n%v\nThe process's output:\n%s",
+			t.Fatalf("%s: the room closed but the evictor has closed it %d time(s) in %v, not the two this burst leaves, so what closed it is some other path - a browser append the durable gate refused, the settlement rescue's failRoomLocked, or an unload - and not the window of the notification the interval refused.\nThis room's evictions, then the closes and the head reads that failed:\n%v\n%v\n%v\nThe process's output:\n%s",
 				what, evictions, budget,
 				p.logLines("closed a document room another process's write left behind", "room="+artifactID),
 				p.logLines("close a document room another process's write left behind", "room="+artifactID),
