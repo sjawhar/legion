@@ -85,8 +85,13 @@ An install of your own — an interpreter, a browser, a second toolchain, an ext
 on the sanctioned side when both of these hold: what it writes lands on the issue's own volume,
 under `/legion`, which outlives the pod and is shared by the issue's roles — whether through a
 variable the runtime sets for you there or under a path on that volume your harness names
-itself — and after the command exits nothing else resolves differently. The variables the
-runtime sets on the volume, where a tool's own cache already goes, are
+itself — but outside the issue's workspace (`$LEGION_WORKSPACE`, under `/legion/workspaces`) and
+the runtime's own directories (`/legion/repos`, `/legion/feed`, `/legion/sessions`); and after
+the command exits nothing else resolves differently. The workspace is excluded because its jj
+working copy tracks every new file, so a root written there is added to the change every role
+shares; the one write into it that is sanctioned is a repository's own dependency install into
+its ignored directories, below. The variables the runtime sets on the volume, where a tool's own
+cache already goes, are
 `XDG_CACHE_HOME` (`/legion/scratch/cache`), `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`,
 `GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` (`/legion/uv/cache`) and
 `UV_PYTHON_INSTALL_DIR` (`/legion/uv/python/<issue>`). (`XDG_CONFIG_HOME` is set too and is not
