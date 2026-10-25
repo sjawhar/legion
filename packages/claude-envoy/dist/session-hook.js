@@ -19300,8 +19300,14 @@ function dispatchSettings(env, config2) {
 
 // ../envoy-client/src/envoy-settings.ts
 var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 120000;
-var MIN_HEARTBEAT_MS = 25;
+var DEFAULT_HEARTBEAT_MS = 90000;
+var MIN_PASS_DEADLINE_MS = 30000;
+var MIN_INTERVAL_MS = 25;
+var MAX_INTERVAL_MS = 2147483647;
+function namedInterval(raw) {
+  const parsed = Number(raw);
+  return Number.isFinite(parsed) && parsed > 0 ? parsed : undefined;
+}
 function natsSeedFromEnvironment(env) {
   const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
   if (file2 !== undefined) {
@@ -19388,13 +19394,17 @@ function envoySettings(env, config2, options = {}) {
       inbound = { off: messageFor(error48) };
     }
   }
-  const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+  const namedHeartbeatMs = namedInterval(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs = namedHeartbeatMs === undefined ? DEFAULT_HEARTBEAT_MS : Math.min(Math.max(namedHeartbeatMs, MIN_INTERVAL_MS), MAX_INTERVAL_MS);
+  const namedPassDeadlineMs = namedInterval(env.ENVOY_PASS_DEADLINE_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url2),
     token,
     inbound,
-    heartbeatMs: Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS) : DEFAULT_HEARTBEAT_MS
+    heartbeatMs,
+    passDeadlineMs: Math.min(Math.max(namedPassDeadlineMs ?? MIN_PASS_DEADLINE_MS, heartbeatMs), MAX_INTERVAL_MS),
+    passDeadlineRaisedFrom: namedPassDeadlineMs !== undefined && namedPassDeadlineMs < heartbeatMs ? namedPassDeadlineMs : undefined
   };
 }
 function normalizeEnvoyUrl(value) {
@@ -19447,6 +19457,9 @@ function startNotice(config2, dispatch, envoy, nats) {
   if (envoy.enabled && nats && "off" in envoy.inbound) {
     parts.push(`Envoy's inbound messages are off: ${envoy.inbound.off}; the Envoy tools still work`);
   }
+  if (envoy.enabled && envoy.passDeadlineRaisedFrom !== undefined) {
+    parts.push(`Envoy's pass deadline is ${envoy.passDeadlineMs} ms, not the ${envoy.passDeadlineRaisedFrom} ms ENVOY_PASS_DEADLINE_MS names: a deadline inside one ${envoy.heartbeatMs} ms heartbeat interval would abandon every pass before the next tick, so the registration refresh the heartbeat posts for a stalled pass would never run`);
+  }
   return parts.length === 0 ? null : parts.join("; ");
 }
 function sessionSettings(file2, env, options) {
@@ -19457,7 +19470,11 @@ function sessionSettings(file2, env, options) {
   const config2 = readEnvoyConfig(file2.path, env, options);
   const dispatch = dispatchSettings(env, config2);
   const envoy = envoySettings(env, config2, { nats: options.nats });
-  return { dispatch, envoy, notice: startNotice(config2, dispatch, envoy, options.nats !== false) };
+  return {
+    dispatch,
+    envoy,
+    notice: startNotice(config2, dispatch, envoy, options.nats !== false)
+  };
 }
 function sessionDispatchSettings(file2, env, options) {
   if (file2.path === null)
