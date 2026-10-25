@@ -715,15 +715,17 @@ transaction locks; and the count the migration's own census answers. Those table
   Postgres's lexer reads the migration: not in its comments, its string literals or the body of a
   function it defines, and in a `DO` block's body, which it runs;
 - the table behind each index it drops or alters;
-- every table a foreign key reaches from a table whose rows it writes, read from `pg_constraint`
-  when the census is taken, and from the `references` an earlier pending migration adds, which
-  applies first at boot (in a `create table` or `alter table`, inside a `DO` block too, behind an
-  `if not exists` over `pg_constraint` or not): a row inserted or updated (an upsert's `do update`
-  included) is checked against the table its key references, and a row deleted, or one whose key
-  an update changes, is checked against every table that references it or cascades into it, and on
-  from there. The report prints such a table as `touches <table> through a foreign key with
-  <table>`, and checks its holders and that it can be read, but neither counts its rows nor holds
-  it to the size limit: the migration locks it only to check or act on the rows that key connects.
+- every table a foreign key reaches from a table whose rows it writes, or from a table it drops,
+  read from `pg_constraint` when the census is taken, and from the `references` an earlier pending
+  migration adds, which applies first at boot (in a `create table` or `alter table`, inside a `DO`
+  block too, behind an `if not exists` over `pg_constraint` or not): a row inserted or updated (an
+  upsert's `do update` included) is checked against the table its key references, a dropped
+  table's own foreign keys go with it and take ACCESS EXCLUSIVE on each table they reference, and a
+  row deleted, or one whose key an update changes, is checked against every table that references
+  it or cascades into it, and on from there. The report prints such a table as `touches <table>
+  through a foreign key with <table>`, and checks its holders and that it can be read, but neither
+  counts its rows nor holds it to the size limit: the migration locks it to check or act on the
+  rows that key connects, or, for a drop, only for the catalog change, reading no row.
 
 A table a statement only reads (`insert … select from`, `create view … as`) is not listed: its
 ACCESS SHARE waits only behind an ACCESS EXCLUSIVE holder. Each store's tests apply every one of

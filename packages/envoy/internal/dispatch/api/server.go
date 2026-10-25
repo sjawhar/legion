@@ -242,6 +242,11 @@ type server struct {
 	deps            Deps
 	routeIndex      []routeIndexEntry
 	adviceQueryHook func(context.Context, pgx.Tx, string) error
+	// suggestionTimeout overrides the allowance the suggestion step runs under; zero, which every
+	// server the deployment builds leaves it, means writeSuggestionTimeout. Only a test sets it
+	// (newFailingAdviceHandler), so a case's outcome is its own choice rather than its machine's
+	// speed (INFRA-56).
+	suggestionTimeout time.Duration
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
 	// with no Lifetime (register), which mounts no GET /ws/delivery.
 	deliveryHub *deliveryHub

@@ -87,7 +87,7 @@ func (s *Service) VerifyServiceToken(ctx context.Context, token string) (Service
 // TokenLogin logs account (VerifyServiceToken's answer) in, and no person approves it.
 // compactRequest is a machine request object signed by the key the credential is bound to, with
 // exactly one launcher_credential detail naming account's service, verified and replay-checked as
-// Login's is (verifyLauncherRequest). The account's one credential (enroll.Service.IssueTokenLogin)
+// LoginDevice's is (verifyLauncherRequest). The account's one credential (enroll.Service.IssueTokenLogin)
 // moves to that key and expires with the token, at most MaxTokenLoginLifetime after the login.
 //
 // Refusals: record.ErrRequestInvalid (a request object that does not verify, names no single

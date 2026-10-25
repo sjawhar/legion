@@ -59,7 +59,7 @@ The controller is the project's order keeper. It retains its startup role,
 `legion-<project>-controller`; `backlog-order` is retired. Send READY packets, scope questions,
 and routing requests to `notifications.role.legion-<project>-controller`, then follow
 [Backlog stewardship](skill://legion-controller/references/backlog-stewardship.md) for daily
-weekly-plan reconciliation, Sami's rulings, ownership routing, and stopped-session recovery.
+weekly-plan reconciliation, a person's rulings, ownership routing, and stopped-session recovery.
 These duties change Dispatch's priority and board-rank data and route plan work to a live session;
 they start nothing on Legion and hand it no issue ([Free slots](#free-slots-go-daemon)).
 
@@ -373,9 +373,9 @@ themselves: an issue reaches Legion only when a person hands it over
 
 - **Direct user message always first.** If this turn includes a direct user message, answer
   it before handling every other wake.
-- **Sami's rulings.** A direct Dispatch message from Sami is a ruling: after answering it, run
-  the full [Backlog stewardship](#backlog-stewardship) reconciliation and record the current rule
-  in the weekly plan.
+- **A person's rulings.** A direct Dispatch message to this controller from a person is a ruling:
+  after answering it, run the full [Backlog stewardship](#backlog-stewardship) reconciliation and
+  record the current rule in the weekly plan.
 - **One wake = one turn.** Handle exactly the wake's implication, then end the turn. Never
   poll, idle-loop, or wait for another event. Two additions, after any direct user message: every
   turn first rechecks the [trees waiting on a root
