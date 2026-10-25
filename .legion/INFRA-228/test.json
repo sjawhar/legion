@@ -2,24 +2,42 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T16:17:15Z",
-  "round": 6,
+  "completed": "2026-10-25T16:28:27Z",
+  "round": 7,
   "headTested": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-  "handoffHead": "01dff75e43225cc06f422d002925d44f80e276b8",
+  "handoffHead": "82aaf56b9d50d328f12af0300cf2fcb51d282075",
   "implementerProof": {
     "verdict": "verified",
-    "how": "No behaviour moved: `jj diff --from 2fa337992ae8 --to 6c9e78b02f9b` touches packages/envoy/cmd/broker/multiprocess_test.go and the handoff ledger only. `go test -tags multiprocess -count=5 -v -run TestAFixedSessionNameAcrossARollout ./cmd/broker/` -> all four subtests PASS five times of five (subtest 4: 0.21-0.28 s). The test is not vacuous: in an exported copy of 6c9e78b02f9b with the take at the claim removed (BindSession's fixed argument forced false), subtests 3 and 4 FAIL; with a process refusing a holder the name its configuration fixes for another, subtests 1, 3 and 4 FAIL."
+    "how": "Nothing but the ledger moved: `jj diff --from 71dedd02cc65 --to 82aaf56b9d50` touches .legion/INFRA-228/implement.json alone, so the code head is still 6c9e78b02f9b, the head round 6 drove. The body was read on GitHub: 'at every moment', 'refused throughout', 'some running configuration', 'no lapse hands it', 'exactly two ways' and 'cannot take a name from each other' each return zero hits; the Threads ledger line for PRRT_kwDORFy7ds6wBhTN now says a token lapsing no longer hands the name across and points at the Change bullet. The two scoped statements match what I drove: 'while both generations fix the same name, one of their two entries holds it and every other principal is refused it' is round 5's alternation (A and C taking the name by turns, a stranger refused on both generations); 'a name a rollout newly fixes … stays with whichever principal already held it … until the new entry's first exchange' is round 6's B case (B answered 200 on both generations until C's first exchange)."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "Every sentence of the pull request body is true of the code. The architect named the one to attack: 'at every moment the name is held by an entry some running configuration fixes it for, and a principal no configuration designates is refused throughout' (Change bullet 3, rollout paragraph).",
-      "evidence": "I produced such a moment during a rollout, outside the retention case. A rollout that newly fixes a name another principal already holds: the old configuration fixes nothing for legion-daemon:ACME and the new one fixes it for example-other (C). Live, two broker processes on one database (throwaway probe, $TMPDIR/infra228/probes/r6/zz_tester_r6_test.go on the tester's volume): example-worker (B) claims the name on the old process -> 200, held by B under the ordinary 90-day rule. The new process starts and reserves at its first exchange, logging `left a session name the configuration fixes with its holder until the entry claims it … holder=…example-worker entry=…example-other`. Then B, which no running configuration designates, asks the name on the new process -> 200 and on the old process -> 200; A, also undesignated, -> 400 because B holds it; only when C exchanges -> 200 does it move (holder C, infinity) and B -> 400. So while both configurations run, the name is held by, and answered to, a principal no running configuration fixes it for, and that principal is served rather than refused. The same holds after the last old process stops in my round-5 sequence: the old entry holds the name, no running configuration fixes it for that entry, and it is answered 200 until the new entry exchanges. The bullet's first paragraph does describe this window ('a re-point takes effect at the new entry's first exchange … the previous holder keeps the name'), so no behaviour is undisclosed and no code change is called for; the rollout paragraph's closing sentence contradicts it. Remedy: scope that sentence to what it is true of (for example: while both generations fix the name, it is held by one of their two entries, and any other principal is refused; a name a rollout newly fixes stays with its previous holder until the new entry first exchanges, as above)."
+      "criterion": "A pod, a workflow run and a dev box session each obtain a Dispatch access token naming the session, the person and the project scope, by the RFC 8693 exchange, holding no secret; the token is bound to the caller's key, and introspection answers only a live access token.",
+      "surface": "The real compiled cmd/broker binary on a real Postgres, driven over HTTP; the production code at 6c9e78b02f9b is 2fa337992ae8's (6c9e78b02f9b changed one test file).",
+      "command": "rounds 3-6 throwaway drivers against the built binary, plus `go test -count=1 -v -run TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt ./cmd/broker/` (PASS 25.38s at 2fa337992ae8, whose production code 6c9e78b02f9b carries unchanged)",
+      "observed": "Pod, workflow and dev-box exchanges each 200 and introspected with session, person and project scope; a machine login's refresh token and a revoked or lapsed token introspect {\"active\":false}; a storage outage and an undecodable row answer 503 and log the store's own words, with no token or token part anywhere in the log.",
+      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
+      "negativeControl": "The machine token exchanged under a DPoP proof of another key -> 400 invalid_dpop_proof; a replayed workflow token -> 400 (jti used once); a pod of another project asking a held name after the holder's token lapsed -> 400 invalid_grant."
+    },
+    {
+      "criterion": "A session name belongs to its principal: a replacement pod, the next run of a fixed-session workflow and a resumed session keep it; a stranger is refused a fixed name before its entry ever claims it; a re-point lands on the new entry and never locks it out; a revoke wins over an exchange.",
+      "surface": "Real broker processes on one Postgres, including two configurations at once, as in a rollout.",
+      "command": "`go test -tags multiprocess -count=5 -v -run TestAFixedSessionNameAcrossARollout ./cmd/broker/` at 6c9e78b02f9b, and my own live sequences (rounds 3-6 probes on the tester's volume)",
+      "observed": "All four subtests PASS five of five. Replacement pod and workflow runs 101-103 keep the fixed name; a stranger gets 400 before the entry's first claim on both generations; after a re-point the new entry gets 200 at every exchange, the two entries alternate while old-configuration processes serve, and after the last old process stops the new entry keeps it; 10 races of exchange against revoke left no live token.",
+      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
+      "negativeControl": "Subtest 4 is not vacuous: with the take at the claim removed, subtests 3 and 4 fail; with a process refusing the holder a name its configuration fixes for another, subtests 1, 3 and 4 fail."
+    },
+    {
+      "criterion": "Dispatch reaches the broker on its own service-account token, the test suites and the local path run without a shared secret, and the deployment component renders what Dispatch boots on.",
+      "surface": "The real Dispatch binary relaying to the real broker; packages/dispatch/e2e/run-server.sh; scripts/dev-broker.sh; envoy-infra's rendering test.",
+      "command": "round-2 drivers (unchanged code on these paths since), and `go test -run TestDispatchWithABrokerPresentsItsOwnServiceAccountToken ./gcp/` in packages/envoy/infra",
+      "observed": "Dispatch's credential pages answer through the broker on its own token, a rotated token file reaches the broker after the 30 s cache, an unreadable one answers 500 AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE and logs its path; run-server.sh boots against the fake and a real broker; dev-broker.sh's walk-through approves a machine login and exchanges both kinds of token; the component renders a projected ServiceAccount token.",
+      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
+      "negativeControl": "An unlisted account's token -> 403 ACCOUNT_NOT_LISTED; the dev broker with no token -> 401 ACCOUNT_TOKEN_INVALID; carol approving alice's machine login on Dispatch -> 403 NOT_APPROVER."
     }
   ],
-  "exercised": [
-    "The two phrases caught earlier are gone from the bullets: neither 'exactly two ways' nor 'cannot take a name from each other' appears in the body. 'no lapse hands it' survives only in the Threads ledger line for PRRT_kwDORFy7ds6wBhTN ('so no lapse hands it to another account, workflow or person'), a record of the round-3 fix that is also an overstatement; correct it with the bullet.",
-    "Rest of the rollout description, as driven in round 5 at the same production code and pinned by subtest 4: during a re-point the two entries take the name by turns, each take logged with both principals; the holder is answered on every process; neither entry is refused its own name; it ends when the last old-configuration process stops and the new entry next exchanges.",
-    "CI, read from the code commits' own runs: 2fa337992ae8 Tests 40209134669 success (Legion Envoy and Contracts 40209134633 cancelled by the newer push). At 6c9e78b02f9b: Tests 40210525013 and Legion Envoy and Contracts 40210525029 queued; Docs 40210525008 and Worker Image 40210525014 in progress."
-  ]
+  "observationForTheArchitect": "Statement 1 has one stacked corner, sent to the architect as a child-issue candidate per its ruling: a name newly fixed by one generation whose entry never exchanged, then re-pointed by the next. Live (probe $TMPDIR/infra228/probes/r7/zz_tester_r7_test.go): v1 fixes nothing and B claims legion-daemon:ACME; v2 fixes it for A, who never exchanges; v3 re-points it to C; during the v2 -> v3 rollout both generations fix the name, yet B, neither generation's entry, holds it and is answered 200 on both. It is statement 2's window still open from the earlier rollout, so nothing undisclosed happens; only 'one of their two entries holds it' does not hold in that composition.",
+  "ciAtCodeHead": "6c9e78b02f9b: Docs 40210525008 success; Worker Image 40210525014 success; Tests 40210525013 in progress (test running); Legion Envoy and Contracts 40210525029 queued. 2fa337992ae8 (same production code) settled Tests 40209134669 success."
 }
