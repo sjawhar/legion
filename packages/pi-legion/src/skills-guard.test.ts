@@ -83,9 +83,13 @@ test("no skill or prompt says Legion never merges", () => {
 
 // The controller's `gh` acts as the review App (LEGION-668): the skill must say how it checks a
 // pull request's state, and nothing anywhere in the sweep's roots may still claim the controller
-// (or any role) cannot read GitHub.
+// (or any role) cannot read GitHub. The skill is its SKILL.md and its references, which SKILL.md
+// names at the step that needs each one.
 test("the controller skill reads pull requests as the review App, and nothing says the controller holds no GitHub credential", () => {
-  const controllerSkill = readFileSync(path.join(staged, "legion-controller/SKILL.md"), "utf8");
+  const controllerSkill = files(path.join(staged, "legion-controller"))
+    .filter((file) => file.endsWith(".md"))
+    .map((file) => readFileSync(file, "utf8"))
+    .join("\n");
   expect(controllerSkill).toContain(
     "gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state"
   );
