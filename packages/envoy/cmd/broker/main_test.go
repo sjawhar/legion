@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -224,7 +225,7 @@ func TestMainSignsInToALocalPasswordlessURLAsGiven(t *testing.T) {
 	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	addr, boot := startBroker(t, append(noAWSEnv(t),
+	addr, boot, _ := startBroker(t, append(noAWSEnv(t),
 		"BROKER_DATABASE_URL="+parsed.String(),
 		"PGPASSFILE="+passfile,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
@@ -238,9 +239,12 @@ func TestMainSignsInToALocalPasswordlessURLAsGiven(t *testing.T) {
 }
 
 // startBroker builds and starts the broker binary with productionEnv and env, stops it with
-// SIGTERM when t ends, and returns the address its "broker listening" line names and its log up
-// to that line.
-func startBroker(t *testing.T, env ...string) (addr, boot string) {
+// SIGTERM when t ends, and returns the address its "broker listening" line names, its log up to
+// that line, and await: everything the broker has logged once a line carrying want has arrived.
+// The binary logs the rest of its boot — the state of its token exchange — after the bind line a
+// caller synchronises on, so a test that reads one of those later lines asks await for it rather
+// than reading the snapshot; await fails t if that line has not come within ten seconds.
+func startBroker(t *testing.T, env ...string) (addr, boot string, await func(want string) string) {
 	t.Helper()
 	cmd := exec.Command(buildBroker(t))
 	cmd.Env = append(append(os.Environ(), productionEnv...), env...)
@@ -255,9 +259,38 @@ func startBroker(t *testing.T, env ...string) (addr, boot string) {
 		_ = cmd.Process.Signal(syscall.SIGTERM)
 		_ = cmd.Wait()
 	})
-	var log strings.Builder
-	addr = waitForBoundAddress(t, io.TeeReader(stderr, &log))
-	return addr, log.String()
+	log := &brokerLog{}
+	addr = waitForBoundAddress(t, io.TeeReader(stderr, log))
+	return addr, log.String(), func(want string) string {
+		t.Helper()
+		for deadline := time.Now().Add(10 * time.Second); ; time.Sleep(20 * time.Millisecond) {
+			if text := log.String(); strings.Contains(text, want) {
+				return text
+			}
+			if time.Now().After(deadline) {
+				t.Fatalf("the broker never logged a line carrying %q:\n%s", want, log.String())
+			}
+		}
+	}
+}
+
+// brokerLog is everything the broker has written, which the goroutine draining its stderr keeps
+// adding to while a test reads it.
+type brokerLog struct {
+	mu   sync.Mutex
+	text strings.Builder
+}
+
+func (l *brokerLog) Write(p []byte) (int, error) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.text.Write(p)
+}
+
+func (l *brokerLog) String() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.text.String()
 }
 
 // requireHealthy fails t unless GET /healthz at addr answers 200.
@@ -279,8 +312,9 @@ var addrLogPattern = regexp.MustCompile(`addr=(\S+)`)
 
 // waitForBoundAddress scans the broker's stderr for its "broker listening" log line — the bind
 // fix's whole point: a real bind is reported once, synchronously, only after Listen has already
-// succeeded — and returns the addr it names. Fails the test if the process exits or 10s pass
-// without that line ever appearing.
+// succeeded — and returns the addr it names. It goes on draining stderr after that line, so a
+// caller teeing it into a log is given every later line too and the broker never blocks on a full
+// pipe. Fails the test if the process exits or 10s pass without that line ever appearing.
 func waitForBoundAddress(t *testing.T, stderr io.Reader) string {
 	t.Helper()
 	scanner := bufio.NewScanner(stderr)
@@ -293,8 +327,10 @@ func waitForBoundAddress(t *testing.T, stderr io.Reader) string {
 				continue
 			}
 			if m := addrLogPattern.FindStringSubmatch(line); m != nil {
-				done <- m[1]
-				return
+				select {
+				case done <- m[1]:
+				default:
+				}
 			}
 		}
 	}()
@@ -339,7 +375,7 @@ func TestMainLogsRealBoundAddress(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	addr, boot := startBroker(t,
+	addr, boot, _ := startBroker(t,
 		"BROKER_DATABASE_URL="+databaseURL,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
@@ -394,7 +430,7 @@ func TestFakeSecretsFileServesUnderTheGCPStore(t *testing.T) {
 	]}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	addr, boot := startBroker(t,
+	addr, boot, _ := startBroker(t,
 		"BROKER_DATABASE_URL="+storetest.URL(t),
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
