@@ -1518,20 +1518,61 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.calls).toHaveLength(0);
       expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
     });
-  test("a compound command whose dispatch sends nothing, or names dispatch only as text, is not refused", async () => {
+  test("a compound command whose dispatch sends nothing is not refused", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
     for (const command of [
       "cd /tmp && dispatch ask --help",
       "dispatch ask --dry-run --issue X-1 --question q | jq .",
       "dispatch search --query 'ask' && dispatch read --issue X-1",
       "cd /tmp && dispatch issue --project P --title t",
-      "echo 'dispatch ask --issue X-1' && grep -n 'dispatch comment' notes.md",
-      "cat > /tmp/n.md <<'EOF'\ndispatch ask --issue X-1 --question q\nEOF\necho written",
-      "rg dispatch src | head  # dispatch comment later",
+      "echo $D comment",
+      "rg dispatch src | head",
     ]) {
       expect(await g.bash("b", command)).toBeUndefined();
     }
     expect(g.entries).toHaveLength(0);
+  });
+  // A write another command runs escapes every scan of the call's commands: the text inside
+  // `bash -c`, `eval`, `xargs`, a function or a variable is one word to the shell. AskGate takes
+  // `dispatch` beside a write subcommand anywhere in the call's text as a write it cannot read.
+  const WRAPPED: Array<[string, string, string]> = [
+    ["bash -c", "bash -c 'dispatch comment --issue X-1 --body hi'", "dispatch_comment"],
+    ["sh -c", 'sh -c "dispatch ask --issue X-1 --question q"', "dispatch_ask"],
+    ["eval", "eval 'dispatch comment --issue X-1 --body hi'", "dispatch_comment"],
+    ["xargs", "echo X-1 | xargs -I{} dispatch comment --issue {} --body hi", "dispatch_comment"],
+    [
+      "a function",
+      'f(){ dispatch comment "$@"; }; f --issue X-1 --body hi',
+      "dispatch_comment",
+    ],
+    [
+      "a readable write and a wrapped one",
+      "dispatch comment --issue X-1 --body one; bash -c 'dispatch comment --issue X-1 --body two'",
+      "dispatch_comment",
+    ],
+    [
+      "a here-document another command runs",
+      "cat > /tmp/n.sh <<'EOF'\ndispatch ask --issue X-1 --question q\nEOF\nbash /tmp/n.sh",
+      "dispatch_ask",
+    ],
+  ];
+  for (const [form, command, tool] of WRAPPED)
+    test(`a gated write another command would run is refused: ${form}`, async () => {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      const result = await g.bash("w", command);
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("Nothing in the call ran");
+      expect(g.dryRuns).toHaveLength(0);
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
+    });
+  test("the text scan reads a write it cannot run, and says to keep such text off the command line", async () => {
+    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+    const result = await g.bash("t", "grep -n 'dispatch comment --issue' notes.md");
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain("in this call's text");
+    expect(result?.reason).toContain("put that text in a file and name the file");
+    expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([["dispatch_comment", "unreadable"]]);
   });
   test("a halt or a session the gate would skip lets a compound write run", async () => {
     const compound = "cd $X && dispatch comment --issue X-1 --body b";
@@ -1562,7 +1603,13 @@ console.log(JSON.stringify(args, null, 2));
         "git commit -m 'dispatch ask'; dispatch message --issue X --body \"a; b\" | cat"
       )
     ).toEqual({ tool: "dispatch_message", label: "dispatch message" });
-    expect(unreadableDispatchWrite('echo "run dispatch ask later"')).toBeUndefined();
+    // Text alone is read too: AskGate cannot tell a quoted write from one a wrapper would run.
+    expect(unreadableDispatchWrite('echo "run dispatch ask later"')).toEqual({
+      tool: "dispatch_ask",
+      label: "dispatch ask",
+      wrapped: true,
+    });
+    expect(unreadableDispatchWrite("rg dispatch src | head")).toBeUndefined();
   });
   test("unreadableDispatchWrite reads a command substitution, quoted or not, as a command of its own", () => {
     expect(unreadableDispatchWrite('out="$(dispatch comment --issue X --body y)"')).toEqual({
@@ -1572,15 +1619,21 @@ console.log(JSON.stringify(args, null, 2));
     expect(unreadableDispatchWrite('echo "posted: `dispatch message --issue X --body y`"')).toEqual(
       { tool: "dispatch_message", label: "dispatch message" }
     );
+    // A write in a here-document body, and one in backquotes the shell does not run, are text the
+    // scan reads: AskGate cannot prove the text never reaches a shell.
     expect(
       unreadableDispatchWrite(
         "git commit -m \"$(cat <<'EOF'\nThen dispatch ask --issue X.\nEOF\n)\""
       )
-    ).toBeUndefined();
+    ).toEqual({ tool: "dispatch_ask", label: "dispatch ask", wrapped: true });
     expect(
       unreadableDispatchWrite('echo "$((1 + 2))" "$(echo "a)b")" && dispatch read --issue X')
     ).toBeUndefined();
-    expect(unreadableDispatchWrite('echo "run \\`dispatch ask\\` later"')).toBeUndefined();
+    expect(unreadableDispatchWrite('echo "run \\`dispatch ask\\` later"')).toEqual({
+      tool: "dispatch_ask",
+      label: "dispatch ask",
+      wrapped: true,
+    });
   });
   test("dispatch called by a literal path is reviewed as bare dispatch is: absolute, relative or quoted", async () => {
     // No stub on PATH: only the path the command names reaches it.

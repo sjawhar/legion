@@ -1128,18 +1128,50 @@ export interface UnreadableCommand {
   program?: { namesDispatch: boolean; unread: string[] };
   /** The word after `dispatch` is not literal, so the subcommand it names is unknown. */
   subcommand?: { unread: string[] };
+  /** The write is in the call's text, where another command (`bash -c`, `eval`, a function) runs it. */
+  wrapped?: true;
   /** A file the call would make Dispatch read cannot be captured safely. */
   file?: { flag: string; path: string; reason: string };
 }
 
 /**
- * A scoped `dispatch` write in a `bash` command AskGate does not read: a write at a command's
- * position (after any assignments and prefixes such as `env -u HOME --` or `timeout -s KILL 30`,
- * each prefix's options and its `--` read as its own parser reads them: `commandStart`), a scoped
- * subcommand run by a program an expansion names (`$D comment …`, `$(command -v dispatch) ask …`),
- * which may be `dispatch`, or a `dispatch` whose own subcommand an expansion names (`dispatch
- * $SUB …`), which may be a write. One carrying `--dry-run` or `--help`, or a `dispatch issue`
- * without `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
+ * `dispatch`, by name or by a path ending in it, with a gated write subcommand after it. The
+ * pattern is applied to the whole command's text, quotes and here-document bodies included: the
+ * text a `bash -c '…'`, `sh -c`, `eval`, `xargs`, a function or a variable would run is one word
+ * to the shell, so no scan of the call's own commands finds the write inside it.
+ */
+const DISPATCH_IN_TEXT = new RegExp(
+  `(?:^|[^A-Za-z0-9_.-])(?:[^\\s'";|&<>()]*/)?dispatch[ \\t]+(${SCOPED_COMMANDS.join("|")})(?![A-Za-z0-9_-])`,
+  "g"
+);
+
+/**
+ * A gated write in the command's own text, with the flags that follow it to the end of its line,
+ * which say whether it would send anything (`--dry-run`, `--help`, an `issue` with no spec, an
+ * upload that is no markdown document).
+ */
+function textDispatchWrite(command: string): { tool: string; label: string } | undefined {
+  for (const match of command.matchAll(DISPATCH_IN_TEXT)) {
+    const name = match[1];
+    const from = (match.index ?? 0) + match[0].length;
+    const lineEnd = command.indexOf("\n", from);
+    const flags = commandWords(command.slice(from, lineEnd === -1 ? command.length : lineEnd))[0];
+    if (!reviewedWrite(name, flags ?? [])) continue;
+    return { tool: `dispatch_${name.replaceAll("-", "_")}`, label: `dispatch ${name}` };
+  }
+  return undefined;
+}
+
+/**
+ * A scoped `dispatch` write in a `bash` command AskGate does not read. Three scans, in order: a
+ * write at a command's position (after any assignments and prefixes such as `env -u HOME --` or
+ * `timeout -s KILL 30`, each prefix's options and its `--` read as its own parser reads them:
+ * `commandStart`), or a scoped subcommand run by a program an expansion names (`$D comment …`,
+ * `$(command -v dispatch) ask …`), which may be `dispatch`; a `dispatch` whose own subcommand an
+ * expansion names (`dispatch $SUB …`), which may be a write; and `dispatch` beside a write
+ * subcommand anywhere in the call's text (`textDispatchWrite`), which is the write another
+ * command would run. One carrying `--dry-run` or `--help`, or a `dispatch issue` without
+ * `--spec`/`--spec-file`, sends nothing for review and is not one. Only for a command
  * `scopedCommand` could not read.
  */
 export function unreadableDispatchWrite(command: unknown): UnreadableCommand | undefined {
@@ -1176,7 +1208,8 @@ export function unreadableDispatchWrite(command: unknown): UnreadableCommand | u
       ? found
       : { ...found, program: { namesDispatch: named, unread: named ? unread : expansions } };
   }
-  return unknownSubcommand;
+  const wrapped = textDispatchWrite(command);
+  return wrapped === undefined ? unknownSubcommand : { ...wrapped, wrapped: true as const };
 }
 
 /** Runs `script` under bash in a process group of its own, which is killed at the limit or on the signal. */
@@ -1629,7 +1662,13 @@ function resendFlags(flag: string): { stdin: string; regular: string } {
 const LITERAL_GRAMMAR =
   "AskGate reads one form only: one `dispatch` call alone, with at most one `cd <path> &&` before it, one `2>&1` after it, and one here-document opened with a quoted delimiter (`<<'EOF'`). Every word is literal: no `$`, backtick, `~`, `*`, `?`, `[`, `{`, `}` or backslash. Nothing else is in the call: no second command, no pipe, no `;`, `&&`, `||` or `&`, no assignment and no other redirect.";
 /** The refusal for a scoped `dispatch` write inside a command the gate cannot read; nothing in the call ran. */
-function renderUnreadable({ label, program, subcommand, file }: UnreadableCommand): string {
+function renderUnreadable({
+  label,
+  program,
+  subcommand,
+  wrapped,
+  file,
+}: UnreadableCommand): string {
   if (file !== undefined) {
     const { stdin, regular } = resendFlags(file.flag);
     return `AskGate did not run this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. Nothing in the call ran.`;
@@ -1639,16 +1678,18 @@ function renderUnreadable({ label, program, subcommand, file }: UnreadableComman
       ? `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and in this call AskGate cannot know the text it would send.`
       : `AskGate did not run this call: the word after \`dispatch\` holds ${characters(subcommand.unread)}, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`;
   const why =
-    program === undefined
-      ? ""
-      : program.namesDispatch
+    program !== undefined
+      ? program.namesDispatch
         ? ` Here the word that calls \`dispatch\` holds ${characters(program.unread)}, which AskGate does not take as literal.`
-        : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`;
+        : ` Here its program's name holds ${characters(program.unread)}, so AskGate cannot tell which program would run.`
+      : wrapped === true
+        ? ` Here \`${label}\` is in this call's text, where another command (\`bash -c\`, \`sh -c\`, \`eval\`, \`xargs\`, a function or a variable) can run it.`
+        : "";
   const resend =
     subcommand === undefined
       ? ` Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling \`dispatch\` by name"}.`
       : " Send the `dispatch` command again with its subcommand written out.";
-  return `${opening} ${LITERAL_GRAMMAR}${why} Nothing in the call ran.${resend} Text it posts from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.`;
+  return `${opening} ${LITERAL_GRAMMAR}${why} Nothing in the call ran.${resend} Text it posts from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.${wrapped === true ? ` If \`${label}\` here is text and no Dispatch write (a search pattern, a message, a file's content), keep it out of the command line: put that text in a file and name the file.` : ""}`;
 }
 
 /**
