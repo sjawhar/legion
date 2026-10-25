@@ -201,7 +201,9 @@ published — it embeds the original payload, so an envelope near the server's m
 notice refused as too large on every attempt — logs ERROR `listener exception publish failed`
 beside the give-up line and changes nothing else: the message is not NAKed, it keeps the
 attempt-cache entry that turns a redelivery a lost ACK brings into `listener attempt-dedupe skip`,
-and it is ACKed. Only the fanout path still NAKs a message whose exception could not be published.
+and it is ACKed. No other path NAKs on a notice it could not publish: the generic fanout, the one
+that still could, owes no `no_holder` notice at all, since the handler routes every role and agent
+topic elsewhere and a topic reaching the fanout is never a control topic.
 A role lane publishes its exception on the attempt itself, since nothing redelivers a core message.
 
 Role exceptions use core NATS with the role lane. Other control exceptions retain ordinary
