@@ -1,13 +1,16 @@
 // handlers_ui_machinelogin.go: POST /v1/machine-logins/lookup — resolves a pending machine login
-// by its human-readable confirmation code, for the operator's own UI (ruling 13: a direct link
+// by its human-readable confirmation code, for the operator's own page (ruling 13: a direct link
 // can never approve a machine login, only the typed code selects it) — and GET
 // /v1/launcher-credentials and POST /v1/launcher-credentials/{id}/revoke-by-approver, the machine
-// logins a person may revoke that can still reach a secret, and the route that ends one.
+// logins a person may revoke that can still reach a secret, and the route that ends one. Part of
+// the routes a listed service calls with its own ServiceAccount token (accountAuth); see
+// handlers_ui_records.go for the shared trust-model note.
 package api
 
 import (
 	"context"
 	"errors"
+	"log/slog"
 	"net/http"
 	"time"
 
@@ -25,7 +28,7 @@ type lookupMachineLoginBody struct {
 // user code the machine's device authorization minted, and is the only route
 // that selects a machine record. Deciding it takes the same code again (CODE_REQUIRED /
 // CODE_MISMATCH), so a direct link to the record can never approve it (ruling 13).
-func (s *server) lookupMachineLogin(w http.ResponseWriter, r *http.Request) {
+func (s *server) lookupMachineLogin(w http.ResponseWriter, r *http.Request, _ string) {
 	var body lookupMachineLoginBody
 	if !readJSON(w, r, &body, "INVALID_LOOKUP") {
 		return
@@ -90,7 +93,7 @@ type launcherCredentialsResponse struct {
 
 // listLauncherCredentials lists the machine logins the person ?approver= names may revoke
 // (enroll.Service.LiveCredentials, through writeLauncherCredentials).
-func (s *server) listLauncherCredentials(w http.ResponseWriter, r *http.Request) {
+func (s *server) listLauncherCredentials(w http.ResponseWriter, r *http.Request, _ string) {
 	approver := r.URL.Query().Get("approver")
 	if !requireApprover(w, approver) {
 		return
@@ -119,8 +122,10 @@ func (s *server) writeLauncherCredentials(w http.ResponseWriter, r *http.Request
 
 // revokeLauncherCredential ends a machine login on the word of the person Dispatch names
 // (enroll.Service.RevokeCredential, through revokeCredentialAs): a service's on the word of anyone
-// signed in, a person's machine's on the word of the person who approved it.
-func (s *server) revokeLauncherCredential(w http.ResponseWriter, r *http.Request) {
+// signed in, a person's machine's on the word of the person who approved it. The caller that
+// relayed it is logged beside that person, whose name is still the caller's own to state
+// (dispatch://INFRA-314).
+func (s *server) revokeLauncherCredential(w http.ResponseWriter, r *http.Request, callerName string) {
 	id, ok := pathUUID(w, r, "id", "CREDENTIAL_ID_INPUT", "launcher credential")
 	if !ok {
 		return
@@ -132,6 +137,7 @@ func (s *server) revokeLauncherCredential(w http.ResponseWriter, r *http.Request
 	if !requireApprover(w, body.Approver) {
 		return
 	}
+	slog.Info("machine login revocation relayed", "caller", callerName, "approver", body.Approver, "credential", id)
 	s.revokeCredentialAs(w, r, s.deps.Enroll.RevokeCredential, id, body.Approver, record.HumanActor(body.Approver))
 }
 
