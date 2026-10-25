@@ -3006,6 +3006,8 @@ cat > "$sequence" <<'SEQUENCE'
 set -euo pipefail
 echo "sequence: process $$; a deliberate stop is: kill -TERM -- -$$"
 workload=""                                    # the Job's create sets it; the trap reads it
+run=$(python3 -c 'import secrets; print(secrets.token_hex(4))')
+echo "run: sequence-run=$run"                  # the Job's label, which exists before its name
 dir=$(mktemp -d "${TMPDIR:-/tmp}/workload.XXXXXX")
 password=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
 
@@ -3013,8 +3015,11 @@ cleanup() {
   status=$?
   trap - EXIT INT TERM HUP
   set +e
-  if [ -z "$workload" ]; then                  # no name read from a create: nothing to remove
-    echo "cleanup: no Job name was read; nothing removed"
+  if [ -z "$workload" ]; then                  # no name read: find this run's Job by its label
+    echo "cleanup: no Job name was read; deleting by label sequence-run=$run"
+    kubectl delete job -l sequence-run="$run" --cascade=foreground --ignore-not-found \
+      || { echo "cleanup: the Job's delete failed"; [ "$status" -ne 0 ] || status=1; }
+    kubectl get jobs -l sequence-run="$run"    # "No resources found"
     rm -rf "$dir"
     echo "sequence: exit $status"
     exit "$status"
@@ -3047,6 +3052,7 @@ apiVersion: batch/v1
 kind: Job
 metadata:
   generateName: <issue key lowercased>-postgres-   # the API server adds five characters
+  labels: { sequence-run: "$run" }      # on the Job alone, not its pods: how the trap finds it unnamed
 spec:
   activeDeadlineSeconds: 3600           # on the Job, at most 43200
   ttlSecondsAfterFinished: 3600         # at most 86400
@@ -3146,11 +3152,17 @@ found`; and exits with the status it began with, or 1 when a clean-up step faile
 had succeeded, printing it last as `sequence: exit <status>`, since the call that waits for a
 detached sequence prints its output and not its status. A trap that runs before the sequence has
 read its Job's name from the create's answer — the create refused, or a stop that landed first —
-has no name to act on: it prints `cleanup: no Job name was read; nothing removed` and its status,
-and removes nothing. After a refused create that is all there was; a stop that landed while the
-create was in flight, or between its answer and the line that reads it, can have left a Job the
-trap never learned the name of, which the listing under the recovery lines below finds by its
-issue key.
+finds the Job by this run's label instead. The sequence draws eight random hexadecimal characters
+before the create, prints them as `run: sequence-run=<value>`, and writes them as a label on the
+Job's own metadata, not its pod template, so the label is never one a pod carries and cannot be
+read as the reachability label. That trap prints `cleanup: no Job name was read; deleting by label
+sequence-run=<value>`, deletes every Job carrying that label with `--cascade=foreground`, lists the
+Jobs carrying it, which prints `No resources found`, and exits with its status. After a refused
+create, or a stop before the create's request left, the delete finds nothing; a stop that landed
+while the create was in flight, or between its answer and the line that reads it, finds the Job
+the create made. Another run's Job carries a value drawn for that run, so the delete leaves it
+alone. No Service exists on that path: the sequence applies its Service only once it has read the
+name.
 
 **A timeout of the role's own bash tool is what the detaching is for.** The tool ends a call that
 runs past its timeout by signalling the command and every process under it and killing them almost
@@ -3184,7 +3196,10 @@ kubectl wait --for=delete service/<the printed workload name> --timeout=60s
 ```
 
 A role that lost the name lists the Jobs with `kubectl get jobs`. Its issue's start with its issue
-key, and so do its sibling roles', so it deletes only the one it started.
+key, and so do its sibling roles', so it deletes only the one it started. A run whose name never
+printed — a `SIGKILL` that landed during the create — printed its label first, and
+`kubectl delete job -l sequence-run=<the printed value> --cascade=foreground` removes its Job; it
+had no Service yet.
 
 That check is `python3`, which the image carries, because **the role container had no client for
 any of these servers** when it was written ([Worker image](#worker-image)), a role may not `exec`
@@ -3265,7 +3280,8 @@ gate commands itself rather than trusting the answers recorded here:
   infra-232-postgres-: cannot use generate name with apply`, and the trap removed nothing; and
   `kubectl create --dry-run=server` admitted a Job with a generated name, a Job whose name the
   client chose, and one setting both a name and a one-letter `generateName` under the client's
-  name — on that date the namespace's admission did not require a generated name.
+  name — on that date the namespace's admission did not require a generated name, which
+  dispatch://INFRA-383 adds.
 - *Executed from a role container on 2026-10-25, for dispatch://INFRA-215, with the sequence as
   published then (before dispatch://INFRA-232 moved the Job to a generated name), through the
   role's own bash tool*: the block taken from this page
