@@ -234,13 +234,48 @@
   runs, as its own plugin reported it (envoy-client's `machineID()`), rather than whichever
   listener happened to register it. Sessions on separate machines registering through one shared
   listener previously all showed that listener's own `machine_id` as their machine. `machine_id`
-  keeps its routing meaning unchanged (the listener that owns the session's delivery,
-  `store.Registry.Match`, `session.go`'s `hostFor`); `host` is carried on `POST
+  still names the listener that owns the session's delivery (`store.Registry.Match`), and `host`
+  is where that listener reaches a session on a serving port, unless the session is on its own
+  machine and it has a host bridge (the next entry); `host` is carried on `POST
   /v1/interests/subscribe` (`subscribeBody.Host`, every subscribe and heartbeat), stored on the
   session entry (`session.SessionEntry.Host`), and returned from `GET /v1/sessions` and `GET
   /v1/roles/<role>`, falling back to `machine_id` (`SessionEntry.HostOrMachine`) for a session
   whose plugin predates the field. `GET /api/v1/agents` carries it through unchanged, with its
   own defensive fallback to `machine_id` for a listener that predates the field too.
+- A session on a serving port (the OpenCode plugin's way of being reached) receives a topic the
+  stream does not store, such as a team topic, when its machine's listener runs with
+  `ENVOY_SUBSCRIBE_ALL_TOPICS=1` (INFRA-122). Such a listener opens a second NATS client holding
+  one core queue subscription on `notifications.>`, in the group
+  `envoy-listener-live-<machine id, spaces as hyphens>` (`bus.ListenerLiveQueue`, so two listeners
+  of one machine deliver each message once); it leaves a subject under `notifications.role.` to the
+  role lane and one the stream stores to the durable, and fans every other notification topic out
+  to the sessions on its machine subscribed to it, by the same `POST
+  /session/<id>/prompt_async`. Such a topic is live: it reaches whoever is subscribed when it is
+  published, once, and is never retained or retried. Unset, empty or `0` leaves it off, as before;
+  any other value refuses startup naming the variable. Only a NATS user whose grant allows a
+  `notifications.>` subscribe (`HostPermissions`, a host's own user) may opt in: under the hub's
+  or Dispatch's listener grant the start ends with exit 1 and an ERROR naming
+  `ENVOY_SUBSCRIBE_ALL_TOPICS`. Both compose files set it. `/healthz` gains `live_topics`,
+  `subscribed` or `not_applicable`, and answers `503 {"status":"unhealthy","error":"live
+  subscription inactive"}` when the opt-in is on and the live subscription is gone. Shutdown
+  drains the live client for up to 3 s between the HTTP stop and the main client's drain: 10 s +
+  3 s + 13 s = 26 s, inside every runtime's 30 s. envoy-infra renders it from
+  `core.ListenerConfig.SubscribeAllTopics`, set by the optional input `subscribeAllTopics` on
+  `host:Listener` and `aws:WebhookListener` and by `envoy-infra render webhook-listener-env
+  --subscribe-all-topics`; left unset, every existing rendering is unchanged.
+
+  A listener reaches a session on a serving port by one address rule: at
+  `ENVOY_HOST_BRIDGE` when the session is on the listener's own machine (`machine_id` empty or the
+  listener's) and the bridge is set, otherwise at the registration's recorded `host` when it is
+  not empty, otherwise at `host.docker.internal` for its own machine and at the machine id for
+  another (`session.Deliverer.hostFor`, an IPv6 literal bracketed). A listener without a bridge
+  used to dial `host.docker.internal` for every session on its machine, whatever host it recorded,
+  so a serving port bound to loopback alone was never reached and every delivery to it failed.
+  Since the recorded host now goes into the delivery URL, `POST
+  /v1/interests/subscribe` with `port` above 0 refuses a non-empty `host` that is neither an IP
+  literal nor a plain host name (letters, digits, `_`, `.`, `-`; `session.ValidHost`) with
+  `400 {"error":"host is not a host name or address","expected":["host"]}` and writes nothing. A
+  registration with no `host` (an older plugin) or no port is accepted as before.
 - `deploy/compose/single-node.compose.yml` runs Envoy on one machine: a JetStream NATS of its own
   (its data on the `nats-data` volume) and the listener, both on `127.0.0.1` only, with
   `deploy/compose/single-node.env.example` as its settings template. The site's Envoy page ("Running

@@ -19,9 +19,11 @@ const SessionWireSchema = z.object({
   session_id: z.string(),
   machine_id: z.string(),
   // The session's real machine, as the client reported it (machineID()); machine_id stays the
-  // registering listener's own machine and keeps its routing meaning (session.go's hostFor,
-  // store.Registry.Match). Optional here only for a listener predating the field — the live
-  // listener always fills it in, falling back to machine_id itself (session.SessionEntry.HostOrMachine).
+  // registering listener's own machine, which says which listener fans a topic out to the session
+  // (store.Registry.Match). A listener reaches a serve-port session at this host unless the
+  // session is on its own machine and it has a host bridge (session.go's hostFor). Optional here
+  // only for a listener predating the field — the live listener always fills it in, falling back
+  // to machine_id itself (session.SessionEntry.HostOrMachine).
   host: z.string().optional(),
   dir: z.string(),
   port: z.number().int(),
@@ -312,7 +314,9 @@ export function createEnvoyClient(config: EnvoyClientConfig): EnvoyClient {
             // Where this session process actually runs (machineID(): ENVOY_MACHINE_ID, falling
             // back to the kernel hostname), sent on every subscribe and heartbeat (registerSession
             // re-subscribes on each tick). The listener stores it separately from the registering
-            // listener's own machine_id, which keeps its routing meaning either way.
+            // listener's own machine_id and reaches a serve-port session at it, unless the session
+            // is on the listener's machine and the listener has a host bridge. With a port, a value
+            // that is not a host name or IP address is refused with 400 (expected: ["host"]).
             host: machineID(),
           })
         )

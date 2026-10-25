@@ -55,6 +55,10 @@ services:
       # loopback; unset, the listener would dial host.docker.internal, which host networking does
       # not resolve.
       ENVOY_HOST_BRIDGE: 127.0.0.1
+      # The NATS above has no users, so nothing refuses a subscription to every notification
+      # topic: a session that registered a port also receives a topic the stream does not store,
+      # a team topic for one.
+      ENVOY_SUBSCRIBE_ALL_TOPICS: "1"
       # Optional on loopback: when set, every /v1 caller must send it as a bearer token.
       ENVOY_API_TOKEN: ${ENVOY_API_TOKEN:-}
 

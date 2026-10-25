@@ -28,6 +28,11 @@ services:
       # own without this (packages/envoy/internal/bus/reach.go).
       ENVOY_ALLOW_REMOTE_NATS: "1"
       ENVOY_HOST_BRIDGE: 127.0.0.1
+      # A host's own listener, whose NATS user holds the host grant (a plain notifications.>
+      # subscribe): it takes every topic the stream does not store, a team topic for one, off the
+      # bus for the sessions on this machine that registered a port. A user without that grant
+      # refuses the subscription and the start exits naming this variable.
+      ENVOY_SUBSCRIBE_ALL_TOPICS: "1"
       ENVOY_WEBHOOKS: ${ENVOY_WEBHOOKS:-}
       ENVOY_GITHUB_WEBHOOK_SECRET: ${ENVOY_GITHUB_WEBHOOK_SECRET:-}
       ENVOY_GITHUB_MENTION_TRIGGER: ${ENVOY_GITHUB_MENTION_TRIGGER:-@legion}

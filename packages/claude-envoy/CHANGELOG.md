@@ -17,6 +17,12 @@
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
   and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
+- The bundled `envoy_publish` description (`dist/` regenerated) and the `envoy` skill say a team
+  topic, any `notifications.` topic the stream does not store, reaches a session on a serve port
+  through its machine's listener when that listener subscribes to every topic
+  (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`; the shared hub's listener does not), where they said such a
+  session received none. A session of this plugin holds its own NATS connection and receives such
+  a topic as before (INFRA-122).
 
 ### Fixed
 

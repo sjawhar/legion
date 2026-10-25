@@ -141,8 +141,9 @@ session that spawned you subscribes to, included. The listener skips its push to
 entirely, so the push path's skip of the source session never decides anything for it, and a
 topic the stream retains and a team topic that travels live (below) behave alike here. The
 session whose own publish does not come back is one the listener delivers to by push, one
-registered with a serve port such as the OpenCode plugin; such a session receives no team topic
-at all, since it holds no NATS subscription of its own.
+registered with a serve port such as the OpenCode plugin. Such a session receives a team topic
+through its machine's listener when that listener subscribes to every topic
+(`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which the shared hub's listener does not set).
 
 A role lane is the case that needs the `agent://` hop, because a role is not a subject its holder
 subscribes to: the listener resolves the live holder and forwards the message to it, and drops
@@ -200,10 +201,12 @@ that one instead. A token after the repository that is not a GitHub topic kind (
 Any `notifications.` topic that no built-in source owns is yours to name: a group of sessions
 subscribes to `notifications.team.deploy-squad.>`, and any of them publishes there with
 `envoy_publish(topic="notifications.team.deploy-squad.all", message=...)`. Such a topic travels
-live, as a role does: it reaches the sessions subscribed when it is published, the publisher
-itself included when it subscribes, it is not retained, and a session that subscribes later does
-not receive earlier messages. A topic outside `notifications.` is refused. Use a role for one
-owner, and `envoy_send` for one session.
+live, as a role does: it reaches the sessions subscribed when it is published, it is not
+retained, and a session that subscribes later does not receive earlier messages. A session that
+holds its own NATS connection receives it directly, its own publish included; a session on a
+serve port receives it through its machine's listener when that listener subscribes to every
+topic, as a host's own listener does when started with `ENVOY_SUBSCRIBE_ALL_TOPICS=1`. A topic
+outside `notifications.` is refused. Use a role for one owner, and `envoy_send` for one session.
 
 ## Roles
 
