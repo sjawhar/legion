@@ -349,7 +349,7 @@ request by its URL.
   back. Nothing in `read_state` records that, so read the tree's issue (its `Claimed by:` line
   and the ask or message the architect opened) before you name it.
 - **Free slots.** The free slots, as [Free slots](#free-slots-go-daemon) counts them: each stays
-  free until a person hands Legion an issue.
+  free until a person hands Legion an issue, or a role's clear defect gives you one to file.
 - **Open capabilities.** Each row of `capabilities` in `read_state` whose `status` is
   `open` (the `tick` payload's `openCapabilities`): its name, its `detail`, and, on a deployment
   row, its `configLine`, the `legion.yaml` line that records a decision. A live row a running
@@ -396,7 +396,7 @@ themselves: an issue reaches Legion only when a person hands it over or a role r
 
 | Wake | Content | Controller action |
 |---|---|---|
-| New issue created in the Dispatch project, status `triage`: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above); the start procedure above catches one sent while no controller ran | issue key + triage context (incl. pre-existing children) | Triage: read who set the label; admit (`set_status` to `todo`) only a root a person handed over, park one to `backlog`/`icebox`, and ask the person about any other ([New issue triage](#new-issue-triage)) |
+| New issue created in the Dispatch project, status `triage`: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above); the start procedure above catches one sent while no controller ran | issue key + triage context (incl. pre-existing children) | Triage: read who set the label; admit (`set_status` to `todo`) a root a person handed over or a clear defect one of your sessions filed, park one to `backlog`/`icebox`, and ask the person about any other ([New issue triage](#new-issue-triage)) |
 | `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify the free slots in `read_state` and name them in your summary; take nothing ([Free slots](#free-slots-go-daemon)) |
 | `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Take nothing: an issue nobody handed to Legion is not Legion's ([Free slots](#free-slots-go-daemon)) |
 | `unslotted on <KEY>` from the Go daemon (payload `{kind: "unslotted", reason}`) | a root that held no slot and waited for none: a person or another session moved it from `todo` to the status `reason` names while it waited, so the daemon took it out of the workflow (`issues.<KEY>.phase` is `done`) and starts nothing for it ([reading admission](skill://legion-controller/references/admission.md)) | Re-admit nothing yourself: the move was someone else's, and `dispatch read` shows who claims it now. Name it in your summary to the human ("<KEY> left Legion's waiting line: it was set to <status> while it waited for a slot, so Legion let it go; `todo` with the `legion` label queues it again") |

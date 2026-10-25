@@ -13,7 +13,7 @@ They are Markdown instructions loaded by Oh My Pi sessions; the daemon and the t
 | `envoy/` | every role | subscriptions, agent-to-agent messages, and topic formats |
 | `leading-a-work-stream/` | a Legion architect, and any session that leads a team of agents | what a lead does and does not do, decision rights, check-ins, and facts proven with a command |
 | `legion-architect/` | root and sub-architects | tree ownership, decomposition, waves, gates, integration, the acceptance before the merge |
-| `legion-controller/` | the controller root process | wake routing, admitting only the work a person hands over, asking a person about each finding before filing it, the daily report, escalation |
+| `legion-controller/` | the controller root process | wake routing, admitting the work a person hands over and the clear defects roles report, filing each clear defect and asking a person about every other finding, the daily report, escalation |
 | `legion-oracle/` | any role doing research | repository-grounded research |
 | `legion-retro/` | the implementer, at retro | the pre-merge retrospective, its Dispatch message, its last commit removing the issue's `.legion/<issue>/` from the head that merges, and the PR body content the pull request's changed paths require at that head |
 | `legion-worker/` | planner, implementer, tester, reviewer, merger | the phase contracts: handoffs, GitHub identity, PR body and READY discipline, the merge-gate order |

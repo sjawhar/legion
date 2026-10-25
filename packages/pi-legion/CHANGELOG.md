@@ -143,11 +143,20 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   controller's rule never to label work nobody asked for names a clear defect as its one
   exception, by the deployment owner's ruling: a clear defect's fix is "how" inside work a person
   already wants, as `STRATEGY.md` puts the split.
-  `legion-worker/references/findings.md` holds the two paths. `legion-controller`,
-  `legion-architect`, `legion-worker`, `legion-retro`, the production check's `fail` in
-  `merge-gate.md`, `dispatch`, `dispatch-first`, and the daemon's role prompts and production-check
-  task say the same. This reverses part of #2130: the owner had to approve every clear defect by
-  hand.
+  `legion-worker/references/findings.md` holds the two paths. `legion-controller` (its "Free
+  slots", triage row, report wake and daily-report text), `legion-architect`, `legion-worker`,
+  `legion-retro`, the production check's `fail` in `merge-gate.md`, `dispatch`, `dispatch-first`,
+  `skills/AGENTS.md`, and the daemon's role prompts and production-check task say the same. The
+  learning `docs/solutions/legion/a-clear-defect-goes-to-the-controller-…-INFRA-140.md` supersedes
+  the #2130 learning that made every finding an ask. This reverses part of #2130: the owner had to
+  approve every clear defect by hand.
+- The reviewer waits for its own prose head's required checks to be green before it approves
+  (INFRA-140). The daemon marks any push by the review App beyond `.legion/` a planned red
+  (`classify.ApplyPush`), and `RedSendsBack` ignores a planned red, so nothing sends that head
+  back: the reviewer's own read is the only one, and GitHub then holds the merge under the base
+  branch's required checks. `merge-gate.md`, the reviewer's role prompt, its core part and the Go
+  part say the one order: push the prose fix, wait for green, approve that head. Two claims that a
+  later red sends the issue back are corrected for this one head.
 - `legion-worker`: a role requests a secret from the agent-secrets broker only to use it for its
   own issue's work, never to find out whether it exists or resolves, since a request for a secret
   its role does not hold reaches a person's Inbox (INFRA-140). A planner read the rule to check
