@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-122",
-  "completed": "2026-10-25T19:32:25Z",
+  "completed": "2026-10-25T20:30:37Z",
   "proof": [
     {
-      "criterion": "2. Nothing arrives twice (tester's failure): an inbox message reaches a serving-port session once with another machine's listener on the bus",
-      "surface": "two built envoy-listener processes (m1 owner, m2) on one real nats-server -js, python fake serving port on 0.0.0.0:18081, session registered through m1 with host = pod IP 10.1.10.198",
-      "command": "bash $TMPDIR/smoke/inbox.sh $TMPDIR/bin/envoy-listener-head head-nobridge; ... head-bridge ENVOY_HOST_BRIDGE=127.0.0.1; in-process go test ./cmd/listener/ -run TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBus",
-      "observed": "POST /v1/messages/send through m2 answered 200; exactly one prompt at the port, m1 'listener agent delivered', m2 'listener agent session not found anywhere', both with and without m1's bridge; the tester's test (unmodified) PASS 7.0 s",
-      "headSha": "c6889bb0b56b16176234b16a738ea213c35493fa",
-      "negativeControl": "round-2 binary d73383ee in the same inbox.sh -> two prompts, m1 and m2 both 'listener agent delivered'; CI at c9801bcb failed exactly that test (live_topics_test.go:525); the test fails with the ownership check removed"
+      "criterion": "2. Nothing else changes, nothing arrives twice: two listeners, an inbox message and a stored topic each once, no exception from the non-owner, a re-registered session keeps its stored topics",
+      "surface": "two built envoy-listener processes (m1, m2) on one real nats-server -js; python fake serving port on 0.0.0.0:18082; session host = pod IP 10.1.10.198",
+      "command": "bash $TMPDIR/smoke/rehome.sh $TMPDIR/bin/envoy-listener-head rehome-head; in-process go test ./cmd/listener/ -run 'TestANonOwningListenerLeavesAnInboxMessageToTheOwnerSilently|TestARehomedSessionStillReceivesItsStoredTopicOnce|TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBus'",
+      "observed": "inbox send through m2: 200, exactly one prompt, m1 'listener agent delivered', m2 nothing above DEBUG; after re-registering through m2, the stored topic notifications.github.acme.repo1792960117.pr.1 arrived exactly once, no 'listener delivery failed' on either; the three tests PASS (a raw subscriber on notifications.envoy.exceptions.> saw nothing)",
+      "headSha": "311640e7692341d75896ce75e491b702f3e18281",
+      "negativeControl": "round-3 binary c6889bb0 in the same rehome.sh: the stored topic never arrived, m1 logged 'listener delivery failed', m2 'listener agent session not found anywhere' (the no_holder path); each new test fails against round 3's session/handler/delivery code"
     },
     {
       "criterion": "1. A serving-port session receives a topic the stream does not store within 2 s",
@@ -77,6 +77,7 @@
     "packages/envoy/internal/bus/stream_config_test.go",
     "packages/envoy/internal/config/config.go",
     "packages/envoy/internal/config/config_test.go",
+    "packages/envoy/internal/session/handler.go",
     "packages/envoy/internal/session/handler_test.go",
     "packages/envoy/internal/session/registry.go",
     "packages/envoy/internal/session/session.go",
@@ -101,9 +102,10 @@
     "Acceptance 4's grep is narrowed to the stale claims, dropping the literal INFRA-122, at the architect's direction: the envoy CHANGELOG entry names the issue it closes.",
     "Simplify pass: 0 applied; six priority-3 findings skipped as cosmetic (listed in the PR's Thermo line).",
     "Round 2 also marks a config reload's revocation of the live subscription as a refusal (not asked by the review; same defect class, found while adapting to in-process NATS).",
-    "Round 3, architect's decision: only the owning listener delivers to a serving-port session (session.ErrWrongMachine for another machine's entry); the approved spec's sentence reaching another machine's session at its recorded host, else that machine's name, is not built. The spec stays as approved; the PR body records the departure and the census names the removed behaviour."
+    "Round 3, architect's decision: only the owning listener delivers to a serving-port session (session.ErrWrongMachine for another machine's entry); the approved spec's sentence reaching another machine's session at its recorded host, else that machine's name, is not built. The spec stays as approved; the PR body records the departure and the census names the removed behaviour.",
+    "Round 4: the owner of a serving-port session is the listener its stored subscription names (interest.MachineID, which Registry.Match fans out on), else the entry's MachineID; mergeForUpsert unchanged (dispatch://INFRA-429). Architect agreed. The reviewer's bus file split is on the Fast-follow line at the architect's narrowing; the refusal-parse hardening (Go-quoted names, strconv.Unquote) is in."
   ],
   "openQuestions": [],
-  "round": 3,
-  "answersReview": "tester round 2 failure at c9801bcb: an inbox message reached a serve-port session twice with a second machine's listener on the bus"
+  "round": 4,
+  "answersReview": "review round 2 at b2d506d6 (review 5644961188): a non-owner's false no_holder exception, and a re-registered session losing its stored topics; plus the refusal-parse hardening"
 }
