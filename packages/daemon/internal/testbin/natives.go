@@ -69,11 +69,13 @@ func nativesCache(omp string) (string, error) {
 // embedded size, so a directory that exists is complete. A staging directory the lock's holder
 // finds is a dead filler's, which it removes.
 //
-// A fill that writes nothing, or a file short of its embedded size (a full disk), is refused rather
-// than cached, since every later HOME takes its natives from this copy. Which natives a binary
-// extracts is its own choice — the pin writes only the variant the CPU runs, earlier binaries wrote
-// every variant they embed — so the check reads what was extracted rather than demanding each
-// embedded name.
+// Which natives a binary writes is its own choice: the pin writes only the variant its CPU
+// selects, and earlier binaries wrote every variant they embed. So the check reads what was
+// extracted rather than demanding each embedded name. What it still refuses is every way a write
+// can fail: omp writes each native to a `.tmp.<pid>.<ms>` file and renames it only once it is
+// whole, so a failed write leaves nothing (refused as an empty extraction), or a leftover
+// temporary file when the cleanup fails too (refused by its name), and a file that is not what the
+// binary embeds at its embedded size is refused as well.
 func fillNativesCache(root, omp string) (string, error) {
 	digest, embedded, err := readBinary(omp)
 	if err != nil {
@@ -124,6 +126,10 @@ func fillNativesCache(root, omp string) (string, error) {
 		if err != nil || entry.IsDir() {
 			return err
 		}
+		if !entry.Type().IsRegular() {
+			extracted[entry.Name()] = -1
+			return nil
+		}
 		info, err := entry.Info()
 		if err != nil {
 			return err
@@ -134,7 +140,7 @@ func fillNativesCache(root, omp string) (string, error) {
 		return "", fmt.Errorf("the natives %s extracted: %w", omp, err)
 	}
 	if len(extracted) == 0 {
-		return "", fmt.Errorf("%s extracted no native under %s (a write failed, as on a full disk), so nothing is cached", omp, natives)
+		return "", fmt.Errorf("%s extracted no native under %s (its write failed), so nothing is cached", omp, natives)
 	}
 	for _, name := range slices.Sorted(maps.Keys(extracted)) {
 		size, ok := embedded[name]
@@ -161,8 +167,8 @@ var (
 )
 
 // readBinary returns the digest that names omp's cache and the native files omp embeds, each with
-// its size: what a complete extraction holds. A binary that lists none is refused, since then no
-// extraction could be told from a partial one.
+// its size, which every extracted file must match. A binary that lists none is refused, since then
+// no file it extracted could be checked.
 func readBinary(path string) (string, map[string]int64, error) {
 	file, err := os.Open(path)
 	if err != nil {
@@ -200,7 +206,7 @@ func readBinary(path string) (string, map[string]int64, error) {
 		embedded[name] = size
 	}
 	if len(embedded) == 0 {
-		return "", nil, fmt.Errorf("%s lists no embedded natives (%s), so a fill could not tell a complete extraction from a partial one", path, embeddedNative)
+		return "", nil, fmt.Errorf("%s lists no embedded natives (%s), so no file it extracted could be checked", path, embeddedNative)
 	}
 	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:16]), embedded, nil

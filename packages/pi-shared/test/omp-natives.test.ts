@@ -68,10 +68,10 @@ test("fills racing for one binary's natives cache run it once, and each HOME lin
   }
 });
 
-// As when a full disk truncates Oh My Pi's write and it still exits 0. The stand-in writes its one
-// native short of its embedded size on the first run and whole after. A binary that writes only
-// one of the variants it embeds, which the pin does, is a complete fill rather than a partial one.
-test("a fill whose extraction is short of a file's embedded size caches nothing, and the next whole one is cached", async () => {
+// A binary that writes only one of the variants it embeds, which the pin does, is a whole fill. A
+// file that is not what the binary embeds at its embedded size is not, however it got there. The
+// stand-in writes its native short on the first run and whole after.
+test("a fill holding a file short of its embedded size caches nothing, and the next whole one is cached", async () => {
   const dir = await scratch();
   const runs = path.join(dir, "runs");
   const binary = await standIn(
@@ -93,10 +93,29 @@ test("a fill whose extraction is short of a file's embedded size caches nothing,
   expect(await missing(cache)).toBe(true);
   expect(await fillNativesCache(root, binary)).toBe(cache);
   expect(await missing(path.join(cache, "9.9.9", "pi_natives.test-modern.node"))).toBe(false);
-  expect(await missing(path.join(cache, "9.9.9", "pi_natives.test-baseline.node"))).toBe(true);
 });
 
-// A fill that writes nothing at all, as a full disk leaves it, is the other partial one.
+// Oh My Pi writes each native to a `.tmp.<pid>.<ms>` file and renames it once it is whole, so a
+// write that failed and whose cleanup failed too leaves that file behind. The loop over the
+// embedded names this check replaced ignored it, and every later HOME would have linked it.
+test("a fill holding a leftover temporary file caches nothing", async () => {
+  const dir = await scratch();
+  const binary = await standIn(
+    dir,
+    ['{ variant: "default", filename: "pi_natives.test.node", size: 6 },'],
+    `natives="$HOME/.omp/natives/9.9.9"\nmkdir -p "$natives"\n` +
+      `printf native >"$natives/pi_natives.test.node"\n` +
+      `printf nat >"$natives/pi_natives.test.node.tmp.1.2"\n`
+  );
+  const root = path.join(dir, "cache");
+
+  await expect(fillNativesCache(root, binary)).rejects.toThrow(
+    "extracted pi_natives.test.node.tmp.1.2 under"
+  );
+  expect(await missing(path.join(root, await cacheDigest(binary)))).toBe(true);
+});
+
+// A fill that writes nothing at all, as a failed write and its cleanup leave it.
 test("a fill whose extraction writes no native caches nothing", async () => {
   const dir = await scratch();
   const binary = await standIn(
@@ -110,7 +129,7 @@ test("a fill whose extraction writes no native caches nothing", async () => {
   expect(await missing(path.join(root, await cacheDigest(binary)))).toBe(true);
 });
 
-// With nothing to check an extraction against, a partial one would be cached.
+// With no embedded list, no file an extraction holds could be checked.
 test("a binary that lists no embedded natives is refused before it runs", async () => {
   const dir = await scratch();
   const runs = path.join(dir, "runs");

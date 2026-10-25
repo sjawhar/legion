@@ -10,6 +10,7 @@
 import {
   chmod,
   link,
+  lstat,
   mkdir,
   mkdtemp,
   readdir,
@@ -58,12 +59,13 @@ function nativesCacheRoot(): string {
  * into place whole once every file in it is one the binary embeds, at its embedded size, so a
  * directory that exists is complete. A staging directory the lock's holder finds is a dead
  * filler's, which it removes.
- *
- * A fill that writes nothing, or a file short of its embedded size (a full disk), is refused rather
- * than cached, since every later HOME takes its natives from this copy. Which natives a binary
- * extracts is its own choice — the pin writes only the variant the CPU runs, earlier binaries wrote
- * every variant they embed — so the check reads what was extracted rather than demanding each
- * embedded name.
+ * Which natives a binary writes is its own choice: the pin writes only the variant its CPU
+ * selects, and earlier binaries wrote every variant they embed. So the check reads what was
+ * extracted rather than demanding each embedded name. What it still refuses is every way a write
+ * can fail: the binary writes each native to a `.tmp.<pid>.<ms>` file and renames it only once it
+ * is whole, so a failed write leaves nothing (refused as an empty extraction), or a leftover
+ * temporary file when the cleanup fails too (refused by its name), and a file that is not what the
+ * binary embeds at its embedded size is refused as well.
  */
 export async function fillNativesCache(root: string, binary: string): Promise<string> {
   const { digest, embedded } = await readBinary(binary);
@@ -101,14 +103,14 @@ export async function fillNativesCache(root: string, binary: string): Promise<st
       const extracted = new Map<string, number>();
       for (const relative of await readdir(natives, { recursive: true })) {
         const file = path.join(natives, relative);
-        const info = await stat(file);
-        if (!info.isFile()) continue;
-        extracted.set(path.basename(file), info.size);
-        await chmod(file, 0o500);
+        const info = await lstat(file);
+        if (info.isDirectory()) continue;
+        extracted.set(path.basename(file), info.isFile() ? info.size : -1);
+        if (info.isFile()) await chmod(file, 0o500);
       }
       if (extracted.size === 0) {
         throw new Error(
-          `${binary} extracted no native under ${natives} (a write failed, as on a full disk), so nothing is cached`
+          `${binary} extracted no native under ${natives} (its write failed), so nothing is cached`
         );
       }
       for (const name of [...extracted.keys()].sort()) {
@@ -145,9 +147,9 @@ const embeddedNative = /^filename: "(pi_natives\.[^"/]+)", size: ([0-9]+)/;
 
 /**
  * The digest that names the binary's cache (the first 16 bytes of its sha256, in hex, as the Go
- * tests name it) and the native files it embeds, each with its size: what a complete extraction
- * holds. A binary that lists none is refused, since then no extraction could be told from a partial
- * one. The binary is read, not mapped: while a Bun.mmap of it is live, spawning it fails with
+ * tests name it) and the native files it embeds, each with its size, which every extracted file
+ * must match. A binary that lists none is refused, since then no file it extracted could be
+ * checked. The binary is read, not mapped: while a Bun.mmap of it is live, spawning it fails with
  * ETXTBSY.
  */
 async function readBinary(
@@ -174,7 +176,7 @@ async function readBinary(
   }
   if (embedded.size === 0) {
     throw new Error(
-      `${binary} lists no embedded natives (${embeddedNative.source}), so a fill could not tell a complete extraction from a partial one`
+      `${binary} lists no embedded natives (${embeddedNative.source}), so no file it extracted could be checked`
     );
   }
   const digest = new Bun.CryptoHasher("sha256").update(buffer).digest("hex").slice(0, 32);

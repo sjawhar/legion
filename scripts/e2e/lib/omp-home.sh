@@ -9,8 +9,9 @@
 # XDG_DATA_HOME moves only a named profile's data, and only once $XDG_DATA_HOME/omp/profiles/<name>
 # exists, and PI_CONFIG_DIR reaches no pane (neither daemon's pane allow-list carries it).
 #
-# DIR/.omp/natives links to the operator's native module cache (~350 MB per Oh My Pi version,
-# resolved as getNativesDir in @oh-my-pi/pi-natives' native/loader-state.js resolves it), which a
+# DIR/.omp/natives links to the operator's native module cache (~112 MB per Oh My Pi version at the
+# pin, the one variant the CPU selects; resolved as getNativesDir in @oh-my-pi/pi-natives'
+# native/loader-state.js resolves it), which a
 # fresh home would download again; removing DIR removes the link, never the cache. MISE_DATA_DIR and
 # XDG_CONFIG_HOME are exported first as the operator's own, where each already resolves, so what the
 # daemon itself runs under DIR finds what it did under the operator's HOME: `mise` the same pinned
