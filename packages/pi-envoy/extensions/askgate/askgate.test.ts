@@ -23,6 +23,7 @@ import {
   unreadableDispatchWrite,
 } from "./askgate-core";
 import * as fx from "./askgate-fixtures";
+import type { RecordClient } from "./decision-record";
 import { type DispatchSession, parseRuleVerdict, type RuleMatch } from "./rules-check";
 import { renderTemplate } from "./text";
 
@@ -3478,5 +3479,115 @@ describe("the measured rules prompts (Task 2, Task 6)", () => {
       ])
     );
     expect(measured).toEqual(MEASURED);
+  });
+});
+
+describe("the Dispatch decision record (A5)", () => {
+  const KEEP = {
+    issue: "X-1",
+    question:
+      "I checked the cache path and it is fine. Should I change it? Recommendation: keep it as it is.",
+    options: [],
+  };
+  const MATCHED = rulesAnswer([{ ask: 1, rule: "no_change" as const, quote: "keep it as it is" }]);
+  /** A Dispatch that answers the record's two calls; the gate reads no document in these tests. */
+  function recordingDispatch(answers: Partial<RecordClient> = {}) {
+    const uploads: Array<{ project: string; name: string; content: string }> = [];
+    const edits: Array<{ id: string; markdown: string }> = [];
+    const client = {
+      projectArtifact: async (project, input) => {
+        uploads.push({
+          project,
+          name: input.name,
+          content: "content" in input ? input.content : "",
+        });
+        return answers.projectArtifact
+          ? await answers.projectArtifact(project, input)
+          : { artifact: { id: "doc-1" } };
+      },
+      docEdit: async (id, input) => {
+        for (const op of input.ops) edits.push({ id, markdown: op.markdown ?? "" });
+        return { applied: input.ops.length };
+      },
+    } satisfies RecordClient;
+    // The gate's dependency hands back the host's own client; the record calls these two of it.
+    const session = () => ({
+      client: client as unknown as DispatchClient,
+      serverUrls: ["https://dispatch.example"],
+    });
+    return { uploads, edits, session };
+  }
+  /** The JSON records a document's markdown holds, in order. */
+  const recordsIn = (markdown: string) =>
+    [...markdown.matchAll(/```json\n(.*)\n```/g)].map(
+      ([, line]) => JSON.parse(line as string) as Record<string, unknown>
+    );
+
+  test("a rules decision is published to the session's own document, and the next one appends to it", async () => {
+    const dispatch = recordingDispatch();
+    const g = bind({
+      complete: bySystem(ALLOW, MATCHED),
+      env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+      dispatch: dispatch.session,
+    });
+    expect((await g.device("t1", "dispatch_ask", KEEP))?.block).toBe(true);
+    expect(dispatch.uploads).toMatchObject([
+      { project: "INFRA", name: "askgate-decisions-sess-1.md" },
+    ]);
+    expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
+      {
+        session: "sess-1",
+        source: "machine",
+        project: "INFRA",
+        tool: "dispatch_ask",
+        target: "dispatch_ask issue=X-1",
+        rule: "no_change",
+        ruleOutcome: "match",
+        decision: "revise",
+        outcome: "verdict",
+        verdictMode: "warn",
+      },
+    ]);
+    expect(dispatch.uploads[0]?.content).not.toContain("cache path");
+    expect(g.entries[0]?.recordError).toBeUndefined();
+
+    expect((await g.device("t2", "dispatch_ask", KEEP))?.block).toBe(true);
+    expect(dispatch.uploads).toHaveLength(1);
+    expect(dispatch.edits).toMatchObject([{ id: "doc-1" }]);
+    expect(recordsIn(dispatch.edits[0]?.markdown ?? "")).toMatchObject([{ rule: "no_change" }]);
+    expect(g.entries[1]?.recordError).toBeUndefined();
+  });
+
+  test("a record Dispatch refuses leaves the refusal as it was and is recorded as recordError", async () => {
+    const dispatch = recordingDispatch({
+      projectArtifact: () => Promise.reject(new Error("dispatch: 503 Service Unavailable")),
+    });
+    const g = bind({
+      complete: bySystem(ALLOW, MATCHED),
+      env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+      dispatch: dispatch.session,
+    });
+    const result = await g.device("t1", "dispatch_ask", KEEP);
+    expect(result?.block).toBe(true);
+    expect(result?.reason).toContain('The ask matches the rule "no change": "keep it as it is".');
+    expect(g.entries).toMatchObject([
+      {
+        decision: "revise",
+        outcome: "verdict",
+        rule: "no_change",
+        ruleOutcome: "match",
+        recordError: "dispatch: 503 Service Unavailable",
+      },
+    ]);
+  });
+
+  test("with no record project set the gate asks Dispatch for nothing and records nothing", async () => {
+    const dispatch = recordingDispatch();
+    const g = bind({ complete: bySystem(ALLOW, MATCHED), dispatch: dispatch.session });
+    expect((await g.device("t1", "dispatch_ask", KEEP))?.block).toBe(true);
+    expect(g.dispatchReads).toEqual([]);
+    expect(dispatch.uploads).toEqual([]);
+    expect(g.entries).toMatchObject([{ rule: "no_change", ruleOutcome: "match" }]);
+    expect(g.entries[0]?.recordError).toBeUndefined();
   });
 });

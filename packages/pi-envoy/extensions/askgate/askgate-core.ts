@@ -146,6 +146,7 @@ import * as path from "node:path";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
 import uploadRule from "./askgate-upload.md" with { type: "text" };
+import { createDecisionRecorder, RECORD_TIMEOUT_MS } from "./decision-record";
 import ruleCheckRules from "./rule-check.md" with { type: "text" };
 import ruleCheckSystem from "./rule-check-system.md" with { type: "text" };
 import rules from "./rules.md" with { type: "text" };
@@ -340,6 +341,8 @@ export interface GateEntry {
   ruleTextMissing?: true;
   /** New asks the rules request left out or cut to its bounds. */
   ruleAsksCut?: number;
+  /** Why this decision reached no Dispatch decision record (`decision-record.ts`); the call itself was unaffected. */
+  recordError?: string;
 }
 /** A model as the gate passes it around: the fork's full Model, of which the core reads only these. */
 export type GateModel = { provider: string; id: string };
@@ -2133,6 +2136,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     const rebuttals = new Map<string, string>();
     const breaker = new Breaker();
     const dumpPath = deps.env.OMP_ASKGATE_DUMP;
+    // Keyed by session id and not reset with the state below: a session the process returns to
+    // appends to the decision document it already uploaded.
+    const recordDecision = createDecisionRecorder(deps);
     let failures = 0;
     /** Rules calls in a row that ended without a rules verdict. */
     let ruleFailures = 0;
@@ -2884,11 +2890,34 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           // The notice is best effort; the logger has it.
         }
       }
+      const entry: GateEntry = {
+        ...(base ?? identity(event, mode)),
+        ...decision.fields,
+        latencyMs: deps.now() - started,
+      };
+      // The entry below reaches only this machine's disk, so a rules decision also goes to
+      // Dispatch, where a session with no access to this machine counts it (`decision-record.ts`).
+      // The gated call's own stop is closed by now, so the write gets a stop of its own; whatever
+      // it costs or loses, the decision above and the call's result stand.
+      let recordError: string | undefined;
+      const recordStop = new AbortController();
+      const recordTimer = setTimeout(() => recordStop.abort(), RECORD_TIMEOUT_MS);
+      try {
+        recordError = await recordDecision({
+          entry,
+          sessionId: ctx.sessionManager.getSessionId(),
+          directory: ctx.cwd,
+          signal: recordStop.signal,
+        });
+      } catch (error) {
+        recordError = messageOf(error);
+      } finally {
+        clearTimeout(recordTimer);
+      }
       try {
         pi.appendEntry(ADVISOR_GATE_ENTRY_TYPE, {
-          ...(base ?? identity(event, mode)),
-          ...decision.fields,
-          latencyMs: deps.now() - started,
+          ...entry,
+          ...(recordError === undefined ? {} : { recordError }),
         } satisfies GateEntry);
       } catch {
         // The entry is best effort; the call still runs.
