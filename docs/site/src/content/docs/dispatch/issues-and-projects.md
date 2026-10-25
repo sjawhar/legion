@@ -155,12 +155,22 @@ outage lands exactly once, and the page keeps asking while your connection is do
 
 A corner of the screen accounts for the ones still out: **Saving 2 changes…**, and once one has
 gone 30 seconds unconfirmed, **Dispatch has not confirmed 2 changes — still trying**, with **Stop
-trying** beside each. A change Dispatch refuses is listed there as **Not saved: …** with why, and
-with **Retry** and **Discard**; the control you used puts itself back as it was. While any change
-is unconfirmed the browser asks you to confirm before you leave or reload the page, and a change
-a reload interrupted is picked up again when the page comes back, for the person who made it and
-for nobody else. One interrupted more than five minutes ago is not sent on its own: it comes back
-as **Not sent**, for you to retry or discard.
+trying** beside each. A change Dispatch refuses shows its reason where you made it, with
+**Retry**, when that place is a form or a field you are in front of: a comment, an answer, the
+title, the priority, the assignee, the repository, the components, a new issue. A quick control
+such as **Status** or **Labels** instead puts itself back as it was, and the corner lists the
+change as **Not saved: …** with why, **Retry** and **Discard**. While any change is unconfirmed
+the browser asks you to confirm before you leave or reload the page, and a change a reload
+interrupted is picked up again when the page comes back, for the person who made it and for
+nobody else; an upload in progress is the exception, since its file cannot be kept. One
+interrupted more than five minutes ago is not sent on its own: it comes back as **Not sent**, for
+you to retry or discard.
+
+Now and then Dispatch makes a change but its answer is lost on the way back. The change is made;
+the page says so (for example **The issue “…” was made, but Dispatch lost its answer, so it may
+take a moment to appear.**) and clears the form, so pressing again makes nothing twice. A new agent
+token made that way has lost its value with the answer, so the page offers **Revoke it and mint
+another**.
 
 ### The tabs
 
