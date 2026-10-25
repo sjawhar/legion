@@ -1037,10 +1037,12 @@
   summary shows the first line. An app that posts a formatted message leaves `text` empty and puts
   the words in `attachments` or `blocks`, and such a wake used to carry a summary ending in `: `
   and a payload with no words in it at all. A string exactly equal to one already delivered is not
-  delivered twice, and a message that carries words of its own has its `rich_text` blocks left
-  unread, since that tree is the Slack client's own copy of those words — the one block kind the
-  walk knows by name, and the reason a message composed in a client reads as it did, the `&`, `<`
-  and `>` a person typed included. The delivered text is still cut at 2,048 runes and marked
+  delivered twice, and a `rich_text` block that says nothing the message's own text does not say
+  already is left unread — that tree is the Slack client's structured copy of a person's words,
+  and it is the one block kind the walk knows by name, which is why a message composed in a client
+  reads as it did, the `&`, `<` and `>` its author typed included. An app's own rich text, which
+  Slack tells app authors to post beside a short `text` field, says more than that field and is
+  read like any other block. The delivered text is still cut at 2,048 runes and marked
   `body_truncated`, and a deleted message still delivers nothing (INFRA-180).
 
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
