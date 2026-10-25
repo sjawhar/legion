@@ -578,9 +578,10 @@ WORKDIR /home/legion
 #    first run in the image, so the CodeGraph install also extracts OMP's native module from the
 #    binary (no network) into /home/legion/.omp/natives/<version>/ — the build's success is the
 #    check. From 18.11.0 OMP writes only the variant the CPU selects, so this is the build runner's
-#    (ubuntu-24.04, AVX2), 111 MiB; this layer ships it, and a pod extracts none, while a node whose
-#    CPUs select the other variant has each role container write that one into its writable layer at
-#    its first OMP run. The probes in the final step never wait on it.
+#    (ubuntu-24.04, AVX2), 111 MiB; this layer ships it, so a pod whose node selects the same
+#    variant extracts nothing, while a node that selects the other has each role container write
+#    that one into its writable layer at its first OMP run. The probes in the final step never
+#    wait on it.
 # Any failure fails the build: a broken image never publishes.
 RUN set -eu; \
     bun --version; omp --version; jj --version; gh --version; git --version; codegraph --version; \

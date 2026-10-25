@@ -97,7 +97,7 @@ test("a fill holding a file short of its embedded size caches nothing, and the n
 
 // A file under natives that is not a native the binary embeds is refused by its name. Oh My Pi
 // writes each native to a `.tmp.<pid>.<ms>` file and renames it once whole, so a write that failed
-// and whose cleanup failed too leaves that file and no native beside it.
+// and whose cleanup failed too leaves that file in place of its native.
 test("a fill holding a leftover temporary file caches nothing", async () => {
   const dir = await scratch();
   const binary = await standIn(

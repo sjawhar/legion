@@ -66,8 +66,8 @@ function nativesCacheRoot(): string {
  * whole native of this binary: the binary writes each native to a `.tmp.<pid>.<ms>` file and
  * renames it only once it is whole, so a failed write leaves nothing (refused as an empty
  * extraction), or a leftover temporary file when the cleanup fails too (refused by its name), and
- * anything that is not a regular file, or not at its embedded size, is refused as well. One fill
- * it accepts that the name-by-name rule would not: a failed write of the selected variant whose
+ * anything that is not a regular file, or not at its embedded size, is refused as well. Among the
+ * fills a failed write can leave, one is accepted: a failed write of the selected variant whose
  * fallback variant was then written whole. That set loads, so it is a usable cache.
  */
 export async function fillNativesCache(root: string, binary: string): Promise<string> {

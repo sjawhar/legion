@@ -122,7 +122,7 @@ func TestANativesFillShortOfAnEmbeddedSizeCachesNothing(t *testing.T) {
 
 // A file under natives that is not a native the binary embeds is refused by its name. omp writes
 // each native to a `.tmp.<pid>.<ms>` file and renames it once it is whole, so a write that failed
-// and whose cleanup failed too leaves that file and no native beside it.
+// and whose cleanup failed too leaves that file in place of its native.
 func TestANativesFillHoldingALeftoverTemporaryFileCachesNothing(t *testing.T) {
 	dir := t.TempDir()
 	omp := standIn(t, dir, []string{
