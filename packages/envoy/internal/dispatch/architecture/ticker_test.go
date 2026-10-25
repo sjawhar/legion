@@ -14,8 +14,8 @@ import (
 func TestAnImportPassSyncsEverySourceAndGoesOnPastAFailure(t *testing.T) {
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles(), repos: map[string]*fakeRepo{
-		"acme/broken": {commit: "broken-one", branchMissing: true},
-		"legion/ops":  {commit: "ops-one", files: map[string]string{"ops.md": "---\ntitle: Operations\n---\nRunbooks.\n"}},
+		"acme/broken": {commit: commitAcmeBroken, branchMissing: true},
+		"legion/ops":  {commit: commitOps, files: map[string]string{"ops.md": "---\ntitle: Operations\n---\nRunbooks.\n"}},
 	}}
 	importer, database := newImporterFixture(t, fake)
 	if _, err := database.Pool.Exec(ctx, `
@@ -42,9 +42,9 @@ func TestAnImportPassSyncsEverySourceAndGoesOnPastAFailure(t *testing.T) {
 		t.Fatalf("read sources: %v", err)
 	}
 	want := []string{
-		"CORE legion/arch commit-one ok 3",
+		"CORE legion/arch " + commitOne + " ok 3",
 		"CORE acme/broken - failed 0",
-		"OPS legion/ops ops-one ok 1",
+		"OPS legion/ops " + commitOps + " ok 1",
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("sources after one pass = %#v\nwant %#v", got, want)

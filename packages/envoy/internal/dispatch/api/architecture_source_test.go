@@ -27,6 +27,18 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
+// The fixture repositories' commits: full 40-hex SHAs, the only answer Ref accepts.
+const (
+	shaOne     = "1111111111111111111111111111111111111111"
+	shaTwo     = "2222222222222222222222222222222222222222"
+	shaArch    = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	shaInfra   = "cccccccccccccccccccccccccccccccccccccccc"
+	shaRelease = "dddddddddddddddddddddddddddddddddddddddd"
+	shaBroken  = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	shaNul     = "0000000000000000000000000000000000000000"
+	shaNulKey  = "0000000000000000000000000000000000000001"
+)
+
 // fakeGitHubApp is the GitHub App API surface the access check walks:
 // installation lookup, token mint, and the repository read that proves the
 // minted token works, plus the commit/tree/blob reads the architecture
@@ -44,9 +56,10 @@ type fakeGitHubApp struct {
 }
 
 // fakeArchitectureRepo is one repository's architecture branch. commit is the
-// sha every branch resolves to; branchMissing answers 404 instead, as a
-// repository absent from fakeGitHubApp.repos does. files is keyed by file name
-// inside architecture.SourceDir.
+// sha every branch resolves to; branchMissing answers 422 instead, as GitHub
+// does for a branch that does not exist, and a repository absent from
+// fakeGitHubApp.repos answers 404, as GitHub does for one it cannot find.
+// files is keyed by file name inside architecture.SourceDir.
 type fakeArchitectureRepo struct {
 	commit        string
 	files         map[string]string
@@ -96,8 +109,20 @@ func (f *fakeGitHubApp) handler(t *testing.T) http.Handler {
 	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
 		f.headReads = append(f.headReads, r.PathValue("owner")+"/"+r.PathValue("repo")+"@"+r.PathValue("branch"))
 		repo := f.repo(r)
-		if repo == nil || repo.branchMissing {
+		if repo == nil {
 			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		if repo.branchMissing {
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			fmt.Fprintf(w, `{"message":"No commit found for SHA: %s","documentation_url":"https://docs.github.com/rest/commits/commits#get-a-commit","status":"422"}`, r.PathValue("branch"))
+			return
+		}
+		// As GitHub does: the bare sha for Accept: application/vnd.github.sha, JSON otherwise.
+		if r.Header.Get("Accept") == "application/vnd.github.sha" {
+			w.Header().Set("Content-Type", "application/vnd.github.sha")
+			fmt.Fprint(w, repo.commit)
 			return
 		}
 		fmt.Fprintf(w, `{"sha":%q}`, repo.commit)
@@ -187,8 +212,8 @@ func twoSourceFake() *fakeGitHubApp {
 	return &fakeGitHubApp{
 		installations: map[string]string{"legion/arch": "read", "acme/infra": "read"},
 		repos: map[string]*fakeArchitectureRepo{
-			"legion/arch": {commit: "sha-arch", files: archFiles()},
-			"acme/infra":  {commit: "sha-infra", files: infraFiles()},
+			"legion/arch": {commit: shaArch, files: archFiles()},
+			"acme/infra":  {commit: shaInfra, files: infraFiles()},
 		},
 	}
 }
@@ -381,8 +406,8 @@ func TestArchitectureSourcesListAddAndChangeBranch(t *testing.T) {
 	}
 
 	if got, want := sourceStrings(syncSources(t, handler, "CORE")), []string{
-		"CORE legion/arch@main enabled=true commit=sha-arch error=- components=2",
-		"CORE acme/infra@main enabled=true commit=sha-infra error=- components=1",
+		"CORE legion/arch@main enabled=true commit=" + shaArch + " error=- components=2",
+		"CORE acme/infra@main enabled=true commit=" + shaInfra + " error=- components=1",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("synced CORE sources = %q, want %q", got, want)
 	}
@@ -398,7 +423,7 @@ func TestArchitectureSourcesListAddAndChangeBranch(t *testing.T) {
 	}
 	if got, want := sourceStrings(listSources(t, handler, "CORE")), []string{
 		"CORE legion/arch@release enabled=true commit=- error=- components=2",
-		"CORE acme/infra@main enabled=true commit=sha-infra error=- components=1",
+		"CORE acme/infra@main enabled=true commit=" + shaInfra + " error=- components=1",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("CORE sources after the re-save = %q, want %q", got, want)
 	}
@@ -518,11 +543,11 @@ func TestArchitectureSourceSingularSyncForOlderClients(t *testing.T) {
 		want    string
 	}{
 		{"both sources healthy", "", false,
-			"CORE legion/arch@main enabled=true commit=sha-arch error=- components=2"},
+			"CORE legion/arch@main enabled=true commit=" + shaArch + " error=- components=2"},
 		{"model error on the second source", "acme/infra", false,
-			`CORE acme/infra@main enabled=true commit=sha-infra error=broken.md: unknown parent "nowhere" components=1`},
+			`CORE acme/infra@main enabled=true commit=` + shaInfra + ` error=broken.md: unknown parent "nowhere" components=1`},
 		{"access failure on the first source", "legion/arch", true,
-			"CORE legion/arch@main enabled=true commit=sha-arch error=the branch does not exist: main on legion/arch components=2"},
+			"CORE legion/arch@main enabled=true commit=" + shaArch + " error=the branch does not exist: main on legion/arch components=2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			warnings := captureSourceWarnings(t)
@@ -536,7 +561,7 @@ func TestArchitectureSourceSingularSyncForOlderClients(t *testing.T) {
 			if failing := fake.repos[tc.failing]; failing != nil && tc.access {
 				failing.branchMissing = true
 			} else if failing != nil {
-				failing.commit = "sha-broken"
+				failing.commit = shaBroken
 				failing.files = map[string]string{"broken.md": "---\ntitle: Broken\nparent: nowhere\n---\nBroken.\n"}
 			}
 			fake.headReads = nil
@@ -598,7 +623,7 @@ func TestArchitectureSourceDeleteRemovesOnlyItsComponents(t *testing.T) {
 		t.Fatalf("issue components after the delete = %+v, want deploy live and api retired", read.Components)
 	}
 	if got, want := sourceStrings(listSources(t, handler, "CORE")), []string{
-		"CORE acme/infra@main enabled=true commit=sha-infra error=- components=1",
+		"CORE acme/infra@main enabled=true commit=" + shaInfra + " error=- components=1",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("CORE sources after the delete = %q, want %q", got, want)
 	}
@@ -655,7 +680,7 @@ func TestAgentUsesEveryArchitectureSourceRoute(t *testing.T) {
 	if one.Code != http.StatusOK {
 		t.Fatalf("agent sync legion/arch: status=%d body=%s", one.Code, one.Body.String())
 	}
-	if got, want := decodeStrict[architectureSourceResponse](t, one).String(), "CORE legion/arch@main enabled=true commit=sha-arch error=- components=2"; got != want {
+	if got, want := decodeStrict[architectureSourceResponse](t, one).String(), "CORE legion/arch@main enabled=true commit="+shaArch+" error=- components=2"; got != want {
 		t.Fatalf("agent synced legion/arch = %s, want %s", got, want)
 	}
 	every := agentRequest(t, handler, http.MethodPost, "/api/v1/projects/CORE/architecture-sources/sync", nil, "agent-token")
@@ -663,8 +688,8 @@ func TestAgentUsesEveryArchitectureSourceRoute(t *testing.T) {
 		t.Fatalf("agent sync every source: status=%d body=%s", every.Code, every.Body.String())
 	}
 	if got, want := sourceStrings(decodeStrict[[]architectureSourceResponse](t, every)), []string{
-		"CORE legion/arch@main enabled=true commit=sha-arch error=- components=2",
-		"CORE acme/infra@main enabled=true commit=sha-infra error=- components=1",
+		"CORE legion/arch@main enabled=true commit=" + shaArch + " error=- components=2",
+		"CORE acme/infra@main enabled=true commit=" + shaInfra + " error=- components=1",
 	}; !reflect.DeepEqual(got, want) {
 		t.Fatalf("agent synced sources = %q, want %q", got, want)
 	}
@@ -793,7 +818,7 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 	handler, database := newArchitectureSourceServer(t, fake)
 	createTestProject(t, handler, "CORE")
 	arch := fake.repos["legion/arch"]
-	arch.commit = "sha-one"
+	arch.commit = shaOne
 
 	if missing := agentRequest(t, handler, http.MethodPost, sourcePath("CORE", "legion/arch")+"/sync", nil, "agent-token"); missing.Code != http.StatusNotFound ||
 		decodeBody[map[string]string](t, missing)["code"] != "SOURCE_NOT_FOUND" {
@@ -811,7 +836,7 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 	if synced.Code != http.StatusOK {
 		t.Fatalf("sync: status=%d body=%s", synced.Code, synced.Body.String())
 	}
-	if got := decodeStrict[architectureSourceResponse](t, synced); got.String() != "CORE legion/arch@main enabled=true commit=sha-one error=- components=2" || got.LastSyncAt == nil {
+	if got := decodeStrict[architectureSourceResponse](t, synced); got.String() != "CORE legion/arch@main enabled=true commit="+shaOne+" error=- components=2" || got.LastSyncAt == nil {
 		t.Fatalf("sync response: %s (last_sync_at %v)", got, got.LastSyncAt)
 	}
 	components := func() string {
@@ -829,13 +854,13 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 	}
 
 	// A rejected model: 200, the reason on the row, the projection intact.
-	arch.commit = "sha-broken"
+	arch.commit = shaBroken
 	arch.files = map[string]string{"api.md": "x\n", "API.md": "duplicate\n"}
 	rejected := syncSource(t, handler, "CORE", "legion/arch")
 	if rejected.LastError == nil || !strings.Contains(*rejected.LastError, "duplicate component id") {
 		t.Fatalf("rejected response last_error: %s", rejected)
 	}
-	if rejected.LastCommit == nil || *rejected.LastCommit != "sha-one" || rejected.Components != 2 {
+	if rejected.LastCommit == nil || *rejected.LastCommit != shaOne || rejected.Components != 2 {
 		t.Fatalf("rejected import moved the source: %s", rejected)
 	}
 	if got := components(); got != "api,store" {
@@ -844,20 +869,20 @@ func TestArchitectureSourceSyncRoute(t *testing.T) {
 
 	// Front matter that spells U+0000 as a YAML escape is a rejected model too, not a 500 that
 	// records nothing (LEGION-527).
-	arch.commit = "sha-nul"
+	arch.commit = shaNul
 	arch.files = map[string]string{"api.md": "---\ntitle: \"HTTP\\0API\"\n---\nThe API.\n", "store.md": "---\ntitle: Store\n---\nThe store.\n"}
 	escaped := syncSource(t, handler, "CORE", "legion/arch")
-	if escaped.LastError == nil || !strings.Contains(*escaped.LastError, "api.md: front matter title") || escaped.LastCommit == nil || *escaped.LastCommit != "sha-one" {
+	if escaped.LastError == nil || !strings.Contains(*escaped.LastError, "api.md: front matter title") || escaped.LastCommit == nil || *escaped.LastCommit != shaOne {
 		t.Fatalf("front matter NUL response: %s", escaped)
 	}
 
 	// An unknown front-matter key that YAML decodes to U+0000 reaches KnownFields before Parse can
 	// name a decoded value. The recorded failure is made storable before it reaches the row/event,
 	// so this route is still the same 200 with last_error (LEGION-527).
-	arch.commit = "sha-nul-key"
+	arch.commit = shaNulKey
 	arch.files = map[string]string{"api.md": "---\n\"\\0\": value\n---\nThe API.\n", "store.md": "---\ntitle: Store\n---\nThe store.\n"}
 	key := syncSource(t, handler, "CORE", "legion/arch")
-	if key.LastError == nil || !strings.Contains(*key.LastError, "api.md: front matter") || strings.IndexByte(*key.LastError, 0) >= 0 || key.LastCommit == nil || *key.LastCommit != "sha-one" {
+	if key.LastError == nil || !strings.Contains(*key.LastError, "api.md: front matter") || strings.IndexByte(*key.LastError, 0) >= 0 || key.LastCommit == nil || *key.LastCommit != shaOne {
 		t.Fatalf("front matter NUL key response: %s", key)
 	}
 
@@ -894,8 +919,8 @@ func TestArchitectureSourcesSyncEverySource(t *testing.T) {
 	}
 
 	healthy := map[string]string{
-		"legion/arch": "CORE legion/arch@main enabled=true commit=sha-arch error=- components=2",
-		"acme/infra":  "CORE acme/infra@main enabled=true commit=sha-infra error=- components=1",
+		"legion/arch": "CORE legion/arch@main enabled=true commit=" + shaArch + " error=- components=2",
+		"acme/infra":  "CORE acme/infra@main enabled=true commit=" + shaInfra + " error=- components=1",
 	}
 	for _, tc := range []struct {
 		name    string
@@ -904,13 +929,13 @@ func TestArchitectureSourcesSyncEverySource(t *testing.T) {
 		want    string
 	}{
 		{"model error on the second source", "acme/infra", false,
-			`CORE acme/infra@main enabled=true commit=sha-infra error=broken.md: unknown parent "nowhere" components=1`},
+			`CORE acme/infra@main enabled=true commit=` + shaInfra + ` error=broken.md: unknown parent "nowhere" components=1`},
 		{"model error on the first source", "legion/arch", false,
-			`CORE legion/arch@main enabled=true commit=sha-arch error=broken.md: unknown parent "nowhere" components=2`},
+			`CORE legion/arch@main enabled=true commit=` + shaArch + ` error=broken.md: unknown parent "nowhere" components=2`},
 		{"access failure on the second source", "acme/infra", true,
-			"CORE acme/infra@main enabled=true commit=sha-infra error=the branch does not exist: main on acme/infra components=1"},
+			"CORE acme/infra@main enabled=true commit=" + shaInfra + " error=the branch does not exist: main on acme/infra components=1"},
 		{"access failure on the first source", "legion/arch", true,
-			"CORE legion/arch@main enabled=true commit=sha-arch error=the branch does not exist: main on legion/arch components=2"},
+			"CORE legion/arch@main enabled=true commit=" + shaArch + " error=the branch does not exist: main on legion/arch components=2"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			fake := twoSourceFake()
@@ -926,7 +951,7 @@ func TestArchitectureSourcesSyncEverySource(t *testing.T) {
 			if tc.access {
 				failing.branchMissing = true
 			} else {
-				failing.commit = "sha-broken"
+				failing.commit = shaBroken
 				failing.files = map[string]string{"broken.md": "---\ntitle: Broken\nparent: nowhere\n---\nBroken.\n"}
 			}
 			fake.headReads = nil
@@ -967,14 +992,14 @@ func TestArchitectureSourcesSyncEverySource(t *testing.T) {
 func TestArchitectureSourceRePutReprojectsAnIdenticalTree(t *testing.T) {
 	fake := &fakeGitHubApp{
 		installations: map[string]string{"legion/arch": "read"},
-		repos:         map[string]*fakeArchitectureRepo{"legion/arch": {commit: "sha-one", files: archFiles()}},
+		repos:         map[string]*fakeArchitectureRepo{"legion/arch": {commit: shaOne, files: archFiles()}},
 	}
 	handler, database := newArchitectureSourceServer(t, fake)
 	createTestProject(t, handler, "CORE")
 	putSource(t, handler, "CORE", "legion/arch", "main")
 	syncSource(t, handler, "CORE", "legion/arch")
 
-	fake.repos["legion/arch"].commit = "sha-release"
+	fake.repos["legion/arch"].commit = shaRelease
 	putSource(t, handler, "CORE", "legion/arch", "release")
 	syncSource(t, handler, "CORE", "legion/arch")
 
@@ -986,14 +1011,14 @@ func TestArchitectureSourceRePutReprojectsAnIdenticalTree(t *testing.T) {
 	`).Scan(&snapshots, &snapshotCommit); err != nil {
 		t.Fatalf("snapshots: %v", err)
 	}
-	if snapshots != 2 || snapshotCommit != "sha-release" {
-		t.Fatalf("snapshots = %d newest %q, want 2 with sha-release (the re-pointed source must re-project)", snapshots, snapshotCommit)
+	if snapshots != 2 || snapshotCommit != shaRelease {
+		t.Fatalf("snapshots = %d newest %q, want 2 with %s (the re-pointed source must re-project)", snapshots, snapshotCommit, shaRelease)
 	}
 	var owned string
 	if err := database.Pool.QueryRow(context.Background(), `
 		select string_agg(distinct s.commit, ',') from components c
 		join architecture_snapshots s on s.id = c.snapshot_id where c.project_key = 'CORE'
-	`).Scan(&owned); err != nil || owned != "sha-release" {
-		t.Fatalf("components owned by snapshot %q err %v, want sha-release", owned, err)
+	`).Scan(&owned); err != nil || owned != shaRelease {
+		t.Fatalf("components owned by snapshot %q err %v, want %s", owned, err, shaRelease)
 	}
 }

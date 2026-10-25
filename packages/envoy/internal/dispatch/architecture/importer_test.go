@@ -35,14 +35,51 @@ import (
 // archRepo is the repository newImporterFixture's source of CORE reads.
 const archRepo = "legion/arch"
 
+// The fixture repositories' commits: full 40-hex SHAs, the only answer Ref accepts.
+const (
+	commitOne    = "1111111111111111111111111111111111111111"
+	commitTwo    = "2222222222222222222222222222222222222222"
+	commitThree  = "3333333333333333333333333333333333333333"
+	commitBroken = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+	// The heads of the sources other than legion/arch's main: legion/arch's own
+	// in the collision race, acme/infra's two, legion/ops's, and acme/broken's,
+	// whose branch is missing.
+	commitArch       = "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+	commitInfraOne   = "cccccccccccccccccccccccccccccccccccccccc"
+	commitInfraTwo   = "c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2c2"
+	commitOps        = "dddddddddddddddddddddddddddddddddddddddd"
+	commitAcmeBroken = "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+)
+
+// writeCommit answers the commits route as GitHub does: the bare sha for Accept:
+// application/vnd.github.sha, the commit's JSON otherwise.
+func writeCommit(w http.ResponseWriter, r *http.Request, sha string) {
+	if r.Header.Get("Accept") == "application/vnd.github.sha" {
+		w.Header().Set("Content-Type", "application/vnd.github.sha")
+		fmt.Fprint(w, sha)
+		return
+	}
+	fmt.Fprintf(w, `{"sha":%q}`, sha)
+}
+
+// writeNoCommit answers the commits route as GitHub does for a branch that
+// does not exist: 422 with its JSON error body.
+func writeNoCommit(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	fmt.Fprintf(w, `{"message":"No commit found for SHA: %s","documentation_url":"https://docs.github.com/rest/commits/commits#get-a-commit","status":"422"}`, r.PathValue("branch"))
+}
+
 // fakeSource is the GitHub App surface a sync walks: installation lookup,
 // token mint, branch commit, the architecture directory's subtree, and blob
 // reads. Each repository answers its own head, files and failures: archRepo,
 // the fixture's source, answers commit, files, branchMissing and treeFailure,
 // and every other repository answers its entry in repos (a repository in
-// neither has no installation). files is keyed by the file name inside
-// SourceDir; the subtree sha is derived from the files, so identical files
-// under a new commit answer the same sha exactly like git would.
+// neither has no installation, and its reads answer 404). branchMissing
+// answers the commits route as GitHub does for a branch that does not exist:
+// 422 (see writeNoCommit). files is keyed by the file name inside SourceDir;
+// the subtree sha is derived from the files, so identical files under a new
+// commit answer the same sha exactly like git would.
 type fakeSource struct {
 	t              *testing.T
 	installationID int64
@@ -120,11 +157,15 @@ func (f *fakeSource) handler() http.Handler {
 	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
 		repo, ok := f.repo(r)
-		if !ok || repo.branchMissing {
+		if !ok {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
-		fmt.Fprintf(w, `{"sha":%q}`, repo.commit)
+		if repo.branchMissing {
+			writeNoCommit(w, r)
+			return
+		}
+		writeCommit(w, r, repo.commit)
 	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}/git/trees/{ref}", func(w http.ResponseWriter, r *http.Request) {
 		f.mu.Lock()
@@ -217,7 +258,7 @@ func newImporterFixture(t *testing.T, fake *fakeSource) (*Importer, *store.Store
 		fake.installationID = 11
 	}
 	if fake.commit == "" {
-		fake.commit = "commit-one"
+		fake.commit = commitOne
 	}
 	client := newGitHubClient(t, fake.handler())
 
@@ -307,7 +348,7 @@ func TestSyncProjectsComponentsDependenciesAndSnapshot(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync: %v", err)
 	}
-	if source.LastCommit == nil || *source.LastCommit != "commit-one" || source.LastError != nil || source.LastSyncAt == nil {
+	if source.LastCommit == nil || *source.LastCommit != commitOne || source.LastError != nil || source.LastSyncAt == nil {
 		t.Fatalf("source after sync: %+v", source)
 	}
 	want := []string{
@@ -332,11 +373,11 @@ func TestSyncProjectsComponentsDependenciesAndSnapshot(t *testing.T) {
 		`select commit, files from architecture_snapshots where project_key = 'CORE'`).Scan(&commit, &files); err != nil {
 		t.Fatalf("read snapshot: %v", err)
 	}
-	if commit != "commit-one" || files["api.md"] != validAPI {
+	if commit != commitOne || files["api.md"] != validAPI {
 		t.Fatalf("snapshot: commit=%q files=%#v", commit, files)
 	}
 
-	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced commit-one"}) {
+	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced " + commitOne}) {
 		t.Fatalf("events = %#v", got)
 	}
 }
@@ -379,7 +420,7 @@ func TestSyncSameCommitIsIdempotentEventlessAndFetchesNothing(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, `select count(*) from architecture_snapshots`).Scan(&snapshots); err != nil || snapshots != 1 {
 		t.Fatalf("snapshots = %d err %v, want 1", snapshots, err)
 	}
-	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced commit-one"}) {
+	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced " + commitOne}) {
 		t.Fatalf("same-commit re-import emitted an event: %#v", got)
 	}
 }
@@ -397,12 +438,12 @@ func TestSyncMovedHeadWithUnchangedTreeRecordsTheCommitOnly(t *testing.T) {
 	before := componentRows(t, database)
 	_, blobsBefore := fake.reads()
 
-	fake.commit = "commit-two"
+	fake.commit = commitTwo
 	source, err := importer.Sync(ctx, "CORE", archRepo)
 	if err != nil {
 		t.Fatalf("moved-head sync: %v", err)
 	}
-	if source.LastCommit == nil || *source.LastCommit != "commit-two" || source.LastError != nil {
+	if source.LastCommit == nil || *source.LastCommit != commitTwo || source.LastError != nil {
 		t.Fatalf("source after moved head: %+v", source)
 	}
 	if _, blobs := fake.reads(); blobs != blobsBefore {
@@ -415,12 +456,12 @@ func TestSyncMovedHeadWithUnchangedTreeRecordsTheCommitOnly(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, `select count(*) from architecture_snapshots`).Scan(&snapshots); err != nil || snapshots != 1 {
 		t.Fatalf("snapshots = %d err %v, want 1 (the model did not change)", snapshots, err)
 	}
-	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced commit-one"}) {
+	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced " + commitOne}) {
 		t.Fatalf("unchanged tree emitted an event: %#v", got)
 	}
 
 	// A real model change under the next head goes the whole way again.
-	fake.commit = "commit-three"
+	fake.commit = commitThree
 	fake.files = map[string]string{"server.md": "---\ntitle: Server\n---\nThe server.\n"}
 	if _, err := importer.Sync(ctx, "CORE", archRepo); err != nil {
 		t.Fatalf("changed-tree sync: %v", err)
@@ -429,7 +470,7 @@ func TestSyncMovedHeadWithUnchangedTreeRecordsTheCommitOnly(t *testing.T) {
 		t.Fatalf("components after the tree changed = %#v", got)
 	}
 	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{
-		"architecture.synced commit-one", "architecture.synced commit-three",
+		"architecture.synced " + commitOne, "architecture.synced " + commitThree,
 	}) {
 		t.Fatalf("events = %#v", got)
 	}
@@ -444,7 +485,7 @@ func TestSyncInvalidSetKeepsThePreviousProjection(t *testing.T) {
 	}
 	before := componentRows(t, database)
 
-	fake.commit = "commit-broken"
+	fake.commit = commitBroken
 	fake.files = map[string]string{"api.md": "x\n", "API.md": "duplicate\n"}
 	source, err := importer.Sync(ctx, "CORE", archRepo)
 	if err == nil {
@@ -453,7 +494,7 @@ func TestSyncInvalidSetKeepsThePreviousProjection(t *testing.T) {
 	if source.LastError == nil || !strings.Contains(*source.LastError, "duplicate component id") {
 		t.Fatalf("last_error = %v", source.LastError)
 	}
-	if source.LastCommit == nil || *source.LastCommit != "commit-one" {
+	if source.LastCommit == nil || *source.LastCommit != commitOne {
 		t.Fatalf("last_commit moved to the rejected commit: %v", source.LastCommit)
 	}
 	if got := componentRows(t, database); !reflect.DeepEqual(got, before) {
@@ -485,7 +526,7 @@ func TestSyncRepeatedIdenticalFailureEmitsOneEventAndRecoveryEmitsSynced(t *test
 	if _, err := importer.Sync(ctx, "CORE", archRepo); err != nil {
 		t.Fatalf("recovery sync: %v", err)
 	}
-	if got := projectEvents(t, database); len(got) != 2 || got[1] != "architecture.synced commit-one" {
+	if got := projectEvents(t, database); len(got) != 2 || got[1] != "architecture.synced "+commitOne {
 		t.Fatalf("recovery events = %#v", got)
 	}
 
@@ -506,7 +547,7 @@ func TestSyncRemovedFileRetiresItsComponent(t *testing.T) {
 		t.Fatalf("first sync: %v", err)
 	}
 
-	fake.commit = "commit-two"
+	fake.commit = commitTwo
 	fake.files = map[string]string{"server.md": "---\ntitle: Server\n---\nThe server.\n"}
 	if _, err := importer.Sync(ctx, "CORE", archRepo); err != nil {
 		t.Fatalf("second sync: %v", err)
@@ -519,7 +560,7 @@ func TestSyncRemovedFileRetiresItsComponent(t *testing.T) {
 		t.Fatalf("dependency rows = %d err %v, want 0", dependencies, err)
 	}
 	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{
-		"architecture.synced commit-one", "architecture.synced commit-two",
+		"architecture.synced " + commitOne, "architecture.synced " + commitTwo,
 	}) {
 		t.Fatalf("events = %#v", got)
 	}
@@ -551,7 +592,7 @@ func TestSyncOfOneProjectIsSerialized(t *testing.T) {
 	if err := database.Pool.QueryRow(ctx, `select count(*) from architecture_snapshots`).Scan(&snapshots); err != nil || snapshots != 1 {
 		t.Fatalf("snapshots = %d err %v, want 1", snapshots, err)
 	}
-	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced commit-one"}) {
+	if got := projectEvents(t, database); !reflect.DeepEqual(got, []string{"architecture.synced " + commitOne}) {
 		t.Fatalf("concurrent syncs emitted %#v", got)
 	}
 }
@@ -570,9 +611,9 @@ func TestSyncAcrossProcessesSerializesOnTheSourceRow(t *testing.T) {
 	fake := &fakeSource{t: t, files: files, treeShaFollowsCommit: true}
 	var heads atomic.Int64
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, _ *http.Request) {
+	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
 		// A push lands between the two processes' head lookups.
-		fmt.Fprintf(w, `{"sha":"commit-%d"}`, heads.Add(1))
+		writeCommit(w, r, fmt.Sprintf("%040x", heads.Add(1)))
 	})
 	mux.Handle("/", fake.handler())
 	client := newGitHubClient(t, mux)
@@ -629,7 +670,7 @@ func TestSyncAcrossProcessesSerializesOnTheSourceRow(t *testing.T) {
 // nothing — no old-repo commit on the new row, no error recorded against it.
 func TestSyncAbortsWhenTheSourceMovedMidFetch(t *testing.T) {
 	ctx := context.Background()
-	fake := &fakeSource{t: t, files: validFiles(), commit: "commit-one", installationID: 11}
+	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne, installationID: 11}
 	var moved atomic.Bool
 	var database *store.Store
 	mux := http.NewServeMux()
@@ -757,7 +798,7 @@ func TestAProjectionFailureIsRecordedOnTheRow(t *testing.T) {
 	if _, err := database.Pool.Exec(ctx, `alter table components add constraint test_refuses_boom check (title <> 'Boom')`); err != nil {
 		t.Fatalf("add the refusing constraint: %v", err)
 	}
-	fake.commit = "commit-two"
+	fake.commit = commitTwo
 	fake.files = validFiles()
 	fake.files["server.md"] = "---\ntitle: Boom\n---\nThe server.\n"
 	source, err := importer.Sync(ctx, "CORE", archRepo)
@@ -824,8 +865,8 @@ func TestSyncReusesAnExistingSnapshotForTheSameCommit(t *testing.T) {
 	var seeded int64
 	if err := database.Pool.QueryRow(ctx, `
 		insert into architecture_snapshots (project_key, commit, files)
-		values ('CORE', 'commit-one', '{"seeded": "by another process"}') returning id
-	`).Scan(&seeded); err != nil {
+		values ('CORE', $1, '{"seeded": "by another process"}') returning id
+	`, commitOne).Scan(&seeded); err != nil {
 		t.Fatalf("seed snapshot: %v", err)
 	}
 
@@ -1019,7 +1060,7 @@ func TestSyncDeadlineIsRecordedOnTheRow(t *testing.T) {
 // each process loaded before its fetch.
 func TestSyncAcrossProcessesEmitsOneEventForOneHead(t *testing.T) {
 	ctx := context.Background()
-	fake := &fakeSource{t: t, files: validFiles(), commit: "commit-one"}
+	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne}
 	// Gate the head lookups so both processes are mid-fetch at once: neither may
 	// project until both have loaded their (identical, pre-sync) source rows.
 	var arrived sync.WaitGroup
@@ -1199,7 +1240,7 @@ func TestEverySourceOfAProjectImportsItsOwnHeadAndComponents(t *testing.T) {
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
-	addSource(t, database, fake, infraRepo, "infra-one", infraFiles())
+	addSource(t, database, fake, infraRepo, commitInfraOne, infraFiles())
 
 	results, err := importer.SyncProject(ctx, "CORE")
 	if err != nil || len(results) != 2 {
@@ -1208,7 +1249,7 @@ func TestEverySourceOfAProjectImportsItsOwnHeadAndComponents(t *testing.T) {
 	for n, want := range []struct {
 		repo, commit string
 		components   int
-	}{{archRepo, "commit-one", 3}, {infraRepo, "infra-one", 3}} {
+	}{{archRepo, commitOne, 3}, {infraRepo, commitInfraOne, 3}} {
 		got := results[n]
 		if got.Err != nil || got.Source.Repo != want.repo || got.Source.LastCommit == nil || *got.Source.LastCommit != want.commit ||
 			got.Source.LastError != nil || got.Source.Components != want.components {
@@ -1228,7 +1269,7 @@ func TestEverySourceOfAProjectImportsItsOwnHeadAndComponents(t *testing.T) {
 			t.Fatalf("projection lacks %q:\n%s", edge, before)
 		}
 	}
-	wantEvents := []string{"architecture.synced legion/arch@main commit-one 3", "architecture.synced acme/infra@main infra-one 3"}
+	wantEvents := []string{"architecture.synced legion/arch@main " + commitOne + " 3", "architecture.synced acme/infra@main " + commitInfraOne + " 3"}
 	if got := sourceEvents(t, database); !reflect.DeepEqual(got, wantEvents) {
 		t.Fatalf("events = %#v\nwant %#v", got, wantEvents)
 	}
@@ -1238,7 +1279,7 @@ func TestEverySourceOfAProjectImportsItsOwnHeadAndComponents(t *testing.T) {
 	if err != nil || len(results) != 2 {
 		t.Fatalf("second sync of CORE: %d results, err %v", len(results), err)
 	}
-	for n, commit := range []string{"commit-one", "infra-one"} {
+	for n, commit := range []string{commitOne, commitInfraOne} {
 		if got := results[n]; got.Err != nil || got.Source.LastCommit == nil || *got.Source.LastCommit != commit || got.Source.Components != 3 {
 			t.Fatalf("second sync result %d = %+v (err %v), want %s still", n, got.Source, got.Err, commit)
 		}
@@ -1262,14 +1303,14 @@ func TestOneSourcesFailedImportKeepsEverySourcesProjection(t *testing.T) {
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
-	addSource(t, database, fake, infraRepo, "infra-one", infraFiles())
+	addSource(t, database, fake, infraRepo, commitInfraOne, infraFiles())
 	if _, err := importer.SyncProject(ctx, "CORE"); err != nil {
 		t.Fatalf("first sync: %v", err)
 	}
 	attachToCore(t, database, "api", "infra-db")
 	before := projectionState(t, database)
 
-	fake.commit = "commit-broken"
+	fake.commit = commitBroken
 	fake.files = map[string]string{"api.md": "x\n", "API.md": "duplicate\n"}
 	for range 2 {
 		results, err := importer.SyncProject(ctx, "CORE")
@@ -1278,8 +1319,8 @@ func TestOneSourcesFailedImportKeepsEverySourcesProjection(t *testing.T) {
 		}
 		failed, other := results[0], results[1]
 		if failed.Err == nil || failed.Source.LastError == nil || !strings.Contains(*failed.Source.LastError, "duplicate component id") ||
-			failed.Source.LastCommit == nil || *failed.Source.LastCommit != "commit-one" || failed.Source.Components != 3 {
-			t.Fatalf("legion/arch after its broken model = %+v (err %v), want the error recorded over commit-one's 3 components", failed.Source, failed.Err)
+			failed.Source.LastCommit == nil || *failed.Source.LastCommit != commitOne || failed.Source.Components != 3 {
+			t.Fatalf("legion/arch after its broken model = %+v (err %v), want the error recorded over %s's 3 components", failed.Source, failed.Err, commitOne)
 		}
 		if other.Err != nil || other.Source.Repo != infraRepo || other.Source.LastError != nil {
 			t.Fatalf("acme/infra beside legion/arch's failure = %+v (err %v), want a clean import", other.Source, other.Err)
@@ -1302,7 +1343,7 @@ func TestACollidingComponentIDFailsTheImportingSourceAndNamesTheHolder(t *testin
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
-	addSource(t, database, fake, infraRepo, "infra-one", infraFiles())
+	addSource(t, database, fake, infraRepo, commitInfraOne, infraFiles())
 	if _, err := importer.SyncProject(ctx, "CORE"); err != nil {
 		t.Fatalf("first sync: %v", err)
 	}
@@ -1311,7 +1352,7 @@ func TestACollidingComponentIDFailsTheImportingSourceAndNamesTheHolder(t *testin
 	colliding := infraFiles()
 	colliding["server.md"] = "---\ntitle: Another server\n---\nMine.\n"
 	colliding["store.md"] = "---\ntitle: Another store\n---\nMine.\n"
-	fake.repos[infraRepo].commit, fake.repos[infraRepo].files = "infra-two", colliding
+	fake.repos[infraRepo].commit, fake.repos[infraRepo].files = commitInfraTwo, colliding
 	source, err := importer.Sync(ctx, "CORE", infraRepo)
 	wants := []string{
 		`component id "server" is already a component of CORE from legion/arch`,
@@ -1322,8 +1363,8 @@ func TestACollidingComponentIDFailsTheImportingSourceAndNamesTheHolder(t *testin
 			t.Fatalf("colliding import: err %v, row %+v; want both to say %q", err, source, want)
 		}
 	}
-	if source.LastCommit == nil || *source.LastCommit != "infra-one" || source.Components != 3 {
-		t.Fatalf("acme/infra after the collision = %+v, want infra-one's 3 components kept", source)
+	if source.LastCommit == nil || *source.LastCommit != commitInfraOne || source.Components != 3 {
+		t.Fatalf("acme/infra after the collision = %+v, want %s's 3 components kept", source, commitInfraOne)
 	}
 	if after := projectionState(t, database); after != before {
 		t.Fatalf("a colliding import changed the projection:\nbefore\n%s\nafter\n%s", before, after)
@@ -1332,7 +1373,7 @@ func TestACollidingComponentIDFailsTheImportingSourceAndNamesTheHolder(t *testin
 		t.Fatalf("events = %#v, want a sync_failed naming acme/infra@main", got)
 	}
 
-	fake.commit = "commit-two"
+	fake.commit = commitTwo
 	fake.files = map[string]string{"api.md": "---\ntitle: HTTP API\n---\nThe API.\n"}
 	if _, err := importer.Sync(ctx, "CORE", archRepo); err != nil {
 		t.Fatalf("legion/arch dropping server and store: %v", err)
@@ -1356,10 +1397,10 @@ func TestACollidingComponentIDFailsTheImportingSourceAndNamesTheHolder(t *testin
 func TestACollisionRacedAcrossProcessesFailsOneSourceByName(t *testing.T) {
 	ctx := context.Background()
 	fake := &fakeSource{
-		t: t, installationID: 11, commit: "arch-one",
+		t: t, installationID: 11, commit: commitArch,
 		files: map[string]string{"shared.md": "---\ntitle: Arch's\n---\n", "arch-only.md": "---\ntitle: Arch\n---\n"},
 		repos: map[string]*fakeRepo{infraRepo: {
-			commit: "infra-one",
+			commit: commitInfraOne,
 			files:  map[string]string{"shared.md": "---\ntitle: Infra's\n---\n", "infra-only.md": "---\ntitle: Infra\n---\n"},
 		}},
 	}
@@ -1426,7 +1467,7 @@ func TestAnIDAnotherSourceImportsRevivesItsAttachment(t *testing.T) {
 	ctx := context.Background()
 	fake := &fakeSource{t: t, files: validFiles()}
 	importer, database := newImporterFixture(t, fake)
-	addSource(t, database, fake, infraRepo, "infra-one", infraFiles())
+	addSource(t, database, fake, infraRepo, commitInfraOne, infraFiles())
 	if _, err := importer.SyncProject(ctx, "CORE"); err != nil {
 		t.Fatalf("first sync: %v", err)
 	}
@@ -1447,7 +1488,7 @@ func TestAnIDAnotherSourceImportsRevivesItsAttachment(t *testing.T) {
 
 	files := infraFiles()
 	files["server.md"] = "---\ntitle: Server\n---\nNow infra's.\n"
-	fake.repos[infraRepo].commit, fake.repos[infraRepo].files = "infra-two", files
+	fake.repos[infraRepo].commit, fake.repos[infraRepo].files = commitInfraTwo, files
 	if _, err := importer.Sync(ctx, "CORE", infraRepo); err != nil {
 		t.Fatalf("acme/infra importing server: %v", err)
 	}
@@ -1461,14 +1502,15 @@ func TestAnIDAnotherSourceImportsRevivesItsAttachment(t *testing.T) {
 // blob is read, its components stay as they were, and no event is emitted.
 func TestTheLegacySourceResyncsThroughTheUnchangedHeadShortcut(t *testing.T) {
 	ctx := context.Background()
-	fake := &fakeSource{t: t, files: validFiles(), commit: "commit-one", installationID: 11}
+	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne, installationID: 11}
 	client := newGitHubClient(t, fake.handler())
 	database := storetest.Open(t)
+	// One multi-statement Exec takes no parameters, so the commit is spelled into the text.
 	if _, err := database.Pool.Exec(ctx, `
 		insert into projects (key, name) values ('CORE', 'Core');
 		insert into architecture_sources (project_key, id, repo, branch, installation_id, created_by, last_sync_at, last_commit, last_tree_sha)
-			values ('CORE', 0, 'legion/arch', 'main', 11, '{"kind":"user","id":"alice"}', now() - interval '1 hour', 'commit-one', 'tree-legacy');
-		insert into architecture_snapshots (id, project_key, commit, files) values (700, 'CORE', 'commit-one', '{}');
+			values ('CORE', 0, 'legion/arch', 'main', 11, '{"kind":"user","id":"alice"}', now() - interval '1 hour', '`+commitOne+`', 'tree-legacy');
+		insert into architecture_snapshots (id, project_key, commit, files) values (700, 'CORE', '`+commitOne+`', '{}');
 		insert into components (project_key, id, title, prose, snapshot_id, source_id) values
 			('CORE', 'legacy', 'Legacy', 'From before.', 700, 0), ('CORE', 'other', 'Other', 'Also.', 700, 0);
 	`); err != nil {
@@ -1481,9 +1523,9 @@ func TestTheLegacySourceResyncsThroughTheUnchangedHeadShortcut(t *testing.T) {
 	if err != nil {
 		t.Fatalf("sync the legacy source: %v", err)
 	}
-	if source.ID != 0 || source.LastCommit == nil || *source.LastCommit != "commit-one" || source.LastError != nil ||
+	if source.ID != 0 || source.LastCommit == nil || *source.LastCommit != commitOne || source.LastError != nil ||
 		source.LastSyncAt == nil || time.Since(*source.LastSyncAt) > time.Minute || source.Components != 2 {
-		t.Fatalf("legacy source after sync = %+v, want id 0 at commit-one, freshly stamped, projecting 2", source)
+		t.Fatalf("legacy source after sync = %+v, want id 0 at %s, freshly stamped, projecting 2", source, commitOne)
 	}
 	if trees, blobs := fake.reads(); trees != 0 || blobs != 0 {
 		t.Fatalf("the shortcut read %d trees and %d blobs, want none", trees, blobs)
@@ -1500,8 +1542,8 @@ func TestTheLegacySourceResyncsThroughTheUnchangedHeadShortcut(t *testing.T) {
 // ErrNoSource.
 func TestSyncProjectLeavesOutASourceDeletedMidCall(t *testing.T) {
 	ctx := context.Background()
-	fake := &fakeSource{t: t, files: validFiles(), commit: "commit-one", installationID: 11,
-		repos: map[string]*fakeRepo{infraRepo: {commit: "infra-one", files: infraFiles()}}}
+	fake := &fakeSource{t: t, files: validFiles(), commit: commitOne, installationID: 11,
+		repos: map[string]*fakeRepo{infraRepo: {commit: commitInfraOne, files: infraFiles()}}}
 	var database *store.Store
 	mux := http.NewServeMux()
 	fetches := fake.handler()

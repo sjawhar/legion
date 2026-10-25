@@ -31,7 +31,7 @@ func newComponentTreeServer(t *testing.T) (http.Handler, *fakeGitHubApp) {
 	t.Helper()
 	fake := &fakeGitHubApp{
 		installations: map[string]string{"legion/arch": "read"},
-		repos:         map[string]*fakeArchitectureRepo{"legion/arch": {commit: "sha-one", files: componentTreeFiles()}},
+		repos:         map[string]*fakeArchitectureRepo{"legion/arch": {commit: shaOne, files: componentTreeFiles()}},
 	}
 	handler, _ := newArchitectureSourceServer(t, fake)
 	createTestProject(t, handler, "CORE")
@@ -154,7 +154,7 @@ func TestArchitectureTreeCountsAttachedWork(t *testing.T) {
 	}
 
 	tree := readTree(t, handler)
-	if len(tree.Sources) != 1 || tree.Sources[0].Repo != "legion/arch" || tree.Sources[0].LastCommit == nil || *tree.Sources[0].LastCommit != "sha-one" {
+	if len(tree.Sources) != 1 || tree.Sources[0].Repo != "legion/arch" || tree.Sources[0].LastCommit == nil || *tree.Sources[0].LastCommit != shaOne {
 		t.Fatalf("tree sources = %+v", tree.Sources)
 	}
 	for _, component := range tree.Components {
@@ -232,7 +232,7 @@ func TestArchitectureTreeCountsAttachedWork(t *testing.T) {
 
 	// Retire workspace by re-import: the closed issue keeps the link as unknown, appears in
 	// retired_links, and its live component still counts it.
-	fake.repos["legion/arch"].commit = "sha-two"
+	fake.repos["legion/arch"].commit = shaTwo
 	delete(fake.repos["legion/arch"].files, "workspace.md")
 	syncComponentTree(t, handler, "legion/arch")
 	retired := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+done.Key, nil, "alice"))
@@ -272,7 +272,7 @@ func TestArchitectureTreeCountsAttachedWork(t *testing.T) {
 func TestIssueComponentsFromEverySource(t *testing.T) {
 	handler, fake := newComponentTreeServer(t)
 	fake.installations["acme/infra"] = "read"
-	fake.repos["acme/infra"] = &fakeArchitectureRepo{commit: "sha-infra", files: map[string]string{
+	fake.repos["acme/infra"] = &fakeArchitectureRepo{commit: shaInfra, files: map[string]string{
 		"deploy.md": "---\ntitle: Deploy\n---\nShipping.\n",
 		"cloud.md":  "---\ntitle: Cloud\nexternal: true\n---\nThe cloud.\n",
 	}}
@@ -316,7 +316,7 @@ func TestIssueComponentsFromEverySource(t *testing.T) {
 	for _, source := range tree.Sources {
 		sources = append(sources, source.Repo+"@"+source.Branch+" "+deref(source.LastCommit))
 	}
-	if want := []string{"legion/arch@main sha-one", "acme/infra@main sha-infra"}; !reflect.DeepEqual(sources, want) {
+	if want := []string{"legion/arch@main " + shaOne, "acme/infra@main " + shaInfra}; !reflect.DeepEqual(sources, want) {
 		t.Fatalf("tree sources = %q, want %q", sources, want)
 	}
 	for id, source := range map[string]string{"legion": "legion/arch", "daemon": "legion/arch", "github": "legion/arch", "deploy": "acme/infra", "cloud": "acme/infra"} {
