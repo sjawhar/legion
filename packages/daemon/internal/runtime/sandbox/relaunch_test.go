@@ -450,6 +450,61 @@ func TestASiblingReadBetweenAMigratingLaunchsDeleteAndCreateIsDisplaced(t *testi
 	}
 }
 
+// The name the runtime keeps for that gap names one pod by uid, so it answers for the roles of
+// that pod and no other. A role recorded in an earlier pod of the same issue — one an earlier
+// replacement ended, whose Sandbox is long gone — ends on its own, and a read of it inside the gap
+// must not take that end for the daemon's doing: a death read as a displacement is a death the
+// supervisor never counts and a failing role nothing ever stops. The invariant is the one
+// relaunch.go's strand states; without the uid comparison in evaluate the whole package stays
+// green, which is why this is here.
+func TestAGapReadOfARoleOfAnotherPodThanTheReplacementEndedIsNotDisplaced(t *testing.T) {
+	name := SandboxName(workerToken)
+	older := sandboxLocator(otherToken, "uid-pod-older")
+	var deleting, probed atomic.Bool
+	var g *rig
+	var inGap runtime.Observation
+	var gapErr error
+	storeHeldIt := true
+	hooks := &sandboxHooks{
+		beforeDelete: func(n string) {
+			if n == name {
+				deleting.Store(true)
+			}
+		},
+		afterGet: func(n string) {
+			if n != name || !deleting.Load() || probed.Load() {
+				return
+			}
+			if _, err := g.dyn.Tracker().Get(sandboxGVR, testNamespace, name); !apierrors.IsNotFound(err) {
+				return
+			}
+			probed.Store(true)
+			for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+				if s, _ := g.r.storedSandbox(name); s == nil {
+					storeHeldIt = false
+					break
+				}
+			}
+			inGap, gapErr = g.r.Probe(g.ctx, older)
+		},
+	}
+	g = supersededIssue(t, withSandboxHooks(hooks))
+	g.spawn(workerSpec(t))
+	if !probed.Load() {
+		t.Fatal("the launch never reached the gap between deleting the superseded Sandbox and creating its replacement")
+	}
+	if storeHeldIt {
+		t.Fatal("the Sandbox store still held the deleted Sandbox when the older pod's role was probed, so the probe proves nothing about the gap")
+	}
+	if gapErr != nil {
+		t.Fatal(gapErr)
+	}
+	if inGap.Kind != runtime.Gone || inGap.Displaced {
+		t.Fatalf("a role recorded in pod uid-pod-older, read in the gap the replacement of pod uid-pod-old opened: %s, Displaced %t (%s); want Gone and not Displaced — the kept name answers for the pod the suspension ended and for no other",
+			inGap.Kind, inGap.Displaced, inGap.Detail)
+	}
+}
+
 // A replacement whose Create fails leaves the issue's name with no Sandbox until the issue's next
 // launch: the roles of the pod it replaced are read Displaced throughout, not only for the moment
 // a successful Create would have taken, and the Sandbox that next launch creates carries the name,
