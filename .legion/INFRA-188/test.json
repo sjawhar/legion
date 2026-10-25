@@ -2,19 +2,28 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-188",
-  "completed": "2026-10-25T06:15:00Z",
+  "completed": "2026-10-25T06:30:00Z",
   "pullRequest": "sjawhar/legion#2174",
   "rounds": [
     "Round 1 at head 2a2256ed2a39 (source identical to the first code head 066ac315a446): pass, no failures.",
-    "Round 2 at code head b079634292d9, the corrective push answering review round 1's three findings: pass, no failures."
+    "Round 2 at code head b079634292d9, the corrective push answering review round 1's three findings: pass, no failures.",
+    "Round 3 at code head af1e1b816584, review round 2's one-string corrective push (a test rename): pass, no failures."
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2: re-ran each of the implementer's three corrective proofs independently on the same surfaces at the corrective head. The example: `bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-29` (refused, nothing sent) and `issue-update --help` both print `Example: dispatch issue-update --issue DSP-1 --priority 1 --before DSP-2`, and I ran a call of that exact shape against my own fixtures, which moved the card and set the priority in one line. The closed-issue bullet: with SMOKE-30 and SMOKE-31 closed, the move was taken in both directions and a `--priority 3` write on the same closed issue was refused `ISSUE_CLOSED: issue is closed`, which is the whole of what the reworded sentence claims. The empty neighbour: `--before ''` reached the server and was refused `RANK_INPUT: rank neighbor must name another issue`, the behaviour the new unit assertion pins. Round 1's verdict stands: I had driven the implementer's own commands with fixtures of my own (SMOKE-22..25) and every form and refusal reproduced."
+    "how": "Round 3: the change is one string, so I read the renamed test against its own body and re-drove the application at its head. packages/contracts/src/dispatch-tools.test.ts:553 now reads \"dispatch_issue_update takes the four priority buckets and null, and refuses a rank field\", and its body (:554-565) asserts the four buckets, their refusals and that `{ issue, rank: \"a0\" }` is refused under strict — nothing more; `before`/`after` acceptance is asserted where it lives, in the accepted-rows test at :471-475, which the rename leaves alone. I re-ran the application at af1e1b816584 (below) rather than the unit suite, which is CI's. Round 2: re-ran each of the implementer's three corrective proofs independently on the same surfaces at that head — the example printed by the tool refusal, by `--help` and by the committed Claude Code bundle, and a call of that exact shape moving a card; the closed-issue bullet in both halves (the move taken, `--priority 3` refused `ISSUE_CLOSED`); and `--before ''` reaching the server for `RANK_INPUT: rank neighbor must name another issue`. Round 1: drove the implementer's own commands with fixtures of my own (SMOKE-22..25) and every form and refusal reproduced."
   },
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Review round 2's finding (packages/contracts/src/dispatch-tools.test.ts:553): the test is named for what it asserts; and nothing of the behaviour regressed at the head that rename made.",
+      "surface": "The repository's text at the head, and live production Dispatch driven by the command built from this branch and by the committed Claude Code bundle, with my own scratch fixtures SMOKE-35 and SMOKE-36 in project SMOKE on an empty todo board, both closed with a reason at the end.",
+      "command": "read packages/contracts/src/dispatch-tools.test.ts:462-480,545-575; then bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-35 --after SMOKE-36 | --before SMOKE-36 | --priority 1 --before SMOKE-36 | --status todo | --before SMOKE-99999 | --before '' | --after SMOKE-36 --before SMOKE-36 | (no field), and bun packages/claude-envoy/dist/dispatch.js issue-update --issue SMOKE-35 | --after SMOKE-36, each move followed by bun packages/envoy-client/bin/dispatch.ts issues --project SMOKE --status todo",
+      "observed": "The renamed test's body asserts the priority buckets, their refusals and the strict refusal of `{ issue, rank: \"a0\" }`, which is exactly what the new name claims; the board-move acceptance rows it no longer promises are at :471-475, untouched. Live at this head: board 35, 36 → `rank -> after SMOKE-36` → 36, 35 → `rank -> before SMOKE-36` → 35, 36; `priority -> P1; rank -> before SMOKE-36` on one line; `--status todo` alone moved nothing; the three refusals answered `rank neighbor does not exist`, `rank neighbor must name another issue` and `rank neighbors are not ordered` with the board unchanged; both builds print `Example: dispatch issue-update --issue DSP-1 --priority 1 --before DSP-2`; and the committed Claude Code bundle moved a card at this head.",
+      "headSha": "af1e1b816584b68ab5f342b3a3d6a4249cc5c7fd",
+      "negativeControl": "`--before SMOKE-99999` and `--before ''` were refused with the board read before and after each, and the pod's installed `dispatch` (the released build without this change) still refuses `--before` as an unknown flag and prints the old example."
+    },
     {
       "criterion": "Review round 1, finding 2 (packages/contracts/AGENTS.md:62): the Dispatch spec's `example` is updated with the argument shape, and it is the one command line `dispatch issue-update --help` and every refusal print.",
       "surface": "Live production Dispatch, driven by the command built from this branch (`bun packages/envoy-client/bin/dispatch.ts`) and by the committed Claude Code bundle (`bun packages/claude-envoy/dist/dispatch.js`), with my own scratch fixtures SMOKE-29, SMOKE-30, SMOKE-31 in project SMOKE on an empty todo board.",
@@ -56,10 +65,12 @@
       "negativeControl": "`--after SMOKE-23 --before SMOKE-24`, a pair the board does not hold in that order, refused `rank neighbors are not ordered` with the board unchanged; and the pod's released `dispatch` refused `--before` as an unknown flag."
     }
   ],
-  "ciRead": "Round 2, at the corrective code head b079634292d9, read on GitHub at 2026-10-25T06:05Z (`gh run list --commit b079634292d9…`): `PR Title` run 40167755197 success (an earlier PR Title run, 40167656629, was cancelled as superseded); `Tests` run 40167656606 queued; `Legion Envoy and Contracts` run 40167656570 queued; `Docs` run 40167656583 queued; `Worker Image` run 40167656580 in progress. Lint, types and the unit and integration suites are those lanes' work; no lane was re-run here and none was waited for. Round 1's read at the first code head 066ac315a446 was: PR Title and Docs success, Tests, Legion Envoy and Contracts and Worker Image still running.",
+  "ciRead": "Round 3, at the code head af1e1b816584, read on GitHub at 2026-10-25T06:25Z (`gh run list --commit af1e1b816584…`): `Tests` run 40168840567 queued; `Legion Envoy and Contracts` run 40168840566 queued; `Docs` run 40168840568 in progress; `Worker Image` run 40168840569 queued; `PR Title` — ten runs at this head (every pull-request body or comment edit starts one), the newest 40168947813 pending. No lane was re-run here and none was waited for; lint, types and the unit and integration suites are those lanes' work. Round 2's read at b079634292d9: PR Title run 40167755197 success, Tests, Legion Envoy and Contracts and Docs queued, Worker Image in progress. Round 1's read at 066ac315a446: PR Title and Docs success, the other three still running.",
   "notesForTheArchitect": [
     "The example change has one other consumer besides `--help` and the refusal text: packages/envoy-client/src/tool-input-errors.ts:41-44 renders it into every tool-input refusal. I read that code and drove both cross-field refusals (`--status done` without a reason, `--reason` without done): each still names its own rule in full, so the example is an illustration there and never a repair template.",
     "packages/pi-envoy/dist/ is git-ignored (.gitignore:159-162 commits only packages/claude-envoy/dist/), so the stale example I found in a local pi-envoy build is a build artifact of this pod and not a mirror the pull request has to refresh.",
-    "The two items the reviewer declined (narrowing IssueRankInput, and a status-bucket clause in the skill text) were not re-tested: neither changes behaviour this round, and the status-bucket grouping is the board's shape before this change."
+    "The two items the reviewer declined (narrowing IssueRankInput, and a status-bucket clause in the skill text) were not re-tested: neither changes behaviour this round, and the status-bucket grouping is the board's shape before this change.",
+    "Review round 3 touches one test name, so nothing of the application changed; I re-drove the three move forms, the hazard, three refusals and both builds' example line at af1e1b816584 anyway, because the head moved, and read the renamed test against its own body rather than re-running the unit suite.",
+    "All four review threads on the pull request read resolved at this head (gh api graphql reviewThreads): PRRT_kwDORFy7ds6v-1K8, -1K-, -1K_ and -8JH."
   ]
 }
