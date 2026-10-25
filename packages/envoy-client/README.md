@@ -294,9 +294,18 @@ Those are a `DispatchWriteUnsettledError`, deliberately not a `DispatchServiceEr
 caller reads one as a refusal Dispatch decided: its message is the last answer, the number of
 attempts, whether an earlier attempt may have reached Dispatch or Dispatch was still running one,
 and that the write may or may not have taken effect, so check before running it again - a new
-command is a new key. A 2xx replay whose first answer Dispatch did not keep is a
-`DispatchAnswerNotKeptError` (`ANSWER_NOT_KEPT`): the write ran, and the caller reads back what it
-wrote.
+command is a new key. A write Dispatch made whose answer is gone is a `DispatchWriteLandedError`
+(`code`, `status`): `409 KEY_COMMITTED`, a write that landed before its answer was lost, which
+Dispatch will not run again, or a 2xx replay carrying `ANSWER_NOT_KEPT`, a first answer larger than
+Dispatch keeps. It is no refusal and no `DispatchServiceError`, and it is never asked again. Its
+message is the one line the session reads: the method and URL were made, why the answer is gone,
+and to read what it made back with `dispatch read` or the matching list. The `dispatch` command
+exits 0 on one and records `landed_without_answer: <code>` in its ledger entry. A step before the
+command's own write that lands this way fails the command (exit 1) with that line and what it
+means: a picture upload (nothing else was written: run the call again, which uploads it as its
+next version), or the closing reason of `issue-update --status done` (the close was not sent: read
+the issue's messages for the reason, then close with one that points at it). The close's own
+`PATCH` landing this way is the command's write, and exits 0.
 
 Successful write responses may include `advice`. The executor preserves that object as
 `details.advice` and appends short pointers after the subscription/follow suffix: a primary spec

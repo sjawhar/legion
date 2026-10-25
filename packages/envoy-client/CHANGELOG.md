@@ -15,8 +15,12 @@
   attempt's own error, except where that answer alone would say the write never took effect while
   an earlier attempt may have reached Dispatch (a gateway's 408 or 429, Dispatch's 429, and
   `409 KEY_IN_FLIGHT`): that is a `DispatchWriteUnsettledError`, naming the last answer, the
-  attempts and that the write may or may not have taken effect. A replay whose first answer
-  Dispatch did not keep is a `DispatchAnswerNotKeptError`: the write ran. A write is resent only
+  attempts and that the write may or may not have taken effect. A write Dispatch made whose answer
+  is gone - `409 KEY_COMMITTED`, or a 2xx replay carrying `ANSWER_NOT_KEPT` - is a
+  `DispatchWriteLandedError`, never asked again: `dispatch` exits 0 on it, printing that the write
+  was made and how to read it back, unless it was a step before the command's own write (a picture
+  upload, the closing reason of `issue-update --status done`), which fails the command with what to
+  do next. A write is resent only
   against a Dispatch this process has seen run the keyed layer: Dispatch's echo of the key on its
   answer (`Idempotency-Key`), remembered per process and origin, or, where no echo could arrive (a
   transport failure, a gateway's answer), one cached `GET /healthz` read per process and origin
