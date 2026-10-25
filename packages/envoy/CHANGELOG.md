@@ -4,6 +4,18 @@
 
 ### Added
 
+- A project's default assignee, the last step of an issue create's assignee chain: an issue created
+  with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
+  it, goes to the person the project names; nothing already filed, and no create that names an
+  assignee or `null`, changes. A default that no longer names a person who has signed in is
+  ignored rather than refused, so a create never fails on a stale one. A person sets it on the
+  Settings page through
+  `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee`
+  `{assignee}` (an email of someone who has signed in, or `null` to clear it; otherwise
+  `400 ASSIGNEE_NOT_ALLOWED`, and a body without `assignee`, or whose `assignee` is neither a
+  string nor null, is `400 INVALID_PROJECT`), which appends
+  `settings.project_default_assignee.updated`. Both routes are human-only and no agent command,
+  flag or route sets a project's default.
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
   releases nothing and ends the grant for good, as a kind change found before the read does, so a
@@ -548,16 +560,6 @@
 
 ### Changed
 
-- A failed NATS reconnect attempt is logged, where it was silent: one WARN a minute per
-  connection, `envoy nats reconnect attempt failed`, naming the client, the servers it was
-  configured with and the error, with the first failure of an outage logged at once. nats.go
-  retries about once a second forever, so a broker that is down left no line at all in the
-  process's log, and thousands of identical lines would name the outage no better (INFRA-182).
-- A cache watcher that ends on its own logs `<cache> watcher stopped` at WARN, where it was an
-  ERROR. The ERROR is now `<cache> watcher was not repaired`, logged once with the bucket, the
-  recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, and only when a
-  repair has failed or none has run within a minute, so a stop the self-health rebuild repairs a
-  moment later no longer raises one (INFRA-182).
 - **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
   ServiceAccount token, read from `--account-token-file` (default
   `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
@@ -569,6 +571,16 @@
   the workdir and rewrites each before it lapses, and the script exports
   `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, so devrelay approves records and machine logins locally
   again. The Dispatch e2e harness's broker token is `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.
+- A failed NATS reconnect attempt is logged, where it was silent: one WARN a minute per
+  connection, `envoy nats reconnect attempt failed`, naming the client, the servers it was
+  configured with and the error, with the first failure of an outage logged at once. nats.go
+  retries about once a second forever, so a broker that is down left no line at all in the
+  process's log, and thousands of identical lines would name the outage no better (INFRA-182).
+- A cache watcher that ends on its own logs `<cache> watcher stopped` at WARN, where it was an
+  ERROR. The ERROR is now `<cache> watcher was not repaired`, logged once with the bucket, the
+  recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, and only when a
+  repair has failed or none has run within a minute, so a stop the self-health rebuild repairs a
+  moment later no longer raises one (INFRA-182).
 - **Breaking:** once any secret with a `kind` tag holds a value, roll the secrets broker forward,
   never back past this release. A broker before kinds reads no `kind` tag and would serve the
   secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes

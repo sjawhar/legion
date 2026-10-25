@@ -13,6 +13,7 @@ import (
 	"authelia.com/provider/oauth2/handler/rfc8693"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
@@ -291,6 +292,66 @@ func TestEndCredentialEndsItsTokensAndNoOthers(t *testing.T) {
 	}
 	if _, err := s.GetRefreshTokenSession(ctx, "refresh-"+kept, nil); err != nil {
 		t.Errorf("other credential's refresh token = %v, want it live", err)
+	}
+}
+
+// TestARowNamingAnUnregisteredClientIsNotNotFound: a stored token whose row names a client the
+// provider does not register is a row the store cannot decode, not a token it does not have. The
+// library reads oauth2.ErrNotFound from a token read as "no such token", so the error must not
+// carry it, or an introspection would answer a token it failed to read as simply not live.
+func TestARowNamingAnUnregisteredClientIsNotNotFound(t *testing.T) {
+	ctx := context.Background()
+	s, pool := newStore(t)
+	credential := newCredential(t, pool)
+	if err := s.CreateAccessTokenSession(ctx, "access-1", tokenRequest(t, s, "request-1", credential)); err != nil {
+		t.Fatalf("CreateAccessTokenSession: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `update oauth_access_tokens set request = jsonb_set(request, '{client_id}', '"example-unregistered"') where signature = 'access-1'`); err != nil {
+		t.Fatal(err)
+	}
+	_, err := s.GetAccessTokenSession(ctx, "access-1", nil)
+	if err == nil || errors.Is(err, oauth2.ErrNotFound) {
+		t.Fatalf("reading a row naming an unregistered client = %v, want an error that is not ErrNotFound", err)
+	}
+}
+
+// TestLockCredentialHoldsOnlyALiveCredential: a live credential is locked in the caller's
+// transaction, so another transaction's lock of the same row cannot be had until it ends; a
+// revoked, a lapsed and an unknown credential are ErrCredentialEnded; and outside a transaction,
+// where the lock would end with its statement, it refuses.
+func TestLockCredentialHoldsOnlyALiveCredential(t *testing.T) {
+	ctx := context.Background()
+	_, pool := newStore(t)
+	live, revoked, lapsed := newCredential(t, pool), newCredential(t, pool), newCredential(t, pool)
+	if _, err := pool.Exec(ctx, `update launcher_credentials set revoked_at = now() where id = $1`, revoked); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `update launcher_credentials set expires_at = now() - interval '1 minute' where id = $1`, lapsed); err != nil {
+		t.Fatal(err)
+	}
+	if err := oauthstore.LockCredential(ctx, live); err == nil {
+		t.Fatal("LockCredential with no transaction = nil, want an error")
+	}
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin: %v", err)
+	}
+	defer tx.Rollback(ctx)
+	txCtx := oauthstore.WithTx(ctx, tx)
+	for name, id := range map[string]string{"revoked": revoked, "lapsed": lapsed, "unknown": uuid.NewString()} {
+		if err := oauthstore.LockCredential(txCtx, id); !errors.Is(err, oauthstore.ErrCredentialEnded) {
+			t.Errorf("LockCredential(%s) = %v, want ErrCredentialEnded", name, err)
+		}
+	}
+	if err := oauthstore.LockCredential(txCtx, live); err != nil {
+		t.Fatalf("LockCredential(live) = %v, want nil", err)
+	}
+	var one int
+	err = pool.QueryRow(ctx, `select 1 from launcher_credentials where id = $1 for no key update nowait`, live).Scan(&one)
+	var pgErr *pgconn.PgError
+	if !errors.As(err, &pgErr) || pgErr.Code != "55P03" {
+		t.Fatalf("another transaction's lock of the live credential = %v, want SQLSTATE 55P03 (lock not available)", err)
 	}
 }
 

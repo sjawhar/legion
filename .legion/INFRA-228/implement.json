@@ -2,90 +2,67 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T09:05:00Z",
+  "completed": "2026-10-25T16:05:00Z",
+  "round": "the fifth implementing round, answering the tester's single failure at f4f64586fbab: the third way a fixed session name moves",
   "proof": [
     {
-      "criterion": "A pod obtains a Dispatch access token naming the session, the person it acts for and the project it may write, by the standard OAuth token-exchange grant, holding no secret of its own.",
-      "surface": "The real compiled cmd/broker binary on a real Postgres, driven over HTTP, as the package's own live-binary test. Its own boot lines, captured by the test: 'broker listening addr=127.0.0.1:<port>' and 'token exchange state=on kubernetes=true github=true accounts=1 workflows=0'.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -v -run TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt ./cmd/broker/ -- subtests 'the real binary boots on a fresh schema with its token exchange on' and \"a pod's token, a proof of the caller's own key and no client credential mint an access token\"",
-      "observed": "PASS, 12 of 12 subtests, ok github.com/sjawhar/envoy/cmd/broker 12.608s. A pod service-account token carrying its pod uid, posted as an RFC 8693 token exchange with a DPoP proof of the caller's own key and no client credential, answered 200 with token_type=DPoP, issued_token_type=urn:ietf:params:oauth:token-type:access_token. Driven first as a throwaway harness against the same binary (13 of 13 steps, exit 0) and then ported into this test so anyone with a Postgres can re-run it.",
-      "headSha": "f7dc9d711fb6303ea9bb8b665062ca7c02096378",
-      "negativeControl": "Subtest 'an unlisted service account mints nothing': a sound, correctly-audienced pod token of system:serviceaccount:example-ns:example-other, an account the configuration does not list, minted nothing -- 400 invalid_request naming the account."
+      "criterion": "A rollout that re-points a fixed session name cannot leave the entry the configuration fixes it for locked out of its own name (the tester's failure, found on two broker processes against one database).",
+      "surface": "Real compiled broker processes against one Postgres, driven through the rollout sequence, as the tester found the defect.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -tags multiprocess -count=1 -run TestAFixedSessionNameAcrossARollout -v ./cmd/broker",
+      "observed": "--- PASS, all three subtests, ok github.com/sjawhar/envoy/cmd/broker 6.772s. The third drives the defect: a process started with the OLD configuration mid-rollout serves an exchange of its own, and afterwards the name is still the new entry's -- the new entry answers 200 and the old entry 400 invalid_grant -- where before the fix the old process took the name back and the new entry was refused until a replica restarted. The restarted process logs no takeover and one 'left with its holder' line naming both principals.",
+      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
+      "negativeControl": "The same test run against the two changed functions in their pre-fix form fails, and only in that third subtest. A single-process test cannot see this at all, which is why the proof is two processes."
     },
     {
-      "criterion": "A caller can see what the broker takes it for: the answer names the session, the person it acts for and the project it may write, and the token is useless without the key it is bound to.",
-      "surface": "The same live binary's RFC 7662 introspection route, called by a listed Kubernetes service account.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -v -run TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt ./cmd/broker/ -- subtest 'a listed service account introspects it and reads the session, the person, the project, the expiry and the key'",
-      "observed": "PASS. The answer named the session, the person ada@example.com, the project ACME with project_scope 'named', an expiry in the future, the client dispatch-token-exchange, and jkt, the RFC 7638 thumbprint of the key the test generated -- so whoever reads the answer can refuse a holder that cannot prove that key. The same answer read in the earlier harness run: {\"active\":true,\"client_id\":\"dispatch-token-exchange\",\"exp\":1792916870,\"jkt\":\"GDKgDS7waNSKrJH7-zIYM5Xm6keA2zK5xv_u-OlOLz8\",\"person\":\"ada@example.com\",\"project\":\"ACME\",\"project_scope\":\"named\",\"session\":\"example-session\"}.",
-      "headSha": "f7dc9d711fb6303ea9bb8b665062ca7c02096378",
-      "negativeControl": "Subtests 'an introspection with no caller token is refused' (401 ACCOUNT_TOKEN_INVALID, before the token is read back) and 'an introspection by an unlisted service account is refused' (403 ACCOUNT_NOT_LISTED for a sound token of the cluster, for the right audience, from an account BROKER_API_ACCOUNTS does not name)."
+      "criterion": "A stranger is still refused a fixed name its entry has never claimed -- the property that could have been lost when reserving stopped taking (the architect's second condition).",
+      "surface": "The same two-process test, as its first subtest, and the first exchange the database ever sees.",
+      "command": "the same command, subtest 1_AStrangerIsRefusedAFixedNameItsEntryHasNeverClaimed",
+      "observed": "PASS: with a process up whose configuration fixes the name for an entry that has never exchanged, a pod of another account asking for that name is refused 400 invalid_grant, 'The session name … belongs to another identity', and the binding row is the fixed entry's permanent hold.",
+      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
+      "negativeControl": "The same row then shows the name moving to the entry the configuration fixes it for, at that entry's own claim, so the refusal is a reservation rather than a name nobody can use."
     },
     {
-      "criterion": "A role still writes successfully after it has run longer than an access token's life, with nobody restarting it.",
-      "surface": "The same live binary, run a second time with BROKER_ACCESS_TOKEN_SECONDS=2 so the lifetime passes in seconds rather than in fifteen minutes.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -v -run TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt ./cmd/broker/ -- subtest 'a lapsed token is renewed by the same standing pod token' (7.50s)",
-      "observed": "PASS. The first token introspected inactive once its life had passed, and the same pod token -- unchanged, as a kubelet's projected token is between refreshes -- exchanged again for a different live token under the same session name. A standing subject token is not refused as a replay, which is what makes renewal work.",
-      "headSha": "f7dc9d711fb6303ea9bb8b665062ca7c02096378",
-      "negativeControl": "Subtest 'a second pod asking for the session name the first holds mints nothing': a second pod of the very same listed account, with another pod uid, was refused 400 invalid_grant -- the name is bound to the first pod's uid, not to the account, so renewal by the holder is not a way for anyone else in."
+      "criterion": "Two replicas of one generation never take the name from each other (the architect's third condition: shown, not argued).",
+      "surface": "The same two-process test, as its second subtest, asserting on the processes' own logs as well as their answers.",
+      "command": "the same command, subtest 2_TwoProcessesOfOneGenerationNeverTakeTheNameFromEachOther",
+      "observed": "PASS: two processes of the same generation serve the fixed entry's exchanges in turn, including the second process's first exchange; every answer is 200, the binding row stays that entry's permanent hold after every turn, and neither process's log carries the takeover line.",
+      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
+      "negativeControl": "The third subtest shows the same log line being written when a take really happens, so its absence here is the property and not a line that never appears."
     },
     {
-      "criterion": "A token is useless to a caller that is not the identity it was minted for: the exchange accepts only a token bound to a live pod, for this broker's audience, and only from the one client on the one grant, with no credential standing in for a subject token.",
-      "surface": "The same live binary, refusals only.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 -v -run TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt ./cmd/broker/ -- subtests 'a token minted for another audience mints nothing', 'a token with no pod uid mints nothing', 'the same exchange carrying a client secret mints nothing', 'the same credential-less request from the machine-login client id mints nothing'",
-      "observed": "PASS, all four. The listed account's own token minted for the enrolment audience instead of the exchange audience: 400 invalid_request naming the audience the broker accepts. The listed account's token with no kubernetes.io pod uid, the kind `kubectl create token` mints: 400 invalid_request for being bound to no pod. The same exchange request with a client_secret added: 401 invalid_client. The same credential-less request from client id agent-secrets-helper: 400 invalid_grant, the library's own refusal of a public client at that grant.",
-      "headSha": "f7dc9d711fb6303ea9bb8b665062ca7c02096378",
-      "negativeControl": "The positive control for this set is the second subtest of the same run: the identical request, with the listed account's correctly-audienced pod-bound token from the exchange client and no credential, minted a token -- so each refusal above is the one thing that was changed, not a harness that cannot exchange at all."
+      "criterion": "Every sentence of the pull request body is true of the code, including what the fix leaves (the architect: 'a third correction of the same kind is not acceptable on this slice').",
+      "surface": "The body's Change bullet and its Look-at-first line, read against the two statements they describe.",
+      "command": "the body, read against oauthstore/exchange.go's BindSession and ReserveSessions",
+      "observed": "The bullet now says a name leaves its holder in exactly two ways and that nothing else in the code moves one: the retention running out, and the caller the configuration fixes the name for taking it when it exchanges, which is how an operator re-points an entry. It then states the two consequences rather than leaving them to be found: a re-point takes effect at the new entry's first exchange, so an entry that never exchanges leaves the name with its previous holder; and while that is true the name follows the ordinary rule, so if the previous holder's claim then runs out a third principal could claim it, with the fixed entry taking it back at its next exchange. It also states that reserving takes nothing, what that buys mid-rollout, and that the test above proves all three.",
+      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
+      "negativeControl": "The architect's question, answered in the body and checkable there: after this fix there is no other path by which a name is held by a principal the current configuration does not fix it for. The two named are the whole of it, and both end at that entry's next exchange."
     },
     {
-      "criterion": "A continuous-integration job exchanges its workflow token for a Dispatch token. Proven by a test of the exchange, since no job writes to Dispatch yet (the issue's own acceptance line).",
-      "surface": "The real broker handlers behind a test server, with a fake issuer standing in for GitHub's.",
-      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 ./internal/broker/oauth/...",
-      "observed": "ok github.com/sjawhar/envoy/internal/broker/oauth 15.271s. The live binary's test starts and configures a GitHub issuer too, and the binary reports github=true at boot.",
-      "headSha": "f7dc9d711fb6303ea9bb8b665062ca7c02096378",
-      "negativeControl": "The same workflow token presented a second time is refused: a workflow run mints a fresh token per request, so its jti is single-use, unlike a pod's standing token."
-    },
-    {
-      "criterion": "Nothing in the design names this deployment's people, machines or projects; the repository's check for private names passes.",
-      "surface": "The repository's own check, over the whole tree.",
-      "command": "bash .github/scripts/check-private-names.sh",
-      "observed": "no file or path names the private deployment repository or the company, and no text names a private internal host or a Tailscale MagicDNS host (4884 files in the repository)",
-      "headSha": "f7dc9d711fb6303ea9bb8b665062ca7c02096378",
-      "negativeControl": "The broker's documentation generator, which refuses a BROKER_* variable the configuration reads but no field documents and a documented variable nothing reads, was run over the tree and exited 0 writing api.md, config.md and errors.md -- so the new settings are documented under their real names and the removed one is gone from both sides."
+      "criterion": "The change the earlier rounds proved still holds at this head.",
+      "surface": "The broker suites and the live-binary test, on a real Postgres.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 ./internal/broker/... ./cmd/broker/",
+      "observed": "Every package green except internal/broker/helper, which fails only with this pod's SO_PEERPIDFD errors. cmd/broker, which carries the live-binary exchange test, ok 101.423s.",
+      "headSha": "2fa337992ae844666191d0c147e7b2c625e000b8",
+      "negativeControl": "gofmt -l prints nothing; go vet ./... and go vet -tags multiprocess ./cmd/broker are clean; check-private-names passes over 4985 files."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/oidc/keys.go, keys_test.go: a JSON Web Key Set source, because the OAuth library validates a subject token through a jwt.Keyfunc that must return the key, and go-oidc's RemoteKeySet verifies a signature without handing its keys out.",
-    "packages/envoy/internal/broker/exchange/: the policy half -- what a verified subject token entitles its holder to, as the session, the person, the project and its scope, plus the platform identity the session name binds to.",
-    "packages/envoy/internal/broker/oauthstore/{exchange.go,client.go,store.go}: the session name binding, the subject-token replay store, the ExchangeSession the RFC 8693 handlers write on, token rows with no launcher credential, and the two client registrations.",
-    "packages/envoy/internal/broker/store/migrations/0017_oauth_token_exchange.up.sql: oauth_session_bindings and oauth_exchange_jtis, with their expiry indexes and sweeps.",
-    "packages/envoy/internal/broker/oauth/{provider.go,exchange.go,clientauth.go,introspect.go,codes.go}: the composed grant in the library's required factory order, the registered subject-token types, the narrowed client-authentication hook, the broker's own decision step, and Provider.Introspect.",
-    "packages/envoy/internal/broker/config/config.go: the exchange's settings, BROKER_API_ACCOUNTS, and BROKER_UI_TOKEN[_FILE] moved to removedVars.",
-    "packages/envoy/internal/broker/api/{routes_table.go,server.go,handlers_introspect.go,handlers_ui_*.go,limits.go}: the introspection route, the service-account authentication kind that replaces the shared bearer on every route it held, and the route documentation that names the approver residue and dispatch://INFRA-314.",
-    "packages/envoy/cmd/broker/main.go, packages/envoy/internal/broker/brokertest/rig.go, packages/envoy/scripts/dev-broker.sh: the wiring, the rig and the local run.",
-    "packages/envoy/internal/dispatch/agentsecrets/client.go, packages/envoy/cmd/dispatch/{main.go,settings.go}: Dispatch presents its own projected service-account token, read at call time behind a short cache because a projected token rotates.",
-    "packages/envoy/AGENTS.md: the broker's own guide brought true for the whole slice.",
-    "packages/envoy/cmd/broker/token_exchange_test.go, main_test.go: the live proof as the package's own test -- the real binary booted on a real Postgres and driven through the exchange, introspection, renewal and eight refusals; startBroker now goes on draining the binary's stderr after the line it synchronises on, so a test reads what the binary logs later and the binary never blocks on a full pipe."
+    "packages/envoy/internal/broker/oauthstore/exchange.go: ReserveSessions holds a fixed name only where no other principal holds it, takes nothing, and answers the names it left with their holders; BindSession takes a `fixed` argument -- this process's configuration fixes this name for this caller -- holds the name with no expiry when it is set, and answers the principal it took the name from.",
+    "packages/envoy/internal/broker/oauth/exchange.go: reserveSessions logs each name it left with its holder and goes on serving; claimSession passes `fixed` and the takeover is logged after the commit.",
+    "packages/envoy/cmd/broker/multiprocess_test.go: TestAFixedSessionNameAcrossARollout, the rollout proof on real processes.",
+    "packages/envoy/internal/broker/oauth/{exchange_test.go,provider_test.go} and oauthstore/exchange_test.go: the in-process cases for the same rules, and a second provider on one database."
   ],
   "trickyParts": [
-    "The pinned library has no path for a credential-less token exchange: it refuses a public client that grant (handler/rfc8693/flow_token_exchange.go:36) and refuses the 'none' method to a confidential one (client_authentication_strategy.go:242). RFC 8693 Section 2.1 makes client authentication a deployment decision, so the broker supplies the library's own ClientAuthenticationStrategy hook for one client id, one grant, and a request carrying no credential of any kind; everything else goes to the library untouched. The alternatives were a client secret in every pod -- the shared secret this issue removes -- or keying client authentication, which would lock out the continuous-integration caller, which has no enrolled key.",
-    "A pod's projected service-account token is a standing credential its kubelet refreshes, so single-use (ValidateJTI) on that subject-token type would refuse every renewal. It is off for the Kubernetes type and on for the GitHub one, whose runs mint a fresh token per request.",
-    "RFC8693CustomJWTTypeFactory asserts the composed strategy to jwt.Strategy, which the broker's code strategy was not. The handler uses that strategy only to issue a JSON Web Token, which this provider never does, so the method set is implemented as explicit refusals: no signing key is generated anywhere and nothing can quietly mint a signed token.",
-    "The library checks a subject token's issuer and its expiry and never its audience, so the broker checks the audience itself -- without it a token a pod was given for another service would be spendable at the exchange.",
-    "oauthstore wrote and read only *oauth2.DefaultSession. The exchange needs a session the RFC 8693 handlers can write their subject and actor claims on, and an introspection reads those claims back out of the row, so the store now round-trips both kinds."
+    "The defect was invisible to every single-process test, because it needs two processes with configurations that disagree and an order between their first exchanges. That is why the proof is in cmd/broker under the multiprocess tag, beside TestTwoBrokers, rather than in the provider's own package.",
+    "Moving the take from seeding to the claim is what removes the race rather than narrowing it: two configurations can no longer take a name from each other at all, because only the caller a configuration fixes the name for ever takes it, and that is also the moment that carries the operator's intent."
   ],
   "deviations": [
-    "The plan's decision D8 said the exchanging callers are public clients. That is not buildable against the pinned library, for the reason in trickyParts; the client is registered confidential and authenticates with no credential through the library's own strategy hook. Reported to the architect, who agreed and asked for the narrowness to be proved by test (it is: oauth/exchange_test.go, and live steps 6.5a and 6.5b) and for the reason to be in the pull request body (it is).",
-    "The plan's section 5 item 7 put the approver assertion in this slice, as a further configured issuer. The architect withdrew it in three steps and settled it as dispatch://INFRA-314: no approver-identity mechanism is built here, and the RFC 7523 assertion grant written for it was removed from the branch rather than left unused, since nothing presents a person-held assertion to the token endpoint.",
-    "The architect added to this slice, in its place, the removal of the broker's shared bearer: BROKER_UI_TOKEN is gone and every route it authenticated takes the caller's own Kubernetes service-account token. What those routes do with an approver's name is deliberately unchanged -- removing the bearer and the approver trust together would stop every agent secret being approved from the moment this deploys -- and the route table says so beside them.",
-    "The plan said a token's session claim comes from configuration. A Kubernetes service-account token names the account and the pod, never the agent's own session, so the exchange reads a session form parameter; a configured entry that fixes the name wins and refuses another, which is how the Legion daemon keeps the name it writes under today. The architect then required the name to be bound to the identity that first claimed it, which it is: first caller wins until its tokens lapse.",
-    "A dev box session's token carries no project, as a person's own cookie and personal token carry none. The architect required the absence to be explicit rather than missing, so every token carries a project scope and a later slice's check can refuse one carrying neither."
+    "The architect's round cap said a new finding after round 3 goes to a child issue. This one is fixed here instead, which the architect and I reached independently and the architect confirmed: it is the feature built in this slice failing on the deployment's own two replicas at its first rollout, locking out the entry the configuration fixes, and the alternative was a body sentence describing a lockout that lasts until an unrelated restart."
   ],
   "openQuestions": [
-    "Nothing presents a broker token to Dispatch yet: Dispatch accepting one is Child A and Legion presenting one is Child D, so this slice's credential kind is inert in production until those land. That is the plan's own ordering (section 7) and not a gap in this work.",
-    "The deployment change this slice needs is listed in the pull request body under 'Deployment'. BROKER_API_ACCOUNTS is required and replaces BROKER_UI_TOKEN in the same deploy: a broker started with the old variable refuses it by name, so the two must move together."
+    "dispatch://INFRA-382 still owns the limit this slice leaves: inside one project, two pods are the same principal."
   ],
   "discoveredComplexity": [
-    "This pod cannot start a workload in the cluster (kubectl auth can-i create services and get services both answer no, and docs/kubernetes.md forbids submitting a Job on anything less than three bare yes answers), and it has no Docker and no psql. The live run was made possible by fetching a standalone Postgres build and running it in this pod; the harness talks to it with pgx. A role that needs a database for a live proof in this deployment has no sanctioned path until dispatch://INFRA-206's declarations are applied.",
-    "Five test packages fail in this pod for reasons that are the pod's and not the change's, and they pass in CI: internal/broker/helper, cmd/agent-secrets and cmd/agent-secrets-helper fail with 'SO_PEERPIDFD: protocol not available' (this kernel identifies no socket peer), and cmd/listener and cmd/natstail fail with 'rootless Docker not found'. Every other package of the module is green."
+    "The schema did not move: migration 0018 is unchanged, and the fix is two statements and the argument that tells them apart."
   ]
 }

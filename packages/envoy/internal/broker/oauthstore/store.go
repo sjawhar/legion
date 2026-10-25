@@ -10,8 +10,10 @@
 // re-hydrates the client with GetClient and the session into the kind the caller hands it, an
 // *oauth2.DefaultSession or the *ExchangeSession an exchanged token runs on. Every machine
 // login's token row names the launcher credential its session's Extra["credential_id"] carries,
-// so EndCredential ends a revoked credential's tokens in the revoke's own transaction; an
-// exchanged token follows no login and its row names none.
+// so EndCredential ends a revoked credential's tokens in the revoke's own transaction. A token
+// exchanged for a machine access token names the same credential, because the library reads the
+// subject token's session into the session the new token is issued on; one exchanged for a pod's
+// or a workflow run's token follows no login and its row names none.
 //
 // Every method runs in the transaction the context carries (WithTx, or BeginTX), and on the pool
 // when it carries none.
@@ -324,6 +326,11 @@ func flatten(request oauth2.Requester) (storedRequest, error) {
 // kind the store writes; any other type is an error) and its client re-hydrated by id. An
 // *ExchangeSession is handed its *oauth2.DefaultSession first, so a row written from either kind
 // decodes into it.
+//
+// A row naming a client the provider does not register is a row it cannot decode, and its error
+// does not wrap GetClient's oauth2.ErrNotFound: the library reads that sentinel from a token read
+// as "no such token", and an introspection would answer a stored token it failed to read as
+// simply not live.
 func (s *Store) hydrate(ctx context.Context, raw []byte, session oauth2.Session, stored *storedRequest) error {
 	switch typed := session.(type) {
 	case nil:
@@ -342,16 +349,18 @@ func (s *Store) hydrate(ctx context.Context, raw []byte, session oauth2.Session,
 	}
 	client, err := s.GetClient(ctx, stored.ClientID)
 	if err != nil {
-		return fmt.Errorf("stored OAuth request's client %q: %w", stored.ClientID, err)
+		return fmt.Errorf("stored OAuth request names client %q, which the provider does not register (%v)", stored.ClientID, err)
 	}
 	stored.Client = client
 	return nil
 }
 
 // credentialOf is the launcher credential id a token session's Extra names, and "" for a token
-// that follows no machine login: an exchanged or asserted token is issued against a subject
-// token or an assertion, no credential was ever issued for it, and its row holds none, which is
-// what 0016 leaves the column nullable for. A machine login's tokens are issued only after an
+// that follows no machine login: a token exchanged for a pod's or a workflow run's token, or an
+// asserted one, is issued against a subject token or an assertion, no credential was ever issued
+// for it, and its row holds none, which is what 0016 leaves the column nullable for. A token
+// exchanged for a machine access token carries that token's credential id over, so its row names
+// the credential and a revoke ends it. A machine login's tokens are issued only after an
 // approval, which names the credential, so a session of that client naming none is still an
 // error: its row would hold no credential a revoke could end it by.
 func credentialOf(request oauth2.Requester, session *oauth2.DefaultSession) (string, error) {
@@ -690,6 +699,38 @@ func (s *Store) RevokeRefreshToken(ctx context.Context, requestID string) error 
 	}
 	if _, err := state.tx.Exec(ctx, `update oauth_refresh_tokens set active = false where request_id = $1 and active`, requestID); err != nil {
 		return fmt.Errorf("revoke refresh tokens: %w", err)
+	}
+	return nil
+}
+
+// ErrCredentialEnded is a launcher credential LockCredential found revoked, past its expiry, or
+// not there at all: there is no login left for a token to follow.
+var ErrCredentialEnded = errors.New("oauthstore: the launcher credential is revoked or past its expiry")
+
+// LockCredential holds launcher credential id's row lock until the transaction ctx carries ends,
+// leaving the row as it is, and reports ErrCredentialEnded for a credential revoked or past its
+// expiry. Expiry is compared with clock_timestamp(), the statement's own moment, not now(), the
+// transaction's start, so a retire that commits after the token request's transaction began still
+// ends the login for it.
+//
+// It is what keeps a token issued for the credential from stepping over its revoke: the revoke
+// (enroll.Service.RevokeCredential) locks the same row before EndCredential, so it either commits
+// first, and the lock finds no live row, or waits for the token to commit and then ends it. An
+// exchange of a machine access token takes it, because its minted token names the same
+// credential; the device code grant takes the same lock in machine.Service.Live.
+func LockCredential(ctx context.Context, credentialID string) error {
+	state, err := txOf(ctx)
+	if err != nil {
+		return err
+	}
+	var one int
+	err = state.tx.QueryRow(ctx, `select 1 from launcher_credentials
+		where id = $1 and revoked_at is null and expires_at > clock_timestamp() for no key update`, credentialID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrCredentialEnded
+	}
+	if err != nil {
+		return fmt.Errorf("lock the launcher credential: %w", err)
 	}
 	return nil
 }

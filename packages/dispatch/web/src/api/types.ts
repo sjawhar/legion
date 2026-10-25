@@ -167,6 +167,8 @@ export type {
   OpenAskOwner,
   ProgressCount,
   Project,
+  ProjectDefaultAssignee,
+  ProjectDefaultAssigneeInput,
   RepoProject,
   SearchArtifactRef,
   SearchOwner,

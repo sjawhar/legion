@@ -34,26 +34,29 @@ const (
 	// exchangeGrantType is RFC 8693's own grant type, which the library spells in a package its
 	// users cannot import.
 	exchangeGrantType = "urn:ietf:params:oauth:grant-type:token-exchange"
-	// podAccount is the one identity BROKER_EXCHANGE_ACCOUNTS lists here, with the project and
-	// the person its entry gives it; otherAccount is listed nowhere; apiAccount is the listed
-	// caller of the introspection route, BROKER_API_ACCOUNTS' own.
-	podAccount   = "system:serviceaccount:example-ns:example-worker"
-	otherAccount = "system:serviceaccount:example-ns:example-other"
-	apiAccount   = "system:serviceaccount:example-ns:example-dispatch"
-	person       = "ada@example.com"
-	project      = "ACME"
+	// podAccount is the identity BROKER_EXCHANGE_ACCOUNTS lists here whose pods the test drives,
+	// with the project and the person its entry gives it; listedAccount is listed too, for another
+	// project and another person; otherAccount is listed nowhere; apiAccount is the listed caller
+	// of the introspection route, BROKER_API_ACCOUNTS' own.
+	podAccount    = "system:serviceaccount:example-ns:example-worker"
+	listedAccount = "system:serviceaccount:other-ns:example-worker"
+	otherAccount  = "system:serviceaccount:example-ns:example-other"
+	apiAccount    = "system:serviceaccount:example-ns:example-dispatch"
+	person        = "ada@example.com"
+	project       = "ACME"
 	// enrolmentAudience is what a pod's enrolment token and a listed caller's own token carry;
 	// exchangeAudience is what a token presented to the exchange must carry, and workflowAudience
 	// what a GitHub workflow run's would. A token minted for one is not spendable at another.
 	enrolmentAudience = "https://broker.example"
 	exchangeAudience  = "https://broker.example/exchange"
 	workflowAudience  = "https://broker.example/ci"
-	// heldSession is the session name the first pod writes under, which a second pod of the same
-	// account may not take; renewalSession is the renewing role's own.
+	// heldSession is the session name the first pod writes under, which belongs to its account:
+	// a second pod of the same account writes under it too, and a pod of another account may not
+	// take it. renewalSession is the renewing role's own.
 	heldSession    = "example-session"
 	renewalSession = "example-renewal"
-	// firstPodUID is the pod that holds heldSession; secondPodUID is another pod of the very same
-	// listed account, which is another identity.
+	// firstPodUID is the pod that first claims heldSession; secondPodUID is another pod of the
+	// very same listed account, which is the same principal.
 	firstPodUID  = "pod-uid-1"
 	secondPodUID = "pod-uid-2"
 	// longAccessSeconds is the access-token lifetime of the run every step but the renewal drives,
@@ -66,7 +69,8 @@ const (
 // TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt is the live proof of the exchange: the
 // real binary on a fresh schema, a pod's projected token exchanged with a DPoP proof of a key this
 // test generates and no client credential at all, the minted token read back by the listed API
-// account, a lapsed token renewed from the same standing pod token, and the eight refusals that
+// account, a second pod of the same account writing under the first's session name, a lapsed token
+// renewed from the same standing pod token, and the eight refusals that
 // keep the credential-less path from being a way in for anyone else. It skips when
 // BROKER_TEST_DATABASE_URL is unset, as every Postgres-backed broker test does.
 func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
@@ -87,21 +91,22 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 	apiToken := accountToken(t, cluster, clusterKey, apiAccount)
 	strangerToken := accountToken(t, cluster, clusterKey, otherAccount)
 
-	addr, _, await := startBroker(t, exchangeEnv(t, databaseURL, cluster, github, longAccessSeconds)...)
+	broker := startBroker(t, brokerOptions{Env: exchangeEnv(t, databaseURL, cluster, github, longAccessSeconds)})
+	addr := broker.Addr
 	live := newLiveBroker(addr, key)
 
 	t.Run("the real binary boots on a fresh schema with its token exchange on", func(t *testing.T) {
 		// The binary logs the state of its exchange after the bind line startBroker synchronises
 		// on, so the boot is read once that line has arrived.
-		boot := await("token exchange")
+		boot := broker.Await(t, "token exchange")
 		t.Logf("the broker's own boot lines:\n%s", boot)
 		requireHealthy(t, addr)
 		for _, want := range []string{
 			"broker listening addr=" + addr,
-			"token exchange state=on kubernetes=true github=true accounts=1",
+			"token exchange state=on kubernetes=true github=true accounts=2",
 		} {
 			if !strings.Contains(boot, want) {
-				t.Fatalf("the boot log carries no %q; the real binary must log the address it bound — the one that just answered /healthz — and report its token exchange on, with both issuers and the one listed account:\n%s", want, boot)
+				t.Fatalf("the boot log carries no %q; the real binary must log the address it bound — the one that just answered /healthz — and report its token exchange on, with both issuers and the two listed accounts:\n%s", want, boot)
 			}
 		}
 	})
@@ -151,11 +156,24 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 		}
 	})
 
+	t.Run("a second pod of the same account writes under the session name the first holds", func(t *testing.T) {
+		status, body := live.exchange(t, exchangeForm(mintPodToken(t, cluster, clusterKey, podAccount, exchangeAudience, secondPodUID), heldSession))
+		second, _ := body["access_token"].(string)
+		if status != http.StatusOK || second == "" {
+			t.Fatalf("the exchange of a second pod of %s naming %s = %d %v, want 200: the session name belongs to the account, so the pod that replaces another in a rolling update, or a session resumed in a relaunched pod, writes under it", podAccount, heldSession, status, body)
+		}
+		status, body = live.introspect(t, second, apiToken)
+		if status != http.StatusOK || body["active"] != true || body["session"] != heldSession || body["person"] != person {
+			t.Fatalf("introspection of the second pod's token = %d %v, want 200, live, under the session %s acting for %s", status, body, heldSession, person)
+		}
+	})
+
 	t.Run("a lapsed token is renewed by the same standing pod token", func(t *testing.T) {
 		// Its own broker run, on a schema of its own, started with an access-token lifetime of a
 		// few seconds: the proof is that the first token lapses, not that the test waits.
-		renewalAddr, _, renewalAwait := startBroker(t, exchangeEnv(t, storetest.URL(t), cluster, github, shortAccessSeconds)...)
-		renewalAwait("token exchange")
+		renewalBroker := startBroker(t, brokerOptions{Env: exchangeEnv(t, storetest.URL(t), cluster, github, shortAccessSeconds)})
+		renewalBroker.Await(t, "token exchange")
+		renewalAddr := renewalBroker.Addr
 		renewal := newLiveBroker(renewalAddr, key)
 		podToken := mintPodToken(t, cluster, clusterKey, podAccount, exchangeAudience, "pod-uid-renewal")
 
@@ -216,14 +234,14 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 			form:   exchangeForm(mintPodToken(t, cluster, clusterKey, podAccount, exchangeAudience, ""), "example-unbound"),
 			status: http.StatusBadRequest, code: "invalid_request",
 			says:   "bound to no pod",
-			proves: "the listed account's token carrying no kubernetes.io pod uid — the kind `kubectl create token` mints — proves only that the account exists, and the session name is bound to a pod",
+			proves: "the listed account's token carrying no kubernetes.io pod uid — the kind `kubectl create token` mints — proves only that the account exists, not that Kubernetes minted it for a pod of this cluster",
 		},
 		{
-			name:   "a second pod asking for the session name the first holds mints nothing",
-			form:   exchangeForm(mintPodToken(t, cluster, clusterKey, podAccount, exchangeAudience, secondPodUID), heldSession),
+			name:   "a pod of another listed account asking for the session name the first holds mints nothing",
+			form:   exchangeForm(mintPodToken(t, cluster, clusterKey, listedAccount, exchangeAudience, "pod-uid-other"), heldSession),
 			status: http.StatusBadRequest, code: "invalid_grant",
-			says:   "Another identity is writing under the session name '" + heldSession + "'",
-			proves: "two pods of one account are two identities, and the session name is bound to the first pod's uid rather than to the account",
+			says:   "The session name '" + heldSession + "' belongs to another identity",
+			proves: "the session name belongs to the account whose pods claimed it, so a pod of another account, listed for another project and another person, cannot mint a token naming it",
 		},
 		{
 			name:   "the same exchange carrying a client secret mints nothing",
@@ -282,7 +300,7 @@ func TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt(t *testing.T) {
 
 // exchangeEnv is what one broker run of this test needs beyond productionEnv: the fresh schema it
 // migrates and serves from, the cluster issuer with the audience a pod enrols with and the one it
-// exchanges with, the GitHub issuer, the one listed account with its project and person, the
+// exchanges with, the GitHub issuer, the two listed accounts with their projects and persons, the
 // listed caller of the introspection route, and how long an access token it mints lasts.
 func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Issuer, accessSeconds int) []string {
 	t.Helper()
@@ -298,7 +316,7 @@ func exchangeEnv(t *testing.T, databaseURL string, cluster, github *oidctest.Iss
 		"BROKER_K8S_OIDC_ISSUER=" + cluster.URL(),
 		"BROKER_K8S_OIDC_AUDIENCE=" + enrolmentAudience,
 		"BROKER_EXCHANGE_K8S_AUDIENCE=" + exchangeAudience,
-		"BROKER_EXCHANGE_ACCOUNTS=" + podAccount + "=" + project + "=" + person,
+		"BROKER_EXCHANGE_ACCOUNTS=" + podAccount + "=" + project + "=" + person + " " + listedAccount + "=OTHER=mallory@example.com",
 		"BROKER_EXCHANGE_GITHUB_ISSUER=" + github.URL(),
 		"BROKER_EXCHANGE_GITHUB_AUDIENCE=" + workflowAudience,
 		"BROKER_API_ACCOUNTS=dispatch=" + apiAccount,

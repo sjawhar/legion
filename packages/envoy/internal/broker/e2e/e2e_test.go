@@ -33,8 +33,6 @@ package e2e
 import (
 	"context"
 	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -303,15 +301,6 @@ func decode[T any](t *testing.T, body []byte) T {
 	return v
 }
 
-func newSigningKey(t *testing.T) *ecdsa.PrivateKey {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	return key
-}
-
 // --- wire-shape mirrors of the shared broker contract, the fields this test actually reads ---
 
 type wireError struct {
@@ -421,7 +410,7 @@ func TestEndToEnd(t *testing.T) {
 	// routes accept a launcher proof ("lid") signed by the machine's own key by creating the box
 	// enrollment the later steps reuse.
 	t.Run("1_MachineLoginMintsCredentialAcceptedByEnrollmentRoutes", func(t *testing.T) {
-		machineKey := newSigningKey(t)
+		machineKey := brokertest.NewSigningKey(t)
 		da := ts.deviceLogin(t, machineKey, testApprover, "e2e-agents")
 		login := struct{ Code string }{da.UserCode}
 
@@ -467,7 +456,7 @@ func TestEndToEnd(t *testing.T) {
 			t.Fatalf("refresh = credential_id %v, rotated %t; want %s and a new refresh token", refreshed.Extra("credential_id"), refreshed.RefreshToken != tok.RefreshToken, launcherCredentialID)
 		}
 
-		sessionKey = newSigningKey(t)
+		sessionKey = brokertest.NewSigningKey(t)
 		sessionThumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
 		if err != nil {
 			t.Fatalf("thumbprint: %v", err)
@@ -741,7 +730,7 @@ func (s *e2eServer) awaitValue(t *testing.T, key *ecdsa.PrivateKey, enrollmentID
 // enrolls a box session under it, as step 1 does for testApprover.
 func (s *e2eServer) loginAndEnroll(t *testing.T, person, host string) (string, *ecdsa.PrivateKey) {
 	t.Helper()
-	machineKey := newSigningKey(t)
+	machineKey := brokertest.NewSigningKey(t)
 	code := s.deviceLogin(t, machineKey, person, host).UserCode
 	_, body := s.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
 	recordID := decode[wireRecord](t, body).RecordID
@@ -753,7 +742,7 @@ func (s *e2eServer) loginAndEnroll(t *testing.T, person, host string) (string, *
 	credentialID := *decode[struct {
 		CredentialID *string `json:"credential_id"`
 	}](t, body).CredentialID
-	sessionKey := newSigningKey(t)
+	sessionKey := brokertest.NewSigningKey(t)
 	thumbprint, err := proof.Thumbprint(&sessionKey.PublicKey)
 	if err != nil {
 		t.Fatalf("thumbprint: %v", err)

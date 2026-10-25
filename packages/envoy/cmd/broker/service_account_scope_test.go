@@ -45,16 +45,17 @@ func TestAnAccountProvesOnlyTheServiceItIsListedFor(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	addr, _, _ := startBroker(t,
-		"BROKER_DATABASE_URL="+databaseURL,
+	process := startBroker(t, brokerOptions{Env: []string{
+		"BROKER_DATABASE_URL=" + databaseURL,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
-		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
-		"BROKER_K8S_OIDC_ISSUER="+issuer.URL(),
-		"BROKER_K8S_OIDC_AUDIENCE="+podAudience,
-		"BROKER_SERVICE_LOGINS="+service+"="+loginAccount+" "+otherService+"="+otherLogin,
-		"BROKER_SERVICES="+service+"="+accountA+" "+service+"="+accountB+" "+otherService+"="+accountD,
-	)
+		"BROKER_FAKE_SECRETS_FILE=" + fakeSecretsFile,
+		"BROKER_K8S_OIDC_ISSUER=" + issuer.URL(),
+		"BROKER_K8S_OIDC_AUDIENCE=" + podAudience,
+		"BROKER_SERVICE_LOGINS=" + service + "=" + loginAccount + " " + otherService + "=" + otherLogin,
+		"BROKER_SERVICES=" + service + "=" + accountA + " " + service + "=" + accountB + " " + otherService + "=" + accountD,
+	}})
+	addr := process.Addr
 	requireHealthy(t, addr)
 	broker := podBroker{t: t, base: "http://" + addr, issuer: issuer, key: podKey, audience: podAudience}
 

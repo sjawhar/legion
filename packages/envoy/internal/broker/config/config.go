@@ -205,6 +205,19 @@ type Config struct {
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
 	// the pending requests and machine logins nobody decided in time.
 	SweepSeconds int
+	// BROKER_DRAIN_SECONDS: how long the broker goes on serving after SIGTERM while answering
+	// GET /healthz with 503, so Kubernetes has stopped sending it new requests before it stops
+	// accepting them. It is configuration rather than a compiled constant because the right value
+	// is the cluster's EndpointSlice propagation time — how long a pod the control plane has
+	// marked for deletion keeps receiving traffic — which lives in the deployment's own
+	// repository, not this one, and must be tunable there without a new image. Removal from a
+	// Service's EndpointSlice starts when the pod's deletion timestamp appears, concurrently with
+	// the kubelet beginning termination, so what the drain must outlast is that propagation and
+	// not a readiness probe's periodSeconds × failureThreshold, which no longer stands between
+	// the pod and the endpoint controller by then; 5 seconds is what this repository's own
+	// Dispatch deployment sizes its preStop wait at, for the same reason. 0 is for a local run or
+	// a dev stack, where nothing propagates and the wait is pure delay.
+	DrainSeconds int
 	// BROKER_TRUSTED_PROXY_HEADER: the request header (e.g. X-Forwarded-For) whose last entry the
 	// machine-login and secret-reread rate limiters take as the caller's address. Unset, they use
 	// the connection's own address, which is right only when nothing proxies the broker. Set it
@@ -639,6 +652,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{"BROKER_ACCESS_TOKEN_SECONDS", &cfg.AccessTokenSeconds, 900, 1, 3600},
 		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
+		{"BROKER_DRAIN_SECONDS", &cfg.DrainSeconds, 5, 0, 120},
 		{"BROKER_SIGNIN_SESSION_SECONDS", &sessionSeconds, 86400, 1, 86400},
 	}
 	for _, i := range ints {

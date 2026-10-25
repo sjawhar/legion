@@ -225,7 +225,12 @@ func routes() []apiRoute {
 		// The approval page's one stylesheet, embedded in the broker; served while sign-in is off
 		// too, since the page saying so links it.
 		{http.MethodGet, "/approve/assets/approve.css", public((*server).approvalStylesheet)},
-		// Report whether the broker can reach its database.
+		// Report whether the broker can reach its database. From SIGTERM onward it answers 503
+		// SHUTTING_DOWN instead (Deps.Draining) while the process goes on serving every other route,
+		// which is what takes a stopping pod out of its Service's endpoints before it stops
+		// accepting connections. So this is a readiness probe and must never be used as a liveness
+		// probe: a liveness probe on it would have the kubelet kill the container in the middle of
+		// the drain, dropping the requests the pod was draining.
 		{http.MethodGet, "/healthz", public((*server).healthz)},
 	}
 }

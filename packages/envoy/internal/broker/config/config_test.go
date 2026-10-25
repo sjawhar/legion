@@ -112,9 +112,36 @@ func TestLoadDefaultsTheIntegerSettings(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 || cfg.AccessTokenSeconds != 900 ||
-		cfg.LauncherCredentialSeconds != 2592000 || cfg.SweepSeconds != 5 {
-		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d AccessTokenSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
-			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.AccessTokenSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
+		cfg.LauncherCredentialSeconds != 2592000 || cfg.SweepSeconds != 5 || cfg.DrainSeconds != 5 {
+		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d AccessTokenSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d DrainSeconds=%d",
+			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.AccessTokenSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds, cfg.DrainSeconds)
+	}
+}
+
+// TestLoadReadsTheDrainSeconds pins BROKER_DRAIN_SECONDS, the wait the broker serves out after
+// SIGTERM while answering /healthz with 503: 0 is allowed, since a local run has no EndpointSlice
+// to propagate and the wait would be pure delay, and a value past two minutes, a negative one or
+// one that is not a whole number refuses to start naming the variable, rather than leaving the
+// drain at a length nobody chose.
+func TestLoadReadsTheDrainSeconds(t *testing.T) {
+	for _, good := range []struct {
+		value string
+		want  int
+	}{{"0", 0}, {"30", 30}, {"120", 120}} {
+		e := validEnv()
+		e["BROKER_DRAIN_SECONDS"] = good.value
+		cfg, err := Load(env(e))
+		if err != nil || cfg.DrainSeconds != good.want {
+			t.Fatalf("Load(BROKER_DRAIN_SECONDS=%s) = %d, %v; want %d", good.value, cfg.DrainSeconds, err, good.want)
+		}
+	}
+	for _, bad := range []string{"121", "-1", "five", "5s", "5.0", " "} {
+		e := validEnv()
+		e["BROKER_DRAIN_SECONDS"] = bad
+		_, err := Load(env(e))
+		if err == nil || !strings.HasPrefix(err.Error(), "BROKER_DRAIN_SECONDS must be a whole number between 0 and 120") {
+			t.Fatalf("Load(BROKER_DRAIN_SECONDS=%q) = %v, want a refusal naming BROKER_DRAIN_SECONDS and its range", bad, err)
+		}
 	}
 }
 

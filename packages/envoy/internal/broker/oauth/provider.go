@@ -22,6 +22,8 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"authelia.com/provider/oauth2"
@@ -63,12 +65,15 @@ type Provider struct {
 	oauth    oauth2.Provider
 	store    *oauthstore.Store
 	strategy *codeStrategy
-	// access is Config.AccessLifetime, which the exchange's own step needs before the library
-	// has set the issued token's expiry: a session name is claimed until the token it is claimed
-	// for would expire.
-	access time.Duration
 	// exchange is Config.Exchange, which the exchange's own step decides by.
 	exchange ExchangeConfig
+	// reservations are the session names the exchange's entries fix, each mapped to the
+	// principal it belongs to, which reserveSessions holds before this provider's first exchange.
+	reservations map[string]string
+	// reserved says reserveSessions has held them; reserving serializes the first exchanges
+	// while it does.
+	reserved  atomic.Bool
+	reserving sync.Mutex
 }
 
 // ErrLoginEnded is the TokenHooks.Before error (wrapped or not) that refuses a token request
@@ -164,7 +169,11 @@ func New(c Config, store *oauthstore.Store) (*Provider, error) {
 		compose.RFC8693TokenExchangeGrantFactory, compose.RFC8693AccessTokenTypeFactory,
 		compose.RFC8693RefreshTokenTypeFactory, compose.RFC8693CustomJWTTypeFactory,
 		compose.RFC8693ActorTokenValidationFactory)
-	p := &Provider{oauth: provider, store: store, strategy: strategy, access: c.AccessLifetime, exchange: c.Exchange}
+	reservations := map[string]string{}
+	for _, reservation := range c.Exchange.Policy.Reservations() {
+		reservations[reservation.Session] = reservation.Principal
+	}
+	p := &Provider{oauth: provider, store: store, strategy: strategy, exchange: c.Exchange, reservations: reservations}
 	// A provider built with no store serves no request at all and is only ever inspected, as the
 	// broker's route wiring test inspects it, so there is nothing there to give the decision to.
 	if store != nil {

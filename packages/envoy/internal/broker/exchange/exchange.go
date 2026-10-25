@@ -1,7 +1,7 @@
 // Package exchange decides what a verified subject token entitles its holder to write in
 // Dispatch: the claims a minted Dispatch access token carries — the session that is writing, the
 // person it acts for, and which projects it may write, either the one it names or every one its
-// person may write — and, beside them, the platform identity the session name is to be bound to.
+// person may write — and, beside them, the principal the session name belongs to.
 //
 // It is the policy half of the RFC 8693 token exchange and nothing else. It verifies no token,
 // reads no configuration, takes no clock and makes no call: it is handed entries someone else
@@ -18,12 +18,18 @@
 //     repository, the workflow's path and the ref it ran on gives the project and the person;
 //   - a dev box session's machine credential, which no entry lists, because the person is the
 //     approver the credential already records.
+//
+// The principal is the caller's standing identity, never the instance asking: the listed account
+// for a pod, the listed workflow for a run, the person for a dev box. A session name belongs to
+// one principal, so a pod's replacement and a workflow's next run keep writing under the name
+// their predecessor held, and a caller of any other principal is refused it.
 package exchange
 
 import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"unicode"
 	"unicode/utf8"
@@ -90,8 +96,8 @@ func (s ProjectScope) String() string {
 	}
 }
 
-// Claims are what an exchange writes into the Dispatch access token it mints, and the binding it
-// makes before it does.
+// Claims are what an exchange writes into the Dispatch access token it mints, and the principal
+// the session name it writes under belongs to.
 type Claims struct {
 	// Session is who the token's writes are recorded as.
 	Session string
@@ -103,12 +109,23 @@ type Claims struct {
 	// Project is the one project key the token may write, and is empty for a
 	// ProjectScopePerson token, which names no project.
 	Project string
-	// Binding is the platform identity the session name is to be bound to, and is not a claim of
-	// the minted token: it is what the broker records as the holder of the session name, so a
-	// caller that may exchange cannot mint a token naming a session another identity is already
-	// writing under. It is the pod uid for a pod, the repository and run id for a workflow run,
-	// and the machine credential's id for a dev box session.
-	Binding string
+	// Principal is who the session name belongs to, and is not a claim of the minted token: it is
+	// what the broker records as the name's holder, so a caller that may exchange cannot mint a
+	// token naming a session another principal writes under. It is the listed account for a pod,
+	// the listed workflow (its repository, path and ref) for a run, and the person for a dev box
+	// session, each spelled with its kind first (account:, workflow:, person:) so principals of
+	// two kinds never compare equal. Every pod of one account, every run of one workflow and every
+	// machine of one person is therefore one holder.
+	Principal string
+}
+
+// Reservation is a session name an entry fixes and the principal it belongs to. The broker holds
+// each one for its entry's principal before it makes any exchange, so a name an entry fixes is
+// refused to every other caller by the same rule that refuses any held name, whether or not the
+// entry's own caller has exchanged yet.
+type Reservation struct {
+	Session   string
+	Principal string
 }
 
 // AccountEntry lists one Kubernetes service account and what a pod running as it may write. Every
@@ -123,7 +140,8 @@ type AccountEntry struct {
 	Person string
 	// Session, when set, is the session name every token minted for this account carries, and a
 	// request naming any other is refused. It is how a long-running service keeps writing under
-	// one name it does not get to choose per request.
+	// one name it does not get to choose per request. The name is one of the set's Reservations,
+	// held for the account however many of its pods exchange and refused to every other caller.
 	Session string
 }
 
@@ -154,18 +172,33 @@ type workflowKey struct{ repository, workflow, ref string }
 // Set is the listed identities as one build of the configuration read them. It is immutable once
 // built, so every Pod, Workflow and Machine on it is a pure function of its arguments.
 type Set struct {
-	accounts  map[string]AccountEntry
-	workflows map[workflowKey]WorkflowEntry
+	accounts     map[string]AccountEntry
+	workflows    map[workflowKey]WorkflowEntry
+	reservations []Reservation
 }
 
 // NewSet validates every entry and builds the set the exchange decides against. It refuses,
 // naming the entry it refuses: an empty or blank required field, an account or repository that is
-// not of its grammar, a fixed session name that is not usable, and an identity listed twice, since
-// two answers for one identity is a configuration whose meaning depends on order.
+// not of its grammar, a fixed session name that is not usable, an identity listed twice, since
+// two answers for one identity is a configuration whose meaning depends on order, two workflows
+// whose principals spell alike, and a session name two entries fix, since one name belongs to one
+// principal.
 func NewSet(accounts []AccountEntry, workflows []WorkflowEntry) (*Set, error) {
 	set := &Set{
 		accounts:  make(map[string]AccountEntry, len(accounts)),
 		workflows: make(map[workflowKey]WorkflowEntry, len(workflows)),
+	}
+	fixedBy, spelledBy := map[string]string{}, map[string]string{}
+	reserve := func(where, session, principal string) error {
+		if session == "" {
+			return nil
+		}
+		if other, fixed := fixedBy[session]; fixed {
+			return fmt.Errorf("exchange: %s: %s fixes the same session name, and one name belongs to one identity", where, other)
+		}
+		fixedBy[session] = where
+		set.reservations = append(set.reservations, Reservation{Session: session, Principal: principal})
+		return nil
 	}
 	for i, entry := range accounts {
 		where := fmt.Sprintf("account entry %d, %q", i+1, entry.Account)
@@ -177,6 +210,9 @@ func NewSet(accounts []AccountEntry, workflows []WorkflowEntry) (*Set, error) {
 		}
 		if _, listed := set.accounts[entry.Account]; listed {
 			return nil, fmt.Errorf("exchange: %s: the account is listed twice, and one account writes as one identity", where)
+		}
+		if err := reserve(where, entry.Session, accountPrincipal(entry.Account)); err != nil {
+			return nil, err
 		}
 		set.accounts[entry.Account] = entry
 	}
@@ -198,9 +234,24 @@ func NewSet(accounts []AccountEntry, workflows []WorkflowEntry) (*Set, error) {
 		if _, listed := set.workflows[key]; listed {
 			return nil, fmt.Errorf("exchange: %s: the workflow is listed twice, and one workflow writes as one identity", where)
 		}
+		principal := workflowPrincipal(key)
+		if other, spelled := spelledBy[principal]; spelled {
+			return nil, fmt.Errorf("exchange: %s: %s spells the same identity, so the two could not be told apart as holders of a session name", where, other)
+		}
+		spelledBy[principal] = where
+		if err := reserve(where, entry.Session, principal); err != nil {
+			return nil, err
+		}
 		set.workflows[key] = entry
 	}
 	return set, nil
+}
+
+// Reservations are the session names the entries fix, each with the principal it belongs to, in
+// the order the entries were listed: accounts first, then workflows. The slice is the caller's
+// own, so the set stays immutable.
+func (s *Set) Reservations() []Reservation {
+	return slices.Clone(s.reservations)
 }
 
 // checkGrant refuses what every entry shares: a blank project or person, which would mint a token
@@ -231,15 +282,18 @@ func checkGrant(where, project, person, session string) error {
 // (oauth.kubernetesTolerance) allows up to 24 hours ahead. What bounds the reach that follows is
 // the access token each exchange mints, which lives BROKER_ACCESS_TOKEN_SECONDS (15 minutes by
 // default). That trades immediate revocation of a pod's token for needing no access to the
-// cluster's own interface. The uid is also what the session name is bound to, so one pod cannot
-// write under the session name another pod of the same account is writing under.
+// cluster's own interface.
+//
+// The principal is the account, not the pod: every pod of one account is one holder, so the
+// replacement pod of a rolling update, or a Legion session resumed in a relaunched pod, keeps
+// writing under the name the pod before it held. Pods of one account are not kept apart from one
+// another by their session names; an entry lists an account because its pods are one service.
 func (s *Set) Pod(token map[string]any, session string) (Claims, error) {
 	account, err := claimString(token, "sub")
 	if err != nil {
 		return Claims{}, err
 	}
-	uid := podUID(token)
-	if uid == "" {
+	if podUID(token) == "" {
 		return Claims{}, fmt.Errorf("%w: %s presented a token bound to no pod, which proves only that the account exists", ErrNoPodBinding, account)
 	}
 	entry, listed := s.accounts[account]
@@ -250,11 +304,11 @@ func (s *Set) Pod(token map[string]any, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	return Claims{Session: name, Person: entry.Person, Scope: ProjectScopeNamed, Project: entry.Project, Binding: uid}, nil
+	return Claims{Session: name, Person: entry.Person, Scope: ProjectScopeNamed, Project: entry.Project, Principal: accountPrincipal(account)}, nil
 }
 
 // Workflow answers the claims for a continuous-integration workflow run's GitHub token, from the
-// claims GitHub puts in it: `repository`, `workflow_ref`, `job_workflow_ref`, `ref` and `run_id`.
+// claims GitHub puts in it: `repository`, `workflow_ref`, `job_workflow_ref` and `ref`.
 //
 // The identity is the repository, the workflow file's path and the ref, each compared exactly. A
 // run whose job comes from a reusable workflow other than the one the run started in is refused:
@@ -262,9 +316,9 @@ func (s *Set) Pod(token map[string]any, session string) (Claims, error) {
 // run entered through, and where they differ the code that is running is not the code the entry
 // names.
 //
-// The session name is bound to the run, which is `run_id` under its repository: a run id is
-// unique only within the repository that numbered it, so two repositories' runs would otherwise
-// collide on one binding.
+// The principal is that listed workflow, not the run: every run of it is one holder, so the next
+// run of a release workflow keeps writing under the name the run before it held, however soon
+// after it starts.
 func (s *Set) Workflow(token map[string]any, session string) (Claims, error) {
 	repository, err := claimString(token, "repository")
 	if err != nil {
@@ -282,10 +336,6 @@ func (s *Set) Workflow(token map[string]any, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	run, err := claimString(token, "run_id")
-	if err != nil {
-		return Claims{}, err
-	}
 	if jobRef != workflowRef {
 		return Claims{}, fmt.Errorf("%w: %s ran %s, whose job is written in %s; an entry lists the workflow a job runs in", ErrNoEntry, repository, workflowRef, jobRef)
 	}
@@ -293,7 +343,8 @@ func (s *Set) Workflow(token map[string]any, session string) (Claims, error) {
 	if !ok {
 		return Claims{}, fmt.Errorf("%w: the subject token's workflow_ref is not <owner>/<name>/<path>@<ref> under its repository %s", ErrClaimMissing, repository)
 	}
-	entry, listed := s.workflows[workflowKey{repository, workflow, ref}]
+	key := workflowKey{repository, workflow, ref}
+	entry, listed := s.workflows[key]
 	if !listed {
 		return Claims{}, fmt.Errorf("%w: no entry lists the workflow %s of %s on %s", ErrNoEntry, workflow, repository, ref)
 	}
@@ -301,19 +352,18 @@ func (s *Set) Workflow(token map[string]any, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	return Claims{
-		Session: name,
-		Person:  entry.Person,
-		Scope:   ProjectScopeNamed,
-		Project: entry.Project,
-		Binding: repository + "/actions/runs/" + run,
-	}, nil
+	return Claims{Session: name, Person: entry.Person, Scope: ProjectScopeNamed, Project: entry.Project, Principal: workflowPrincipal(key)}, nil
 }
 
 // Machine answers the claims for a dev box session's machine credential, credential being the
 // credential's own id. No entry lists one: the person is approver, the one the credential already
-// records, and the session is the one the caller names and is bound to that credential, so one
-// person's dev box cannot write under another's session name.
+// records, and the session is the one the caller names. A machine login's token names the
+// credential it was issued under, so a token naming none is refused as not being one.
+//
+// The principal is the person, not the credential: every machine and every session of one person
+// is one holder, so a person's session resumed on another of their machines, or after their
+// machine logged in again, keeps its name, and one person's dev box cannot write under another's
+// session name or under one an entry fixes.
 //
 // The token names no project, and says so: its scope is ProjectScopePerson. A machine credential
 // is a person's own identity on their own machine, as their browser cookie and their personal
@@ -323,7 +373,7 @@ func (s *Set) Workflow(token map[string]any, session string) (Claims, error) {
 // from mistaking that for a token no project check applies to.
 func (s *Set) Machine(credential, approver, session string) (Claims, error) {
 	if strings.TrimSpace(credential) == "" {
-		return Claims{}, fmt.Errorf("%w: the machine credential has no id to bind the session name to", ErrClaimMissing)
+		return Claims{}, fmt.Errorf("%w: the subject token names no machine credential id, so it is not a machine login's token", ErrClaimMissing)
 	}
 	if strings.TrimSpace(approver) == "" {
 		return Claims{}, fmt.Errorf("%w: the machine credential records no approver to act for", ErrClaimMissing)
@@ -332,8 +382,20 @@ func (s *Set) Machine(credential, approver, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	return Claims{Session: name, Person: approver, Scope: ProjectScopePerson, Binding: credential}, nil
+	return Claims{Session: name, Person: approver, Scope: ProjectScopePerson, Principal: personPrincipal(approver)}, nil
 }
+
+// The three spellings of a principal, each led by its kind so that no account, workflow and
+// person ever spell the same string. A workflow's is <repository>/<path>@<ref>, as an operator
+// reads one elsewhere; a path or ref carrying "@" could make two entries spell one string, and
+// NewSet refuses that pair rather than let one's runs hold the other's names.
+func accountPrincipal(account string) string { return "account:" + account }
+
+func workflowPrincipal(key workflowKey) string {
+	return "workflow:" + key.repository + "/" + key.workflow + "@" + key.ref
+}
+
+func personPrincipal(person string) string { return "person:" + person }
 
 // sessionRule is the one sentence that says what a session name may be, so an entry refused at
 // build time and a request refused at exchange time are refused in the same words, and the cap it

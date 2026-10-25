@@ -4,6 +4,10 @@
 
 ### Added
 
+- The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
+  `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
+  still names a person who has signed in, and `dispatch_whoami` says a session under the shared
+  token creates issues that fall to the parent's assignee and then to that default.
 - Two optional arguments on `dispatch_issue_update`, `before` and `after`, which move an issue on
   its project's board: `before` puts it above that issue, `after` below, and both together land it
   between them. Either one is a field, so the rule that requires at least one field besides `issue`

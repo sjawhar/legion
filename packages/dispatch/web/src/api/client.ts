@@ -62,6 +62,8 @@ import type {
   MyAnswersResponse,
   MyRepliesResponse,
   Project,
+  ProjectDefaultAssignee,
+  ProjectDefaultAssigneeInput,
   RepoProject,
   SearchResponse,
   Subscriber,
@@ -334,6 +336,24 @@ export class DispatchApiClient {
 
   async deleteRepoProject(repo: string): Promise<void> {
     await this.response(`/api/v1/settings/repo-projects/${repoPath(repo)}`, { method: "DELETE" });
+  }
+
+  /** Only the projects that name a default; a project left out names nobody. Human-only. */
+  listProjectDefaultAssignees(): Promise<ProjectDefaultAssignee[]> {
+    return this.json<ProjectDefaultAssignee[]>("/api/v1/settings/project-default-assignees");
+  }
+
+  /** Sets the person a project's unowned work lands on, or clears it with `{assignee: null}`.
+   *  Human-only, and a login nobody has signed in as is refused `400 ASSIGNEE_NOT_ALLOWED`. */
+  putProjectDefaultAssignee(
+    project: string,
+    input: ProjectDefaultAssigneeInput
+  ): Promise<ProjectDefaultAssignee> {
+    return this.send<ProjectDefaultAssignee>(
+      "PUT",
+      `/api/v1/projects/${pathSegment(project)}/default-assignee`,
+      input
+    );
   }
 
   listArchitectureSources(): Promise<ArchitectureSource[]> {

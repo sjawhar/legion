@@ -1,16 +1,20 @@
 -- packages/envoy/internal/broker/store/migrations/0018_oauth_token_exchange.up.sql
--- The token exchange's OAuth 2.0 state (authelia.com/provider/oauth2): which identity holds a
+-- The token exchange's OAuth 2.0 state (authelia.com/provider/oauth2): which principal holds a
 -- session name, and the replay store the exchange's subject tokens are kept out of a second use
 -- by.
--- Every row of both expires, and the store's sweep deletes it through the expires index each
--- table carries.
--- A session name is held by the platform identity that first claimed it (a pod's uid, a workflow
--- run under its repository, or a dev box's machine credential id) until the token the claim was
--- made for would have expired, so a caller that may exchange cannot mint a token naming a session
--- another identity is writing under.
+-- Every row of both expires but a session name the configuration fixes, and the store's sweep
+-- deletes the rest through the expires index each table carries.
+-- A session name belongs to the principal that first claimed it: a listed service account (every
+-- pod of it), a listed workflow (every run of it) or a person (every machine of theirs), never
+-- the one pod, run or machine that asked. The principal holds it until
+-- oauthstore.SessionRetention (90 days) after the last token minted under it expires, and a name
+-- an entry of the configuration fixes is held for that entry's principal with an expires_at of
+-- 'infinity' for as long as the configuration fixes it, so a caller that may exchange cannot mint
+-- a token naming a session another principal writes under, and no lapse of a token hands a name
+-- to another principal while its holder has used it within the retention.
 create table oauth_session_bindings (
   session text primary key,
-  identity text not null,
+  principal text not null,
   expires_at timestamptz not null
 );
 create index oauth_session_bindings_expires on oauth_session_bindings (expires_at);

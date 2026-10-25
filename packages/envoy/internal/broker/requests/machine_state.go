@@ -92,6 +92,10 @@ const jtiRetentionMargin = time.Minute
 
 // DefaultMissRereads bounds the policy rereads one enrollment's unknown-name requests trigger:
 // a session inventing names costs at most Burst DescribeSecret calls, refilled one per Every.
+// The budget is per process, so two broker pods make two of it for the same enrollment. That is
+// left as it is because this bounds load rather than authority - a reread only moves a pod
+// toward the secret store's own truth, and grants nothing - so the cost of sharing it across
+// pods, a store read's worth of state in Postgres on every miss, buys nothing an operator needs.
 var DefaultMissRereads = ratelimit.Limit{Every: 10 * time.Second, Burst: 10}
 
 // SecretDecision is how the policy decided one name of a request.

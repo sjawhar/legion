@@ -34,7 +34,10 @@
 # (postgres://<user>@<host>:<port>/<database>, a role that may create databases), on that server
 # through psql, with no Docker at all. cmd/broker binds before it reports anything and
 # logs the address it actually bound; this script waits for that line and reads the real port from
-# it, so a curl success can only ever mean this instance's own broker answered.
+# it, so a curl success can only ever mean this instance's own broker answered. The broker is
+# started with BROKER_DRAIN_SECONDS=0 so this stack's cleanup stays instant: the default
+# five-second drain exists to outlast a Kubernetes EndpointSlice propagation nothing here has, so
+# here it would be pure delay on every Ctrl-C and every restart.
 #
 # The helper a second shell runs keeps its socket, sessions file and log in WORK_DIR too: the
 # printed exports name WORK_DIR's helper.sock and operator file (written here), so a walk through
@@ -238,13 +241,15 @@ fi
 echo "dev-broker: starting broker..." >&2
 : >"$BROKER_LOG"
 # BROKER_MACHINE_LOGIN_URL is a placeholder: no Dispatch runs here, and devrelay stands in for it
-# (it approves a login by its code without a page).
+# (it approves a login by its code without a page). BROKER_DRAIN_SECONDS=0 turns the drain off
+# (see the header).
 BROKER_DATABASE_URL="$POSTGRES_URL" \
 BROKER_PUBLIC_URL="$PUBLIC_URL" \
 BROKER_MACHINE_LOGIN_URL="http://127.0.0.1/credentials/machine" \
 BROKER_SECRETS_PREFIX="$SECRETS_PREFIX" \
 BROKER_SECRETS_KMS_KEY_ARN="$SECRETS_KMS_KEY_ARN" \
 BROKER_FAKE_SECRETS_FILE="$FAKE_SECRETS_FILE" \
+BROKER_DRAIN_SECONDS=0 \
 BROKER_LISTEN_ADDR="$LISTEN_ADDR" \
 BROKER_K8S_OIDC_ISSUER="$ISSUER_URL" \
 BROKER_K8S_OIDC_AUDIENCE="$BROKER_AUDIENCE" \
