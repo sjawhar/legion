@@ -1105,17 +1105,19 @@ func slackEventSlice(event, message map[string]any, key string) []any {
 var slackDisplayFields = []string{"pretext", "author_name", "title", "text", "value", "footer", "fallback"}
 
 // slackDeliveredText is every word a Slack message delivers: its own text, then each display
-// string its attachments and its blocks carry that the text does not already hold, a line apiece.
-// An app posts its words there as often as in the message's own text, and a deleted message
-// delivers none.
+// string its attachments and its blocks carry that is not a repeat of one already delivered, a
+// line apiece. An app posts its words there as often as in the message's own text, and a deleted
+// message delivers none. A message that carries words of its own has its rich_text blocks left
+// unread: they are the client's structured copy of those same words.
 func slackDeliveredText(body map[string]any) string {
 	event := mapValue(body["event"])
 	if stringValue(event["subtype"]) == "message_deleted" {
 		return ""
 	}
 	message := slackMessage(event)
-	var walk slackTextWalk
-	walk.take(slackEventString(event, message, "text"))
+	own := slackEventString(event, message, "text")
+	walk := slackTextWalk{skipRichText: strings.TrimSpace(own) != ""}
+	walk.take(own)
 	walk.walk(slackEventSlice(event, message, "attachments"))
 	walk.walk(slackEventSlice(event, message, "blocks"))
 	return walk.text
@@ -1126,16 +1128,34 @@ type slackTextWalk struct {
 	text string
 	// runes is the rune count of text, kept as it grows so no piece recounts the whole.
 	runes int
-	// full reports that the text has run past what an envelope carries, so nothing more is read.
-	full bool
+	// taken is every piece the text already holds, so a value Slack repeats across an
+	// attachment's fields and a block's nested text is delivered once. It is built as pieces
+	// arrive, so a message with no display strings allocates no set.
+	taken map[string]struct{}
+	// skipRichText leaves a rich_text block tree unread, which is what a message that carries
+	// words of its own wants: the tree is the Slack client's structured copy of those words,
+	// split per segment and with & < > unescaped, so reading it delivers a near-duplicate line.
+	skipRichText bool
 }
 
-// take appends a display string, unless it is empty or the text so far already holds it: Slack
-// repeats the same words across an attachment's fields and a block's nested text.
+// full reports that the text has run past what an envelope carries. It bounds the work the walk
+// does and nothing else: where the delivered text is cut is capBody's decision.
+func (w *slackTextWalk) full() bool {
+	return w.runes > maxEnvelopeTextRunes
+}
+
+// take appends a display string, unless it holds no word or is exactly one already taken.
 func (w *slackTextWalk) take(piece string) {
-	if w.full || piece == "" || strings.Contains(w.text, piece) {
+	if w.full() || strings.TrimSpace(piece) == "" {
 		return
 	}
+	if _, repeat := w.taken[piece]; repeat {
+		return
+	}
+	if w.taken == nil {
+		w.taken = make(map[string]struct{})
+	}
+	w.taken[piece] = struct{}{}
 	if w.text == "" {
 		w.text = piece
 		w.runes = utf8.RuneCountInString(piece)
@@ -1143,44 +1163,65 @@ func (w *slackTextWalk) take(piece string) {
 		w.text += "\n" + piece
 		w.runes += 1 + utf8.RuneCountInString(piece)
 	}
-	w.full = w.runes > maxEnvelopeTextRunes
 }
 
-// walk takes the display strings of an object, then descends in sorted key order into its values
-// that are not strings, so that a block's nested text reaches the output while a string under any
-// other name, or directly at an array index, stays out. An array is descended in index order.
+// walk reads an object through the one key order slackWalkKeys gives it, taking a string under a
+// display name and descending into every value that is not a string, so that a block's nested
+// text reaches the output in the place the object shows it. An array is descended in index order.
+// rich_text is the only kind name the walk recognises, and only to skip the whole object when
+// skipRichText is set.
 func (w *slackTextWalk) walk(value any) {
-	if w.full {
+	if w.full() {
 		return
 	}
 	switch node := value.(type) {
 	case map[string]any:
-		for _, field := range slackDisplayFields {
-			w.take(stringValue(node[field]))
+		if w.skipRichText && stringValue(node["type"]) == "rich_text" {
+			return
 		}
-		// A block's leaves are commonly all strings, so the keys to descend into are collected
-		// before they are sorted: such a node then sorts and allocates nothing.
-		var keys []string
-		for key, item := range node {
-			if _, isString := item.(string); !isString {
-				keys = append(keys, key)
+		for _, key := range slackWalkKeys(node) {
+			if text, isString := node[key].(string); isString {
+				w.take(text)
+			} else {
+				w.walk(node[key])
 			}
-		}
-		slices.Sort(keys)
-		for _, key := range keys {
-			w.walk(node[key])
-			if w.full {
+			if w.full() {
 				return
 			}
 		}
 	case []any:
 		for _, item := range node {
 			w.walk(item)
-			if w.full {
+			if w.full() {
 				return
 			}
 		}
 	}
+}
+
+// slackWalkKeys is the order an object's keys are read in: the display names it carries, ranked as
+// slackDisplayFields ranks them, then its remaining keys alphabetically. A remaining key whose
+// value is a string is left out: a string under a name Slack does not display is not a word a
+// person reads, and a string is nothing to descend into, so such a key can contribute nothing.
+func slackWalkKeys(node map[string]any) []string {
+	var keys []string
+	for _, field := range slackDisplayFields {
+		if _, has := node[field]; has {
+			keys = append(keys, field)
+		}
+	}
+	display := len(keys)
+	for key, item := range node {
+		if _, isString := item.(string); isString {
+			continue
+		}
+		if slices.Contains(slackDisplayFields, key) {
+			continue
+		}
+		keys = append(keys, key)
+	}
+	slices.Sort(keys[display:])
+	return keys
 }
 
 func slackFilesSuffix(files []any) string {
