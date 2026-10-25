@@ -1,0 +1,61 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-236",
+  "completed": "2026-10-25T05:37:28Z",
+  "round": 1,
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 5,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/broker/api/limits.go:87",
+      "description": "The new broker-wide burst of 2 breaks the third back-to-back agent-secrets write. CI's envoy-go lane is red at the code head 2fa08226c7ec (job 121080509450): TestSecretDeleteAndRestoreAreServedByTheBrokerAtOnce fails at step 3 of delete/restore/retag with 'the write to the secret store stands, but the broker could not be asked to reread TEST_AUTO_SECRET ... too many secret rereads (RATE_LIMITED)'. The same lane at the previous head 3275c17cf765 (job 121066141966, burst 5) reports 'ok github.com/sjawhar/envoy/cmd/agent-secrets 198.702s', so the change caused it. Reproduced against the live constants: a scratch row driving ratelimit.Keyed.AllowBothAt with api.DefaultRereadLimit and each broker-wide bucket at 50 ms apart allows rereads 1 and 2 and refuses 3 and 4, for DefaultRereadOverallLimit {1s,2} and GCPRereadOverallLimit {4s,2} alike. Not a test nit: the refused reread is the narrowing retag, which then reaches no pod until each one's five-minute reload, the guarantee this PR adds. brokertest.NewRig mounts the production bucket with no override."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/broker/main.go:178",
+      "description": "A SIGTERM arriving during boot can no longer stop the process. policy.NewCurrent(serving, ...) at :190 and oauthStore.Secret(serving) at :278 run on context.WithoutCancel(ctx) with no timeout of their own, and <-ctx.Done() at :356 is reached only after boot finishes, so neither call ends on the signal. The second-signal escape is registered at :372, inside the drain, and signal.NotifyContext's relay goroutine has already returned after the first signal while its channel stays registered, so further SIGTERMs are swallowed rather than taking the default disposition. The pod then holds a bound listening socket with no srv.Serve goroutine until the kubelet SIGKILLs it at terminationGracePeriodSeconds, which this PR's own operate.md asks to be at least 65 s. The PR's own negative control records the previous head exiting 1 about two seconds after the same signal. Remedy: bound both boot calls, or test ctx.Err() after each and fall through to the drain, and register the second-signal channel before boot."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/broker/api/limits.go:101",
+      "description": "Security[authz]: the shared reread bucket is now smaller than one source address's own sustained budget, so the unauthenticated POST /v1/secrets/{name}/reread (routes_table.go:169, public = no credential) can be starved fleet-wide from a single address. DefaultRereadLimit stays {Every: 2s, Burst: 30} = 0.5 rereads/s sustained per address; GCPRereadOverallLimit becomes {Every: 4s, Burst: 2} = 0.25/s, and DefaultRereadOverallLimit {Every: 1s, Burst: 2} = 1/s. ratelimit.Keyed.AllowBothAt charges a refusal to neither bucket, so an attacker need only keep succeeding at the refill rate: one address starves the GCP fleet (was two addresses at 1/s), two starve the AWS fleet (was eight at 4/s). While the shared bucket is empty every agent-secrets write exits 1 (cmd/agent-secrets reports the 429) and no narrowing retag is enforced anywhere until each pod's five-minute reload. Remedy: lower the per-address sustained rate below the shared refill, or reserve part of the shared bucket from the per-address path."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/AGENTS.md:3078",
+      "description": "The reread limits paragraph states the superseded constants and contradicts itself seven lines later: ':3078-3079 'DefaultRereadOverallLimit, burst 5 and one back every 500 ms ... GCPRereadOverallLimit, burst 5 and one back every 2 s' against the live {1s, 2} and {4s, 2} at limits.go:87 and :101, while :3085 already says '1 s for the shared bucket, 4 s for the GCP one' and :3089-3090 '2 pods x 1 reread/s' and '0.25 reread/s'. The constants moved twice on this branch; the second move updated limits.go, operate.md and troubleshooting.md and missed this."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/broker/multiprocess_test.go:641",
+      "description": "Row 5's premise comment states both superseded figures ('a burst of five, one back every 500 ms') and the superseded sizing model ('that cap is sized as the fleet's whole budget divided by the replica count'), which is exactly what row 7 at :852 in the same file was written to disprove: the live sizing divides by the replica count squared."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/broker/main.go:198",
+      "description": "The firstListen barrier does not establish the property its comment claims. The token is sent inside the Dial wrapper at :221, before Dial has returned, and pglisten.Listener.listen runs conn.Exec(listenCtx, l.statement()) at listener.go:148 after Dial returns, so the process can bind while the LISTEN statement is still in flight. The hook that would establish it is OnConnected (listener.go:157), which runs after LISTEN succeeded and which reread.Listener already wires to its unexported connected field. Either wait on that signal or state the comment as the insurance the tester measured it to be (ten boots at each head put the LISTEN session on the channel before the first answered request in every one)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/cmd/broker/multiprocess_test.go:878",
+      "description": "Latent flake in the PR's central proof row. The wait loop at :870 exits as soon as both processes have read the store once more, and :878 then re-reads both counters, so a straggling read gives reads=3 and the assertion computes 2 x 1.00 x 3 = 6.00 > 4.00 and fails. The assertion at :892 also sits exactly on its boundary with no margin. Capture the counts the loop exited on."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/site/src/content/docs/broker/operate.md:330",
+      "description": "Two of the five new log lines take the shape operate.md's alarm table defines as a request that failed with a 500 or 503 — 'broker: <operation> failed error=...', produced only by the slog.Error helpers at api/server.go:310 and :316 — but at WARN and off the request path: main.go:339 fires on a 200 and reread/reread.go:171 on no request at all. A pattern-based monitor on the documented row then fires on healthy traffic. None of the five new lines is in the table, including 'broker: a Postgres listener has no connection; redialing', which is the only signal that a pod's fan-out is dead."
+    }
+  ],
+  "ciRead": "Base main requires lint, typecheck, test and pr-title (repos/sjawhar/legion/rules/branches/main; branch protection has no required checks). CI head for branch legion/INFRA-236 is 2fa08226c7ec706eeca4a65f16a0d9e43f118290, the newest pull_request run's head; compare 2fa08226c7ec...bdff57d48c98 lists only .legion/INFRA-236/implement.json and .legion/INFRA-236/test.json, so the code under review is that commit's. Its check-runs: every required name present, completed and success (lint, typecheck, test, pr-title). Not required but red on this change: envoy-go failure (job 121080509450, run 40163746160). Still running at this read: dispatch in_progress. The PR body's CI line is stale — it records envoy-go as 'still running'; it has since completed as failure.",
+  "thermonuclear": {
+    "head": "bdff57d48c9838c467df3a47c9186d7f0edfd399",
+    "deepReview": "CHANGES — M1 SIGTERM during boot (taken), M2 alarm-table shape (taken), M3 starvation (taken), L1 PR-body claim wider than the code, L2 no liveness signal for a LISTEN a transaction pooler silently never delivers, L3 Close's comment wrong about the hijacked connection, L4 row 7 flake (taken). No finding in shutdown ordering, hostile NOTIFY payloads, statement injection, the RDS IAM minter surviving the hijack, the 503's content, or CI supply chain.",
+    "codeQuality": "CHANGES — F1 stale limit numbers (taken), F2 pglisten.Owner optional with a self-defeating default, F3 the listener pool duplicated against internal/dispatch/store/pool.go, F4 the boot barrier (taken), F5 brokertest Rig/Client duplication, F6 two nil-func deps against Register's own normalization convention, F7 the stop sequence belongs in cmd/broker/shutdown.go, F8 a WithRereadOverallLimit rig option as the structural answer to the envoy-go break."
+  },
+  "threads": "No review threads existed on pull request #2162 at this round (gh api graphql reviewThreads: 0 nodes). The only pull-request comment is the implementer's own rebase record.",
+  "fastFollow": "One cleanup item, batched: make pglisten.Owner required and delete owner()'s fallback (F2), share the hijacked one-connection listener pool between internal/broker/store and internal/dispatch/store (F3), fold brokertest.Rig onto the new Client so request() loses its uiCall indirection and its `at` parameter (F5), default NotifyReread and Draining in api.Register as every other optional dep is (F6), move the stop sequence to cmd/broker/shutdown.go (F7), and correct store.go Close's comment, which claims it releases a connection pgxpool no longer holds after Hijack (L3)."
+}
