@@ -2,6 +2,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- A session refreshes its Envoy registration every 100 s rather than every 120 s: the listener
+  expires a session record 300 s after its last write, and a third of that lifetime leaves room for
+  two whole refreshes to fail before a live session's record is dropped.
+
+### Added
+
+- `ENVOY_PASS_DEADLINE_MS` resolves `passDeadlineMs`, the bound on one task of the pi-envoy
+  plugin's serial queues, so a task that never settles cannot hold the next heartbeat tick, session
+  event or Legion claim behind it. A finite value above 0 is used, floored at 25 ms; anything else
+  falls back to the resolved `heartbeatMs` or 30 s, whichever is longer.
+
 ### Fixed
 
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then

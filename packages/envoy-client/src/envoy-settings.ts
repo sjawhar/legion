@@ -20,8 +20,14 @@ export const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 // (`envoy.natsUrls` or `ENVOY_NATS_URL`), and any baked-in value silently misroutes every
 // deployment it doesn't match. An empty natsUrls means "inbound messaging not configured" -
 // consumers must degrade loudly instead of dialing an invented address.
-export const DEFAULT_HEARTBEAT_MS = 120_000;
-const MIN_HEARTBEAT_MS = 25;
+// The Envoy listener expires a session record 300 s after its last write
+// (`OpenSessionRegistry`'s default `ttl`, `packages/envoy/internal/session/registry.go`). A record
+// that expires unless refreshed is renewed at a third of its lifetime, so two whole refreshes may
+// fail before a live session's record is dropped.
+export const DEFAULT_HEARTBEAT_MS = 100_000;
+/** The deadline a pass gets when nothing names one and the heartbeat is shorter. */
+export const DEFAULT_PASS_DEADLINE_MS = 30_000;
+const MIN_INTERVAL_MS = 25;
 
 /** The variables `envoySettings` consults, by name, over whatever else the environment holds. */
 export type EnvoyEnvironment = EnvoyConfigEnvironment & {
@@ -32,6 +38,7 @@ export type EnvoyEnvironment = EnvoyConfigEnvironment & {
   readonly NATS_NKEY_SEED?: string | undefined;
   readonly NATS_NKEY_SEED_FILE?: string | undefined;
   readonly ENVOY_HEARTBEAT_MS?: string | undefined;
+  readonly ENVOY_PASS_DEADLINE_MS?: string | undefined;
 };
 
 /** A NATS user's nkey seed, and where it came from, which an error about it names. */
@@ -84,6 +91,11 @@ export interface EnabledEnvoySettings {
    * listener and its bearer stand), and with `NO_NATS_CONNECTION` for a caller that opens none. */
   readonly inbound: EnvoyInbound;
   readonly heartbeatMs: number;
+  /** The bound on one task of the pi-envoy plugin's serial queues, so a task that never settles
+   * cannot hold the next heartbeat tick, session event or Legion claim behind it. The default
+   * never cuts a healthy pass short: the worst legitimate pass is about one 20 s NATS dial plus a
+   * few `AbortSignal.timeout(5000)` HTTP calls. */
+  readonly passDeadlineMs: number;
 }
 
 /** No Envoy: a `notice` says why, or an `error` names what could not be read or used. */
@@ -230,15 +242,21 @@ export function envoySettings(
     }
   }
   const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
+  const heartbeatMs =
+    Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
+      ? Math.max(rawHeartbeatMs, MIN_INTERVAL_MS)
+      : DEFAULT_HEARTBEAT_MS;
+  const rawPassDeadlineMs = Number(env.ENVOY_PASS_DEADLINE_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url),
     token,
     inbound,
-    heartbeatMs:
-      Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0
-        ? Math.max(rawHeartbeatMs, MIN_HEARTBEAT_MS)
-        : DEFAULT_HEARTBEAT_MS,
+    heartbeatMs,
+    passDeadlineMs:
+      Number.isFinite(rawPassDeadlineMs) && rawPassDeadlineMs > 0
+        ? Math.max(rawPassDeadlineMs, MIN_INTERVAL_MS)
+        : Math.max(heartbeatMs, DEFAULT_PASS_DEADLINE_MS),
   };
 }
 

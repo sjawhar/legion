@@ -48,7 +48,8 @@ describe("envoySettings", () => {
         natsUrls: ["nats://nats.internal.example:4222"],
         natsSeed: { value: "SUFILESEED", source: `envoy.natsSeed in ${config.path}` },
       },
-      heartbeatMs: 120_000,
+      heartbeatMs: 100_000,
+      passDeadlineMs: 100_000,
     });
   });
 
@@ -74,6 +75,7 @@ describe("envoySettings", () => {
         natsSeed: { value: "SUENVSEED", source: "NATS_NKEY_SEED" },
       },
       heartbeatMs: 25,
+      passDeadlineMs: 30_000,
     });
 
     const tokenFile = secretFile("  pointer-token\n");
@@ -93,6 +95,31 @@ describe("envoySettings", () => {
       inbound: {
         natsSeed: { value: "SUPOINTERSEED", source: `NATS_NKEY_SEED_FILE (${seedFile})` },
       },
+    });
+  });
+
+  test("ENVOY_PASS_DEADLINE_MS names the deadline, floored at 25ms", () => {
+    const config = configFrom({ envoy: listener });
+    expect(envoySettings({ ENVOY_PASS_DEADLINE_MS: "7500" }, config)).toMatchObject({
+      heartbeatMs: 100_000,
+      passDeadlineMs: 7500,
+    });
+    expect(envoySettings({ ENVOY_PASS_DEADLINE_MS: "10" }, config)).toMatchObject({
+      passDeadlineMs: 25,
+    });
+  });
+
+  test("an unusable ENVOY_PASS_DEADLINE_MS falls back to the resolved heartbeat's deadline", () => {
+    const config = configFrom({ envoy: listener });
+    for (const value of ["soon", "0", "-5000"]) {
+      expect(
+        envoySettings({ ENVOY_HEARTBEAT_MS: "5000", ENVOY_PASS_DEADLINE_MS: value }, config)
+      ).toMatchObject({ heartbeatMs: 5000, passDeadlineMs: 30_000 });
+    }
+    // A pane given a long heartbeat gets a deadline at least that long.
+    expect(envoySettings({ ENVOY_HEARTBEAT_MS: "45000" }, config)).toMatchObject({
+      heartbeatMs: 45_000,
+      passDeadlineMs: 45_000,
     });
   });
 
@@ -126,7 +153,8 @@ describe("envoySettings", () => {
       url: "http://127.0.0.1:9020",
       token: undefined,
       inbound: { natsUrls: ["nats://nats.internal.example:4222"], natsSeed: undefined },
-      heartbeatMs: 120_000,
+      heartbeatMs: 100_000,
+      passDeadlineMs: 100_000,
     });
   });
 
@@ -240,7 +268,8 @@ describe("envoySettings", () => {
         url: "http://listener.internal.example:9020",
         token: "file-token",
         inbound: { off: "this session opens no NATS connection" },
-        heartbeatMs: 120_000,
+        heartbeatMs: 100_000,
+        passDeadlineMs: 100_000,
       });
     }
     expect(existsSync(ran)).toBe(false);
@@ -376,7 +405,8 @@ describe("the NATS seed in envoy.json", () => {
       inbound: {
         off: `ENVOY_NATS_URL names other servers than ${config.path}'s envoy.natsUrls; set NATS_NKEY_SEED_FILE for them`,
       },
-      heartbeatMs: 120_000,
+      heartbeatMs: 100_000,
+      passDeadlineMs: 100_000,
     });
     expect(existsSync(runs)).toBe(false);
     // A set holding one other server is other servers too, whether it replaces one of the file's
