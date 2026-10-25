@@ -277,8 +277,8 @@ Compaction (`Compact`, which ygo runs as a room closes and as the server shuts d
 runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding
 that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest
 version's cursor changed content. A compacted `doc_updates`, and any backup of it taken later,
-therefore holds no text a write deleted: text deleted before a version captured it is gone (Sami's
-decision, LEGION-496).
+therefore holds no text a write deleted: text deleted before a version captured it is gone (the
+operator's decision, LEGION-496).
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
@@ -2266,9 +2266,9 @@ An enrollment's kind is `session` (an agent session on a machine its person logg
 helper's own, or a key a launcher such as agentbox brings through the helper's
 `enroll-session-key`) or `pod`; migration 0012 rewrote every stored `box`/`host` to `session`.
 `POST /v1/enrollments` takes only `session` and `pod` (`400 INVALID_KIND` otherwise): the `host`
-and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in.
-No reader of stored data needs them: the `enrollments` kind constraint admits only the two, and a
-record body that predates 0012 keeps its `box`/`host` as text its id hashes, which
+and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in
+again. No reader of stored data needs them: the `enrollments` kind constraint admits only the
+two, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which
 `record.ParseBody` reads without checking the kind. The helper still asks an older broker, which
 answers `session` `400 INVALID_KIND`, once more as `host` or `box` (`helper/broker.go`, `enroll`:
 gone once the production broker records `session`). The CLI and helper speak only the kind-free
