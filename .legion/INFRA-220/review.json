@@ -2,28 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-220",
-  "completed": "2026-10-25T13:27:00Z",
-  "round": 2,
-  "reviewedHead": "52feca1a999db3bf486ec683d5472d0eb1fda952 plus this handoff commit (code head 2fc4b487c8fad9f8f9c786fc41c0eed4214a75d9; compare 2fc4b487...52feca1a: status ahead, 2 files, both under .legion/)",
-  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title; branch protection names none. CI head 2fc4b487 (newest pull_request runs: Tests 40195025978, PR Title 40195026011): lint, typecheck, test, pr-title completed success at 13:17Z.",
-  "forwardMerges": "6ef7e8e5 and 2fc4b487 brought main in. Interdiff of the branch's own changes (14571f6f..fb3bc446 against 3ca092a6..2fc4b487) differs only in the adaptation to main's session_store cloudsql-iam (SessionDSNSecret -> SessionStore.InDatabase(); the DSN file pointer for every role under either database store). Reviewed and accepted.",
+  "completed": "2026-10-25T16:26:00Z",
+  "round": 3,
+  "reviewedHead": "0493abd27512fb002875ef24892ea78050c714fa plus this handoff commit (code head 91f50e61b385: 802c9b23, where the image ships Claude Code's pin and a pod fetches the binary, merged forward with main 371d6c87). Compare 91f50e61...0493abd2 shows status ahead and 2 files, both under .legion/.",
+  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title. At CI head 91f50e61 at 16:20Z: typecheck and pr-title success; lint and test in_progress (Tests run 40210101226). A request for changes does not wait on them. Not required: the 'Legion Envoy and Contracts' failure at 2fc4b487 was cmd/broker test files main had broken (this branch touches nothing under packages/envoy); at this head `go vet ./cmd/broker` is clean.",
   "thermonuclear": {
-    "deepReview": "APPROVE at 52feca1a: all four round-1 Important fixes traced correct and complete, the cloudsql-iam adaptation included; no new finding.",
-    "codeQuality": "APPROVE at 52feca1a: no finding in the round-2 changes."
+    "deepReview": "CHANGES at 0493abd2: one Medium, the cold-cache race in claudeCodeBlock.",
+    "codeQuality": "CHANGES at 0493abd2: the same race, plus splitting plugins_test.go (declined: the repository has no rule on file length, and the suite is cohesive)."
   },
-  "ownChecks": "At this head, go test ./internal/runtime/sandbox ./internal/claudelaunch ./cmd/legion: ok. go test ./internal/supervise: ok with CGO_ENABLED=0; with cgo, the table tests' type-check fails on this pod's missing C toolchain (go tool cgo for net), which is environment, not code. bun test pi-shared phase-reminder and phase-stall: 10 pass.",
-  "threads": "All 9 threads I opened in round 1 have the implementer's fix reply and its resolution. Each now carries my reply naming the fixing commit (0d606e3bee31 or 551d496d1143) and what I verified; all 9 accepted. No bot threads.",
-  "decision": "approved",
+  "decision": "changes_requested",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "notes": [
-    "The PR body's E2E (implementer) line still names 6ef7e8e5, and items 1-2 name dc2230ae. implement.json names 2fc4b487 for all three proofs. I asked the implementer on Envoy to bring the body line to its handoff. This is a body edit, not a code finding: the tester's line names this code head and re-ran both real-binary proofs there.",
-    "M1, retrying publish failures other than no-holder, is a departure from the spec that the architect accepted on Envoy. It is not a finding."
+  "important": 1,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/runtime/sandbox/plugins.go",
+      "description": "claudeCodeBlock :376 `[ -d \"$cache\" ] || rm -f -- \"$cache\"` runs before the flock under the wrapper's set -eu, and every Claude role of the pod shares one cache. On a cold cache (a new or recreated volume, roles relaunched together), two roles can both see no directory; once one has made it, the other's rm -f fails on the directory and its wrapper exits 1 before npm. That is a charged launch failure. Reproduced in sh: rm -f on the directory prints 'Is a directory' and the subshell exits 1; the control, a cold cache with no race, succeeds. installBlock escapes the same line only because it sits inside its retried `legion_install || legion_install`. Make the cache creation race-safe and add a deterministic test."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/daemon/internal/runtime/backend.go",
+      "description": ":42 still says the worker image carries Claude Code."
+    },
+    {
+      "severity": "minor",
+      "file": "scripts/e2e/stage1-skeleton.sh",
+      "description": ":251 still says the worker image carries Claude Code; the claude-code row now checks the pin and the plugin."
+    },
+    {
+      "severity": "minor",
+      "file": "PR body",
+      "description": "The Change bullet still says the worker image carries Claude Code. The E2E (implementer) line names 2fc4b487 and has no item for the pod's install of the pinned release, while implement.json records all four proofs at 91f50e61, the fourth being that install."
+    }
   ],
   "notProven": [
-    "scripts/e2e/claude-backend-sandbox.sh (acceptance bullet 1's cluster run) and the tmux step of scripts/e2e/claude-backend-tmux.sh are written but not run. Whether the issue is accepted without them is with the owner (ask 14f85ee4).",
-    "Claude Code's LICENSE.md grants no redistribution, and the worker image is public. This is with the owner (ask ff4a6680)."
+    "scripts/e2e/claude-backend-sandbox.sh (acceptance bullet 1's cluster run, which now also proves the pod's fetch of the pinned Claude Code) and the tmux step of scripts/e2e/claude-backend-tmux.sh are written but not run; whether to accept without them is with the owner (ask 14f85ee4)."
   ]
 }
