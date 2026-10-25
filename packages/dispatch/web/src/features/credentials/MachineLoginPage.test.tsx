@@ -42,7 +42,6 @@ test("code -> lookup -> Approve posts the looked-up code", async () => {
   const lookupMachineCredential = spyOn(api, "lookupMachineCredential").mockResolvedValue(record);
   const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockResolvedValue({
     credential_id: "cred-9",
-    grant_id: null,
     state: "approved",
   });
 

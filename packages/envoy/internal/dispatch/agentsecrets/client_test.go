@@ -74,21 +74,6 @@ func TestPendingSendsBearerAndApproverQuery(t *testing.T) {
 	}
 }
 
-func TestRecordSendsBearerAndPath(t *testing.T) {
-	server, captured := serveCapturing(t, http.StatusOK, `{"id":"req-1"}`)
-	defer server.Close()
-
-	if _, err := New(server.URL, tokenFile(t, "account-token")).Record(context.Background(), "req-1"); err != nil {
-		t.Fatalf("Record: %v", err)
-	}
-	if captured.Method != http.MethodGet || captured.Path != "/v1/credential-requests/req-1" {
-		t.Fatalf("request = %s %s, want GET /v1/credential-requests/req-1", captured.Method, captured.Path)
-	}
-	if captured.Auth != "Bearer account-token" {
-		t.Fatalf("Authorization = %q, want Bearer account-token", captured.Auth)
-	}
-}
-
 // Approve and Deny send exactly the Decision Dispatch built — the approver and, for a machine
 // login, the code — as the broker's strict decideBody reads it; a decision with no code carries
 // no code field at all.

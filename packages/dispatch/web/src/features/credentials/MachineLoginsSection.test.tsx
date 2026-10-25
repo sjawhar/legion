@@ -362,7 +362,7 @@ test("a machine login approved on the page joins the list", async () => {
   const approveCredentialRecord = spyOn(api, "approveCredentialRecord").mockImplementation(
     async () => {
       live = [devbox];
-      return { credential_id: "cred-devbox", grant_id: null, state: "approved" };
+      return { credential_id: "cred-devbox", state: "approved" };
     }
   );
 

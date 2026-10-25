@@ -183,6 +183,7 @@ test("with no broker, a reconnect of the event stream asks the list again once, 
       relisted.resolve({
         pending: [
           {
+            approve_url: "https://secrets.example.com/approve/record-1",
             identifiers: ["DEMO_API_KEY"],
             kind: "agent_secret",
             record_id: "record-1",

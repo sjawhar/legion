@@ -1,17 +1,20 @@
-// Package agentsecrets relays Dispatch's credential-request UI to the secrets broker's
-// named-caller API (its UI routes: https://sjawhar.github.io/legion/broker/reference/api/). Reads
-// and the machine-login lookup carry and return
-// json.RawMessage, so a broker read-shape change never requires a Dispatch code change. Every
-// decision (approve, deny, revoke) instead carries a Decision Dispatch builds itself: its
-// approver is the login Dispatch's own session resolved, so nothing the browser sends can name
-// who decided.
+// Package agentsecrets relays Dispatch's credential pages to the secrets broker's named-caller
+// API (its account routes: https://sjawhar.github.io/legion/broker/reference/api/). Dispatch lists
+// the credential requests waiting on a person, each secret request linking to the broker's own
+// page, where that person, signed in to the broker, decides it; it relays a machine login's
+// decision with the code the person typed; and it relays a person's revoke of a grant or a
+// machine login. Reads and the machine-login lookup carry and return json.RawMessage, so a broker
+// read-shape change never requires a Dispatch code change. Every decision (a machine login's
+// approve or deny, a revoke) instead carries a Decision Dispatch builds itself: its approver is
+// the login Dispatch's own session resolved, so nothing the browser sends can name who decided.
 //
 // Dispatch authenticates to the broker as itself: every call carries Dispatch's own projected
 // Kubernetes ServiceAccount token, which the broker verifies against its cluster issuer and
-// matches against BROKER_API_ACCOUNTS. That names the caller and nothing more — the broker still
-// takes each decision's approver from the body, on the word of that listed caller, and
-// dispatch://INFRA-314 is what replaces that trust with a credential the approver's own session
-// holds.
+// matches against BROKER_API_ACCOUNTS. That names the caller and nothing more: the broker takes a
+// machine login's approver, and the person a revoke names, from the body, on the word of that
+// listed caller. It decides no secret request on that word: it refuses an approve or deny of one
+// with 403 DECIDE_ON_BROKER_PAGE carrying the record's approve_url, an *Error the routes relay
+// like any other.
 package agentsecrets
 
 import (
@@ -69,9 +72,9 @@ func WithTimeout(timeout time.Duration) Option {
 
 // New returns a client for the secrets broker's named-caller API. tokenFile names the file
 // holding Dispatch's own projected Kubernetes ServiceAccount token, which every call presents:
-// the broker reads the calling service's identity from it (BROKER_API_ACCOUNTS) and then trusts
-// the approver login Dispatch sends — resolved by Dispatch's own session, not read from an env
-// var here.
+// the broker reads the calling service's identity from it (BROKER_API_ACCOUNTS) and then takes a
+// machine login's approver, and a revoke's, from the login Dispatch sends — resolved by
+// Dispatch's own session, not read from an env var here.
 func New(baseURL, tokenFile string, options ...Option) *Client {
 	client := &Client{
 		URL:       strings.TrimSuffix(baseURL, "/"),
@@ -190,14 +193,9 @@ func (c *Client) Pending(ctx context.Context, approver string) (json.RawMessage,
 	return c.do(ctx, http.MethodGet, "/v1/pending?"+query.Encode(), nil)
 }
 
-// Record returns one credential request by id.
-func (c *Client) Record(ctx context.Context, recordID string) (json.RawMessage, error) {
-	return c.do(ctx, http.MethodGet, "/v1/credential-requests/"+url.PathEscape(recordID), nil)
-}
-
 // Decision is every approve, deny and revoke body Dispatch sends: Approver is the deciding
-// human's canonical login as Dispatch's session resolved it, and Code, for a machine login only,
-// is the typed confirmation code the human entered.
+// human's canonical login as Dispatch's session resolved it, and Code, for a machine login, is the
+// typed confirmation code the human entered.
 type Decision struct {
 	Approver string  `json:"approver"`
 	Code     *string `json:"code,omitempty"`
@@ -211,7 +209,9 @@ func (d Decision) body() (json.RawMessage, error) {
 	return body, nil
 }
 
-// Approve relays an approver's decision to grant a credential request.
+// Approve relays a person's approval of a machine login, which carries its typed code. The broker
+// refuses one of a secret request, writing nothing, with 403 DECIDE_ON_BROKER_PAGE naming the page
+// where a person signed in to the broker decides it.
 func (c *Client) Approve(ctx context.Context, recordID string, d Decision) (json.RawMessage, error) {
 	body, err := d.body()
 	if err != nil {
@@ -220,7 +220,8 @@ func (c *Client) Approve(ctx context.Context, recordID string, d Decision) (json
 	return c.do(ctx, http.MethodPost, "/v1/credential-requests/"+url.PathEscape(recordID)+"/approve", body)
 }
 
-// Deny relays an approver's decision to refuse a credential request.
+// Deny relays a person's refusal of a machine login, which carries its typed code. The broker
+// refuses one of a secret request as it refuses Approve.
 func (c *Client) Deny(ctx context.Context, recordID string, d Decision) (json.RawMessage, error) {
 	body, err := d.body()
 	if err != nil {

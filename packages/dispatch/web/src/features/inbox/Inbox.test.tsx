@@ -709,6 +709,7 @@ test("a held row stays inside its owner's group", async () => {
 
 function secretRequest(overrides: Partial<CredentialPendingRow> = {}): CredentialPendingRow {
   return {
+    approve_url: "https://secrets.example.com/approve/record-1",
     identifiers: ["DEMO_API_KEY"],
     kind: "agent_secret",
     record_id: "record-1",
@@ -723,7 +724,7 @@ test("a credential request alone is listed and on the banner, and nothing says n
   const { unmount } = renderInbox();
   try {
     const request = await screen.findByRole("link", { name: /Secret request.*DEMO_API_KEY/s });
-    expect(request.getAttribute("href")).toBe("/credentials/record-1");
+    expect(request.getAttribute("href")).toBe("https://secrets.example.com/approve/record-1");
     expect(screen.getByText("Blocked on you: 1 item, oldest 3h")).toBeTruthy();
     expect(screen.queryByRole("region", { name: "Inbox empty state" })).toBeNull();
     expect(screen.queryByText("Nothing needs you")).toBeNull();

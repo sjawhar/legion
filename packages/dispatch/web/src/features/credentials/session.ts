@@ -15,8 +15,8 @@ export type CredentialSessionStatus =
  *  and only when both lines show. */
 export type CredentialSessionSource = "enrollment" | "request";
 
-/** One line the Inbox row and the record page both render: one of a credential request's ids,
- *  resolved to a `CredentialSessionStatus`, and where it came from. `source` is null only when
+/** One line the Inbox row and `CredentialRecordFacts` both render: one of a credential request's
+ *  ids, resolved to a `CredentialSessionStatus`, and where it came from. `source` is null only when
  *  both ids agree (or only the enrollment's was ever set); every request-sourced line is
  *  `"request"`, except when it equals a present enrollment id, where the two collapse into one
  *  line. */

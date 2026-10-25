@@ -47,13 +47,13 @@ function CredentialSessionLineText({ line }: { line: CredentialSessionLine }): R
 }
 
 /**
- * The credential request's session, resolved against the live Agents list: the Inbox row and the
- * record page both render this one component (LEGION-587), so a running, not-running, couldn't-
- * check or unnamed session always reads identically in both places. Takes the agents list (and
- * its loading/error state) as props rather than calling `useAgents` itself: a page that renders
- * several of these (the Inbox's pending-requests list) polls the shared Agents list once from
- * its own page-level `useAgents` call and passes the result down, so N rows cost one 15s poll,
- * not N independently-phased ones (TanStack dedupes only a fetch already in flight, which a
+ * The credential request's session, resolved against the live Agents list: the Inbox row and
+ * `CredentialRecordFacts` both render this one component (LEGION-587), so a running, not-running,
+ * couldn't-check or unnamed session always reads identically in both places. Takes the agents
+ * list (and its loading/error state) as props rather than calling `useAgents` itself: a page that
+ * renders several of these (the Inbox's pending-requests list) polls the shared Agents list once
+ * from its own page-level `useAgents` call and passes the result down, so N rows cost one 15s
+ * poll, not N independently-phased ones (TanStack dedupes only a fetch already in flight, which a
  * second per-row `useQuery` observer mounting later than the first is not). Renders bare
  * text/links, no wrapping element: each call site supplies its own layout.
  */

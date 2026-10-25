@@ -32,28 +32,48 @@ function renderSection(credentials: CredentialRequests) {
   );
 }
 
-test("renders every pending credential request, linking a machine row to /credentials/machine", () => {
+test("renders every pending credential request, linking a secret row to its broker page and a machine row to /credentials/machine", () => {
   const machineRow: CredentialPendingRow = {
     identifiers: ["worker-7.example.com"],
     kind: "launcher_credential",
     record_id: "req-2",
     requested_at: "2026-09-27T01:00:00Z",
   };
-  renderSection({ requests: [pendingSecretRow(), machineRow], status: "listed" });
+  renderSection({
+    requests: [
+      pendingSecretRow({ approve_url: "https://secrets.example.com/approve/req-1" }),
+      machineRow,
+    ],
+    status: "listed",
+  });
 
   expect(screen.getByText("Secret request")).toBeDefined();
   expect(screen.getByText("Machine login")).toBeDefined();
   expect(screen.getByText("ANTHROPIC_API_KEY")).toBeDefined();
   expect(screen.getByText("worker-7.example.com")).toBeDefined();
-  expect(
-    screen.getByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s }).getAttribute("href")
-  ).toBe("/credentials/req-1");
+  const secret = screen.getByRole("link", { name: /Secret request.*ANTHROPIC_API_KEY/s });
+  expect(secret.getAttribute("href")).toBe("https://secrets.example.com/approve/req-1");
+  expect(secret.getAttribute("target")).toBeNull();
   expect(
     screen
       .getByRole("link", { name: /Machine login.*worker-7\.example\.com/s })
       .getAttribute("href")
   ).toBe("/credentials/machine");
+  expect(screen.queryByText("Decided on the secrets broker.")).toBeNull();
   expect(screen.getAllByText("No session named.")).toHaveLength(2);
+});
+
+// A broker older than its own approval page names none, and an approve_url that is not an
+// absolute http(s) URL is no page to send anyone to: either row links nowhere and says where the
+// request is decided.
+test("a secret row with no usable approve_url is unlinked and says it is decided on the secrets broker", () => {
+  for (const approve_url of [undefined, "javascript:alert(1)", "/approve/req-1"]) {
+    const view = renderSection({ requests: [pendingSecretRow({ approve_url })], status: "listed" });
+    expect(screen.getByText("ANTHROPIC_API_KEY")).toBeDefined();
+    expect(screen.getByText("Decided on the secrets broker.")).toBeDefined();
+    expect(screen.queryByRole("link")).toBeNull();
+    view.unmount();
+  }
 });
 
 test("renders nothing while the list loads or when it lists none, a broker-less Dispatch's answer", () => {

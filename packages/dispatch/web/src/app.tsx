@@ -112,12 +112,6 @@ const BroadcastPage = lazy(() =>
   import("./features/agents/BroadcastPage").then((module) => ({ default: module.BroadcastPage }))
 );
 
-const CredentialRecordPage = lazy(() =>
-  import("./features/credentials/CredentialRecordPage").then((module) => ({
-    default: module.CredentialRecordPage,
-  }))
-);
-
 const DeliveryPage = lazy(() =>
   import("./features/delivery/DeliveryPage").then((module) => ({ default: module.DeliveryPage }))
 );
@@ -714,7 +708,6 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
                 <Route element={<ProjectPage />} path="/projects/:key/issues" />
                 <Route element={<ProjectPage />} path="/projects/:key/documents" />
                 <Route element={<DocumentPage />} path="/projects/:key/documents/:slug" />
-                <Route element={<CredentialRecordPage />} path="/credentials/:recordId" />
                 <Route element={<MachineLoginPage />} path="/credentials/machine" />
                 <Route element={<SettingsPage />} path="/settings" />
                 <Route element={<DeliveryPage />} path="/delivery" />
