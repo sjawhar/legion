@@ -2,41 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T13:07:18Z",
-  "round": 1,
-  "reviewedCodeHead": "e55e76f6e6facd2bfc1753a029815ffb1473151b",
+  "completed": "2026-10-25T16:39:57Z",
+  "round": 2,
+  "reviewedCodeHead": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 5,
+  "important": 2,
   "minor": 0,
-  "ci": "Required set on main (rulesets): lint, typecheck, test, pr-title. CI head e55e76f6e6fa (newest pull_request run); compare e55e76f6e6fa...4f1fbe658253 touches only .legion/. lint, typecheck, test success (Tests 40193878201); pr-title success (40193995600, newest of three). Not required: envoy-go failed in scripts/listener-deploy-probe.test.sh ('every Dispatch message sent: want each attempt's sent state ... at ticks 1 and 3'), a timing test of a file this diff does not touch; dispatch, dispatch-memory, envoy-go-race still running at the read.",
-  "thermonuclear": "Both run once at 4f1fbe65 (code e55e76f6e6fa). deep-review: four findings, three verified and kept (introspection hides storage outage; machine exchange races revocation; binding expiry computed before the token's), one declined (job_workflow_ref is in ordinary GitHub tokens: Fulcio builds every GitHub Actions certificate SAN from it). code-quality: two structural items, batched into the fast-follow.",
+  "roundOneFindings": "All four fixed and accepted on their threads (PRRT_kwDORFy7ds6wBhTL, PRRT_kwDORFy7ds6wBhTN, PRRT_kwDORFy7ds6wBhTO, PRRT_kwDORFy7ds6wBhTQ). My round-1 overlay probes re-run at 6c9e78b02f9b against Postgres: the fixed-session second run and the replacement pod now get 200, and another project's pod naming a lapsed session now gets 400 while the holder renews. The census is present and its rollout line accepts and announces the approval gap between the two deploys. Broker packages oauth, oauthstore, exchange, api and machine pass on Postgres here.",
+  "ci": "Required on main: lint, typecheck, test, pr-title. CI head 6c9e78b02f9b; compare to 3d56da33c49b touches only .legion/. At the read: lint, typecheck and pr-title success; test still in progress (Tests 40210525013); Legion Envoy and Contracts queued. No approval was given, so nothing waited on it.",
+  "thermonuclear": "Both run once at 3d56da33. deep-review confirmed the four round-1 fixes and found one new availability defect (accountAuth verifies before any rate limit; reproduced as 12 forged requests causing 12 JWKS fetches), which I kept. code-quality raised three structural items (one session type for every grant, one shared ServiceAccount validity check, splitting the 1,300-line multiprocess test), batched into the fast-follow.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/broker/exchange/exchange.go",
-      "description": "A session name an entry fixes is bound to the pod uid or the workflow run, so the next run of a fixed-session workflow and the replacement pod of a fixed-session account are refused invalid_grant until the previous claim lapses (a still-renewing old pod holds it indefinitely). Proven with a throwaway test on Postgres: both 400 invalid_grant 'Another identity is writing under the session name'."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/broker/oauthstore/exchange.go",
-      "description": "Security[authz]: a session name is held only while its holder keeps exchanging. Once the claim lapses (the access lifetime, 15 minutes by default) any listed identity takes it: a throwaway test showed another project's pod getting 200 and a token introspecting session=<the first pod's session>, person=its own, project=OTHER, after which the first pod's renewal is refused. A dev box may name any session, including one an entry fixes. The binding also expires before the token it is made for (deep-review). The PR body's 'held by the identity that first claimed it' overstates what the code holds."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/broker/oauth/introspect.go",
-      "description": "The library wraps a storage failure in ErrRequestUnauthorized (401), so Introspect answers a database outage as {active:false} with 200 instead of the 503 and error log its own comment and the route promise."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/broker/oauth/exchange.go",
-      "description": "Security[authz]: the machine access-token exchange does not lock and check the launcher credential the way machine.Service.Live does for the device grant, so an exchange racing a revoke commits a live 15-minute token after the revoke ended the machine's tokens."
+      "file": "packages/envoy/internal/broker/api/server.go",
+      "description": "Security[authz]: the nine accountAuth routes verify the caller's token before any rate limit, so an unauthenticated flood of forged tokens naming an unknown kid makes go-oidc fetch the cluster issuer's JWKS once per request. The shared bearer they replaced needed no network, and the broker's own token-login route limits by address before verifying for exactly this reason (api/limits.go:13-21). The introspection bucket runs inside the handler, after authentication."
     },
     {
       "severity": "important",
       "file": "PR body",
-      "description": "No '## Contract change census' although the change adds boot refusals (BROKER_UI_TOKEN[_FILE], DISPATCH_AGENT_SECRETS_TOKEN[_FILE]), moves every broker approval route from the shared bearer to BROKER_API_ACCOUNTS, drops UI_INVALID, and removes the envoy-infra Dispatch component input agentSecretsTokenSecret, which the deployment repository's dispatch/main.go passes today. The rollout line must say how approvals behave between the broker's deploy and Dispatch's, which are separate deploys."
+      "description": "The Change bullet's 'While both generations fix the same name, one of their two entries holds it and every other principal is refused it' is false when the name is still held by a third principal from an earlier re-point that neither entry has since exchanged over, which the tester found. Add the one qualifying clause the architect described, since a body cannot be amended after the merge."
     }
   ],
-  "fastFollow": "Broker exchange tidy-up: the 'UI-bearer' wording and brokertest's UIToken name (tester's item); run decide once after NewAccessRequest instead of through Store.ExchangeSubject plus an access-token branch; one ServiceAccount validity check shared by accountCaller and machine.Service.VerifyServiceToken instead of two copies with two skew sources."
+  "fastFollow": "Broker exchange tidy-up: the 'UI-bearer' wording and brokertest's UIToken name; one session type for every grant instead of DefaultSession beside ExchangeSession with cross-decoding; one ServiceAccount validity check shared by accountCaller and machine.Service.VerifyServiceToken; run decide once after NewAccessRequest; move TestAFixedSessionNameAcrossARollout and its helpers into a file of its own."
 }
