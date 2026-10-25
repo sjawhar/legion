@@ -101,29 +101,41 @@ test("a GET past the deadline fails with RequestTimeoutError", async () => {
   });
 });
 
-// The deadline is the whole answer's, its body included: headers that arrive in time with a body
-// that never ends are no answer either.
-test("a GET whose body stalls past the deadline fails with RequestTimeoutError", async () => {
+// The deadline is the wait for Dispatch's answer, not the download of it: headers that arrive in
+// time start a body that may take as long as the line needs, so a large read on a slow line is
+// never cut off and asked again from the start.
+test("a GET whose headers arrive at 29 s reads a body that streams for another 20 s", async () => {
   await onFakeClock(async () => {
     const stub = heldFetch();
     const api = createApiClient(stub.fetch);
+    const encoder = new TextEncoder();
+    let stream: ReadableStreamDefaultController<Uint8Array> | undefined;
 
     const read = outcome(api.getIssue("CORE-1"));
     const signal = stub.requests[0]?.init?.signal;
+    jest.advanceTimersByTime(29_000);
     stub.answer(
       new Response(
-        new ReadableStream({
+        new ReadableStream<Uint8Array>({
           start(body) {
-            body.enqueue(new TextEncoder().encode('{"key":'));
+            stream = body;
+            body.enqueue(encoder.encode('{"key":'));
+            // A browser errors the body of a request its signal aborts.
             signal?.addEventListener("abort", () => body.error(signal.reason), { once: true });
           },
         }),
         { headers: { "Content-Type": "application/json" } }
       )
     );
-    jest.advanceTimersByTime(REQUEST_DEADLINE_MS);
+    await Promise.resolve();
+    jest.advanceTimersByTime(10_000);
+    stream?.enqueue(encoder.encode('"CORE-1",'));
+    jest.advanceTimersByTime(10_000);
+    expect(stub.requests[0]?.init?.signal?.aborted).toBe(false);
+    stream?.enqueue(encoder.encode('"title":"Slow line"}'));
+    stream?.close();
 
-    expect(await read).toBeInstanceOf(RequestTimeoutError);
+    expect(await read).toEqual({ key: "CORE-1", title: "Slow line" } as never);
   });
 });
 
@@ -161,6 +173,38 @@ test("a write given a deadline is held to it", async () => {
 
     expect(error).toBeInstanceOf(RequestTimeoutError);
     expect(apiErrorMessage(error, "fallback")).toBe("Dispatch did not answer within 15 seconds");
+  });
+});
+
+// An attempt's deadline is the whole answer's: the attempt is made again under its key, so headers
+// that arrive in time with a body that never ends are no answer either.
+test("a write given a deadline is held to it, its body included", async () => {
+  await onFakeClock(async () => {
+    const stub = heldFetch();
+    const api = createApiClient(stub.fetch);
+
+    const sent = outcome(
+      api.createBroadcast(
+        { body: "Ready?", delivery: "btw", idempotency_key: "send-1", session_ids: ["planner"] },
+        { deadlineMs: 15_000 }
+      )
+    );
+    const signal = stub.requests[0]?.init?.signal;
+    stub.answer(
+      new Response(
+        new ReadableStream({
+          start(body) {
+            body.enqueue(new TextEncoder().encode('{"id":'));
+            signal?.addEventListener("abort", () => body.error(signal.reason), { once: true });
+          },
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      )
+    );
+    await Promise.resolve();
+    jest.advanceTimersByTime(15_000);
+
+    expect(await sent).toBeInstanceOf(RequestTimeoutError);
   });
 });
 
