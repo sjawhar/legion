@@ -3130,9 +3130,10 @@ kubectl logs -l job-name="$workload" --tail=5                    # and what it s
 # The work itself goes here, inside this script: "$address" port 5432, user postgres, password
 # "$password". The trap above tries to remove the workload on every exit it runs on, and prints
 # `sequence: exit <status>` last. It can leave the workload: on a SIGKILL or the role's pod going
-# away, which run no trap, and on a second stop signal while the trap runs, which ends it part-way,
-# both with no `sequence: exit` line; on a clean-up step that fails, which it prints; and on a
-# create the API server stores after its label delete has listed the Jobs (see below).
+# away, which run no trap, and on a stop signal that reaches the sequence while the trap runs (a
+# second stop, or one sent after a failed step or the work's end started the trap), which can end
+# it part-way, both with no `sequence: exit` line; on a clean-up step that fails, which it prints;
+# and on a create the API server stores after its label delete has listed the Jobs (see below).
 SEQUENCE
 echo "sequence: $sequence, its output in $sequence.log"
 flock "$sequence" setsid -f bash "$sequence" > "$sequence.log" 2>&1 < /dev/null   # out of the tool's reach
@@ -3207,12 +3208,18 @@ only when the step in progress returns, which each step's own timeout bounds. Me
 left; `SIGHUP` and `SIGINT` sent to the group during the Ready wait, and `SIGINT` and `SIGTERM`
 sent to it during the check, each ran the trap within a second; `SIGTERM` sent to the `bash` alone
 during the Ready wait ran it 76 s later, when the wait returned, and `SIGINT` sent to it alone
-during a check that was being refused ran it 58 s later, when the check gave up. Send one stop and
-let the trap finish: the trap restores each signal's default as it starts, so a second stop that
-reaches the sequence while the trap runs can end it part-way. Measured on 2026-10-25 with a stub of
-the trap's structure, a `sleep 3` in place of the delete: one `kill -TERM -- -<process>` printed the
-stub's `cleanup: delete done` and `sequence: exit 143`; two sent 0.5 s apart printed the stub's
-first clean-up line and nothing after it. A `SIGKILL`, or the role's pod going away, runs no trap.
+during a check that was being refused ran it 58 s later, when the check gave up. Send a stop only
+while the work runs, and send at most one: the trap restores each signal's default as it starts,
+whatever started it, so a stop that reaches the sequence while the trap runs can end it part-way.
+That is a second stop, or one sent after a failed step or the work's end started the trap, which
+is not short: its foreground delete took 6 s to 31 s in the runs above, and its Service wait
+allows 60 s. Measured on 2026-10-25 with a stub of the trap's structure, a `sleep 3` in place of
+the delete: one `kill -TERM -- -<process>` during the work printed the stub's
+`cleanup: delete done` and `sequence: exit 143`, and two sent 0.5 s apart printed the stub's first
+clean-up line and nothing after it; with the stub's work ending in `false`, one
+`kill -TERM -- -<process>` sent while its trap ran printed the first clean-up line and nothing
+after it, where the same run with no stop printed `cleanup: delete done` and `sequence: exit 1`.
+A `SIGKILL`, or the role's pod going away, runs no trap.
 A sequence that has ended with no `sequence: exit` line in its output had its clean-up cut short
 or never run: the Job's two deadlines bound what is left, and a role that stopped that way — or
 that ran the sequence in its tool's foreground and saw the call time out — removes it with the
@@ -3225,8 +3232,8 @@ kubectl wait --for=delete service/<the printed workload name> --timeout=60s
 
 A role that lost the name lists the Jobs with `kubectl get jobs`. Its issue's start with its issue
 key, and so do its sibling roles', so it deletes only the one it started. A run can leave a Job
-with no name printed: a `SIGKILL` or the role's pod going away before the name printed; a second
-stop that cut short a trap on its label path; a label delete that failed, printing `cleanup: the
+with no name printed: a `SIGKILL` or the role's pod going away before the name printed; a stop
+that cut short a trap on its label path; a label delete that failed, printing `cleanup: the
 Job's delete failed`; and a stop or failed connection whose create the server stored only after
 the trap's label delete had listed the Jobs (above). Each printed its label first, and
 `kubectl delete job -l sequence-run=<the printed value> --cascade=foreground` removes that Job once
@@ -3311,8 +3318,9 @@ gate commands itself rather than trusting the answers recorded here:
   installed, printed nothing and made nothing; of those that took the label path, two found the Job
   the create had made and deleted it by the label, and the rest found nothing; the later ones had
   read the name and deleted their Job by it. Each of the others ended `sequence: exit 143`, and no
-  Job of theirs was left. For the runs that took the label path, nothing they printed shows when
-  the stop landed relative to the create's request and answer. A `kill -KILL -- -<process>` that
+  Job of theirs was left. For the two that found a Job, nothing they printed shows whether the stop
+  landed while the create was in flight or after its answer; for the rest, whether it landed
+  before the create's request left or while it was in flight. A `kill -KILL -- -<process>` that
   landed before the name printed left a Job with no name printed, and
   `kubectl delete job -l sequence-run=<the printed value> --cascade=foreground` removed it in
   31 s, its pod still initialising. With the Job's `cpu` request `"1"`: the create refused by
