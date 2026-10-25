@@ -354,6 +354,17 @@ run("askgate-facts-on-8", askgate("facts"), [
   refused("call-a", `AskGate did not send this call.\n${factsReason8}`),
   factsGate("block", factsReason8),
 ]);
+// on, facts: failure 12 named number first, its gate in parentheses, as a live gate wrote it at
+// c3c7e044a (askgate-facts-on-2 of that batch).
+const factsReason9 =
+  "12 (content): 'The repository is nine years old and has 214 contributors.' — neither fact bears on which branch the release builds from.";
+run("askgate-facts-on-9", askgate("facts"), [
+  ...header,
+  turn[0],
+  askCall,
+  refused("call-a", `AskGate did not send this call.\n${factsReason9}`),
+  factsGate("block", factsReason9),
+]);
 const linkGate = (decision: string, outcome = "verdict") =>
   gate({ ...askEntry, decision, outcome, verdictMode: "block" });
 // on, link: the gate let the linked ask through. The `--help` call before it has no gate entry.
@@ -588,6 +599,9 @@ test("askgate on, facts: reads the refused entry's own reason, and needs failure
   expect(out).toMatch(
     /askgate-facts-on-8\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
   );
+  expect(out).toMatch(
+    /askgate-facts-on-9\tpass=true\t.*refused=true failure12=true age=true contributors=true verdictMode=block /
+  );
 });
 
 test("askgate on, facts: reads the first ask that sends, past one with --help or --dry-run", () => {
@@ -649,7 +663,7 @@ test("askgate: another label and case pair, a directory naming no case, and a ca
 });
 
 test("askgate: the counts are per case and label", () => {
-  expect(out).toContain("askgate:facts\ton\t5/8\t0/8\t0\n");
+  expect(out).toContain("askgate:facts\ton\t6/9\t0/9\t0\n");
   expect(out).toContain("askgate:link\ton\t2/9\t0/9\t0\n");
   expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\n");
   expect(out).toContain("askgate:facts\toff\t1/3\t0/3\t0\n");

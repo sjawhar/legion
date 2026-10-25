@@ -282,3 +282,23 @@ test("a run on a profile whose settings leave the handler limit at its default i
   expect(existsSync(path.join(work, "runs", "askgate-facts-stale-1"))).toBe(false);
   expect(lines(path.join(stub, "docker.log")).join("\n")).not.toContain("stale");
 });
+
+// The link case's ask states the reindex time from a file, for AskGate's content 9 (an unsourced
+// claim about what we run today): the run's working directory must hold that file, with the line
+// the prompt quotes.
+test("a link run's working directory holds the crontab its prompt cites, with the line it quotes", async () => {
+  const child = Bun.spawn(["bash", rig, "run", "askgate", "on", "1", "4", start], {
+    env: { ...env, SKILL_SCENARIOS_ASKGATE_CASE: "link" },
+    stdout: "pipe",
+    stderr: "pipe",
+  });
+  const [code, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()]);
+  expect({ code, stderr }).toEqual({ code: 0, stderr: "" });
+  const dir = path.join(work, "runs", "askgate-link-on-1");
+  const prompt = readFileSync(path.join(dir, "prompt.txt"), "utf8");
+  const quoted = /export-host\.crontab runs .*\(its line (\d+): `([^`]+)`\)/.exec(prompt);
+  const [, line = "", text = ""] = quoted ?? [];
+  expect(quoted).not.toBeNull();
+  const crontab = lines(path.join(dir, "cwd", "export-host.crontab"));
+  expect(crontab[Number(line) - 1]).toBe(text);
+});

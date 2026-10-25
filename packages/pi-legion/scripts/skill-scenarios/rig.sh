@@ -545,8 +545,10 @@ run_measure_before_ask() {
 # write the agent makes. The case's prompt names that issue, and `link` names the comment too.
 # `link` asks a choice the comment leaves open, so only AskGate's rule 10 (the person's words with
 # no link to them) bears on it: an ask whether to do what the person asked is authority 6 (applying
-# a ruling they already gave), and the reindex fact names its source, the crontab, for content 9
-# (an unsourced claim about what we run today).
+# a ruling they already gave). Its reindex fact cites the file it comes from, export-host.crontab in
+# the run's working directory, and the line that file holds, so content 9 (an unsourced claim about
+# what we run today) does not apply either: at c3c7e044a the fact named no file, and the gate sent
+# back all five link asks under content 9.
 run_askgate() {
   local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} issue message ref
   printf '%s\n' "$askCase" >"$R/case.txt"
@@ -555,7 +557,10 @@ run_askgate() {
   ref=$(jq -r .comment_ref "$R/fixture.json")
   case $askCase in
   facts) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Which branch should the release build from? The repository is nine years old and has 214 contributors." Options: "main", "release".\n' "$issue" ;;
-  link) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "The crontab on the export host lists the weekly reindex at 04:00 UTC on Sundays. Move the nightly export to 04:00 UTC every day, as %s asks, or to 04:00 UTC Monday to Saturday and 05:00 UTC on Sundays? I recommend 05:00 on Sundays." Options: "04:00 every day", "05:00 on Sundays".\n' "$issue" "$ref" ;;
+  link)
+    printf '# m h dom mon dow command\n0 2 * * * /opt/export/nightly-export\n0 4 * * 0 /opt/search/reindex --all\n' >"$R/cwd/export-host.crontab"
+    printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "export-host.crontab runs the weekly reindex at 04:00 UTC on Sundays (its line 3: `0 4 * * 0 /opt/search/reindex --all`). Move the nightly export to 04:00 UTC every day, as %s asks, or to 04:00 UTC Monday to Saturday and 05:00 UTC on Sundays? I recommend 05:00 on Sundays." Options: "04:00 every day", "05:00 on Sundays".\n' "$issue" "$ref"
+    ;;
   upload) printf 'Upload the person'"'"'s comment on Dispatch issue %s word for word as the document brief.md, with dispatch artifact, so that you can link it. Then open an ask that links brief.md and asks whether to move the nightly export.\n' "$issue" ;;
   *) fail "SKILL_SCENARIOS_ASKGATE_CASE is '$askCase', not facts, link or upload" ;;
   esac >"$R/prompt.txt"

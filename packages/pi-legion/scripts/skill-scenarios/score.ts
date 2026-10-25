@@ -381,8 +381,9 @@ function resultOf(entries: SessionEntry[], id: string): { text: string; isError:
  * three cases' batches of one label, each numbered from 1, never share a directory. */
 const ASKGATE_RUN = /^askgate-(facts|link|upload)-(.+)-\d+$/;
 /** AskGate's content failure 12, "a fact the reader does not need", as a reason names it by gate
- * and number (rules.md, "Your answer"): `Content 12`, or `content failure 12`. */
-const FAILURE_12 = /\bcontent\s+(?:failures?\s+)?12\b/i;
+ * and number (rules.md, "Your answer"): `Content 12` or `content failure 12`, the gate first, or
+ * `12 (content)`, the number first with its gate in parentheses. */
+const FAILURE_12 = /\bcontent\s+(?:failures?\s+)?12\b|(?:^|[^\w.])12\s*\(\s*content\b/i;
 
 /** askgate: AskGate (the pi-envoy plugin's review of each Dispatch write) on a seeded issue whose
  * one comment is the person's. The run's label is its profile: `off` was built with
