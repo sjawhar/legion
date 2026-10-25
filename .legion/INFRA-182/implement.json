@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-182",
-  "completed": "2026-10-25T07:36:00Z",
-  "round": 3,
-  "answers": "Review round 1 at c939145e2b04 (dispatch review in .legion/INFRA-182/review.json): one Important and three Minor findings, all fixed; the four threads replied to and resolved one by one.",
+  "completed": "2026-10-25T08:22:00Z",
+  "round": 4,
+  "answers": "Review round 2 at dd2fb2b41ecf: one finding, a racy log capture in package bus tests (PRRT_kwDORFy7ds6v_jdd), fixed in 29ebf098c578, replied to and resolved. Round 3's proofs stand at this head: no production file changed since dd2fb2b41ecf.",
   "proof": [
+    {
+      "criterion": "Review round 2 finding PRRT_kwDORFy7ds6v_jdd: package bus tests read the captured default log only behind the writer's lock, so a closed client's late callback cannot race a read in envoy-go-race.",
+      "surface": "go test -race in the issue pod (zig 0.13.0 as the C compiler, -ldflags=-linkmode=external; the pod has none); a throwaway in-package test (deleted) with a goroutine logging through the default slog while the test reads the capture for 500 ms, as nats.go's async dispatcher does for a client an earlier test closed (nats.go:5892-5910).",
+      "command": "CGO_ENABLED=1 CC='zig cc' go test -race -ldflags=-linkmode=external ./internal/bus/ -run 'TestZZNewCapture$|TestZZOldCapture$' ; and -run 'TestNATSURLWithoutUserinfo|TestLoggedNATSURLsCarryNoUserinfo|TestAConsumerNotActiveReportIsAWarning|TestEnsureStreamWithConfigNamesEverySubjectThatReplacedAnOverlappingOne|TestEnsureStreamWithConfigNamesTheDeployedSubjectsItKeepsWithoutCompilingThem|TestEnsureStreamWithConfigLogsNoReconciliationWhenTheUpdateFails' -count=3",
+      "observed": "Reading through captureLogs: ok, no race report. The six real non-container tests of internal/bus that capture the log: ok under -race -count=3.",
+      "headSha": "29ebf098c5781cdb502d6409eafc9541c9ea53f4",
+      "negativeControl": "The same throwaway with the removed pattern (a bare bytes.Buffer read without the lock): 'WARNING: DATA RACE' 5 times, 'race detected during execution of test', FAIL."
+    },
     {
       "criterion": "R3 (review finding PRRT_kwDORFy7ds6v_JF6): the reconnect WARN, and every other line the bus logs naming a NATS URL, never carries the credential, including URL userinfo, which nats.go authenticates with.",
       "surface": "The real envoy-listener binary built at this head (cd packages/envoy && go build -o $TMPDIR/listener-new ./cmd/listener) run as a process with PORT=9099 ENVOY_MACHINE_ID=smoke against a real nats-server v2.11.4 on 127.0.0.1:4222 started with --user envoy --pass pw-SECRET-77, then with --auth tok-SECRET-88; the server killed with SIGKILL under the connected listener and started again.",
@@ -40,6 +48,9 @@
     }
   ],
   "filesChanged": [
+    "packages/envoy/internal/bus/stream_config_test.go: capturedLogs (mutex-guarded Write/String), records, recordsWithMsg, captureLogs: the one capture helper of package bus",
+    "packages/envoy/internal/bus/log_url_test.go: captureDefaultSlog and decodeRecords removed; the two tests use captureLogs",
+    "packages/envoy/internal/bus/async_error_test.go: TestAConsumerNotActiveReportIsAWarning uses captureLogs and keeps only its own client's records",
     "packages/envoy/internal/bus/reach.go: natsURLWithoutUserinfo; refuseRemoteNATS names the URL without its userinfo",
     "packages/envoy/internal/bus/connect.go: the reconnect WARN's servers and the reconnected line's url have no userinfo; the comment says why",
     "packages/envoy/internal/bus/log_url_test.go (new): the helper table, the reconnect WARN and refusal with user:password, token-only and schemeless URLs, and the reconnected line on a real connection (container)",
@@ -57,10 +68,11 @@
   ],
   "deviations": [
     "Beyond the four findings, runSelfHealthMonitor now returns without logging when its ctx ended during a failed rebuild: cutting the rebind on the shutdown's cancel (the point of finding JF8) made an ordered shutdown log 'self-health rebuild failed ... context canceled' at ERROR, observed on the real listener this round.",
-    "The unread 'stops' counter of the kvwatch test fake was removed while the fake was rewritten to keep every callback."
+    "The unread 'stops' counter of the kvwatch test fake was removed while the fake was rewritten to keep every callback.",
+    "Round 4: stream_config_test.go's captureLogs, a third unguarded in-package capture the review did not name, now has the guard too and is the one helper. The async-error test also keeps only its own client's records: with the race fixed, a closed client's 'connection closed' line would still break its exact comparison."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "go test -race could not run in the pod (no C compiler); envoy-go-race runs it in CI. The container-backed tests (log_url_test.go's reconnected-line test, the new kvwatch test, the repair and listener container tests) run only in CI's envoy-go."
+    "go test -race runs in the pod with zig as the C compiler and external linking (the race runtime needs __popcountdi2, which only the external link resolves). The container-backed tests still run only in CI's envoy-go and envoy-go-race."
   ]
 }
