@@ -316,10 +316,10 @@ const legionLabel = "legion"
 // before this runs.
 var legionManagedStatusSQL = `
 	with recursive chain as (
-		select i.key, i.parent_key, i.labels, 0 as depth
+		select i.parent_key, i.labels, 0 as depth
 		from issues i where i.key = $1
 		union
-		select p.key, p.parent_key, p.labels, c.depth + 1
+		select p.parent_key, p.labels, c.depth + 1
 		from issues p join chain c on p.key = c.parent_key
 		where c.depth < ` + parentDepthCapSQL + `
 	)
@@ -388,36 +388,33 @@ func (s *server) claimWrite(
 	if err != nil {
 		return claimApplied{}, err
 	}
-	if !change.changed {
-		managed, err := legionManagedStatus(ctx, tx, key)
+	applied := claimApplied{issue: before}
+	if change.changed {
+		if err := writeIssueClaim(ctx, tx, key, change.claim); err != nil {
+			return claimApplied{}, err
+		}
+		after, err := s.loadIssue(ctx, tx, key)
 		if err != nil {
 			return claimApplied{}, err
 		}
-		if err := tx.Commit(ctx); err != nil {
+		after.LastSeq++
+		event, err := s.appendEvent(ctx, tx, claimEvent(change.eventType, key, actor, after, change.previous, change.reason))
+		if err != nil {
 			return claimApplied{}, err
 		}
-		return claimApplied{issue: before, legionManagedStatus: managed}, nil
+		applied = claimApplied{issue: after, event: event}
 	}
-	if err := writeIssueClaim(ctx, tx, key, change.claim); err != nil {
-		return claimApplied{}, err
-	}
-	after, err := s.loadIssue(ctx, tx, key)
-	if err != nil {
-		return claimApplied{}, err
-	}
-	after.LastSeq++
-	event, err := s.appendEvent(ctx, tx, claimEvent(change.eventType, key, actor, after, change.previous, change.reason))
-	if err != nil {
-		return claimApplied{}, err
-	}
+	// A claim writes neither labels nor parent_key, so the walk answers the same whether the
+	// claim changed or not: one query, under the row lock this transaction already holds.
 	managed, err := legionManagedStatus(ctx, tx, key)
 	if err != nil {
 		return claimApplied{}, err
 	}
+	applied.legionManagedStatus = managed
 	if err := tx.Commit(ctx); err != nil {
 		return claimApplied{}, err
 	}
-	return claimApplied{issue: after, legionManagedStatus: managed, event: event}, nil
+	return applied, nil
 }
 
 // errClaimContended is what the bounded cycle answers with when the holder changed under

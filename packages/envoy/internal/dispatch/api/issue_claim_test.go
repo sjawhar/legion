@@ -110,7 +110,8 @@ func claimIssueKey(t *testing.T, handler http.Handler, status string) string {
 	return key
 }
 
-// claimedIssue is the part of an issue read a claim test asserts on.
+// claimedIssue is the part of a claim answer a claim test asserts on: the issue, flat, with the
+// one field both routes add beside it.
 type claimedIssue struct {
 	Status string `json:"status"`
 	Claim  *struct {
@@ -123,6 +124,7 @@ type claimedIssue struct {
 		} `json:"actor"`
 		At string `json:"at"`
 	} `json:"claim"`
+	LegionManagedStatus bool `json:"legion_managed_status"`
 }
 
 func claimActorBody(id, title string) map[string]any {
@@ -403,11 +405,6 @@ func claimLabelledIssueKey(t *testing.T, handler http.Handler, title string, lab
 	}](t, created).Key
 }
 
-// legionManagedAnswer is the one field both claim routes add beside the issue.
-type legionManagedAnswer struct {
-	LegionManagedStatus bool `json:"legion_managed_status"`
-}
-
 // TestClaimAnswersWhoOwnsTheIssuesStatus covers the answer a session acts on: on an issue Legion
 // runs only its daemon writes the status, so both routes have to say so — on the issue's own
 // label whatever case it was typed in, and on a child that carries no label of its own.
@@ -439,11 +436,12 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 			if claimed.Code != http.StatusOK {
 				t.Fatalf("claim: status=%d body=%s", claimed.Code, claimed.Body.String())
 			}
-			if got := decodeBody[legionManagedAnswer](t, claimed).LegionManagedStatus; got != want.managed {
-				t.Fatalf("claim legion_managed_status=%v, want %v", got, want.managed)
+			answer := decodeBody[claimedIssue](t, claimed)
+			if answer.LegionManagedStatus != want.managed {
+				t.Fatalf("claim legion_managed_status=%v, want %v", answer.LegionManagedStatus, want.managed)
 			}
 			// The issue is still the body's own shape: the dashboard merges it into its cache.
-			if got := decodeBody[claimedIssue](t, claimed); got.Claim == nil {
+			if answer.Claim == nil {
 				t.Fatalf("the claim answer must still carry the issue it wrote: %s", claimed.Body.String())
 			}
 
@@ -453,7 +451,7 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 			if released.Code != http.StatusOK {
 				t.Fatalf("release: status=%d body=%s", released.Code, released.Body.String())
 			}
-			if got := decodeBody[legionManagedAnswer](t, released).LegionManagedStatus; got != want.managed {
+			if got := decodeBody[claimedIssue](t, released).LegionManagedStatus; got != want.managed {
 				t.Fatalf("release legion_managed_status=%v, want %v", got, want.managed)
 			}
 			// A release of an issue nobody holds writes nothing and answers the issue as it
@@ -464,7 +462,7 @@ func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
 			if again.Code != http.StatusOK {
 				t.Fatalf("release an unclaimed issue: status=%d body=%s", again.Code, again.Body.String())
 			}
-			if got := decodeBody[legionManagedAnswer](t, again).LegionManagedStatus; got != want.managed {
+			if got := decodeBody[claimedIssue](t, again).LegionManagedStatus; got != want.managed {
 				t.Fatalf("second release legion_managed_status=%v, want %v", got, want.managed)
 			}
 		})

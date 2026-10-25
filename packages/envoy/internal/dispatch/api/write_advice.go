@@ -54,6 +54,9 @@ func (e *adviceQueryError) Unwrap() error {
 	return e.err
 }
 
+// computeWriteAdvice runs the issue-scoped advice queries for a session's write. Both of them
+// are about the calling session itself - its own writes since the last human event, its own
+// open asks - so writeAdvice calls this only for a session actor.
 func (s *server) computeWriteAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -62,9 +65,6 @@ func (s *server) computeWriteAdvice(
 	excludeAskID string,
 ) (*writeAdvice, error) {
 	advice := &writeAdvice{YourOpenAsks: []adviceAsk{}}
-	if actor.Kind != "session" {
-		return advice, nil
-	}
 	if err := s.runAdviceQueryHook(ctx, tx, "session_writes_since_human"); err != nil {
 		return nil, &adviceQueryError{query: "session_writes_since_human", err: err}
 	}
@@ -124,6 +124,12 @@ func (s *server) writeAdvice(
 	excludeAskID string,
 	status string,
 ) *writeAdvice {
+	// A human or service write has no advice query to run - both are about the calling session
+	// - so it is answered here, outside the savepoint and the two statement_timeout statements
+	// that would otherwise run inside the write's own transaction while it holds the issue row.
+	if actor.Kind != "session" {
+		return &writeAdvice{YourOpenAsks: []adviceAsk{}, IssueStatus: status}
+	}
 	adviceTx, err := tx.Begin(ctx)
 	if err != nil {
 		s.logAdviceError(route, issueKey, "savepoint", err)

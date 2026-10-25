@@ -702,15 +702,19 @@ func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
 		t.Fatalf("committed messages = %d, want 1", messages)
 	}
 }
+
+// Only a session's write runs the issue-advice queries, so only a session's document edit can
+// meet one that fails; what it keeps is the document's own block count.
 func TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails(t *testing.T) {
 	handler, _ := newFailingAdviceHandler(t, "session_writes_since_human")
 	createAdviceProject(t, handler, "COUNT")
 	spec := "# Count-only advice\n"
 	issue := createAdviceIssue(t, handler, "COUNT", "Failed issue advice", &spec)
 
-	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-		"ops": []map[string]string{{"op": "insert", "markdown": ":::ask{#window}\nWhich deployment window?\n:::", "after": "end"}},
-	}, "alice")
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":   []map[string]string{{"op": "insert", "markdown": ":::ask{#window}\nWhich deployment window?\n:::", "after": "end"}},
+		"actor": adviceSessionActor("session-count-only"),
+	})
 	advice := adviceFromResponse(t, edited.Code, edited.Body.String())
 	if advice.DecisionBlocksAdded == nil || *advice.DecisionBlocksAdded != 1 {
 		t.Fatalf("edit advice = %#v, want one added decision block: %s", advice, edited.Body.String())

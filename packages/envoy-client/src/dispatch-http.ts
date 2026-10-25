@@ -433,10 +433,8 @@ export class DispatchClient {
   }
 
   /** `DELETE /api/v1/issues/{key}/claim`: give up the claim, or clear one whose session is
-   *  gone. The status does not move. It answers the same two 409s, and has no force. Its
-   *  `legion_managed_status` says whether the Legion daemon owns this issue's status — true when
-   *  the issue carries the `legion` label in any case or sits under one that does, where a status
-   *  anyone else writes is undone. */
+   *  gone. The status does not move. It answers the same two 409s, has no force, and carries
+   *  `legion_managed_status` as `claimIssue` does. */
   async releaseIssueClaim(
     issue: string,
     input: { readonly actor?: Actor } = {}

@@ -516,6 +516,12 @@ function componentsChange(input: IssueComponentsInput, after: IssueComponents): 
 const architectureComponentsAction =
   'Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
+/** What both claim results say when the server answers `legion_managed_status`: on an issue
+ *  Legion runs, only its daemon writes the status. One copy, since the claim and the release
+ *  must say the same thing. */
+const LEGION_OWNS_STATUS =
+  "Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone.";
+
 /**
  * Guidance only: creation already succeeded, so an unavailable source lookup must not turn this
  * into a failed write.
@@ -3003,18 +3009,20 @@ export async function executeDispatchTool(
       // still claimed" state to render here.
       let text: string;
       if (release) {
+        const released = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status}`;
         text = legionManaged
-          ? `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status}; Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone.`
-          : `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status} — move it yourself if that is no longer where the work is.`;
+          ? `${released}; ${LEGION_OWNS_STATUS}`
+          : `${released} — move it yourself if that is no longer where the work is.`;
       } else {
         if (held === null) {
           // A successful claim always answers with the claim in place; anything else is a
           // server that no longer matches this contract, worth saying rather than papering over.
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
+        const claimed = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}`;
         text = legionManaged
-          ? `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; Legion's daemon moves this issue's status on an issue it runs, so leave it alone — a status written here is undone. Release the claim when you stop.`
-          : `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
+          ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop.`
+          : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
         text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
