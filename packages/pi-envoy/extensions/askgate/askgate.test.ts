@@ -3427,7 +3427,7 @@ describe("rules check", () => {
     expect(reason).toContain("2 more new ask(s) in this call match a rule too.");
     expect(g.entries).toMatchObject([{ rule: "no_change", ruleAsk: 1 }]);
   });
-  test("asks past the request's bounds are cut and counted (E6)", async () => {
+  test("asks past the request's bounds are clipped, every one of them listed (E6)", async () => {
     const long = "x".repeat(9 * 1024);
     const many = Array.from(
       { length: 6 },
@@ -3440,12 +3440,47 @@ describe("rules check", () => {
       ops: [{ op: "insert", after: "end", markdown: many }],
     });
     const user = g.calls.find(isRules)?.user ?? "";
-    expect(bytes(user.slice(user.indexOf("<new-asks>"), user.indexOf("</new-asks>")))).toBeLessThan(
-      33 * 1024
+    const list = user.slice(user.indexOf("<new-asks>"), user.indexOf("</new-asks>"));
+    expect(bytes(list)).toBeLessThan(33 * 1024);
+    expect(list).toContain('<ask n="6" kind="block" id="a5">');
+    // Each of the six is clipped to its share of the 32 KiB list, and counted once for that.
+    expect(g.entries[0].ruleAsksCut).toBe(6);
+  });
+  test("a call's every ask is listed, each clipped to its share of the list (E6)", () => {
+    // The call the review reproduced: three long ask blocks, then the one whose own
+    // recommendation is to change nothing. Spending the list first-come left that fourth ask out
+    // of the request, so no rules check ever saw it and the call recorded `none`.
+    const long = "x".repeat(9 * 1024);
+    const described = describeAsks([
+      ...Array.from({ length: 3 }, (_, index) => ({
+        kind: "block" as const,
+        id: `a${index}`,
+        text: `Keep item ${index} as it is? ${long}`,
+        opening: `Keep item ${index}`,
+      })),
+      {
+        kind: "block",
+        id: "a3",
+        text: `Should we change the retry budget? ${long} My recommendation is to change nothing`,
+        opening: "Should we change",
+      },
+    ]);
+    expect(described.list).toContain('<ask n="4" kind="block" id="a3">');
+    expect(described.list.match(/<ask n=/g)).toHaveLength(4);
+    expect(bytes(described.list)).toBeLessThanOrEqual(32 * 1024);
+    // Four asks, each clipped: the cut counts each of them once and no ask is left out.
+    expect(described.asksCut).toBe(4);
+  });
+  test("a call whose asks all fit is listed whole, with nothing counted cut (E6)", () => {
+    const described = describeAsks([
+      { kind: "ask", text: "Which deployment window?", opening: "Which deployment window?" },
+      { kind: "block", id: "a1", text: "Keep the retry budget?", opening: "Keep the retry" },
+    ]);
+    expect(described.list).toBe(
+      '<ask n="1" kind="ask">\nWhich deployment window?\n</ask>\n' +
+        '<ask n="2" kind="block" id="a1">\nKeep the retry budget?\n</ask>'
     );
-    expect(user).toContain("3 further new ask(s) in this call are not listed here.");
-    // Six asks cut to 8 KiB each, and the three of them the 32 KiB list had no room for.
-    expect(g.entries[0].ruleAsksCut).toBe(9);
+    expect(described.asksCut).toBe(0);
   });
   test("an ask the escaping pushes past the bound is clipped and counted as cut (E6)", () => {
     // Under 8 KiB as written, over it once `<`, `>` and `&` become entities, which is the text

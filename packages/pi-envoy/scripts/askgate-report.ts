@@ -501,7 +501,15 @@ const ERROR_OUTCOMES = ["error", "timeout", "no-verdict"];
  */
 export type ReportRecord = Pick<
   DecisionRecord,
-  "time" | "session" | "source" | "target" | "rule" | "ruleOutcome" | "ruleError" | "outcome"
+  | "time"
+  | "session"
+  | "source"
+  | "target"
+  | "rule"
+  | "ruleOutcome"
+  | "ruleError"
+  | "ruleAsksCut"
+  | "outcome"
 >;
 
 /** What the reader reads of a project's artifact: the two names it matches, and the id it reads. */
@@ -549,6 +557,8 @@ export function parseRecordLine(line: string): ReportRecord | null {
     rule: strOrNull(value.rule),
     ruleOutcome,
     ruleError: strOrNull(value.ruleError),
+    // A record written before the gate counted the asks holds none, which is no ask cut.
+    ruleAsksCut: num(value.ruleAsksCut) ?? 0,
     outcome: str(value.outcome),
   };
 }
@@ -653,6 +663,11 @@ export interface DecisionCounts {
   overrides: number;
   /** Rules calls that carried an error text, timed out, or gave no verdict. */
   errors: number;
+  /**
+   * Rules calls whose request did not carry every new ask whole (`ruleAsksCut`): the check judged
+   * clipped text, so what it did not read could match no rule.
+   */
+  cut: number;
 }
 
 /** One day's decisions over one Dispatch project, as both output modes print them. */
@@ -690,6 +705,7 @@ function countDecisions(
     errors: calls.filter(
       (record) => record.ruleError !== null || ERROR_OUTCOMES.includes(record.ruleOutcome as string)
     ).length,
+    cut: calls.filter((record) => record.ruleAsksCut > 0).length,
   };
 }
 
@@ -728,6 +744,7 @@ export function formatDispatchReport(report: DispatchReport): string[] {
     "An override is the other record a document holds: a refused call the agent sent again, which no rules check judged and which no rules call count holds.",
     "A rules refusal is a rules call with a rule. It was overridden when the next record on its target, in its session, is a rebuttal or a breaker.",
     "A document that could not be read, and a line that is not a record, are counted below: the decisions they held are missing from every other count.",
+    "A rules call with asks cut is one whose request did not carry every new ask of the call whole: the check judged clipped text.",
     `project: ${report.project}`,
     `since: ${report.since}`,
     `documents: ${report.documents}`,
@@ -743,6 +760,7 @@ export function formatDispatchReport(report: DispatchReport): string[] {
     ),
     `overrides: ${bySource(report, (c) => c.overrides)}`,
     `rules errors: ${bySource(report, (c) => c.errors)}`,
+    `rules calls with asks cut: ${bySource(report, (c) => c.cut)}`,
     `rules error rate: ${share(report.total.errors, report.total.calls)} (pod ` +
       `${share(report.pod.errors, report.pod.calls)}, machine ` +
       `${share(report.machine.errors, report.machine.calls)})`,

@@ -132,7 +132,7 @@ export interface RulesCheck {
   latencyMs: number;
   /** An ask's text could not be read, so the call judged that ask without it. */
   textMissing: boolean;
-  /** Asks the request left out or cut. */
+  /** Asks whose text the request does not carry whole: each clipped ask, counted once. */
   asksCut: number;
   usage?: RuleUsage;
 }
@@ -210,48 +210,67 @@ export function matchLines(matches: readonly RuleMatch[], names: readonly string
 /** An XML attribute value: escaped as the text is, with the quote that would close it escaped too. */
 const attribute = (value: string) => escapeXml(value).replaceAll('"', "&quot;");
 
+/** What an ask whose text could not be read is listed as, in place of that text. */
+const MISSING_TEXT =
+  "The text of this block is not available, so judge it on what the call and the transcript show.";
+
+/**
+ * How many bytes of each ask's text the list carries, by the order the needs are given in: an
+ * equal share of what the tags leave of `ASKS_MAX_BYTES`, except that an ask needing less than its
+ * share hands the rest to the asks that need more, and no ask is given more than `ASK_MAX_BYTES`.
+ * Sharing rather than spending first-come is what keeps every ask in the list.
+ */
+function textBudgets(needs: readonly number[], budget: number): number[] {
+  const budgets = new Array<number>(needs.length).fill(0);
+  const smallestFirst = needs.map((_, index) => index).sort((a, b) => needs[a] - needs[b]);
+  let left = Math.max(0, budget);
+  for (const [taken, index] of smallestFirst.entries()) {
+    const share = Math.floor(left / (smallestFirst.length - taken));
+    budgets[index] = Math.min(needs[index], ASK_MAX_BYTES, share);
+    left -= budgets[index];
+  }
+  return budgets;
+}
+
 /**
  * The asks as the request lists them: each in an `<ask>` tag of its own, numbered from 1 and
- * escaped, each clipped to 8 KiB and the list to 32 KiB. Also how a refusal names each ask, and how
- * many asks the bounds left out or cut.
+ * escaped, each clipped to its share of the list's 32 KiB and to 8 KiB of its own. Also how a
+ * refusal names each ask, and how many of them the request does not carry whole.
+ *
+ * Every ask of the call is listed, so the rules check judges each one: an ask the request leaves
+ * out matches no rule, and the call records `ruleOutcome: "none"` as if a check had read it. A
+ * call with so many asks that their tags alone exceed 32 KiB (hundreds in one write, which a
+ * session does not make) lists them all with no text of their own, and goes past the bound by
+ * those tags: a longer request is better than an ask no check ever saw.
  */
 export function describeAsks(asks: readonly NewAsk[]): {
   list: string;
   names: string[];
   asksCut: number;
 } {
-  const names: string[] = [];
-  const listed: string[] = [];
-  let cut = 0;
-  let used = 0;
-  let left = 0;
-  for (const [index, ask] of asks.entries()) {
-    const n = index + 1;
+  // The bound clips the escaped text, so an ask is cut by what that text measures, not the raw one.
+  const entries = asks.map((ask, index) => {
     const id = ask.id === undefined ? "" : ` id="${attribute(ask.id)}"`;
-    // The bound clips the escaped text, so an ask is cut by what that text measures, not the raw one.
-    const escapedText = escapeXml(ask.text.trim());
-    const body = ask.textMissing
-      ? "The text of this block is not available, so judge it on what the call and the transcript show."
-      : clipBytes(escapedText, ASK_MAX_BYTES);
-    if (ask.textMissing || byteLength(escapedText) > ASK_MAX_BYTES) cut++;
-    names.push(askName(ask));
-    const text = `<ask n="${n}" kind="${ask.kind}"${id}>\n${body}\n</ask>`;
-    const size = byteLength(text) + (listed.length > 0 ? 1 : 0);
-    if (used + size > ASKS_MAX_BYTES) {
-      left++;
-      continue;
-    }
-    used += size;
-    listed.push(text);
-  }
-  return {
-    list:
-      left > 0
-        ? `${listed.join("\n")}\n${left} further new ask(s) in this call are not listed here.`
-        : listed.join("\n"),
-    names,
-    asksCut: cut + left,
-  };
+    const text = ask.textMissing ? MISSING_TEXT : escapeXml(ask.text.trim());
+    return { ask, open: `<ask n="${index + 1}" kind="${ask.kind}"${id}>`, text };
+  });
+  // What the list spends before any ask's text: each ask's tags and their two newlines, and the
+  // newline joining each ask to the one before it.
+  const tags =
+    entries.reduce((sum, entry) => sum + byteLength(`${entry.open}\n\n</ask>`), 0) +
+    Math.max(0, entries.length - 1);
+  const budgets = textBudgets(
+    entries.map((entry) => byteLength(entry.text)),
+    ASKS_MAX_BYTES - tags
+  );
+  let cut = 0;
+  const listed = entries.map((entry, index) => {
+    const whole = byteLength(entry.text) <= budgets[index];
+    if (entry.ask.textMissing || !whole) cut++;
+    const body = whole ? entry.text : clipBytes(entry.text, budgets[index]);
+    return `${entry.open}\n${body}\n</ask>`;
+  });
+  return { list: listed.join("\n"), names: entries.map(({ ask }) => askName(ask)), asksCut: cut };
 }
 
 /** How a refusal names one ask to the agent. */

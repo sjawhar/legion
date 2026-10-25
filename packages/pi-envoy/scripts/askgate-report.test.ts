@@ -596,6 +596,8 @@ function decision(e: {
   /** Null is an override's own: a call the agent sent anyway, which no rules check judged. */
   ruleOutcome?: string | null;
   ruleError?: string;
+  /** How many of the call's new asks the rules request did not carry whole. */
+  ruleAsksCut?: number;
 }): string {
   return JSON.stringify({
     time: e.time,
@@ -609,7 +611,7 @@ function decision(e: {
       e.ruleOutcome === undefined ? (e.rule === undefined ? "none" : "match") : e.ruleOutcome,
     ruleError: e.ruleError ?? null,
     ruleTextMissing: false,
-    ruleAsksCut: 0,
+    ruleAsksCut: e.ruleAsksCut ?? 0,
     decision: e.rule === undefined ? "allow" : "revise",
     outcome: e.outcome ?? "verdict",
     verdictMode: "block",
@@ -652,8 +654,8 @@ function dispatchProject(documents: readonly ProjectDocument[]): ReportClient {
   };
 }
 
-// The pod session: a refusal a rebuttal on the same target overrode, a refusal nothing overrode,
-// and a rules call that errored.
+// The pod session: a refusal a rebuttal on the same target overrode, a refusal whose request did
+// not carry every ask whole, and a rules call that errored.
 const POD_DOCUMENT = decisionDocument(POD_SESSION, [
   decision({ time: at(1), session: POD_SESSION, source: "pod", rule: "no_change", target: ASK_1 }),
   decision({
@@ -670,6 +672,7 @@ const POD_DOCUMENT = decisionDocument(POD_SESSION, [
     source: "pod",
     rule: "untried_access",
     target: EDIT_2,
+    ruleAsksCut: 2,
   }),
   decision({
     time: at(4),
@@ -681,7 +684,8 @@ const POD_DOCUMENT = decisionDocument(POD_SESSION, [
   }),
 ]);
 
-// The machine session: one refusal, and a rules call that timed out with no error text of its own.
+// The machine session: one refusal, a rules call that timed out with no error text of its own,
+// and one allowed call whose request clipped an ask.
 const MACHINE_DOCUMENT = decisionDocument(MACHINE_SESSION, [
   decision({
     time: at(1),
@@ -697,7 +701,13 @@ const MACHINE_DOCUMENT = decisionDocument(MACHINE_SESSION, [
     target: SPEC,
     ruleOutcome: "timeout",
   }),
-  decision({ time: at(3), session: MACHINE_SESSION, source: "machine", target: SPEC }),
+  decision({
+    time: at(3),
+    session: MACHINE_SESSION,
+    source: "machine",
+    target: SPEC,
+    ruleAsksCut: 1,
+  }),
 ]);
 
 /** The day's project: the two sessions' documents, and one document that is not a decision one. */
@@ -720,6 +730,7 @@ const DAY_REPORT: DispatchReport = {
     byRule: { no_change: 2, untried_access: 1 },
     overrides: 1,
     errors: 2,
+    cut: 2,
   },
   pod: {
     calls: 3,
@@ -727,6 +738,7 @@ const DAY_REPORT: DispatchReport = {
     byRule: { no_change: 1, untried_access: 1 },
     overrides: 1,
     errors: 1,
+    cut: 1,
   },
   machine: {
     calls: 3,
@@ -734,6 +746,7 @@ const DAY_REPORT: DispatchReport = {
     byRule: { no_change: 1, untried_access: 0 },
     overrides: 0,
     errors: 1,
+    cut: 1,
   },
 };
 
@@ -778,6 +791,7 @@ describe("the Dispatch reader", () => {
       byRule: { no_change: 0, untried_access: 1 },
       overrides: 0,
       errors: 0,
+      cut: 0,
     });
   });
 
@@ -846,6 +860,7 @@ describe("the Dispatch reader", () => {
       byRule: { no_change: 1, untried_access: 0 },
       overrides: 0,
       errors: 0,
+      cut: 0,
     });
   });
 
@@ -867,7 +882,50 @@ describe("the Dispatch reader", () => {
     expect(text).toContain("rule untried_access: 1 (pod 1, machine 0)");
     expect(text).toContain("overrides: 1 (pod 1, machine 0)");
     expect(text).toContain("rules errors: 2 (pod 1, machine 1)");
+    expect(text).toContain("rules calls with asks cut: 2 (pod 1, machine 1)");
     expect(text).toContain("rules error rate: 33.3% (pod 33.3%, machine 33.3%)");
+  });
+
+  test("the asks a request did not carry whole are counted from the records, by source", async () => {
+    // Two pod calls whose request clipped an ask, one machine call whose request carried its asks
+    // whole: what the rules check judged short of the call's own text is the count's whole point.
+    const documents: ProjectDocument[] = [
+      {
+        name: `askgate-decisions-${POD_SESSION}.md`,
+        markdown: decisionDocument(POD_SESSION, [
+          decision({
+            time: at(1),
+            session: POD_SESSION,
+            source: "pod",
+            rule: "no_change",
+            target: ASK_1,
+            ruleAsksCut: 4,
+          }),
+          decision({
+            time: at(2),
+            session: POD_SESSION,
+            source: "pod",
+            target: SPEC,
+            ruleAsksCut: 1,
+          }),
+        ]),
+      },
+      {
+        name: `askgate-decisions-${MACHINE_SESSION}.md`,
+        markdown: decisionDocument(MACHINE_SESSION, [
+          decision({ time: at(1), session: MACHINE_SESSION, source: "machine", target: SPEC }),
+        ]),
+      },
+    ];
+    const { read, report } = await reportOf(documents, SINCE);
+    // The count is of the calls that lost text, not of the asks they lost: five asks, two calls.
+    expect(read.records.map((record) => record.ruleAsksCut)).toEqual([4, 1, 0]);
+    expect([report.total.cut, report.pod.cut, report.machine.cut]).toEqual([2, 2, 0]);
+    expect(dispatchReportLines(report, false)).toContain(
+      "rules calls with asks cut: 2 (pod 2, machine 0)"
+    );
+    const json = JSON.parse(dispatchReportLines(report, true)[0] as string) as DispatchReport;
+    expect([json.total.cut, json.pod.cut, json.machine.cut]).toEqual([2, 2, 0]);
   });
 
   test("an override counts on the refusal it overrode and in none of the rules call counts", async () => {
@@ -911,6 +969,7 @@ describe("the Dispatch reader", () => {
       byRule: { no_change: 1, untried_access: 0 },
       overrides: 1,
       errors: 1,
+      cut: 0,
     });
     const text = dispatchReportLines(report, false);
     expect(text).toContain("rules calls: 2 (pod 2, machine 0)");
