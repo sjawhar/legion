@@ -1,8 +1,10 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"net/http"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -69,6 +71,9 @@ type rereadResponse struct {
 // ended first - its caller went away, or its deadline passed - is the request's failure, not the
 // broker's, so it logs nothing, as the miss path logs nothing for one: anyone can end a request,
 // and the "broker: reread secret failed" line is the one an operator's alert counts.
+// Having reread it here, the handler tells every other pod serving the same database to reread it
+// too (Deps.NotifyReread), so one call reaches the whole fleet rather than the pod the load
+// balancer happened to pick.
 func (s *server) rereadSecret(w http.ResponseWriter, r *http.Request) {
 	if s.refuseReread(w, r) {
 		return
@@ -86,5 +91,40 @@ func (s *server) rereadSecret(w http.ResponseWriter, r *http.Request) {
 		writeInternal(w, "reread secret", err)
 		return
 	}
+	// Tell the other pods, on the 200 path alone: a reread that never happened - a name no secret
+	// can carry, a caller that went away, a store that failed, or the 429 refuseReread wrote
+	// before any work - is nothing for a peer to copy.
+	//
+	// It notifies on every 200, whether or not the broker now serves the name. Notifying only
+	// when the live answer changed would need RefreshOne to report a change it does not report,
+	// and would still leave a hole: a pod whose own five-minute reload had already caught the
+	// retag would answer "unchanged" and tell nobody, leaving its peers stale for up to a reload.
+	// Notifying always is also the arithmetic DefaultRereadOverallLimit is halved by, and a
+	// reread a notification drives takes no token from any of this package's buckets - the pod
+	// that served the original call already paid for it - so the fleet's whole metadata traffic
+	// is the sending pod's bucket times the replica count, whichever pod was asked.
+	//
+	// The fan-out deliberately does not ride r's context, which is cancelled as soon as the
+	// answer is written and which a caller that hangs up mid-reread cancels earlier still: the
+	// local reread has already succeeded and its answer stands, so that caller must not be able
+	// to stop the other pods from learning of it. The handler answers 200 whatever the fan-out
+	// does, since nothing about it changes what this pod now serves.
+	//
+	// Only this public route notifies; the call is deliberately not inside
+	// policy.Current.RefreshOne. RefreshOne's other caller is the miss path in
+	// requests/machine_state.go, which is bounded per enrollment and per process and already
+	// heals a new secret on first use; fanning that out would spend every peer a store read for
+	// a name that peer may never be asked for.
+	if s.deps.NotifyReread != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), notifyRereadTimeout)
+		defer cancel()
+		s.deps.NotifyReread(ctx, name)
+	}
 	writeJSON(w, http.StatusOK, rereadResponse{Name: name, Served: lk.Served, Reason: lk.Reason})
 }
+
+// notifyRereadTimeout bounds the fan-out one reread sends: a single Postgres NOTIFY on the shared
+// pool, which either goes out at once or is waiting for a connection the requests behind it need
+// back. It is short because the pod's own reread has already succeeded by the time it runs, and
+// every peer's five-minute reload is the backstop for a notification that never goes out.
+const notifyRereadTimeout = 5 * time.Second

@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"slices"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -371,11 +372,37 @@ func signMachineLoginRequest(t *testing.T, key *ecdsa.PrivateKey, audience, logi
 
 // --- tests ---
 
+// TestHealthzIsPublic also pins what a broker with no Deps.Draining answers, the nil every test
+// and every in-process rig leaves it: a process that never stops is never draining, so the ping
+// alone decides.
 func TestHealthzIsPublic(t *testing.T) {
 	ts := newTestServer(t)
 	status, _ := ts.req(t, http.MethodGet, "/healthz", nil, nil)
 	if status != http.StatusOK {
 		t.Fatalf("GET /healthz = %d, want 200", status)
+	}
+}
+
+// TestHealthzFailsWhileDrainingAndNothingElseDoes pins the drain a stopping pod answers with. The
+// code in the body is what is asserted, not the status alone, which a broker that cannot reach
+// Postgres answers too. A terminating pod leaves its Service's EndpointSlice concurrently with
+// the kubelet beginning termination, so the whole point of failing the health check is that the
+// pod goes on serving the requests still being routed to it: GET /v1/settings, a public route of
+// the same mux, must answer exactly as it always does while /healthz is refusing.
+func TestHealthzFailsWhileDrainingAndNothingElseDoes(t *testing.T) {
+	var draining atomic.Bool
+	ts := newTestServerWith(t, func(d *api.Deps) { d.Draining = draining.Load })
+
+	if status, body := ts.req(t, http.MethodGet, "/healthz", nil, nil); status != http.StatusOK {
+		t.Fatalf("GET /healthz before the drain = %d %s, want 200", status, body)
+	}
+	draining.Store(true)
+	status, body := ts.req(t, http.MethodGet, "/healthz", nil, nil)
+	if status != http.StatusServiceUnavailable || decode[wireError](t, body).Code != "SHUTTING_DOWN" {
+		t.Fatalf("GET /healthz while draining = %d %s, want 503 SHUTTING_DOWN", status, body)
+	}
+	if status, body := ts.req(t, http.MethodGet, "/v1/settings", nil, nil); status != http.StatusOK {
+		t.Fatalf("GET /v1/settings while draining = %d %s, want the 200 it always answers", status, body)
 	}
 }
 

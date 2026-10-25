@@ -173,7 +173,11 @@ func (c *Current) CheckName(name string) error {
 
 // MintedRecheck is how long StillMinted holds a name's verdict: the 30 seconds the GCP store holds
 // a value read's (secrets.GCP.Read), so a deleted or retagged minted secret stops minting within
-// it, and the shared metadata quota pays at most one read per name in it.
+// it, and the shared metadata quota pays at most one read per name in it. The held verdict is per
+// process, so two broker pods pay two of those reads per name in that window. It is held per
+// process rather than shared because it is a load question rather than an authority question:
+// each pod's verdict is its own read of the store's truth, and holding it longer or shorter
+// changes only how much of the quota the fleet spends, never who may have a secret.
 const MintedRecheck = 30 * time.Second
 
 // mintedVerdict is one StillMinted read: what the store served the name from, empty when it served

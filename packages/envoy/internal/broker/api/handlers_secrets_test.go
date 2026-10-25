@@ -7,7 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -236,5 +238,79 @@ func TestOneAddressFloodingItsLimitLeavesOthersTheirRereads(t *testing.T) {
 	}
 	if status, _, body := postReread(t, ts, "WORKER_TOKEN", map[string]string{"X-Forwarded-For": "198.51.100.2"}); status != http.StatusOK {
 		t.Fatalf("another address's first reread after the flood: %d %s, want 200", status, body)
+	}
+}
+
+// recordingNotifier stands in for the Postgres fan-out cmd/broker wires into Deps.NotifyReread
+// (internal/broker/reread's Notifier), recording the names it was asked to send. The handler
+// calls it on a context of its own rather than the request's, from the server's own goroutine, so
+// the names are taken under a mutex; a context already ended when the call arrives is recorded as
+// its own entry, so a fan-out wrongly riding the request's context fails the comparison rather
+// than passing unnoticed.
+type recordingNotifier struct {
+	mu    sync.Mutex
+	names []string
+}
+
+func (n *recordingNotifier) notify(ctx context.Context, name string) {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		name = name + " (on an ended context: " + err.Error() + ")"
+	}
+	n.names = append(n.names, name)
+}
+
+func (n *recordingNotifier) recorded() []string {
+	n.mu.Lock()
+	defer n.mu.Unlock()
+	return slices.Clone(n.names)
+}
+
+// TestRereadNotifiesEveryOtherPodOnEvery200 pins the fan-out's one call site and the decision that
+// it fires on every 200: a name this broker now serves and a name it does not are both changes a
+// peer must learn of, and the handler cannot tell "unchanged" from "changed" without a verdict
+// RefreshOne does not report. A name no secret can carry rereads nothing, so it notifies nobody.
+func TestRereadNotifiesEveryOtherPodOnEvery200(t *testing.T) {
+	notifier := &recordingNotifier{}
+	ts := newTestServerWith(t, func(d *api.Deps) { d.NotifyReread = notifier.notify })
+	ts.Secrets.Put(policytest.Secret("NEW_KEY", testApprover, policy.TierAgent, "v1"))
+
+	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/NEW_KEY/reread", nil, nil); status != http.StatusOK {
+		t.Fatalf("reread of a name the broker now serves: %d %s, want 200", status, body)
+	}
+	// MISSING_KEY is a well-formed name no secret under the prefix carries: still a 200, with
+	// served=false, and still a notification, since a peer that does serve it must drop it.
+	status, body := ts.req(t, http.MethodPost, "/v1/secrets/MISSING_KEY/reread", nil, nil)
+	if r := decode[wireReread](t, body); status != http.StatusOK || r.Served {
+		t.Fatalf("reread of a name the broker does not serve: %d %+v, want 200 served=false", status, r)
+	}
+	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/not_a_name/reread", nil, nil); status != http.StatusBadRequest || decode[wireError](t, body).Code != "SECRET_NAME_INVALID" {
+		t.Fatalf("malformed name: %d %s, want 400 SECRET_NAME_INVALID", status, body)
+	}
+	if got := notifier.recorded(); !slices.Equal(got, []string{"NEW_KEY", "MISSING_KEY"}) {
+		t.Fatalf("notified %q, want exactly one notification per 200, in order, and none for the refused name", got)
+	}
+}
+
+// TestARereadTheLimiterRefusesNotifiesNobody pins that the 429 a drained bucket writes before any
+// work sends nothing either: no reread happened on this pod, so there is nothing for a peer to
+// copy, and a flood the limiter exists to stop must not reach the other pods through the fan-out.
+func TestARereadTheLimiterRefusesNotifiesNobody(t *testing.T) {
+	notifier := &recordingNotifier{}
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.NotifyReread = notifier.notify
+		d.RereadOverallLimit = &ratelimit.Limit{Every: time.Hour, Burst: 1}
+	})
+	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/WORKER_TOKEN/reread", nil, nil); status != http.StatusOK {
+		t.Fatalf("first reread: %d %s, want 200", status, body)
+	}
+	for i := range 3 {
+		if status, _, body := postReread(t, ts, "WORKER_TOKEN", nil); status != http.StatusTooManyRequests {
+			t.Fatalf("reread %d past the drained bucket: %d %s, want 429", i+2, status, body)
+		}
+	}
+	if got := notifier.recorded(); !slices.Equal(got, []string{"WORKER_TOKEN"}) {
+		t.Fatalf("notified %q, want only the one reread that happened", got)
 	}
 }

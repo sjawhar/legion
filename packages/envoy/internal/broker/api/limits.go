@@ -38,35 +38,52 @@ type LauncherLimits struct {
 
 // DefaultLauncherLimits allows a burst of ten requests per source address and five per login,
 // refilled at two a minute and one a minute: generous for a person logging in a few machines,
-// useless for a flood.
+// useless for a flood. Both buckets live in one process, so a fleet of N broker pods allows N
+// times each; they are left where they are because a login flood costs the broker its own work
+// rather than a shared external quota, and because the load balancer spreads one address's flood
+// over the pods instead of handing it all to one.
 var DefaultLauncherLimits = LauncherLimits{
 	PerAddress: ratelimit.Limit{Every: 30 * time.Second, Burst: 10},
 	PerLogin:   ratelimit.Limit{Every: time.Minute, Burst: 5},
 }
 
 // DefaultTokenLimit bounds POST /v1/oauth/token per source address, in a bucket of its own: a
-// burst of 60 and two a second. A machine polls its device code every five seconds while its
-// person decides and refreshes about once a day, so even many machines behind one address
-// never meet it; a flood from one address is refused before the provider does any work.
+// burst of 60 and two a second, per process, so a fleet of N broker pods allows N times it. A
+// machine polls its device code every five seconds while its person decides and refreshes about
+// once a day, so even many machines behind one address never meet it; a flood from one address is
+// refused before the provider does any work.
 var DefaultTokenLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 60}
 
 // DefaultRereadLimit bounds POST /v1/secrets/{name}/reread per source address: a person's write
-// burst passes; a flood cannot make the broker hammer DescribeSecret.
+// burst passes; a flood cannot make the broker hammer DescribeSecret. The bucket is per process,
+// so a fleet of N broker pods allows one address N times it; what bounds the fleet's reread
+// traffic is DefaultRereadOverallLimit below, which is sized for the replica count.
 var DefaultRereadLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 30}
 
 // DefaultRereadOverallLimit bounds POST /v1/secrets/{name}/reread across every caller at once,
 // whatever address each comes from. Every reread takes the policy's writer lock for one
 // DescribeSecret, so a per-address limit alone bounds nothing a flood spread over addresses
 // cannot pass: with no cap of its own it could keep that lock busy and hold up the five-minute
-// reload and the miss-path rereads a session's own request waits on. Four a second, burst ten:
+// reload and the miss-path rereads a session's own request waits on. Two a second, burst five:
 // well above the rereads a person's writes make (one per secret written, in bursts), and far
 // below what would keep the lock busy.
-var DefaultRereadOverallLimit = ratelimit.Limit{Every: 250 * time.Millisecond, Burst: 10}
+//
+// This bucket is per process, and is sized by the invariant that replicas × this rate, and
+// replicas × this burst, is the whole fleet's cap; the deployment runs two pods, so each is
+// allowed half of what one pod alone was, in rate and in burst alike. Read it as that
+// arithmetic rather than as the number two: a third replica makes both figures a third of the
+// fleet's cap, not half of it. A reread another pod's notification drives (Deps.NotifyReread)
+// takes no token from this bucket, since the pod that served the original call already paid for
+// it, so the fleet's reread traffic is still the sending pod's bucket times the replica count.
+var DefaultRereadOverallLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 5}
 
 // GCPRereadOverallLimit is DefaultRereadOverallLimit for the Google Secret Manager store, where a
-// reread costs two reads against the 600-a-minute metadata quota the whole project shares: one a
-// second, burst ten, so the public route alone can spend at most 120 of them a minute.
-var GCPRereadOverallLimit = ratelimit.Limit{Every: time.Second, Burst: 10}
+// reread costs two reads against the 600-a-minute metadata quota the whole project shares: half a
+// reread a second, burst five. It follows the same invariant - replicas × this rate × two reads
+// is what the public route can spend of that quota - restated for the fleet: 0.5 reread/s per pod
+// × 2 pods × 2 reads is 2 reads a second, the same 120 a minute the one-pod figure allowed. A
+// third replica needs the rate divided by three, not by two, to leave that 120 where it is.
+var GCPRereadOverallLimit = ratelimit.Limit{Every: 2 * time.Second, Burst: 5}
 
 type launcherLimiter struct {
 	perAddress, perLogin *ratelimit.Keyed
