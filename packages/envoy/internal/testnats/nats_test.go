@@ -490,12 +490,8 @@ var (
 		"github.com/sjawhar/envoy/cmd/natstail",
 		// internal/smoke is not here: its container-backed tests are behind the smoke build tag,
 		// which this walk does not see, as it does not see image.go either.
-		"github.com/sjawhar/envoy/internal/store",
 	}
-	filesAwaitingMigration = []string{
-		"internal/kvwatch/end_test.go",
-		"internal/session/stopwatch_test.go",
-	}
+	filesAwaitingMigration = []string{}
 )
 
 // No package of this module outside internal/testnats may reach a container runtime: Envoy's

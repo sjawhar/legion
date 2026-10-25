@@ -117,9 +117,9 @@ func TestAStampedBuildPublishesItsStartOnce(t *testing.T) {
 // TestTheStartIsRetriedUntilTheStreamAcknowledgesIt: with the server away, the publish fails and is
 // retried; once the server is back, the retry publishes, and the stream holds the one start.
 func TestTheStartIsRetriedUntilTheStreamAcknowledgesIt(t *testing.T) {
-	ctr, uri := testnats.StartRestartable(t)
+	srv, uri := testnats.Start(t)
 	client := connect(t, uri)
-	testnats.Stop(t, ctr)
+	srv.Stop(t)
 	waitFor(t, 15*time.Second, "the client to notice the server is gone", func() bool { return !client.Connected() })
 
 	var logs logBuffer
@@ -139,9 +139,7 @@ func TestTheStartIsRetriedUntilTheStreamAcknowledgesIt(t *testing.T) {
 		return strings.Contains(logs.String(), "dispatch could not publish its start")
 	})
 
-	if err := ctr.Start(context.Background()); err != nil {
-		t.Fatalf("start NATS again: %v", err)
-	}
+	srv.Start(t)
 	select {
 	case <-done:
 	case <-time.After(60 * time.Second):
@@ -162,9 +160,9 @@ func TestTheStartIsRetriedUntilTheStreamAcknowledgesIt(t *testing.T) {
 // TestAStoppedProcessGivesUpItsStart: a context that ends while the server is away ends the
 // retries without a publish.
 func TestAStoppedProcessGivesUpItsStart(t *testing.T) {
-	ctr, uri := testnats.StartRestartable(t)
+	srv, uri := testnats.Start(t)
 	client := connect(t, uri)
-	testnats.Stop(t, ctr)
+	srv.Stop(t)
 	waitFor(t, 15*time.Second, "the client to notice the server is gone", func() bool { return !client.Connected() })
 
 	ctx, cancel := context.WithCancel(t.Context())

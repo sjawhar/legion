@@ -1,10 +1,8 @@
 package store
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log/slog"
 	"regexp"
 	"slices"
@@ -19,9 +17,6 @@ import (
 	"github.com/sjawhar/envoy/internal/kvwatch"
 	"github.com/sjawhar/envoy/internal/kvwatch/kvwatchtest"
 	"github.com/sjawhar/envoy/internal/testnats"
-	"github.com/testcontainers/testcontainers-go"
-	tcnats "github.com/testcontainers/testcontainers-go/modules/nats"
-	"github.com/testcontainers/testcontainers-go/wait"
 )
 
 // captureJSONLogs routes slog.Default() into a buffer for the test and decodes the records back, so
@@ -713,7 +708,7 @@ func TestThePurgeSendsTheStreamPurgeSubjectItsGrantMustAllow(t *testing.T) {
 // grantedServer is a tracing NATS server with one nkey user, the connection a test's registry and
 // passes share, and the interest bucket on that server.
 type grantedServer struct {
-	ctr      *tcnats.NATSContainer
+	srv      *testnats.Server
 	conn     *natsgo.Conn
 	registry *Registry
 	// js waits as long as the listener's own context does (10 s, internal/bus): on a loaded machine
@@ -735,15 +730,7 @@ func startGrantedServer(t *testing.T, deny []string) grantedServer {
 	config := fmt.Sprintf("trace: true\njetstream {}\nauthorization {\n  users = [ { nkey: %q, permissions: "+
 		"{ publish: { allow: [\">\"], deny: [%s] }, subscribe: { allow: [\">\"] } } } ]\n}\n",
 		public, strings.Join(quoted, ", "))
-	ctr, err := tcnats.Run(context.Background(), testnats.Image, tcnats.WithConfigFile(strings.NewReader(config)))
-	testcontainers.CleanupContainer(t, ctr)
-	if err != nil {
-		t.Fatalf("start the granted NATS: %v", err)
-	}
-	uri, err := ctr.ConnectionString(context.Background())
-	if err != nil {
-		t.Fatalf("NATS connection string: %v", err)
-	}
+	srv, uri := testnats.StartConfig(t, config, []string{"-DV", "-js"}, false)
 	pair, err := nkeys.FromSeed([]byte(seed))
 	if err != nil {
 		t.Fatalf("read the user's seed: %v", err)
@@ -780,24 +767,24 @@ func startGrantedServer(t *testing.T, deny []string) grantedServer {
 	}
 	t.Cleanup(registry.StopWatch)
 	waitFor(t, 30*time.Second, registry.watcher.Ready)
-	return grantedServer{ctr: ctr, conn: conn, registry: registry, js: js, kv: kv}
+	return grantedServer{srv: srv, conn: conn, registry: registry, js: js, kv: kv}
 }
 
 // traceSentinels numbers the sentinels traceThrough publishes, so each call waits for its own
 // sentinel's line rather than for one an earlier call on the same server put in the log.
 var traceSentinels atomic.Uint64
 
-// traceWait bounds how long traceThrough waits for the sentinel's line to reach the container's log.
+// traceWait bounds how long traceThrough waits for the sentinel's line to reach the server's log.
 const traceWait = 5 * time.Second
 
 // traceThrough publishes a sentinel on the server's connection and returns every line of the
 // server's log once the sentinel's own trace line is in it. The server traces a connection's
 // operations in the order it reads them, and traces what it sends back while handling one (a
-// permissions violation) before it reads the next. Docker copies the container's output into its
-// log in that order, a moment after the server writes it, so a read taken as soon as a pass returns
-// can miss the pass's last lines. Once the sentinel's line is in the log, every line for what the
-// connection sent before it is there too. Past traceWait it fails the test, naming the sentinel's
-// line and every publish the server traced.
+// permissions violation) before it reads the next. It writes each of those lines from the
+// goroutine reading that connection, a moment after the publish that caused it returns, so a read
+// taken as soon as a pass returns can miss the pass's last lines. Once the sentinel's line is in
+// the log, every line for what the connection sent before it is there too. Past traceWait it fails
+// the test, naming the sentinel's line and every publish the server traced.
 func (g grantedServer) traceThrough(t *testing.T) []string {
 	t.Helper()
 	sentinel := fmt.Sprintf("trace.sentinel.%d", traceSentinels.Add(1))
@@ -808,26 +795,23 @@ func (g grantedServer) traceThrough(t *testing.T) []string {
 		t.Fatalf("flush the trace sentinel: %v", err)
 	}
 	want := "[PUB " + sentinel + " "
-	if err := wait.ForLog(want).WithStartupTimeout(traceWait).WaitUntilReady(context.Background(), g.ctr); err != nil {
-		t.Fatalf("the server's log holds no line with %q after %s (%v). Every publish it traced:\n%s",
-			want, traceWait, err, strings.Join(tracedPublishLines(serverLog(t, g.ctr)), "\n"))
+	deadline := time.Now().Add(traceWait)
+	for {
+		lines := serverLog(g.srv)
+		if slices.ContainsFunc(lines, func(line string) bool { return strings.Contains(line, want) }) {
+			return lines
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the server's log holds no line with %q after %s. Every publish it traced:\n%s",
+				want, traceWait, strings.Join(tracedPublishLines(lines), "\n"))
+		}
+		time.Sleep(10 * time.Millisecond)
 	}
-	return serverLog(t, g.ctr)
 }
 
-// serverLog is every line of the container's log.
-func serverLog(t *testing.T, ctr *tcnats.NATSContainer) []string {
-	t.Helper()
-	logs, err := ctr.Logs(context.Background())
-	if err != nil {
-		t.Fatalf("read the server's log: %v", err)
-	}
-	defer logs.Close()
-	text, err := io.ReadAll(logs)
-	if err != nil {
-		t.Fatalf("read the server's log: %v", err)
-	}
-	return strings.Split(string(text), "\n")
+// serverLog is every line the server has logged so far.
+func serverLog(srv *testnats.Server) []string {
+	return strings.Split(srv.Log(), "\n")
 }
 
 // tracedPublish matches the line a tracing server writes for each publish a client sends,

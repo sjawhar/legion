@@ -281,7 +281,7 @@ func TestMergeForUpsert_PreservesMachineIDAndDirFromExistingEntry(t *testing.T) 
 	}
 }
 
-// --- Integration Tests (testcontainers NATS) ---
+// --- Integration Tests (a real NATS server) ---
 
 // connectNATS connects to the package's shared NATS server, in the JetStream account
 // testnats.URL hands t, where no earlier test made an interest or role bucket.
@@ -447,8 +447,7 @@ func TestWatch_PropagatesPurge(t *testing.T) {
 }
 
 func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
-	ctx := context.Background()
-	ctr, uri := testnats.Start(t)
+	srv, uri := testnats.Start(t)
 	conn := testnats.Connect(t, uri)
 	// Safety net: a double close is a no-op.
 	t.Cleanup(conn.Close)
@@ -474,9 +473,7 @@ func TestMatch_IndependentOfKVAfterStartup(t *testing.T) {
 
 	// Kill NATS — KV is now unreachable
 	conn.Close()
-	if err := ctr.Terminate(ctx); err != nil {
-		t.Fatalf("failed to terminate NATS: %v", err)
-	}
+	srv.Terminate(t)
 
 	// Match should still return correct results from cache
 	got := reg.Match("m1", "notifications.test")
