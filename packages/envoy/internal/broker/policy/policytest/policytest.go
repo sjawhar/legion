@@ -37,6 +37,23 @@ func Secret(name, owner, tier, value string) secrets.LocalSecret {
 	}
 }
 
+// FixtureGitHubOwners is the github-owners tag KindSecret gives a github-app secret, in the
+// canonical form ParseGitHubOwners answers.
+const FixtureGitHubOwners = "acme ada"
+
+// KindSecret is Secret with a kind tag: a secret whose release the broker mints from value. A
+// kind that needs github-owners (policy.KindNeedsGitHubOwners) also carries them
+// (FixtureGitHubOwners), without which the policy refuses it; a test of that refusal deletes the
+// tag.
+func KindSecret(name, owner, tier, kind, value string) secrets.LocalSecret {
+	secret := Secret(name, owner, tier, value)
+	secret.Tags[policy.TagKind] = kind
+	if policy.KindNeedsGitHubOwners(kind) {
+		secret.Tags[policy.TagGitHubOwners] = FixtureGitHubOwners
+	}
+	return secret
+}
+
 // ID is the Secrets Manager name of the secret a session asks for as name.
 func ID(name string) string {
 	return Prefix + mustSlug(name)
@@ -73,18 +90,9 @@ func (c *CountingDescriber) DescribeSecret(ctx context.Context, in *secretsmanag
 	return c.SecretsManagerAPI.DescribeSecret(ctx, in, opts...)
 }
 
-// MintName is the one minted secret the test Loader serves, MintTarget the account its tag must
-// name, and MintOwner the owner it must carry.
-const (
-	MintName   = "ADMIN_GCP_TOKEN"
-	MintTarget = "agent-admin@example-project.iam.gserviceaccount.com"
-	MintOwner  = "sami@example.com"
-)
-
-// Loader is the policy.Loader over store, with services registered and MintName listed.
+// Loader is the policy.Loader over store, with services registered.
 func Loader(store *secrets.Local, services ...string) policy.Loader {
-	return policy.Loader{Store: Store(store), Prefix: Prefix, Services: services,
-		MintTargets: map[string]policy.MintTarget{MintName: {Account: MintTarget, Owner: MintOwner}}}
+	return policy.Loader{Store: Store(store), Prefix: Prefix, Services: services}
 }
 
 // Current loads store's policy, as the broker does at boot; Refresh rereads it after store

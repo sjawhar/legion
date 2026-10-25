@@ -298,14 +298,23 @@ package api
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
 //
-// 36: sjawhar/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
+// 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
+// `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
+// issue beneath it is still in the workflow and a merged root's close waits for the rest of its
+// tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
+// request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
+// request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
+//
+// 37: sjawhar/legion INFRA-225 -- Legion starts no issue that waits on an unfinished Dispatch
 // issue, and says what it is waiting for. `api.Admission` gains `blocked`, required: every root
 // and every child Legion is waiting to start, by issue key, each `{issue, blockedBy}` with the
 // keys it waits on that are not done (`blockedBy` is never null, and a key the daemon has no
 // mirror row of counts as unfinished). `waiting` is unchanged, the roots' waiting line.
 // `api.WaveReleaseResponse` gains `started` and `held`, both required, `held` an array of the
 // same `{issue, blockedBy}` row: a release accepts the whole wave whatever its children's links
-// say, and these two say which children it started and which it left held. A 35 plugin's strict
+// say, and these two say which children it started and which it left held. A 36 plugin's strict
 // reader refuses a state carrying `blocked` and a release answer carrying `started` or `held`,
-// so the boot gate and `legion probe-image` refuse the mixed pair.
-const DaemonAPIVersion = 36
+// so the boot gate and `legion probe-image` refuse the mixed pair. (36 went to INFRA-229 on main
+// while this branch was open, so this change takes the number above it, as the collision note
+// says.)
+const DaemonAPIVersion = 37

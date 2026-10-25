@@ -337,11 +337,13 @@ func (c *client) Settings(ctx context.Context) (Settings, error) {
 }
 
 // Reread is POST /v1/secrets/{name}/reread's exact response shape: whether the broker serves the
-// secret now and, when it does not, why.
+// secret now, as which kind ("" for a stored secret, and from a broker older than the field), and,
+// when it does not serve it, why.
 type Reread struct {
 	Name   string `json:"name"`
 	Served bool   `json:"served"`
 	Reason string `json:"reason"`
+	Kind   string `json:"kind"`
 }
 
 // RereadSecret asks the broker to read the secret name from Secrets Manager now, as whoever just

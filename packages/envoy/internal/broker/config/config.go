@@ -90,18 +90,20 @@ type Config struct {
 	// BROKER_SERVICES: the registered services, whitespace-separated name=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion:legion-worker. A name (lowercase
 	// letters, digits and hyphens, at most 64, not shared) is what a secret's owner tag may name; the
-	// service account (system:serviceaccount:<namespace>:<name>) is the one the service's pods run
-	// as, and each account is bound to one service only. A session is the service's when a launcher
-	// logged in as the service enrolled it and it is a pod whose projected token proved it runs as
-	// that account. A machine login's service name is the machine's own claim, approved by whoever
-	// its login names, so the pod's verified service account is what proves the service, and an
-	// account bound to two names would prove neither. A namespace's default account
+	// service account (system:serviceaccount:<namespace>:<name>) is one the service's pods run as. A
+	// service may be named for several accounts, one entry each, but each account is given once and
+	// proves exactly one service. A session is the service's when a launcher logged in as the
+	// service enrolled it and it is a pod whose projected token proved it runs as one of that
+	// service's accounts. A machine login's service name is the machine's own claim, approved by
+	// whoever its login names, so the pod's verified service account is what proves the service,
+	// and an account bound to two names would prove neither. A namespace's default account
 	// (system:serviceaccount:<namespace>:default) is refused: every pod in the namespace whose spec
 	// names no account runs as it and can mount a token for the broker's audience, so it proves
-	// nothing about which pods are the service's. A secret owned by a listed service goes at once
-	// to those pods and is refused to every other session. Unset, no service is registered, and a
-	// secret whose owner tag names one is refused as owner-tag-malformed.
-	ServiceAccounts map[string]string
+	// nothing about which pods are the service's. Keyed by account, each answering its service. A
+	// secret owned by a listed service goes at once to those pods and is refused to every other
+	// session. Unset, no service is registered, and a secret whose owner tag names one is refused
+	// as owner-tag-malformed.
+	ServicesByAccount map[string]string
 	// BROKER_SERVICE_LOGINS: the ServiceAccounts that log in as a service with their own projected
 	// token (POST /v1/launcher-credentials/token), whitespace-separated <service>=<service account>
 	// entries, such as legion-daemon=system:serviceaccount:legion-system:legion-daemon-legion. Each
@@ -114,13 +116,6 @@ type Config struct {
 	// authenticating once its entry is gone. Needs BROKER_K8S_OIDC_ISSUER, whose tokens it trusts.
 	// Unset, no service logs in with a token.
 	ServiceLogins map[string]string
-	// BROKER_MINT_TARGETS: the minted secrets the broker serves, whitespace-separated
-	// <NAME>=<service account email>=<owner email> entries. A minted secret is served only when
-	// its name is listed here, its mint-service-account tag is the listed account, its owner tag
-	// the listed owner and its tier human, so only that person approves a token, under that name,
-	// for the account. Keyed by name. Needs BROKER_SECRETS_STORE gcp-secret-manager, the only
-	// store that mints. Unset, no minted secret is served.
-	MintTargets map[string]policy.MintTarget
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
 	K8sOIDCIssuer string
@@ -142,8 +137,6 @@ type Config struct {
 	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login lasts without a refresh. An
 	// approval mints its credential for this long, and each refresh moves its expiry to this long
 	// from then; past it the machine logs in again, with a new key, a new code and a new approval.
-	// A login through the earlier route (POST /v1/launcher-credentials), which cannot refresh,
-	// lasts seven days or this, whichever is shorter.
 	LauncherCredentialSeconds int
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
 	// the pending requests and machine logins nobody decided in time.
@@ -172,6 +165,9 @@ const noRulesFile = "the broker reads each secret's owner and tier from the secr
 // its grant lasts until the requesting session ends.
 const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts until the requesting session ends"
 
+// noMintTargets is why BROKER_MINT_TARGETS is gone: each secret's kind tag names its minter.
+const noMintTargets = "the broker no longer mints service account tokens; a secret's kind tag selects what it mints"
+
 // removedVars are environment variables the broker no longer reads. A stale deployment still
 // setting one must fail loudly rather than silently running on configuration that means nothing
 // any more.
@@ -187,6 +183,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_RULES_S3_URI", noRulesFile},
 	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
 	{"BROKER_MAX_GRANT_SECONDS", noGrantCap},
+	{"BROKER_MINT_TARGETS", noMintTargets},
 }
 
 // serviceAccountPattern is a Kubernetes service account's subject, the one a pod's projected token
@@ -207,7 +204,9 @@ type serviceAccountEntry struct{ service, subject, text string }
 // the entry: one not of that form or naming the service policy.OwnerShared; a namespace's default
 // account, which every pod in that namespace whose spec names no account runs as and can get a
 // token for the broker's audience with, so it proves nothing; and an account given twice, since
-// each account proves one service.
+// each account proves one service: named for two services, the refusal names both; named twice
+// for the same service, it names the account and that service. A service named for several
+// accounts is allowed.
 func parseServiceAccounts(setting, value string) ([]serviceAccountEntry, error) {
 	var entries []serviceAccountEntry
 	seen := map[string]string{}
@@ -220,6 +219,9 @@ func parseServiceAccounts(setting, value string) ([]serviceAccountEntry, error) 
 			return nil, fmt.Errorf("%s names a namespace's default service account, got %q: every pod in that namespace whose spec names no account runs as it and can get a token for the broker's audience, so it proves nothing; name a dedicated account", setting, text)
 		}
 		if other, twice := seen[subject]; twice {
+			if other == service {
+				return nil, fmt.Errorf("%s names the service account %s twice for %q; each account proves one service, so name it once", setting, subject, service)
+			}
 			return nil, fmt.Errorf("%s names the service account %s for both %q and %q; each account proves one service, so name it once", setting, subject, other, service)
 		}
 		seen[subject] = service
@@ -394,23 +396,18 @@ func Load(getenv func(string) string) (Config, error) {
 		return Config{}, err
 	}
 	for _, entry := range services {
-		if _, duplicate := cfg.ServiceAccounts[entry.service]; duplicate {
-			return Config{}, fmt.Errorf("BROKER_SERVICES must give each service once, got %q", entry.text)
+		if cfg.ServicesByAccount == nil {
+			cfg.ServicesByAccount = map[string]string{}
 		}
-		if cfg.ServiceAccounts == nil {
-			cfg.ServiceAccounts = map[string]string{}
-		}
-		cfg.ServiceAccounts[entry.service] = entry.subject
+		cfg.ServicesByAccount[entry.subject] = entry.service
 	}
 	logins, err := parseServiceAccounts("BROKER_SERVICE_LOGINS", getenv("BROKER_SERVICE_LOGINS"))
 	if err != nil {
 		return Config{}, err
 	}
 	for _, entry := range logins {
-		for name, subject := range cfg.ServiceAccounts {
-			if subject == entry.subject {
-				return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS names %s, the account BROKER_SERVICES binds for %q's pods, got %q: every such pod holds a token for it and would log in as %s; log the service in with an account of its own that no pod it enrolls runs as", entry.subject, name, entry.text, entry.service)
-			}
+		if name, bound := cfg.ServicesByAccount[entry.subject]; bound {
+			return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS names %s, the account BROKER_SERVICES binds for %q's pods, got %q: every such pod holds a token for it and would log in as %s; log the service in with an account of its own that no pod it enrolls runs as", entry.subject, name, entry.text, entry.service)
 		}
 		if cfg.ServiceLogins == nil {
 			cfg.ServiceLogins = map[string]string{}
@@ -424,22 +421,6 @@ func Load(getenv func(string) string) (Config, error) {
 	cfg.K8sOIDCIssuer, cfg.K8sOIDCAudience = issuer, audience
 	if len(cfg.ServiceLogins) > 0 && cfg.K8sOIDCIssuer == "" {
 		return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its accounts log in with")
-	}
-	for _, text := range strings.Fields(getenv("BROKER_MINT_TARGETS")) {
-		parts := strings.Split(text, "=")
-		if len(parts) != 3 || !policy.ValidName(parts[0]) || !policy.ValidMintTarget(parts[1]) || !policy.ValidPersonOwner(parts[2]) {
-			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS entry %q is not <NAME>=<service account email>=<owner email>", text)
-		}
-		if _, dup := cfg.MintTargets[parts[0]]; dup {
-			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS names %s twice", parts[0])
-		}
-		if cfg.MintTargets == nil {
-			cfg.MintTargets = map[string]policy.MintTarget{}
-		}
-		cfg.MintTargets[parts[0]] = policy.MintTarget{Account: parts[1], Owner: parts[2]}
-	}
-	if len(cfg.MintTargets) > 0 && cfg.SecretsStore != secrets.StoreGCP {
-		return Config{}, fmt.Errorf("BROKER_MINT_TARGETS needs BROKER_SECRETS_STORE=%s, the only store that mints", secrets.StoreGCP)
 	}
 	token, err := secretValue(getenv, "BROKER_UI_TOKEN")
 	if err != nil {

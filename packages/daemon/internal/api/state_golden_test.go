@@ -269,6 +269,7 @@ func populatedState(t *testing.T) State {
 					Repo:           "acme/widgets",
 					Number:         1247,
 					Head:           "5b3d9e2c8f1a47d06b2e5c9f3a8d1e4b7c0f6a29",
+					State:          "open",
 					ChecksVerdict:  "pending",
 					ReviewDecision: "changes_requested",
 					FixAttempts:    1,
@@ -311,6 +312,7 @@ func populatedState(t *testing.T) State {
 					Repo:           "acme/widgets",
 					Number:         1239,
 					Head:           "7d1e4f2a9c3b5e8d0a6f2c4b8e1d3a5f7c9b2e40",
+					State:          "merged",
 					ReviewDecision: "approved",
 				},
 				Check: &CheckView{

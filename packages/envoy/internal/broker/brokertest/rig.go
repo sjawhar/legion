@@ -137,7 +137,7 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 		Audience: srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
-	provider := newOAuthProvider(t, st)
+	provider := NewOAuthProvider(t, st)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
@@ -169,10 +169,10 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 // MachineLoginURL is the rig broker's machine-login page, the device grant's verification_uri.
 const MachineLoginURL = "https://dispatch.example/credentials/machine"
 
-// newOAuthProvider builds the machine login's OAuth provider on st's database as
+// NewOAuthProvider builds the machine login's OAuth provider on st's database as
 // cmd/broker/main.go does: device codes live as long as a pending machine login, refresh tokens
-// as long as a launcher credential.
-func newOAuthProvider(t *testing.T, st *store.Store) *oauth.Provider {
+// as long as a launcher credential, and verification_uri is MachineLoginURL.
+func NewOAuthProvider(t *testing.T, st *store.Store) *oauth.Provider {
 	t.Helper()
 	oauthStore := oauthstore.New(st.Pool)
 	oauthStore.Reused = enroll.RevokeReusedCredential

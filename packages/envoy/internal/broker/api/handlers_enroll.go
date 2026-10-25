@@ -11,15 +11,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 )
 
-// legacyKinds are the kinds an agent-secrets-helper before legion-envoy 10 sends, each recorded as
-// "session": "host" for a session the helper enrolls for itself (Broker.Enroll), and "box" for a key
-// a launcher enrolled through its enroll-box op, which agentbox calls. Such a helper keeps running
-// until no session is registered with it (dotfiles' installers/agent-secrets.sh restarts it only
-// then), so the broker must enroll its sessions through any client rollout. Each such enrollment
-// logs "an enrollment named a legacy kind"; this set goes once the production broker has logged
-// none for 30 days.
-var legacyKinds = map[string]struct{}{"host": {}, "box": {}}
-
 // createEnrollmentBody is POST /v1/enrollments's body (the shared broker contract's
 // enrollment route). It names no approver: the policy picks a request's approver at request time,
 // never at enrollment. slot is optional and pod-only: omitted or "" is the runtime's one
@@ -27,7 +18,7 @@ var legacyKinds = map[string]struct{}{"host": {}, "box": {}}
 // (enroll.Enrollment.Slot), chosen by the launcher whose proof authenticates the call.
 type createEnrollmentBody struct {
 	// What the session is: "session" (an agent session on a machine its person logged in) or
-	// "pod". The broker also takes "host" and "box" and records either as "session" (legacyKinds).
+	// "pod".
 	Kind string `json:"kind"`
 	// The session's runtime: a pod's UID, or whatever names the session on its machine (the
 	// helper's host:pid:start time, a container's id). A launcher enrolls one live session per
@@ -97,18 +88,11 @@ func (s *server) createEnrollment(w http.ResponseWriter, r *http.Request, cred e
 	if !readJSON(w, r, &body, "INVALID_ENROLLMENT") {
 		return
 	}
-	_, legacy := legacyKinds[body.Kind]
-	kind := body.Kind
-	switch {
-	case legacy:
-		kind = "session"
-		slog.Info("broker: an enrollment named a legacy kind; recorded as session", "kind", body.Kind)
-	case body.Kind == "session" || body.Kind == "pod":
-		kind = body.Kind
-	default:
+	if body.Kind != "session" && body.Kind != "pod" {
 		writeError(w, http.StatusBadRequest, "INVALID_KIND", `kind must be "session" or "pod"`)
 		return
 	}
+	kind := body.Kind
 
 	result, err := s.deps.Enroll.Create(r.Context(), cred, enroll.Enrollment{
 		Kind:       kind,

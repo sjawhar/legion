@@ -368,11 +368,15 @@ type PhaseView struct {
 // decided it until the next round opens or a new generation clears it, so a request for changes
 // stays through implementing and testing, and an approval through retro and every phase after
 // it; absent until a review in a round decides.
+// State is whether the pull request is open, merged, or closed unmerged, always one of the three:
+// a merged root waits in awaiting_merge for the rest of its tree, so an operator reads the merge
+// here rather than guessing at it.
 type PullRequestView struct {
 	// Repo is the repository (owner/name) the pull request is in, its issue's.
 	Repo           string `json:"repo"`
 	Number         int    `json:"number"`
 	Head           string `json:"head"`
+	State          string `json:"state"`
 	ChecksVerdict  string `json:"checksVerdict,omitempty"`
 	ReviewDecision string `json:"reviewDecision,omitempty"`
 	FixAttempts    int    `json:"fixAttempts"`
