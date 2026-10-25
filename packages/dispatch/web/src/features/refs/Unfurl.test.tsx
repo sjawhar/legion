@@ -165,6 +165,33 @@ test("Unfurl unfurls a dispatch project document reference with its name and doc
   }
 });
 
+test("Unfurl titles an issue reference with its key in semibold, then its title", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    artifacts: [],
+    key: "CORE-12",
+    status: "todo",
+    title: "Fix the thing",
+  } as never);
+  const queryClient = new QueryClient({
+    defaultOptions: { queries: { retry: false } },
+  });
+
+  try {
+    const view = render(
+      <QueryClientProvider client={queryClient}>
+        <Unfurl body="dispatch://CORE-12" />
+      </QueryClientProvider>
+    );
+
+    const card = await screen.findByRole("link", { name: /^CORE-12 Fix the thing/ });
+    expect(card.getAttribute("href")).toBe("/issues/CORE-12");
+    expect(card.querySelector(".font-semibold")?.textContent).toBe("CORE-12");
+    view.unmount();
+  } finally {
+    getIssue.mockRestore();
+  }
+});
+
 test("Unfurl unfurls a dispatch ask reference with the question, not the issue title", async () => {
   const issue: IssueDetails = {
     route_status: null,

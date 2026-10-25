@@ -497,6 +497,182 @@ function trimReference(value: string): string {
   return value.slice(0, end);
 }
 
+/**
+ * One reference a text writes, in the server's grammar (`text.Mentions` in
+ * `packages/envoy/internal/dispatch/text/mentions.go`): an `address` is a reference span as
+ * `referenceSpans` reads it (a `dispatch://` reference or an `http(s)://` URL, which names a
+ * Dispatch item or not), `value` its trimmed text; a `key` is an issue key written bare
+ * (`CORE-12`), which names an issue only if that issue exists; a `question` is `#` and a question
+ * block id (`#q2`, `id` without its `#`), which names a question only in the document the text
+ * belongs to (`questionReference`). `start` is the first character's index and `end` one past the
+ * last of what the reference's link covers.
+ */
+export type TextReference =
+  | {
+      readonly kind: "address";
+      readonly start: number;
+      readonly end: number;
+      readonly value: string;
+    }
+  | { readonly kind: "key"; readonly start: number; readonly end: number; readonly key: string }
+  | {
+      readonly kind: "question";
+      readonly start: number;
+      readonly end: number;
+      readonly id: string;
+    };
+
+/**
+ * Every reference text writes, in order: its address spans, and between them each bare issue key
+ * and `#id` that stands alone, by the server's `text.Mentions` grammar character for character, so
+ * the renderers, the composer, the unfurl cards and the editor read a text as the reference graph
+ * does (`DISPATCH_TEXT_REFERENCES` in `@legion/contracts` is the table both are tested against).
+ *
+ * A key or `#id` stands alone at the start of the text, after whitespace or a numeric character
+ * reference to whitespace (`&#32;`, as stored markdown writes the space at a mark's edge), or after
+ * one of ( [ " ' * _ > ` ~ |. A key is `[A-Z][A-Z0-9]{1,9}-[1-9][0-9]*` that ends at the end of the
+ * text or before a character that is not a letter, a digit, `-`, `/`, `#` or `@`, where `.` `,` `:`
+ * `;` `_` `*` `~` end it only when no letter or digit follows them (`CORE-1's` and `CORE-1.` are
+ * CORE-1; `CORE-1.5`, `CORE-1/spec` and `CORE-1#q1` nothing). A `#id` is `#` and the longest run of
+ * `[A-Za-z0-9_-]` (see `questionReference` for the run without its trailing `_` and `-`). Nothing
+ * inside an address span is read, whether or not the address names anything. There is no markdown
+ * parse, so a candidate in code is read: a renderer, which links nothing inside code, applies this
+ * to its rendered text outside code.
+ */
+export function textReferences(text: string): TextReference[] {
+  const found: TextReference[] = [];
+  let from = 0;
+  for (const match of text.matchAll(referencePattern)) {
+    scanBareReferences(text, from, match.index, found);
+    const value = trimReference(match[0]);
+    if (value !== "") {
+      found.push({ end: match.index + value.length, kind: "address", start: match.index, value });
+    }
+    from = match.index + match[0].length;
+  }
+  scanBareReferences(text, from, text.length, found);
+  return found;
+}
+
+/**
+ * What `#id` names in a document whose question map is `questions` (block id to its ask's
+ * `dispatch://` reference): the question holding the whole run, else the one holding the run
+ * without its trailing `_` and `-` (so `_see #q2_` names q2), as the server reads it. `id` is the
+ * id it named, whose `#` and characters are what a link covers; undefined when it names none.
+ */
+export function questionReference(
+  id: string,
+  questions: ReadonlyMap<string, string>
+): { readonly id: string; readonly ask: string } | undefined {
+  const whole = questions.get(id);
+  if (whole !== undefined) {
+    return { ask: whole, id };
+  }
+  const trimmed = id.replace(/[_-]+$/, "");
+  const ask = trimmed === id || trimmed === "" ? undefined : questions.get(trimmed);
+  return ask === undefined ? undefined : { ask, id: trimmed };
+}
+
+/** An issue key and a `#id`'s run of block-id characters, read where the scan stands (sticky).
+ *  The key's run of `[A-Z0-9]` before its `-` must be 2 to 10 long, as the server's `keyAt` reads
+ *  it: no shorter match of the run can be followed by the `-`. */
+const issueKeyAt = new RegExp(issueKeyPattern, "y");
+const blockIdRunAt = /[A-Za-z0-9_-]+/y;
+
+/** The keys and `#id`s that stand alone in text from `from` to `to`, appended to `found`; a run
+ *  read from inside the range may run past `to`, as the server's does. */
+function scanBareReferences(text: string, from: number, to: number, found: TextReference[]): void {
+  for (let index = from; index < to; index += 1) {
+    const char = text.charAt(index);
+    if ((char !== "#" && (char < "A" || char > "Z")) || !mentionStart(text, index)) {
+      continue;
+    }
+    if (char === "#") {
+      blockIdRunAt.lastIndex = index + 1;
+      const id = blockIdRunAt.exec(text)?.[0];
+      if (id !== undefined) {
+        found.push({ end: index + 1 + id.length, id, kind: "question", start: index });
+        index += id.length;
+      }
+      continue;
+    }
+    issueKeyAt.lastIndex = index;
+    const key = issueKeyAt.exec(text)?.[0];
+    if (key === undefined || !issueKeyEnds(text, index + key.length)) {
+      continue;
+    }
+    found.push({ end: index + key.length, key, kind: "key", start: index });
+    index += key.length - 1;
+  }
+}
+
+const letterOrDigit = /^[\p{L}\p{Nd}]$/u;
+
+/** Whether a key that runs up to end stands alone on its right (the server's `keyEnds`). */
+function issueKeyEnds(text: string, end: number): boolean {
+  const next = text.codePointAt(end);
+  if (next === undefined) {
+    return true;
+  }
+  const char = String.fromCodePoint(next);
+  if ("-/#@".includes(char)) {
+    return false;
+  }
+  if (".,:;_*~".includes(char)) {
+    const after = text.codePointAt(end + 1);
+    return after === undefined || !letterOrDigit.test(String.fromCodePoint(after));
+  }
+  return !letterOrDigit.test(char);
+}
+
+/** Whether a bare key or `#id` may start at offset (the server's `mentionStart`). */
+function mentionStart(text: string, offset: number): boolean {
+  if (offset === 0) {
+    return true;
+  }
+  const low = text.charCodeAt(offset - 1);
+  const high = offset >= 2 ? text.charCodeAt(offset - 2) : 0;
+  // The code point that ends at offset: a surrogate pair read whole, a lone surrogate as itself.
+  const before =
+    low >= 0xdc00 && low <= 0xdfff && high >= 0xd800 && high <= 0xdbff
+      ? (text.codePointAt(offset - 2) ?? low)
+      : low;
+  const char = String.fromCodePoint(before);
+  if ("([\"'*_>`~|".includes(char)) {
+    return true;
+  }
+  return char === ";"
+    ? endsWithWhitespaceReference(text.slice(0, offset))
+    : isReferenceSpace(before);
+}
+
+/** Whether prefix, which ends with `;`, ends with a numeric character reference as CommonMark
+ *  reads one (`&#` and 1 to 7 decimal digits, or `&#x` and 1 to 6 hex digits) to whitespace. */
+function endsWithWhitespaceReference(prefix: string): boolean {
+  const window = prefix.slice(Math.max(0, prefix.length - 11), prefix.length - 1);
+  const amp = window.lastIndexOf("&#");
+  if (amp < 0) {
+    return false;
+  }
+  const digits = window.slice(amp + 2);
+  const hex = /^[xX]([0-9A-Fa-f]{1,6})$/.exec(digits);
+  if (hex !== null) {
+    return isReferenceSpace(Number.parseInt(hex[1] ?? "", 16));
+  }
+  return /^[0-9]{1,7}$/.test(digits) && isReferenceSpace(Number.parseInt(digits, 10));
+}
+
+const referenceSpaceSeparator = /^\p{Z}$/u;
+
+/** The whitespace that ends a reference: tab, line feed, form feed, carriage return and the
+ *  Unicode space separators, not a vertical tab or U+FEFF (the server's `isReferenceSpace`). */
+function isReferenceSpace(code: number): boolean {
+  if (code === 0x09 || code === 0x0a || code === 0x0c || code === 0x0d) {
+    return true;
+  }
+  return code <= 0x10ffff && referenceSpaceSeparator.test(String.fromCodePoint(code));
+}
+
 /** A reference a text cites: the `dispatch://` form and the dashboard path it opens. */
 export interface ComposerReference {
   href?: string;

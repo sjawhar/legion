@@ -232,17 +232,28 @@ export function useMarkdownHeadline(
       setHeadline(undefined);
       return;
     }
-    return renderWithEngine((engine) => {
-      const parsed = engine?.parse(markdown);
-      const characters = Array.from(
-        (parsed === undefined ? markdown : plainWords(parsed)).replace(/\s+/g, " ").trim()
-      );
-      const cut = characters.length > max;
-      setHeadline({
-        cut,
-        text: cut ? `${characters.slice(0, max).join("")}…` : characters.join(""),
-      });
-    });
+    return renderWithEngine((engine) => setHeadline(headlineWith(engine, markdown, max)));
   }, [markdown, max]);
   return headline;
+}
+
+/** `useMarkdownHeadline` outside React, for a caller that draws no component of its own (the
+ *  document editor's reference titles): the headline once the engine has loaded on the page
+ *  (`warmMarkdownRenderer`), `undefined` before. */
+export function markdownHeadline(markdown: string, max: number): MarkdownHeadline | undefined {
+  return readyEngine === undefined ? undefined : headlineWith(readyEngine, markdown, max);
+}
+
+/** The headline of markdown read by engine, or of its literal text without one. */
+function headlineWith(
+  engine: MarkdownEngine | undefined,
+  markdown: string,
+  max: number
+): MarkdownHeadline {
+  const parsed = engine?.parse(markdown);
+  const characters = Array.from(
+    (parsed === undefined ? markdown : plainWords(parsed)).replace(/\s+/g, " ").trim()
+  );
+  const cut = characters.length > max;
+  return { cut, text: cut ? `${characters.slice(0, max).join("")}…` : characters.join("") };
 }

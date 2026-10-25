@@ -707,12 +707,16 @@ test("a resolving reference above a linked card does not end the hold", async ({
     const sheet = page.getByTestId("margin-sheet");
     const card = sheet.locator(`[data-margin-item="${comment.id}"]`);
     await expect(card).toBeInViewport();
-    await expect(sheet.getByText(target.key, { exact: true }).first()).toBeVisible();
-    await expect(sheet.getByText(target.title, { exact: true })).toHaveCount(0);
+    // Until the issue answers, the reference reads as its author wrote it; then as the issue's
+    // key and its long title.
+    const written = `dispatch://${target.key}`;
+    const resolved = `${target.key} ${target.title}`;
+    await expect(sheet.getByText(written, { exact: true }).first()).toBeVisible();
+    await expect(sheet.getByText(resolved, { exact: true })).toHaveCount(0);
     await landingSettled(sheet);
 
     referenceHeld.resolve();
-    await expect(sheet.getByText(target.title, { exact: true })).toHaveCount(2);
+    await expect(sheet.getByText(resolved, { exact: true })).toHaveCount(2);
     const before = "Paragraph 34: surrounding context for a long document.";
     const inserted = Array.from(
       { length: 30 },

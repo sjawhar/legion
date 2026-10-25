@@ -1,6 +1,6 @@
-import { type QueryClient, queryOptions, useQuery } from "@tanstack/react-query";
+import { type QueryClient, queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 
-import { api, artifactVersionPath } from "../../api/client";
+import { ApiError, api, artifactVersionPath, type ReferenceSource } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import type {
   Artifact,
@@ -11,7 +11,7 @@ import type {
   IssueDetails,
   MessageRead,
 } from "../../api/types";
-import { useMarkdownHeadline } from "./markdown-engine";
+import { type MarkdownHeadline, markdownHeadline, useMarkdownHeadline } from "./markdown-engine";
 import {
   type DispatchReferenceRoute,
   isProjectRoute,
@@ -27,7 +27,14 @@ import {
  */
 
 export interface ReferenceTarget {
+  /** The target's title as one line of words, which is also its link's accessible name: an
+   *  issue's key, a space and its title (`CORE-12 Fix the thing`); a document's name; an ask's,
+   *  comment's or message's own text cut to a headline. `undefined` while loading and for a
+   *  target that does not exist, where a surface shows the reference as its author wrote it. */
   readonly title: string | undefined;
+  /** The issue key `title` begins with, which a surface draws in semibold as an issue list row
+   *  does (`features/project/IssueList.tsx`); `undefined` for any other target. */
+  readonly titleKey: string | undefined;
   /** What the target says, as its author wrote it (Markdown): a message's body, a document's
    *  text. `undefined` while loading or for a target with nothing to say. */
   readonly description: string | undefined;
@@ -37,10 +44,37 @@ export interface ReferenceTarget {
 }
 
 /** How much of a target's own text becomes a reference link's title: an ask's question, a
- *  comment's body. Long enough to recognise, short enough for a link inside a sentence. */
+ *  comment's or message's body. Long enough to recognise, short enough for a link inside a
+ *  sentence. */
 const TITLE_HEADLINE_MAX = 60;
 
-const issueQuery = (key: string | undefined) =>
+/**
+ * The retry rule of the queries a reference resolves through: the client's own (the app's shared
+ * rule, `isRetryableQueryError` as `main.tsx` sets it), except that a 404 is final. A reference to
+ * an issue, ask, comment or message that does not exist (`dispatch://CORE-999999`, a key-shaped
+ * word such as `UTF-8` written bare) is asked about once, so a body full of such words costs one
+ * request each and its written text shows at once. Set in each reference query's own options, so
+ * a page that reads the same record keeps the shared rule.
+ */
+export function referenceRetry(
+  queryClient: QueryClient
+): (failureCount: number, error: Error) => boolean {
+  const shared = queryClient.getDefaultOptions().queries?.retry;
+  return (failureCount, error) => {
+    if (error instanceof ApiError && error.status === 404) {
+      return false;
+    }
+    if (typeof shared === "function") {
+      return shared(failureCount, error);
+    }
+    // TanStack's own default, three retries in a browser, when the client sets none.
+    return typeof shared === "number" ? failureCount < shared : (shared ?? failureCount < 3);
+  };
+}
+
+/** One issue with its documents, as the issue page reads it: a reference's title, and whether a
+ *  key written bare names an issue that exists (`useRenderedMarkdown`). */
+export const issueQuery = (key: string | undefined) =>
   queryOptions({
     queryKey: ["issue", key],
     queryFn: () => api.getIssue(key ?? ""),
@@ -88,6 +122,25 @@ export const commentQuery = (id: string | undefined) =>
   queryOptions({
     queryKey: ["comment", id],
     queryFn: () => api.getComment(id ?? ""),
+  });
+
+/**
+ * The question map a `#id` in source's text resolves against: the document the text belongs to and
+ * its question blocks, each to its ask (`GET /api/v1/references/questions`). Keyed under
+ * `["references"]`, which the event stream refreshes on every write that rewrites the reference
+ * index (`changesReferenceGraph` in `api/sse.ts`): a document version, which can add or retire a
+ * block, and `ask.opened`, which settlement writes as it makes a block's ask - the same events
+ * that refetch the document's asks.
+ */
+export const referenceQuestionsQuery = (source: ReferenceSource | undefined) =>
+  queryOptions({
+    queryKey: ["references", "questions", source?.kind, source?.id],
+    queryFn: () => {
+      if (source === undefined) {
+        throw new Error("A question map needs the text it is read for.");
+      }
+      return api.getReferenceQuestions(source);
+    },
   });
 
 /** The reference's target records, each present once its query resolved. `artifact` is the
@@ -151,37 +204,81 @@ export function prefetchReference(queryClient: QueryClient, route: DispatchRefer
   });
 }
 
+/** Which record of each kind a reference reads, `undefined` for each it does not. */
+interface ReferenceRecords {
+  readonly issueKey: string | undefined;
+  readonly document: Extract<DispatchReferenceRoute, { kind: "document" }> | undefined;
+  readonly agentArtifact: Extract<DispatchReferenceRoute, { kind: "agent-artifact" }> | undefined;
+  readonly message: Extract<DispatchReferenceRoute, { kind: "message" }> | undefined;
+  readonly version: number | undefined;
+  readonly askId: string | undefined;
+  readonly commentId: string | undefined;
+}
+
+function referenceRecords(route: DispatchReferenceRoute | undefined): ReferenceRecords {
+  return {
+    issueKey:
+      route === undefined || route.kind === "agent-artifact" || isProjectRoute(route)
+        ? undefined
+        : route.key,
+    document: route?.kind === "document" ? route : undefined,
+    agentArtifact: route?.kind === "agent-artifact" ? route : undefined,
+    message: route?.kind === "message" ? route : undefined,
+    version:
+      route?.kind === "artifact" || route?.kind === "document" || route?.kind === "agent-artifact"
+        ? route.version
+        : undefined,
+    askId:
+      route?.kind === "ask"
+        ? route.id
+        : route?.kind === "document" && route.item?.kind === "ask"
+          ? route.item.id
+          : undefined,
+    commentId:
+      route?.kind === "comment"
+        ? route.id
+        : route?.kind === "document" && route.item?.kind === "comment"
+          ? route.item.id
+          : undefined,
+  };
+}
+
+/** The artifact a reference names, from whichever owner's record holds it. */
+function namedArtifact(
+  route: DispatchReferenceRoute | undefined,
+  records: ReferenceRecords,
+  issue: IssueDetails | undefined,
+  projectArtifact: Artifact | undefined,
+  sessionArtifact: Artifact | undefined
+): Artifact | undefined {
+  if (records.document !== undefined) {
+    return projectArtifact;
+  }
+  if (records.agentArtifact !== undefined) {
+    return sessionArtifact;
+  }
+  return issue?.artifacts.find(
+    (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
+  );
+}
+
+function documentMarkdown(text: ArtifactText | ArtifactVersionContent | undefined) {
+  return text !== undefined && "markdown" in text ? text.markdown : undefined;
+}
+
 export function useReferenceData(route: DispatchReferenceRoute | undefined): ReferenceData {
-  const issueKey =
-    route === undefined || route.kind === "agent-artifact" || isProjectRoute(route)
-      ? undefined
-      : route.key;
-  const document = route?.kind === "document" ? route : undefined;
-  const agentArtifact = route?.kind === "agent-artifact" ? route : undefined;
-  const message = route?.kind === "message" ? route : undefined;
-  const version =
-    route?.kind === "artifact" || route?.kind === "document" || route?.kind === "agent-artifact"
-      ? route.version
-      : undefined;
-  const askId =
-    route?.kind === "ask"
-      ? route.id
-      : route?.kind === "document" && route.item?.kind === "ask"
-        ? route.item.id
-        : undefined;
-  const commentId =
-    route?.kind === "comment"
-      ? route.id
-      : route?.kind === "document" && route.item?.kind === "comment"
-        ? route.item.id
-        : undefined;
+  const records = referenceRecords(route);
+  const { agentArtifact, askId, commentId, document, issueKey, message, version } = records;
+  const retry = referenceRetry(useQueryClient());
   const issue = useQuery({
     ...issueQuery(issueKey),
     enabled: issueKey !== undefined && message === undefined,
+    retry,
   });
   const messageQueryResult = useQuery({
     ...messageQuery(message?.key, message?.id),
     enabled: message !== undefined,
+    retry,
   });
   const projectArtifact = useQuery({
     ...projectArtifactQuery(document?.project, document?.slug),
@@ -191,80 +288,183 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
     ...agentArtifactQuery(agentArtifact?.session, agentArtifact?.slug),
     enabled: agentArtifact !== undefined,
   });
-  const artifact =
-    document !== undefined
-      ? projectArtifact.data
-      : agentArtifact !== undefined
-        ? sessionArtifact.data
-        : issue.data?.artifacts.find(
-            (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
-          );
+  const artifact = namedArtifact(
+    route,
+    records,
+    issue.data,
+    projectArtifact.data,
+    sessionArtifact.data
+  );
   const text = useQuery({
     ...artifactTextQuery(artifact?.id, version),
     enabled: artifact?.kind === "doc",
   });
-  const ask = useQuery({ ...askQuery(askId), enabled: askId !== undefined });
-  const comment = useQuery({ ...commentQuery(commentId), enabled: commentId !== undefined });
+  const ask = useQuery({
+    ...askQuery(askId),
+    enabled: askId !== undefined,
+    retry,
+  });
+  const comment = useQuery({
+    ...commentQuery(commentId),
+    enabled: commentId !== undefined,
+    retry,
+  });
   return {
     issue: issue.data,
     artifact,
-    markdown: text.data !== undefined && "markdown" in text.data ? text.data.markdown : undefined,
+    markdown: documentMarkdown(text.data),
     ask: ask.data,
     comment: comment.data,
     message: messageQueryResult.data,
   };
 }
 
-/**
- * Every query behind a resolved reference title, shared by the Unfurl card and the inline
- * `RefLink` markdown/document rendering so both draw from one fetch path. An ask or comment
- * (whether issue-scoped or nested under a project document's `item`) resolves to its own text
- * rather than the owning issue's title or document; everything else falls back to the artifact
- * name (a document reference) or the issue title. A title drawn from text its author wrote (the
- * question, the comment) is that Markdown projected to plain words and cut
- * (`useMarkdownHeadline`): a link's text can hold no formatting, so a `**Blocking:**` question
- * titles its link `Blocking: …`, never `**Blocking:** …`. The description is the target's own
- * Markdown, for the caller to render formatted: a message's body, a document's text, and an
- * ask's or comment's text where the title had to cut it (a title that holds the whole text
- * needs no second copy under it); an issue with no document falls back to its status. An ask or
- * comment never borrows its issue's status or its document's text, while it loads or after. A
- * reference to an image artifact, of an issue, a project or an agent's conversation, also
- * answers its picture: the bytes route of the version it pins, else of the latest.
- */
-export function useReferenceTarget(route: DispatchReferenceRoute | undefined): ReferenceTarget {
-  const { artifact, ask, comment, issue, markdown, message } = useReferenceData(route);
-  const kind = route === undefined ? undefined : referenceTargetKind(route);
-  const authored =
-    kind === "ask" ? ask?.ask.question : kind === "comment" ? comment?.comment.body : undefined;
-  const headline = useMarkdownHeadline(authored, TITLE_HEADLINE_MAX);
+/** `useReferenceData` from what the query cache holds now, fetching nothing. */
+function cachedReferenceData(
+  queryClient: QueryClient,
+  route: DispatchReferenceRoute
+): ReferenceData {
+  const records = referenceRecords(route);
+  const { agentArtifact, askId, commentId, document, issueKey, message, version } = records;
+  const issue =
+    issueKey === undefined || message !== undefined
+      ? undefined
+      : queryClient.getQueryData(issueQuery(issueKey).queryKey);
+  const artifact = namedArtifact(
+    route,
+    records,
+    issue,
+    document === undefined
+      ? undefined
+      : queryClient.getQueryData(projectArtifactQuery(document.project, document.slug).queryKey),
+    agentArtifact === undefined
+      ? undefined
+      : queryClient.getQueryData(
+          agentArtifactQuery(agentArtifact.session, agentArtifact.slug).queryKey
+        )
+  );
+  return {
+    issue,
+    artifact,
+    markdown:
+      artifact?.kind === "doc"
+        ? documentMarkdown(
+            queryClient.getQueryData(artifactTextQuery(artifact.id, version).queryKey)
+          )
+        : undefined,
+    ask: askId === undefined ? undefined : queryClient.getQueryData(askQuery(askId).queryKey),
+    comment:
+      commentId === undefined
+        ? undefined
+        : queryClient.getQueryData(commentQuery(commentId).queryKey),
+    message:
+      message === undefined
+        ? undefined
+        : queryClient.getQueryData(messageQuery(message.key, message.id).queryKey),
+  };
+}
 
-  if (kind === "message") {
-    return {
-      title:
-        message === undefined
-          ? undefined
-          : `${message.message.author.kind} ${message.message.author.id}`,
-      description: message?.message.body,
-      picture: undefined,
-    };
+/** The text a reference's title is a headline of: an ask's question, a comment's or a message's
+ *  body; `undefined` for any other target and while it loads. */
+function authoredText(route: DispatchReferenceRoute, data: ReferenceData): string | undefined {
+  switch (referenceTargetKind(route)) {
+    case "ask":
+      return data.ask?.ask.question;
+    case "comment":
+      return data.comment?.comment.body;
+    case "message":
+      return data.message?.message.body;
+    default:
+      return undefined;
   }
-  if (kind === "ask" || kind === "comment") {
+}
+
+/** The one title rule, given the target's records and the headline of its authored text. */
+function referenceTargetOf(
+  route: DispatchReferenceRoute,
+  data: ReferenceData,
+  headline: MarkdownHeadline | undefined
+): ReferenceTarget {
+  const kind = referenceTargetKind(route);
+  if (kind === "ask" || kind === "comment" || kind === "message") {
     return {
       title: headline?.text,
-      description: headline?.cut === true ? authored : undefined,
+      titleKey: undefined,
+      description: headline?.cut === true ? authoredText(route, data) : undefined,
       picture: undefined,
     };
   }
-  const text = markdown !== undefined && markdown.trim() !== "" ? markdown : undefined;
-  const named = route === undefined ? undefined : referencedArtifact(route);
+  if (kind === "issue") {
+    const key = data.issue === undefined || !("key" in route) ? undefined : route.key;
+    return {
+      title: key === undefined ? undefined : `${key} ${data.issue?.title}`,
+      titleKey: key,
+      description: data.issue?.status,
+      picture: undefined,
+    };
+  }
+  const { artifact, markdown } = data;
+  const named = referencedArtifact(route);
   const pictureVersion =
     named?.version ?? artifact?.versions.reduce((latest, item) => Math.max(latest, item.number), 0);
   return {
-    title: artifact?.name ?? issue?.title,
-    description: text ?? (artifact === undefined ? issue?.status : undefined),
+    title: artifact?.name,
+    titleKey: undefined,
+    description: markdown !== undefined && markdown.trim() !== "" ? markdown : undefined,
     picture:
       named === undefined || artifact?.kind !== "image" || !pictureVersion
         ? undefined
         : artifactVersionPath(named.owner, named.slug, pictureVersion),
   };
+}
+
+const NO_TARGET: ReferenceTarget = {
+  description: undefined,
+  picture: undefined,
+  title: undefined,
+  titleKey: undefined,
+};
+
+/**
+ * A reference's target as the query cache holds it now, by the title rule `useReferenceTarget`
+ * draws with, for a caller outside React (the document editor's reference titles). It fetches
+ * nothing: a target whose records are not cached yet, and an ask, comment or message before the
+ * Markdown engine has loaded on the page (`warmMarkdownRenderer`), have no title yet.
+ */
+export function referenceTitle(
+  queryClient: QueryClient,
+  route: DispatchReferenceRoute
+): ReferenceTarget {
+  const data = cachedReferenceData(queryClient, route);
+  const authored = authoredText(route, data);
+  return referenceTargetOf(
+    route,
+    data,
+    authored === undefined ? undefined : markdownHeadline(authored, TITLE_HEADLINE_MAX)
+  );
+}
+
+/**
+ * Every query behind a resolved reference title, shared by the Unfurl card and the inline
+ * `RefLink` markdown/document rendering so both draw from one fetch path, by the title rule
+ * `referenceTitle` shares. An issue reads as its key then its title (`titleKey` names the key, as
+ * `features/project/IssueList.tsx` sets it in semibold); a document as its name; an ask, comment
+ * or message (whether issue-scoped or nested under a project document's `item`) as its own text
+ * rather than the owning issue's title or document. A title drawn from text its author wrote (the
+ * question, the comment, the message) is that Markdown projected to plain words and cut
+ * (`useMarkdownHeadline`): a link's text can hold no formatting, so a `**Blocking:**` question
+ * titles its link `Blocking: …`, never `**Blocking:** …`. The description is the target's own
+ * Markdown, for the caller to render formatted: a document's text, and an ask's, comment's or
+ * message's text where the title had to cut it (a title that holds the whole text needs no second
+ * copy under it); an issue's is its status. An ask, comment or message never borrows its issue's
+ * status or its document's text, while it loads or after, and a target that does not exist (a 404,
+ * final in these queries) has no title. A reference to an image artifact, of an issue, a project or
+ * an agent's conversation, also answers its picture: the bytes route of the version it pins, else
+ * of the latest.
+ */
+export function useReferenceTarget(route: DispatchReferenceRoute | undefined): ReferenceTarget {
+  const data = useReferenceData(route);
+  const authored = route === undefined ? undefined : authoredText(route, data);
+  const headline = useMarkdownHeadline(authored, TITLE_HEADLINE_MAX);
+  return route === undefined ? NO_TARGET : referenceTargetOf(route, data, headline);
 }

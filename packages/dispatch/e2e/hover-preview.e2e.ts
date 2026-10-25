@@ -47,7 +47,7 @@ test("hovering a dispatch:// reference in a comment previews the target issue; E
     const page = await alice.newPage();
     await page.goto(`/issues/${source.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    const link = turns.getByRole("link", { name: "Hover target" });
+    const link = turns.getByRole("link", { exact: true, name: `${target.key} Hover target` });
     await expect(link).toBeVisible();
     await expect(page.getByRole("tooltip")).toHaveCount(0);
 
@@ -147,7 +147,7 @@ test("a card survives a held-button drag that leaves its reference and comes bac
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name === "iphone", "a held mouse button is not a touch gesture");
-  const { source } = await seedReference();
+  const { source, target } = await seedReference();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
@@ -157,7 +157,7 @@ test("a card survives a held-button drag that leaves its reference and comes bac
     await page.clock.install();
     await page.goto(`/issues/${source.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    const link = turns.getByRole("link", { name: "Hover target" });
+    const link = turns.getByRole("link", { exact: true, name: `${target.key} Hover target` });
     await expect(link).toBeVisible();
     await link.hover();
     const card = page.getByRole("tooltip");
@@ -201,14 +201,14 @@ test("a card survives a held-button move from the card back onto its reference",
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name === "iphone", "a held mouse button is not a touch gesture");
-  const { source } = await seedReference();
+  const { source, target } = await seedReference();
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
     await page.clock.install();
     await page.goto(`/issues/${source.key}/conversation`);
     const turns = page.getByRole("list", { name: "Conversation turns" });
-    const link = turns.getByRole("link", { name: "Hover target" });
+    const link = turns.getByRole("link", { exact: true, name: `${target.key} Hover target` });
     await expect(link).toBeVisible();
     await link.hover();
     const card = page.getByRole("tooltip");
@@ -252,7 +252,7 @@ test("on a phone, tapping a reference follows it and never shows a card", async 
     await page.goto(`/issues/${source.key}/conversation`);
     const link = page
       .getByRole("list", { name: "Conversation turns" })
-      .getByRole("link", { name: "Hover target" });
+      .getByRole("link", { exact: true, name: `${target.key} Hover target` });
     await expect(link).toBeVisible();
     await link.tap();
     await expect(page).toHaveURL(new RegExp(`/issues/${target.key}(/|$)`));

@@ -111,7 +111,7 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
     await waitFor(() => expect(preview().textContent).toContain("Design decision"));
     const reference = preview().querySelector<HTMLElement>("[data-dispatch-ref]");
     if (reference === null) throw new Error("the reference did not render as one");
-    expect(reference.textContent).toBe("Design decision");
+    expect(reference.textContent).toBe("CORE-1 Design decision");
     expect(reference.closest("mark") !== null || reference.querySelector("mark") !== null).toBe(
       true
     );
@@ -125,7 +125,9 @@ test("a hit inside a dispatch:// reference keeps its highlight on the reference'
     // gave the link, which the resolved title replaces.
     rerender({ highlight: ["design"], lines: 2, markdown: "See [the design](dispatch://CORE-1)." });
     await waitFor(() =>
-      expect(preview().querySelector("[data-dispatch-ref]")?.textContent).toBe("Design decision")
+      expect(preview().querySelector("[data-dispatch-ref]")?.textContent).toBe(
+        "CORE-1 Design decision"
+      )
     );
     const linked = preview().querySelector<HTMLElement>("[data-dispatch-ref]");
     expect(linked?.closest("mark") !== null || linked?.querySelector("mark") !== null).toBe(true);

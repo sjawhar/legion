@@ -1,3 +1,5 @@
+import type { ReferenceQuestions, ReferenceSourceKind } from "@legion/contracts";
+
 import type {
   Agent,
   AgentToken,
@@ -213,6 +215,14 @@ export interface ListEventsOptions {
   ids?: string[];
   limit?: number;
   order?: "desc";
+}
+
+/** A text a `#id` can be written in, by its kind and id: a document's own text, an ask, a comment
+ *  or a message. A renderer is told the item whose text it draws, so a `#id` resolves against that
+ *  item's document (`GET /api/v1/references/questions`). */
+export interface ReferenceSource {
+  readonly kind: ReferenceSourceKind;
+  readonly id: string;
 }
 
 /** Who an uploaded file belongs to: an issue, a project (its documents), or an agent's
@@ -734,6 +744,12 @@ export class DispatchApiClient {
   }
   getReferences(reference: string): Promise<GraphReferences> {
     return this.json<GraphReferences>(pathWithQuery("/api/v1/references", { to: reference }));
+  }
+  /** The document a text belongs to and its question blocks, which a `#id` in that text names. */
+  getReferenceQuestions(source: ReferenceSource): Promise<ReferenceQuestions> {
+    return this.json<ReferenceQuestions>(
+      pathWithQuery("/api/v1/references/questions", { kind: source.kind, id: source.id })
+    );
   }
 
   /** One deploy-repository run with every job it ran, for the drill-down's job lists. */

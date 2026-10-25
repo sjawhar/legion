@@ -1608,6 +1608,26 @@ export interface GraphReferences {
   readonly edges: GraphEdge[];
 }
 
+/** The kinds of text a `#id` can be written in: a document's own text, an ask, a comment and a
+ *  message, as `GET /api/v1/references/questions` names its source. */
+export type ReferenceSourceKind = "artifact" | "ask" | "comment" | "message";
+
+/** One question block of a document: the id its `:::ask{#id}` line declares and the
+ *  `dispatch://` reference of the ask a `#` and that id names (a copied block's original ask). */
+export interface ReferenceQuestion {
+  readonly block_id: string;
+  readonly ask: string;
+}
+
+/** `GET /api/v1/references/questions?kind=&id=`: the document the source's text belongs to, which
+ *  a `#id` in it resolves against, as its `dispatch://` reference, and that document's question
+ *  blocks. A text that belongs to no document (a direct message) has `document: null` and no
+ *  questions. */
+export interface ReferenceQuestions {
+  readonly document: string | null;
+  readonly questions: readonly ReferenceQuestion[];
+}
+
 export interface ArtifactCreatedEventPayload extends ReferenceChangesPayload {
   readonly artifact: Artifact;
 }

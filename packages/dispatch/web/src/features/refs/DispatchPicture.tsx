@@ -63,7 +63,7 @@ export function DispatchPicture({
   const [failed, setFailed] = useState(false);
   const named = referencedArtifact(route);
   if (failed || named?.version === undefined) {
-    return <RefLink route={route} />;
+    return <RefLink route={route} text={caption} />;
   }
   const src = artifactVersionPath(named.owner, named.slug, named.version);
   return variant === "inline" ? (

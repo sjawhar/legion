@@ -1,6 +1,7 @@
 import type { Node as ProseMirrorNode } from "prosemirror-model";
 import { type ReactNode, useRef } from "react";
 
+import type { ReferenceSource } from "../../api/client";
 import { markdownClassName, type SoftBreaks } from "./markdown-engine";
 import { type PaintMarkdown, useRenderedMarkdown } from "./useRenderedMarkdown";
 
@@ -108,6 +109,7 @@ export function MarkdownBody({
   markdown,
   onRendered,
   softBreaks = "space",
+  source,
   variant = "block",
 }: {
   markdown: string;
@@ -116,6 +118,9 @@ export function MarkdownBody({
    *  Markdown is one paragraph), `"line"` for text whose author meant its lines as lines, such
    *  as a model's streamed turn (`SoftBreaks`). */
   softBreaks?: SoftBreaks;
+  /** The item whose text this is, which a `#<question id>` in it resolves against; without one a
+   *  `#id` stays text, and a bare issue key links either way (`useRenderedMarkdown`). */
+  source?: ReferenceSource;
   variant?: "block" | "inline";
 }): ReactNode {
   // One ref per tag, since a `<div>` and a `<span>` type their refs differently.
@@ -126,7 +131,7 @@ export function MarkdownBody({
     inline ? inlineRoot : blockRoot,
     markdown,
     inline ? paintInline : paintBlock,
-    { pictures: variant, onRendered, softBreaks }
+    { pictures: variant, onRendered, softBreaks, source }
   );
 
   return inline ? (
