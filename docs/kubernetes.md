@@ -1363,8 +1363,8 @@ speaks (the launcher, the shim, `workspace-init`): an install refreshes no binar
 image carries that change, and such a release is still pinned only after every tree is drained or
 every issue pod is relaunched onto the new image.
 
-**Moving from one container per role to one `roles` container (daemon API contract 36).** A
-release at contract 36 builds an issue pod with one container, `roles`, whose launcher runs every
+**Moving from one container per role to one `roles` container (daemon API contract 37).** A
+release at contract 37 builds an issue pod with one container, `roles`, whose launcher runs every
 role in multi-role mode, which only an image of that release's `legion` has: pin the worker image
 with the daemon release, since the image probe refuses an image whose `pi-legion` declares another
 contract. **Dump the database first** (`pg_dump -Fc -f <dump file> '<postgres_dsn>'` with the
@@ -1386,13 +1386,13 @@ release reads. Re-pinning alone boots neither:
 
 - Migration 0051 has no down migration, and the earlier release cannot read what it wrote: it
   refuses an issue pod's locator naming the container `roles` (`sandbox container "roles" does not
-  match claim role`, `Locator.Validate` in `internal/runtime/locator.go` before contract 36), which
+  match claim role`, `Locator.Validate` in `internal/runtime/locator.go` before contract 37), which
   it reads as it loads its claims. Nothing refuses the newer schema first: its `Migrate` applies
   the migrations it has not recorded and compares nothing against the version the database is at
   (`internal/store/store.go`).
 - Before it opens the database at all, its boot census refuses every issue Sandbox whose template
   is not exactly the six role containers (`legacyIssueSandbox` in
-  `internal/runtime/sandbox/install.go` before contract 36): `legacy issue Sandbox <name> runs
+  `internal/runtime/sandbox/install.go` before contract 37): `legacy issue Sandbox <name> runs
   containers [roles], not exactly the launchers its labels name [architect implementer merger
   planner reviewer tester]`. Every Sandbox this release launched a pod into has the one-container
   template, Suspended or not, and restoring the dump changes no Sandbox.
