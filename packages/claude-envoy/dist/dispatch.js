@@ -14000,7 +14000,7 @@ var commentValidation = {
   },
   message: `${commentOwner.message} turn requires reply_to_ask.`
 };
-var ISSUE_UPDATE_FIELDS_RULE = "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, or repo.";
+var ISSUE_UPDATE_FIELDS_RULE = "Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.";
 var ISSUE_UPDATE_DONE_RULE = "status done requires reason, a non-empty note saying why the issue is closing, posted on the issue before it closes because a closed issue refuses messages, comments, and artifacts";
 var ISSUE_UPDATE_REASON_RULE = "reason goes only with status done";
 var ISSUE_UPDATE_RULE = `${ISSUE_UPDATE_FIELDS_RULE} ${ISSUE_UPDATE_DONE_RULE}; ${ISSUE_UPDATE_REASON_RULE}.`;
@@ -14014,7 +14014,7 @@ function issueUpdateProblem(value) {
     const status = typeof input.status === "string" ? `status ${input.status}` : "an update without status done";
     return `${ISSUE_UPDATE_REASON_RULE}: it is the note posted on the issue as it closes, and ${status} closes nothing. Drop reason, or set status done to close the issue.`;
   }
-  const changesAField = typeof input.status === "string" || typeof input.title === "string" || Array.isArray(input.labels) || typeof input.priority === "number" || input.priority === null || Array.isArray(input.external_links) || typeof input.route === "string" || typeof input.parent === "string" || Array.isArray(input.blocked_by) || typeof input.components === "object" && input.components !== null || typeof input.repo === "string";
+  const changesAField = typeof input.status === "string" || typeof input.title === "string" || Array.isArray(input.labels) || typeof input.priority === "number" || input.priority === null || Array.isArray(input.external_links) || typeof input.route === "string" || typeof input.parent === "string" || Array.isArray(input.blocked_by) || typeof input.components === "object" && input.components !== null || typeof input.repo === "string" || typeof input.before === "string" || typeof input.after === "string";
   return changesAField ? undefined : ISSUE_UPDATE_FIELDS_RULE;
 }
 var messageValidation = {
@@ -14102,7 +14102,7 @@ var dispatchToolSpecs = [
       status: "done",
       reason: "Shipped in owner/repo#7; verified on the production dashboard."
     },
-    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, replace the issues it is blocked by, attach it to " + "architecture components, or set the repository it targets. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. A non-empty external_links is " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link; an empty external_links removes every link instead. components " + "replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. A closed issue takes only rank, components, " + "a reopening status (any status but done), and an external_links write that adds no new " + "link (so a link can move to the issue that replaced it); everything else, priority " + "included, waits for the reopen. " + "priority is yours to set and a human overrides it; rank, the board's own order, is not " + "settable here. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
+    description: "Update an existing issue: move its lifecycle status, retitle it, replace its labels, set " + "its priority, link a URL (the pull request that delivers it, a run, a document), set its " + "route, set or clear its parent, replace the issues it is blocked by, attach it to " + "architecture components, set the repository it targets, or move it on its project's " + "board. Status is one of " + `${ISSUE_STATUSES.join(", ")}; outside Legion, move it yourself as the work advances; inside ` + "Legion the daemon moves it. A non-empty external_links is " + "merged into the issue's existing links by URL, so linking the pull request you just opened " + "keeps every earlier link; an empty external_links removes every link instead. components " + "replaces the issue's own attachment. Closing an issue " + "(status done) requires reason, the note that says why: it is posted on the issue as a " + "message, then the issue closes, because a closed issue refuses messages, comments, and " + "artifacts; reason goes only with status done. A closed issue takes only a board move " + "(before, after), components, " + "a reopening status (any status but done), and an external_links write that adds no new " + "link (so a link can move to the issue that replaced it); everything else, priority " + "included, waits for the reopen. " + "priority is yours to set and a human overrides it. before and after move the issue on " + "its project's board: before puts it above that issue, after below, and both together " + "land it between them. A project's board order is one agent's to keep; in a Legion " + "deployment that is the controller. At least one " + `field besides issue is required. ${ISSUE_REFERENCE}`,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       status: z2.enum(ISSUE_STATUSES).describe("New lifecycle status.").optional(),
@@ -14115,7 +14115,9 @@ var dispatchToolSpecs = [
       parent: z2.string().describe("Parent issue key in the same project; an empty string clears the parent.").optional(),
       blocked_by: z2.array(z2.string({ min: 1 }), { max: MAX_ISSUE_BLOCKERS }).describe("Replacement list of issue keys in the same project this issue waits on; [] clears it. Dispatch refuses a dependency cycle.").optional(),
       components: componentsArgument(z2).optional(),
-      repo: z2.string().describe("The repository the issue targets, owner/name, mapped to the issue's project in Settings; an empty string clears it, so the issue inherits its parent's or the project's default again.").optional()
+      repo: z2.string().describe("The repository the issue targets, owner/name, mapped to the issue's project in Settings; an empty string clears it, so the issue inherits its parent's or the project's default again.").optional(),
+      before: z2.string().describe("Move the issue above this issue on its project's board: an issue key in the same project. With after, the issue lands between the two. The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.").optional(),
+      after: z2.string().describe("Move the issue below this issue on its project's board: an issue key in the same project. With before, the issue lands between the two. The server refuses a key that does not exist, one in another project, this issue itself, an empty value, and a pair the board does not hold in that order.").optional()
     }),
     validation: {
       check: (value) => issueUpdateProblem(value) === undefined,
@@ -17895,6 +17897,8 @@ async function executeDispatchTool(input) {
       const parent = optionalString(args, "parent");
       const components = optionalComponents(args, "components");
       const repo2 = optionalString(args, "repo");
+      const rankBefore = optionalString(args, "before");
+      const rankAfter = optionalString(args, "after");
       const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? args.labels : undefined;
       const blockedBy = Array.isArray(args.blocked_by) ? args.blocked_by : undefined;
@@ -17936,6 +17940,12 @@ async function executeDispatchTool(input) {
           ...components === undefined ? {} : { components },
           ...repo2 === undefined ? {} : { repo: repo2 === "" ? null : repo2 },
           ...sentLinks === undefined ? {} : { external_links: sentLinks },
+          ...rankBefore === undefined && rankAfter === undefined ? {} : {
+            rank: {
+              ...rankBefore === undefined ? {} : { before: rankBefore },
+              ...rankAfter === undefined ? {} : { after: rankAfter }
+            }
+          },
           actor
         });
       } catch (error48) {
@@ -17957,6 +17967,12 @@ async function executeDispatchTool(input) {
         ...title === undefined ? [] : [`title "${after.title}"`],
         ...labels === undefined ? [] : [after.labels.length === 0 ? "labels cleared" : `labels ${after.labels.join(", ")}`],
         ...priority === undefined ? [] : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`],
+        ...rankBefore === undefined && rankAfter === undefined ? [] : [
+          `rank -> ${[
+            ...rankAfter === undefined ? [] : [`after ${rankAfter}`],
+            ...rankBefore === undefined ? [] : [`before ${rankBefore}`]
+          ].join(", ")}`
+        ],
         ...requestedLinks === undefined ? [] : [
           requestedLinks.length === 0 ? "external links cleared" : newLinks.length === 0 ? `already linked ${requestedLinks.join(", ")} ${linkCount}` : `linked ${newLinks.join(", ")} ${linkCount}`
         ],
