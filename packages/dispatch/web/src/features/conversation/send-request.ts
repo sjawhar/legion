@@ -218,16 +218,20 @@ function unedited(refused: SentRequest, next: Omit<SentRequest, "sendKey">): boo
 
 /**
  * What Send or Retry sends, given `refused`, the request of the refusal it replaces, if any. A
- * Retry of a draft the reader has not edited is the refused request itself, as it was sent - its
- * mode, picked or plain, and its key - whichever surface made it and whichever presses Retry, so a
- * message the live view sent in a mode it picked never goes out again in the Agents row's mode
- * under a key of its own. An edited draft is a request of its own (`sendKeyFor`).
+ * Retry of a message to one session whose draft the reader has not edited is the refused request
+ * itself, as it was sent - its mode, picked or plain, and its key - whichever surface made it and
+ * whichever presses Retry, so a message the live view sent in a mode it picked never goes out again
+ * in the Agents row's mode under a key of its own. Any other Retry, and an edited draft, is the
+ * request as the composer shows it now (`sendKeyFor`): a comment carries no key to keep, and goes
+ * in the modes its mentioned sessions advertise now.
  */
 export function requestFor(
   refused: SentRequest | undefined,
   next: Omit<SentRequest, "sendKey">
 ): SentRequest {
-  if (refused !== undefined && unedited(refused, next)) return refused;
+  if (refused !== undefined && refused.owner.kind === "session" && unedited(refused, next)) {
+    return refused;
+  }
   return { ...next, sendKey: sendKeyFor(refused, next) };
 }
 

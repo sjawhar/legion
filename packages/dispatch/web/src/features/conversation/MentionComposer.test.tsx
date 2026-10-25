@@ -895,6 +895,41 @@ test("a mention of a session that takes only Aside goes as an Aside", async () =
   }
 });
 
+// Only a send to one session keeps its refused request for an unedited Retry, since its key must
+// survive. A comment carries no key, so its Retry is sent as the composer shows it then: a
+// mentioned session that stopped advertising Send after the refusal gets the Aside the composer
+// says it gets, not the Send the refused comment asked for.
+test("a comment's Retry goes in the mode the composer shows now, not the refused one's", async () => {
+  const createComment = spyOn(api, "createComment")
+    .mockRejectedValueOnce(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }))
+    .mockResolvedValueOnce(createdComment);
+  const steers: Agent = { ...planner, capabilities: ["aside", "btw", "steer"] };
+  const asides: Agent = { ...planner, capabilities: ["aside", "btw"] };
+  const seedMentions = [plannerMention];
+  const { rerender, view } = renderComposer({ agents: [steers], seedMentions });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "@Planner hello" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Couldn't send — the server is down");
+    expect(createComment.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({ delivery: "steer", mentions: [{ target: "session:A" }] })
+    );
+
+    rerender({ agents: [asides], seedMentions });
+    expect(screen.getByText("Sending as Aside: Planner does not advertise Send.")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createComment).toHaveBeenCalledTimes(2));
+    expect(createComment.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({ delivery: "aside", mentions: [{ target: "session:A" }] })
+    );
+  } finally {
+    view.unmount();
+    createComment.mockRestore();
+  }
+});
+
 test("the Sending as Aside line leaves out a mentioned session that takes no messages", () => {
   const aside: Agent = { ...planner, capabilities: ["aside"] };
   const deaf: Agent = { ...worker, capabilities: [] };

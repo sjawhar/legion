@@ -782,8 +782,8 @@ export function MentionComposer({
   };
   /** The send as it stands, for `sendRequest`: the fields' own text, since a keystroke in Send's
    *  task may not have rendered yet, and every prop and setting that addresses or shapes it - or,
-   *  for a Retry of a draft the reader has not edited, `refused`, the refusal's own request, as it
-   *  was sent (`requestFor`). */
+   *  for a Retry of an unedited message to one session, `refused`, the refusal's own request, as
+   *  it was sent (`requestFor`). */
   const sentRequest = (refused: SentRequest | undefined): SentRequest => {
     const request = {
       anchor,
