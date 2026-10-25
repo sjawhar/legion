@@ -3,7 +3,7 @@
   "phase": "implement",
   "issue": "INFRA-80",
   "completed": "2026-10-25T19:40:00Z",
-  "round": "12 — review round 11's two Minors, both sentences this change wrote, with the lines read cited",
+  "round": "12 (corrected in round 13) — review round 11's two Minors, and the false limit claim this handoff carried",
   "citations": [
     "packages/daemon/internal/workflow/check.go:472-483 — `checkLookEnded` calls `endLook(ctx, tx, check, fact.Cause)` for a look nobody reported.",
     "packages/daemon/internal/workflow/check.go:220-231 — `endLook` clears `LookOpen`, logs, and returns `e.endLookPending(ctx, tx, check)`: it ends the look as a report of `pending` would.",
@@ -59,7 +59,7 @@
   "openQuestions": [
     "Stage 4b is repaired and has run at no head at all.",
     "Stage 4a's inverted checks are still unrun; the runner's revised list is a comment on the pull request.",
-    "`./internal/daemon` still cannot run in this pod, checked against a second source rather than inferred from one failure: `command -v docker` → none, `DOCKER_HOST` unset, `/var/run/docker.sock` absent, and `go test ./internal/daemon -run TestNothingAtAll` compiles and runs the package with no test selected (`ok … [no tests to run]`), which separates \"the package does not build here\" from \"its tests need a container runtime\". So last round's fixture inversion has compile and reading evidence only, and a tester with Docker should run that package.",
+    "CORRECTION, made in round 13 after the tester disproved it: the claim that `./internal/daemon` cannot run in this pod was **false**. With a Postgres on the issue's own volume at `LEGION_TEST_PG_DSN`, the three fixture tests this change touches (TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns, TestIssueCloseDeletesTheSandboxAfterARestart, TestAnOldTreesCleanupBeforeTheNewTreesStartDeletesTheCarriedChildsSandbox) pass here in 4.1 s, so the fixture inversion has a run. One test needs a container runtime — TestABootWaitsOutAGitHubRequestThatNeverAnswers, `panic: rootless Docker not found` — and it takes an unfiltered package run with it. A test, not the package. The three sources I gathered under the second-source rule (no docker on PATH, DOCKER_HOST unset, no socket) were each a correct reading of 'this pod has no container runtime', a proposition nobody disputed; the skip's own text named LEGION_TEST_PG_DSN, a database. Three sources about the wrong subject look like diligence and are worse than none, because they make an unchecked claim look checked.",
     "The envoy-go hang is now dispatch://INFRA-407, filed by the controller after the person answered the ask; this change files nothing for it."
   ],
   "discoveredComplexity": [
