@@ -3019,7 +3019,7 @@ cleanup() {
     echo "cleanup: no Job name was read; deleting by label sequence-run=$run"
     kubectl delete job -l sequence-run="$run" --cascade=foreground --ignore-not-found \
       || { echo "cleanup: the Job's delete failed"; [ "$status" -ne 0 ] || status=1; }
-    kubectl get jobs -l sequence-run="$run"    # "No resources found"
+    kubectl get jobs -l sequence-run="$run"    # "No resources found" does not prove none is left: see below
     rm -rf "$dir"
     echo "sequence: exit $status"
     exit "$status"
@@ -3128,7 +3128,8 @@ PY
 kubectl logs -l job-name="$workload" --tail=5                    # and what it says it is doing
 
 # The work itself goes here, inside this script: "$address" port 5432, user postgres, password
-# "$password". However it ends, the trap above removes the workload, short of a SIGKILL.
+# "$password". However it ends, the trap above removes the workload, short of a SIGKILL or a
+# create the API server stores after the trap's label delete has listed the Jobs (see below).
 SEQUENCE
 echo "sequence: $sequence, its output in $sequence.log"
 flock "$sequence" setsid -f bash "$sequence" > "$sequence.log" 2>&1 < /dev/null   # out of the tool's reach
@@ -3152,17 +3153,30 @@ found`; and exits with the status it began with, or 1 when a clean-up step faile
 had succeeded, printing it last as `sequence: exit <status>`, since the call that waits for a
 detached sequence prints its output and not its status. A trap that runs before the sequence has
 read its Job's name from the create's answer — the create refused, or a stop that landed first —
-finds the Job by this run's label instead. The sequence draws eight random hexadecimal characters
-before the create, prints them as `run: sequence-run=<value>`, and writes them as a label on the
-Job's own metadata, not its pod template, so the label is never one a pod carries and cannot be
-read as the reachability label. That trap prints `cleanup: no Job name was read; deleting by label
-sequence-run=<value>`, deletes every Job carrying that label with `--cascade=foreground`, lists the
-Jobs carrying it, which prints `No resources found`, and exits with its status. After a refused
-create, or a stop before the create's request left, the delete finds nothing; a stop that landed
-while the create was in flight, or between its answer and the line that reads it, finds the Job
-the create made. Another run's Job carries a value drawn for that run, so the delete leaves it
-alone. No Service exists on that path: the sequence applies its Service only once it has read the
-name.
+looks for the Job by this run's label instead. The sequence draws eight random hexadecimal
+characters before the create, prints them as `run: sequence-run=<value>`, and writes them as a
+label on the Job's own metadata, not its pod template, so the label is never one a pod carries and
+cannot be read as the reachability label. That trap prints `cleanup: no Job name was read; deleting
+by label sequence-run=<value>`, deletes every Job carrying that label with `--cascade=foreground`,
+lists the Jobs carrying it, and exits with its status. After a refused create, or a stop before
+the create's request left, there is no Job, and the delete finds nothing. Otherwise the delete
+finds the Job only if the API server has stored it by the time the delete lists the Jobs. In every
+run of that kind measured on 2026-10-25 for dispatch://INFRA-232, it had: the stop placed between
+the create's answer and the line that reads it, and the two stops that landed while the create was
+in flight, 0.33 s and 0.35 s after the first line (two of the twenty-six in the bullet below; that
+issue's tester measured two more, at 0.318 s and 0.320 s, sjawhar/legion#2195), each had its Job
+deleted by the label. A create the server finishes only after that listing — its request still in
+flight when a stop or a failed connection ended `kubectl create` — leaves a Job the delete never
+saw. No run measured that case, and none rules it out. The trap's own listing shows such a Job
+only if the server stored it before that listing, and prints `No resources found` if later, so
+neither the listing nor the block's closing comment covers it. Such a Job would run until the
+3600 s deadline it and its pod carry, holding the four processors it requested. So after every
+run whose trap printed `cleanup: no Job name was read`, list `kubectl get jobs -l
+sequence-run=<the printed value>` once more after the sequence has ended, and remove any Job it
+lists with `kubectl delete job -l sequence-run=<the printed value> --cascade=foreground`, the
+recovery that removed a Job a `SIGKILL` inside the create had left, measured on 2026-10-25.
+Another run's Job carries a value drawn for that run, so neither command touches it. No Service
+exists on that path: the sequence applies its Service only once it has read the name.
 
 **A timeout of the role's own bash tool is what the detaching is for.** The tool ends a call that
 runs past its timeout by signalling the command and every process under it and killing them almost
@@ -3257,8 +3271,9 @@ dispatch://INFRA-206's declarations on 2026-10-25 turned two of the gate's three
 to `yes`. So each bullet below carries the date of the run behind it, and a reader runs the three
 gate commands itself rather than trusting the answers recorded here:
 
-- *Executed from a role container on 2026-10-25, for dispatch://INFRA-232, with the sequence
-  exactly as published above, through the role's own bash tool*: the block taken from this page
+- *Executed from a role container on 2026-10-25, for dispatch://INFRA-232, with every command of
+  the sequence as published above (dispatch://INFRA-386 has since changed two of its comments and
+  none of its commands), through the role's own bash tool*: the block taken from this page
   with only its three bracketed lines filled in, each run under the name the API server gave it
   and a run label of its own, and a fixture changing one line of it where named. As published,
   with reads of the workload pod's labels and of the Jobs carrying the run label added:
