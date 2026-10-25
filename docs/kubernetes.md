@@ -2709,6 +2709,7 @@ owns it, because a rule checking a submission sees only the object submitted and
 Job up, so a selector by name would let a Service owned by one Job front another's pods. A
 `job-name` selector, though the Job puts that label on its pods too, is refused at submission,
 naming that rule:
+
 ```yaml
 apiVersion: v1
 kind: Service
@@ -2796,9 +2797,12 @@ gate commands itself rather than trusting the answers recorded here:
   Service applied exactly as published and created, the pod waited for into existence (at once)
   and then to Ready (70 s), the workload pod's labels read and carrying both its Job's
   `batch.kubernetes.io/controller-uid` and the reachability label, the reachability check
-  answering by the Service name on its first try, the Job's log ending `database system is ready
-  to accept connections`, `kubectl delete job` run, and the closing listing showing the Job and
-  its Service gone at once and its pod `Terminating`, then nothing of it twenty seconds later.
+  answering by the Service name about two seconds after the Ready wait returned — the same block
+  with one print per attempt added saw its first connection refused and the retry answer, the
+  listener opening a second or so after Ready, which is the starting-up case the paragraph under
+  the sequence describes — the Job's log ending `database system is ready to accept connections`,
+  `kubectl delete job` run, and the closing listing showing the Job and its Service gone at once
+  and its pod `Terminating`, then nothing of it twenty seconds later.
 - *Executed from a role container on 2026-10-24, for dispatch://INFRA-71, and not run again
   since*: the credential-less gate, with the in-cluster environment removed; the Job manifest
   above through the namespace's own admission, server-side with nothing created, together with
