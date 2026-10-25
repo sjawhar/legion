@@ -26,6 +26,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/docs"
 	"github.com/sjawhar/envoy/internal/dispatch/files"
 	"github.com/sjawhar/envoy/internal/dispatch/files/filestest"
+	"github.com/sjawhar/envoy/internal/dispatch/githubapp/githubapptest"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
@@ -1247,9 +1248,10 @@ func TestDevSignInRefusesAnAppJSONKeyWhateverTheBase(t *testing.T) {
 		t.Errorf("a key in app.json without the flag: %v, want accepted", err)
 	}
 
+	_, throwaway := githubapptest.Key(t)
 	app, source, err = loadAppCredentials(envGetter(map[string]string{
 		"DISPATCH_APP_CLIENT_ID": "Iv1.env",
-		"DISPATCH_APP_PEM_B64":   base64.StdEncoding.EncodeToString([]byte("throwaway key")),
+		"DISPATCH_APP_PEM_B64":   base64.StdEncoding.EncodeToString([]byte(throwaway)),
 	}), dataDir)
 	if err != nil || app == nil {
 		t.Fatalf("loadAppCredentials from the environment: %+v, %v", app, err)
