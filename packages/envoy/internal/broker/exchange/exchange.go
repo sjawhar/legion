@@ -1,6 +1,7 @@
 // Package exchange decides what a verified subject token entitles its holder to write in
-// Dispatch: the three claims a minted Dispatch access token carries — the session that is writing,
-// the person it acts for, and the one project it may write.
+// Dispatch: the claims a minted Dispatch access token carries — the session that is writing, the
+// person it acts for, and which projects it may write, either the one it names or every one its
+// person may write — and, beside them, the platform identity the session name is to be bound to.
 //
 // It is the policy half of the RFC 8693 token exchange and nothing else. It verifies no token,
 // reads no configuration, takes no clock and makes no call: it is handed entries someone else
@@ -58,15 +59,56 @@ var accountPattern = regexp.MustCompile(`^system:serviceaccount:[a-z0-9]([-a-z0-
 // 100 of letters, digits, hyphens, underscores and dots.
 var repositoryPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]{1,100}$`)
 
-// Claims are what an exchange writes into the Dispatch access token it mints.
+// ProjectScope says what a minted token's project claim means. Its zero value is no scope at
+// all, so a Claims that was not built by this package carries one that every reader refuses:
+// the absence of a project must be a decision this package made, never a field nobody filled in.
+type ProjectScope int
+
+const (
+	// ProjectScopeUnset is the zero value, which no decision answers. A project check handed it
+	// refuses the token: a Claims built by anything but this package's constructors has decided
+	// nothing, and 'no project named' must not read as 'no oversight'.
+	ProjectScopeUnset ProjectScope = iota
+	// ProjectScopeNamed is a token that may write the one project Claims.Project names.
+	ProjectScopeNamed
+	// ProjectScopePerson is a token that may write every project the person it acts for may
+	// write, and names none. It is what a person's own credential gets, because a person reaches
+	// whichever projects they may reach.
+	ProjectScopePerson
+)
+
+// String names the scope as a refusal or a log line spells it, the zero value included, so a
+// Claims that decided nothing does not read as a number.
+func (s ProjectScope) String() string {
+	switch s {
+	case ProjectScopeNamed:
+		return "one named project"
+	case ProjectScopePerson:
+		return "every project the person may write"
+	default:
+		return "no project scope"
+	}
+}
+
+// Claims are what an exchange writes into the Dispatch access token it mints, and the binding it
+// makes before it does.
 type Claims struct {
 	// Session is who the token's writes are recorded as.
 	Session string
 	// Person is who the session acts for: the human answerable for what the token writes.
 	Person string
-	// Project is the one project key the token may write. Empty is a token scoped to no project
-	// at all, which is what a person's own credential gets.
+	// Scope is what Project means, and is always one of ProjectScopeNamed or ProjectScopePerson:
+	// every constructor sets it, so a reader never has to read an empty Project as either.
+	Scope ProjectScope
+	// Project is the one project key the token may write, and is empty for a
+	// ProjectScopePerson token, which names no project.
 	Project string
+	// Binding is the platform identity the session name is to be bound to, and is not a claim of
+	// the minted token: it is what the broker records as the holder of the session name, so a
+	// caller that may exchange cannot mint a token naming a session another identity is already
+	// writing under. It is the pod uid for a pod, the repository and run id for a workflow run,
+	// and the machine credential's id for a dev box session.
+	Binding string
 }
 
 // AccountEntry lists one Kubernetes service account and what a pod running as it may write. Every
@@ -182,13 +224,16 @@ func checkGrant(where, project, person, session string) error {
 //
 // A token carrying no pod uid is refused however the account is listed: Kubernetes mints such a
 // token to anyone holding the account's credentials, and it proves only that the account exists,
-// where a bound one proves a pod of this cluster is running right now.
+// where a bound one proves a pod of this cluster is running right now. That uid is also what the
+// session name is bound to, so one pod cannot write under the session name another pod of the
+// same account is writing under.
 func (s *Set) Pod(token map[string]any, session string) (Claims, error) {
 	account, err := claimString(token, "sub")
 	if err != nil {
 		return Claims{}, err
 	}
-	if podUID(token) == "" {
+	uid := podUID(token)
+	if uid == "" {
 		return Claims{}, fmt.Errorf("%w: %s presented a token bound to no pod, which proves only that the account exists", ErrNoPodBinding, account)
 	}
 	entry, listed := s.accounts[account]
@@ -199,17 +244,21 @@ func (s *Set) Pod(token map[string]any, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	return Claims{Session: name, Person: entry.Person, Project: entry.Project}, nil
+	return Claims{Session: name, Person: entry.Person, Scope: ProjectScopeNamed, Project: entry.Project, Binding: uid}, nil
 }
 
 // Workflow answers the claims for a continuous-integration workflow run's GitHub token, from the
-// claims GitHub puts in it: `repository`, `workflow_ref`, `job_workflow_ref` and `ref`.
+// claims GitHub puts in it: `repository`, `workflow_ref`, `job_workflow_ref`, `ref` and `run_id`.
 //
 // The identity is the repository, the workflow file's path and the ref, each compared exactly. A
 // run whose job comes from a reusable workflow other than the one the run started in is refused:
 // `job_workflow_ref` names the workflow file the job is written in and `workflow_ref` the one the
 // run entered through, and where they differ the code that is running is not the code the entry
 // names.
+//
+// The session name is bound to the run, which is `run_id` under its repository: a run id is
+// unique only within the repository that numbered it, so two repositories' runs would otherwise
+// collide on one binding.
 func (s *Set) Workflow(token map[string]any, session string) (Claims, error) {
 	repository, err := claimString(token, "repository")
 	if err != nil {
@@ -224,6 +273,10 @@ func (s *Set) Workflow(token map[string]any, session string) (Claims, error) {
 		return Claims{}, err
 	}
 	ref, err := claimString(token, "ref")
+	if err != nil {
+		return Claims{}, err
+	}
+	run, err := claimString(token, "run_id")
 	if err != nil {
 		return Claims{}, err
 	}
@@ -242,18 +295,30 @@ func (s *Set) Workflow(token map[string]any, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	return Claims{Session: name, Person: entry.Person, Project: entry.Project}, nil
+	return Claims{
+		Session: name,
+		Person:  entry.Person,
+		Scope:   ProjectScopeNamed,
+		Project: entry.Project,
+		Binding: repository + "/actions/runs/" + run,
+	}, nil
 }
 
-// Machine answers the claims for a dev box session's machine credential. No entry lists one: the
-// person is approver, the one the credential already records, and the session is the one the
-// caller names.
+// Machine answers the claims for a dev box session's machine credential, credential being the
+// credential's own id. No entry lists one: the person is approver, the one the credential already
+// records, and the session is the one the caller names and is bound to that credential, so one
+// person's dev box cannot write under another's session name.
 //
-// The token carries no project. A machine credential is a person's own identity on their own
-// machine, as their browser cookie and their personal token are, and neither of those carries a
-// project either: the person reaches whichever projects they may reach, and an exchange that
-// pinned one here would hand a dev box more standing than the person has, not less.
-func (s *Set) Machine(approver, session string) (Claims, error) {
+// The token names no project, and says so: its scope is ProjectScopePerson. A machine credential
+// is a person's own identity on their own machine, as their browser cookie and their personal
+// token are, and neither of those carries a project either: the person reaches whichever projects
+// they may reach, and an exchange that pinned one here would hand a dev box more standing than
+// the person has, not less. Naming the scope is what keeps a reader of an introspection answer
+// from mistaking that for a token no project check applies to.
+func (s *Set) Machine(credential, approver, session string) (Claims, error) {
+	if strings.TrimSpace(credential) == "" {
+		return Claims{}, fmt.Errorf("%w: the machine credential has no id to bind the session name to", ErrClaimMissing)
+	}
 	if strings.TrimSpace(approver) == "" {
 		return Claims{}, fmt.Errorf("%w: the machine credential records no approver to act for", ErrClaimMissing)
 	}
@@ -261,7 +326,7 @@ func (s *Set) Machine(approver, session string) (Claims, error) {
 	if err != nil {
 		return Claims{}, err
 	}
-	return Claims{Session: name, Person: approver}, nil
+	return Claims{Session: name, Person: approver, Scope: ProjectScopePerson, Binding: credential}, nil
 }
 
 // sessionRule is the one sentence that says what a session name may be, so an entry refused at

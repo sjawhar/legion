@@ -18,6 +18,8 @@ const (
 	person        = "ada@example.com"
 	fixedSession  = "legion-daemon:ACME"
 	podUID        = "11111111-2222-3333-4444-555555555555"
+	runID         = "4242"
+	credentialID  = "66666666-7777-8888-9999-aaaaaaaaaaaa"
 )
 
 // listed is the set every decision test asks: one account whose sessions name themselves, one
@@ -59,7 +61,18 @@ func workflowToken(repo, workflowRef, jobRef, gitRef string) map[string]any {
 		"workflow_ref":     workflowRef,
 		"job_workflow_ref": jobRef,
 		"ref":              gitRef,
+		"run_id":           runID,
 	}
+}
+
+// runBinding is what a run of the repository's workflows binds its session name to.
+var runBinding = repository + "/actions/runs/" + runID
+
+// withoutClaim is token with the named claim dropped, for a case that must miss exactly one. It
+// changes the map it is handed, which every builder here returns fresh.
+func withoutClaim(token map[string]any, name string) map[string]any {
+	delete(token, name)
+	return token
 }
 
 // runRef is the workflow_ref a run of path in repository on ref carries.
@@ -158,11 +171,11 @@ func TestPodAnswersTheListedAccount(t *testing.T) {
 		want    exchange.Claims
 	}{
 		{name: "the session the request names", token: podToken(workerAccount, podUID), session: "implementer-g1",
-			want: exchange.Claims{Session: "implementer-g1", Person: person, Project: project}},
+			want: exchange.Claims{Session: "implementer-g1", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Binding: podUID}},
 		{name: "the session the entry fixes, the request naming none", token: podToken(daemonAccount, podUID), session: "",
-			want: exchange.Claims{Session: fixedSession, Person: person, Project: project}},
+			want: exchange.Claims{Session: fixedSession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Binding: podUID}},
 		{name: "the session the entry fixes, the request naming the same", token: podToken(daemonAccount, podUID), session: fixedSession,
-			want: exchange.Claims{Session: fixedSession, Person: person, Project: project}},
+			want: exchange.Claims{Session: fixedSession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Binding: podUID}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			claims, err := set.Pod(c.token, c.session)
@@ -231,9 +244,9 @@ func TestWorkflowAnswersTheListedRun(t *testing.T) {
 		want    exchange.Claims
 	}{
 		{name: "the session the request names", token: workflowToken(repository, runRef(workflow), runRef(workflow), ref),
-			session: "release-bot", want: exchange.Claims{Session: "release-bot", Person: person, Project: project}},
+			session: "release-bot", want: exchange.Claims{Session: "release-bot", Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Binding: runBinding}},
 		{name: "the session the entry fixes", token: workflowToken(repository, runRef(".github/workflows/nightly.yaml"), runRef(".github/workflows/nightly.yaml"), ref),
-			session: "", want: exchange.Claims{Session: fixedSession, Person: person, Project: project}},
+			session: "", want: exchange.Claims{Session: fixedSession, Person: person, Scope: exchange.ProjectScopeNamed, Project: project, Binding: runBinding}},
 	} {
 		t.Run(c.name, func(t *testing.T) {
 			claims, err := set.Workflow(c.token, c.session)
@@ -261,6 +274,8 @@ func TestWorkflowRefusesWhatItCannotDecide(t *testing.T) {
 			session: "release-bot", want: exchange.ErrClaimMissing, names: "job_workflow_ref"},
 		{name: "a token with no ref", token: workflowToken(repository, runRef(workflow), runRef(workflow), ""),
 			session: "release-bot", want: exchange.ErrClaimMissing, names: "ref"},
+		{name: "a token with no run id", token: withoutClaim(workflowToken(repository, runRef(workflow), runRef(workflow), ref), "run_id"),
+			session: "release-bot", want: exchange.ErrClaimMissing, names: "run_id"},
 		{name: "a workflow_ref that names no path", token: workflowToken(repository, repository+"/"+workflow, repository+"/"+workflow, ref),
 			session: "release-bot", want: exchange.ErrClaimMissing, names: repository},
 		{name: "a workflow_ref under another repository", token: workflowToken(repository, "example-org/other-repo/"+workflow+"@"+ref, "example-org/other-repo/"+workflow+"@"+ref, ref),
@@ -292,33 +307,74 @@ func TestWorkflowRefusesWhatItCannotDecide(t *testing.T) {
 	}
 }
 
-func TestMachineActsForTheApproverAndWritesNoProject(t *testing.T) {
+func TestMachineActsForTheApproverAndWritesEveryProjectThePersonMay(t *testing.T) {
 	set := listed(t)
-	claims, err := set.Machine(person, "ada-devbox")
+	claims, err := set.Machine(credentialID, person, "ada-devbox")
 	if err != nil {
 		t.Fatalf("Machine: %v", err)
 	}
-	if want := (exchange.Claims{Session: "ada-devbox", Person: person}); claims != want {
-		t.Fatalf("Machine = %+v, want %+v: a machine credential carries no project", claims, want)
+	want := exchange.Claims{Session: "ada-devbox", Person: person, Scope: exchange.ProjectScopePerson, Binding: credentialID}
+	if claims != want {
+		t.Fatalf("Machine = %+v, want %+v: a machine credential names no project and says which absence that is", claims, want)
+	}
+}
+
+// TestEveryDecisionScopesItsProject: the zero ProjectScope is what a Claims nobody built carries,
+// so no constructor may answer it; a later project check refuses a token that names neither a
+// project nor the person's whole reach.
+func TestEveryDecisionScopesItsProject(t *testing.T) {
+	set := listed(t)
+	pod, err := set.Pod(podToken(workerAccount, podUID), "implementer-g1")
+	if err != nil {
+		t.Fatalf("Pod: %v", err)
+	}
+	run, err := set.Workflow(workflowToken(repository, runRef(workflow), runRef(workflow), ref), "release-bot")
+	if err != nil {
+		t.Fatalf("Workflow: %v", err)
+	}
+	machine, err := set.Machine(credentialID, person, "ada-devbox")
+	if err != nil {
+		t.Fatalf("Machine: %v", err)
+	}
+	for _, c := range []struct {
+		name   string
+		claims exchange.Claims
+		want   exchange.ProjectScope
+	}{
+		{name: "Pod", claims: pod, want: exchange.ProjectScopeNamed},
+		{name: "Workflow", claims: run, want: exchange.ProjectScopeNamed},
+		{name: "Machine", claims: machine, want: exchange.ProjectScopePerson},
+	} {
+		if c.claims.Scope != c.want {
+			t.Errorf("%s scope = %v, want %v", c.name, c.claims.Scope, c.want)
+		}
+		if (c.claims.Project != "") != (c.want == exchange.ProjectScopeNamed) {
+			t.Errorf("%s = %+v: a named scope names a project and no other scope does", c.name, c.claims)
+		}
+	}
+	if got := exchange.ProjectScopeUnset.String(); !strings.Contains(got, "no project scope") {
+		t.Errorf("ProjectScopeUnset.String() = %q, want it to say the scope was never set", got)
 	}
 }
 
 func TestMachineRefusesWhatItCannotDecide(t *testing.T) {
 	set := listed(t)
 	for _, c := range []struct {
-		name     string
-		approver string
-		session  string
-		want     error
-		names    string
+		name       string
+		credential string
+		approver   string
+		session    string
+		want       error
+		names      string
 	}{
-		{name: "a credential with no approver", approver: " ", session: "ada-devbox", want: exchange.ErrClaimMissing, names: "approver"},
-		{name: "a request naming no session", approver: person, session: "", want: exchange.ErrSessionRequired, names: person},
-		{name: "a request naming a session with whitespace", approver: person, session: "ada devbox", want: exchange.ErrSessionInvalid, names: person},
-		{name: "a request naming a session past the cap", approver: person, session: strings.Repeat("s", exchange.MaxSessionBytes+1), want: exchange.ErrSessionInvalid, names: person},
+		{name: "a credential with no id", credential: " ", approver: person, session: "ada-devbox", want: exchange.ErrClaimMissing, names: "id"},
+		{name: "a credential with no approver", credential: credentialID, approver: " ", session: "ada-devbox", want: exchange.ErrClaimMissing, names: "approver"},
+		{name: "a request naming no session", credential: credentialID, approver: person, session: "", want: exchange.ErrSessionRequired, names: person},
+		{name: "a request naming a session with whitespace", credential: credentialID, approver: person, session: "ada devbox", want: exchange.ErrSessionInvalid, names: person},
+		{name: "a request naming a session past the cap", credential: credentialID, approver: person, session: strings.Repeat("s", exchange.MaxSessionBytes+1), want: exchange.ErrSessionInvalid, names: person},
 	} {
 		t.Run(c.name, func(t *testing.T) {
-			claims, err := set.Machine(c.approver, c.session)
+			claims, err := set.Machine(c.credential, c.approver, c.session)
 			if !errors.Is(err, c.want) {
 				t.Fatalf("Machine(%s) = %+v, %v; want %v", c.name, claims, err, c.want)
 			}

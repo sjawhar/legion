@@ -5,10 +5,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
 	"authelia.com/provider/oauth2"
+	"authelia.com/provider/oauth2/handler/rfc8693"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -567,15 +569,101 @@ func TestAuthorizeCodeSessionsAreRefused(t *testing.T) {
 	}
 }
 
-func TestOnlyTheOneClientExists(t *testing.T) {
+// TestTheProviderHasThreeClientsAndNoOther: the helper logging a machine in, the caller
+// exchanging a subject token, and the issuer asserting a signed-in person, each with the grants
+// and the client type it is registered with, and nothing else.
+func TestTheProviderHasThreeClientsAndNoOther(t *testing.T) {
 	ctx := context.Background()
 	s, _ := newStore(t)
-	client, err := s.GetClient(ctx, oauthwire.ClientID)
-	if err != nil || !client.IsPublic() || client.GetID() != oauthwire.ClientID {
-		t.Fatalf("GetClient(%q) = (%#v, %v)", oauthwire.ClientID, client, err)
+	for _, c := range []struct {
+		name   string
+		id     string
+		public bool
+		grant  oauth2.GrantType
+	}{
+		{name: "the machine login's helper", id: oauthwire.ClientID, public: true, grant: oauth2.GrantTypeDeviceCode},
+		{name: "the exchanging caller", id: oauthwire.ExchangeClientID, grant: oauth2.GrantTypeTokenExchange},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			client, err := s.GetClient(ctx, c.id)
+			if err != nil || client.GetID() != c.id {
+				t.Fatalf("GetClient(%q) = (%#v, %v)", c.id, client, err)
+			}
+			if client.IsPublic() != c.public {
+				t.Errorf("GetClient(%q).IsPublic() = %v, want %v", c.id, client.IsPublic(), c.public)
+			}
+			if !client.GetGrantTypes().Has(string(c.grant)) {
+				t.Errorf("GetClient(%q) holds the grants %v, want %s among them", c.id, client.GetGrantTypes(), c.grant)
+			}
+			if _, ok := client.(rfc8693.Client); !ok {
+				t.Errorf("GetClient(%q) = %T, which the token exchange cannot read", c.id, client)
+			}
+		})
 	}
 	if _, err := s.GetClient(ctx, "someone-else"); !errors.Is(err, oauth2.ErrNotFound) {
 		t.Fatalf("GetClient(other) = %v, want ErrNotFound", err)
+	}
+}
+
+// TestTheExchangeClientIsConfidentialAndNarrow: the library refuses a public client at the
+// token-exchange grant, so that client must never read as public; it may present exactly the
+// three kinds of subject token this broker accepts, ask for an access token and nothing else,
+// and present no actor token. Only it may exchange a machine login's token.
+func TestTheExchangeClientIsConfidentialAndNarrow(t *testing.T) {
+	ctx := context.Background()
+	s, _ := newStore(t)
+	client, err := s.GetClient(ctx, oauthwire.ExchangeClientID)
+	if err != nil {
+		t.Fatalf("GetClient: %v", err)
+	}
+	exchanger, ok := client.(rfc8693.Client)
+	if !ok {
+		t.Fatalf("the exchange client is %T, which the token exchange cannot read", client)
+	}
+	if client.IsPublic() {
+		t.Error("the exchange client reads as public, which the token-exchange grant refuses")
+	}
+	for _, c := range []struct {
+		name       string
+		got, want  []string
+		wantNoMore bool
+	}{
+		{name: "subject token types", got: exchanger.GetSupportedSubjectTokenTypes(),
+			want: []string{oauthwire.SubjectTokenTypeKubernetes, oauthwire.SubjectTokenTypeGitHub, "urn:ietf:params:oauth:token-type:access_token"}},
+		{name: "requested token types", got: exchanger.GetSupportedRequestTokenTypes(),
+			want: []string{"urn:ietf:params:oauth:token-type:access_token"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if !slices.Equal(c.got, c.want) {
+				t.Errorf("%s = %v, want %v", c.name, c.got, c.want)
+			}
+		})
+	}
+	for _, actor := range exchanger.GetSupportedActorTokenTypes() {
+		if actor == "urn:ietf:params:oauth:token-type:access_token" || actor == oauthwire.SubjectTokenTypeKubernetes || actor == oauthwire.SubjectTokenTypeGitHub {
+			t.Errorf("the exchange client permits %s as an actor token", actor)
+		}
+	}
+	if len(exchanger.GetSupportedActorTokenTypes()) == 0 {
+		t.Error("the exchange client permits every actor token type, which an empty list means")
+	}
+	machine, err := s.GetClient(ctx, oauthwire.ClientID)
+	if err != nil {
+		t.Fatalf("GetClient: %v", err)
+	}
+	for _, c := range []struct {
+		name  string
+		asked oauth2.Client
+		want  bool
+	}{
+		{name: "the exchange client", asked: client, want: true},
+		{name: "the asserting issuer", asked: machine},
+	} {
+		t.Run("a machine login's token is exchanged by "+c.name, func(t *testing.T) {
+			if got := machine.(rfc8693.Client).GetTokenExchangePermitted(c.asked, nil); got != c.want {
+				t.Errorf("GetTokenExchangePermitted(%s) = %v, want %v", c.name, got, c.want)
+			}
+		})
 	}
 }
 
