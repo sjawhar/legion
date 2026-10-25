@@ -356,10 +356,19 @@ if (got.split(/\s+/)[0] !== want) {
 // read with no default, as installBlock reads BUN_INSTALL_CACHE_DIR: the runtime sets it for every
 // role container (roleEnvironment) and owns it (runtimeOwned), and its absence is a broken
 // invariant `set -u` should announce. The install takes /usr/bin/flock on that directory with
-// installBlock's bound (lockWait, installLockWait), made (mkdir -p, after the same rm of a regular
-// file an interrupted flock can leave) before the lock so the lock's inode exists, and so a
-// stalled holder fails the launch by the failure branch while the daemon is still watching rather
-// than being retired by the registration deadline. It is tried once: installBlock's retry covers
+// installBlock's bound (lockWait, installLockWait), made before the lock so the lock's inode
+// exists, and so a stalled holder fails the launch by the failure branch while the daemon is
+// still watching rather than being retired by the registration deadline. `mkdir -p` comes first
+// and alone: it succeeds on a directory another process has just made, which the recovery below
+// must never be asked to decide. The pod's Claude roles share this cache, so on a cold one — a new
+// volume, or one just lost — two of them start together and both find it missing; a `[ -d ]` test
+// in front of the recovery would send both down it, and whichever reached the rm second would fail
+// it on the directory the first had made, ending that launch under `set -e` before npm and before
+// this block's own failure line. Only when the one `mkdir -p` fails does the recovery run: that is
+// a regular file at the path, which an interrupted flock leaves if it ever runs with the directory
+// missing, and removing it and making the directory is the launch's way past it. A failure there
+// is the wrapper's exit, as every other failure of this block is.
+// It is tried once: installBlock's retry covers
 // an agent's own `bun install` filling the shared bun cache, and no agent's npm uses this cache.
 // A Claude launch never also installs the plugin pair (specs.stalePluginInstall installs none for
 // the claude backend), so its script spends at most one wait of the deadline, not installBlock's
@@ -373,8 +382,7 @@ func claudeCodeBlock(stateHome string, generation uint64, lockWait int) string {
   mkdir -p -- %s
   cd -- %s
   cache="$XDG_CACHE_HOME/legion-claude-code"
-  [ -d "$cache" ] || rm -f -- "$cache"
-  mkdir -p -- "$cache"
+  mkdir -p -- "$cache" 2>/dev/null || { rm -f -- "$cache" && mkdir -p -- "$cache"; }
   { cp -- %s %s . \
     && /usr/bin/flock -w %d -- "$cache" /usr/local/bin/npm ci --ignore-scripts --omit=dev --no-audit --no-fund --cache "$cache"; } \
     || { echo %s; exit 1; }

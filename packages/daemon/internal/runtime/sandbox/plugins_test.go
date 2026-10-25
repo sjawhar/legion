@@ -350,7 +350,10 @@ type claudeCodeRun struct {
 // version the repository actually pins. Everything else — node, /usr/bin/flock, and the script
 // itself — is what a pod runs. An earlier generation's install is left under the role's root
 // first, which the run must remove.
-func runClaudeStart(t *testing.T, npmBody string) claudeCodeRun {
+//
+// seedCache, when given, is handed the shared npm cache's path before the wrapper runs, so a test
+// can put the cache in whatever state another of the pod's Claude roles would have left it in.
+func runClaudeStart(t *testing.T, npmBody string, seedCache ...func(t *testing.T, cache string)) claudeCodeRun {
 	t.Helper()
 	if _, err := exec.LookPath("sh"); err != nil {
 		t.Skip("no /bin/sh in this environment")
@@ -392,6 +395,9 @@ func runClaudeStart(t *testing.T, npmBody string) claudeCodeRun {
 	}
 	script = strings.Replace(script, "/usr/local/bin/npm ", npm+" ", 1)
 	script = strings.ReplaceAll(script, claudeCodePin+"/", pin+"/")
+	for _, seed := range seedCache {
+		seed(t, run.cache)
+	}
 	cmd := exec.Command("/bin/sh", "-c", script, startName, "0", "/bin/sh", "-c", `echo ran >"$0"`, agentLog)
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "XDG_CACHE_HOME="+filepath.Join(dir, "cache"))
@@ -515,6 +521,44 @@ func TestAClaudeLaunchInstallsThePinnedClaudeCode(t *testing.T) {
 				if !strings.Contains(run.stderr, want) {
 					t.Errorf("stderr is %q, want the failure named by %q", run.stderr, want)
 				}
+			}
+		})
+	}
+}
+
+// The pod's Claude roles share one npm cache on the issue's volume, and the launch must go on
+// whatever state it finds that path in rather than die before npm and before the block's own
+// failure line: a directory another role made a moment earlier (the ordinary case, and the state
+// the loser of a cold-cache race meets), and the regular file an interrupted flock leaves behind
+// if it ever runs with the directory missing, which the recovery removes. Both run the real
+// wrapper against the committed pin, so what is proven is the script a pod runs.
+func TestAClaudeLaunchMakesItsSharedNpmCacheWhateverItFinds(t *testing.T) {
+	pinned := pinnedClaudeCode(t)
+	for name, seed := range map[string]func(t *testing.T, cache string){
+		"a directory another role made first": func(t *testing.T, cache string) {
+			t.Helper()
+			if err := os.MkdirAll(cache, 0o700); err != nil {
+				t.Fatal(err)
+			}
+		},
+		"the regular file an interrupted flock left": func(t *testing.T, cache string) {
+			t.Helper()
+			if err := os.MkdirAll(filepath.Dir(cache), 0o700); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(cache, nil, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			run := runClaudeStart(t, claudeCodeStub(pinned)+"exit 0\n", seed)
+			if run.exit != 0 || !run.agentRan {
+				t.Fatalf("the wrapper exited %d and the agent ran: %v, want the agent started:\n%s",
+					run.exit, run.agentRan, run.stderr)
+			}
+			if info, err := os.Stat(run.cache); err != nil || !info.IsDir() {
+				t.Errorf("the shared npm cache is %v (%v), want the directory npm was pointed at", info, err)
 			}
 		})
 	}

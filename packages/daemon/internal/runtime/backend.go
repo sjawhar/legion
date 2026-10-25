@@ -39,10 +39,11 @@ type BackendInfo struct {
 }
 
 // Backends is every harness a launch can run on. Oh My Pi runs every role under either runtime,
-// and Claude Code the phase workers under either, since the worker image carries Claude Code and
-// its Legion plugin; it is told claude-mechanics.md, the role prompts' Oh My Pi tool names as
-// Claude Code names them. A harness is added here, as a tmux Launcher (runtime/tmux), and as a
-// boot resolver (daemon's launchers.go).
+// and Claude Code the phase workers under either: the worker image carries Claude Code's pin and
+// its Legion plugin, and a pod installs the pinned release at launch (sandbox.claudeCodeBlock),
+// while a pane resolves the host's own binary. It is told claude-mechanics.md, the role prompts'
+// Oh My Pi tool names as Claude Code names them. A harness is added here, as a tmux Launcher
+// (runtime/tmux), and as a boot resolver (daemon's launchers.go).
 var Backends = map[Backend]BackendInfo{
 	BackendOmp: {Name: "OMP", Runtimes: []string{"tmux", "kubernetes"}},
 	BackendClaude: {

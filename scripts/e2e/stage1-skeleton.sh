@@ -248,8 +248,9 @@ jq -e --arg p "$project" \
 # (contract 25): under tmux, resource-limits is what the runtime alone decides and pool-capacity
 # reads that tmux runs no probe pod, so neither is boot's measurement; and no live, image or
 # withheld row carries `source` at all. The twenty-first row is `claude-code` (INFRA-220): the
-# worker image carries Claude Code and its Legion plugin unconditionally, so every deployment's
-# image is probed for them, this one included.
+# worker image carries Claude Code's pin and the Legion plugin unconditionally — the binary itself
+# a pod installs at launch — so every deployment's image is probed for the pin and the plugin,
+# this one included.
 jq -e '(.capabilities | length) == 21
   and (.capabilities | map(select(.name == "resource-limits" and .status == "open"
     and .configLine == "capabilities.decided.resource-limits: \"<reason>\""
