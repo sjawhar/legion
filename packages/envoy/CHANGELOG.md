@@ -267,19 +267,24 @@
   `host:Listener` and `aws:WebhookListener` and by `envoy-infra render webhook-listener-env
   --subscribe-all-topics`; left unset, every existing rendering is unchanged.
 
-  Only the owning listener delivers to a session on a serving port: the listener whose machine id
-  the session's `machine_id` names, or any listener when it is empty. It reaches the session at
+  Only the owning listener delivers to a session on a serving port. Its owner is the listener its
+  stored subscription names (the interest's `machine_id`, the one `store.Registry.Match` fans its
+  topics out on, which a re-registration through another listener keeps), else, with no
+  subscription stored, the listener it registered through (the session entry's `machine_id`); a
+  session neither names is every listener's. The owner reaches the session at
   `ENVOY_HOST_BRIDGE` when the bridge is set, otherwise at the registration's recorded `host` when
   it is not empty, otherwise at `host.docker.internal` (`session.Deliverer.hostFor`, an IPv6
   literal bracketed). A listener without a bridge used to dial `host.docker.internal` for every
   session on its machine, whatever host it recorded, so a serving port bound to loopback alone was
   never reached and every delivery to it failed. Another listener's session is now that listener's
-  to deliver: this one requests nothing and answers the message with no delivery and no NAK
-  (`session.ErrWrongMachine`), where it used to dial the session at the owning listener's machine
-  id. Every listener on the bus reads each inbox message from its own durable, so a second
+  to deliver: this one requests nothing and leaves an inbox message to the owner silently
+  (`session.ErrWrongMachine`, `HandleAgentResult.OwnedElsewhere`: no delivery, no `no_holder`
+  exception, no NAK, one DEBUG line), where it used to dial the session at the owning listener's
+  machine id. Every listener on the bus reads each inbox message from its own durable, so a second
   listener that could reach the session would deliver the same message again; the owner always
-  has the message. A session registered through a listener that cannot reach its port is reached
-  by nobody.
+  has the message. A session that re-registers through another listener stays with the one its
+  stored subscription names, which matches its topics and delivers them. A session owned by a
+  listener that cannot reach its port is reached by nobody.
   Since the recorded host now goes into the delivery URL, `POST
   /v1/interests/subscribe` with `port` above 0 refuses a non-empty `host` that is neither an IP
   literal nor a plain host name (letters, digits, `_`, `.`, `-`; `session.ValidHost`) with
