@@ -345,11 +345,13 @@ func TestTheOrphanSweepDeletesOnlySandboxesOfClosedTreesPastTheGrace(t *testing.
 // The sweep decides on a Sandbox as the informer held it, and takes the pod's launch turn only once
 // its tree looks closed. An issue of that closed tree can be re-admitted in between — a child
 // re-admitted as a root of its own, whose launch keeps the suspended Sandbox, relabelled for the
-// new tree with its UID unchanged (TestAnOrphanRootKeepsTheSandboxAndVolumeItsOldTreeLeft), and
-// runs a pod in it before the sweep's turn comes. The delete is fenced to what the decision read,
-// as the controller branch's is (TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays): the
-// re-admitted issue keeps its running Sandbox, and with it the volume holding its clone, workspace
-// and sessions, on this sweep and on the next, which reads the Sandbox under its live tree.
+// new tree with its UID unchanged (TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft), and runs a pod
+// in it before the sweep's turn comes. The delete is fenced to what the decision read, as the
+// controller branch's is (TestAControllerSandboxWrittenSinceItsDeleteWasDecidedStays): the
+// re-admitted issue keeps its running Sandbox on this sweep and on the next, which reads the
+// Sandbox under its live tree. Its Sandbox owns no volume claim template, the shape this runtime
+// makes for an issue, so the launch relabels it rather than replacing it
+// (TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape).
 func TestAnIssueSandboxReadmittedSinceItsDeleteWasDecidedStays(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-209-architect")
 	name := SandboxName(orphan)
@@ -360,7 +362,7 @@ func TestAnIssueSandboxReadmittedSinceItsDeleteWasDecidedStays(t *testing.T) {
 	var loc runtime.Locator
 	store := &readmittingStore{fakeStore: newFakeStore(), tree: testTree}
 	store.readmit = func() { loc = g.spawn(spec) }
-	g = newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree)},
+	g = newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree))},
 		withOptions(func(o *Options) { o.Store = store }))
 	g.dyn.PrependReactor("patch", "sandboxes", k8stesting.ObjectReaction(&versionedTracker{ObjectTracker: generationTracker{g.dyn.Tracker()}}))
 	g.dyn.PrependReactor("delete", "sandboxes", fenceSandboxDeletes(g))
@@ -375,7 +377,7 @@ func TestAnIssueSandboxReadmittedSinceItsDeleteWasDecidedStays(t *testing.T) {
 		t.Helper()
 		s := g.sandbox(name)
 		if s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || s.mode() != modeRunning {
-			t.Fatalf("the re-admitted issue's Sandbox %s = %+v; want the relabelled Sandbox uid-sandbox-old-tree kept Running under tree LEGION-209, its volume and sessions with it", when, s)
+			t.Fatalf("the re-admitted issue's Sandbox %s = %+v; want the relabelled Sandbox uid-sandbox-old-tree kept Running under tree LEGION-209", when, s)
 		}
 		if pod := g.pod(name); pod == nil || string(pod.UID) != loc.Sandbox.PodUID {
 			t.Fatalf("the re-admitted issue's pod %s = %+v; want the launch's pod %s still running", when, pod, loc.Sandbox.PodUID)

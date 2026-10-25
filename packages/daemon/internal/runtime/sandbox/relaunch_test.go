@@ -168,12 +168,14 @@ func TestRoleStartsShareOneIssuePodAndDoNotReinitializeIt(t *testing.T) {
 }
 
 // Every relaunch before an agent registers — the deadline, a death, a retry, boot finishing an
-// interrupted launch — is a Spawn over a Sandbox that already exists (B2).
+// interrupted launch — is a Spawn over a Sandbox that already exists (B2). Each of these owns no
+// volume claim template, the shape this runtime makes for an issue: one of the release before the
+// pod-owned disk is replaced instead of kept (TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape).
 func TestSpawnOverAnExistingSandbox(t *testing.T) {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)
 	t.Run("suspended", func(t *testing.T) {
-		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels)})
+		g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels))})
 		loc := g.spawn(workerSpec(t))
 		expectSteps(t, steps(t, g.writes(), name), "create secret", "run", "record addresses")
 		if g.sandbox(name).UID != "uid-sandbox-kept" || loc.Sandbox.PodUID != string(g.pod(name).UID) {
@@ -182,7 +184,7 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 	})
 	t.Run("running a pod no launcher of this runtime is bound to", func(t *testing.T) {
 		g := newRig(t, []k8sruntime.Object{
-			sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels),
+			withoutVolume(sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels)),
 			podObject(name, "uid-pod-old", "uid-sandbox-kept", labels, runningStatus()),
 		})
 		g.suspendDelay = 50 * time.Millisecond
@@ -218,12 +220,16 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 // A child of a closed tree re-admitted as a root of its own keeps its key, so its Sandbox's name,
 // and finds the Sandbox its old tree left, still labelled with that tree. The orphan root's launch
 // keeps that Sandbox, relabelled for its own tree, rather than deleting and remaking it, and
-// patches its labels, mode and pod template alone, leaving the rest of its spec as it found it.
-// Its disk it does not keep: an issue pod's disk is the pod's own ephemeral volume, so the old
-// tree's pod took it, and the orphan's pod brings one of its own and provisions its workspace
-// afresh. One its old tree left Running, none of whose roles runs any more, is suspended in the
-// relabel's patch and kept the same way. One a claim of the old tree still runs in is refused and
-// left as it is.
+// patches its labels, mode and pod template alone, leaving the rest of its spec as it found it:
+// the Sandbox it finds owns no volume claim template, the shape this runtime makes for an issue,
+// and the relabel adds none. Its disk it does not keep: an issue pod's disk is the pod's own
+// ephemeral volume, so the old tree's pod took it, and the orphan's pod brings one of its own and
+// provisions its workspace afresh. One its old tree left Running, none of whose roles runs any
+// more, is suspended in the relabel's patch and kept the same way. One a claim of the old tree
+// still runs in is refused and left as it is. An orphan root whose Sandbox still owned the `issue`
+// claim template of the release before the pod-owned disk would be relabelled here and then
+// replaced by the same launch, Sandbox and claim together
+// (TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape).
 func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-209-architect")
 	name := SandboxName(orphan)
@@ -234,7 +240,7 @@ func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 		return spec
 	}
 	t.Run("suspended by its old tree", func(t *testing.T) {
-		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree)})
+		g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-old-tree", modeSuspended, oldTree))})
 		loc := g.spawn(orphanSpec(t))
 		if deleted := slices.ContainsFunc(g.writes(), func(a action) bool { return a.resource == "sandboxes" && a.verb == "delete" }); deleted {
 			t.Fatalf("the orphan root's launch deleted a Sandbox: %v", g.writes())
@@ -243,8 +249,8 @@ func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 		if s == nil || s.UID != "uid-sandbox-old-tree" || s.Labels[labelTree] != labelValue("LEGION-209") || s.Labels[labelIssue] != labelValue("LEGION-209") {
 			t.Fatalf("orphan root's Sandbox = %+v, want the old tree's Sandbox kept and relabelled for tree LEGION-209", s)
 		}
-		if len(s.Spec.VolumeClaimTemplates) != 1 || s.Spec.VolumeClaimTemplates[0].Metadata.Name != issueVolume {
-			t.Fatalf("orphan root's Sandbox claims %+v, want the spec it had left as the launch found it", s.Spec.VolumeClaimTemplates)
+		if len(s.Spec.VolumeClaimTemplates) != 0 {
+			t.Fatalf("orphan root's Sandbox claims %+v, want none: the launch patches its labels, mode and pod template alone", s.Spec.VolumeClaimTemplates)
 		}
 		if got := s.Spec.PodTemplate.Metadata.Labels[labelTree]; got != labelValue("LEGION-209") {
 			t.Fatalf("the relabelled Sandbox's pod template carries tree %q, want LEGION-209", got)
@@ -259,7 +265,7 @@ func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 		podDisk(t, pod.Spec)
 	})
 	t.Run("left running by its old tree, none of whose roles runs", func(t *testing.T) {
-		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
+		g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree))})
 		// A claim of the orphan root's own tree runs nothing the relabel would end: only a claim of
 		// another tree holds the Sandbox.
 		g.store.running["LEGION-209"] = runningClaim{tree: "LEGION-209", claim: "legion-legion-legion-209-planner:launching"}
@@ -289,7 +295,7 @@ func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 		podDisk(t, pod.Spec)
 	})
 	t.Run("still running its old tree's roles", func(t *testing.T) {
-		g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree)})
+		g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-old-tree", modeRunning, oldTree))})
 		g.store.running["LEGION-209"] = runningClaim{tree: testTree, claim: "legion-legion-legion-209-implementer:working"}
 		g.launcher(orphan)
 		if _, err := g.r.Spawn(g.ctx, orphanSpec(t)); err == nil || !strings.Contains(err.Error(), "still runs roles (legion-legion-legion-209-implementer:working)") {
@@ -299,6 +305,62 @@ func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 			t.Fatalf("the old tree's running Sandbox = %+v, want it left as it was", s)
 		}
 	})
+}
+
+// An issue Sandbox the release before the pod-owned disk created still owns the `issue` volume
+// claim template, and spec.volumeClaimTemplates is immutable in the CRD, so the issue's next
+// launch is the migration: it suspends the Sandbox, waits its pod out, deletes it in the
+// foreground — the claim it owns reaped with it — and creates one of the shape this runtime makes
+// now, which owns no template and whose pod carries a disk of its own. The order is what this
+// proves. The delete comes before the create, and both before the Secrets this launch writes: the
+// provisioning Secret and every role Secret are the Sandbox's own, so ones written first would be
+// reaped with the old Sandbox and the new pod's launchers would come up on nothing.
+func TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape(t *testing.T) {
+	name := SandboxName(workerToken)
+	labels := claimLabels(claim.RoleTester)
+	g := newRig(t, []k8sruntime.Object{
+		sandboxObject(t, name, "uid-sandbox-superseded", modeRunning, labels),
+		podObject(name, "uid-pod-old", "uid-sandbox-superseded", labels, runningStatus()),
+	})
+	g.suspendDelay = 50 * time.Millisecond
+	loc := g.spawn(workerSpec(t))
+	expectSteps(t, steps(t, g.writes(), name), "suspend", "delete sandbox", "create sandbox", "create secret", "run", "record addresses")
+	s := g.sandbox(name)
+	if s == nil || s.UID == "uid-sandbox-superseded" || len(s.Spec.VolumeClaimTemplates) != 0 {
+		t.Fatalf("the issue's Sandbox = %+v, want one this launch created, owning no volume claim template", s)
+	}
+	writes := g.writes()
+	at := func(what string, match func(action) bool) int {
+		t.Helper()
+		i := slices.IndexFunc(writes, match)
+		if i < 0 {
+			t.Fatalf("writes %v hold no %s", writes, what)
+		}
+		return i
+	}
+	deleted := at("delete of the superseded Sandbox", func(a action) bool {
+		return a.resource == "sandboxes" && a.verb == "delete" && a.name == name
+	})
+	created := at("create of the replacement Sandbox", func(a action) bool {
+		return a.resource == "sandboxes" && a.verb == "create" && a.name == name
+	})
+	role := at("write of the tester's launcher Secret", func(a action) bool {
+		return a.resource == "secrets" && a.name == roleSecretName(name, claim.RoleTester)
+	})
+	if deleted > created || created > role {
+		t.Fatalf("writes %v: the delete is write %d, the create %d, the tester's Secret %d; want the delete, then the create, then the role Secrets",
+			writes, deleted, created, role)
+	}
+	secret := g.secret(roleSecretName(name, claim.RoleTester))
+	if owner := secret.OwnerReferences; len(owner) != 1 || owner[0].UID != s.UID {
+		t.Fatalf("the tester's launcher Secret is owned by %+v, want the Sandbox this launch created (%s): the foreground delete reaps every Secret the old one owned",
+			owner, s.UID)
+	}
+	pod := g.pod(name)
+	if pod == nil || pod.UID == "uid-pod-old" || string(pod.UID) != loc.Sandbox.PodUID {
+		t.Fatalf("pod %+v, locator %+v; want the pod of the Sandbox this launch created", pod, loc)
+	}
+	podDisk(t, pod.Spec)
 }
 
 // The death path's Resume over a Failed issue pod, which the controller keeps under Running:
@@ -315,7 +377,7 @@ func TestResumeAfterAFailedPod(t *testing.T) {
 		Data: map[string][]byte{provisionTokenKey: []byte("ghs_old")},
 	}
 	g := newRig(t, []k8sruntime.Object{
-		sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels),
+		withoutVolume(sandboxObject(t, name, "uid-sandbox-kept", modeRunning, labels)),
 		podObject(name, "uid-pod-dead", "uid-sandbox-kept", labels, corev1.PodStatus{
 			Phase: corev1.PodFailed, ContainerStatuses: []corev1.ContainerStatus{terminated(workerContainer, 137, "Error")},
 		}),
@@ -431,7 +493,7 @@ func TestARelaunchReplacesAPodRunningAnotherImage(t *testing.T) {
 func TestASuspendedSandboxsInstallingResumeReplacesAndInstallsNothing(t *testing.T) {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)
-	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels)})
+	g := newRig(t, []k8sruntime.Object{withoutVolume(sandboxObject(t, name, "uid-sandbox-kept", modeSuspended, labels))})
 	g.launcher(workerToken)
 	spec := workerSpec(t)
 	spec.ResumeSessionFile, spec.Plugins = resumeSession, &runtime.PluginInstall{PiLegion: "9.7.0", PiEnvoy: "9.6.1", Contract: 24}
