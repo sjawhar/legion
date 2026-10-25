@@ -3128,8 +3128,10 @@ PY
 kubectl logs -l job-name="$workload" --tail=5                    # and what it says it is doing
 
 # The work itself goes here, inside this script: "$address" port 5432, user postgres, password
-# "$password". However it ends, the trap above removes the workload, short of a SIGKILL or a
-# create the API server stores after the trap's label delete has listed the Jobs (see below).
+# "$password". On the exits measured below, the trap above removed the workload. It can miss it:
+# on a SIGKILL or the role's pod going away, which run no trap; on a clean-up step that fails,
+# which it prints; and on a create the API server stores after its label delete has listed the
+# Jobs (see below).
 SEQUENCE
 echo "sequence: $sequence, its output in $sequence.log"
 flock "$sequence" setsid -f bash "$sequence" > "$sequence.log" 2>&1 < /dev/null   # out of the tool's reach
@@ -3157,27 +3159,29 @@ looks for the Job by this run's label instead. The sequence draws eight random h
 characters before the create, prints them as `run: sequence-run=<value>`, and writes them as a
 label on the Job's own metadata, not its pod template, so the label is never one a pod carries and
 cannot be read as the reachability label. That trap prints `cleanup: no Job name was read; deleting
-by label sequence-run=<value>`, deletes every Job carrying that label with `--cascade=foreground`,
-lists the Jobs carrying it, and exits with its status. After a refused create, or a stop before
-the create's request left, there is no Job, and the delete finds nothing. Otherwise the delete
-finds the Job only if the API server has stored it by the time the delete lists the Jobs. In every
-run of that kind measured on 2026-10-25 for dispatch://INFRA-232, it had: the stop placed between
-the create's answer and the line that reads it, and the two stops that landed while the create was
-in flight, 0.33 s and 0.35 s after the first line (two of the twenty-six in the bullet below; that
-issue's tester measured two more, at 0.318 s and 0.320 s, sjawhar/legion#2195), each had its Job
-deleted by the label. A create the server finishes only after that listing — its request still in
-flight when a stop or a failed connection ended `kubectl create` — leaves a Job the delete never
-saw. No run measured that case, and none rules it out. The trap's own listing shows such a Job
-only if the server stored it before that listing, and prints `No resources found` if later, so an
-empty listing there does not show that no such Job exists; the block's closing comment names this
-case as an exception to its clean-up. Such a Job would run until the 3600 s deadline it and its
-pod carry, holding the four processors it requested. So after every run whose trap printed
-`cleanup: no Job name was read`, list `kubectl get jobs -l sequence-run=<the printed value>` once
-more after the sequence has ended, and remove any Job it lists with
+by label sequence-run=<value>`, deletes every Job the server lists with that label, with
+`--cascade=foreground`, lists the Jobs carrying it, and exits with its status. After a refused
+create, or a stop before the create's request left, there is no Job, and the delete finds nothing.
+Otherwise the delete finds the Job only if the API server has stored it by the time the delete
+lists the Jobs. In every run of that kind measured on 2026-10-25 for dispatch://INFRA-232, it had:
+the stop placed between the create's answer and the line that reads it, and two of the twenty-six
+stops in the bullet below, sent 0.33 s and 0.35 s after the first line, that took this path and
+found a Job (that issue's tester measured two more, at 0.318 s and 0.320 s, sjawhar/legion#2195),
+each had its Job deleted by the label, and none of the twenty-six left a Job. Nothing those runs
+printed shows whether their stop landed while the create was in flight or after its answer. A
+create the server finishes only after that listing — its request still in flight when a stop or a
+failed connection ended `kubectl create` — leaves a Job the delete never saw. No run measured that
+case, and none rules it out. The trap's own listing shows such a Job only if the server stored it
+before that listing, and prints `No resources found` if later, so an empty listing there does not
+show that no such Job exists; the block's closing comment names this case among those the trap can
+miss. Such a Job would run until the 3600 s deadline it and its pod carry, holding the four
+processors it requested. So after every run whose trap printed `cleanup: no Job name was read`,
+list `kubectl get jobs -l sequence-run=<the printed value>` once more after the sequence has ended,
+and remove any Job it lists with
 `kubectl delete job -l sequence-run=<the printed value> --cascade=foreground`, the recovery that
-removed a Job a `SIGKILL` inside the create had left, measured on 2026-10-25. No wait was measured
-either: how long after its client is gone the server can still store a create is not known, so an
-empty listing shows only that no such Job was stored by the time the listing ran.
+removed a Job a `SIGKILL` left before its name was printed, measured on 2026-10-25. No wait was
+measured either: how long after its client is gone the server can still store a create is not
+known, so an empty listing shows only that no such Job was stored by the time the listing ran.
 Another run's Job carries a value drawn for that run, so neither command touches it. No Service
 exists on that path: the sequence applies its Service only once it has read the name.
 
@@ -3213,11 +3217,13 @@ kubectl wait --for=delete service/<the printed workload name> --timeout=60s
 ```
 
 A role that lost the name lists the Jobs with `kubectl get jobs`. Its issue's start with its issue
-key, and so do its sibling roles', so it deletes only the one it started. A run whose name never
-printed — a `SIGKILL` that landed during the create, or a stop or failed connection whose create
-the server stored only after the trap's label delete had listed the Jobs (above) — printed its
-label first, and `kubectl delete job -l sequence-run=<the printed value> --cascade=foreground`
-removes its Job, as it removed the one a `SIGKILL` left on 2026-10-25; it had no Service yet.
+key, and so do its sibling roles', so it deletes only the one it started. A run that left a Job
+without printing its name — a `SIGKILL` or the role's pod going away during the create, or a stop
+or failed connection whose create the server stored only after the trap's label delete had listed
+the Jobs (above) — printed its label first, and
+`kubectl delete job -l sequence-run=<the printed value> --cascade=foreground` removes that Job once
+the server has stored it, as it removed the one a `SIGKILL` left on 2026-10-25; it had no Service
+yet.
 
 That check is `python3`, which the image carries, because **the role container had no client for
 any of these servers** when it was written ([Worker image](#worker-image)), a role may not `exec`
