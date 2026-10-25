@@ -21,6 +21,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/podsafety"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/shellprefix"
@@ -1077,6 +1078,11 @@ func TestNewRefusesOptionsNoPodCouldRun(t *testing.T) {
 		"an unreserved cache":       {func(o *Options) { o.RepositoryCache.Resources = corev1.ResourceRequirements{} }, "the repository cache reserves no cpu"},
 		"a role unreserved":         {func(o *Options) { delete(o.Resources, claim.RoleTester) }, "no reservation for role tester"},
 		"the controller unreserved": {func(o *Options) { delete(o.Resources, claim.RoleController) }, "no reservation for role controller"},
+		"the file session store": {
+			func(o *Options) { o.SessionStore = ompsessions.Store{Kind: ompsessions.StoreVolume} },
+			"no session store that keeps sessions in a database",
+		},
+		"no session store": {func(o *Options) { o.SessionStore = ompsessions.Store{} }, "no session store that keeps sessions in a database"},
 		"cpu request past limit": {
 			func(o *Options) {
 				o.Resources[claim.RoleReviewer].Requests[corev1.ResourceCPU] = resource.MustParse("1500m")
@@ -1513,15 +1519,15 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 // `<NAME>_FILE` names, so the shim exports it to no one, and the session database's URL key last.
 // The pointer is the runtime's, not the spec's: a spec that carries no seed still gets it, and the
 // claim's Secret never holds a copy. With neither a provider key nor a providers secret the Secret
-// is still mounted, holding the session database's URL alone: that key is required, so no pod runs
-// without the volume and no shim without the directory.
+// is still mounted under the postgres store, holding the session database's URL alone, so no pod of
+// that store runs without the volume and no shim without the directory.
 func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 	const providersSecret = "legion-" + testProject + "-providers"
 	const seed = "SUAIBDPBAUTWCWBKIO6XHQNINK5FWJW4OHLXC3HQ2KFE4PEJUA44CNHTC4"
 	nats := []string{"NATS_NKEY_SEED"}
 	natsItem := corev1.KeyToPath{Key: "NATS_NKEY_SEED", Path: "NATS_NKEY_SEED"}
 	anthropic := corev1.KeyToPath{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}
-	sessionItem := corev1.KeyToPath{Key: testSessionDSNKey, Path: sessionDSNFile}
+	sessionItem := corev1.KeyToPath{Key: testSessionDSNKey, Path: ompsessions.DSNFileName}
 	for _, tc := range []struct {
 		name      string
 		keys      map[string]string

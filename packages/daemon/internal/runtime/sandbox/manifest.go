@@ -104,15 +104,21 @@ var runtimeOwned = map[string]bool{
 const slackChannelsVariable = "LEGION_SLACK_CHANNELS"
 
 // sessionStoreVariables are Oh My Pi's two variables that place a session: the runtime sets both
-// under a session database (Options.SessionDSNKey) and the pod baseline the first to file otherwise
-// (internal/podsafety), so neither is ever the operator's or a provider key's to set.
+// under either database store (Options.SessionStore) and the pod baseline the first to file
+// otherwise (internal/podsafety), so neither is ever the operator's or a provider key's to set.
 var sessionStoreVariables = []string{ompsessions.StorageVariable, ompsessions.DSNFileVariable}
 
-// sessionDSNFile is the file under ProvidersDir that the providers Secret's session database URL
-// key (Options.SessionDSNKey) is mounted as: named for the variable whose `_FILE` pointer names it,
-// OMP_SESSION_SQL_DSN_FILE, so the shim, which skips a file whose pointer its environment carries,
-// never exports the URL into Oh My Pi's environment whatever the key is called.
-const sessionDSNFile = "OMP_SESSION_SQL_DSN"
+// providersDSNFile is where the providers Secret's session database URL key
+// (ompsessions.Store.DSNSecret) is mounted under the postgres store: ompsessions.DSNFileName is
+// the variable whose `_FILE` pointer names it, OMP_SESSION_SQL_DSN_FILE, so the shim, which skips
+// a file whose pointer its environment carries, never exports the URL into Oh My Pi's environment
+// whatever the Secret's key is called.
+const providersDSNFile = ProvidersDir + "/" + ompsessions.DSNFileName
+
+// sessionProxyFlagNames are the flags a role container's `legion launcher` is told the Cloud SQL
+// session database by, in the order sessionProxyFlags writes them: the instance's connection name,
+// the database in it, and the IAM login the pod signs in as.
+var sessionProxyFlagNames = [3]string{"--session-instance", "--session-database", "--session-user"}
 
 // legionVolumeNames are the volumes Legion puts in a pod, an issue pod's, the controller's or the
 // probe's, whose names the operator's volumes may not take: the shared ones and each launcher
@@ -408,13 +414,16 @@ func (r *Runtime) podTemplate(l launch) podTemplate {
 }
 
 // launcherContainers are the pod's launcher containers, one per role of l.roles: an issue pod's
-// six, the controller's one. Each runs only `legion launcher`; the per-generation worker-shim argv
-// and plain environment arrive in the launcher's start command, while values the kubelet must
-// resolve (the downward API, the operator's secret refs) are set on every container. An issue
-// pod's role container also mounts its own gh volume, read-only, at GHConfigDir: the role's
-// GitHub credential, which no other role's container can read.
+// six, the controller's one. Each runs only `legion launcher`, told the Cloud SQL session database
+// its own proxy serves this pod's generations when the deployment keeps sessions there
+// (sessionProxyFlags); the per-generation worker-shim argv and plain environment arrive in the
+// launcher's start command, while values the kubelet must resolve (the downward API, the
+// operator's secret refs) are set on every container. An issue pod's role container also mounts
+// its own gh volume, read-only, at GHConfigDir: the role's GitHub credential, which no other
+// role's container can read.
 func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMount) []corev1.Container {
 	resolved, _ := r.launchEnvironment(l)
+	sessionProxy := r.sessionProxyFlags()
 	containers := make([]corev1.Container, 0, len(l.roles))
 	for _, role := range l.roles {
 		mounts := []corev1.VolumeMount{
@@ -429,11 +438,11 @@ func (r *Runtime) launcherContainers(l launch, providersMounts []corev1.VolumeMo
 		containers = append(containers, corev1.Container{
 			Name:  string(role),
 			Image: r.image,
-			Command: []string{
+			Command: slices.Concat([]string{
 				r.tools.Legion, "launcher", connectFlag, r.streamURL, "--token-file", LauncherDir + "/" + LauncherTokenFile,
 				"--sandbox", l.name, "--role", string(role), "--private-dir", LauncherPrivateDir,
 				"--stop-grace", r.terminationGrace.String(),
-			},
+			}, sessionProxy),
 			Env:             slices.Clone(resolved),
 			WorkingDir:      l.workspace,
 			VolumeMounts:    slices.Concat(mounts, providersMounts, agentSecretsMounts(r.agentSecrets, role), r.pod.VolumeMounts),
@@ -559,11 +568,14 @@ func agentSecretsMounts(broker *AgentSecrets, role claim.Role) []corev1.VolumeMo
 // configured keys alone, each a file named for the variable Oh My Pi reads, which is what the shim
 // exports into Oh My Pi's environment (--provider-env-dir, shim.ReadProviderEnv); each providers
 // secret (Options.ProvidersSecrets), a file of its own name that the shim skips, since the
-// container's `<NAME>_FILE` points at it (providersPointers); and the session database's URL key
-// (Options.SessionDSNKey) as sessionDSNFile, which the shim skips for the same reason
-// (mainEnvironment's OMP_SESSION_SQL_DSN_FILE). Every pod mounts it: the URL key is required, so
-// the Secret and its mount are too, whatever else the deployment configures.
+// container's `<NAME>_FILE` points at it (providersPointers); and, under the postgres session
+// store alone, that store's URL key at providersDSNFile, which the shim skips for the same reason
+// (mainEnvironment's OMP_SESSION_SQL_DSN_FILE). None of them without any of the three, so a
+// deployment with none needs no such Secret.
 func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
+	if !r.mountsProviders() {
+		return nil, nil
+	}
 	var items []corev1.KeyToPath
 	for _, variable := range sortedKeys(r.providerKeys) {
 		items = append(items, corev1.KeyToPath{Key: r.providerKeys[variable], Path: variable})
@@ -571,27 +583,68 @@ func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
 	for _, name := range r.providersSecrets {
 		items = append(items, corev1.KeyToPath{Key: name, Path: name})
 	}
-	items = append(items, corev1.KeyToPath{Key: r.sessionDSNKey, Path: sessionDSNFile})
+	if key := r.sessionStore.DSNSecretKey(); key != "" {
+		items = append(items, corev1.KeyToPath{Key: key, Path: ompsessions.DSNFileName})
+	}
 	return []corev1.Volume{{Name: providersVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 			SecretName: ProvidersSecretName(r.project), Items: items, DefaultMode: new(int32(0o440)),
 		}}}},
 		[]corev1.VolumeMount{{Name: providersVolume, MountPath: ProvidersDir, ReadOnly: true}}
 }
 
+// mountsProviders reports whether every pod mounts the providers Secret: some provider key,
+// providers secret, or session database URL key is configured.
+func (r *Runtime) mountsProviders() bool {
+	return len(r.providerKeys) > 0 || len(r.providersSecrets) > 0 || r.sessionStore.DSNSecretKey() != ""
+}
+
 // providersKeys are the providers Secret's keys every pod mounts, sorted: what the image probe
 // names when the kubelet cannot mount one.
 func (r *Runtime) providersKeys() []string {
 	keys := slices.Concat(slices.Collect(maps.Values(r.providerKeys)), r.providersSecrets)
-	keys = append(keys, r.sessionDSNKey)
+	if key := r.sessionStore.DSNSecretKey(); key != "" {
+		keys = append(keys, key)
+	}
 	slices.Sort(keys)
 	return keys
 }
 
-// sessionDSNPointer is OMP_SESSION_SQL_DSN_FILE naming the mounted session database URL: in the
-// image probe's container it is what keeps `legion probe-image`, which reads the providers
-// directory as the shim does, from exporting the URL into Oh My Pi's environment.
+// sessionDSNPointer is OMP_SESSION_SQL_DSN_FILE naming the mounted session database URL, none
+// without one: in the image probe's container it is what keeps `legion probe-image`, which reads
+// the providers directory as the shim does, from exporting the URL into Oh My Pi's environment.
+// Under cloudsql-iam the probe's pod mounts no session key, so it is told no pointer either.
 func (r *Runtime) sessionDSNPointer() []corev1.EnvVar {
-	return []corev1.EnvVar{{Name: ompsessions.DSNFileVariable, Value: ProvidersDir + "/" + sessionDSNFile}}
+	if r.sessionStore.DSNSecretKey() == "" {
+		return nil
+	}
+	return []corev1.EnvVar{{Name: ompsessions.DSNFileVariable, Value: providersDSNFile}}
+}
+
+// sessionDSNFile is the file a generation's Oh My Pi reads its session database's URL from: the
+// providers mount's projection of the Secret key under postgres, and, under cloudsql-iam, the file
+// the generation's own launcher writes in its private directory beside the socket it proxies.
+func (r *Runtime) sessionDSNFile(generation uint64) string {
+	if r.sessionStore.Kind == ompsessions.StoreCloudSQLIAM {
+		return generationDir(generation) + "/" + ompsessions.DSNFileName
+	}
+	return providersDSNFile
+}
+
+// sessionProxyFlags are what each role container's `legion launcher` is told of the Cloud SQL
+// session database it proxies its generations' sessions to, none under any other store. There is
+// no address among them: the launcher binds the socket in the generation's own private directory,
+// which it already knows from --private-dir.
+func (r *Runtime) sessionProxyFlags() []string {
+	if r.sessionStore.Kind != ompsessions.StoreCloudSQLIAM {
+		return nil
+	}
+	database := r.sessionStore.Database
+	values := [len(sessionProxyFlagNames)]string{database.Instance, database.Name, database.User}
+	flags := make([]string, 0, 2*len(values))
+	for i, value := range values {
+		flags = append(flags, sessionProxyFlagNames[i], value)
+	}
+	return flags
 }
 
 // providersPointers are the `<NAME>_FILE` pointer of each providers secret to its file in the
@@ -822,20 +875,20 @@ func (r *Runtime) LaunchBound() time.Duration {
 // every tmux pane is told (runtime/tmux/spawn.go, panePairs), then the operator's
 // (runtime.kubernetes.pod), then the spec's own, then one `<NAME>_FILE` pointer per secret into
 // the generation's private launcher directory, then one per providers secret into the providers
-// mount, then OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the mounted URL of the
-// session database every session is a row in (Options.SessionDSNKey), which a pod created before
-// the store was configured does not mount: Oh My Pi refuses to start on an unreadable URL file, so
-// such a generation fails rather than writing a session onto a disk that dies with its pod (the
-// relaunch replaces that pod first, movedSessionStore). None of them repeats another: the runtime
-// refuses a spec naming one of its own (runtimeOwned), and the daemon an operator's variable
-// naming one of the runtime's or a spec's. The temporary directory, XDG homes and tool caches are
-// the issue pod's disk's (roleEnvironment) — the issue's scratch and its Go caches, which every
-// role of it is told the same of, but the state home, which is the role's own — carried to the
-// role's shim by the start command (launcherCommand's Env). POD_UID is the pod's own incarnation,
-// from the downward API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX
-// puts the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of
-// the issue's disk leads PATH. The GIT_CONFIG pairs are the GitHub credential of every git the
-// role runs, in the issue's clone or outside it (gitCredentialEnv).
+// mount, then OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the URL file of the
+// session database every session is a row in (Options.SessionStore, sessionDSNFile), which a pod
+// created before the store was configured does not carry: Oh My Pi refuses to start on an
+// unreadable URL file, so such a generation fails rather than writing a session onto a disk that
+// dies with its pod (the relaunch replaces that pod first, movedSessionStore). None of them repeats
+// another: the runtime refuses a spec naming one of its own (runtimeOwned), and the daemon an
+// operator's variable naming one of the runtime's or a spec's. The temporary directory, XDG homes
+// and tool caches are the issue pod's disk's (roleEnvironment) — the issue's scratch and its Go
+// caches, which every role of it is told the same of, but the state home, which is the role's own
+// — carried to the role's shim by the start command (launcherCommand's Env). POD_UID is the pod's
+// own incarnation, from the downward API. The secrets broker is told when the runtime enrolls
+// pods. PI_SHELL_PREFIX puts the `legion` directory first on PATH alone: a pod's gh is the
+// image's, so no directory of the issue's disk leads PATH. The GIT_CONFIG pairs are the GitHub
+// credential of every git the role runs, in the issue's clone or outside it (gitCredentialEnv).
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -883,12 +936,12 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 		add(name+"_FILE", generationDir(l.spec.Generation)+"/"+name)
 	}
 	env = append(env, r.providersPointers()...)
-	// Oh My Pi's own two variables, which place the session in the database whose URL the mounted
-	// key holds (providers): every pod gets them, since the key is required and nothing in a pod
-	// may keep a session as a file (internal/podsafety's baseline covers only a container the
-	// runtime tells neither, the image probe's).
+	// Oh My Pi's own two variables, which place the session in the database the generation's URL
+	// file names (sessionDSNFile): every pod gets them, since the store must keep sessions in a
+	// database and nothing in a pod may keep a session as a file (internal/podsafety's baseline
+	// covers only a container the runtime tells neither, the image probe's).
 	add(ompsessions.StorageVariable, ompsessions.SQLStorage)
-	add(ompsessions.DSNFileVariable, ProvidersDir+"/"+sessionDSNFile)
+	add(ompsessions.DSNFileVariable, r.sessionDSNFile(spec.Generation))
 	return env
 }
 

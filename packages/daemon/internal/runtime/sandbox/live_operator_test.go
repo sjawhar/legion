@@ -180,7 +180,7 @@ func (r *liveRig) checkPodBaseline() error {
 		"PI_CONFIG_FILES":           overlay + ":" + operatorOverlays,
 		"PI_CONFIG_DIR":             ".omp",
 		ompsessions.StorageVariable: ompsessions.SQLStorage,
-		ompsessions.DSNFileVariable: ProvidersDir + "/" + sessionDSNFile,
+		ompsessions.DSNFileVariable: providersDSNFile,
 		"XDG_STATE_HOME":            stateHome, "TMPDIR": scratchRoot + "/tmp",
 	}
 	for name, value := range r.pod.Env {

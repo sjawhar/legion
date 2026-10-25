@@ -50,6 +50,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -85,7 +86,7 @@ type Runtime struct {
 	providerKeys                   map[string]string
 	providersSecrets               []string
 	natsUser                       string
-	sessionDSNKey                  string
+	sessionStore                   ompsessions.Store
 	agentSecrets                   *AgentSecrets
 	controllerSlackChannels        []string
 	agent                          []string
@@ -253,11 +254,12 @@ func configureProber(opts Options) (*Runtime, error) {
 		return refuse("no issue volume size: %s is not a positive quantity", opts.IssueVolume.String())
 	// An issue pod's disk is the pod's own ephemeral volume, created with the pod and deleted with
 	// it, so a session kept as a file on it dies with the pod and the next launch's resume fails on
-	// the missing file. Every session is a row in the database this key names, which makes the key
-	// as necessary to a launch as the image (config's readSessionStore refuses the file store for
-	// the same reason, and the two keep an Options built by hand from reaching a launch at all).
-	case opts.SessionDSNKey == "":
-		return refuse("no session database URL key: the providers Secret's key holding the postgres:// URL every role's Oh My Pi keeps its session in is required (runtime.kubernetes.session_store postgres, session_dsn_secret), since an issue pod's disk is deleted with the pod and no session can live on it")
+	// the missing file. Every session is a row in the database the store names, which makes a store
+	// that keeps sessions in a database as necessary to a launch as the image (config's
+	// readSessionStore refuses the file store for the same reason, and the two keep an Options
+	// built by hand from reaching a launch at all).
+	case !opts.SessionStore.InDatabase():
+		return refuse("no session store that keeps sessions in a database (runtime.kubernetes.session_store): an issue pod's disk is deleted with the pod, so no session can live on it")
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
 	case opts.RegistrationIntervals <= 0:
@@ -300,7 +302,7 @@ func configureProber(opts Options) (*Runtime, error) {
 			return refuse("agent secrets: token expiry %s is not between %s and %s (the API server's floor and the cluster's admission cap)", a.TokenExpiry, 10*time.Minute, time.Hour)
 		}
 	}
-	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets, opts.SessionDSNKey); err != nil {
+	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets, opts.SessionStore); err != nil {
 		return refuse("%v", err)
 	}
 	for _, name := range opts.ProvidersSecrets {
@@ -314,7 +316,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
-		sessionDSNKey: opts.SessionDSNKey, controllerSlackChannels: slices.Clone(opts.ControllerSlackChannels),
+		sessionStore: opts.SessionStore, controllerSlackChannels: slices.Clone(opts.ControllerSlackChannels),
 		bootTimeout: opts.BootTimeout, registrationIntervals: opts.RegistrationIntervals,
 		busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),

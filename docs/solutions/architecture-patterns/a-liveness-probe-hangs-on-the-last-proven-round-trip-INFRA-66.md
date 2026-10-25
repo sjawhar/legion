@@ -8,7 +8,7 @@ tags:
   - multiprocess
 date: 2026-10-23
 status: active
-module: packages/envoy/internal/dispatch/pglisten
+module: packages/envoy/internal/pglisten
 related_issues:
   - "INFRA-66"
   - "sjawhar/legion#2087"

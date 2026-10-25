@@ -12,6 +12,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
 const workerImage = "ghcr.io/sjawhar/legion-worker@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
@@ -54,9 +55,17 @@ func kubernetesWith(line, replacement string) string {
 	return strings.Replace(kubernetesFile, line, replacement, 1)
 }
 
-// sessionStoreRefusal is the one answer every session_store but postgres gets, an omitted key
+// sessionStoreLines are kubernetesFile's session store: the postgres one, with its key.
+const sessionStoreLines = "    session_store: postgres\n    session_dsn_secret: SESSION_DSN\n"
+
+// withSessionStore is kubernetesFile with its session store replaced by lines.
+func withSessionStore(lines string) string { return kubernetesWith(sessionStoreLines, lines) }
+
+// sessionStoreRefusal is the one answer a store that keeps sessions as files gets, an omitted key
 // included: a file session would die with the pod's disk.
-const sessionStoreRefusal = "runtime.kubernetes.session_store must be 'postgres': an issue pod's disk is deleted with the pod, so a session kept as a file on it ('pvc') dies with it and the next launch's resume fails on the missing file, retiring the claim after three failures"
+const sessionStoreRefusal = "runtime.kubernetes.session_store must name a store that keeps sessions in a database, and is required (INFRA-80):" +
+	" an issue pod's disk is the pod's own ephemeral volume, deleted with the pod, so a session kept as a file on it ('pvc', also what an omitted session_store means) dies with it," +
+	" the next launch's resume fails on the missing file (internal/launcher's sessionWritten), and three such failures retire the claim"
 
 func TestLoadForValidationSettlesEveryMemberOfTheKubernetesBlock(t *testing.T) {
 	path := writeConfigFile(t, kubernetesFile+`    issue_volume: 30Gi
@@ -118,13 +127,13 @@ provider_keys: {ANTHROPIC_API_KEY: anthropic_api_key}
 		Namespace:    "legion",
 		Image:        workerImage,
 		StorageClass: "gp2",
-		// `session_store: postgres` is the only store this runtime has, so the key its
-		// `session_dsn_secret` names settles on every load of the block.
-		SessionDSNSecret: "SESSION_DSN",
-		IssueVolume:      "30Gi",
-		Kubeconfig:       filepath.Join(filepath.Dir(path), "kube/legion-daemon"),
-		Context:          "legion-daemon@example",
-		Setup:            []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"},
+		IssueVolume:  "30Gi",
+		Kubeconfig:   filepath.Join(filepath.Dir(path), "kube/legion-daemon"),
+		Context:      "legion-daemon@example",
+		// A store that keeps sessions in a database is required under this runtime, so the one
+		// kubernetesFile names settles on every load of the block.
+		SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
+		Setup:        []string{"/bin/sh", "-c", "omp plugin marketplace add acme/agent-skills"},
 		Scheduling: Scheduling{
 			NodeSelector: map[string]string{"karpenter.k8s.aws/instance-family": "m7i", "zone": "4"},
 			Tolerations: []Toleration{
@@ -261,7 +270,7 @@ func TestLoadForValidationDefaultsTheKubernetesBlock(t *testing.T) {
 		{"kubeconfig", block.Kubeconfig, ""},
 		{"context", block.Context, ""},
 		{"pod", block.Pod, PodConfig{}},
-		{"session_dsn_secret", block.SessionDSNSecret, "SESSION_DSN"},
+		{"session_store", block.SessionStore, ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"}},
 		{"setup", block.Setup, []string(nil)},
 		{"repository_cache", block.RepositoryCache, RepositoryCacheConfig{
 			Volume: "20Gi", RefreshMinutes: 10, RetainHours: 168,
@@ -432,16 +441,37 @@ func TestARolesEphemeralStorageBoundSettlesFieldByField(t *testing.T) {
 	}
 }
 
-// `session_store: postgres` is the one store, and `session_dsn_secret` names the providers Secret's
-// key that holds the session database's URL, which every pod mounts for its Oh My Pi.
+// `session_store` settles to the one kind with the one field that kind carries: `postgres` the
+// providers Secret's key that holds the session database's whole URL, `cloudsql-iam` the Cloud SQL
+// instance, database and IAM login each pod signs in as. `pvc` and an omitted store are refused
+// (TestLoadForValidationRefusesUnderKubernetes): no issue disk holds a session.
 func TestLoadForValidationSettlesTheSessionStore(t *testing.T) {
-	body := kubernetesWith("    session_dsn_secret: SESSION_DSN\n", "    session_dsn_secret: OMP_SESSIONS_URL\n")
-	cfg, err := LoadForValidation(writeConfigFile(t, body), noEnv)
-	if err != nil {
-		t.Fatalf("LoadForValidation: %v", err)
-	}
-	if got := cfg.Runtime.Kubernetes.SessionDSNSecret; got != "OMP_SESSIONS_URL" {
-		t.Errorf("SessionDSNSecret = %q, want OMP_SESSIONS_URL", got)
+	for _, tc := range []struct {
+		name, body string
+		want       ompsessions.Store
+	}{
+		{"postgres", withSessionStore("    session_store: postgres\n    session_dsn_secret: OMP_SESSIONS_URL\n"),
+			ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "OMP_SESSIONS_URL"}},
+		{"cloudsql-iam", withSessionStore("    session_store: cloudsql-iam\n" +
+			"    session_database: {instance: example-project:us-central1:example-instance, name: legion_sessions, user: legion-sessions@example-project.iam}\n"),
+			ompsessions.Store{Kind: ompsessions.StoreCloudSQLIAM, Database: ompsessions.Database{
+				Instance: "example-project:us-central1:example-instance", Name: "legion_sessions", User: "legion-sessions@example-project.iam",
+			}}},
+		{"cloudsql-iam with a domain-scoped project", withSessionStore("    session_store: cloudsql-iam\n" +
+			"    session_database: {instance: \"example.com:example-project:us-central1:example-instance\", name: legion_sessions, user: legion-sessions@example-project.iam}\n"),
+			ompsessions.Store{Kind: ompsessions.StoreCloudSQLIAM, Database: ompsessions.Database{
+				Instance: "example.com:example-project:us-central1:example-instance", Name: "legion_sessions", User: "legion-sessions@example-project.iam",
+			}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			cfg, err := LoadForValidation(writeConfigFile(t, tc.body), noEnv)
+			if err != nil {
+				t.Fatalf("LoadForValidation: %v", err)
+			}
+			if got := cfg.Runtime.Kubernetes.SessionStore; got != tc.want {
+				t.Errorf("SessionStore = %#v, want %#v", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -740,7 +770,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		},
 		{
 			name: "session_store omitted",
-			body: kubernetesWith("    session_store: postgres\n    session_dsn_secret: SESSION_DSN\n", ""),
+			body: withSessionStore(""),
 			want: sessionStoreRefusal,
 		},
 		{
@@ -749,14 +779,14 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			want: sessionStoreRefusal,
 		},
 		{
-			name: "session_store neither pvc nor postgres",
+			name: "session_store none of the three",
 			body: kubernetesWith("    session_store: postgres\n", "    session_store: s3\n"),
-			want: sessionStoreRefusal,
+			want: "runtime.kubernetes.session_store must be 'pvc', 'postgres' or 'cloudsql-iam'",
 		},
 		{
 			name: "session_store postgres without its key",
 			body: kubernetesWith("    session_dsn_secret: SESSION_DSN\n", ""),
-			want: "runtime.kubernetes.session_dsn_secret is required when runtime is kubernetes: the key of the providers Secret that holds the session database's postgres:// URL",
+			want: "runtime.kubernetes.session_dsn_secret is required with runtime.kubernetes.session_store postgres: the key of the providers Secret that holds the session database's postgres:// URL",
 		},
 		{
 			name: "session_store postgres with an empty key",
@@ -767,6 +797,69 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 			name: "session_store postgres with a key no Secret can hold",
 			body: kubernetesWith("    session_dsn_secret: SESSION_DSN\n", "    session_dsn_secret: sessions/dsn\n"),
 			want: `runtime.kubernetes.session_dsn_secret "sessions/dsn" is not a Secret data key ([-._a-zA-Z0-9]+)`,
+		},
+		{
+			name: "session_database with the postgres store",
+			body: kubernetesFile + "    session_database: {instance: example-project:us-central1:example-instance, name: legion_sessions, user: legion-sessions@example-project.iam}\n",
+			want: "runtime.kubernetes.session_database is not used when runtime.kubernetes.session_store is postgres; remove it",
+		},
+		{
+			name: "session_dsn_secret with the cloudsql-iam store",
+			body: kubernetesWith("    session_store: postgres\n", "    session_store: cloudsql-iam\n") +
+				"    session_database: {instance: example-project:us-central1:example-instance, name: legion_sessions, user: legion-sessions@example-project.iam}\n",
+			want: "runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is cloudsql-iam; remove it",
+		},
+		{
+			name: "session_store cloudsql-iam without its database",
+			body: withSessionStore("    session_store: cloudsql-iam\n"),
+			want: "runtime.kubernetes.session_database is required with runtime.kubernetes.session_store cloudsql-iam: the Cloud SQL instance, the database in it, and the IAM login each pod signs in as",
+		},
+		{
+			name: "session_database that is no mapping",
+			body: withSessionStore("    session_store: cloudsql-iam\n    session_database: example-project:us-central1:example-instance\n"),
+			want: "runtime.kubernetes.session_database must be a mapping",
+		},
+		{
+			name: "session_database naming a member it does not model",
+			body: withSessionStore("    session_store: cloudsql-iam\n" +
+				"    session_database: {instance: example-project:us-central1:example-instance, name: legion_sessions, user: legion-sessions@example-project.iam, port: 5432}\n"),
+			want: "unknown key runtime.kubernetes.session_database.port",
+		},
+		{
+			name: "session_database without its instance",
+			body: withSessionStore("    session_store: cloudsql-iam\n" +
+				"    session_database: {name: legion_sessions, user: legion-sessions@example-project.iam}\n"),
+			want: "runtime.kubernetes.session_database.instance is required: the Cloud SQL instance the pod's session proxy dials",
+		},
+		{
+			name: "session_database with an empty database",
+			body: withSessionStore("    session_store: cloudsql-iam\n" +
+				"    session_database: {instance: example-project:us-central1:example-instance, name: \"\", user: legion-sessions@example-project.iam}\n"),
+			want: "runtime.kubernetes.session_database.name must not be empty",
+		},
+		{
+			name: "session_database without its login",
+			body: withSessionStore("    session_store: cloudsql-iam\n" +
+				"    session_database: {instance: example-project:us-central1:example-instance, name: legion_sessions}\n"),
+			want: "runtime.kubernetes.session_database.user is required: the IAM login each pod signs in as",
+		},
+		{
+			name: "session_database with an instance that is no connection name",
+			body: withSessionStore("    session_store: cloudsql-iam\n" +
+				"    session_database: {instance: example-instance, name: legion_sessions, user: legion-sessions@example-project.iam}\n"),
+			want: `runtime.kubernetes.session_database.instance "example-instance" must be the Cloud SQL instance's connection name, project:region:instance, or domain:project:region:instance for a domain-scoped project`,
+		},
+		{
+			name: "session_database with an instance missing a segment",
+			body: withSessionStore("    session_store: cloudsql-iam\n" +
+				"    session_database: {instance: \"example-project::example-instance\", name: legion_sessions, user: legion-sessions@example-project.iam}\n"),
+			want: `runtime.kubernetes.session_database.instance "example-project::example-instance" must be the Cloud SQL instance's connection name, project:region:instance, or domain:project:region:instance for a domain-scoped project`,
+		},
+		{
+			name: "session_database with an instance led by whitespace",
+			body: withSessionStore("    session_store: cloudsql-iam\n" +
+				"    session_database: {instance: \" example-project:us-central1:example-instance\", name: legion_sessions, user: legion-sessions@example-project.iam}\n"),
+			want: `runtime.kubernetes.session_database.instance " example-project:us-central1:example-instance" must be the Cloud SQL instance's connection name, project:region:instance, or domain:project:region:instance for a domain-scoped project`,
 		},
 		{
 			name: "daemon_url empty",

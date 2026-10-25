@@ -37,6 +37,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghconfig"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
@@ -47,8 +48,9 @@ const (
 	testProject   = "legion"
 	testImage     = "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef"
 	testTree      = "LEGION-208"
-	// testSessionDSNKey is the providers Secret's key holding the session database's URL
-	// (Options.SessionDSNKey), which every runtime a test configures carries as production's does.
+	// testSessionDSNKey is the providers Secret's key holding the session database's URL under the
+	// postgres store (Options.SessionStore), which every runtime a test configures carries as a
+	// postgres deployment's does.
 	testSessionDSNKey = "SESSION_DSN"
 )
 
@@ -60,24 +62,24 @@ var (
 	childToken = claim.Token("legion-legion-legion-209-implementer")
 )
 
-// testOptions are the options every test starts from: production's shape — the session database's
-// URL key included, which every deployment names and configure requires — every role's reservation
-// at the daemon's defaults (reservations), with budgets short enough that a wait the test expects
-// to end never slows the suite.
+// testOptions are the options every test starts from: production's shape — a store that keeps
+// sessions in a database included, which configure requires, here the postgres one with its URL key
+// — every role's reservation at the daemon's defaults (reservations), with budgets short enough
+// that a wait the test expects to end never slows the suite.
 func testOptions() Options {
 	return Options{
-		Namespace:     testNamespace,
-		Project:       testProject,
-		Store:         newFakeStore(),
-		Image:         testImage,
-		StorageClass:  "gp2",
-		IssueVolume:   resource.MustParse("20Gi"),
-		Resources:     reservations(),
-		SessionDSNKey: testSessionDSNKey,
-		StreamURL:     "tcp://192.0.2.250:13371",
-		DaemonURL:     "http://192.0.2.250:13370",
-		EnvoyURL:      "http://192.0.2.250:9020",
-		NATSURLs:      []string{"nats://192.0.2.250:4222"},
+		Namespace:    testNamespace,
+		Project:      testProject,
+		Store:        newFakeStore(),
+		Image:        testImage,
+		StorageClass: "gp2",
+		IssueVolume:  resource.MustParse("20Gi"),
+		Resources:    reservations(),
+		SessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: testSessionDSNKey},
+		StreamURL:    "tcp://192.0.2.250:13371",
+		DaemonURL:    "http://192.0.2.250:13370",
+		EnvoyURL:     "http://192.0.2.250:9020",
+		NATSURLs:     []string{"nats://192.0.2.250:4222"},
 		Tools: Tools{
 			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
 			AgentSecrets: "/opt/legion/bin/agent-secrets",
@@ -939,7 +941,7 @@ func podObject(name, uid, ownerUID string, labels map[string]string, status core
 			Name: providersVolume,
 			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 				SecretName: ProvidersSecretName(testProject),
-				Items:      []corev1.KeyToPath{{Key: testSessionDSNKey, Path: sessionDSNFile}},
+				Items:      []corev1.KeyToPath{{Key: testSessionDSNKey, Path: ompsessions.DSNFileName}},
 			}},
 		}}},
 		Status: status,

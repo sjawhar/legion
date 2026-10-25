@@ -1,9 +1,9 @@
 //go:build e2e
 
 // The Stage 4a harness's session-store check: the runtime under runtime.kubernetes.session_store
-// postgres — the one store the daemon loads, which every runtime of the run is built on — against
-// the scratch Postgres the script started on the devbox's private address
-// (LEGION_E2E_SESSION_DB_PORT). The rig is live_test.go.
+// postgres — a store that keeps sessions in a database, as the daemon requires, and the one every
+// runtime of the run is built on — against the scratch Postgres the script started on the devbox's
+// private address (LEGION_E2E_SESSION_DB_PORT). The rig is live_test.go.
 
 package sandbox
 
@@ -41,7 +41,7 @@ func (r *liveRig) checkPostgresResume() error {
 	if c.state != stateNone {
 		return fmt.Errorf("%s was launched before this check, which needs its first pod of the run", c.name)
 	}
-	note("runtime", "every runtime of the run keeps sessions in the scratch database: providers Secret key %s at %s", liveSessionsSecretKey, ProvidersDir+"/"+sessionDSNFile)
+	note("runtime", "every runtime of the run keeps sessions in the scratch database: providers Secret key %s at %s", liveSessionsSecretKey, providersDSNFile)
 	since := time.Now()
 	if _, err := r.spawn(c, true); err != nil {
 		return err
@@ -58,15 +58,15 @@ func (r *liveRig) checkPostgresResume() error {
 	if got := agent[launcher.WorkspaceRecreatedVariable]; got != "false" {
 		return fmt.Errorf("the fresh agent has %s=%q, want false", launcher.WorkspaceRecreatedVariable, got)
 	}
-	if agent[ompsessions.StorageVariable] != ompsessions.SQLStorage || agent[ompsessions.DSNFileVariable] != ProvidersDir+"/"+sessionDSNFile {
+	if agent[ompsessions.StorageVariable] != ompsessions.SQLStorage || agent[ompsessions.DSNFileVariable] != providersDSNFile {
 		return fmt.Errorf("the agent has %s=%q and %s=%q, want %s and %s", ompsessions.StorageVariable, agent[ompsessions.StorageVariable],
-			ompsessions.DSNFileVariable, agent[ompsessions.DSNFileVariable], ompsessions.SQLStorage, ProvidersDir+"/"+sessionDSNFile)
+			ompsessions.DSNFileVariable, agent[ompsessions.DSNFileVariable], ompsessions.SQLStorage, providersDSNFile)
 	}
-	if value, held := agent[sessionDSNFile]; held {
-		return fmt.Errorf("the agent's environment holds %s (%d bytes): the session database's URL reached Oh My Pi's environment", sessionDSNFile, len(value))
+	if value, held := agent[ompsessions.DSNFileName]; held {
+		return fmt.Errorf("the agent's environment holds %s (%d bytes): the session database's URL reached Oh My Pi's environment", ompsessions.DSNFileName, len(value))
 	}
 	note("operator", "the agent's environment: %s=%s, %s=%s, no %s", ompsessions.StorageVariable, agent[ompsessions.StorageVariable],
-		ompsessions.DSNFileVariable, agent[ompsessions.DSNFileVariable], sessionDSNFile)
+		ompsessions.DSNFileVariable, agent[ompsessions.DSNFileVariable], ompsessions.DSNFileName)
 
 	session := ompSessionsDir + "/" + SandboxName(c.token) + "-postgres.jsonl"
 	if out, err := r.exec(c, "sh", "-c", `test -e "$1" || echo absent`, "absent", session); err != nil || out != "absent" {

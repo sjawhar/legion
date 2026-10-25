@@ -84,7 +84,8 @@ type RuntimeSettings struct {
 }
 
 // KubernetesSettings is the settled `runtime.kubernetes` block without its credential file
-// (`kubeconfig`, `context`), its credential source (`session_dsn_secret`) and the operator's `pod`
+// (`kubeconfig`, `context`), the session store's own fields (`session_dsn_secret`, the credential
+// source, and `session_database`, the instance and login behind it) and the operator's `pod`
 // pieces, which every pod reads from its own spec.
 type KubernetesSettings struct {
 	Namespace    string                           `json:"namespace"`
@@ -93,7 +94,9 @@ type KubernetesSettings struct {
 	IssueVolume  string                           `json:"issue_volume"`
 	Scheduling   SchedulingSettings               `json:"scheduling"`
 	Resources    map[string]RoleResourcesSettings `json:"resources"`
-	// SessionStore is always "postgres": the only store `runtime: kubernetes` loads (readSessionStore).
+	// SessionStore is the settled store's kind and nothing else of it: always one that keeps
+	// sessions in a database (ompsessions.Store.InDatabase), since `runtime: kubernetes` refuses
+	// "pvc" (readSessionStore).
 	SessionStore string                `json:"session_store"`
 	AgentSecrets *AgentSecretsSettings `json:"agent_secrets,omitempty"`
 	// Plugins is the settled pair, whatever its source, absent while the daemon knows none.
@@ -282,7 +285,7 @@ func kubernetesSettingsOf(block *config.Kubernetes) *KubernetesSettings {
 			PriorityClass: block.Scheduling.PriorityClass,
 		},
 		Resources:    make(map[string]RoleResourcesSettings, len(block.Resources)),
-		SessionStore: "postgres",
+		SessionStore: string(block.SessionStore.Kind),
 		Setup:        stringsOf(block.Setup),
 		RepositoryCache: RepositoryCacheSettings{
 			Volume:         block.RepositoryCache.Volume,

@@ -13,6 +13,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 )
 
@@ -143,17 +144,20 @@ type Options struct {
 	// seed of this same user (bootprobe.NATSUser), so a providers Secret holding a blank, invalid,
 	// or other seed refuses boot instead of every agent's connection.
 	NATSUser string
-	// SessionDSNKey is the providers Secret's key that holds the postgres:// URL of the database
-	// every role's Oh My Pi keeps its session in (runtime.kubernetes.session_store postgres). It is
-	// required: an issue pod's disk is the pod's own ephemeral volume and is deleted with the pod,
-	// so a session kept as a file on it would not survive to be resumed, and configure refuses an
-	// empty key as it refuses an unpinned image. Every pod and the image probe mount that key at
-	// ProvidersDir/OMP_SESSION_SQL_DSN, and every generation is started with
-	// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming that file (mainEnvironment),
-	// which the shim, seeing the pointer, never exports; a resume is held to the session table
-	// (the role launcher's check, internal/launcher), and no launch expects any disk to hold a
-	// session.
-	SessionDSNKey string
+	// SessionStore is where every role's Oh My Pi keeps its session
+	// (runtime.kubernetes.session_store), settled. It is required to keep sessions in a database
+	// (InDatabase): an issue pod's disk is the pod's own ephemeral volume and is deleted with the
+	// pod, so a session kept as a file on it would not survive to be resumed, and configure refuses
+	// any other store as it refuses an unpinned image. Every generation is started with
+	// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming a URL file (mainEnvironment), a
+	// resume is held to the session table (the role launcher's check, internal/launcher), and no
+	// launch expects any disk to hold a session. Under postgres that file is the providers Secret
+	// key the pod and the image probe mount at ProvidersDir/OMP_SESSION_SQL_DSN, which the shim,
+	// seeing the pointer, never exports; under cloudsql-iam no pod mounts a session key at all —
+	// each role container's launcher is told the instance, database and login (sessionProxyFlags),
+	// proxies a socket of its own to Cloud SQL as the pod itself, and writes the URL file in the
+	// generation's private directory.
+	SessionStore ompsessions.Store
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,
 	// `--append-system-prompt`); Oh My Pi itself when nil.

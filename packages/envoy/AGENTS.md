@@ -36,6 +36,7 @@ events to the right session.
 | Native Dispatch workspace | `cmd/dispatch/`, `internal/dispatch/` | HTTP API, Postgres store, documents, and event outbox |
 | Dispatch settings | `cmd/dispatch/settings.go` | the one table of every Dispatch setting envoy-dispatch reads (the libraries it links read `HOME`, libpq's `PG*`, the AWS SDK's `AWS_*` and Go's own variables themselves); `envoy-dispatch settings` prints it, and a test fails on any other environment read under `cmd/dispatch` or `internal/dispatch` |
 | Migration runners' shared rules | `internal/pgmigrate/` | Dispatch's and the secrets broker's runners: the set loader that refuses a set before anything applies (`Load`), the lock bound on every migration (`LockTimeout`), the watch that names the lock a timed-out migration wanted, and the pre-deploy census of pending migrations (`Census`, and `CensusTables`, its one reading of what a migration locks; the `<version>_<name>.census.sql` a migration declares; `envoy-dispatch census`); a migration runs while the build before it is still serving, which is what it may add and what it must split across two releases (`cmd/dispatch/README.md`, "Database migrations") |
+| Postgres LISTEN loop's shared rules | `internal/pglisten/` | Dispatch's and the secrets broker's listeners: one LISTEN connection that dials, reports each notification, pings itself when idle, wakes a caller on its own goroutine, and redials on every failure (`Listener`, `Run`, `RedialBackoff`), because a connection waiting for a notification must outlive every failure between it and the server (INFRA-66). Shared the way `internal/pgmigrate` is, since the broker's cross-pod secret-reread fan-out (`internal/broker/reread`) listens on the same kind of connection as Dispatch's delivery hub and event stream relay (`internal/dispatch/api`) and its stale-room evictor (`internal/dispatch/docs`); each caller sets `Listener.Owner`, the prefix of the one line the loop logs, and an unset `Owner` logs `dispatch` |
 | GitHub webhook redelivery | `internal/dispatch/redeliver/`, `cmd/dispatch/redeliver.go` | Dispatch's sweep of the App webhook's failed deliveries; `internal/dispatch/githubapp/githubapptest` fakes GitHub's delivery API |
 | Document tree (Proof schema) | `internal/dispatch/pmdoc/` | render/parse/diff of Proof documents; fixtures from the fork's headless engine |
 | Delivery measures | `internal/dispatch/delivery/measures/` | pure DORA computation (`measures.go`) and the Pipeline page's timings (`pipeline.go`), each ported formula by formula from the delivery prototype; `api/delivery_measures.go` serves the first as `GET /api/v1/delivery/measures`, and as the timeline's `measures`, over the timeline's facet pipeline (`filteredDeliveryPullRequests`), and `api/delivery_pipeline.go` the second as `GET /api/v1/delivery/pipeline`, its clock `?at=` or now; `delivery/reconcile_backfill.go`'s `backfillRuns` fills older runs' `head_branch` and `event` once, and deploy runs' `created_at` once more under its own step; a pull request ships with the earliest-finishing successful production deploy whose run GitHub created after its merge (`delivery/containment.go`, `DeliveryRun.Created`) |
@@ -682,7 +683,7 @@ version, a fork of the live tree or a rebuild from a room behind the head is ref
 What is per-process is the room: while a room is resident in one process it receives none of the
 other's updates, so presence and cursors show only the peers on that process. Every durable
 change notifies `dispatch_doc_changed` from inside the transaction holding the room's advisory
-lock, and the other process's listener (`docs/stale_room.go`, over `internal/dispatch/pglisten`)
+lock, and the other process's listener (`docs/stale_room.go`, over `internal/pglisten`)
 closes the room that notification leaves behind the head, so within that round trip the browser
 reconnects, re-syncs and shows the current text - a brief reconnect, never stale text a reader
 can act on. Cross-process live co-editing of one document, two rooms with updates streaming
@@ -2473,6 +2474,40 @@ answers the store (`store`: `secrets.StoreAWS` or `secrets.StoreGCP`), the prefi
 the key ARN with its region and account (`secrets.AWSKeyARNParts`) or the Cloud KMS key name with the
 project number (`secrets.GCPProject`), the other store's fields omitted.
 
+That reread is fleet-wide. On its 200 path alone `rereadSecret` calls `Deps.NotifyReread`, which
+`cmd/broker` fills with `reread.Notifier(st.Pool, senderID)`: one parameterized Postgres `NOTIFY`
+on `reread.Channel` (`broker_secret_reread`, `internal/broker/reread`, the one place the name is
+written, since `pglisten` splices a channel into its listen statement as written), carrying the
+secret's name and this process's own boot-minted sender id, under `notifyRereadTimeout` (5 s) on a
+context of its own, so a caller that hangs up cannot stop the other pods from learning of a reread
+that already happened. Every process runs `reread.Listener` for its whole life (started after the
+first policy load, and the bind then waits up to `rereadListenWait` (5 s) for its `OnConnected`,
+which `pglisten` runs only once the `LISTEN` statement itself has returned, so an address the load
+balancer can reach is an address a retag can reach; a pod whose dial or `LISTEN` failed waits the
+bound out, warns and serves anyway. Once that `LISTEN` is in place the boot takes **one more
+whole-namespace load** before `net.Listen`, so the subscription exists before the read whose
+result it is meant to invalidate: Postgres delivers nothing to a session for a `NOTIFY` committed
+before that session's `LISTEN`, so without it a retag a peer served while this pod was reading the
+namespace would be lost here until the five-minute reload. A failed catch-up warns and the boot
+carries on, and the timeout branch takes none, there being no subscription to order a read
+against). It
+runs on a context derived with `context.WithoutCancel` from the signal's, not on the signal's own,
+and so does the five-minute policy reload: a pod is sent requests for the whole of its drain, so a
+listener and a reload stopped at `SIGTERM` would leave the one pod the load balancer is still
+choosing serving the tags it read before the retag, with no backstop either. Both end after
+`srv.Shutdown` returns, where `st.Close` then releases the store. The listener drops what carries its own
+sender id, and calls `Current.RefreshOne` under `refreshTimeout` (30 s) on the listener's one
+goroutine. It dials `store.Store.Listener`: a one-connection pool opened from `s.Pool.Config()`
+(so `BeforeConnect`'s RDS IAM minter still mints a token per redial) and hijacked, which costs one
+Postgres connection per pod outside `pool_max_conns`, held for the life of the process since a
+`LISTEN` ends when a pooled connection is recycled, and needs a session-mode path to Postgres,
+never a transaction pooler. A notification sent while a pod is redialing is lost and nothing is
+caught up (`onConnected`), deliberately: the catch-up available there is a whole-namespace read on
+every redial, and the pod's own `policyRefresh` already is the backstop, so the documented promise
+is "within seconds, except while a pod's listener is redialing". A failed notify is one WARN in
+`cmd/broker` and nothing else. The miss path (`requests/machine_state.go`) does not fan out, and
+`RefreshOne` itself does not notify: only this public route does.
+
 `agent-secrets secret list|show|create|set|retag|delete|restore` (`cmd/agent-secrets/secret.go`,
 its AWS side in `secret_aws.go`, its GCP side in `secret_gcp.go`) is the person's side of that
 reread. Each form reads the broker's settings from `AGENT_SECRETS_URL`, whose `store` field
@@ -2968,7 +3003,11 @@ set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, m
 mints its credential for this long, and each refresh of its device login moves its expiry to this
 long from then; past it the machine logs in again, new key, new code, new human approval),
 `BROKER_SWEEP_SECONDS` (default 5, max 60 —
-`requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
+`requests.Sweeper`'s tick interval, the poller's replacement), `BROKER_DRAIN_SECONDS` (default 5,
+min 0, max 120 — how long a stopping process goes on serving while `/healthz` answers 503; it is
+configuration rather than a constant because the right value is the cluster's EndpointSlice
+propagation time, which lives in the deployment's own repository, and 0 is for a local run), and
+`BROKER_TRUSTED_PROXY_HEADER`
 (optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate
 limiters' per-address buckets trust for the caller's real address (`clientAddress`) — its last
 comma-separated entry, the hop your own reverse proxy appended, never an earlier client-supplied
@@ -3006,6 +3045,33 @@ credentials=aws-sdk|application-default|fake secrets file`; the AWS config is lo
 AWS store or an RDS-form database URL), and reads one thing `config.Load` does not:
 `BROKER_FAKE_SECRETS_FILE`, which makes the run a local one (above), the only kind that may set a
 `BROKER_PUBLIC_URL` on port 0. The broker takes no flags, and refuses any flag it is given.
+
+`cmd/broker`'s stop is a drain and then a shutdown, and it logs the whole budget at boot, before
+anything else: `broker stop budget drain=<BROKER_DRAIN_SECONDS> shutdown=60s total=<their sum>`
+(`wholeSeconds`, whole seconds because its reader is a deployment's
+`terminationGracePeriodSeconds`). That line and the operate page stand in for the guard this
+repository cannot write, the Deployment being another repository's. On SIGTERM it logs
+`broker draining`, sets the atomic flag `api.Deps.Draining` reports, and goes on serving: `healthz`
+answers `503 SHUTTING_DOWN` before its Postgres ping while every other route answers exactly as
+before, because a pod is removed from its Service's EndpointSlice concurrently with the kubelet
+beginning termination, so new connections still arrive after the signal — which is why
+`GET /healthz` is a readiness probe and must never be a liveness probe, one being enough to have
+the kubelet kill the container mid-drain. It waits `BROKER_DRAIN_SECONDS` (a second signal ends
+the wait at once: that channel is registered unconditionally before any boot work, since
+`signal.NotifyContext`'s context is already cancelled by the first signal, and one watchdog
+goroutine is its only reader, deciding from `serveStarted`'s state — never from a `select` over
+both — whether the second signal is the drain's, handed over on `drainNow`, or an exit that
+skips it. A zero drain takes neither the timer nor that select) and only then closes the listener
+and calls `srv.Shutdown` under `shutdownTimeout`, which is `writeTimeout` (`requestDeadline` 45 s
+plus 15 s) rather than a figure of its own: the longest exchange the server itself allows a
+request past its headers, so one admitted in the drain's last instant still gets its whole handler
+deadline. Go resets the write deadline once the headers are read, so it bounds that exchange
+rather than the whole accepted connection, and `Shutdown` closes an idle connection at once, treating
+one that has gone five seconds without its headers as idle, rather than waiting the budget out
+for it. A deployment's
+`terminationGracePeriodSeconds` therefore has to cover any preStop pause plus the drain plus 60 s,
+65 s at the defaults with no pause, the pause and the drain being paid out of the one grace
+period.
 
 `docker/rds-global-bundle.pem`, the RDS CA bundle an IAM-form URL's `sslrootcert` names (the image
 ships it at `/etc/ssl/rds/global-bundle.pem`), is a dated snapshot of AWS's global bundle. Refresh it
@@ -3053,12 +3119,62 @@ cannot answer while authenticating is a 503 naming it. Every 500 is logged with 
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
 against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
 unauthenticated `POST /v1/secrets/{name}/reread` is rate limited both per source address and over
-every caller at once (`DefaultRereadLimit` and `DefaultRereadOverallLimit`, since each reread holds
+every caller at once (the per-address bucket, which is `RereadLimitFor` of the shared bucket this
+process mounts — burst `DefaultRereadBurst` (30) and one back every `2 ×` that bucket's `Every` —
+and `DefaultRereadOverallLimit`, burst 10 and one back every second — under the GCP store
+`GCPRereadOverallLimit`, burst 10 and one back every 4 s, which `cmd/broker` passes as
+`Deps.RereadOverallLimit` — since each reread holds
 the policy's writer lock for one `DescribeSecret`, so a flood spread over addresses cannot hold up a
 reload; a reread spends a token from either bucket only when both allow it
 (`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
-with the refusing limit's `Retry-After`), and the
+with the refusing limit's `Retry-After`: 1 s for the shared bucket, 4 s for the GCP one, and the
+address's own is twice whichever of those the process mounted — 2 s on the default store, 8 s
+under Secret Manager).
+The two shared buckets' **rate** is the fleet's whole store budget divided by
+the replica count **squared**, because one accepted reread costs the store one read
+per pod — the pod that served it and every peer the fan-out tells — so the fleet spends
+replicas × rate × replicas (default: 2 pods × 1 reread/s × 2 store reads = the 4 store reads a
+second one pod alone was allowed, which is the policy writer lock's budget and not a provider's,
+since AWS serves `DescribeSecret` at 40,000 a second; GCP: 2 pods × 0.25 reread/s × 2 store reads
+× 2 metadata reads = the same 120 reads a minute, a fifth of the 600 a minute per project Secret
+Manager serves, the rest being every pod's reload, its miss-path rereads and its releases) — read
+them as that arithmetic, never as the number two, since a
+third replica divides by nine rather than by four. Their **burst** does **not** divide at all: it
+stays at the budget's ten. A burst is a depth and what it must admit is one person's write burst,
+which is a hard floor fixed in the replica count, while what it guards — each pod's own transient,
+its own burst plus every peer's — is a soft cost, latency against the reload and the miss-path
+rereads rather than a quota, spent once and re-bounded immediately by the rate. One side is a hard
+floor and the other is a soft cost, and sizing by the soft one is the error this corrects: `10 / N`
+put the depth at 3 for a three-pod fleet, under the floor its own guard enforces. That floor is
+four, measured against the live row with an overlay changing only this burst (2 FAIL, 3 FAIL,
+4 ok, 5 ok), since `cmd/agent-secrets/secret_e2e_test.go`'s
+`TestSecretDeleteAndRestoreAreServedByTheBrokerAtOnce` sends four rereads — delete, restore,
+retag, and the `NO_VALUE_KEY` retag that expects `no-current-value` and meets `RATE_LIMITED`
+instead when the bucket is spent — so ten carries six tokens of headroom and that row is the
+burst's pin. The momentary cost is two quantities, never one: a burst lets the fleet accept
+`replicas × burst` rereads and each costs a store read on every pod, so the fleet's momentary
+store cost is `replicas² × burst` — 40, 90 and 160 store reads at two, three and four pods, twice
+that in metadata reads under Secret Manager (80, 180, 320), which against the cited 600 a minute
+is 8, 18 and 32 seconds of quota, each a transient spent once and re-bounded by the rate, which is
+the half of the pair that protects the provider. That cost grows with the square of the replica
+count while the rate is already divided by it, so there is a count beyond which this shape stops
+making sense; nothing in the code bounds it, because the fleet is two.
+`RereadLimitFor` derives the per-address rate from the shared bucket **this process mounts**,
+rather than from a constant: `cmd/broker` mounts the GCP bucket only under `gcp-secret-manager`,
+so one constant derived from the Google figure tightened every AWS deployment fourfold for a quota
+it never touches. Half that bucket's refill means at least two addresses on either store to hold
+the fleet's budget at zero — the route takes no credential, and
+`AllowBothAt` charges a refusal to neither bucket, so a caller that merely keeps succeeding at the
+shared refill starves the fan-out for everyone. That is a weakening on the default store, which
+used to take eight; the eight was never designed, and buying it back costs every bulk writer there
+a fourfold tightening for the difference between two attackers and eight on a route with no
+credential. The two shared rates are re-derived when the replica
+count changes (at four pods: 4 s and 16 s), and the per-address one follows them without being
+touched. A reread `reread.Listener` drives spends no
+token at all, since the pod that served the original call already paid for it. Every other limiter
+is one process's and unchanged, so a fleet of N pods allows N times each: the per-address reread
+bucket, both `LauncherLimits` buckets, `DefaultTokenLimit` and `DefaultMissRereads`. The
 unauthenticated `POST /v1/oauth/device_authorization` spends its source address's bucket before
 the provider does any work, then verifies the request object locally and spends a per-login
 bucket keyed on the signed request object itself (`launcherLoginKey`): `person:<login>`, the person
@@ -3464,7 +3580,22 @@ than fail, when `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/br
 `internal/broker/requests`); `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for
 them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and
 CI's `envoy-go` job (`.github/workflows/envoy-and-contracts.yaml`) points
-`BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`. Every client-facing
+`BROKER_TEST_DATABASE_URL` at the same server as `DISPATCH_TEST_DATABASE_URL`.
+`storetest.URL` stays the helper for everything ordinary: a migrated schema of its own per test,
+cheaper than a database and isolating rows just as well. `storetest.DatabaseURL` hands out a
+fresh, unmigrated database instead, for the two things that are per database rather than per
+schema — a `LISTEN`/`NOTIFY` channel name, so a test on a schema would hear a sibling test's
+notifications on the one channel constant, and the migration advisory lock, which `Migrate` takes
+database-wide. `cmd/broker/multiprocess_test.go` builds under the `multiprocess` tag alone and
+starts real `cmd/broker` binaries against one such database, driving them over real HTTP
+(`brokertest`'s client) and their own logs: one refresh token and one device code each raced
+against both processes, both migrating one empty database at once, a retag one process is told to
+reread being enforced by the other through the fan-out, that fan-out spending no rate-limit token
+on the pod it reaches, and a signalled process failing readiness while it serves a request out
+past the old ten-second shutdown budget. CI's `broker-multiprocess` job runs them —
+`go test -tags multiprocess -count=1 -timeout 20m ./cmd/broker` in `packages/envoy` — in a job of
+its own, since each row waits out tens of seconds and `envoy-go`'s unit step runs under go test's
+default ten-minute package deadline. Every client-facing
 lane's own test mounts the real broker handlers (`api.Register` with real, Postgres-backed services)
 rather than a hand-rolled fake standing in for broker behavior — `internal/broker/api/api_test.go`,
 `internal/broker/e2e/e2e_test.go`, and `cmd/agent-secrets-devrelay/main_test.go` all wire real

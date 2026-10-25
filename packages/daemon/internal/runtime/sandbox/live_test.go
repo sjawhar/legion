@@ -781,11 +781,12 @@ type liveRig struct {
 	enrollments        map[claim.Token]liveEnrollment
 	grants             map[claim.Token]string
 	requests           map[claim.Token]string
-	// sessionStore is the providers Secret's key every runtime of the run keeps its sessions in
-	// (Options.SessionDSNKey, runtime.kubernetes.session_store postgres): liveSessionsSecretKey,
-	// the scratch database's URL the script wrote there, from the rig's first runtime on. The
-	// daemon loads no other store, so there is no run of this harness without one.
-	sessionStore string
+	// sessionStore is where every runtime of the run keeps its sessions (Options.SessionStore,
+	// runtime.kubernetes.session_store postgres): liveSessionsSecretKey, the providers Secret key
+	// holding the scratch database's URL the script wrote there, from the rig's first runtime on.
+	// The daemon loads no store that keeps sessions on the issue's disk, so there is no run of this
+	// harness without a database.
+	sessionStore ompsessions.Store
 }
 
 func TestStage4aSandboxRuntimeLive(t *testing.T) {
@@ -834,7 +835,8 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 	ctx, cancel := context.WithCancel(context.Background())
 	r := &liveRig{
 		t: t, env: env, ctx: ctx, cancel: cancel, reg: newRegistry(), obs: &observations{changed: make(chan struct{})}, trees: newFakeStore(),
-		enrollments: map[claim.Token]liveEnrollment{}, grants: map[claim.Token]string{}, sessionStore: liveSessionsSecretKey,
+		enrollments: map[claim.Token]liveEnrollment{}, grants: map[claim.Token]string{},
+		sessionStore: ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: liveSessionsSecretKey},
 	}
 	fail := func(format string, args ...any) {
 		fmt.Printf("CHECK identity: FAIL: "+format+"\n", args...)
@@ -996,7 +998,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		GitHubCredential:      r.tokens.Credential,
 		Conns:                 ln,
 		Log:                   r.log,
-		SessionDSNKey:         r.sessionStore,
+		SessionStore:          r.sessionStore,
 		RepositoryCache:       liveRepositoryCache(),
 		Mapped:                r.mappedRepositories,
 	}
