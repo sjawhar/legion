@@ -809,6 +809,13 @@ func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.
 	if err != nil {
 		t.Fatalf("jetstream: %v", err)
 	}
+	// accountKeeper exists so the account is never emptied by the deletes below: deleting an
+	// account's last stream schedules the removal of its streams directory in the background,
+	// and the restore of the same stream name would then race that removal and fail.
+	const accountKeeper = "kvwatch-test-account-keeper"
+	if _, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: accountKeeper}); err != nil {
+		t.Fatalf("create the account keeper bucket: %v", err)
+	}
 	const stream = "KV_kvwatch-test"
 	old, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: "kvwatch-test"})
 	if err != nil {
@@ -833,6 +840,13 @@ func TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache(t *testing.
 	w.Start()
 	eventually(t, "the live bucket's key", func() bool { return into.has("live-key") })
 
+	keeperPresent := false
+	for name := range js.StreamNames() {
+		keeperPresent = keeperPresent || name == "KV_"+accountKeeper
+	}
+	if !keeperPresent {
+		t.Fatal("the account keeper bucket is gone before the delete: the delete would empty the account and the restore would race the streams-directory removal")
+	}
 	// Delete it and restore the older snapshot in its place.
 	if err := js.DeleteKeyValue("kvwatch-test"); err != nil {
 		t.Fatalf("delete the live bucket: %v", err)
