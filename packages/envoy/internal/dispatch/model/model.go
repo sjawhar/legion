@@ -92,13 +92,19 @@ type RepoProject struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
-// ArchitectureSource names the repository and branch a project's architecture
-// documents are imported from. InstallationID caches the GitHub App
+// ArchitectureSource names a repository and branch a project's architecture
+// documents are imported from; a project has one per repository, and its
+// component model is every source's components together. ID names the source
+// within its project (the first source of a project before sources were per
+// repository is 0) and is a server detail kept out of the JSON shape, as the
+// repository already addresses a source. InstallationID caches the GitHub App
 // installation the access check resolved — the importer re-resolves it on
-// sync — and is a server detail kept out of the JSON shape. The sync
-// bookkeeping fields stay null until the importer runs.
+// sync — and is kept out of the JSON shape too. The sync bookkeeping fields
+// stay null until the importer runs; Components is how many components the
+// source currently projects.
 type ArchitectureSource struct {
 	Project        string     `json:"project"`
+	ID             int64      `json:"-"`
 	Repo           string     `json:"repo"`
 	Branch         string     `json:"branch"`
 	Enabled        bool       `json:"enabled"`
@@ -112,6 +118,7 @@ type ArchitectureSource struct {
 	// successful import: importer bookkeeping for the unchanged-model
 	// short-circuit, kept out of the JSON shape.
 	LastTreeSha *string `json:"-"`
+	Components  int     `json:"components"`
 }
 
 // ExternalLink connects a native issue to an external tracker item.

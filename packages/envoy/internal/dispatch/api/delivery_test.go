@@ -406,11 +406,13 @@ func seedDeliveryIssueFacts(t *testing.T, database *store.Store) {
 	ctx := t.Context()
 	for _, statement := range []string{
 		`insert into projects (key, name) values ('ACME', 'Acme') on conflict do nothing`,
+		`insert into architecture_sources (project_key, id, repo, branch, installation_id, created_by)
+			values ('ACME', 1, 'acme/arch', 'main', 1, '{"kind":"system","id":"test"}')`,
 		`insert into architecture_snapshots (id, project_key, commit, files) values (900, 'ACME', 'c1', '{}')`,
-		`insert into components (project_key, id, title, prose, parent, snapshot_id) values
-			('ACME', 'platform', 'The platform', '', null, 900),
-			('ACME', 'api', 'Public API', '', 'platform', 900),
-			('ACME', 'docs', 'Documentation', '', null, 900)`,
+		`insert into components (project_key, id, title, prose, parent, snapshot_id, source_id) values
+			('ACME', 'platform', 'The platform', '', null, 900, 1),
+			('ACME', 'api', 'Public API', '', 'platform', 900, 1),
+			('ACME', 'docs', 'Documentation', '', null, 900, 1)`,
 		`insert into issues (key, project_key, number, title, status, priority, created_by, rank) values
 			('ACME-1', 'ACME', 1, 'Ship widgets', 'todo', 0, '{"kind":"system","id":"test"}', 'U'),
 			('ACME-3', 'ACME', 3, 'Tidy docs', 'todo', null, '{"kind":"system","id":"test"}', 'W')`,

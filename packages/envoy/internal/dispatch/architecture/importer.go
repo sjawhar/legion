@@ -23,7 +23,8 @@ import (
 // from, at the configured branch's head commit.
 const SourceDir = ".dispatch/architecture"
 
-// ErrNoSource is "this project has no architecture source configured".
+// ErrNoSource is "this project has no architecture source configured" (or
+// none from the named repository).
 var ErrNoSource = errors.New("no architecture source configured")
 
 // SystemActor authors every importer-written event: the importer is not a
@@ -31,8 +32,12 @@ var ErrNoSource = errors.New("no architecture source configured")
 var SystemActor = model.Actor{Kind: "system", ID: "architecture-importer"}
 
 // SourceColumns is the architecture_sources select list ScanSource reads, in
-// scan order; every query that returns a source row selects exactly this.
-const SourceColumns = `project_key, repo, branch, enabled, installation_id, created_by, created_at, last_sync_at, last_commit, last_error, last_tree_sha`
+// scan order; every query that returns a source row selects exactly this,
+// against the table under its own name (a select's from, or the target of an
+// insert, update or delete ... returning). Its last column counts the
+// components the source currently projects.
+const SourceColumns = `project_key, id, repo, branch, enabled, installation_id, created_by, created_at, last_sync_at, last_commit, last_error, last_tree_sha,
+	(select count(*) from components where components.project_key = architecture_sources.project_key and components.source_id = architecture_sources.id)`
 
 // syncTimeout bounds one whole sync — every GitHub call plus the projection —
 // so a slow upstream cannot hold the per-project lock (and every queued
@@ -44,12 +49,12 @@ var syncTimeout = 2 * time.Minute
 // imports the new configuration.
 var errSourceMoved = errors.New("the architecture source changed during the sync; nothing was recorded")
 
-// Importer imports one project's architecture model from its configured
-// source. Every trigger — the five-minute ticker, the Settings Refresh button,
-// and the `dispatch architecture-sync` command — funnels through Sync, and syncs of
-// one project are serialized by a per-project mutex (the server is one
-// process), so two refreshes of the same project cannot interleave their
-// projections.
+// Importer imports a project's architecture model from its configured
+// sources, one repository each. Every trigger — the five-minute ticker, the
+// Settings Refresh button, and the `dispatch architecture-sync` command —
+// funnels through Sync, and syncs of one project are serialized by a
+// per-project mutex (the server is one process), so two refreshes of the same
+// project cannot interleave their projections.
 type Importer struct {
 	store  *store.Store
 	github *githubapp.Client
@@ -82,36 +87,81 @@ func (i *Importer) HasApp() bool {
 	return i != nil && i.github != nil
 }
 
-// ListEnabled names every project with an enabled architecture source, in key
-// order: the ticker's work list.
-func (i *Importer) ListEnabled(ctx context.Context) ([]string, error) {
+// EnabledSource names one enabled architecture source: its project and its
+// repository.
+type EnabledSource struct {
+	Project string
+	Repo    string
+}
+
+// ListEnabled names every enabled architecture source, ordered by project and
+// then by the source's id: the ticker's work list.
+func (i *Importer) ListEnabled(ctx context.Context) ([]EnabledSource, error) {
 	rows, err := i.store.Pool.Query(ctx, `
-		select project_key from architecture_sources where enabled order by project_key
+		select project_key, repo from architecture_sources where enabled order by project_key, id
 	`)
 	if err != nil {
 		return nil, fmt.Errorf("list enabled architecture sources: %w", err)
 	}
 	defer rows.Close()
-	var projects []string
+	var sources []EnabledSource
 	for rows.Next() {
-		var project string
-		if err := rows.Scan(&project); err != nil {
+		var source EnabledSource
+		if err := rows.Scan(&source.Project, &source.Repo); err != nil {
 			return nil, fmt.Errorf("scan enabled architecture source: %w", err)
 		}
-		projects = append(projects, project)
+		sources = append(sources, source)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterate enabled architecture sources: %w", err)
 	}
-	return projects, nil
+	return sources, nil
 }
 
-// Sync imports project's architecture model at its source branch's head.
+// SyncResult is one source's outcome of SyncProject: the row as Sync answered
+// it and Sync's error. A failure that could not be recorded carries a zero
+// Source.
+type SyncResult struct {
+	Source model.ArchitectureSource
+	Err    error
+}
+
+// SyncProject imports every source of project, in id order, attempting each
+// whatever an earlier one did, and answers each source's outcome in that
+// order. A source deleted while the call runs is left out. A project with no
+// source is ErrNoSource.
+func (i *Importer) SyncProject(ctx context.Context, project string) ([]SyncResult, error) {
+	rows, err := i.store.Pool.Query(ctx,
+		`select repo from architecture_sources where project_key = $1 order by id`, project)
+	if err != nil {
+		return nil, fmt.Errorf("list architecture sources of %s: %w", project, err)
+	}
+	repos, err := pgx.CollectRows(rows, pgx.RowTo[string])
+	if err != nil {
+		return nil, fmt.Errorf("list architecture sources of %s: %w", project, err)
+	}
+	if len(repos) == 0 {
+		return nil, fmt.Errorf("%w for %s", ErrNoSource, project)
+	}
+	results := make([]SyncResult, 0, len(repos))
+	for _, repo := range repos {
+		source, err := i.Sync(ctx, project, repo)
+		if errors.Is(err, ErrNoSource) {
+			continue
+		}
+		results = append(results, SyncResult{Source: source, Err: err})
+	}
+	return results, nil
+}
+
+// Sync imports one source's architecture model — project's source from repo —
+// at its branch's head, and replaces only that source's components.
 //
 // It returns the source row as it now stands plus, when the import failed, the
-// failure itself: the row carries the same text in last_error, the previous
-// projection stays up (the spec's drift rule), and the caller decides how to
-// answer. A missing source row is ErrNoSource with a zero row.
+// failure itself: the row carries the same text in last_error, the source's
+// previous projection and every other source's stay up (the spec's drift
+// rule), and the caller decides how to answer. A missing source row is
+// ErrNoSource with a zero row.
 //
 // A healthy source whose branch head is the recorded commit — or whose new
 // head carries an unchanged architecture subtree — only refreshes the
@@ -119,12 +169,12 @@ func (i *Importer) ListEnabled(ctx context.Context) ([]string, error) {
 // fetch, no re-projection, no event, so a caller looping the sync route is
 // bounded to the head lookup.
 //
-// Events follow state changes, not ticks: `architecture.synced` when the
-// imported model changes (or the source is recovering from a failure),
-// `architecture.sync_failed` when the error text first appears or changes. A
+// Events follow state changes of the source, not ticks: `architecture.synced`
+// when its imported model changes (or it is recovering from a failure),
+// `architecture.sync_failed` when its error text first appears or changes. A
 // steady source — same commit, or the same failure over and over — emits
 // nothing.
-func (i *Importer) Sync(ctx context.Context, project string) (model.ArchitectureSource, error) {
+func (i *Importer) Sync(ctx context.Context, project, repo string) (model.ArchitectureSource, error) {
 	lock := i.lock(project)
 	lock.Lock()
 	defer lock.Unlock()
@@ -136,7 +186,7 @@ func (i *Importer) Sync(ctx context.Context, project string) (model.Architecture
 	ctx, cancel := context.WithTimeout(parent, syncTimeout)
 	defer cancel()
 
-	source, err := i.loadSource(ctx, project)
+	source, err := i.loadSource(ctx, project+" from "+repo, `project_key = $1 and repo = $2`, project, repo)
 	if err != nil {
 		return model.ArchitectureSource{}, err
 	}
@@ -171,8 +221,9 @@ func (i *Importer) Sync(ctx context.Context, project string) (model.Architecture
 		return i.failed(ctx, parent, source, importErr)
 	}
 	updated, importErr := i.project(ctx, source, commit, listing.SHA, files, parsed)
-	// A projection PostgreSQL refused is recorded like any other import failure. A source that
-	// moved or was deleted while the sync ran has nothing to record it on.
+	// A projection PostgreSQL refused, or one whose ids another source of the project holds, is
+	// recorded like any other import failure. A source that moved or was deleted while the sync
+	// ran has nothing to record it on.
 	if importErr != nil && !errors.Is(importErr, errSourceMoved) && !errors.Is(importErr, ErrNoSource) {
 		return i.failed(ctx, parent, source, importErr)
 	}
@@ -202,9 +253,9 @@ func (i *Importer) failed(ctx, parent context.Context, source model.Architecture
 func (i *Importer) touch(ctx context.Context, source model.ArchitectureSource, commit string) (model.ArchitectureSource, error) {
 	updated, err := ScanSource(i.store.Pool.QueryRow(ctx, `
 		update architecture_sources
-		set last_sync_at = now(), last_commit = $4
-		where project_key = $1 and repo = $2 and branch = $3 and last_error is null
-		returning `+SourceColumns, source.Project, source.Repo, source.Branch, commit))
+		set last_sync_at = now(), last_commit = $5
+		where project_key = $1 and id = $2 and repo = $3 and branch = $4 and last_error is null
+		returning `+SourceColumns, source.Project, source.ID, source.Repo, source.Branch, commit))
 	if err == nil {
 		return updated, nil
 	}
@@ -212,19 +263,21 @@ func (i *Importer) touch(ctx context.Context, source model.ArchitectureSource, c
 		return model.ArchitectureSource{}, fmt.Errorf("record architecture sync freshness: %w", err)
 	}
 	// The source moved (or vanished) mid-sync: leave the row alone.
-	updated, err = i.loadSource(ctx, source.Project)
+	updated, err = i.loadSource(ctx, source.Project, `project_key = $1 and id = $2`, source.Project, source.ID)
 	if err != nil {
 		return model.ArchitectureSource{}, err
 	}
 	return updated, errSourceMoved
 }
 
-func (i *Importer) loadSource(ctx context.Context, project string) (model.ArchitectureSource, error) {
+// loadSource reads the one source row where (over args) names; none is
+// ErrNoSource for name.
+func (i *Importer) loadSource(ctx context.Context, name, where string, args ...any) (model.ArchitectureSource, error) {
 	source, err := ScanSource(i.store.Pool.QueryRow(ctx,
-		`select `+SourceColumns+` from architecture_sources where project_key = $1`, project))
+		`select `+SourceColumns+` from architecture_sources where `+where, args...))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return model.ArchitectureSource{}, fmt.Errorf("%w for %s", ErrNoSource, project)
+			return model.ArchitectureSource{}, fmt.Errorf("%w for %s", ErrNoSource, name)
 		}
 		return model.ArchitectureSource{}, fmt.Errorf("read architecture source: %w", err)
 	}
@@ -244,8 +297,8 @@ func (i *Importer) resolve(ctx context.Context, source *model.ArchitectureSource
 	}
 	if installation.ID != source.InstallationID {
 		if _, err := i.store.Pool.Exec(ctx,
-			`update architecture_sources set installation_id = $2 where project_key = $1`,
-			source.Project, installation.ID); err != nil {
+			`update architecture_sources set installation_id = $3 where project_key = $1 and id = $2`,
+			source.Project, source.ID, installation.ID); err != nil {
 			return "", "", "", fmt.Errorf("record re-resolved installation: %w", err)
 		}
 		source.InstallationID = installation.ID
@@ -258,22 +311,60 @@ func (i *Importer) resolve(ctx context.Context, source *model.ArchitectureSource
 }
 
 // lockSourceRow opens a writing transaction the cross-process way: it takes
-// the source's row lock (`for update`), so two server processes projecting or
-// recording on one project serialize on the row instead of deadlocking inside
-// delete+reinsert, and re-reads repo/branch under the lock. moved reports
-// that the source changed since this sync's fetch began — the caller must
-// abort without writing, because its data describes the old configuration.
+// the source's own row lock (`for update`), so two server processes recording
+// on one source serialize on the row, and re-reads repo/branch under the lock.
+// moved reports that the source changed since this sync's fetch began — the
+// caller must abort without writing, because its data describes the old
+// configuration.
 func lockSourceRow(ctx context.Context, tx pgx.Tx, source model.ArchitectureSource) (locked lockedSource, moved bool, err error) {
 	var repo, branch string
 	if err := tx.QueryRow(ctx,
-		`select repo, branch, last_commit, last_error from architecture_sources where project_key = $1 for update`,
-		source.Project).Scan(&repo, &branch, &locked.lastCommit, &locked.lastError); err != nil {
+		`select repo, branch, last_commit, last_error from architecture_sources where project_key = $1 and id = $2 for update`,
+		source.Project, source.ID).Scan(&repo, &branch, &locked.lastCommit, &locked.lastError); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return lockedSource{}, true, nil
 		}
 		return lockedSource{}, false, fmt.Errorf("lock architecture source: %w", err)
 	}
 	return locked, repo != source.Repo || branch != source.Branch, nil
+}
+
+// lockProjectSources takes the row lock of every source of the source's
+// project, in id order, so two server processes projecting any two sources of
+// one project serialize instead of deadlocking inside delete+reinsert or both
+// claiming one component id: the second sees the first's components once it
+// holds the locks. It answers what lockSourceRow answers for the source
+// itself, plus every source's repository by id, which names who holds a
+// colliding id. recordFailure takes only its own row's lock, and a lock taken
+// here is never waited for while holding another order, so no cycle forms.
+func lockProjectSources(ctx context.Context, tx pgx.Tx, source model.ArchitectureSource) (locked lockedSource, repos map[int64]string, moved bool, err error) {
+	rows, err := tx.Query(ctx,
+		`select id, repo, branch, last_commit, last_error from architecture_sources where project_key = $1 order by id for update`,
+		source.Project)
+	if err != nil {
+		return lockedSource{}, nil, false, fmt.Errorf("lock architecture sources: %w", err)
+	}
+	defer rows.Close()
+	repos = map[int64]string{}
+	found := false
+	for rows.Next() {
+		var id int64
+		var repo, branch string
+		var state lockedSource
+		if err := rows.Scan(&id, &repo, &branch, &state.lastCommit, &state.lastError); err != nil {
+			return lockedSource{}, nil, false, fmt.Errorf("lock architecture sources: %w", err)
+		}
+		repos[id] = repo
+		if id == source.ID {
+			found = true
+			locked = state
+			moved = repo != source.Repo || branch != source.Branch
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return lockedSource{}, nil, false, fmt.Errorf("lock architecture sources: %w", err)
+	}
+	return locked, repos, moved || !found, nil
 }
 
 // lockedSource is the sync state read under the row lock. The state-change
@@ -287,18 +378,51 @@ type lockedSource struct {
 
 // abortMoved rolls the aborted write back and answers with the row as it now
 // stands plus errSourceMoved. A source deleted mid-sync is ErrNoSource.
-func (i *Importer) abortMoved(ctx context.Context, tx pgx.Tx, project string) (model.ArchitectureSource, error) {
+func (i *Importer) abortMoved(ctx context.Context, tx pgx.Tx, source model.ArchitectureSource) (model.ArchitectureSource, error) {
 	_ = tx.Rollback(ctx)
-	updated, err := i.loadSource(ctx, project)
+	updated, err := i.loadSource(ctx, source.Project, `project_key = $1 and id = $2`, source.Project, source.ID)
 	if err != nil {
 		return model.ArchitectureSource{}, err
 	}
 	return updated, errSourceMoved
 }
 
-// project writes the snapshot, replaces the project's components and their
+// heldElsewhere names each id of parsed that another source of the project
+// currently projects, with that source's repository: component ids are
+// project-wide, so such an import fails for the importing source alone and the
+// source holding the id keeps it.
+func heldElsewhere(ctx context.Context, tx pgx.Tx, source model.ArchitectureSource, repos map[int64]string, parsed Model) error {
+	ids := make([]string, 0, len(parsed.Components))
+	for _, component := range parsed.Components {
+		ids = append(ids, component.ID)
+	}
+	rows, err := tx.Query(ctx, `
+		select id, source_id from components
+		where project_key = $1 and source_id <> $2 and id = any($3)
+		order by id
+	`, source.Project, source.ID, ids)
+	if err != nil {
+		return fmt.Errorf("read the components of the project's other sources: %w", err)
+	}
+	defer rows.Close()
+	var problems []error
+	for rows.Next() {
+		var id string
+		var holder int64
+		if err := rows.Scan(&id, &holder); err != nil {
+			return fmt.Errorf("read the components of the project's other sources: %w", err)
+		}
+		problems = append(problems, fmt.Errorf("component id %q is already a component of %s from %s", id, source.Project, repos[holder]))
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("read the components of the project's other sources: %w", err)
+	}
+	return errors.Join(problems...)
+}
+
+// project writes the snapshot, replaces the source's own components and their
 // dependency edges, and updates the source row — one transaction, so a reader
-// never sees a half-projected model.
+// never sees a half-projected model. Every other source's components stay.
 func (i *Importer) project(
 	ctx context.Context,
 	source model.ArchitectureSource,
@@ -316,12 +440,15 @@ func (i *Importer) project(
 		return model.ArchitectureSource{}, fmt.Errorf("begin architecture import: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	locked, moved, err := lockSourceRow(ctx, tx, source)
+	locked, repos, moved, err := lockProjectSources(ctx, tx, source)
 	if err != nil {
 		return model.ArchitectureSource{}, err
 	}
 	if moved {
-		return i.abortMoved(ctx, tx, source.Project)
+		return i.abortMoved(ctx, tx, source)
+	}
+	if err := heldElsewhere(ctx, tx, source, repos, parsed); err != nil {
+		return model.ArchitectureSource{}, err
 	}
 
 	// The snapshot is immutable per commit: a re-import of the same commit
@@ -343,7 +470,7 @@ func (i *Importer) project(
 		return model.ArchitectureSource{}, fmt.Errorf("record architecture snapshot: %w", err)
 	}
 
-	if _, err := tx.Exec(ctx, `delete from components where project_key = $1`, source.Project); err != nil {
+	if _, err := tx.Exec(ctx, `delete from components where project_key = $1 and source_id = $2`, source.Project, source.ID); err != nil {
 		return model.ArchitectureSource{}, fmt.Errorf("retire previous components: %w", err)
 	}
 	// Both projections travel as one batch per table: the per-row INSERTs are unchanged, so
@@ -359,9 +486,9 @@ func (i *Importer) project(
 			paths = []string{}
 		}
 		components.Queue(`
-			insert into components (project_key, id, title, prose, parent, external, paths, snapshot_id)
-			values ($1, $2, $3, $4, $5, $6, $7, $8)
-		`, source.Project, component.ID, component.Title, component.Prose, parent, component.External, paths, snapshotID)
+			insert into components (project_key, id, title, prose, parent, external, paths, snapshot_id, source_id)
+			values ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		`, source.Project, component.ID, component.Title, component.Prose, parent, component.External, paths, snapshotID, source.ID)
 	}
 	if err := execBatch(ctx, tx, components, func(index int) string {
 		return "project component " + parsed.Components[index].ID
@@ -388,17 +515,17 @@ func (i *Importer) project(
 
 	updated, err := ScanSource(tx.QueryRow(ctx, `
 		update architecture_sources
-		set last_sync_at = now(), last_commit = $2, last_error = null, last_tree_sha = $3
-		where project_key = $1
-		returning `+SourceColumns, source.Project, commit, treeSHA))
+		set last_sync_at = now(), last_commit = $3, last_error = null, last_tree_sha = $4
+		where project_key = $1 and id = $2
+		returning `+SourceColumns, source.Project, source.ID, commit, treeSHA))
 	if err != nil {
 		return model.ArchitectureSource{}, fmt.Errorf("record architecture sync: %w", err)
 	}
 
-	// State change only: a new commit, or a source recovering from a recorded
-	// failure, judged from the row as it was under the lock. A same-commit
-	// re-import of a healthy source is silent — including the second of two
-	// processes that both fetched the same head.
+	// State change of this source only: a new commit, or the source recovering
+	// from a recorded failure, judged from its row as it was under the lock. A
+	// same-commit re-import of a healthy source is silent — including the
+	// second of two processes that both fetched the same head.
 	changed := locked.lastCommit == nil || *locked.lastCommit != commit || locked.lastError != nil
 	var event model.Event
 	if changed {
@@ -406,7 +533,9 @@ func (i *Importer) project(
 			ProjectKey: &source.Project,
 			Type:       "architecture.synced",
 			Actor:      SystemActor,
-			Payload:    map[string]any{"commit": commit, "components": len(parsed.Components)},
+			Payload: map[string]any{
+				"repo": source.Repo, "branch": source.Branch, "commit": commit, "components": len(parsed.Components),
+			},
 		})
 		if err != nil {
 			return model.ArchitectureSource{}, fmt.Errorf("append architecture.synced: %w", err)
@@ -456,14 +585,14 @@ func (i *Importer) recordFailure(ctx context.Context, source model.ArchitectureS
 	}
 	if moved {
 		// The failure describes a configuration that no longer exists.
-		return i.abortMoved(ctx, tx, source.Project)
+		return i.abortMoved(ctx, tx, source)
 	}
 
 	updated, err := ScanSource(tx.QueryRow(ctx, `
 		update architecture_sources
-		set last_sync_at = now(), last_error = $2
-		where project_key = $1
-		returning `+SourceColumns, source.Project, message))
+		set last_sync_at = now(), last_error = $3
+		where project_key = $1 and id = $2
+		returning `+SourceColumns, source.Project, source.ID, message))
 	if err != nil {
 		return model.ArchitectureSource{}, fmt.Errorf("record architecture sync failure: %w", err)
 	}
@@ -474,7 +603,7 @@ func (i *Importer) recordFailure(ctx context.Context, source model.ArchitectureS
 			ProjectKey: &source.Project,
 			Type:       "architecture.sync_failed",
 			Actor:      SystemActor,
-			Payload:    map[string]any{"error": message},
+			Payload:    map[string]any{"repo": source.Repo, "branch": source.Branch, "error": message},
 		})
 		if err != nil {
 			return model.ArchitectureSource{}, fmt.Errorf("append architecture.sync_failed: %w", err)
@@ -556,9 +685,9 @@ func ScanSource(row pgx.Row) (model.ArchitectureSource, error) {
 	var source model.ArchitectureSource
 	var createdBy []byte
 	if err := row.Scan(
-		&source.Project, &source.Repo, &source.Branch, &source.Enabled, &source.InstallationID,
+		&source.Project, &source.ID, &source.Repo, &source.Branch, &source.Enabled, &source.InstallationID,
 		&createdBy, &source.CreatedAt, &source.LastSyncAt, &source.LastCommit, &source.LastError,
-		&source.LastTreeSha,
+		&source.LastTreeSha, &source.Components,
 	); err != nil {
 		return model.ArchitectureSource{}, err
 	}

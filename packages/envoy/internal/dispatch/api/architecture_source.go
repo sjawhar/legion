@@ -21,7 +21,7 @@ func (s *server) listArchitectureSources(w http.ResponseWriter, r *http.Request)
 	rows, err := s.deps.Store.Pool.Query(r.Context(), `
 		select `+architecture.SourceColumns+`
 		from architecture_sources
-		order by project_key
+		order by project_key, id
 	`)
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -53,6 +53,8 @@ func (s *server) getArchitectureSource(w http.ResponseWriter, r *http.Request) {
 		select `+architecture.SourceColumns+`
 		from architecture_sources
 		where project_key = $1
+		order by id
+		limit 1
 	`, r.PathValue("key")))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -132,21 +134,40 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	source, err := architecture.ScanSource(tx.QueryRow(r.Context(), `
+	// This route keeps one source per project: a save replaces the project's source in place,
+	// under the project row's lock so two first saves cannot both add one.
+	if err := tx.QueryRow(r.Context(), "select key from projects where key = $1 for no key update", key).Scan(new(string)); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	var existing int64
+	query := `
 		insert into architecture_sources (project_key, repo, branch, enabled, installation_id, created_by)
 		values ($1, $2, $3, true, $4, $5)
-		on conflict (project_key) do update set
-			repo = excluded.repo,
-			branch = excluded.branch,
-			enabled = true,
-			installation_id = excluded.installation_id,
-			created_by = excluded.created_by,
-			last_sync_at = null,
-			last_commit = null,
-			last_tree_sha = null,
-			last_error = null
-		returning `+architecture.SourceColumns,
-		key, owner+"/"+name, branch, check.InstallationID, actorJSON))
+		returning ` + architecture.SourceColumns
+	args := []any{key, owner + "/" + name, branch, check.InstallationID, actorJSON}
+	switch err := tx.QueryRow(r.Context(),
+		"select id from architecture_sources where project_key = $1 order by id limit 1", key).Scan(&existing); {
+	case err == nil:
+		query = `
+			update architecture_sources set
+				repo = $2,
+				branch = $3,
+				enabled = true,
+				installation_id = $4,
+				created_by = $5,
+				last_sync_at = null,
+				last_commit = null,
+				last_tree_sha = null,
+				last_error = null
+			where project_key = $1 and id = $6
+			returning ` + architecture.SourceColumns
+		args = append(args, existing)
+	case !errors.Is(err, pgx.ErrNoRows):
+		s.writeHandlerError(w, err)
+		return
+	}
+	source, err := architecture.ScanSource(tx.QueryRow(r.Context(), query, args...))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -230,19 +251,24 @@ func (s *server) syncArchitectureSource(w http.ResponseWriter, r *http.Request) 
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	source, err := s.deps.Architecture.Sync(r.Context(), r.PathValue("key"))
-	if err == nil {
-		WriteJSON(w, http.StatusOK, source)
-		return
+	results, err := s.deps.Architecture.SyncProject(r.Context(), r.PathValue("key"))
+	if err == nil && len(results) == 0 {
+		err = architecture.ErrNoSource
 	}
 	if errors.Is(err, architecture.ErrNoSource) {
 		writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source configured for "+r.PathValue("key"))
 		return
 	}
-	if source.Project == "" {
-		// Sync could not even record the failure on the row: the database, not
-		// the model or GitHub, is what broke.
+	if err != nil {
 		s.writeHandlerError(w, err)
+		return
+	}
+	source, err := results[0].Source, results[0].Err
+	if err == nil {
+		WriteJSON(w, http.StatusOK, source)
+		return
+	}
+	if source.Project == "" {
 		return
 	}
 	if architecture.IsAccessFailure(err) {
