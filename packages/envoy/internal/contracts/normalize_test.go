@@ -2936,6 +2936,32 @@ func TestSlackDeliveredText(t *testing.T) {
 			wantText:    "Deploy failed on web-1",
 		},
 		{
+			// An app that follows Slack's own two recommendations — the top-level text field
+			// carries the content a screen reader reads (docs.slack.dev/block-kit,
+			// "Accessibility considerations") and the content itself goes in a rich_text block
+			// ("Block Kit and AI", best practice 1, "Use rich text for formatted output") —
+			// posts words in a rich_text block that are not a copy of its own text. Those words
+			// are the message's content and must be delivered: the exception for the Slack
+			// client's structured copy must not swallow an app's own rich text.
+			name: "an app's rich-text words beside a short text of its own",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "subtype": "bot_message", "channel": "C01234567",
+					"bot_id": "B01234567", "username": "ci", "text": "Build failed",
+					"blocks": []any{map[string]any{
+						"type": "rich_text",
+						"elements": []any{map[string]any{
+							"type":     "rich_text_section",
+							"elements": []any{map[string]any{"type": "text", "text": "FAIL TestFoo at line 42: want 3, got 4"}},
+						}},
+					}},
+				},
+			},
+			wantSummary: "slack bot message in C01234567 from ci: Build failed",
+			wantText:    "Build failed\nFAIL TestFoo at line 42: want 3, got 4",
+		},
+		{
 			name: "a field value the words merely contain",
 			body: map[string]any{
 				"team_id": "T01234567",
