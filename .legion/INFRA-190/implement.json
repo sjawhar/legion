@@ -2,9 +2,10 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-190",
-  "completed": "2026-10-25T18:45:00Z",
+  "completed": "2026-10-25T19:15:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2204",
   "evidence": "https://github.com/sjawhar/legion/pull/2204#issuecomment-6401596447",
+  "rebaseRecheck": "rebase re-check 3562964859069a0c762adda181fc94efe89e7123 -> 2c016c99830ae38b862237576bbd571dc8632783 (forward merge of main 4ceb3aa9c5, CHANGELOG-only conflicts): fingerprint 0ef9d407ca42... unchanged, bare gates only, plus linked-images.e2e.ts chromium+iphone 16 passed on the merged tree (https://github.com/sjawhar/legion/pull/2204#issuecomment-6401828292)",
   "proof": [
     {
       "criterion": "A1 (R1): the spec's reproduction prints [![x](i.png)](https://u.com) for the original and for the copy read back from the Y.Doc",
