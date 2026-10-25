@@ -92,21 +92,18 @@ func runWorkspaceController(_ context.Context, args []string, stdout, stderr io.
 	return workspaceInitExit(flags, workspaceController(*root), stderr)
 }
 
-// workspaceController prepares the controller's volume: the sessions directory Oh My Pi's
-// sessions are mounted from, and nothing else — the controller works no repository and holds no
-// GitHub credential, so it gets no workspace and no gh files. It holds the controller to no
-// session: every session is a row in the session database, which the role launcher looks up
-// before it starts the child (internal/launcher).
+// workspaceController prepares the controller's volume: nothing at all, beyond refusing a root
+// that is not the absolute path its pod mounts the volume at and a pod handed the provisioning
+// token. The controller works no repository and holds no GitHub credential, so it gets no
+// workspace and no gh files, and it is held to no session either: every session is a row in the
+// session database, which the role launcher looks up before it starts the child
+// (internal/launcher).
 func workspaceController(root string) error {
 	if !filepath.IsAbs(root) {
 		return fmt.Errorf("--root must be an absolute path (got %q)", root)
 	}
 	if _, set := os.LookupEnv(provisionTokenFileEnv); set {
 		return errors.New(provisionTokenFileEnv + " is set: the controller's pod holds no provisioning token")
-	}
-	sessions := filepath.Join(root, "sessions")
-	if err := os.MkdirAll(sessions, 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", sessions, err)
 	}
 	return nil
 }

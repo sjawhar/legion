@@ -1126,8 +1126,9 @@ func issueClose(m *Machine, ctx context.Context, _ Event) error {
 }
 
 // issueCloseRetired is the issue's close reaching a claim already retired (a tree's close retired it
-// with its session kept): the session is on the volume the close releases, so it goes, and a claim
-// recording none is left as it is.
+// with its session kept): the issue is finished, so the session goes with it — a later start of the
+// issue, re-entered by a person's todo, is a fresh one — and a claim recording none is left as it
+// is.
 func issueCloseRetired(m *Machine, ctx context.Context, _ Event) error {
 	if m.claim.Session == "" && m.claim.SessionFile == "" {
 		return nil

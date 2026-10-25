@@ -32,13 +32,11 @@ const sessionsImportUsage = "usage: legion sessions import --dsn-file <file> --c
 // sessionsInput is what `legion sessions import` reads first: --dsn-file and --claims, registered
 // on its flag set by addSessionsInput.
 type sessionsInput struct {
-	command, usage      string
 	dsnFile, claimsFile *string
 }
 
-func addSessionsInput(command, usage string, flags *flag.FlagSet) sessionsInput {
+func addSessionsInput(flags *flag.FlagSet) sessionsInput {
 	return sessionsInput{
-		command: command, usage: usage,
 		dsnFile:    flags.String("dsn-file", "", "file holding the session database's postgres:// URL (required)"),
 		claimsFile: flags.String("claims", "", "the claims `legion claims list --json` printed, or - for stdin (required)"),
 	}
@@ -49,23 +47,23 @@ func addSessionsInput(command, usage string, flags *flag.FlagSet) sessionsInput 
 // when conn is nil.
 func (in sessionsInput) open(ctx context.Context, flags *flag.FlagSet, stderr io.Writer) (claims []importedClaim, conn *pgx.Conn, code int) {
 	if flags.NArg() != 0 {
-		fmt.Fprintf(stderr, "legion sessions %s: unexpected argument %q\n%s\n", in.command, flags.Arg(0), in.usage)
+		fmt.Fprintf(stderr, "legion sessions import: unexpected argument %q\n%s\n", flags.Arg(0), sessionsImportUsage)
 		return nil, nil, 2
 	}
 	for _, pair := range [][2]string{{"dsn-file", *in.dsnFile}, {"claims", *in.claimsFile}} {
 		if pair[1] == "" {
-			fmt.Fprintf(stderr, "legion sessions %s: --%s is required\n%s\n", in.command, pair[0], in.usage)
+			fmt.Fprintf(stderr, "legion sessions import: --%s is required\n%s\n", pair[0], sessionsImportUsage)
 			return nil, nil, 2
 		}
 	}
 	claims, err := readImportedClaims(*in.claimsFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "legion sessions %s: %v\n", in.command, err)
+		fmt.Fprintf(stderr, "legion sessions import: %v\n", err)
 		return nil, nil, 1
 	}
 	conn, err = ompsessions.Connect(ctx, *in.dsnFile)
 	if err != nil {
-		fmt.Fprintf(stderr, "legion sessions %s: %v\n", in.command, err)
+		fmt.Fprintf(stderr, "legion sessions import: %v\n", err)
 		return nil, nil, 1
 	}
 	return claims, conn, 0
@@ -96,7 +94,7 @@ type importedClaim struct {
 // twice: a session the table already holds byte for byte is reported as copied before.
 func runSessionsImport(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("sessions import", sessionsImportUsage, stderr)
-	input := addSessionsInput("import", sessionsImportUsage, flags)
+	input := addSessionsInput(flags)
 	tree := flags.String("tree", "", "copy the sessions of this tree's claims alone")
 	treeVolume := flags.String("tree-volume", "", "read each session from the tree volume mounted here rather than at its recorded path")
 	if code, ok := parseFlags(flags, args); !ok {

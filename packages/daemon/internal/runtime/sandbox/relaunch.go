@@ -252,13 +252,14 @@ func boundRanOut(parent, bounded context.Context, bound time.Duration, err error
 // ensureSandbox's Get, its Create or relabel patch and that relabel's store read, and for a Sandbox
 // being deleted the wait's last Get, past its deadline, and the Get and Create after it (6); the
 // suspension patch (1); awaitPodGone's confirming Get, which may begin just before its deadline
-// (1); provision's retained-sessions store read, its token mint and its Secret upsert's Get,
-// Delete and Create (5), and its repository cache's ensure (cacheEnsureCalls); the Running patch
-// (1); the stop of an earlier generation (1); the address record patch (1); the Start frame (1).
-// A try replacing a Sandbox of the superseded disk shape spends no more: its Get, Delete,
-// confirming Get and Create (4) come out of the budget of ensureSandbox's wait for a Sandbox being
-// deleted (3 of the 6 above), which that try never takes — a Sandbox it waited out is gone, and
-// the one it creates in its place already owns no claim template (replaceSupersededSandbox).
+// (1); provision's token mint and its Secret upsert's Get, Delete and Create (4), and its
+// repository cache's ensure (cacheEnsureCalls); the Running patch (1); the stop of an earlier
+// generation (1); the address record patch (1); the Start frame (1) — 16, the cache's ensure apart.
+// A try replacing a Sandbox of the superseded disk shape spends one call more, and so sets the
+// count at 17: its deleteStoredSandbox Get, the fenced Delete, awaitSandboxDeleted's confirming
+// Get and the Create (4) against the 3 of the 6 above that ensureSandbox's wait for a Sandbox
+// being deleted spends, which that try never takes — a Sandbox it waited out is gone, and the one
+// it creates in its place already owns no claim template (replaceSupersededSandbox).
 // Per launcher role of the pod (relaunchRoleCalls, claim.Roles for an issue pod, the most any pod
 // has): launcherBound's Secret Get (1); writeLauncherSecrets' credential mint and its upsert's Get,
 // Delete and Create (4); bindLauncherSecrets' Get and Update, and both again on a conflict (4).
@@ -522,8 +523,9 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 // owns none and its pod carries its disk as a generic ephemeral volume of its own
 // (issuePod.diskSource, sandboxManifest). The launch's kind is this Sandbox's: ensureSandbox finds
 // it by the claim's own name, and an issue's labels are what podKindOf reads an issue pod's kind
-// from. The project controller's Sandbox owns that template by design — its session outlives its
-// pods, so the claim holding it must — and is never replaced for this reason.
+// from. The project controller's Sandbox owns that template by design — the working root its
+// launcher runs in outlives its pods, so the claim holding it must — and is never replaced for
+// this reason.
 func supersededDisk(s *sandbox, l launch) bool {
 	_, issue := l.kind.(issuePod)
 	return issue && len(s.Spec.VolumeClaimTemplates) > 0

@@ -166,10 +166,6 @@ type launch struct {
 	secrets map[string]string
 	// prompt is the one --append-system-prompt value.
 	prompt string
-	// resumeFile is the session the role launcher resumes the child on, looked up in the session
-	// table before it starts the child (internal/launcher). It is the spec's, verbatim: the table's
-	// key, not a place on any disk.
-	resumeFile string
 	// cacheURL is the address of the issue's repository's cache (cacheURL, set by
 	// issuePod.provision), which its fetch container is told (fetchEnvironment).
 	cacheURL string
@@ -212,7 +208,7 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	if backend := runtime.Of(spec.Backend); !runtime.Backends[backend].LaunchedBy(configName) {
 		return launch{}, refuse("its role runs on %s, which the worker image does not carry: a pod runs Oh My Pi alone", backend)
 	}
-	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, resumeFile: spec.ResumeSessionFile, gh: r.tools.GH}
+	l := launch{spec: spec, name: SandboxName(spec.Claim), kind: issuePod{}, gh: r.tools.GH}
 	if spec.Role == claim.RoleController {
 		l.kind = controllerPod{}
 	} else {
@@ -320,8 +316,8 @@ func (l launch) agentArgv(agent []string) []string {
 		envoy, legion = pluginRoots(pluginGenDir(roleStateHome(l.spec.Role), l.spec.Generation))
 	}
 	argv := append(slices.Clone(agent), "--extension", envoy, "--extension", legion)
-	if l.resumeFile != "" {
-		argv = append(argv, "--resume="+l.resumeFile)
+	if l.spec.ResumeSessionFile != "" {
+		argv = append(argv, "--resume="+l.spec.ResumeSessionFile)
 	}
 	return append(argv, "--mode", "rpc", "--append-system-prompt", l.prompt)
 }
@@ -349,9 +345,9 @@ func (r *Runtime) diskSpec() corev1.PersistentVolumeClaimSpec {
 // (podKind.claimTemplates). An issue's Sandbox owns none: its pod's disk is a generic ephemeral
 // volume the pod itself owns, created with the pod and deleted with it (INFRA-80), so nothing of
 // an issue survives the pod that did it. The controller's Sandbox still owns its one `issue`
-// template, so a relaunch finds the session its last pod left. Its pod template never runs: the
-// relaunch's Running patch replaces it with the template the launch computes before the controller
-// creates a pod.
+// template, so the working root its launcher runs in outlives the pod that left it. Its pod
+// template never runs: the relaunch's Running patch replaces it with the template the launch
+// computes before the controller creates a pod.
 func (r *Runtime) sandboxManifest(l launch) sandbox {
 	return sandbox{
 		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},

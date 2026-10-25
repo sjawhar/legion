@@ -27,8 +27,8 @@ type podKind interface {
 	// claimToken is the claim of a launcher of role, one of roles, on a pod of this kind of project,
 	// issue being the issue key its Secrets carry (secretAnnotations).
 	claimToken(project, issue string, role claim.Role) (claim.Token, error)
-	// prepare resolves what the kind decides of a launch, its workspace and whether its volume
-	// must already hold what it left, refusing a spec it cannot honour.
+	// prepare resolves what the kind decides of a launch, its working directory above all,
+	// refusing a spec it cannot honour.
 	prepare(l *launch) error
 	// labels are the pod's resource labels, on its Sandbox, pod template and Secrets, which name
 	// its kind (podKindOf).
@@ -279,10 +279,11 @@ func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox
 }
 
 // controllerPod is the project controller's pod (`controller: daemon`): the controller's launcher
-// alone, working in the root of a volume of its own, which its Sandbox owns, so a relaunch resumes
-// its session. It belongs to no tree and holds the review App's GitHub credential like any
-// verdict-only role (appauth.AppRoleFor), but provisions no workspace: its one init container
-// makes its sessions directory and holds a resume to its session.
+// alone, working in the root of a volume of its own, which its Sandbox owns, so the working root a
+// pod leaves is the one its successor finds. It belongs to no tree and holds the review App's
+// GitHub credential like any verdict-only role (appauth.AppRoleFor), but provisions no workspace:
+// its one init container creates nothing on that volume, and refuses only a pod handed the
+// provisioning token, which the controller never holds.
 type controllerPod struct{}
 
 func (controllerPod) roles() []claim.Role { return []claim.Role{claim.RoleController} }
@@ -303,10 +304,10 @@ func (controllerPod) labels(project string, _ launch) map[string]string {
 	return map[string]string{labelProject: project, labelRole: string(claim.RoleController)}
 }
 
-// claimTemplates are the one `issue` volume the controller's Sandbox owns, so the session a pod
-// left on it is there for the next one to resume. Its labels are the pod's own (labels), which
-// carry the project and the controller role and no tree: the controller belongs to none, and the
-// daemon's restricted identity has no PVC verb, so a label put on the claim at creation is the
+// claimTemplates are the one `issue` volume the controller's Sandbox owns, so the working root the
+// controller runs in (TreeRoot, prepare) outlives its pods. Its labels are the pod's own (labels),
+// which carry the project and the controller role and no tree: the controller belongs to none, and
+// the daemon's restricted identity has no PVC verb, so a label put on the claim at creation is the
 // label it keeps for life.
 func (controllerPod) claimTemplates(r *Runtime, l launch) []volumeClaimTemplate {
 	return []volumeClaimTemplate{{

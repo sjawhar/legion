@@ -143,8 +143,8 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 		case reason != "":
 			refused = append(refused, "Sandbox "+object.GetName()+reason)
 		case superseded:
-			log.Info(fmt.Sprintf("sandbox runtime: issue Sandbox %s owns a %q claim template, the disk shape before the pod-owned disk; its next launch replaces it", object.GetName(), issueVolume),
-				"sandbox", object.GetName())
+			log.Info("sandbox runtime: the issue Sandbox owns a claim template, the disk shape before the pod-owned disk; its next launch replaces it",
+				"sandbox", object.GetName(), "claim_template", issueVolume)
 		}
 	}
 	if len(refused) == 0 {
@@ -159,8 +159,9 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 // owning the `issue` claim template of the release before the pod-owned disk, which its next
 // launch replaces. An issue pod's disk is the pod's own generic ephemeral volume
 // (issuePod.diskSource), so the Sandbox this runtime now makes for an issue owns no claim template
-// at all, while the controller's owns the one named issueVolume its session is resumed from. The
-// tree-volume layout before per-issue volumes gave only the tree root's Sandbox a template, named
+// at all, while the controller's owns the one named issueVolume, which outlives its pods because
+// the controller's working root is on it (controllerPod.claimTemplates). The tree-volume layout
+// before per-issue volumes gave only the tree root's Sandbox a template, named
 // `tree`, which every child of the tree mounted, and its controller's Sandbox a `tree` template of
 // its own; a controller owning no volume comes from that layout too. Such a Sandbox is never
 // adopted: a root's volume holds every clone and workspace of its tree, which only the drained
