@@ -1,4 +1,5 @@
 import {
+  encodeBlockId,
   hasControlCharacter,
   isSessionId,
   itemFromSearch,
@@ -11,14 +12,23 @@ import type { Artifact } from "../../api/types";
 import { EVERYONE_FILTER_VALUE } from "../inbox/sections";
 import { shortSessionId } from "./actor";
 
+/** A block of a document, as a reference to it names one (`<document>#b-<id>[@v<N>]`): `block` is
+ *  the block's id as the document writes it, and `pin` the version of the document a pinned
+ *  reference names. A route with a block names no version or item of its own; a pin comes only
+ *  with a block. */
+export interface BlockTarget {
+  block?: string;
+  pin?: number;
+}
+
 export type IssueRoute =
   | { key: string; kind: "issue" }
-  | { key: string; kind: "spec" }
+  | ({ key: string; kind: "spec" } & BlockTarget)
   | { key: string; kind: "conversation" }
   | { key: string; kind: "activity" }
   | { key: string; kind: "children" }
   | { key: string; kind: "artifacts" }
-  | { key: string; kind: "artifact"; slug: string; version?: number }
+  | ({ key: string; kind: "artifact"; slug: string; version?: number } & BlockTarget)
   | { key: string; kind: "ask"; id: string }
   | { key: string; kind: "comment"; id: string }
   | { key: string; kind: "message"; id: string };
@@ -31,13 +41,13 @@ export type ProjectRoute =
   | { kind: "architecture"; project: string }
   | { kind: "issues"; project: string }
   | { kind: "documents"; project: string }
-  | {
+  | ({
       kind: "document";
       project: string;
       slug: string;
       version?: number;
       item?: { kind: "ask" | "comment"; id: string };
-    };
+    } & BlockTarget);
 
 export type DispatchRoute = IssueRoute | ProjectRoute;
 export type ProjectDocumentRoute = Extract<ProjectRoute, { kind: "document" }>;
@@ -244,11 +254,67 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   };
 }
 
+/** The block id a `#b-` fragment names after its `b-`: not empty, holding no raw `@`
+ *  (`encodeBlockId` writes one as `%40`, so a raw `@` is only ever a pin), and decoding as a path
+ *  segment does, with any percent-encoding; undefined otherwise. */
+function blockIdOf(encoded: string): string | undefined {
+  return encoded.includes("@") ? undefined : decodedSegment(encoded);
+}
+
+/** `route` naming its document's block `block`, pinned to version `pin` when one is given: only a
+ *  spec, an issue artifact or a project document, at no version and naming no item, holds blocks
+ *  a reference can name; undefined for any other route. */
+function withBlock(
+  route: DispatchReferenceRoute | undefined,
+  block: string,
+  pin?: number
+): DispatchReferenceRoute | undefined {
+  if (
+    route === undefined ||
+    (route.kind !== "spec" && route.kind !== "artifact" && route.kind !== "document") ||
+    (route.kind !== "spec" && route.version !== undefined) ||
+    (route.kind === "document" && route.item !== undefined)
+  ) {
+    return undefined;
+  }
+  return pin === undefined ? { ...route, block } : { ...route, block, pin };
+}
+
+/** `<document reference>#b-<block id>[@v<N>]`, as the server's `text.parseBlock` reads it: the
+ *  fragment's id with any percent-encoding, a raw `@` only as the start of a well-formed pin, and
+ *  a document that `withBlock` admits. Any other fragment names nothing. */
+function parseBlockReference(
+  document: string,
+  fragment: string
+): DispatchReferenceRoute | undefined {
+  if (!fragment.startsWith("b-") || document.includes("@")) {
+    return undefined;
+  }
+  const encoded = fragment.slice(2);
+  const at = encoded.indexOf("@");
+  const pin = at === -1 ? undefined : encoded.slice(at + 1).match(/^v([1-9]\d*)$/)?.[1];
+  if (at !== -1 && pin === undefined) {
+    return undefined;
+  }
+  const block = blockIdOf(at === -1 ? encoded : encoded.slice(0, at));
+  return block === undefined
+    ? undefined
+    : withBlock(
+        parseDispatchReference(document),
+        block,
+        pin === undefined ? undefined : Number(pin)
+      );
+}
+
 /** A `dispatch://` reference's route. One holding a control character names nothing, as the
- * server's `text.Extract` reads it. */
+ * server's `text.Extract` reads it; a fragment names a block (`parseBlockReference`) or nothing. */
 export function parseDispatchReference(value: string): DispatchReferenceRoute | undefined {
   if (hasControlCharacter(value)) {
     return undefined;
+  }
+  const hash = value.indexOf("#");
+  if (hash !== -1) {
+    return parseBlockReference(value.slice(0, hash), value.slice(hash + 1));
   }
   const match = value.match(/^dispatch:\/\/([^/]+)(?:\/(.*))?$/);
   if (match === null) {
@@ -392,7 +458,10 @@ export function routeProjectOf(pathname: string): string | undefined {
 /** The reference a `dispatch://` URL or a same-origin dashboard path names; undefined for an
  * external link or a dashboard path that is not an issue/document reference. A reference holding a
  * control character, or naming a slug Dispatch never gives a document, names nothing, as the
- * server's `text.Extract` reads it. */
+ * server's `text.Extract` reads it. A `#b-<block id>` fragment on a document page names that
+ * block, unless the page is a version (whose stored text holds no block ids) or names an item; a
+ * raw `@` there is no pin, since pins are written only in `dispatch://` references. Any other
+ * fragment leaves the page's reference as it is. */
 export function referenceRouteFromHref(
   href: string,
   appOrigin: string = window.location.origin
@@ -434,7 +503,8 @@ export function referenceRouteFromHref(
       return { id: item.id, key: route.key, kind: item.kind };
     }
   }
-  return route;
+  const block = url.hash.startsWith("#b-") ? blockIdOf(url.hash.slice(3)) : undefined;
+  return (block === undefined ? undefined : withBlock(route, block)) ?? route;
 }
 
 export interface ReferenceSpan {
@@ -529,23 +599,39 @@ export function composerReferences(
   return references;
 }
 
+/** The `#b-` fragment every link to a block of a document carries: the id as `encodeBlockId`
+ *  writes it, the one encoding the server's `text.EncodeBlockID` shares. */
+export function blockFragment(blockId: string): string {
+  return `#b-${encodeBlockId(blockId)}`;
+}
+
+/** The block of its document a reference names (`#b-`), or undefined for a reference to anything
+ *  else. */
+export function routeBlock(route: DispatchReferenceRoute): string | undefined {
+  return "block" in route ? route.block : undefined;
+}
+
 export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if (route.kind === "agent-artifact") {
     return `dispatch://agent/${route.session}/artifact/${encodeURIComponent(route.slug)}${
       route.version === undefined ? "" : `@v${route.version}`
     }`;
   }
+  const block =
+    "block" in route && route.block !== undefined
+      ? `${blockFragment(route.block)}${route.pin === undefined ? "" : `@v${route.pin}`}`
+      : "";
   if ("project" in route) {
     return `dispatch://${route.project}/artifact/${encodeURIComponent(route.slug)}${
       route.version === undefined ? "" : `@v${route.version}`
-    }${route.item === undefined ? "" : `/${route.item.kind}/${encodeURIComponent(route.item.id)}`}`;
+    }${route.item === undefined ? "" : `/${route.item.kind}/${encodeURIComponent(route.item.id)}`}${block}`;
   }
   const issue = `dispatch://${route.key}`;
   if (route.kind === "issue") {
     return issue;
   }
   if (route.kind === "spec") {
-    return `${issue}/spec`;
+    return `${issue}/spec${block}`;
   }
   // The conversation keeps the `log` spelling every reference written before the Activity tab
   // existed used; activity, newer, is spelled as its own path is.
@@ -564,7 +650,7 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
   if (route.kind === "artifact") {
     return `${issue}/artifact/${encodeURIComponent(route.slug)}${
       route.version === undefined ? "" : `@v${route.version}`
-    }`;
+    }${block}`;
   }
   return `${issue}/${route.kind}/${encodeURIComponent(route.id)}`;
 }
@@ -614,9 +700,12 @@ export interface ReferencedArtifact {
 }
 
 /** The artifact a reference names, as its owner, its slug and the version it pins: an issue's
- *  artifact, a project document (not an ask or comment on one), or an agent conversation's
- *  artifact. Undefined for a reference to anything else. */
+ *  artifact, a project document (not an ask, a comment or a block of one), or an agent
+ *  conversation's artifact. Undefined for a reference to anything else. */
 export function referencedArtifact(route: DispatchReferenceRoute): ReferencedArtifact | undefined {
+  if (routeBlock(route) !== undefined) {
+    return undefined;
+  }
   switch (route.kind) {
     case "artifact":
       return { owner: { issue: route.key }, slug: route.slug, version: route.version };
@@ -693,7 +782,7 @@ export function documentItemPath(
 ): string {
   const path = buildReferencePath(documentRoute(artifact));
   if (item.blockID !== undefined) {
-    return `${path}#b-${encodeURIComponent(item.blockID)}`;
+    return `${path}${blockFragment(item.blockID)}`;
   }
   return `${path}?${item.kind}=${encodeURIComponent(item.id)}`;
 }
@@ -701,10 +790,13 @@ export function documentItemPath(
 /** What a reference resolves to for display: the record whose title, excerpt, or author the
  * reader is shown. An issue's spec/log/activity/children/artifacts tabs all resolve to the issue
  * itself; an ask or comment nested under a project document resolves to that item, not the
- * document. */
-export type ReferenceTargetKind = "issue" | "document" | "ask" | "comment" | "message";
+ * document; a block of a document (`#b-`) resolves to that block. */
+export type ReferenceTargetKind = "issue" | "document" | "block" | "ask" | "comment" | "message";
 
 export function referenceTargetKind(route: DispatchReferenceRoute): ReferenceTargetKind {
+  if (routeBlock(route) !== undefined) {
+    return "block";
+  }
   if (route.kind === "document") {
     return route.item?.kind ?? "document";
   }
@@ -729,15 +821,19 @@ export function shortForm(route: DispatchReferenceRoute): string {
   if (route.kind === "agent-artifact") {
     return `agent/${shortSessionId(route.session)}/${route.slug}`;
   }
+  const block =
+    "block" in route && route.block !== undefined
+      ? ` block${route.pin === undefined ? "" : ` v${route.pin}`}`
+      : "";
   if (isProjectRoute(route)) {
     const base = `${route.project}/${route.slug}`;
-    return route.item === undefined ? base : `${base} ${route.item.kind}`;
+    return route.item === undefined ? `${base}${block}` : `${base} ${route.item.kind}`;
   }
   switch (route.kind) {
     case "issue":
       return route.key;
     case "spec":
-      return `${route.key} spec`;
+      return `${route.key} spec${block}`;
     case "conversation":
       return `${route.key} log`;
     case "activity":
@@ -747,7 +843,7 @@ export function shortForm(route: DispatchReferenceRoute): string {
     case "artifacts":
       return `${route.key} artifacts`;
     case "artifact":
-      return `${route.key} ${route.slug}`;
+      return `${route.key} ${route.slug}${block}`;
     case "ask":
       return `${route.key} ask`;
     case "comment":
@@ -757,13 +853,37 @@ export function shortForm(route: DispatchReferenceRoute): string {
   }
 }
 
-/** The SPA path a reference navigates to, whichever side of the issue/project split it is on. */
-export function buildReferencePath(route: DispatchReferenceRoute): string {
+/** The SPA path a reference navigates to, whichever side of the issue/project split it is on. A
+ *  block opens its document at the block (`#b-`); a pinned block opens the version of its document
+ *  it pins, since a version's stored text holds no block ids to land on. An issue's spec keeps its
+ *  versions under its own slug, which a spec route does not carry: `specSlug` names it once the
+ *  issue is read (`useReferencePath`), and until then a pinned block of the spec opens the live
+ *  spec at the block. */
+export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: string): string {
   if (route.kind === "agent-artifact") {
     const artifact = `/agents/${encodeURIComponent(route.session)}/artifacts/${encodeURIComponent(route.slug)}`;
     return route.version === undefined ? artifact : `${artifact}?v=${route.version}`;
   }
-  return isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route);
+  const path = isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route);
+  if (!("block" in route) || route.block === undefined) {
+    return path;
+  }
+  const live = `${path}${blockFragment(route.block)}`;
+  if (route.pin === undefined) {
+    return live;
+  }
+  if (route.kind === "document") {
+    return buildProjectPath({
+      kind: "document",
+      project: route.project,
+      slug: route.slug,
+      version: route.pin,
+    });
+  }
+  const slug = route.kind === "artifact" ? route.slug : specSlug;
+  return slug === undefined
+    ? live
+    : buildIssuePath({ key: route.key, kind: "artifact", slug, version: route.pin });
 }
 
 export function buildIssuePath(route: IssueRoute): string {

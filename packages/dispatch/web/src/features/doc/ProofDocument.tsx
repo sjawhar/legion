@@ -36,7 +36,9 @@ import {
 } from "../artifacts/ArtifactUpload";
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
+import { fetchReferencePath } from "../refs/reference-target";
 import {
+  blockFragment,
   buildIssuePath,
   buildProjectPath,
   buildReferencePath,
@@ -310,7 +312,9 @@ export function ProofDocument({
     if (blockId === null || blockId === undefined) {
       return false;
     }
-    return copyText(`${window.location.origin}${window.location.pathname}#b-${blockId}`);
+    return copyText(
+      `${window.location.origin}${window.location.pathname}${blockFragment(blockId)}`
+    );
   }, []);
   // Google Docs' chord for the selection bar's Comment button, on the button's own path. It is
   // offered while this editor has focus, holds a selection and takes edits, which is when the bar
@@ -716,14 +720,14 @@ export function ProofDocument({
           </span>
           <a
             className={`block min-w-0 max-w-[90ch] truncate text-sm font-medium underline ${linkText} ${linkHoverText}`}
-            href={`#b-${encodeURIComponent(openDecision.block_id ?? "")}`}
+            href={blockFragment(openDecision.block_id ?? "")}
             onClick={(event) => {
               event.preventDefault();
               const blockID = openDecision.block_id;
               if (blockID === undefined || blockID === null) {
                 return;
               }
-              window.location.hash = `b-${encodeURIComponent(blockID)}`;
+              window.location.hash = blockFragment(blockID);
               editorRef.current?.focusBlock(blockID);
             }}
             title={openDecision.question}
@@ -778,6 +782,12 @@ export function ProofDocument({
             return;
           }
           event.preventDefault();
+          // A block of a spec pinned to a version opens that version under the spec's slug, which
+          // only the issue names; every other reference's path is known at once.
+          if (route.kind === "spec" && route.pin !== undefined) {
+            void fetchReferencePath(queryClient, route).then((path) => navigate(path));
+            return;
+          }
           navigate(buildReferencePath(route));
         }}
       >

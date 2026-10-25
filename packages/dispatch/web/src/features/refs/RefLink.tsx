@@ -1,7 +1,7 @@
-import { type ReactNode, useState } from "react";
+import { type ReactNode, useLayoutEffect, useState } from "react";
 
 import { borderDefault } from "../../theme/classes";
-import { useReferenceTarget } from "./reference-target";
+import { useReferencePath, useReferenceTarget } from "./reference-target";
 import {
   buildDispatchReference,
   buildReferencePath,
@@ -31,9 +31,23 @@ export const pictureThumbnailClassName = `not-prose inline-block h-10 w-10 shrin
  * `useReferenceTarget` has it, the ref's short form until then, and beside it the picture's
  * thumbnail when the reference names an image artifact. A thumbnail the browser cannot draw (a
  * pinned version the server does not serve) is dropped, leaving the title alone, so a stale or
- * hand-written reference never shows a broken-image glyph. */
-export function RefLink({ route }: { route: DispatchReferenceRoute }): ReactNode {
+ * hand-written reference never shows a broken-image glyph. When the element it renders into is a
+ * link, its href follows `useReferencePath`, which a pinned block of a spec resolves only once its
+ * issue is read. */
+export function RefLink({
+  anchor,
+  route,
+}: {
+  anchor?: HTMLElement;
+  route: DispatchReferenceRoute;
+}): ReactNode {
   const { picture, title } = useReferenceTarget(route);
+  const path = useReferencePath(route);
+  useLayoutEffect(() => {
+    if (anchor instanceof HTMLAnchorElement) {
+      anchor.setAttribute("href", path);
+    }
+  }, [anchor, path]);
   // The address that failed, not a flag: a plain reference names the latest version, so a version
   // uploaded since gets its own load instead of inheriting the last one's failure.
   const [failedPicture, setFailedPicture] = useState<string>();

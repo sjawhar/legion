@@ -80,6 +80,97 @@ test("an item's document path names the document it belongs to, never the issue'
   );
 });
 
+test("every block link writes its id as encodeBlockId does, so `_` is %5F", () => {
+  const notes = {
+    issue_key: "CORE-1",
+    kind: "doc" as const,
+    primary: false,
+    project: "CORE",
+    slug: "notes-md",
+  };
+  expect(documentItemPath(notes, { blockID: "ship_it", id: "a1", kind: "ask" })).toBe(
+    "/issues/CORE-1/artifacts/notes-md#b-ship%5Fit"
+  );
+  const block = { block: "ship_it", key: "CORE-1", kind: "spec" as const };
+  expect(buildDispatchReference(block)).toBe("dispatch://CORE-1/spec#b-ship%5Fit");
+  expect(buildReferencePath(block)).toBe("/issues/CORE-1/spec#b-ship%5Fit");
+  // Read back with any percent-encoding, the reference and the page name the same block.
+  expect(parseDispatchReference("dispatch://CORE-1/spec#b-ship_it")).toEqual(block);
+  expect(
+    referenceRouteFromHref("/issues/CORE-1/spec#b-ship%5Fit", "https://dispatch.test")
+  ).toEqual(block);
+});
+
+test("a pinned block reference round-trips with its pin, and opens the version it pins", () => {
+  const pinned = parseDispatchReference("dispatch://CORE-1/artifact/notes-md#b-ship%5Fit@v2");
+  expect(pinned).toEqual({
+    block: "ship_it",
+    key: "CORE-1",
+    kind: "artifact",
+    pin: 2,
+    slug: "notes-md",
+  });
+  if (pinned === undefined) throw new Error("the pinned reference did not parse");
+  expect(buildDispatchReference(pinned)).toBe("dispatch://CORE-1/artifact/notes-md#b-ship%5Fit@v2");
+  expect(referenceTargetKind(pinned)).toBe("block");
+  expect(shortForm(pinned)).toBe("CORE-1 notes-md block v2");
+  // A version's stored text holds no block ids, so a pinned block opens the version itself.
+  expect(buildReferencePath(pinned)).toBe("/issues/CORE-1/artifacts/notes-md?v=2");
+
+  const document = parseDispatchReference("dispatch://CORE/artifact/handbook-md#b-p1@v7");
+  if (document === undefined) throw new Error("the pinned project reference did not parse");
+  expect(buildDispatchReference(document)).toBe("dispatch://CORE/artifact/handbook-md#b-p1@v7");
+  expect(buildReferencePath(document)).toBe("/projects/CORE/documents/handbook-md?version=7");
+
+  // A spec keeps its versions under its own slug: with it, the version; without it, the live spec
+  // at the block.
+  const spec = parseDispatchReference("dispatch://CORE-1/spec#b-p1@v3");
+  if (spec === undefined) throw new Error("the pinned spec reference did not parse");
+  expect(buildDispatchReference(spec)).toBe("dispatch://CORE-1/spec#b-p1@v3");
+  expect(buildReferencePath(spec, "core-1-md")).toBe("/issues/CORE-1/artifacts/core-1-md?v=3");
+  expect(buildReferencePath(spec)).toBe("/issues/CORE-1/spec#b-p1");
+
+  // Unpinned, a block opens the live document at the block.
+  const live = parseDispatchReference("dispatch://CORE-1/spec#b-p1");
+  if (live === undefined) throw new Error("the block reference did not parse");
+  expect(buildReferencePath(live, "core-1-md")).toBe("/issues/CORE-1/spec#b-p1");
+  expect(referenceTargetKind(live)).toBe("block");
+});
+
+test("a block names nothing on a versioned document, an item, an issue or a malformed pin", () => {
+  for (const reference of [
+    "dispatch://CORE-1/artifact/notes-md@v2#b-p1",
+    "dispatch://CORE/artifact/handbook-md/comment/c1#b-p1",
+    "dispatch://CORE-1#b-p1",
+    "dispatch://CORE-1/comment/c1#b-p1",
+    "dispatch://CORE-1/spec#b-p1@v",
+    "dispatch://CORE-1/spec#b-p1@v0",
+    "dispatch://CORE-1/spec#b-p1@v01",
+    "dispatch://CORE-1/spec#b-a@b",
+    "dispatch://CORE-1/spec#b-",
+  ]) {
+    expect(parseDispatchReference(reference)).toBeUndefined();
+  }
+  // A page's raw `@` is no pin, and a version page or an item page is the page whatever its
+  // fragment.
+  const origin = "https://dispatch.test";
+  expect(referenceRouteFromHref("/issues/CORE-1/spec#b-p1@v2", origin)).toEqual({
+    key: "CORE-1",
+    kind: "spec",
+  });
+  expect(referenceRouteFromHref("/issues/CORE-1/artifacts/notes-md?v=2#b-p1", origin)).toEqual({
+    key: "CORE-1",
+    kind: "artifact",
+    slug: "notes-md",
+    version: 2,
+  });
+  expect(referenceRouteFromHref("/issues/CORE-1/spec?comment=c1#b-p1", origin)).toEqual({
+    id: "c1",
+    key: "CORE-1",
+    kind: "comment",
+  });
+});
+
 test("artifact route parser accepts the plural and singular browser paths", () => {
   expect(parseIssuePath(browserPath("issues/CORE-1/artifacts/design"), "?v=3")).toEqual({
     key: "CORE-1",

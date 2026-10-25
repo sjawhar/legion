@@ -18,10 +18,14 @@ import { type IssueStatus, statusLabel } from "../project/board-model";
 import { actorLabel, shortSessionId } from "./actor";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { REF_PREVIEW_CLOSE_DELAY_MS, REF_PREVIEW_OPEN_DELAY_MS } from "./ref-preview-timing";
-import { artifactTextQuery, prefetchReference, useReferenceData } from "./reference-target";
+import {
+  artifactTextQuery,
+  prefetchReference,
+  useReferenceData,
+  useReferencePath,
+} from "./reference-target";
 import {
   buildDispatchReference,
-  buildReferencePath,
   type DispatchReferenceRoute,
   isProjectRoute,
   parseDispatchReference,
@@ -287,17 +291,21 @@ function IssuePreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   );
 }
 
+/** Who a document belongs to, as a card names it: an agent's conversation, a project, an issue. */
+function documentOwner(route: DispatchReferenceRoute): string {
+  return route.kind === "agent-artifact"
+    ? `agent ${shortSessionId(route.session)}`
+    : isProjectRoute(route)
+      ? route.project
+      : route.key;
+}
+
 function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
   const { artifact, markdown } = useReferenceData(route);
   if (artifact === undefined) {
     return <Heading>{shortForm(route)}</Heading>;
   }
-  const owner =
-    route.kind === "agent-artifact"
-      ? `agent ${shortSessionId(route.session)}`
-      : isProjectRoute(route)
-        ? route.project
-        : route.key;
+  const owner = documentOwner(route);
   const latest = artifact.versions.at(-1)?.number;
   return (
     <>
@@ -309,6 +317,40 @@ function DocumentPreview({ route }: { route: DispatchReferenceRoute }): ReactNod
         <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>v{latest}</span>
       )}
       {markdown === undefined || markdown.trim() === "" ? null : <Body markdown={markdown} />}
+    </>
+  );
+}
+
+/** A block of a document: its document, then for a pinned reference the version it pins and how
+ *  the block stands since (`BlockPin.state`), then its text - the pinned version's for a pinned
+ *  reference, its current text otherwise. */
+function BlockPreview({ route }: { route: DispatchReferenceRoute }): ReactNode {
+  const { artifact, block } = useReferenceData(route);
+  if (artifact === undefined || block === undefined) {
+    return <Heading>{shortForm(route)}</Heading>;
+  }
+  const { node } = block;
+  const pin = node.pin;
+  const text = pin === undefined ? node.text : pin.text;
+  return (
+    <>
+      <Heading>
+        <span className={`font-normal ${textMutedOnSurface}`}>{documentOwner(route)} · </span>
+        {artifact.name}
+      </Heading>
+      {pin === undefined ? null : (
+        <span className={`mt-1 block text-xs ${textMutedOnSurface}`}>
+          <span className="block">Version {pin.version}</span>
+          <span className="block">
+            {pin.state === "changed"
+              ? `Changed in version ${node.changed_version}`
+              : pin.state === "removed"
+                ? `Removed in version ${pin.removed_version}`
+                : `Unchanged since version ${pin.version}`}
+          </span>
+        </span>
+      )}
+      {text === undefined || text.trim() === "" ? null : <Body markdown={text} />}
     </>
   );
 }
@@ -368,6 +410,8 @@ function PreviewContent({ route }: { route: DispatchReferenceRoute }): ReactNode
       return <MessagePreview route={route} />;
     case "document":
       return <DocumentPreview route={route} />;
+    case "block":
+      return <BlockPreview route={route} />;
     case "issue":
       return <IssuePreview route={route} />;
   }
@@ -378,6 +422,7 @@ const ANCHOR_GAP_PX = 6;
 
 function PreviewCard({ target }: { target: PreviewTarget }): ReactNode {
   const element = useRef<HTMLDivElement>(null);
+  const path = useReferencePath(target.route);
   // Re-measured on every render: the card grows when its data arrives, and its size decides
   // whether it fits below the anchor. Fixed positioning against the anchor's viewport rect is
   // the boring choice that works in Chromium and iPhone Safari alike — the native Popover API
@@ -411,7 +456,7 @@ function PreviewCard({ target }: { target: PreviewTarget }): ReactNode {
       ref={element}
       role="tooltip"
     >
-      <Link className="block" tabIndex={-1} to={buildReferencePath(target.route)}>
+      <Link className="block" tabIndex={-1} to={path}>
         <PreviewContent route={target.route} />
       </Link>
     </div>

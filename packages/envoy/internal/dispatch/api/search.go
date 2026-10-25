@@ -17,6 +17,7 @@ import (
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const (
@@ -628,7 +629,7 @@ func searchHref(kind string, owner model.SearchOwner, artifact *model.SearchArti
 			return issueHref + "/asks/" + id
 		}
 		if blockID != nil {
-			return documentHref + "#b-" + url.PathEscape(*blockID)
+			return documentHref + "#b-" + text.EncodeBlockID(*blockID)
 		}
 		return documentHref + "?ask=" + url.QueryEscape(id)
 	case "message":

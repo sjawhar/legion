@@ -277,6 +277,23 @@ test("a block copied from an issue's spec links to the spec", () => {
   }
 });
 
+test("a copied block's link names its block as encodeBlockId writes it", () => {
+  const card = renderCard({
+    indexed: false,
+    node: askNode({
+      blockId: "ship_it",
+      copied_from: "ask-source",
+      copied_from_document: "dispatch://CORE-1/artifact/plan",
+    }),
+  });
+  try {
+    const link = card.header.getByRole("link", { name: "CORE-1 plan" });
+    expect(link.getAttribute("href")).toBe("/issues/CORE-1/artifacts/plan#b-ship%5Fit");
+  } finally {
+    card.unmount();
+  }
+});
+
 test("a project document's copied block links to its source under the project", () => {
   const card = renderCard({
     indexed: false,

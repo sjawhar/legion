@@ -346,6 +346,60 @@ test("a bare dispatch ask reference renders an inline link to the ask route with
   }
 });
 
+test("a block reference reads as the headline of its text: the pinned version's, opening that version, or the current one, opening the block", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    artifacts: [
+      { ...picture, id: "spec", kind: "doc", name: "Design.md", primary: true, slug: "design-md" },
+    ],
+    key: "CORE-1",
+    primary_artifact_id: "spec",
+    title: "Core one",
+  } as never);
+  const node = {
+    block_id: "p1",
+    changed_version: 3,
+    document: "dispatch://CORE-1/spec",
+    id: "CORE-1/spec#p1",
+    issue_key: "CORE-1",
+    kind: "block" as const,
+    project: "CORE",
+    ref: "dispatch://CORE-1/spec#b-p1",
+    text: "Ship it on **Monday**.",
+  };
+  const getReferences = spyOn(api, "getReferences").mockImplementation((reference) =>
+    Promise.resolve(
+      reference.endsWith("@v2")
+        ? {
+            edges: [],
+            node: {
+              ...node,
+              pin: { ref: reference, state: "changed", text: "Ship it on Friday.", version: 2 },
+            },
+          }
+        : { edges: [], node }
+    )
+  );
+  const view = render(
+    withQueries(
+      <MarkdownBody markdown="Now dispatch://CORE-1/spec#b-p1 and then dispatch://CORE-1/spec#b-p1@v2." />
+    )
+  );
+
+  try {
+    const current = await within(view.container).findByRole("link", { name: "Ship it on Monday." });
+    expect(current.getAttribute("href")).toBe("/issues/CORE-1/spec#b-p1");
+    const pinned = await within(view.container).findByRole("link", { name: "Ship it on Friday." });
+    await waitFor(() =>
+      expect(pinned.getAttribute("href")).toBe("/issues/CORE-1/artifacts/design-md?v=2")
+    );
+    expect(pinned.getAttribute("data-dispatch-ref")).toBe("dispatch://CORE-1/spec#b-p1@v2");
+  } finally {
+    getReferences.mockRestore();
+    getIssue.mockRestore();
+    view.unmount();
+  }
+});
+
 test("a dispatch reference inside a code span stays literal text, not a link", async () => {
   const view = render(<MarkdownBody markdown="Use `dispatch://CORE-1` as the ref" />);
 

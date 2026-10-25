@@ -56,6 +56,29 @@ test("ProofDocument focuses a block named by the document hash after the editor 
   }
 });
 
+test("ProofDocument copies a block link whose fragment names the block as encodeBlockId writes it", async () => {
+  const originalClipboard = navigator.clipboard;
+  const copied: string[] = [];
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => void copied.push(text) },
+  });
+  const { editors, sync, toolbar, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("editor missing");
+    editor.selectedBlock = "ship_it";
+    expect(await toolbar.current?.copyBlockLink()).toBe(true);
+    expect(copied).toEqual([`${window.location.origin}${window.location.pathname}#b-ship%5Fit`]);
+  } finally {
+    Object.defineProperty(navigator, "clipboard", { configurable: true, value: originalClipboard });
+    view.unmount();
+  }
+});
+
 test("ProofDocument clears the parent's toolbar bag on unmount", () => {
   const { toolbar, view } = renderProofDocument();
 

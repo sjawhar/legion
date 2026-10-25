@@ -8,15 +8,19 @@ import type {
   ArtifactVersionContent,
   AskRead,
   CommentRead,
+  GraphReferences,
   IssueDetails,
   MessageRead,
 } from "../../api/types";
 import { useMarkdownHeadline } from "./markdown-engine";
 import {
+  buildDispatchReference,
+  buildReferencePath,
   type DispatchReferenceRoute,
   isProjectRoute,
   referencedArtifact,
   referenceTargetKind,
+  routeBlock,
 } from "./routes";
 
 /**
@@ -90,9 +94,19 @@ export const commentQuery = (id: string | undefined) =>
     queryFn: () => api.getComment(id ?? ""),
   });
 
+/** `GET /api/v1/references?to=<reference>`: the node a reference names and the edges pointing at
+ *  it, read by the Referenced by panel and, for a block, by the reference's title and card. */
+export const referencesQuery = (reference: string | undefined) =>
+  queryOptions({
+    queryKey: ["references", "to", reference] as const,
+    queryFn: () => api.getReferences(reference ?? ""),
+  });
+
 /** The reference's target records, each present once its query resolved. `artifact` is the
- * document a document/artifact reference names (never the owning issue's primary spec);
- * `markdown` is that document's text at the referenced version. */
+ * document a document/artifact reference names (never the owning issue's primary spec, unless the
+ * reference names a block of it); `markdown` is that document's text at the referenced version,
+ * read for no block reference; `block` is a block reference's graph read, whose node carries the
+ * block's whole text and, for a pinned reference, its pin. */
 export interface ReferenceData {
   readonly issue: IssueDetails | undefined;
   readonly artifact: Artifact | undefined;
@@ -100,13 +114,15 @@ export interface ReferenceData {
   readonly ask: AskRead | undefined;
   readonly comment: CommentRead | undefined;
   readonly message: MessageRead | undefined;
+  readonly block: GraphReferences | undefined;
 }
 
 /** Warms every query the hover card will read for route, so a card mounted after the hover
  * delay renders populated instead of in its loading form: `useReferenceData`'s first hop, then
  * the document text behind a document/artifact reference once its artifact id is known, and —
  * for an issue reference — the issue's primary spec text, which only the card's issue view reads
- * (`useReferenceTarget` never fetches it). Every key comes from the query builders above. */
+ * (`useReferenceTarget` never fetches it). A block reference warms its graph read and the record
+ * that names its document, and no document text. Every key comes from the query builders above. */
 export function prefetchReference(queryClient: QueryClient, route: DispatchReferenceRoute): void {
   if (route.kind === "agent-artifact") {
     void queryClient.prefetchQuery(agentArtifactQuery(route.session, route.slug));
@@ -114,6 +130,15 @@ export function prefetchReference(queryClient: QueryClient, route: DispatchRefer
   }
   if (route.kind === "message") {
     void queryClient.prefetchQuery(messageQuery(route.key, route.id));
+    return;
+  }
+  if (routeBlock(route) !== undefined) {
+    void queryClient.prefetchQuery(referencesQuery(buildDispatchReference(route)));
+    if (route.kind === "document") {
+      void queryClient.prefetchQuery(projectArtifactQuery(route.project, route.slug));
+    } else {
+      void queryClient.prefetchQuery(issueQuery(route.key));
+    }
     return;
   }
   if (route.kind === "ask") {
@@ -157,6 +182,10 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
       ? undefined
       : route.key;
   const document = route?.kind === "document" ? route : undefined;
+  const blockReference =
+    route !== undefined && routeBlock(route) !== undefined
+      ? buildDispatchReference(route)
+      : undefined;
   const agentArtifact = route?.kind === "agent-artifact" ? route : undefined;
   const message = route?.kind === "message" ? route : undefined;
   const version =
@@ -191,17 +220,23 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
     ...agentArtifactQuery(agentArtifact?.session, agentArtifact?.slug),
     enabled: agentArtifact !== undefined,
   });
+  const block = useQuery({
+    ...referencesQuery(blockReference),
+    enabled: blockReference !== undefined,
+  });
   const artifact =
     document !== undefined
       ? projectArtifact.data
       : agentArtifact !== undefined
         ? sessionArtifact.data
-        : issue.data?.artifacts.find(
-            (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
-          );
+        : route?.kind === "spec" && blockReference !== undefined
+          ? primarySpec(issue.data)
+          : issue.data?.artifacts.find(
+              (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
+            );
   const text = useQuery({
     ...artifactTextQuery(artifact?.id, version),
-    enabled: artifact?.kind === "doc",
+    enabled: artifact?.kind === "doc" && blockReference === undefined,
   });
   const ask = useQuery({ ...askQuery(askId), enabled: askId !== undefined });
   const comment = useQuery({ ...commentQuery(commentId), enabled: commentId !== undefined });
@@ -212,6 +247,7 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
     ask: ask.data,
     comment: comment.data,
     message: messageQueryResult.data,
+    block: block.data,
   };
 }
 
@@ -228,14 +264,28 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
  * ask's or comment's text where the title had to cut it (a title that holds the whole text
  * needs no second copy under it); an issue with no document falls back to its status. An ask or
  * comment never borrows its issue's status or its document's text, while it loads or after. A
+ * block of a document resolves to the headline of its own text, as an ask or comment does: the
+ * text the pinned version held for a pinned reference, its current text otherwise. A
  * reference to an image artifact, of an issue, a project or an agent's conversation, also
  * answers its picture: the bytes route of the version it pins, else of the latest.
  */
 export function useReferenceTarget(route: DispatchReferenceRoute | undefined): ReferenceTarget {
-  const { artifact, ask, comment, issue, markdown, message } = useReferenceData(route);
+  const { artifact, ask, block, comment, issue, markdown, message } = useReferenceData(route);
   const kind = route === undefined ? undefined : referenceTargetKind(route);
+  const blockText =
+    block === undefined
+      ? undefined
+      : block.node.pin === undefined
+        ? block.node.text
+        : block.node.pin.text;
   const authored =
-    kind === "ask" ? ask?.ask.question : kind === "comment" ? comment?.comment.body : undefined;
+    kind === "ask"
+      ? ask?.ask.question
+      : kind === "comment"
+        ? comment?.comment.body
+        : kind === "block"
+          ? blockText
+          : undefined;
   const headline = useMarkdownHeadline(authored, TITLE_HEADLINE_MAX);
 
   if (kind === "message") {
@@ -248,7 +298,7 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
       picture: undefined,
     };
   }
-  if (kind === "ask" || kind === "comment") {
+  if (kind === "ask" || kind === "comment" || kind === "block") {
     return {
       title: headline?.text,
       description: headline?.cut === true ? authored : undefined,
@@ -267,4 +317,30 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
         ? undefined
         : artifactVersionPath(named.owner, named.slug, pictureVersion),
   };
+}
+
+/** The SPA path a reference opens (`buildReferencePath`). A block of an issue's spec pinned to a
+ *  version opens that version under the spec's own slug, so its path reads the issue (the query
+ *  the reference's title and card already share); until the issue is read it is the live spec at
+ *  the block. No other reference's path reads anything. */
+export function useReferencePath(route: DispatchReferenceRoute): string;
+export function useReferencePath(route: DispatchReferenceRoute | undefined): string | undefined;
+export function useReferencePath(route: DispatchReferenceRoute | undefined): string | undefined {
+  const specKey = route?.kind === "spec" && route.pin !== undefined ? route.key : undefined;
+  const issue = useQuery({ ...issueQuery(specKey), enabled: specKey !== undefined });
+  return route === undefined ? undefined : buildReferencePath(route, primarySpec(issue.data)?.slug);
+}
+
+/** `useReferencePath`'s answer for a click outside a render: it waits for the issue a pinned block
+ *  of a spec needs, and opens the live spec at the block when the issue cannot be read, as the
+ *  hook's path does before it is. */
+export async function fetchReferencePath(
+  queryClient: QueryClient,
+  route: DispatchReferenceRoute
+): Promise<string> {
+  if (route.kind !== "spec" || route.pin === undefined) {
+    return buildReferencePath(route);
+  }
+  const issue = await queryClient.fetchQuery(issueQuery(route.key)).catch(() => undefined);
+  return buildReferencePath(route, primarySpec(issue)?.slug);
 }

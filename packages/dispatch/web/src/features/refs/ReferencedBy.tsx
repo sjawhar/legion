@@ -2,7 +2,6 @@ import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
 import type { GraphEdge } from "../../api/types";
 import {
   borderDefault,
@@ -12,13 +11,17 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { referenceTriggerProps } from "./RefPreview";
+import { referencesQuery } from "./reference-target";
 import type { DispatchReferenceRoute } from "./routes";
-import { buildReferencePath, parseDispatchReference } from "./routes";
+import { blockFragment, buildReferencePath, parseDispatchReference, routeBlock } from "./routes";
 import { Timestamp } from "./Timestamp";
 
 const NODE_LABELS: Record<GraphEdge["node"]["kind"], string> = {
   artifact: "Artifact",
   ask: "Ask",
+  // A block that cites a node shows as the document holding it, linked to the block, as that
+  // document's row showed before blocks were graph nodes.
+  block: "Artifact",
   comment: "Comment",
   component: "Component",
   issue: "Issue",
@@ -41,13 +44,6 @@ const STRUCTURAL_LABELS: Partial<Record<GraphEdge["kind"], string>> = {
 const CLAMP_LINES = 3;
 const CLAMP_CHARACTERS = 240;
 
-function referencedByQuery(reference: string) {
-  return {
-    queryKey: ["references", "to", reference] as const,
-    queryFn: () => api.getReferences(reference),
-  };
-}
-
 function edgeLabel(edge: GraphEdge): string {
   return STRUCTURAL_LABELS[edge.kind] ?? NODE_LABELS[edge.node.kind];
 }
@@ -62,17 +58,16 @@ interface SourcePath {
   readonly route: DispatchReferenceRoute;
 }
 
-function sourcePath(edge: GraphEdge): SourcePath | undefined {
-  if (edge.node.ref === undefined) {
-    return undefined;
-  }
-  const route = parseDispatchReference(edge.node.ref);
+/** Where `reference` opens, with `block` (the block of a document that holds the mention) as its
+ *  `#b-` fragment when the reference names no block of its own. */
+function referencePath(reference: string | undefined, block?: string): SourcePath | undefined {
+  const route = reference === undefined ? undefined : parseDispatchReference(reference);
   if (route === undefined) {
     return undefined;
   }
   return {
     href: `${buildReferencePath(route)}${
-      edge.excerpt?.block_id === undefined ? "" : `#b-${encodeURIComponent(edge.excerpt.block_id)}`
+      routeBlock(route) !== undefined || block === undefined ? "" : blockFragment(block)
     }`,
     route,
   };
@@ -82,23 +77,39 @@ interface SourceGroup {
   readonly edges: GraphEdge[];
   readonly key: string;
   readonly label: string;
+  /** How many citing nodes the group holds: more than one only when blocks of one document cite
+   *  the node, each then shown as a row linked to its own block. */
+  readonly nodes: number;
   readonly path: SourcePath | undefined;
 }
 
-/** One entry per citing node, in the server's newest-first order: a document that both holds an
- *  ask's anchor and mentions it is one source with two rows, not two cards. */
+/** One entry per citing source, in the server's newest-first order: a document that both holds
+ *  an ask's anchor and mentions it is one source with two rows, not two cards, and the blocks of
+ *  one document that cite the node are that document's rows. A source of one node links to that
+ *  node (a block at the block); a document whose blocks are its rows links to the document, and
+ *  each row to its own block. */
 function groupBySource(edges: readonly GraphEdge[]): SourceGroup[] {
-  const groups = new Map<string, SourceGroup>();
+  const groups = new Map<string, { edges: GraphEdge[]; nodes: Set<string> }>();
   for (const edge of edges) {
-    const key = edge.node.ref ?? `${edge.node.kind}:${edge.node.id}`;
-    const group = groups.get(key);
-    if (group === undefined) {
-      groups.set(key, { edges: [edge], key, label: sourceLabel(edge), path: sourcePath(edge) });
-      continue;
-    }
+    const key = edge.node.document ?? edge.node.ref ?? `${edge.node.kind}:${edge.node.id}`;
+    const group = groups.get(key) ?? { edges: [], nodes: new Set<string>() };
     group.edges.push(edge);
+    group.nodes.add(`${edge.node.kind}:${edge.node.id}`);
+    groups.set(key, group);
   }
-  return [...groups.values()];
+  return [...groups].map(([key, { edges: grouped, nodes }]) => {
+    const [first] = grouped as [GraphEdge, ...GraphEdge[]];
+    return {
+      edges: grouped,
+      key,
+      label: sourceLabel(first),
+      nodes: nodes.size,
+      path:
+        nodes.size === 1
+          ? referencePath(first.node.ref, first.excerpt?.block_id)
+          : referencePath(key),
+    };
+  });
 }
 
 function Excerpt({ text }: { text: string }): ReactNode {
@@ -180,7 +191,7 @@ export function ReferencedBy({
    *  and then the panel is its own heading. */
   toggle?: { id: string };
 }): ReactNode {
-  const query = useQuery(referencedByQuery(reference));
+  const query = useQuery(referencesQuery(reference));
   const groups = groupBySource(query.data?.edges ?? []);
 
   return (
@@ -227,22 +238,38 @@ export function ReferencedBy({
                 )}
               </div>
               <ul className="space-y-2">
-                {group.edges.map((edge) => (
-                  <li key={`${edge.kind}:${edge.direction}:${edge.created_at}`}>
-                    <div
-                      className={`flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurface}`}
-                    >
-                      {group.edges.length === 1 ? null : (
-                        <>
-                          <span>{edgeLabel(edge)}</span>
-                          <span aria-hidden="true">·</span>
-                        </>
-                      )}
-                      <Timestamp at={edge.created_at} />
-                    </div>
-                    {edge.excerpt === undefined ? null : <Excerpt text={edge.excerpt.text} />}
-                  </li>
-                ))}
+                {group.edges.map((edge) => {
+                  const row =
+                    group.nodes === 1
+                      ? undefined
+                      : referencePath(edge.node.ref, edge.excerpt?.block_id);
+                  return (
+                    <li key={`${edge.node.kind}:${edge.node.id}:${edge.kind}:${edge.direction}`}>
+                      <div
+                        className={`flex flex-wrap items-center gap-x-1 text-xs ${textMutedOnSurface}`}
+                      >
+                        {group.edges.length === 1 ? null : (
+                          <>
+                            <span>{edgeLabel(edge)}</span>
+                            <span aria-hidden="true">·</span>
+                          </>
+                        )}
+                        {row === undefined ? (
+                          <Timestamp at={edge.created_at} />
+                        ) : (
+                          <Link
+                            {...referenceTriggerProps(row.route)}
+                            className={`underline ${linkText} ${linkHoverText}`}
+                            to={row.href}
+                          >
+                            <Timestamp at={edge.created_at} />
+                          </Link>
+                        )}
+                      </div>
+                      {edge.excerpt === undefined ? null : <Excerpt text={edge.excerpt.text} />}
+                    </li>
+                  );
+                })}
               </ul>
             </li>
           ))}

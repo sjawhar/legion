@@ -17,7 +17,13 @@ import { AskOptionList } from "../inbox/AskOptionList";
 import { URGENCY_LABELS } from "../inbox/ask-urgency";
 import { actorLabel } from "../refs/actor";
 import { CopyRefButton } from "../refs/CopyRefButton";
-import { buildReferencePath, itemRoute, parseDispatchReference, shortForm } from "../refs/routes";
+import {
+  blockFragment,
+  buildReferencePath,
+  itemRoute,
+  parseDispatchReference,
+  shortForm,
+} from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { type AskBlockFacts, type AskBlockHost, askBlockFacts } from "./ask-block";
 
@@ -178,7 +184,7 @@ function CopiedFromLink({
         {route === undefined ? (
           "another document"
         ) : (
-          <Link to={`${buildReferencePath(route)}#b-${encodeURIComponent(blockId)}`}>
+          <Link to={`${buildReferencePath(route)}${blockFragment(blockId)}`}>
             {route.kind === "spec" ? "the spec" : shortForm(route)}
           </Link>
         )}

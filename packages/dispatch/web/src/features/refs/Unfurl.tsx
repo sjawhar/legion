@@ -11,7 +11,7 @@ import {
 } from "../../theme/classes";
 
 import { MarkdownPreview } from "./MarkdownPreview";
-import { useReferenceTarget } from "./reference-target";
+import { useReferencePath, useReferenceTarget } from "./reference-target";
 import {
   type ComposerReference,
   composerReferences,
@@ -38,11 +38,12 @@ function Body({ markdown }: { markdown: string }): ReactNode {
 function DispatchUnfurl({ reference }: { reference: ComposerReference }): ReactNode {
   const route = parseDispatchReference(reference.reference);
   const { title, description } = useReferenceTarget(route);
+  const path = useReferencePath(route);
 
   return (
     <a
       className={`block rounded-lg border px-3 py-2 text-sm ${surfaceMutedBg} ${borderDefault} ${cardHoverBorder}`}
-      href={reference.href}
+      href={path ?? reference.href}
     >
       <span className={`block font-medium ${linkText}`}>{title ?? reference.reference}</span>
       {description === undefined ? null : <Body markdown={description} />}
