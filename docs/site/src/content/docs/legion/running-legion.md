@@ -290,6 +290,18 @@ What each part is for:
   decimals allowed), `review_round_cap` (3), `max_fix_attempts`
   (3), `controller_wake_interval_seconds` (3600), and the supervision budgets
   `launch_failure_limit` (3), `prompt_failure_limit` (3) and `prompt_retire_limit` (2).
+- **`turn_watchdog_seconds`** (optional) is how long a turn of each role may produce no event
+  before the daemon tries to recover it — asking its process for its state, interrupting the turn,
+  relaunching the claim on its own session, and reporting to the issue's architect when none of
+  that brings the agent back ([A turn that stops making progress](/legion/legion/concepts/#a-turn-that-stops-making-progress)).
+  Each key is a role the daemon supervises (the six issue roles and `controller`), each value a
+  whole number of seconds; `0` switches the watchdog off for that role. The defaults are 1800 for
+  the controller, 21600 for the implementer and the reviewer, and 7200 for every other role, each
+  several times what that role's real turns do:
+
+  ```yaml
+  turn_watchdog_seconds: { implementer: 28800, reviewer: 0 }
+  ```
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
@@ -590,16 +602,20 @@ Closing the terminal leaves the project without one, and the daemon logs
   pending Dispatch status writes: none
   held lifecycle rows: none
   claims nothing will wake: none
+  wedged turns: none
   ```
 
   The `open production checks` line counts the closed issues whose production check is still
   open and names the oldest: its pull request, merge commit, which look it is on, what woke that
   look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build`
-  or `bound`) and when, and when the check's bound comes due (`none` when no check is open).
+  or `bound`) and when, and when the check's bound comes due (`none` when no check is open). The
+  `wedged turns` line counts the claims the turn watchdog is working on and names the one whose
+  rung is oldest ([A turn that stops making progress](/legion/legion/concepts/#a-turn-that-stops-making-progress)).
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,
-  `architect` and `workers` (each claim's `state`), `pullRequest` (`repo`, `head`, `checksVerdict`,
+  `architect` and `workers` (each claim's `state`, and `watchdog` while the turn watchdog holds a
+  record on it: its `step`, `at`, `silenceSeconds` and `steps`), `pullRequest` (`repo`, `head`, `checksVerdict`,
   `fixAttempts`), `designGate` (`currentVersion`, `approvedVersion`) and, for a closed issue whose
   production check is open, `check` (`repo`, `pullRequest`, `mergeCommit`, `openedAt`, `looks`,
   `lookOpen`, `lastWake` with its `kind`, `detail` and `at`, `nextWakeAt`, `last`), the

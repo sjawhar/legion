@@ -67,6 +67,9 @@ type Options struct {
 	RPCTimeout time.Duration
 	// Log receives the listener's lines; nil is slog.Default().
 	Log *slog.Logger
+	// Now is the clock each connection stamps the agent's own frames with (Conn.LastEvent, which
+	// the turn watchdog reads); nil is the wall clock.
+	Now func() time.Time
 }
 
 // Listener accepts shim connections and keeps the live one for each claim. Its life is the
@@ -78,6 +81,7 @@ type Listener struct {
 	resolve  HelloResolver
 	launcher LauncherResolver
 	timeout  time.Duration
+	now      func() time.Time
 	log      *slog.Logger
 	events   *eventQueue
 	mu       sync.Mutex
@@ -118,11 +122,16 @@ func Listen(ctx context.Context, addr string, resolve HelloResolver, opts Option
 	if log == nil {
 		log = slog.Default()
 	}
+	now := opts.Now
+	if now == nil {
+		now = time.Now
+	}
 	l := &Listener{
 		addr:       network + "://" + ln.Addr().String(),
 		ln:         ln,
 		resolve:    resolve,
 		timeout:    opts.RPCTimeout,
+		now:        now,
 		log:        log,
 		events:     newEventQueue(),
 		conns:      map[claim.Token]*Conn{},
@@ -418,7 +427,7 @@ func (l *Listener) register(nc net.Conn, token claim.Token, generation uint64, i
 	if err := nc.SetReadDeadline(time.Time{}); err != nil {
 		return nil, "connection closed before hello_ack"
 	}
-	conn := newConn(nc, token, l.timeout, l.log, l.events)
+	conn := newConn(nc, token, l.timeout, l.now, l.log, l.events)
 	l.registrations++
 	conn.seq = l.registrations
 	// The ack is written before the connection is registered, so it reaches the shim ahead of any

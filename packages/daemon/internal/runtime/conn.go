@@ -55,6 +55,12 @@ type Conn interface {
 	// and returns it as the mount holds it now. A shim that cannot is ErrTokenRefused; every other
 	// error is transport.
 	AgentSecretsToken(ctx context.Context) (string, error)
+	// LastEvent is when the connection last carried an event of the agent's own — a turn's start
+	// or end, a message, a tool call — and the zero time before the first. An answer to a request
+	// the daemon sent is not one: a process that answers while its turn makes no progress is exactly
+	// what the turn watchdog looks for (supervise's watchdog.go), so only the agent's own events say
+	// the turn is moving.
+	LastEvent() time.Time
 	// Sequence is the order the connection was registered in: one registered later has a larger
 	// sequence, so a caller can tell a connection newer than another.
 	Sequence() uint64

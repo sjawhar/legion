@@ -166,6 +166,9 @@ func (m *Machine) sendPending(ctx context.Context) error {
 		m.askFirst = false
 		if m.streaming(ctx, conn) {
 			m.claim.State = StateWorking
+			// A turn this daemon has not seen an event of: the watchdog's clock starts here, as it
+			// does for a turn it saw start (turnStarted).
+			m.armWatchdog()
 			if !holds {
 				m.log.Info("supervise: the agent is in a turn of its own after its task was dropped", "claim", m.claim.Token)
 				return m.persist(ctx)

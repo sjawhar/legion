@@ -75,6 +75,10 @@ type Settings struct {
 	// WorkerBackends is `worker_backends`, the roles that run on a backend other than Oh My Pi by
 	// role, `{}` while the file names none.
 	WorkerBackends map[string]string `json:"worker_backends"`
+	// TurnWatchdogSeconds is `turn_watchdog_seconds`, settled for every role the daemon
+	// supervises: how long a turn of that role may produce no event before the turn watchdog acts
+	// on it, 0 where the deployment switched it off.
+	TurnWatchdogSeconds map[string]int `json:"turn_watchdog_seconds"`
 }
 
 // RuntimeSettings is `runtime`: its name, and the kubernetes block under that runtime alone.
@@ -247,6 +251,7 @@ func SettingsOf(cfg config.Config) Settings {
 		Controller:                              cfg.ControllerLaunch,
 		Capabilities:                            CapabilitiesSettings{Decided: make(map[string]string, len(cfg.Capabilities.Decided))},
 		WorkerBackends:                          make(map[string]string, len(cfg.WorkerBackends)),
+		TurnWatchdogSeconds:                     make(map[string]int, len(cfg.TurnWatchdog)),
 	}
 	for i, key := range cfg.ProviderKeys {
 		settings.ProviderKeys[i] = key.Env
@@ -277,6 +282,9 @@ func SettingsOf(cfg config.Config) Settings {
 	}
 	for role, backend := range cfg.WorkerBackends {
 		settings.WorkerBackends[string(role)] = string(backend)
+	}
+	for role, limit := range cfg.TurnWatchdog {
+		settings.TurnWatchdogSeconds[string(role)] = seconds(limit)
 	}
 	return settings
 }

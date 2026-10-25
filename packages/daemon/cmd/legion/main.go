@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/daemon"
 	"github.com/sjawhar/legion/daemon/internal/registry"
@@ -463,6 +464,7 @@ func runState(ctx context.Context, args []string, stdout, stderr io.Writer) int 
 	fmt.Fprintln(stdout, pendingSummary(state.PendingStatusWrites))
 	fmt.Fprintln(stdout, heldSummary(state.HeldOutboxRows))
 	fmt.Fprintln(stdout, strandedSummary(state.StrandedClaims))
+	fmt.Fprintln(stdout, watchdogSummary(state.Issues))
 	// In a pane, the issue record is what a relaunched worker re-reads.
 	if key := os.Getenv("LEGION_ISSUE"); key != "" {
 		issue, ok := state.Issues[key]
@@ -577,6 +579,47 @@ func strandedSummary(stranded []api.StrandedClaim) string {
 		}
 	}
 	return fmt.Sprintf("claims nothing will wake: %d — %s", len(stranded), strings.Join(groups, "; "))
+}
+
+// wedgedClaim is one claim the turn watchdog's ladder is on, with the issue and role it belongs to.
+type wedgedClaim struct {
+	issue    string
+	role     claim.Role
+	watchdog api.WatchdogView
+}
+
+// wedgedClaims is every claim of the state whose turn watchdog holds a record, oldest rung first
+// and then by issue and role, so the one named is the same whatever order the map came in.
+func wedgedClaims(issues map[string]api.Issue) []wedgedClaim {
+	var wedged []wedgedClaim
+	for key, issue := range issues {
+		if issue.Architect != nil && issue.Architect.Watchdog != nil {
+			wedged = append(wedged, wedgedClaim{issue: key, role: claim.RoleArchitect, watchdog: *issue.Architect.Watchdog})
+		}
+		for role, worker := range issue.Workers {
+			if worker.Claim.Watchdog != nil {
+				wedged = append(wedged, wedgedClaim{issue: key, role: role, watchdog: *worker.Claim.Watchdog})
+			}
+		}
+	}
+	slices.SortFunc(wedged, func(a, b wedgedClaim) int {
+		return cmp.Or(a.watchdog.At.Compare(b.watchdog.At), cmp.Compare(a.issue, b.issue), cmp.Compare(string(a.role), string(b.role)))
+	})
+	return wedged
+}
+
+// watchdogSummary is the one line an operator reads for the turns the watchdog is working on
+// (internal/supervise/watchdog.go): how many claims its ladder holds a record for, and the oldest
+// — its issue and role, the rung that last ran, when, and how long its turn had been silent.
+func watchdogSummary(issues map[string]api.Issue) string {
+	wedged := wedgedClaims(issues)
+	if len(wedged) == 0 {
+		return "wedged turns: none"
+	}
+	oldest := wedged[0]
+	return fmt.Sprintf("wedged turns: %d; the oldest, %s %s, is %s since %s after %s of silence",
+		len(wedged), oldest.issue, oldest.role, oldest.watchdog.Step, oldest.watchdog.At.UTC().Format(time.RFC3339),
+		time.Duration(oldest.watchdog.SilenceSeconds)*time.Second)
 }
 
 // stateAddress is where a daemon answers: the configured bind and port, with --port overriding

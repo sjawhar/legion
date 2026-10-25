@@ -505,6 +505,19 @@ type ClaimReady struct {
 
 func (ClaimReady) isFact() {}
 
+// TurnWedged is the turn watchdog's report (supervise.WedgedTurn): a claim whose turn produced no
+// event for longer than its role's limit, whose process the daemon could not interrupt, and whose
+// relaunch produced no ready agent. Role is the claim's, Issue its issue — empty for the daemon's
+// own controller, whose claim is on none — and Reason the one sentence the report is told in,
+// naming the claim, how long it was wedged and every rung that was tried.
+type TurnWedged struct {
+	Issue  string
+	Role   claim.Role
+	Reason string
+}
+
+func (TurnWedged) isFact() {}
+
 // LingerExpired records the generation whose post-close linger elapsed.
 type LingerExpired struct {
 	Issue      string

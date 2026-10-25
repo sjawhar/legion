@@ -111,7 +111,16 @@
                 }
               ]
             },
-            "pluginContract": 0
+            "pluginContract": 0,
+            "watchdog": {
+              "step": "interrupted",
+              "at": "2026-09-22T15:31:00Z",
+              "silenceSeconds": 21600,
+              "steps": [
+                "the process answered get_state (streaming=true), which says nothing about its turn",
+                "the agent took the abort"
+              ]
+            }
           },
           "rounds": 2
         },
@@ -564,6 +573,15 @@
     },
     "worker_backends": {
       "tester": "omp"
+    },
+    "turn_watchdog_seconds": {
+      "architect": 7200,
+      "controller": 600,
+      "implementer": 0,
+      "merger": 7200,
+      "planner": 7200,
+      "reviewer": 21600,
+      "tester": 7200
     }
   }
 }

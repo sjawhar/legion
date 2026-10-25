@@ -111,8 +111,9 @@ func runningLegion(t *testing.T) int {
 	return probe.Process.Pid
 }
 
-// claim seeds the registry the way `legion start` takes a team.
-func claim(t *testing.T, legions string, e registry.Entry) {
+// claimTeam seeds the registry the way `legion start` takes a team. It is not named `claim`: the
+// command's own code reads `internal/claim`, which a helper of that name would shadow.
+func claimTeam(t *testing.T, legions string, e registry.Entry) {
 	t.Helper()
 	held, ok, err := registry.Claim(legions, e)
 	if err != nil {
@@ -156,7 +157,7 @@ func healthzOn(t *testing.T, host string) int {
 func TestStartRefusesWhileTheTeamsLegionIsRunning(t *testing.T) {
 	legions := legionState(t)
 	pid := runningLegion(t)
-	claim(t, legions, registry.Entry{
+	claimTeam(t, legions, registry.Entry{
 		Team: "LEGION", ConfigPath: "/srv/legion.yaml", PID: pid, Port: 13370,
 		Bind: "127.0.0.1", StartedAt: time.Now().UTC(),
 	})
@@ -186,7 +187,7 @@ func TestStartRefusesTheStateDirectoryAnotherTeamIsRunningOn(t *testing.T) {
 	legions := legionState(t)
 	config := legionConfig(t, "LEGION", 13370)
 	stateDir := filepath.Join(filepath.Dir(config), "state")
-	claim(t, legions, registry.Entry{
+	claimTeam(t, legions, registry.Entry{
 		Team: "WIDGETS", ConfigPath: "/srv/widgets.yaml", PID: runningLegion(t), Port: 14370,
 		Bind: "127.0.0.1", StateDir: stateDir, StartedAt: time.Now().UTC(),
 	})
@@ -210,7 +211,7 @@ func TestStartRefusesTheStateDirectoryAnotherTeamIsRunningOn(t *testing.T) {
 // then the record's own repair, not an error.
 func TestStopRemovesTheEntryOfADaemonThatIsGone(t *testing.T) {
 	legions := legionState(t)
-	claim(t, legions, registry.Entry{
+	claimTeam(t, legions, registry.Entry{
 		Team: "LEGION", ConfigPath: "/srv/legion.yaml", PID: reapedPID(t), Port: 13370,
 		Bind: "127.0.0.1", StartedAt: time.Now().UTC(),
 	})
@@ -242,7 +243,7 @@ func TestStatusDialsTheAddressTheLegionRecorded(t *testing.T) {
 		t.Run(probe.name, func(t *testing.T) {
 			legions := legionState(t)
 			port := healthzOn(t, probe.serve)
-			claim(t, legions, registry.Entry{
+			claimTeam(t, legions, registry.Entry{
 				Team: "LEGION", ConfigPath: "/srv/legion.yaml", PID: runningLegion(t), Port: port,
 				Bind: probe.record, StartedAt: time.Now().UTC(),
 			})
@@ -1395,6 +1396,59 @@ func TestPlainStateNamesTheClaimsNothingWillWake(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			served := "{" + daemon + `,"strandedClaims":` + tc.stranded + "}"
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = w.Write([]byte(served))
+			}))
+			defer server.Close()
+			t.Chdir(t.TempDir())
+			t.Setenv("LEGION_DAEMON_URL", server.URL)
+			t.Setenv("LEGION_ISSUE", "")
+
+			var out, errb bytes.Buffer
+			if code := run(context.Background(), []string{"legion", "state"}, &out, &errb); code != 0 {
+				t.Fatalf("legion state = %d, stderr %q", code, errb.String())
+			}
+			if !strings.Contains(out.String(), tc.want) {
+				t.Fatalf("legion state printed %q, want the line %q", out.String(), tc.want)
+			}
+		})
+	}
+}
+
+// An operator reading plain `legion state` is told which turns the watchdog is working on, and
+// the oldest rung first: its issue and role, the rung that last ran, when, and how long its turn
+// had been silent. With none the line says so.
+func TestPlainStateNamesTheWedgedTurns(t *testing.T) {
+	daemon := `"daemon":{"project":"LEGION","schemaVersion":6,"boots":1,"firstBootAt":"2026-09-23T00:00:00Z","startedAt":"2026-09-23T00:00:00Z"},` +
+		`"admission":{"cap":2,"active":[],"waiting":[]},"pendingStatusWrites":[]`
+	working := `"LEGION-207":{"key":"LEGION-207","generation":1,"phase":"implementing","status":"in_progress",` +
+		`"workers":{"implementer":{"claim":{"session":"ses_207","state":"working","pluginContract":37},"rounds":0}}}`
+	interrupted := `"LEGION-208":{"key":"LEGION-208","generation":1,"phase":"implementing","status":"in_progress",` +
+		`"workers":{"implementer":{"claim":{"session":"ses_208","state":"working","pluginContract":37,` +
+		`"watchdog":{"step":"interrupted","at":"2026-10-25T10:00:00Z","silenceSeconds":21600,"steps":["the agent took the abort"]}},"rounds":0}}}`
+	relaunched := `"LEGION-209":{"key":"LEGION-209","generation":1,"phase":"planning","status":"in_progress",` +
+		`"architect":{"session":"ses_209","state":"launching","pluginContract":37,` +
+		`"watchdog":{"step":"relaunched","at":"2026-10-25T11:00:00Z","silenceSeconds":7200,"steps":["the process did not answer get_state: boom","the claim was relaunched on its own session"]}},` +
+		`"workers":{}}`
+	for _, tc := range []struct {
+		name, issues, want string
+	}{
+		{
+			name:   "two wedged, the oldest rung not the first listed",
+			issues: `{` + relaunched + `,` + working + `,` + interrupted + `}`,
+			want:   "wedged turns: 2; the oldest, LEGION-208 implementer, is interrupted since 2026-10-25T10:00:00Z after 6h0m0s of silence\n",
+		},
+		{
+			name:   "one wedged, on the architect's own claim",
+			issues: `{` + working + `,` + relaunched + `}`,
+			want:   "wedged turns: 1; the oldest, LEGION-209 architect, is relaunched since 2026-10-25T11:00:00Z after 2h0m0s of silence\n",
+		},
+		{name: "none wedged", issues: `{` + working + `}`, want: "wedged turns: none\n"},
+		{name: "no issues", issues: `{}`, want: "wedged turns: none\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			served := "{" + daemon + `,"issues":` + tc.issues + "}"
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				w.Header().Set("Content-Type", "application/json")
 				_, _ = w.Write([]byte(served))

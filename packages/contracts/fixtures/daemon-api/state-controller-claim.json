@@ -117,6 +117,15 @@
     "capabilities": {
       "decided": {}
     },
-    "worker_backends": {}
+    "worker_backends": {},
+    "turn_watchdog_seconds": {
+      "architect": 7200,
+      "controller": 1800,
+      "implementer": 21600,
+      "merger": 7200,
+      "planner": 7200,
+      "reviewer": 21600,
+      "tester": 7200
+    }
   }
 }

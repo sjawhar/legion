@@ -130,6 +130,7 @@ func defaultsFor(port int) Config {
 		ReviewRoundCap:       3,
 		MaxFixAttempts:       3,
 		ControllerLaunch:     ControllerLaunchOperator,
+		TurnWatchdog:         settleTurnWatchdog(nil),
 	}
 }
 

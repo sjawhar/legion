@@ -162,6 +162,11 @@ type Config struct {
 	// WorkerBackends is `worker_backends`: the phase-worker roles that run on a backend other than
 	// Oh My Pi, by role; a role it leaves out runs on Oh My Pi (BackendFor).
 	WorkerBackends map[claim.Role]runtime.Backend
+	// TurnWatchdog is `turn_watchdog_seconds`, settled for every role the daemon supervises (the
+	// six issue roles and the controller): how long a turn of that role may produce no event
+	// before the turn watchdog acts on it, and zero where the file switched the watchdog off.
+	// TurnLimitFor reads it.
+	TurnWatchdog map[claim.Role]time.Duration
 }
 
 const (
@@ -272,6 +277,7 @@ type fileConfig struct {
 	Durations              map[string]int
 	Counts                 map[string]int
 	WorkerBackends         map[claim.Role]runtime.Backend
+	TurnWatchdog           map[claim.Role]time.Duration
 }
 
 // Load reads the daemon's complete runtime configuration. App private-key commands and secrets
@@ -407,6 +413,8 @@ func readKeys(root *yaml.Node) (fileConfig, error) {
 			file.Capabilities, err = readCapabilities(value, key)
 		case "worker_backends":
 			file.WorkerBackends, err = readWorkerBackends(value, key)
+		case turnWatchdogKey:
+			file.TurnWatchdog, err = readTurnWatchdog(value, key)
 		default:
 			if isDurationKey(key) || isCountKey(key) {
 				err = readPositive(value, key, file)
@@ -914,6 +922,7 @@ func resolve(file fileConfig, env func(string) string, configDir string) (Config
 	if err := checkWorkerBackends(cfg); err != nil {
 		return Config{}, err
 	}
+	cfg.TurnWatchdog = settleTurnWatchdog(file.TurnWatchdog)
 	if cfg.Runtime.Name == "kubernetes" {
 		if err := checkPodReachable(cfg); err != nil {
 			return Config{}, err

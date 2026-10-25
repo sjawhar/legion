@@ -97,6 +97,8 @@ type harnessOptions struct {
 	addr       string
 	resolver   *resolver
 	rpcTimeout time.Duration
+	// now is the listener's clock (Options.Now); nil is the wall clock.
+	now func() time.Time
 }
 
 func startListener(t *testing.T, options harnessOptions) *harness {
@@ -115,6 +117,7 @@ func startListener(t *testing.T, options harnessOptions) *harness {
 	listener, err := Listen(ctx, options.addr, options.resolver.resolve, Options{
 		RPCTimeout: options.rpcTimeout,
 		Log:        slog.New(logs),
+		Now:        options.now,
 	})
 	if err != nil {
 		cancel()

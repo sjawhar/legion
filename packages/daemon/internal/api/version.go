@@ -304,4 +304,11 @@ package api
 // tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
 // request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
 // request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
-const DaemonAPIVersion = 36
+//
+// 37: the turn watchdog -- `api.ClaimView` gains `watchdog`, the ladder's position on a claim
+// whose turn stopped producing events (its rung, when that rung ran, the silence it started at
+// and every rung tried), absent on every claim the ladder holds nothing on; and `settings` gains
+// `turn_watchdog_seconds`, every supervised role's limit. A 36 plugin's strict reader refuses a
+// state whose claim views carry the field, so the boot gate and `legion probe-image` refuse the
+// mixed pair. (`settings` is parsed loosely, so its new key bumps nothing on its own.)
+const DaemonAPIVersion = 37

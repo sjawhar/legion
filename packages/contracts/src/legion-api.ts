@@ -124,9 +124,22 @@ const legionCapabilityReportView = z.strictObject({
   open: z.array(z.strictObject({ name: nonEmptyString, detail: nonEmptyString })),
 });
 
+/** `api.WatchdogView` — the turn watchdog's ladder on one claim (contract 37, the daemon's
+ * `internal/supervise/watchdog.go`): the rung it last ran, when that rung ran, how long the turn
+ * had produced no event when the ladder started, and every rung tried with what it found. A claim
+ * carries it only while the ladder holds a position on it: a turn that produces events again, and
+ * an agent that becomes ready after the ladder's relaunch, clear it. */
+const legionWatchdogView = z.strictObject({
+  step: z.enum(["probed", "interrupted", "relaunched", "reported"]),
+  at: timestamp,
+  silenceSeconds: z.number().int().nonnegative(),
+  steps: z.array(nonEmptyString),
+});
+
 /** `api.ClaimView` — `session` is empty until the claim's agent registers one, `locator` is
- * absent while no process runs (queued, suspended, failed, retired), and `capabilities` is absent
- * until a session of the claim reports on `claims/ready` (the controller's never does). */
+ * absent while no process runs (queued, suspended, failed, retired), `capabilities` is absent
+ * until a session of the claim reports on `claims/ready` (the controller's never does), and
+ * `watchdog` is absent on every claim whose turns are producing events (contract 37). */
 const legionClaimView = z.strictObject({
   session: z.string(),
   state: z.enum(LEGION_CLAIM_STATES),
@@ -134,6 +147,7 @@ const legionClaimView = z.strictObject({
   capabilities: legionCapabilityReportView.optional(),
   /** 0 = no contract recorded. */
   pluginContract: z.number().int().nonnegative(),
+  watchdog: legionWatchdogView.optional(),
 });
 
 /** `api.PhaseView` — one phase worker's claim, its committed handoff, and the rounds it has run. */
