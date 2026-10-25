@@ -42,14 +42,19 @@ So that writable `$HOME`, and the issue's disk, are where an install for yoursel
 the mechanics the answer is not a flat no: `redis-cli`, `sqlite3` and `dig` did run from an
 extraction prefix under `$HOME` with `LD_LIBRARY_PATH` set, and `psql` did not — Debian's
 `/usr/bin/psql` is a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no
-extraction prefix is on. What rules the attempt out is not the filesystem but the next section's
-ruling: an extraction prefix is the withheld `operator-setup` capability, for what it leaves every
-later process resolving. That verdict is about resolution, so it reads the same in a container that
-does hand you a writable `/usr/local/bin`, and the room on the issue's disk does not touch it
-either. For everything the five do not cover, the one documented step is a pinned run through one
-of the three package runners the image already carries — plus `uv run --with` when what you need is
-a library rather than a command — and a tool no runner reaches is an image change ("When no runner
-reaches it", below).
+extraction prefix is on. What rules such an attempt out is not the filesystem and not the
+unpacking: it is what the prefix leaves resolving, which is the next section's test, and the test
+is scope. A prefix you export for the commands of your own run is sanctioned; a prefix left where
+a later launch, another role or a subagent picks it up without naming it is not — which is why the
+harness below records its variables in a handoff note rather than leaving them set. Exported onto
+the `PATH` of the shell you go on working in, so your later commands and your subagents find
+`psql` there without asking, the same prefix is the withheld `operator-setup` capability (the
+Dispatch e2e stack, below, is the worked case). That verdict is about resolution, so it reads the
+same in a container that does hand you a writable `/usr/local/bin`, and the room on the issue's
+disk does not touch it either. For everything the five do not cover, the one documented step is a
+pinned run through one of the three package runners the image already carries — plus `uv run
+--with` when what you need is a library rather than a command — and a tool no runner reaches is an
+image change ("When no runner reaches it", below).
 
 ## What the withheld capability is, and what it is not
 
@@ -87,12 +92,19 @@ something else now resolve that it never named?
   declares, into that project's own directory, which a process reaches by asking for that project
   and no other way — and the runtime puts `UV_PYTHON_INSTALL_DIR` and the workspace itself on the
   issue's volume exactly so a later pod reuses it.
-- An extraction prefix: everything in reach of it. Unpacking Debian packages under `$HOME` and
-  exporting `LD_LIBRARY_PATH` changes what every later command in that shell — and every subagent
-  that inherits the environment — resolves `psql` or its libraries to, asked for or not, on a
-  prefix nothing records, pins or rebuilds. That is a dependency the pod carries, configured by the
-  role, which is why the extraction option is rejected (`docs/kubernetes.md`, the extraction row of
-  the options table) even for the three clients that did run from it.
+- An extraction prefix: whatever you leave resolving through it, which is yours to decide. Unpack
+  Debian packages under `$HOME`, export `LD_LIBRARY_PATH` in the shell you go on working in, and
+  you change what every later command in that shell — and every subagent that inherits the
+  environment — resolves `psql` or its libraries to, asked for or not, on a prefix nothing records,
+  pins or rebuilds: that is a dependency the pod carries, configured by the role, and it is the
+  withheld capability. Export the same prefix for the commands of your own run and it is
+  sanctioned, because when they exit nothing else resolves differently. The test is scope, not the
+  `PATH`: what crosses to another role is a note, not an environment — the harness below records
+  its `PATH`, `LD_LIBRARY_PATH` and `DATABASE_URL` in a handoff note the next role sets
+  deliberately, which is that role asking. The opposite shape is in the tree too, and superseded:
+  telling every subagent to prepend a directory to `PATH` because a subagent's shell starts
+  without it hands over an environment to processes that never named it. That is the difference
+  between standing a harness up and getting yourself a CLI.
 
 The test is about what a command leaves for other processes, never about getting the same bytes
 twice — because a pinned line does not promise the same bytes. What a pin binds is the named
@@ -114,8 +126,8 @@ in-memory volume.) `uv run --with pyyaml==6.0.2 --no-project` passes both: the w
 `UV_CACHE_DIR`, under `wheels-v6/pypi/pyyaml/6.0.2-…`, and `UV_PYTHON_INSTALL_DIR` is never
 created, because the image's own `python3` served the run. The interpreter is the other run: a
 project whose `.python-version` names an interpreter uv must fetch puts about 70 MB under
-`UV_PYTHON_INSTALL_DIR`, where the issue's next pod finds it, while the cache takes about 20 KB and
-holds no wheel. A browser download passes too, and for Playwright — the browser driver this
+`UV_PYTHON_INSTALL_DIR`, where the issue's next pod finds it, while the cache holds no wheel. A
+browser download passes too, and for Playwright — the browser driver this
 repository's own Dispatch suite installs (`playwright install`, `packages/dispatch`'s
 `e2e:install`) — it passes as it stands, with nothing pointed anywhere: playwright-core resolves
 its browser registry under `XDG_CACHE_HOME`, which the runtime has already put on the issue's
@@ -145,12 +157,36 @@ under `$HOME` fails the first condition and is outside the sanctioned form, howe
 changes. It is the withheld capability when either condition fails — anything that writes into a
 system prefix, and anything that leaves a toolchain, shim or binary which a later launch or
 another role's process will resolve without asking for it. Between two installs that both land in
-the right place, the test is resolution, not disk: a second toolchain that only an explicit
-absolute path reaches is sanctioned; the same toolchain put where `PATH` finds it is operator
-setup, whoever typed the command. The three artefacts above are the whole of that line's ground.
-Disk is not: the issue's volume is 49 GiB with 5.2 GiB used and every cache already relocated onto
-it, and a sanctioned install is paid once per issue, on the issue's own disk, by the issue's roles
-together.
+the right place, the test is resolution, not disk, and it reads as scope: a second toolchain
+exported for the commands of your own run — by absolute path, or on a `PATH` your harness's own
+script sets around its own invocations — is sanctioned; the same toolchain left where a later
+launch, another role or a subagent picks it up without naming it is operator setup, whoever typed
+the command. The three artefacts above are the whole of
+that line's ground. Disk is not: every cache is already relocated onto the issue's volume, which
+has the room for them (`docs/kubernetes.md`, "The tools a role's own work needs", carries the
+figure), and a sanctioned install is paid once per issue, on the issue's own disk, by the issue's
+roles together.
+
+**The worked case, and the one a role actually meets: the Dispatch e2e stack.** A change to
+`packages/dispatch` is proved by driving its browser suite, which needs a Postgres with pgvector;
+the image carries a `psql` and no server and no pgvector, and no runner reaches either. The way
+that stack is stood up here is Debian packages unpacked with `dpkg-deb -x` into one root on the
+issue's volume — the five packages and the start sequence are in
+`docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md`,
+and
+`docs/solutions/testing/a-browser-harness-in-an-issue-pod-lives-on-the-issue-volume-INFRA-43.md`
+puts it on the volume, moves the caches with it, and writes it as one idempotent script the next
+role re-runs. That passes both conditions, and the second is the one to get right: export the
+root's `PATH` and `LD_LIBRARY_PATH` around the harness's own commands — `initdb`, `pg_ctl`, the
+server, the Playwright run — rather than into the shell you go on working in, where every later
+command and every subagent of yours would resolve through them. Handing the harness to the next
+role is the same test passed again, and
+`docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md`
+is the illustration: it leaves the server running and records the `LD_LIBRARY_PATH`, `PATH` and
+`DATABASE_URL` in its handoff's `trickyParts`, so what crosses to the next role is a note that
+role sets deliberately rather than an environment it inherits. The suite shells out to `psql`,
+and `psql` being in the image is what makes that harness work now without your extracting a
+client for yourself at all.
 
 ## The three pinned runner forms
 
@@ -317,28 +353,47 @@ A tool that is neither in the image nor reachable through one of the three runne
 change: a pull request against sjawhar/legion that carries the same name through every site that
 spells it out, and those sites are not all held by a test.
 
-Three are in `packages/daemon/docker/worker.Dockerfile`: the apt line, with the comment saying why
-that package is carried, installs it; the `THIRD_PARTY_NOTICES` intro string hand-lists the Debian
-packages the image installs, and that file is assembled into the image at
-`/usr/share/doc/legion/THIRD_PARTY_NOTICES`; and the toolchain smoke step runs each tool once, so a
-new one needs its own invocation there (`nc` and `dig` take no `--version`). Four are in Go: the
-`toolchain` name list in `packages/daemon/internal/capabilities/image.go` makes the probe require
-it; that row's summary in `packages/daemon/internal/capabilities/capabilities.go` has to name it, a
-test holding the summary to the list; the stub binaries in
+Do not work from a list of those sites. This page has carried one twice and it was wrong both
+times, so take them from the repository instead: grep for a client the image already carries,
+under both of its names — the command and the Debian package that provides it are spelled
+differently, and different sites spell each — and carry the new name through everything the two
+find.
+
+```text
+$ grep -rn redis-cli
+$ grep -rn redis-tools
+```
+
+Two kinds of hit want more than a substitution. The toolchain smoke step in
+`packages/daemon/docker/worker.Dockerfile` runs each tool once, so a new one needs its own
+invocation there (`nc` and `dig` take no `--version`); and the `THIRD_PARTY_NOTICES` intro string
+in the same file is a licence file that hand-lists the Debian packages the image installs,
+assembled into the image at `/usr/share/doc/legion/THIRD_PARTY_NOTICES`.
+
+Four of the files the grep finds are in Go, and those four are the gated ones: the `toolchain`
+name list in `packages/daemon/internal/capabilities/image.go` makes the probe require it; that
+row's summary in `packages/daemon/internal/capabilities/capabilities.go` has to name it, a test
+holding the summary to the list; the stub binaries in
 `packages/daemon/internal/capabilities/capabilitiestest/capabilitiestest.go` have to include it, or
 the capability and `probe-image` tests fail on an image that does not carry it; and
 `packages/daemon/internal/capabilities/image_test.go` spells the expected detail string out again.
 
-Only those four Go sites are gated: miss one and the suite is red, which is what makes them easy to
-find. Nothing holds the notices string or the smoke step to anything, so a change that stops at the
-gated sites opens green and ships a licence file that does not name the package it installs. It
-reaches a role only once a deployment pins the new image digest, as every Legion change does —
-never within your own phase.
+Miss one of those four and the suite is red, which is what makes them easy to find. Nothing holds
+a Dockerfile comment, the notices string or the smoke step to anything today, so a change that
+stops at the gated sites opens green and ships a licence file that does not name the package it
+installs. That is a fact about this build rather than a property: dispatch://INFRA-255 generates
+the package list from `dpkg-query` at build time and drops the hand-kept string, and once it lands
+the notices half of this warning goes with it while the smoke step and the comments stay yours to
+carry. It reaches a role only once a deployment pins the new image digest, as every Legion change
+does — never within your own phase.
 
 So when your work needs such a tool, say so to the architect that owns your issue (`envoy_publish`
 to its role topic), with the tool, what your phase needs it for, and the runner forms you already
-ruled out. Improvising — an extraction prefix, a vendored binary, a hand-rolled substitute — is not
-the step: the architect decides whether the image change is work to schedule.
+ruled out. What is not the step is improvising a CLI for your own convenience — a vendored binary,
+a hand-rolled substitute, or an extraction prefix dropped on your own `PATH`: the architect decides
+whether the image change is work to schedule. An extraction a harness builds for its own runs is
+not improvising and is not what this rules out (the Dispatch e2e stack, above); the convenience
+case fails the same resolution test, and the mechanism is not what either verdict turns on.
 
 The operator's side of this — why the image carries those five clients rather than anything else,
 the five priced options with their measurements, and what the clients cost the image — is in

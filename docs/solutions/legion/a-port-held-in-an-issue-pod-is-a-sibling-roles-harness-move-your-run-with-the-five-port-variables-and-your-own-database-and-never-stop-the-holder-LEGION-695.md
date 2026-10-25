@@ -40,6 +40,13 @@ applies:
   `create extension vector`) and leaves it running for the roles after it, recording the
   `LD_LIBRARY_PATH`, `PATH` and `DATABASE_URL` it needs in the handoff's `trickyParts`. Two roles
   each built one (55432 and 55433): the first role's note is what spares the next the build.
+  **Note 2026-10-25 (INFRA-221):** still the step, and it is the clearest instance in this
+  repository of the line `skills/legion-worker/references/tools.md` draws for the withheld
+  `operator-setup` capability, which is about scope rather than about unpacking: what crosses to
+  the next role here is a **note, not an environment**. That role reads the `trickyParts` and sets
+  `LD_LIBRARY_PATH` and `PATH` deliberately for its own harness commands, so nothing resolves
+  through the prefix that did not name it. Keep the hand-over in the handoff rather than in a
+  shell every later command inherits.
 - Stop your own `dispatch:local` before you complete, so its ports are free for the next role; a
   Postgres you built stays up.
 

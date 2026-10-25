@@ -64,8 +64,12 @@ related_issues:
    print(yaml.__version__)"`, which prints `Installed 1 package in 12ms` and then `6.0.2` in
    0.597 s wall, with the package available to the code the run executes. The current rule for
    anything the image lacks, and the line between a pinned run and the withheld
-   `operator-setup` capability, is `skills/legion-worker/references/tools.md`. What the item above
-   records is what that pod carried then.
+   `operator-setup` capability, is `skills/legion-worker/references/tools.md`. That line is about
+   scope, which gives this item a second reason to be superseded: "tell every subagent to prepend
+   `$HOME/.local/bin` to `PATH`" hands an environment to processes that never named it, where a
+   harness that passes the test hands the next role a note it sets deliberately
+   (`docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md`).
+   What the item above records is what that pod carried then.
 
 ## Evidence
 
