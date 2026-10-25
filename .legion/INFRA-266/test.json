@@ -2,16 +2,25 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-266",
-  "completed": "2026-10-25T09:25:00Z",
-  "round": 3,
-  "headSha": "d7059b661335619c7b7d5f5e947e80d5650281f2",
-  "codeHeadSha": "69bed70c74a43d6de78d9dbf3da14d39d11591e1",
+  "completed": "2026-10-25T10:30:00Z",
+  "round": 4,
+  "headSha": "4d93fbea623b6efd85e07a7f96630c910a68b611",
+  "codeHeadSha": "65e8caff252a412873aa94df5c367f5613da0d42",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 3, after the reviewer's two picker findings: re-ran Dispatch's browser rows at this head on PostgreSQL 17.11 and Playwright's Chromium (`cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable bun run e2e -- --project=chromium e2e/settings.e2e.ts e2e/inbox.e2e.ts -g 'default assignee'` -> 4 passed (31.3s)), and the two new rows with the head's packages/dispatch/e2e/ restored onto 98ac7624699e -> 2 failed for the defects they name: settings.e2e.ts:468 toHaveValue('bob') received '' (the pick snapped back while its save was held), settings.e2e.ts:525 toBeDisabled() received enabled (an unread default offered as Unassigned); the original settings row passed there. Round 2's API proof stands unchanged: this round touched only ProjectsSection.tsx, its unit and e2e tests, and prose."
+    "how": "Round 4: re-ran all five browser rows at this head on PostgreSQL 17.11 and Playwright's Chromium (`cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable bun run e2e -- --project=chromium e2e/settings.e2e.ts e2e/inbox.e2e.ts -g 'default assignee'` -> 5 passed (30.3s)), not inherited across the merge of main at 65e8caff. The new remount row with ProjectsSection.tsx restored to 69bed70c74a4 on top of 65e8caff -> failed at settings.e2e.ts:551, `toHaveValue('alice')` received 'carol', exactly the defect it names; the three other settings rows passed there. By hand in Chromium against the real server: hold a save (bob), pick carol, go to Inbox, come back (shown carol), go and come back again (shown carol), pick dave then alice, release -> PUTs bob, carol, dave, alice in that order; stored and shown alice, alice after reload. Server smoke at this head after the merge: shared-token create in CORE takes the default, explicit null keeps nobody, explicit bob kept, PUT {} -> 400 INVALID_PROJECT, the shared token's PUT -> 403 HUMAN_ONLY."
   },
-  "failed": 0,
-  "failures": [],
+  "failed": 2,
+  "failures": [
+    {
+      "criterion": "A default-assignee pick made while an earlier save for the same project is out is superseded by the person's newest pick before it leaves the browser, so the stored default goes only from the in-flight pick to the newest one (the behaviour round 3's fix had and the issue's own assignee picker, useIssueFieldWrite, has; the architect asked the tester to decide whether sending every intermediate pick is acceptable).",
+      "evidence": "Judged a defect. At 4d93fbea every pick is its own scoped mutation, so every intermediate pick is sent and stored in turn. In Chromium against the real cmd/dispatch binary on PostgreSQL 17.11: with each save slowed 800 ms, six changes of mind 100 ms apart (bob, carol, dave, alice, bob, carol) sent six PUTs, and the server's default read bob, carol, dave, alice, bob, carol over 5.3 s while the control showed carol the whole time. A person arrowing through the closed picker with the keyboard makes a pick per key press: four ArrowDown presses with 500 ms saves sent alice, bob, carol and dave, and the stored default walked through all four over 2 s. Every stored pick is a default that an issue created in that moment is assigned to permanently (the chain runs only at create) and appends a settings.project_default_assignee.updated event, so a person who merely passed over someone can leave them assigned to work. The right behaviour: one save out per project, and a pick made while it is out replaces any pick already waiting, so when the save settles only the newest waiting pick is sent; keep the queue in QueryClient scope so a remounted row still waits behind the save in flight. Row 498's wire assertion ([bob, carol, alice]) pins the send-every-pick behaviour and needs [bob, alice] once carol is superseded by alice. Pinned by the red row `default assignee picks made while a save is out are superseded by the newest, so only it follows the save` (packages/dispatch/e2e/settings.e2e.ts:575, commit 9aa04afa2a0a): `cd packages/dispatch && DATABASE_URL=<a local Postgres> bun run e2e -- --project=chromium e2e/settings.e2e.ts -g 'superseded'` fails at :622, the wire carrying the extra `sent carol, answered carol, sent dave, answered dave`. The row passes with round 3's ProjectsSection.tsx (69bed70c74a4), so it asks for nothing new."
+    },
+    {
+      "criterion": "A refused save is reported to the person who made it: a default-assignee save refused while Settings is not on screen is shown in that project's row when Settings is opened again.",
+      "evidence": "At 4d93fbea the row's error comes from its own useMutation observer, so it is lost when the row unmounts. In Chromium against the real server: stored alice, pick bob (save held), go to Inbox, the save is refused (500), come back to Settings -> the control shows alice and no alert, so nothing tells the person their pick was refused. With the row mounted, the same refusal shows the row's alert with Retry. Pinned by the red row `a default assignee save refused while Settings is left says so when Settings is reopened` (packages/dispatch/e2e/settings.e2e.ts:633, commit 9aa04afa2a0a): `bun run e2e -- --project=chromium e2e/settings.e2e.ts -g 'refused while Settings'` fails at :673, the alert carrying the server's error text is not found. The error can be read from the mutation cache the same way the pending pick is (useMutationState on the project's mutation key), up to the next attempt for that project."
+    }
+  ],
   "proof": [
     {
       "criterion": "Round 3 (the reviewer's findings): each project's default-assignee picker saves one pick at a time with the last pick both stored and shown, a stale defaults read never overwrites a completed save, and Unassigned appears only for loaded data with no default — never while the defaults are unread or their read failed — with the unread control refusing edits.",
@@ -47,7 +56,11 @@
     }
   ],
   "errorCodeJudgement": "The architect asked whether 400 INVALID_PROJECT misleads for a body without assignee. It does not: the repository's INVALID_<resource> codes name a bad body on a write to that resource (projects.go already answers INVALID_PROJECT for a project create with no name, and INVALID_ISSUE is the issue routes' body code), and the message names the missing field. Not a finding.",
-  "ci": "Read at code head 69bed70c74a4: PR Title 40179193006 success; Tests 40179165743 queued (lint, typecheck, test); Docs 40179165753 in progress; Worker Image 40179165746 in progress; Legion Envoy and Contracts 40179165849 queued. None waited on or rerun by the tester. At 2d30e173f5ae, Legion Envoy and Contracts 40167646297 failed in envoy-go-race alone (internal/bus durable-consumer test, outside this diff, not required by main); the architect owns it if it recurs.",
+  "ci": "Read at code head 65e8caff252a: Docs 40183002179 success; Worker Image 40183002170 success; PR Title 40183002213 and 40183169596 success; Tests 40183002214 in progress; Legion Envoy and Contracts 40183002178 queued. None waited on or rerun by the tester. The tester's red rows (9aa04afa2a0a) start new runs.",
+  "regressionChecks": "Held at 4d93fbea in Chromium against the real server: the picker is disabled with the single option 'Loading…' while the defaults read is held (a forced click, ArrowDown and Enter sent 0 PUTs; selectOption timed out); a refused read shows 'Unavailable', disabled, with 'Couldn't load the default assignees.' and Retry, and Retry loads the stored values; a failed refetch after a load keeps the last known value, enabled, beside the error; a refused last save with the row mounted shows the row's alert with Retry, the control back at the stored value, and Retry stores the pick; a refused first save with a pick behind it still sends and keeps that pick; CORE's held save does not delay OPS's.",
+  "observations": [
+    "A full page reload while a save is held and another pick waits: the waiting pick is lost with the page's QueryClient and the held save lands (server CORE=bob), but the reloaded page read the defaults before that save committed and showed Unassigned until something refetched. A reload is a new QueryClient, the same class as the two-tab case the architect ruled out of scope; not a finding."
+  ],
   "rounds": [
     {
       "round": 1,
@@ -60,6 +73,12 @@
     {
       "round": 2,
       "headSha": "87ae4f4864d2eaf4823e3eb14266e4989561e0e7",
+      "verdict": "pass",
+      "failures": []
+    },
+    {
+      "round": 3,
+      "headSha": "fff29c747ea2894e685960c93416a6759b89442a",
       "verdict": "pass",
       "failures": []
     }
