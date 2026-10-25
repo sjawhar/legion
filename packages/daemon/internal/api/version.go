@@ -298,11 +298,20 @@ package api
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
 //
-// 36: INFRA-220 -- a worker's environment gains the four LEGION_STALL_* numbers under both
+// 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
+// `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
+// issue beneath it is still in the workflow and a merged root's close waits for the rest of its
+// tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
+// request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
+// request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
+//
+// 37: INFRA-220 -- a worker's environment gains the four LEGION_STALL_* numbers under both
 // runtimes (`internal/daemon/specs.go` merges each one the daemon holds into `spec.Env`, which a
 // pane's `-e` pairs and a pod container's `env` carry verbatim), and a Claude Code role's pod
 // worker container gains CLAUDE_CONFIG_DIR, CLAUDE_CODE_DISABLE_BACKGROUND_TASKS and
 // CLAUDE_CODE_DISABLE_CRON. Both plugins read the four numbers through
 // `packages/pi-shared/src/stall-limits.ts`, and `@sjawhar/claude-envoy` reads the Claude
-// directory, so the daemon and the image that carries them ship together.
-const DaemonAPIVersion = 36
+// directory, so the daemon and the image that carries them ship together. (This branch took 36;
+// main then landed INFRA-229 at 36 before it merged, so it takes the number above, as the
+// collision note says.)
+const DaemonAPIVersion = 37

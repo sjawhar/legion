@@ -9,9 +9,9 @@ import { scriptFunctions } from "./script-functions";
 // kubectl exec). It runs under the script's `set -Eeuo pipefail` (lib/rig.sh:16-21 names the
 // hazard): an early-exiting consumer downstream of a live producer turns the producer's SIGPIPE
 // into the pipeline's status, so a match followed by more output than the pipe holds reads as
-// absent. The run at 59e0337c failed mid-turn-carry that way: the planner's hold `/usr/bin/sleep
-// 13` stood at line 118 of a 37 KB process list, 20 KB before its end, and every poll answered
-// false. pod_runs is taken from the script by name and run over a pod_commands stub that prints the
+// absent. The run at 59e0337c failed a since-removed checkpoint that way: a planner's hold
+// `/usr/bin/sleep 13` stood at line 118 of a 37 KB process list, 20 KB before its end, and every
+// poll answered false. pod_runs is taken from the script by name and run over a pod_commands stub that prints the
 // match with a process list after it; the stub writes from a subprocess, as kubectl does, so a
 // consumer that stops reading early gives it SIGPIPE.
 const fn = scriptFunctions(join(import.meta.dir, "..", "stage4b-sandbox-tree.sh"));
