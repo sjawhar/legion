@@ -15281,6 +15281,13 @@ function retryAfterMs(response) {
   const at = Date.parse(value);
   return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
 }
+var KEY_ECHOING_ORIGINS = new Set;
+var KEY_LAYER_PROBES = new Map;
+var KEY_LAYER_PROBE_MS = 5000;
+function keyEchoed(response, key) {
+  const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
+  return echoed.replace(/^"(.*)"$/, "$1") === key;
+}
 async function writeAnswer(response) {
   const { status } = response;
   if (status >= 500)
@@ -15689,7 +15696,8 @@ class DispatchClient {
     };
     if (method !== "POST" && method !== "PATCH")
       return this.fetchImpl(url2, init);
-    headers[IDEMPOTENCY_KEY_HEADER] = crypto.randomUUID();
+    const key = crypto.randomUUID();
+    headers[IDEMPOTENCY_KEY_HEADER] = key;
     const { pausesMs, withinMs, pause = pauseFor, now = () => performance.now() } = this.writeRetry;
     const started = now();
     let reached = false;
@@ -15697,7 +15705,10 @@ class DispatchClient {
       let answer;
       let thrown;
       try {
-        answer = await writeAnswer(await this.fetchImpl(url2, init));
+        const response = await this.fetchImpl(url2, init);
+        if (keyEchoed(response, key))
+          KEY_ECHOING_ORIGINS.add(this.#baseUrl);
+        answer = await writeAnswer(response);
         if (!answer.again)
           return answer.response;
         reached ||= answer.reached;
@@ -15710,7 +15721,8 @@ class DispatchClient {
       }
       const scheduled = pausesMs[attempt - 1];
       const wait = Math.max(scheduled ?? 0, answer === undefined ? 0 : retryAfterMs(answer.response));
-      if (scheduled === undefined || now() - started + wait > withinMs) {
+      const inTime = scheduled !== undefined && now() - started + wait <= withinMs;
+      if (!inTime || !await this.#runsKeyedLayer()) {
         if (answer === undefined)
           throw thrown;
         return this.#unsettled(method, url2, answer.response, reached, attempt);
@@ -15719,6 +15731,34 @@ class DispatchClient {
         return;
       });
       await pause(wait, this.#signal);
+    }
+  }
+  async#runsKeyedLayer() {
+    if (KEY_ECHOING_ORIGINS.has(this.#baseUrl))
+      return true;
+    let probe = KEY_LAYER_PROBES.get(this.#baseUrl);
+    if (probe === undefined) {
+      probe = this.#probeKeyedLayer();
+      KEY_LAYER_PROBES.set(this.#baseUrl, probe);
+    }
+    const runs = await probe;
+    if (runs)
+      KEY_ECHOING_ORIGINS.add(this.#baseUrl);
+    return runs;
+  }
+  async#probeKeyedLayer() {
+    try {
+      const response = await this.fetchImpl(`${this.#baseUrl}/healthz`, {
+        method: "GET",
+        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)])
+      });
+      if (!response.ok || !isJson(response))
+        return false;
+      const health = await response.json();
+      return typeof health === "object" && health !== null && Reflect.get(health, "idempotency_keys") === true;
+    } catch {
+      return false;
     }
   }
   async#unsettled(method, url2, response, reached, attempts) {

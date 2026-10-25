@@ -709,16 +709,20 @@ const acceptOnce =
       ? { accepted: true, ...(body !== undefined && { body }) }
       : { code: "ACCEPT_ALREADY_ACCEPTED", status: 409 };
 
-/** The accept route's response for `answer` to an accept of `attempt`. */
+/** The accept route's response for `answer` to an accept of `attempt`, carrying back the request's
+ *  key as Dispatch's keyed layer does (`key`), which is what lets the client ask again under it. */
 function acceptResponse(
   attempt: number,
   answer: AcceptAnswer,
-  messageID = DIRECT_MESSAGE_ID
+  messageID = DIRECT_MESSAGE_ID,
+  key: string | null = null
 ): Response {
   if ("reject" in answer) throw new TypeError(answer.reject);
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (key !== null) headers["Idempotency-Key"] = key;
   if (!("accepted" in answer)) {
     return new Response(JSON.stringify({ code: answer.code, error: "refused" }), {
-      headers: { "content-type": "application/json" },
+      headers,
       status: answer.status,
     });
   }
@@ -728,7 +732,7 @@ function acceptResponse(
   };
   const body = answer.body === undefined ? DIRECT_MESSAGE_BODY : answer.body;
   return new Response(JSON.stringify(body === null ? accepted : { ...accepted, body }), {
-    headers: { "content-type": "application/json" },
+    headers,
     status: 200,
   });
 }
@@ -775,6 +779,13 @@ async function bootDirectSession(
   const replyWaiters: { readonly count: number; readonly resolve: () => void }[] = [];
   globalThis.fetch = async (input, init) => {
     const url = new URL(input.toString());
+    // This Dispatch runs the keyed layer: its answers to a keyed write carry the key back and its
+    // /healthz says so, so a failed accept is asked again under its key.
+    if (url.pathname === "/healthz") {
+      return new Response(JSON.stringify({ status: "ok", idempotency_keys: true }), {
+        headers: { "content-type": "application/json" },
+      });
+    }
     if (url.pathname.startsWith("/api/v1/messages/")) {
       const authorization = new Headers(init?.headers).get("Authorization");
       if ((init?.method ?? "GET") === "POST" && url.pathname.endsWith("/accept")) {
@@ -787,7 +798,8 @@ async function bootDirectSession(
         return acceptResponse(
           Number(url.pathname.split("/").at(-2)),
           await (options.accept ?? acceptOnce())(accepts.length),
-          url.pathname.split("/").at(-4)
+          url.pathname.split("/").at(-4),
+          new Headers(init?.headers).get("Idempotency-Key")
         );
       }
       // The session asks Dispatch nothing else about a direct message but its reply: any other

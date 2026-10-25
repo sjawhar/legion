@@ -517,14 +517,18 @@ describe("renderInbound dispatch events", () => {
     const server = Bun.serve({
       port: 0,
       fetch: (request) => {
-        keys.push(request.headers.get("Idempotency-Key"));
+        const key = request.headers.get("Idempotency-Key");
+        keys.push(key);
         answers += 1;
+        // Dispatch's keyed layer echoes the key on every answer to a keyed request, which is what
+        // tells the client a repeat is answered from the key rather than run again.
+        const headers: Record<string, string> = key === null ? {} : { "Idempotency-Key": key };
         if (answers === 1)
-          return Response.json({ code: "UNAVAILABLE", error: "down" }, { status: 503 });
-        if (answers === 2) return Response.json({ reply: { id: "reply-1" } });
+          return Response.json({ code: "UNAVAILABLE", error: "down" }, { status: 503, headers });
+        if (answers === 2) return Response.json({ reply: { id: "reply-1" } }, { headers });
         return Response.json(
           { code: "ATTEMPT_ANSWERED", error: "already answered" },
-          { status: 409 }
+          { status: 409, headers }
         );
       },
     });

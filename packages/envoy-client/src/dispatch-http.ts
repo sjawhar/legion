@@ -263,6 +263,39 @@ function retryAfterMs(response: Response): number {
   return Number.isNaN(at) ? 0 : Math.max(0, at - Date.now());
 }
 
+/**
+ * The Dispatch origins this process has seen run the keyed-write layer: one answered a write with
+ * the key it sent (`keyEchoed`), or its `/healthz` said `idempotency_keys`. Only such a Dispatch is
+ * asked again under a key; against any other a repeat would be a second write.
+ */
+const KEY_ECHOING_ORIGINS = new Set<string>();
+
+/** Each origin's `/healthz` probe, asked at most once per process (`DispatchClient.#runsKeyedLayer`). */
+const KEY_LAYER_PROBES = new Map<string, Promise<boolean>>();
+
+/** How long the `/healthz` probe waits; it runs only after a write has already failed. */
+const KEY_LAYER_PROBE_MS = 5_000;
+
+/**
+ * Forgets what this process learned about which Dispatch runs the keyed layer. A test seam: the
+ * memory is per process and per origin, so a test that drives one origin as a Dispatch of its own
+ * starts from nothing.
+ */
+export function forgetKeyedLayerMemory(): void {
+  KEY_ECHOING_ORIGINS.clear();
+  KEY_LAYER_PROBES.clear();
+}
+
+/**
+ * Whether `response` carries back the key its request sent (`Idempotency-Key`), which says the
+ * answer came through Dispatch's keyed layer. Dispatch echoes it bare; a key sent in double quotes
+ * comes back without them, so both forms are read.
+ */
+function keyEchoed(response: Response, key: string): boolean {
+  const echoed = response.headers.get(IDEMPOTENCY_KEY_HEADER)?.trim() ?? "";
+  return echoed.replace(/^"(.*)"$/, "$1") === key;
+}
+
 /** A request body encoded once, so every attempt of a write sends the bytes the first one did. */
 interface EncodedBody {
   readonly content: string | Uint8Array<ArrayBuffer>;
@@ -1038,10 +1071,18 @@ export class DispatchClient {
    * DELETE goes once. A write (POST or PATCH) carries an `Idempotency-Key` minted here for this
    * call alone, so all its attempts are one intent to Dispatch, which runs it once and answers a
    * repeat with the answer it stored, while two calls are two writes. Each attempt sends the same
-   * encoded body. While an attempt gets no definitive answer (`writeAnswer`, or a transport failure)
-   * the write asks again under its key, paced by `writeRetry`, and the first definitive answer is
-   * the call's: a 2xx, a replay of one included, or a refusal. The call's deadline and its caller's
-   * cancellation end the attempts at once, whether a fetch or a pause is under way.
+   * encoded body. While an attempt gets no definitive answer (`writeAnswer`, or a transport
+   * failure) the write asks again under its key, paced by `writeRetry`, and the first definitive
+   * answer is the call's: a 2xx, a replay of one included, or a refusal. The call's deadline and
+   * its caller's cancellation end the attempts at once, whether a fetch or a pause is under way.
+   *
+   * It asks again only against a Dispatch this process has seen run the keyed layer, which an
+   * answer says by echoing the request's key (`keyEchoed`): a Dispatch without the layer would run
+   * a repeat as a second write, so its 5xx — which can come after it committed — is reported as it
+   * stands rather than resent. The failing answer's own echo is that knowledge, so one of
+   * Dispatch's own 5xx, 429 or `409 KEY_IN_FLIGHT` is asked again at once; a transport failure, and
+   * an answer something in Dispatch's place wrote (which carries no echo), ask `/healthz` first
+   * (`#runsKeyedLayer`), once per process per origin.
    */
   async #send(
     method: string,
@@ -1061,7 +1102,8 @@ export class DispatchClient {
       ...(body === undefined ? {} : { body: body.content }),
     };
     if (method !== "POST" && method !== "PATCH") return this.fetchImpl(url, init);
-    headers[IDEMPOTENCY_KEY_HEADER] = crypto.randomUUID();
+    const key = crypto.randomUUID();
+    headers[IDEMPOTENCY_KEY_HEADER] = key;
     const { pausesMs, withinMs, pause = pauseFor, now = () => performance.now() } = this.writeRetry;
     const started = now();
     let reached = false;
@@ -1069,7 +1111,9 @@ export class DispatchClient {
       let answer: WriteAnswer | undefined;
       let thrown: unknown;
       try {
-        answer = await writeAnswer(await this.fetchImpl(url, init));
+        const response = await this.fetchImpl(url, init);
+        if (keyEchoed(response, key)) KEY_ECHOING_ORIGINS.add(this.#baseUrl);
+        answer = await writeAnswer(response);
         if (!answer.again) return answer.response;
         reached ||= answer.reached;
       } catch (error) {
@@ -1084,12 +1128,57 @@ export class DispatchClient {
         scheduled ?? 0,
         answer === undefined ? 0 : retryAfterMs(answer.response)
       );
-      if (scheduled === undefined || now() - started + wait > withinMs) {
+      // Only a Dispatch that runs the keyed layer may be asked again: against any other a repeat
+      // would be a second write. The attempt's own answer says so when it echoed the key; a
+      // transport failure, and an answer something in Dispatch's place wrote, say nothing, so the
+      // probe asks before a write that already failed is resent.
+      const inTime = scheduled !== undefined && now() - started + wait <= withinMs;
+      if (!inTime || !(await this.#runsKeyedLayer())) {
         if (answer === undefined) throw thrown;
         return this.#unsettled(method, url, answer.response, reached, attempt);
       }
       await answer?.response.body?.cancel().catch(() => undefined);
       await pause(wait, this.#signal);
+    }
+  }
+
+  /**
+   * Whether this Dispatch runs the keyed layer, so a failed write may be asked again under its
+   * key. True once an answer echoed the key; otherwise `GET /healthz`, whose `idempotency_keys`
+   * says it, asked at most once per process per origin and bounded at `KEY_LAYER_PROBE_MS`. A
+   * probe that fails, times out, answers no JSON or leaves the field out is false: the write is
+   * reported as it stands rather than resent, since a Dispatch without the layer would run a
+   * repeat as a second write. It runs only after a write has already failed, so the normal path
+   * costs nothing.
+   */
+  async #runsKeyedLayer(): Promise<boolean> {
+    if (KEY_ECHOING_ORIGINS.has(this.#baseUrl)) return true;
+    let probe = KEY_LAYER_PROBES.get(this.#baseUrl);
+    if (probe === undefined) {
+      probe = this.#probeKeyedLayer();
+      KEY_LAYER_PROBES.set(this.#baseUrl, probe);
+    }
+    const runs = await probe;
+    if (runs) KEY_ECHOING_ORIGINS.add(this.#baseUrl);
+    return runs;
+  }
+
+  async #probeKeyedLayer(): Promise<boolean> {
+    try {
+      const response = await this.fetchImpl(`${this.#baseUrl}/healthz`, {
+        method: "GET",
+        headers: { Accept: "application/json", Authorization: `Bearer ${this.token}` },
+        signal: AbortSignal.any([this.#signal, AbortSignal.timeout(KEY_LAYER_PROBE_MS)]),
+      });
+      if (!response.ok || !isJson(response)) return false;
+      const health: unknown = await response.json();
+      return (
+        typeof health === "object" &&
+        health !== null &&
+        Reflect.get(health, "idempotency_keys") === true
+      );
+    } catch {
+      return false;
     }
   }
 

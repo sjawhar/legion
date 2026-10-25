@@ -321,8 +321,9 @@ describe("executeDispatchTool", () => {
       "so the write may or may not have reached Dispatch: check whether it took effect before retrying it."
     );
     expect(write).not.toContain("a retry may succeed");
-    // The write asked again under its key until its five attempts ran out; the read went once.
-    expect(requests).toEqual(Array(5).fill("POST /api/v1/issues/DSP-1/messages"));
+    // Nothing here says this Dispatch runs the keyed layer: the gateway answers its /healthz too,
+    // so the write is asked once and reported, and the read goes once.
+    expect(requests).toEqual(["POST /api/v1/issues/DSP-1/messages", "GET /healthz"]);
     requests.length = 0;
 
     const read = await run("dispatch_read", { issue: "DSP-1" });
@@ -3374,18 +3375,31 @@ describe("executeDispatchTool", () => {
     ).rejects.toThrow(/title is 1 characters over the 1000-character limit \(1001\/1000\)/);
   });
 
-  /** Records every request; the messages route and the PATCH answer with the given responses. */
+  /**
+   * Records every request; the messages route and the PATCH answer with the given responses. This
+   * Dispatch runs the keyed layer: its own answers (JSON) echo the request's key and its /healthz
+   * says `idempotency_keys`, so a write that fails without an answer of Dispatch's own is resent.
+   */
   function closingServer(answers: { message: () => Response; patch: () => Response }) {
     const requests: Array<{ method: string; pathname: string; body?: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
       const method = init?.method ?? "GET";
+      if (pathname === "/healthz") return response({ status: "ok", idempotency_keys: true });
       requests.push({
         method,
         pathname,
         ...(init?.body === undefined ? {} : { body: JSON.parse(String(init.body)) }),
       });
-      if (pathname === "/api/v1/issues/ACME-175/messages") return answers.message();
+      const key = new Headers(init?.headers).get("Idempotency-Key");
+      const echoed = (given: Response): Response => {
+        if (key === null || !(given.headers.get("Content-Type") ?? "").includes("application/json"))
+          return given;
+        const copy = new Response(given.body, given);
+        copy.headers.set("Idempotency-Key", key);
+        return copy;
+      };
+      if (pathname === "/api/v1/issues/ACME-175/messages") return echoed(answers.message());
       if (pathname !== "/api/v1/issues/ACME-175") {
         throw new Error(`unexpected request: ${method} ${pathname}`);
       }
@@ -3399,7 +3413,7 @@ describe("executeDispatchTool", () => {
           external_links: [],
         });
       }
-      return answers.patch();
+      return echoed(answers.patch());
     };
     return { requests, fetchImpl: fetchImpl as typeof fetch };
   }
