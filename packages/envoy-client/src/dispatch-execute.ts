@@ -2833,6 +2833,8 @@ export async function executeDispatchTool(
       const parent = optionalString(args, "parent");
       const components = optionalComponents(args, "components");
       const repo = optionalString(args, "repo");
+      const rankBefore = optionalString(args, "before");
+      const rankAfter = optionalString(args, "after");
       const priority = optionalPriority(args, "priority");
       const labels = Array.isArray(args.labels) ? (args.labels as string[]) : undefined;
       const blockedBy = Array.isArray(args.blocked_by) ? (args.blocked_by as string[]) : undefined;
@@ -2891,6 +2893,16 @@ export async function executeDispatchTool(
           ...(components === undefined ? {} : { components }),
           ...(repo === undefined ? {} : { repo: repo === "" ? null : repo }),
           ...(sentLinks === undefined ? {} : { external_links: sentLinks }),
+          // A rank with neither neighbour is not a no-op: the server ranks the issue last in its
+          // project. So an ordinary update sends no rank key at all.
+          ...(rankBefore === undefined && rankAfter === undefined
+            ? {}
+            : {
+                rank: {
+                  ...(rankBefore === undefined ? {} : { before: rankBefore }),
+                  ...(rankAfter === undefined ? {} : { after: rankAfter }),
+                },
+              }),
           actor,
         });
       } catch (error) {
@@ -2930,6 +2942,14 @@ export async function executeDispatchTool(
         ...(priority === undefined
           ? []
           : [after.priority === null ? "priority cleared" : `priority -> P${after.priority}`]),
+        ...(rankBefore === undefined && rankAfter === undefined
+          ? []
+          : [
+              `rank -> ${[
+                ...(rankAfter === undefined ? [] : [`after ${rankAfter}`]),
+                ...(rankBefore === undefined ? [] : [`before ${rankBefore}`]),
+              ].join(", ")}`,
+            ]),
         ...(requestedLinks === undefined
           ? []
           : [

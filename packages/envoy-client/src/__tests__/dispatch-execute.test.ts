@@ -2850,6 +2850,53 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  test("dispatch_issue_update sends a board move only when a neighbour is named", async () => {
+    const bodies: unknown[] = [];
+    const issue = {
+      key: "ACME-1",
+      title: "Board work",
+      project: "ACME",
+      status: "todo",
+      external_links: [],
+      components: issueComponents("inherit", []),
+    };
+    const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      if (new URL(String(url)).pathname === "/api/v1/projects/ACME/architecture-source") {
+        return sourceNull();
+      }
+      const method = init?.method ?? "GET";
+      if (method === "PATCH") bodies.push(JSON.parse(String(init?.body)));
+      return response({ ...issue, status: method === "PATCH" ? "testing" : "todo" });
+    };
+    const run = (args: Record<string, unknown>) =>
+      executeDispatchTool({
+        tool: "dispatch_issue_update",
+        args: { issue: "ACME-1", ...args },
+        cwd: "/workspace",
+        host: "omp",
+        config,
+        env: {},
+        exec: repoExec("owner/repo"),
+        fetchImpl: fetchImpl as typeof fetch,
+      });
+
+    const above = await run({ before: "ACME-2" });
+    expect(bodies.at(-1)).toEqual(expect.objectContaining({ rank: { before: "ACME-2" } }));
+    expect(above.text).toContain("rank -> before ACME-2");
+    const below = await run({ after: "ACME-2" });
+    expect(bodies.at(-1)).toEqual(expect.objectContaining({ rank: { after: "ACME-2" } }));
+    expect(below.text).toContain("rank -> after ACME-2");
+    const between = await run({ before: "ACME-2", after: "ACME-3" });
+    expect(bodies.at(-1)).toEqual(
+      expect.objectContaining({ rank: { before: "ACME-2", after: "ACME-3" } })
+    );
+    expect(between.text).toContain("rank -> after ACME-3, before ACME-2");
+    // The regression: a rank with neither neighbour ranks the issue last in its project, so an
+    // ordinary update must carry no rank key at all.
+    await run({ status: "testing" });
+    expect(bodies.at(-1)).not.toHaveProperty("rank");
+  });
+
   // A Dispatch server from before the repository fields that took the write anyway answers
   // without repo: the repository was not saved, so the write fails loudly, naming what did happen.
   test("a repo write to a Dispatch server older than the repository fields fails loudly", async () => {
