@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-271",
-  "completed": "2026-10-25T07:22:20Z",
+  "completed": "2026-10-25T07:46:00Z",
   "proof": [
     {
       "criterion": "Legion sends no database password to a pod and needs none: the connection a pod uses names the listener in its own container, the credential is obtained there from the pod's own identity, and nothing is written to the pod's disk.",
@@ -48,9 +48,17 @@
       "criterion": "CI red at 3769204e7212 (test): the PID-namespace launcher tests pass again — TestPIDOneLauncherCleansDetachedDescendants and TestPIDOneLauncherReapsOrphansWhileRoleStaysResident read their two-field `<pid> <result>` markers whole.",
       "surface": "the launcher package's test helpers `published`/`publishedAll` against real marker files, and the whole launcher suite run inside a Legion pod with the pod's own environment (LEGION_WORKSPACE set)",
       "command": "a throwaway in-package test writing `1 gone\\n` and `42 bound envoy-7` markers and calling published/publishedAll; then `go test -count=1 ./internal/launcher/` from packages/daemon with LEGION_WORKSPACE left set",
-      "observed": "two-field marker: pid=1 rest=\"gone\\n\", TrimSpace equals \"gone\" (true) — what namespace_test.go compares; three-field marker: {descendant:42 socket:bound credential:envoy-7}. The suite: ok, with TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten now passing in the pod. The PID-namespace tests skip here (no sudo); CI runs them on this push.",
+      "observed": "two-field marker: pid=1 rest=\"gone\\n\", TrimSpace equals \"gone\" (true) — what namespace_test.go compares; three-field marker: {descendant:42 socket:bound credential:envoy-7}. The suite: ok, with TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten now passing in the pod. The PID-namespace tests skip here (no sudo). CI run 40172562272 at 5c6e2b342e06 ended cancelled, so it proves nothing; the tester ran all three as PID 1 at 5c6e2b342e06 (test.json proof[4]) and they passed, failing with the cleanup disabled.",
       "headSha": "1312d9e2fb1fa066de552fc3fd2f1b33fedfca95",
       "negativeControl": "at 3769204e7212 the same two-field marker parsed to socket=\"gone\\n\" and credential=\"\", which is the empty result CI's run 40168372424 printed (`detached process 9  into the next generation after stop`); and the resume-notice test failed in the pod with `a resume with no workspace was told \"true\", want false` before its LEGION_WORKSPACE was cleared"
+    },
+    {
+      "criterion": "Tester's failure at 5c6e2b342e06: on the container's own SIGTERM the generation's session proxy keeps serving the child through its stop grace, and is closed once the child has exited, bounded by that grace, with nothing left bound when the launcher returns.",
+      "surface": "the real launcher (internal/launcher Run, driven by the test rig's stand-in daemon over shimwire) with its real session proxy dialing a real PostgreSQL 16.2 in this pod as the IAM-style login (pg_hba trusts only that login on 127.0.0.1), a child shell that on SIGTERM waits 1 s and then opens a fresh connection through the generation's socket with the real psql and INSERTs a row (an agent's last session write after its pool idled), and a real SIGTERM delivered to the launcher's process, caught by signal.NotifyContext as cmd/legion's main does",
+      "command": "throwaway TestZZProofSIGTERMLastWrite (not committed): `T271_NOTE=fixed-… PSQL=<pgserver psql> go test -count=1 -v -run TestZZProofSIGTERMLastWrite ./internal/launcher/` from packages/daemon, then `psql … -Atc 'select note from t271_last_write'`; plus `go test -count=1 ./internal/launcher/ ./internal/sessionproxy/` and `-count=10` of TestASessionDatabaseServesItsChildThroughTheChildsShutdownGrace and TestOnTheContainersShutdownASessionDatabaseEndsOnceItsWedgedChildIsKilled",
+      "observed": "with the fix: the child's psql printed `INSERT 0 1`, `psql exit 0`; Run returned `context canceled` after the child exited; the generation's directory was gone; the table then held exactly the row `fixed-f27918df0a66` (the working copy over that commit, committed as 18b29e17673c). The tester's red test, unmodified, passes both cases 10 of 10; the new wedged-child test passes 10 of 10 (a child ignoring SIGTERM is served during the grace, killed at it, and the socket refuses and the directory is gone once Run returns).",
+      "headSha": "18b29e17673cc3512c1e876ee5e042b340760ede",
+      "negativeControl": "the same run with sessionproxy.go restored to its 5c6e2b342e06 version: the child's psql failed `connection to server on socket \"…/g1/.s.PGSQL.5432\" failed: No such file or directory`, `psql exit 2`, and no `old-proxy` row reached the table; the tester's test failed `container_shutdown … refused: … no such file or directory` and the wedged-child test failed `the proxy accepted a connection during the stop grace but never dialed the upstream for it`"
     }
   ],
   "filesChanged": [
@@ -63,13 +71,16 @@
     "packages/daemon/internal/api/settings.go, internal/daemon/{kubernetes,launchsecrets}.go — small reads of the union",
     "packages/daemon/go.mod, go.sum, go.work.sum — cloud.google.com/go/cloudsqlconn v1.25.4 and what MVS brings with it",
     "docs/kubernetes.md, AGENTS.md — the third store, what a pod holds under it, and that no deployment runs it yet",
-    "packages/daemon/internal/launcher/launcher_test.go (CI round) — `published` returns a marker's remainder verbatim again; `publishedAll` splits the stand-in child's three fields; the resume-notice test clears LEGION_WORKSPACE"
+    "packages/daemon/internal/launcher/launcher_test.go (CI round) — `published` returns a marker's remainder verbatim again; `publishedAll` splits the stand-in child's three fields; the resume-notice test clears LEGION_WORKSPACE",
+    "packages/daemon/internal/sessionproxy/sessionproxy.go and its test, internal/launcher/launcher.go (comments) and launcher_test.go, docs/kubernetes.md (review round 1, tester's failure) — Start's context bounds only the start; a started proxy serves until Close, which manager.wait calls after the child and the generation's leftovers exit; new tests: a started proxy outlives its start context until Close, a start with an ended context is refused, a wedged child on the container's shutdown is served in its grace and its proxy closed once it is killed"
   ],
   "trickyParts": [
     "The two URL spellings are not interchangeable and both were measured against their real clients in a pod. Oh My Pi hands the DSN file's text to Bun's SQL client (new Bun.SQL(text, {max: 2, idleTimeout: 5}), read out of the image's own binary), which takes a unix socket as the URL's `path` parameter and ignores the host; pgx takes libpq's `host` as the socket's directory and composes .s.PGSQL.5432 itself. ompsessions.Endpoint composes both; a single spelling would have left one of the two clients unable to connect.",
     "The launcher's resume lookup must not read the file it just wrote: that file holds the agent's spelling, which pgx does not parse. start passes the pgx spelling down instead, and the no-session-database path still reads the env pointer exactly as before, retries and all.",
     "writeFiles had to move ahead of the resume lookup, because the lookup is the second database client in the pod and needs the proxy that the generation's directory holds.",
-    "The connector's own refresh-ahead certificate cache is library behaviour and is not re-tested here; what the tests prove is that the proxy dials per connection and never pins the first dial's credential."
+    "The connector's own refresh-ahead certificate cache is library behaviour and is not re-tested here; what the tests prove is that the proxy dials per connection and never pins the first dial's credential.",
+    "The proxy is closed in manager.wait after cleanExitedGeneration, not straight after cmd.Wait: Close waits for every connection it is copying, and a connection held by a leftover process of the generation would hold Close until that process ends, so the leftovers are ended first. No second Close was added in Run: endGeneration returns only after active.done, which wait closes after the proxy's Close, so Run's stopActive already returns only once the proxy is closed. The proxy's lifetime past the stop is therefore the child's stop grace plus the PID-1 namespace cleanup, which is itself bounded by StopGrace.",
+    "sessionproxy.Start now dials its proof with the caller's ctx and builds the dialer on a context.WithoutCancel child cancelled only by Close, so the connector's background refresh lives exactly as long as the proxy."
   ],
   "deviations": [
     "The plan's D2 put the agent's endpoint on a loopback port, one per role. The tree's architect asked for a unix socket if the agent's client takes one; it does (measured: Bun's SQL client dials a socket named by the URL's `path` parameter, in Oh My Pi's exact call), so the endpoint is a socket in the generation's own directory on the role container's private volume. It cannot collide with anything the pod binds, and it is reachable only from that role's container rather than from all six. names.go therefore gained no port table and the launcher took three flags rather than four.",
