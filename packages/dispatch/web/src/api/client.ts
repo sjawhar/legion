@@ -119,6 +119,33 @@ export class ApiError extends Error {
   }
 }
 
+/** How long the page waits on Dispatch's answer to a GET, its body included, before it gives the
+ *  request up (`RequestTimeoutError`). A read Dispatch never answers would otherwise hold its page
+ *  loading for good; given up, it is retried by the queries' shared policy, as a dropped
+ *  connection is. */
+export const REQUEST_DEADLINE_MS = 30_000;
+
+/** A request Dispatch did not answer within its deadline, which the page then aborted. It is no
+ *  refusal: the request may still have reached Dispatch, so only a read, or a write named to be
+ *  repeated safely (a keyed send to a session), is asked again. */
+export class RequestTimeoutError extends Error {
+  readonly path: string;
+
+  constructor(path: string, deadlineMs: number) {
+    super(`Dispatch did not answer within ${deadlineMs / 1000} seconds`);
+    this.name = "RequestTimeoutError";
+    this.path = path;
+  }
+}
+
+/** How a caller bounds one request: `deadlineMs`, how long Dispatch may take to answer it, its
+ *  body included (`null` for no limit; left out, a GET has `REQUEST_DEADLINE_MS` and every other
+ *  method none), and `signal`, which aborts it as the caller's own abort, never as a timeout. */
+export interface RequestBounds {
+  readonly deadlineMs?: number | null;
+  readonly signal?: AbortSignal;
+}
+
 // A 401 means "not signed in" and should never be retried or confused with a transient
 // network/5xx failure, which the caller should retry and eventually surface with a Retry
 // affordance instead of bouncing the user to the sign-in page.
@@ -171,8 +198,8 @@ export function isDocumentUnloadable(error: unknown): boolean {
 // The retry policy every query in the app shares: an auth outcome (401), a missing architecture
 // source, an unconfigured credential broker or delivery timeline, a stored document outside
 // Proof's schema, or a stored history that cannot load is definitive and retrying it changes
-// nothing; any other failure (dropped connection, 5xx) is worth a couple of automatic attempts
-// before surfacing a Retry affordance to the user.
+// nothing; any other failure (dropped connection, a read past its deadline, 5xx) is worth a couple
+// of automatic attempts before surfacing a Retry affordance to the user.
 export function isRetryableQueryError(error: unknown): boolean {
   return (
     !isUnauthorized(error) &&
@@ -185,10 +212,12 @@ export function isRetryableQueryError(error: unknown): boolean {
 }
 
 // The reason to show a reader for a failed write: the server's own message when it answered
-// with one, otherwise the caller's fallback line (the request never reached the server, or died
-// in transit).
+// with one, that it did not answer in time when it did not, otherwise the caller's fallback line
+// (the request never reached the server, or died in transit).
 export function apiErrorMessage(error: unknown, fallback: string): string {
-  return error instanceof ApiError ? error.message : fallback;
+  return error instanceof ApiError || error instanceof RequestTimeoutError
+    ? error.message
+    : fallback;
 }
 
 // Whether the server refused with one of `codes`: a refusal the same request meets every time,
@@ -279,7 +308,44 @@ async function errorFrom(response: Response): Promise<ApiError> {
 export class DispatchApiClient {
   constructor(private readonly fetchImpl: FetchImplementation) {}
 
-  private async response(path: string, init: RequestInit = {}): Promise<Response> {
+  /** One request to Dispatch, answered with what `read` makes of its response. A GET is held to
+   *  `REQUEST_DEADLINE_MS` and every other method to no deadline, unless `deadlineMs` names one
+   *  (`null` for none). The deadline covers `read`, so a body that stalls fails as headers that
+   *  never come do, and a caller's `init.signal` still aborts the request, as itself. */
+  private async exchange<T>(
+    path: string,
+    init: RequestInit,
+    deadlineMs: number | null | undefined,
+    read: (response: Response) => Promise<T>
+  ): Promise<T> {
+    const limit =
+      deadlineMs !== undefined
+        ? deadlineMs
+        : (init.method ?? "GET").toUpperCase() === "GET"
+          ? REQUEST_DEADLINE_MS
+          : null;
+    if (limit === null) return read(await this.answered(path, init));
+    const deadline = new AbortController();
+    const timer = setTimeout(() => deadline.abort(), limit);
+    const caller = init.signal ?? undefined;
+    try {
+      const signal =
+        caller === undefined ? deadline.signal : AbortSignal.any([caller, deadline.signal]);
+      return await read(await this.answered(path, { ...init, signal }));
+    } catch (error) {
+      // An answer Dispatch gave stays its answer and the caller's abort stays the caller's: only
+      // what the deadline cut short is a timeout.
+      if (deadline.signal.aborted && !(error instanceof ApiError) && caller?.aborted !== true) {
+        throw new RequestTimeoutError(path, limit);
+      }
+      throw error;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  /** Dispatch's response to one request, or its refusal as an `ApiError`. */
+  private async answered(path: string, init: RequestInit): Promise<Response> {
     const response = await this.fetchImpl(path, {
       credentials: "same-origin",
       ...init,
@@ -292,21 +358,40 @@ export class DispatchApiClient {
     return response;
   }
 
-  private async json<T>(path: string, init: RequestInit = {}): Promise<T> {
-    const response = await this.response(path, init);
-    return (await response.json()) as T;
+  /** The response itself, for a caller that reads its body: the deadline holds until the
+   *  response arrives, and the caller reads the body on its own time. */
+  private response(
+    path: string,
+    init: RequestInit = {},
+    deadlineMs?: number | null
+  ): Promise<Response> {
+    return this.exchange(path, init, deadlineMs, async (response) => response);
   }
 
-  private send<T>(method: "PATCH" | "POST" | "PUT", path: string, body: unknown): Promise<T> {
-    return this.json<T>(path, {
-      body: JSON.stringify(body),
-      headers: { "Content-Type": "application/json" },
-      method,
-    });
+  private json<T>(path: string, init: RequestInit = {}, deadlineMs?: number | null): Promise<T> {
+    return this.exchange(path, init, deadlineMs, (response) => response.json() as Promise<T>);
   }
 
-  private post<T>(path: string, body: unknown): Promise<T> {
-    return this.send<T>("POST", path, body);
+  private send<T>(
+    method: "PATCH" | "POST" | "PUT",
+    path: string,
+    body: unknown,
+    { deadlineMs, signal }: RequestBounds = {}
+  ): Promise<T> {
+    return this.json<T>(
+      path,
+      {
+        body: JSON.stringify(body),
+        headers: { "Content-Type": "application/json" },
+        method,
+        signal,
+      },
+      deadlineMs
+    );
+  }
+
+  private post<T>(path: string, body: unknown, bounds?: RequestBounds): Promise<T> {
+    return this.send<T>("POST", path, body, bounds);
   }
 
   getBlockSchema(): Promise<BlockSchema> {
@@ -571,8 +656,14 @@ export class DispatchApiClient {
     return this.post<Message>(`/api/v1/issues/${pathSegment(key)}/messages`, input);
   }
 
-  createAgentMessage(sessionID: string, input: CreateAgentMessageInput): Promise<Message> {
-    return this.post<Message>(`/api/v1/agents/${pathSegment(sessionID)}/messages`, input);
+  /** A person's message to one session. `bounds` holds one attempt of a keyed send to its own
+   *  deadline and stops it with the send (`sendKeyedAgentMessage`). */
+  createAgentMessage(
+    sessionID: string,
+    input: CreateAgentMessageInput,
+    bounds?: RequestBounds
+  ): Promise<Message> {
+    return this.post<Message>(`/api/v1/agents/${pathSegment(sessionID)}/messages`, input, bounds);
   }
 
   listAgentMessages(sessionID: string): Promise<MessageRead[]> {
@@ -677,9 +768,13 @@ export class DispatchApiClient {
     return this.json<ArtifactBlock[]>(`/api/v1/artifacts/${pathSegment(id)}/blocks`);
   }
 
+  /** One version's bytes. A large file on a slow line can take longer than any read deadline, so
+   *  this GET carries none. */
   async getArtifactVersion(id: string, version: number): Promise<ArtifactVersionContent> {
     const response = await this.response(
-      `/api/v1/artifacts/${pathSegment(id)}/versions/${pathSegment(String(version))}`
+      `/api/v1/artifacts/${pathSegment(id)}/versions/${pathSegment(String(version))}`,
+      {},
+      null
     );
     const mime = response.headers.get("Content-Type") ?? "application/octet-stream";
 

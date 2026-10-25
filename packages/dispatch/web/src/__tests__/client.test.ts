@@ -1,13 +1,16 @@
-import { expect, test } from "bun:test";
+import { expect, jest, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
 
 import {
+  apiErrorMessage,
   createApiClient,
   type FetchImplementation,
   isCredentialFeatureOff,
   isDeliveryNotConfigured,
   isRetryableQueryError,
   isUnauthorized,
+  REQUEST_DEADLINE_MS,
+  RequestTimeoutError,
 } from "../api/client";
 
 interface RecordedRequest {
@@ -34,6 +37,169 @@ function stubFetch(
     requests,
   };
 }
+
+/** A fetch Dispatch answers only when the test says so (`answer`, in request order), and that
+ *  rejects as a browser's does once the request's signal aborts: with the signal's reason. */
+function heldFetch(): {
+  answer: (response: Response) => void;
+  fetch: FetchImplementation;
+  requests: RecordedRequest[];
+} {
+  const requests: RecordedRequest[] = [];
+  const answers: ((response: Response) => void)[] = [];
+  return {
+    answer: (response) => answers.shift()?.(response),
+    fetch: (input, init) => {
+      requests.push({ body: init?.body, init, path: input.toString() });
+      const { promise, reject, resolve } = Promise.withResolvers<Response>();
+      answers.push(resolve);
+      const signal = init?.signal;
+      signal?.addEventListener("abort", () => reject(signal.reason), { once: true });
+      return promise;
+    },
+    requests,
+  };
+}
+
+/** What `pending` settled with: its value, or what it rejected with. */
+function outcome(pending: Promise<unknown>): Promise<unknown> {
+  return pending.then(
+    (value) => value,
+    (error: unknown) => error
+  );
+}
+
+/** Runs `body` on the fake clock. A timer left at zero delay would hang a later test's `waitFor`
+ *  once the real clock is back, so the fake one moves a millisecond before it goes. */
+async function onFakeClock(body: () => Promise<void>): Promise<void> {
+  jest.useFakeTimers();
+  try {
+    await body();
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+  }
+}
+
+// A read Dispatch never answers would leave its page loading for good: every GET gives up at the
+// deadline as a timeout, which the shared retry policy asks again, as it does a dropped connection.
+test("a GET past the deadline fails with RequestTimeoutError", async () => {
+  await onFakeClock(async () => {
+    const stub = heldFetch();
+    const api = createApiClient(stub.fetch);
+
+    const read = outcome(api.getIssue("CORE-1"));
+    jest.advanceTimersByTime(REQUEST_DEADLINE_MS - 1);
+    expect(stub.requests[0]?.init?.signal?.aborted).toBe(false);
+    jest.advanceTimersByTime(1);
+    const error = await read;
+
+    expect(error).toBeInstanceOf(RequestTimeoutError);
+    expect(error).toMatchObject({ path: "/api/v1/issues/CORE-1" });
+    expect(apiErrorMessage(error, "fallback")).toBe("Dispatch did not answer within 30 seconds");
+    expect(isRetryableQueryError(error)).toBe(true);
+  });
+});
+
+// The deadline is the whole answer's, its body included: headers that arrive in time with a body
+// that never ends are no answer either.
+test("a GET whose body stalls past the deadline fails with RequestTimeoutError", async () => {
+  await onFakeClock(async () => {
+    const stub = heldFetch();
+    const api = createApiClient(stub.fetch);
+
+    const read = outcome(api.getIssue("CORE-1"));
+    const signal = stub.requests[0]?.init?.signal;
+    stub.answer(
+      new Response(
+        new ReadableStream({
+          start(body) {
+            body.enqueue(new TextEncoder().encode('{"key":'));
+            signal?.addEventListener("abort", () => body.error(signal.reason), { once: true });
+          },
+        }),
+        { headers: { "Content-Type": "application/json" } }
+      )
+    );
+    jest.advanceTimersByTime(REQUEST_DEADLINE_MS);
+
+    expect(await read).toBeInstanceOf(RequestTimeoutError);
+  });
+});
+
+// A write is not abandoned at the read deadline: a comment that mentions agents can take the
+// server longer, and its answer is still the write's outcome.
+test("a POST carries no deadline", async () => {
+  await onFakeClock(async () => {
+    const stub = heldFetch();
+    const api = createApiClient(stub.fetch);
+
+    const created = api.createIssue({ project: "CORE", title: "Slow to create" });
+    jest.advanceTimersByTime(10 * 60_000);
+    expect(stub.requests[0]?.init?.signal).toBeUndefined();
+    stub.answer(Response.json({ key: "CORE-1" }));
+
+    expect(await created).toEqual({ key: "CORE-1" } as never);
+  });
+});
+
+// One attempt of a keyed send to a session is a write its caller bounds itself, and repeats.
+test("a write given a deadline is held to it", async () => {
+  await onFakeClock(async () => {
+    const stub = heldFetch();
+    const api = createApiClient(stub.fetch);
+
+    const sent = outcome(
+      api.createAgentMessage(
+        "planner-session",
+        { body: "Ready?", delivery: "btw", idempotency_key: "send-1" },
+        { deadlineMs: 15_000 }
+      )
+    );
+    jest.advanceTimersByTime(15_000);
+    const error = await sent;
+
+    expect(error).toBeInstanceOf(RequestTimeoutError);
+    expect(apiErrorMessage(error, "fallback")).toBe("Dispatch did not answer within 15 seconds");
+  });
+});
+
+// The caller's own abort is the caller's: it ends the request as itself, not as a timeout, and
+// a request the caller lets run is still held to the deadline.
+test("a caller's signal still aborts", async () => {
+  await onFakeClock(async () => {
+    const stub = heldFetch();
+    const api = createApiClient(stub.fetch);
+    const caller = new AbortController();
+
+    const left = outcome(api.githubRest("repos/acme/dispatch/pulls/7", { signal: caller.signal }));
+    const reason = new Error("the reader left");
+    caller.abort(reason);
+    expect(await left).toBe(reason);
+
+    const kept = outcome(
+      api.githubRest("repos/acme/dispatch/pulls/8", { signal: new AbortController().signal })
+    );
+    jest.advanceTimersByTime(REQUEST_DEADLINE_MS);
+    expect(await kept).toBeInstanceOf(RequestTimeoutError);
+  });
+});
+
+// A version's bytes can be a large file on a slow line: its download is the one GET with no
+// deadline.
+test("a version download carries no deadline", async () => {
+  await onFakeClock(async () => {
+    const stub = heldFetch();
+    const api = createApiClient(stub.fetch);
+
+    const download = api.getArtifactVersion("artifact-1", 3);
+    jest.advanceTimersByTime(10 * 60_000);
+    expect(stub.requests[0]?.init?.signal).toBeUndefined();
+    stub.answer(new Response(new Blob(["bytes"]), { headers: { "Content-Type": "image/png" } }));
+
+    expect(await download).toMatchObject({ mime: "image/png", version: 3 });
+  });
+});
 
 test("API client does not invoke its default fetch as a client method", async () => {
   const originalFetch = globalThis.fetch;
@@ -473,7 +639,11 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.rejectComment("comment-1");
   await api.createCommentDelivery("comment-1", "session:planner-session", "steer");
   await api.createMessage("CORE-1", { body: "Ready" });
-  await api.createAgentMessage("planner-session", { body: "Ready?", delivery: "btw" });
+  await api.createAgentMessage("planner-session", {
+    body: "Ready?",
+    delivery: "btw",
+    idempotency_key: "send-1",
+  });
   await api.listAgentMessages("planner-session");
   await api.listArtifacts("CORE-1");
   await api.listAgents();

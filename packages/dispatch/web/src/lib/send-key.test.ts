@@ -1,10 +1,10 @@
 import { expect, test } from "bun:test";
 
-import { newSendKey } from "./broadcast-composition";
+import { newSendKey } from "./send-key";
 
 // A browser exposes `crypto.randomUUID` only in a secure context, so on a plain-HTTP origin reached
-// by a non-loopback name it is undefined, and a key built from it would throw on the Agents page's
-// first render.
+// by a non-loopback name it is undefined, and a key built from it would throw on the first send
+// (the Agents page builds its broadcast's key on its first render).
 test("a send key is a fresh v4 UUID even where crypto.randomUUID is missing", () => {
   const own = Object.getOwnPropertyDescriptor(crypto, "randomUUID");
   Object.defineProperty(crypto, "randomUUID", {

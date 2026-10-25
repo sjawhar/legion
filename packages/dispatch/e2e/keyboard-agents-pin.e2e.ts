@@ -12,7 +12,7 @@ import {
 } from "./agents";
 import { createAgentMessage, createMessage, replyToMessageDelivery } from "./api";
 import { resetDatabase } from "./seed";
-import { holdPosts, pasteFile, refusePosts } from "./sends";
+import { holdPosts, MESSAGE_REFUSED, pasteFile, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // What an Agents row keeps when it moves between the open list and a fold - by Shift+P, or by
@@ -618,9 +618,9 @@ test.describe("agents page pins", () => {
       await openAgents(page);
       const row = agentRow(page, plannerSession.session_id);
       const field = row.getByRole("textbox", { name: "Comment" });
-      const notice = row.getByText("Couldn't send — the server is down");
+      const notice = row.getByText("Couldn't send — Dispatch refused the message");
       const role = page.getByRole("combobox", { exact: true, name: "Role" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
 
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");

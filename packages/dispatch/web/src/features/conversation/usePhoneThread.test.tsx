@@ -51,6 +51,7 @@ async function refuseReply(queryClient: QueryClient, mutationKey: MutationKey): 
     owner: { issueKey: "CORE-1", kind: "issue" },
     plainDelivery: "steer",
     replyTo: reply,
+    sendKey: "send-1",
   };
   try {
     const store = heldSends(queryClient);

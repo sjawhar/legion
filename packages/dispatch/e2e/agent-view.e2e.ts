@@ -13,7 +13,7 @@ import {
 } from "./api";
 import { expectUncovered } from "./layout";
 import { resetDatabase } from "./seed";
-import { navigateInApp, refusePosts } from "./sends";
+import { MESSAGE_REFUSED, navigateInApp, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 /**
@@ -995,7 +995,11 @@ test("sending a message from the live view while scrolled back takes the reader 
     // The session never took this one: the reader keeps their line, and the refusal is on screen
     // for them to read where they are.
     await scrollThreadTo(page, 1_200);
-    const refuse = await refusePosts(page, `**/api/v1/agents/${sender.session_id}/messages`);
+    const refuse = await refusePosts(
+      page,
+      `**/api/v1/agents/${sender.session_id}/messages`,
+      MESSAGE_REFUSED
+    );
     await input.fill("and this one is refused");
     await page.getByRole("button", { name: "Send" }).click();
     refuse();

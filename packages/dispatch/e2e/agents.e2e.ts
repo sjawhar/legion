@@ -260,7 +260,11 @@ test("Agents puts who needs you first, folds silent and inactive sessions, shows
     await expect(composer).toHaveValue(`/btw ${sentBody}`);
     await composer.press("Control+Enter");
     const request = await sent;
-    expect(request.request().postDataJSON()).toEqual({ body: sentBody, delivery: "btw" });
+    expect(request.request().postDataJSON()).toEqual({
+      body: sentBody,
+      delivery: "btw",
+      idempotency_key: expect.any(String),
+    });
     const message = (await request.json()) as { id: string };
     expect(await getSentMessages()).toMatchObject([{ target_session: planner.session_id }]);
 

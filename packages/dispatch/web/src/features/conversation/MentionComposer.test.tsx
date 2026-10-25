@@ -1,4 +1,4 @@
-import { expect, jest, spyOn, test } from "bun:test";
+import { expect, jest, type Mock, spyOn, test } from "bun:test";
 import { type MutationKey, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { type ReactNode, useState } from "react";
@@ -9,7 +9,10 @@ import type { Agent, Comment, Message } from "../../api/types";
 import { useSending } from "../../hooks/useSending";
 import type { ComposerOwner } from "./composer-model";
 import { MentionComposer, reconcileMentions } from "./MentionComposer";
-import { SEND_DEADLINE_MS } from "./send-request";
+import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS } from "./send-request";
+
+/** What each attempt of a send to one session is held to, beside the message it carries. */
+const keyedAttempt = { deadlineMs: KEYED_SEND_ATTEMPT_MS };
 
 const planner: Agent = {
   capabilities: ["btw"],
@@ -362,11 +365,16 @@ test("a direct-session reply inherits its thread delivery", async () => {
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Follow up" } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createAgentMessage).toHaveBeenCalledWith("A", {
-        body: "Follow up",
-        delivery: "btw",
-        in_reply_to: "message-9",
-      })
+      expect(createAgentMessage).toHaveBeenCalledWith(
+        "A",
+        {
+          body: "Follow up",
+          delivery: "btw",
+          idempotency_key: expect.any(String),
+          in_reply_to: "message-9",
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -831,10 +839,11 @@ for (const capabilities of [["aside"], ["aside", "btw"]]) {
       expect(screen.queryByText(/so sending it records a failed attempt/)).toBeNull();
       fireEvent.click(screen.getByRole("button", { name: "Send" }));
       await waitFor(() =>
-        expect(createAgentMessage).toHaveBeenCalledWith("B", {
-          body: "Ship it.",
-          delivery: "aside",
-        })
+        expect(createAgentMessage).toHaveBeenCalledWith(
+          "B",
+          { body: "Ship it.", delivery: "aside", idempotency_key: expect.any(String) },
+          keyedAttempt
+        )
       );
     } finally {
       view.unmount();
@@ -1075,7 +1084,11 @@ test("the owner's own untouched mention leaves with the channel that seeded it",
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
 
     await waitFor(() =>
-      expect(createAgentMessage).toHaveBeenCalledWith("A", { body: "hello", delivery: "steer" })
+      expect(createAgentMessage).toHaveBeenCalledWith(
+        "A",
+        { body: "hello", delivery: "steer", idempotency_key: expect.any(String) },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -1620,6 +1633,192 @@ test("a refusal after the deadline hands the draft back with Retry", async () =>
     jest.useRealTimers();
     view.unmount();
     createComment.mockRestore();
+  }
+});
+
+/** The key each send to a session carried, in order. */
+function sentKeys(createAgentMessage: Mock<typeof api.createAgentMessage>): string[] {
+  return createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key);
+}
+
+const SEND_KEY = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+
+/** Dispatch's verdict on a message to a session, which a Retry of the same message meets again. */
+const messageRefused = new ApiError(400, {
+  code: "MESSAGE_INPUT",
+  error: "Dispatch refused the message",
+});
+
+// A message to one session names itself to Dispatch with a key minted when Send builds it, so a
+// repeat of the request is the same message there; the next message is another send, with a key
+// of its own, even in the same words.
+test("a send to one session carries a key", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
+  const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(1));
+    expect(createAgentMessage).toHaveBeenCalledWith(
+      "A",
+      {
+        body: "Status please",
+        delivery: "steer",
+        idempotency_key: expect.stringMatching(SEND_KEY),
+      },
+      keyedAttempt
+    );
+
+    await waitFor(() => expect(field.value).toBe(""));
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));
+    const [first, second] = sentKeys(createAgentMessage);
+    expect(second).toMatch(SEND_KEY);
+    expect(second).not.toBe(first);
+  } finally {
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
+// A refusal may follow a request Dispatch did act on, so a Retry that sends the same message to
+// the same session goes under the refused send's key, and Dispatch answers it with the message
+// that key made rather than making a second one.
+test("a Retry of the same text reuses the key", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage")
+    .mockRejectedValueOnce(messageRefused)
+    .mockResolvedValueOnce(createdMessage);
+  const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await screen.findByText("Couldn't send — Dispatch refused the message");
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));
+
+    const [first, retried] = sentKeys(createAgentMessage);
+    expect(first).toMatch(SEND_KEY);
+    expect(retried).toBe(first);
+    await waitFor(() => expect(field.value).toBe(""));
+  } finally {
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
+// Under one key Dispatch takes one request: another body, another mode or another reply is
+// another message, which it would refuse the refused send's key for, so it gets a key of its own.
+test("an edited draft gets a new key", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(messageRefused);
+  const direct = { kind: "session" as const, sessionId: "A" };
+  const { rerender, view } = renderComposer({ owner: direct });
+  const refusedText = "Couldn't send — Dispatch refused the message";
+  /** Once the last attempt's refusal hands its draft back, `edit`s it and retries the draft as
+   *  it then stands. */
+  const retry = async (calls: number, edit?: () => void) => {
+    await screen.findByText(refusedText);
+    edit?.();
+    fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(calls));
+  };
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Status please" } });
+    fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(1));
+
+    await retry(2, () => {
+      // Another body.
+      fireEvent.change(field, { target: { value: "Status please, now" } });
+    });
+    await retry(3, () => {
+      // Another mode.
+      fireEvent.change(field, { target: { value: "/aside Status please, now" } });
+    });
+    await retry(4, () => {
+      // Another reply, which the reader starts afresh, in its thread's mode.
+      rerender({
+        owner: direct,
+        replyTo: {
+          author: "Planner",
+          excerpt: "Question",
+          id: "message-9",
+          thread: { delivery: "btw", target: "session:A", title: "Planner" },
+        },
+      });
+      fireEvent.change(field, { target: { value: "Status please, now" } });
+    });
+    // And nothing changed since: the same message, the same key.
+    await retry(5);
+
+    const keys = sentKeys(createAgentMessage);
+    expect(new Set(keys.slice(0, 4)).size).toBe(4);
+    expect(keys[4]).toBe(keys[3]);
+    expect(createAgentMessage.mock.calls.map(([, input]) => input)).toEqual([
+      { body: "Status please", delivery: "steer", idempotency_key: keys[0] },
+      { body: "Status please, now", delivery: "steer", idempotency_key: keys[1] },
+      { body: "Status please, now", delivery: "aside", idempotency_key: keys[2] },
+      {
+        body: "Status please, now",
+        delivery: "btw",
+        idempotency_key: keys[3],
+        in_reply_to: "message-9",
+      },
+      {
+        body: "Status please, now",
+        delivery: "btw",
+        idempotency_key: keys[3],
+        in_reply_to: "message-9",
+      },
+    ]);
+  } finally {
+    view.unmount();
+    createAgentMessage.mockRestore();
+  }
+});
+
+const stillTrying =
+  "Still sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once.";
+
+// Past its deadline a message to one session is still being tried under its key, so the composer
+// says so instead of offering a Retry, and the message lands once when Dispatch answers.
+test("a send to one session past its deadline says it keeps trying, and lands once", async () => {
+  const answer = Promise.withResolvers<Message>();
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockReturnValueOnce(answer.promise);
+  jest.useFakeTimers();
+  const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
+
+  try {
+    const field = screen.getByLabelText<HTMLTextAreaElement>("Comment");
+    fireEvent.change(field, { target: { value: "Slow but sure" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Send" }));
+    });
+    await act(async () => {
+      jest.advanceTimersByTime(SEND_DEADLINE_MS);
+    });
+    expect(screen.getByText(stillTrying)).toBeTruthy();
+    expect(screen.queryByText(stillSending)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Retry" })).toBeNull();
+    expect(field.value).toBe("Slow but sure");
+
+    await act(async () => {
+      answer.resolve(createdMessage);
+    });
+    expect(createAgentMessage).toHaveBeenCalledTimes(1);
+    expect(field.value).toBe("");
+    expect(screen.queryByText(stillTrying)).toBeNull();
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    view.unmount();
+    createAgentMessage.mockRestore();
   }
 });
 

@@ -1,7 +1,7 @@
 import { useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { useEffect, useState, useSyncExternalStore } from "react";
 
-import { liveSocketFor, useLiveSocketState } from "../../api/live-socket";
+import { liveSocketFor } from "../../api/live-socket";
 import {
   type AgentConversation,
   applyFrame,
@@ -57,7 +57,10 @@ const NOTHING_HEARD: Heard = {
  */
 export function useAgentStream(sessionID: string): AgentStreamState {
   const queryClient = useQueryClient();
-  const connection = useLiveSocketState().state;
+  const live = liveSocketFor(queryClient);
+  // The connection alone: the rest of the socket's state - the delivery pages' last change time
+  // among it - moves with every delivery delta, and none of it is this view's.
+  const connection = useSyncExternalStore(live.onState, () => live.state().state);
   const [heard, setHeard] = useState<Heard>(NOTHING_HEARD);
 
   useEffect(() => {

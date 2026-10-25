@@ -1,12 +1,12 @@
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { type ReactNode, useCallback, useState } from "react";
+import { type ReactNode, useCallback, useEffect, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
-import { api } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import { pillClassName } from "../../components/Pill";
 import { TruncatedText } from "../../components/TruncatedText";
+import { newSendKey } from "../../lib/send-key";
 import {
   connectionDotConnecting,
   connectionDotFailed,
@@ -20,6 +20,7 @@ import {
 } from "../../theme/classes";
 import { useMarkRepliesRead } from "../agents/unread";
 import { MODE_LABELS } from "../conversation/delivery";
+import { sendKeyedAgentMessage } from "../conversation/send-request";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
@@ -112,7 +113,16 @@ export function AgentConversationPage(): ReactNode {
 
   // Talking to the agent is Dispatch's existing targeted delivery: the stream itself stays
   // read-only and this adds no write path of its own. The session confirms a Send or Aside with
-  // Dispatch before it takes one as its user's own turn.
+  // Dispatch before it takes one as its user's own turn. A send is tried until Dispatch decides
+  // it, and its retries are this view's: leaving the view - for another session or another page -
+  // stops them, and a view that is gone has nobody to tell how they ended.
+  const sends = useRef<AbortController | null>(null);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `sessionId` is the trigger: each session's view stops its own sends
+  useEffect(() => {
+    const current = new AbortController();
+    sends.current = current;
+    return () => current.abort();
+  }, [sessionId]);
   const onNew = useCallback(
     async (message: { content: readonly { type: string; text?: string }[] }) => {
       const body = message.content
@@ -122,11 +132,14 @@ export function AgentConversationPage(): ReactNode {
         .trim();
       if (body === "") return;
       setSendError(null);
+      const stop = sends.current?.signal;
       try {
-        await api.createAgentMessage(sessionId, { body, delivery: mode });
+        // One key per press: however many of its attempts reach Dispatch, it is one message.
+        await sendKeyedAgentMessage(sessionId, { body, delivery: mode }, newSendKey(), stop);
         setOwnSendCount((previous) => previous + 1);
         await queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
       } catch (error) {
+        if (stop?.aborted === true) return;
         setSendError(error instanceof Error ? error.message : "could not reach the session");
       }
     },

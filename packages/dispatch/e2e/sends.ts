@@ -34,17 +34,41 @@ export async function holdPosts(
   return { posts: () => posts, release };
 }
 
-/** Holds every `POST` to `pattern` until the returned call, then refuses it, as a server that is
- *  down: 503 with a reason the composer shows. */
-export async function refusePosts(page: Page, pattern: string): Promise<() => void> {
+/** What a route answers a `POST` it refuses: the status, and the code and reason the composer
+ *  shows. */
+export interface Refusal {
+  readonly code: string;
+  readonly error: string;
+  readonly status: number;
+}
+
+/** A server that is down. */
+const SERVER_DOWN: Refusal = { code: "UNAVAILABLE", error: "the server is down", status: 503 };
+
+/** Dispatch's verdict on a message to one session. A send to one session tries a server that is
+ *  down again under its key until Dispatch answers, so a row that needs that send refused refuses
+ *  it with this. */
+export const MESSAGE_REFUSED: Refusal = {
+  code: "MESSAGE_INPUT",
+  error: "Dispatch refused the message",
+  status: 400,
+};
+
+/** Holds every `POST` to `pattern` until the returned call, then refuses it with `refusal`: by
+ *  default as a server that is down, 503 with a reason the composer shows. */
+export async function refusePosts(
+  page: Page,
+  pattern: string,
+  refusal: Refusal = SERVER_DOWN
+): Promise<() => void> {
   const { promise: held, resolve: refuse } = Promise.withResolvers<void>();
   await page.route(pattern, async (route) => {
     if (route.request().method() !== "POST") return route.fallback();
     await held;
     return route.fulfill({
-      body: JSON.stringify({ code: "UNAVAILABLE", error: "the server is down" }),
+      body: JSON.stringify({ code: refusal.code, error: refusal.error }),
       contentType: "application/json",
-      status: 503,
+      status: refusal.status,
     });
   });
   return refuse;

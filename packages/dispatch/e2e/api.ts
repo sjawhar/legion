@@ -644,15 +644,17 @@ export function createMessage(
   );
 }
 
+/** Sends one message to a session as a human. Every send carries an `idempotency_key`; this mints
+ *  one unless the caller names its own. */
 export function createAgentMessage(
   sessionID: string,
-  input: CreateAgentMessageInput,
+  input: Omit<CreateAgentMessageInput, "idempotency_key"> & { readonly idempotency_key?: string },
   options: ApiOptions = {}
 ): Promise<Message> {
   return request<Message>(
     `/api/v1/agents/${encodeURIComponent(sessionID)}/messages`,
     "POST",
-    input,
+    { ...input, idempotency_key: input.idempotency_key ?? crypto.randomUUID() },
     options
   );
 }

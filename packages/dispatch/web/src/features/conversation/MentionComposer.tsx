@@ -76,6 +76,7 @@ import {
   mentionText,
   SEND_DEADLINE_MS,
   type SentRequest,
+  sendKeyFor,
   survivingMentions,
 } from "./send-request";
 import { useAgents } from "./useAgents";
@@ -777,24 +778,28 @@ export function MentionComposer({
     setConfirmingDiscard(false);
   };
   /** The send as it stands, for `sendRequest`: the fields' own text, since a keystroke in Send's
-   *  task may not have rendered yet, and every prop and setting that addresses or shapes it. */
-  const sentRequest = (): SentRequest => ({
-    anchor,
-    ask: { multiple, options: submittedAskOptions(askOptions), urgency },
-    draft: {
-      body: textarea.current?.value ?? body,
-      mentions,
-      replacement: replacementTextarea.current?.value ?? replacement,
-    },
-    edit:
-      edit === undefined
-        ? undefined
-        : { id: edit.id, save: saveEdit ?? ((id, text) => api.editComment(id, { body: text })) },
-    kind,
-    owner,
-    plainDelivery: plainMode,
-    replyTo,
-  });
+   *  task may not have rendered yet, and every prop and setting that addresses or shapes it, under
+   *  the key `sendKeyFor` gives it beside `refused`, the request of the refusal it replaces. */
+  const sentRequest = (refused: SentRequest | undefined): SentRequest => {
+    const request = {
+      anchor,
+      ask: { multiple, options: submittedAskOptions(askOptions), urgency },
+      draft: {
+        body: textarea.current?.value ?? body,
+        mentions,
+        replacement: replacementTextarea.current?.value ?? replacement,
+      },
+      edit:
+        edit === undefined
+          ? undefined
+          : { id: edit.id, save: saveEdit ?? ((id, text) => api.editComment(id, { body: text })) },
+      kind,
+      owner,
+      plainDelivery: plainMode,
+      replyTo,
+    } satisfies Omit<SentRequest, "sendKey">;
+    return { ...request, sendKey: sendKeyFor(refused, request) };
+  };
   const activeMentions = useMemo(() => survivingMentions(body, mentions), [body, mentions]);
   const effectiveTargets: readonly string[] =
     owner.kind === "session"
@@ -835,11 +840,11 @@ export function MentionComposer({
    *  control that could change or discard the draft; the held send covers that hold in this task
    *  before React can disable the fieldset. */
   const send = () =>
-    outgoing.send(() => {
+    outgoing.send((refused) => {
       setConfirmingDiscard(false);
       setAutocomplete(undefined);
       setReferencePickerOpen(false);
-      return sentRequest();
+      return sentRequest(refused);
     });
   /** The hold on the draft from Send's own task on, before React can disable the fieldset: the
    *  fieldset's capture stops every key, click, input and change bound for a control in it - so
@@ -1262,11 +1267,13 @@ export function MentionComposer({
         </>
       )}
       {uploadOwner === undefined ? null : <DraftUploadStatus upload={upload} />}
-      {/* Past its deadline a send is still the server's: no Retry, which would post it twice. */}
+      {/* Past its deadline a send is still the server's: no Retry, which would post it twice. A
+          message to one session is still being tried under its key, which Dispatch takes once. */}
       {late ? (
         <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
-          Still sending — the server has not answered in {SEND_DEADLINE_MS / 1000} seconds. The
-          draft stays here until it does.
+          {outgoing.held?.request.owner.kind === "session"
+            ? "Still sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once."
+            : `Still sending — the server has not answered in ${SEND_DEADLINE_MS / 1000} seconds. The draft stays here until it does.`}
         </p>
       ) : null}
       {refusal === undefined ? null : (

@@ -3,7 +3,7 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import { agentRow, openAgents, plannerSession, seedAgents, shownAgentRows } from "./agents";
 import { createAgentMessage, createMessage, patchIssue } from "./api";
 import { resetDatabase } from "./seed";
-import { holdPosts, refusePosts } from "./sends";
+import { holdPosts, MESSAGE_REFUSED, refusePosts } from "./sends";
 import { asUser } from "./users";
 
 // The issue picker's keyboard-step rule (`markKeyStep` in `AgentMessageComposer.tsx`) holds only
@@ -19,6 +19,10 @@ import { asUser } from "./users";
 test.beforeEach(async () => {
   await resetDatabase();
 });
+
+/** What a row's composer says once Dispatch refuses its message. A server that is down is tried
+ *  again under the send's key, so the rows that need a refusal refuse with Dispatch's verdict. */
+const messageRefused = `Couldn't send — ${MESSAGE_REFUSED.error}`;
 
 /** The send the rows below make, and the path of the one `POST` it produces. A comment and a
  *  direct message share this shape, so the row that calls this names the path it expects. */
@@ -339,7 +343,7 @@ test.describe("agents page", () => {
       const field = row.getByRole("textbox", { name: "Comment" });
       const cancelReply = row.getByRole("button", { name: "Cancel reply" });
       const picker = row.getByRole("combobox", { name: "Issue" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
 
       await page.keyboard.press("j");
       await page.keyboard.press("i");
@@ -356,7 +360,7 @@ test.describe("agents page", () => {
       await expect(cancelReply).toBeDisabled();
       refuse();
 
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toHaveValue("Yes");
       await cancelReply.click();
       await expect(row.getByRole("button", { name: "Choose issue" })).toContainText(issueKey);
@@ -396,7 +400,12 @@ test.describe("agents page", () => {
       const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const reply = row.getByRole("button", { name: "Reply" }).first();
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
+      const sent = page.waitForRequest(
+        (request) =>
+          request.method() === "POST" &&
+          new URL(request.url()).pathname === `/api/v1/agents/${plannerSession.session_id}/messages`
+      );
 
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
@@ -407,7 +416,7 @@ test.describe("agents page", () => {
       await expect(reply).toBeDisabled();
       refuse();
 
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toBeEnabled();
       await expect(field).toHaveValue("Status please");
       await expect(reply).toBeEnabled();
@@ -417,7 +426,14 @@ test.describe("agents page", () => {
           new URL(request.url()).pathname === `/api/v1/agents/${plannerSession.session_id}/messages`
       );
       await row.getByRole("button", { name: "Retry" }).click();
-      expect((await retried).postDataJSON()).toEqual({ body: "Status please", delivery: "aside" });
+      // The same message, so the same key: Dispatch answers a repeat with the message it made.
+      const key = (await sent).postDataJSON().idempotency_key;
+      expect(key).toEqual(expect.any(String));
+      expect((await retried).postDataJSON()).toEqual({
+        body: "Status please",
+        delivery: "aside",
+        idempotency_key: key,
+      });
     } finally {
       await context.close();
     }
@@ -438,7 +454,7 @@ test.describe("agents page", () => {
       await openAgents(page);
       const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
       const sent = page.waitForRequest(
         (request) =>
           request.method() === "POST" &&
@@ -462,7 +478,7 @@ test.describe("agents page", () => {
         `/api/v1/agents/${plannerSession.session_id}/messages`
       );
       refuse();
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toHaveValue("Status please");
       await expect(row.getByRole("button", { name: "Cancel reply" })).toHaveCount(0);
     } finally {
@@ -482,7 +498,7 @@ test.describe("agents page", () => {
       const field = row.getByRole("textbox", { name: "Comment" });
       const toggle = row.getByRole("button", { name: "Choose issue" });
       const picker = row.getByRole("combobox", { name: "Issue" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
       const sent = page.waitForRequest(
         (request) =>
           request.method() === "POST" &&
@@ -510,7 +526,7 @@ test.describe("agents page", () => {
         `/api/v1/agents/${plannerSession.session_id}/messages`
       );
       refuse();
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toHaveValue("Status please");
       await expect(toggle).toContainText("No issue");
     } finally {
@@ -581,7 +597,7 @@ test.describe("agents page", () => {
       await openAgents(page);
       const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
       const sent = page.waitForRequest(
         (request) =>
           request.method() === "POST" &&
@@ -605,7 +621,7 @@ test.describe("agents page", () => {
         `/api/v1/agents/${plannerSession.session_id}/messages`
       );
       refuse();
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toHaveValue("Yes");
       await expect(row.getByRole("button", { name: "Cancel reply" })).toBeVisible();
     } finally {
@@ -625,7 +641,7 @@ test.describe("agents page", () => {
       await openAgents(page);
       const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
-      const notice = row.getByText("Couldn't send — the server is down");
+      const notice = row.getByText(messageRefused);
       const retry = row.getByRole("button", { name: "Retry" });
       let posts = 0;
       page.on("request", (request) => {
@@ -633,7 +649,7 @@ test.describe("agents page", () => {
           posts += 1;
         }
       });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
 
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
@@ -676,7 +692,7 @@ test.describe("agents page", () => {
       const row = shownAgentRows(page).nth(0);
       const field = row.getByRole("textbox", { name: "Comment" });
       const discard = row.getByRole("button", { name: "Discard" });
-      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages");
+      const refuse = await refusePosts(page, "**/api/v1/agents/*/messages", MESSAGE_REFUSED);
 
       await page.keyboard.press("j");
       await page.keyboard.press("Enter");
@@ -690,7 +706,7 @@ test.describe("agents page", () => {
       await expect(discard).toHaveCount(0);
       refuse();
 
-      await expect(row.getByText("Couldn't send — the server is down")).toBeVisible();
+      await expect(row.getByText(messageRefused)).toBeVisible();
       await expect(field).toBeEnabled();
       await expect(field).toHaveValue("Status please");
       await expect(row.getByRole("button", { name: "Retry" })).toBeVisible();

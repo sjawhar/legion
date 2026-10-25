@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, expect, type Mock, spyOn, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, type Mock, spyOn, test } from "bun:test";
 import {
   type AgentStreamCommand,
   type AgentStreamFrame,
@@ -23,11 +23,15 @@ import {
   type FakeLiveSockets,
   installFakeLiveSockets,
 } from "../../__tests__/live-socket-harness";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import { liveSocketFor } from "../../api/live-socket";
 import type { Agent, Message, MessageRead, UserAgentStates } from "../../api/types";
+import { KEYED_SEND_ATTEMPT_MS } from "../conversation/send-request";
 import { Sidebar } from "../sidebar/Sidebar";
 import { AgentConversationPage } from "./AgentConversationPage";
+
+/** What each attempt of the live view's send is held to, beside the message it carries. */
+const keyedAttempt = expect.objectContaining({ deadlineMs: KEYED_SEND_ATTEMPT_MS });
 
 const SESSION = "01a0e090-4848-7473-acc5-fc96e6a646d3";
 
@@ -436,10 +440,11 @@ test("the live view sends as Send by default where the session takes it, and as 
     within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
   );
   await waitFor(() =>
-    expect(createAgentMessage).toHaveBeenCalledWith(SESSION, {
-      body: "try the other branch",
-      delivery: "steer",
-    })
+    expect(createAgentMessage).toHaveBeenCalledWith(
+      SESSION,
+      { body: "try the other branch", delivery: "steer", idempotency_key: expect.any(String) },
+      keyedAttempt
+    )
   );
 
   cleanup();
@@ -459,6 +464,103 @@ test("the live view sends as Send by default where the session takes it, and as 
       .getAllByRole("option")
       .map((option) => option.textContent)
   ).toEqual(["Aside"]);
+});
+
+/** Types `body` into the live view's composer and presses its Send. */
+async function sendFromLiveView(body: string): Promise<void> {
+  fireEvent.change(screen.getByPlaceholderText(/delivered as Send/), { target: { value: body } });
+  await act(async () => {
+    fireEvent.click(
+      within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
+    );
+  });
+}
+
+/** Runs `body` on the fake clock, which moves a millisecond before the real one comes back: a
+ *  timer left at zero delay would otherwise hang a later `waitFor`. */
+async function onFakeClock(body: () => Promise<void>): Promise<void> {
+  jest.useFakeTimers();
+  try {
+    await body();
+  } finally {
+    act(() => {
+      jest.advanceTimersByTime(1);
+    });
+    jest.useRealTimers();
+  }
+}
+
+// A message sent from the live view is one key, minted when the person presses Send: a fetch that
+// fails, or a Dispatch that cannot answer yet, is tried again under it, so the session gets the
+// message once. The next press is another message, with a key of its own.
+test("the live view's send retries under one key", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage")
+    .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+    .mockRejectedValueOnce(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }))
+    .mockImplementation(async (_session, input) => message("sent", input.body));
+  spies.push(createAgentMessage);
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+  const mode = (await screen.findByRole("combobox", {
+    name: "Delivery mode",
+  })) as HTMLSelectElement;
+  await waitFor(() => expect(mode.value).toBe("steer"));
+
+  await onFakeClock(async () => {
+    await sendFromLiveView("try the other branch");
+    expect(createAgentMessage).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      jest.advanceTimersByTime(1_000);
+    });
+    expect(createAgentMessage).toHaveBeenCalledTimes(2);
+    await act(async () => {
+      jest.advanceTimersByTime(2_000);
+    });
+    expect(createAgentMessage).toHaveBeenCalledTimes(3);
+  });
+  expect(screen.queryByTestId("agent-send-error")).toBeNull();
+
+  await sendFromLiveView("and this");
+  await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(4));
+  const [first, ...later] = createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key);
+  expect(first).toMatch(/^[0-9a-f-]{36}$/);
+  expect(later.slice(0, 2)).toEqual([first, first]);
+  expect(later[2]).not.toBe(first);
+});
+
+// A send's retries are the view's: leaving the live view lets them go, and nothing tries again
+// for a view no longer on screen.
+test("leaving the live view stops its send's retries", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
+    new TypeError("Failed to fetch")
+  );
+  spies.push(createAgentMessage);
+  renderLiveView({
+    agentState: {},
+    messages: [],
+    putAgentState: spyOn(api, "putAgentState").mockResolvedValue({ unread_replies: 0 }),
+  });
+  const mode = (await screen.findByRole("combobox", {
+    name: "Delivery mode",
+  })) as HTMLSelectElement;
+  await waitFor(() => expect(mode.value).toBe("steer"));
+
+  await onFakeClock(async () => {
+    await sendFromLiveView("try the other branch");
+    await act(async () => {
+      jest.advanceTimersByTime(1_000);
+    });
+    expect(createAgentMessage).toHaveBeenCalledTimes(2);
+
+    cleanup();
+    await act(async () => {
+      jest.advanceTimersByTime(10 * 60_000);
+    });
+    expect(createAgentMessage).toHaveBeenCalledTimes(2);
+  });
 });
 
 // A Claude Code session whose Envoy channel Claude Code did not load advertises no mode: the
@@ -771,10 +873,11 @@ test("picking a command puts /name in the message as plain text, and Enter sends
   // With the list closed Enter is the composer's own Send again.
   fireEvent.keyDown(input, { key: "Enter" });
   await waitFor(() =>
-    expect(createAgentMessage).toHaveBeenCalledWith(SESSION, {
-      body: "/compact",
-      delivery: "steer",
-    })
+    expect(createAgentMessage).toHaveBeenCalledWith(
+      SESSION,
+      { body: "/compact", delivery: "steer", idempotency_key: expect.any(String) },
+      keyedAttempt
+    )
   );
 });
 
@@ -805,7 +908,11 @@ test("arrow keys move through the commands, and after Escape Enter sends what wa
   await waitFor(() => expect(screen.queryByRole("listbox", { name: "Slash commands" })).toBeNull());
   fireEvent.keyDown(input, { key: "Enter" });
   await waitFor(() =>
-    expect(createAgentMessage).toHaveBeenCalledWith(SESSION, { body: "/rec", delivery: "steer" })
+    expect(createAgentMessage).toHaveBeenCalledWith(
+      SESSION,
+      { body: "/rec", delivery: "steer", idempotency_key: expect.any(String) },
+      keyedAttempt
+    )
   );
 });
 

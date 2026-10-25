@@ -17,9 +17,13 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
+import { KEYED_SEND_ATTEMPT_MS } from "../conversation/send-request";
 import { orderAgents, partitionAgents } from "./AgentsPage";
 import { matchesFilters, searchWords } from "./agent-search";
 import { broadcastPlan, broadcastSendState, composedBroadcast } from "./broadcast-plan";
+
+/** What each attempt of a message to one agent is held to, beside the message it carries. */
+const keyedAttempt = { deadlineMs: KEYED_SEND_ATTEMPT_MS };
 
 // Delivery attempts are dated relative to the run: the dashboard only offers a
 // same-mode Retry while an attempt is inside the stream's duplicate window, so a
@@ -262,10 +266,11 @@ test("an agent card sends a plain message in the mode the session takes", async 
     ).toBeTruthy();
     fireEvent.submit(within(reviewer).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
-      expect(page.createAgentMessage).toHaveBeenCalledWith("reviewer-session", {
-        body: "Is the review done?",
-        delivery: "aside",
-      })
+      expect(page.createAgentMessage).toHaveBeenCalledWith(
+        "reviewer-session",
+        { body: "Is the review done?", delivery: "aside", idempotency_key: expect.any(String) },
+        keyedAttempt
+      )
     );
 
     const silent = card(region, "Deaf");
@@ -792,10 +797,11 @@ test("Agents sends without an issue through the agent message route", async () =
     });
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
-      expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
-        body: "Check the deployment",
-        delivery: "btw",
-      })
+      expect(page.createAgentMessage).toHaveBeenCalledWith(
+        "planner-session",
+        { body: "Check the deployment", delivery: "btw", idempotency_key: expect.any(String) },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -1576,11 +1582,16 @@ test("a reply to an Aside-only agent after a refused Send goes as an Aside", asy
     });
     fireEvent.submit(within(reviewer).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
-      expect(page.createAgentMessage).toHaveBeenCalledWith("reviewer-session", {
-        body: "Can this ship now?",
-        delivery: "aside",
-        in_reply_to: "message-1",
-      })
+      expect(page.createAgentMessage).toHaveBeenCalledWith(
+        "reviewer-session",
+        {
+          body: "Can this ship now?",
+          delivery: "aside",
+          idempotency_key: expect.any(String),
+          in_reply_to: "message-1",
+        },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -1640,11 +1651,16 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
     });
     fireEvent.submit(composer);
     await waitFor(() =>
-      expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
-        body: "Ship it.",
-        delivery: "btw",
-        in_reply_to: "message-2",
-      })
+      expect(page.createAgentMessage).toHaveBeenCalledWith(
+        "planner-session",
+        {
+          body: "Ship it.",
+          delivery: "btw",
+          idempotency_key: expect.any(String),
+          in_reply_to: "message-2",
+        },
+        keyedAttempt
+      )
     );
     await waitFor(() =>
       expect(within(planner).queryByText("Replying to Planner — Yes, it can.")).toBeNull()
@@ -1752,11 +1768,16 @@ test("a reply inherits the mode of the exchange's newest attempt even within one
     });
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
-      expect(page.createAgentMessage).toHaveBeenCalledWith("planner-session", {
-        body: "Ship it.",
-        delivery: "btw",
-        in_reply_to: "message-2",
-      })
+      expect(page.createAgentMessage).toHaveBeenCalledWith(
+        "planner-session",
+        {
+          body: "Ship it.",
+          delivery: "btw",
+          idempotency_key: expect.any(String),
+          in_reply_to: "message-2",
+        },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
