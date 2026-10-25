@@ -11,6 +11,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
@@ -233,6 +234,65 @@ func replaceBlockRefs(
 		return nil, fmt.Errorf("record the block mentions of version %d of %s: %w", version, artifactID, err)
 	}
 	return append(moved, added...), nil
+}
+
+// BlockLinks lists each link from a block of document fromArtifact to a block of document
+// toArtifact (artifact uuids; the two may be one document), newest first, then by the source
+// block's node id, then by the target's. A link counts only while both of its blocks are current
+// blocks of their documents: a deleted block's links drop out, and its stored mentions bring them
+// back when a version holds its id again.
+func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string) ([]model.BlockLink, error) {
+	rows, err := q.Query(ctx, `
+		select r.kind, r.from_node, r.to_id, r.created_at, r.created_version
+		from block_refs r
+		join document_blocks f on f.artifact_id = r.artifact_id and f.block_id = r.block_id
+		join document_blocks t on t.node_id = r.to_id and t.artifact_id = $2::uuid
+		where r.artifact_id = $1::uuid and r.to_kind = 'block'
+		order by r.created_at desc, r.from_node, r.to_id`, fromArtifact, toArtifact)
+	if err != nil {
+		return nil, fmt.Errorf("list the block links from %s to %s: %w", fromArtifact, toArtifact, err)
+	}
+	type linkRow struct {
+		kind, from, to string
+		createdAt      time.Time
+		createdVersion int
+	}
+	var links []linkRow
+	var ends []edgeRow
+	for rows.Next() {
+		var link linkRow
+		if err := rows.Scan(&link.kind, &link.from, &link.to, &link.createdAt, &link.createdVersion); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan a block link: %w", err)
+		}
+		links = append(links, link)
+		ends = append(ends, edgeRow{otherKind: "block", otherID: link.from}, edgeRow{otherKind: "block", otherID: link.to})
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("list the block links from %s to %s: %w", fromArtifact, toArtifact, err)
+	}
+	nodes, err := resolveNodes(ctx, q, true, ends)
+	if err != nil {
+		return nil, err
+	}
+	result := make([]model.BlockLink, 0, len(links))
+	for _, link := range links {
+		from, fromFound := nodes[[2]string{"block", link.from}]
+		to, toFound := nodes[[2]string{"block", link.to}]
+		if !fromFound || !toFound {
+			// A block deleted between the two reads: its links drop out as they would have.
+			continue
+		}
+		result = append(result, model.BlockLink{
+			Kind:           link.kind,
+			From:           from.GraphNode,
+			To:             to.GraphNode,
+			CreatedAt:      link.createdAt,
+			CreatedVersion: link.createdVersion,
+		})
+	}
+	return result, nil
 }
 
 // uniqueBlocks keeps the first block of each id, in order, as the node GET …/blocks addresses by

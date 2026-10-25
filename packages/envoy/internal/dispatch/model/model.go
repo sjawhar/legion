@@ -1364,6 +1364,25 @@ type GraphReferences struct {
 	Edges []GraphEdge `json:"edges"`
 }
 
+// BlockLink is one link from a block of one document to a block of a document: its edge kind,
+// both block nodes, and when and in which version of its document the source block first held
+// it.
+type BlockLink struct {
+	Kind           string    `json:"kind"`
+	From           GraphNode `json:"from"`
+	To             GraphNode `json:"to"`
+	CreatedAt      time.Time `json:"created_at"`
+	CreatedVersion int       `json:"created_version"`
+}
+
+// BlockLinks is GET /api/v1/block-links: the two documents and the links from blocks of From to
+// blocks of To, newest first.
+type BlockLinks struct {
+	From  GraphNode   `json:"from"`
+	To    GraphNode   `json:"to"`
+	Links []BlockLink `json:"links"`
+}
+
 // Event is the immutable event-log record for a Dispatch mutation.
 type Event struct {
 	ID         int64     `json:"id"`

@@ -699,11 +699,18 @@ func blockIDsByText(t *testing.T, handler http.Handler, artifactID string) map[s
 // editSpec applies ops to an issue's spec as a named version and returns the version it wrote.
 func editSpec(t *testing.T, handler http.Handler, key string, ops []map[string]any) model.Version {
 	t.Helper()
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/artifacts/spec/edits", map[string]any{
+	return editIssueDocument(t, handler, key, "spec", ops)
+}
+
+// editIssueDocument applies ops to the issue document slug as a named version and returns the
+// version it wrote.
+func editIssueDocument(t *testing.T, handler http.Handler, key, slug string, ops []map[string]any) model.Version {
+	t.Helper()
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/artifacts/"+slug+"/edits", map[string]any{
 		"ops": ops, "summary": "edit",
 	}, "alice")
 	if response.Code != http.StatusOK {
-		t.Fatalf("edit the spec: status=%d body=%s", response.Code, response.Body.String())
+		t.Fatalf("edit %s of %s: status=%d body=%s", slug, key, response.Code, response.Body.String())
 	}
 	version := decodeBody[struct {
 		Version *model.Version `json:"version"`
@@ -1302,8 +1309,8 @@ func TestALinkInAListItemStartsAtTheItemsParagraph(t *testing.T) {
 
 // A2, design 4: a link to a block counts only while a current version holds the block. Deleting it
 // takes the link out of the document's list, the block's own read, the citing document's links
-// and outgoing list, and the citing issue's closure; restoring the block with its id brings every
-// one back.
+// and outgoing list, the citing issue's closure and the block links between the two documents;
+// restoring the block with its id brings every one back.
 func TestADeletedBlockLeavesEveryListAndReturnsWithItsID(t *testing.T) {
 	handler, _ := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -1368,6 +1375,10 @@ func TestADeletedBlockLeavesEveryListAndReturnsWithItsID(t *testing.T) {
 		}
 		if reached != want {
 			t.Fatalf("%s: closure of %s reaches %s %d times, want %d", stage, ops.Key, specRef, reached, want)
+		}
+		links := readBlockLinks(t, handler, notesRef, specRef).Links
+		if len(links) != want || listed && (links[0].From.Document != notesRef || links[0].To.ID != nodeID) {
+			t.Fatalf("%s: block links from the notes to %s = %#v, want %d to the block", stage, specRef, links, want)
 		}
 	}
 	requireListed("cited", true)
