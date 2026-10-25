@@ -24,11 +24,12 @@ line.
 ## What a mention carries
 
 The delivery's `message` holds Slack's fields: `channel_id`, `user_id` (a Slack user id such as
-`U0123ABCD`), `text` (the message's own words, then the display text its attachments and blocks
-carry, a line apiece, each line delivered once and a line exactly equal to an earlier one left
-out; a mention a person typed in a Slack client carries its own words alone, since a `rich_text`
-block that only repeats those words is not read, while an app's rich text, which says more, is
-delivered; the mention itself appears in it as `<@U…>`, the app's own
+`U0123ABCD`), `text` (the message's own words, then the display text its blocks and then its
+attachments carry, a line apiece, each line delivered once and a line exactly equal to an earlier
+one left out; an attachment's field arrives as one line, `title: value`; a mention a person typed
+in a Slack client carries its own words alone, since a `rich_text` block that only repeats those
+words is not read, while an app's rich text, which says more, is delivered; the mention itself
+appears in it as `<@U…>`, the app's own
 id), `ts` (the mention's own timestamp), `thread_ts` (the thread's root, only when the mention was
 posted inside a thread), and `bot_id` and `bot_name` when a bot posted it.
 
