@@ -15,7 +15,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { StopTrying } from "../conversation/StopTryingButton";
-import { SendStoppedError } from "../conversation/send-request";
+import { SendInterruptedError, SendStoppedError } from "../conversation/send-request";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
 import { type BroadcastSend, type BroadcastSendRow, broadcastQueue } from "./broadcast-queue";
 
@@ -39,7 +39,8 @@ import { type BroadcastSend, type BroadcastSendRow, broadcastQueue } from "./bro
  */
 export function useBroadcastQueue(composing: boolean): {
   enqueue: (send: BroadcastSend) => void;
-  /** Takes a failed send off the list, for Restore draft to hand its draft back. */
+  /** Takes a failed send off the list: for Restore draft to hand its draft back, or for Discard
+   *  to drop one a reload interrupted too long ago to be sent on its own. */
   dismiss: (row: BroadcastSendRow) => void;
   /** Sends a failed send's very request again, at the back of the line and in its own row. */
   retry: (row: BroadcastSendRow) => void;
@@ -100,13 +101,16 @@ function agentCount(count: number): string {
  * The page's sends, one row each, newest press first so the send just pressed is in view: queued,
  * on the wire, still being tried under its key once past its deadline (with Stop trying), sent
  * (linking its broadcast, with the send's exclusions), or refused with the server's reason - or
- * stopped - with Retry and Restore draft. A retried send keeps its row's place. The strip sits
- * above the composer, outside it, because the composer goes whenever the selection empties - at
- * every press - and a send outlives it. Restore draft refuses, and says why under its row, while
- * the host says putting a draft back would replace one (`restoreRefusal`).
+ * stopped - with Retry and Restore draft. One a reload interrupted too long ago to be sent on its
+ * own (`SendInterruptedError`) says so in the error's own words and offers Discard beside them. A
+ * retried send keeps its row's place. The strip sits above the composer, outside it, because the
+ * composer goes whenever the selection empties - at every press - and a send outlives it. Restore
+ * draft refuses, and says why under its row, while the host says putting a draft back would
+ * replace one (`restoreRefusal`).
  */
 export function BroadcastSends({
   className = "",
+  onDiscard,
   onRestore,
   onRetry,
   onStop,
@@ -115,6 +119,7 @@ export function BroadcastSends({
 }: {
   /** Placement only, as the host lays the strip out. */
   className?: string;
+  onDiscard: (row: BroadcastSendRow) => void;
   onRestore: (row: BroadcastSendRow) => void;
   onRetry: (row: BroadcastSendRow) => void;
   onStop: (row: BroadcastSendRow) => void;
@@ -144,7 +149,9 @@ export function BroadcastSends({
                 ) : row.status === "late" ? (
                   `Still sending to ${count} — Dispatch has not confirmed it yet. It keeps trying, and the broadcast is made once.`
                 ) : row.status === "failed" ? (
-                  row.error instanceof SendStoppedError ? (
+                  row.error instanceof SendInterruptedError ? (
+                    row.error.message
+                  ) : row.error instanceof SendStoppedError ? (
                     `Stopped sending to ${count}: ${row.error.message}`
                   ) : (
                     `Could not send to ${count}: ${row.error.message}`
@@ -190,6 +197,15 @@ export function BroadcastSends({
                   >
                     Restore draft
                   </RefusableButton>
+                  {row.error instanceof SendInterruptedError ? (
+                    <button
+                      className={secondaryButtonCompact}
+                      onClick={() => onDiscard(row)}
+                      type="button"
+                    >
+                      Discard
+                    </button>
+                  ) : null}
                   {restoreRefusal === null ? null : (
                     <span
                       className={`basis-full text-xs ${textMutedOnSurface}`}

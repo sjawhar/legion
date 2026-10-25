@@ -5,6 +5,7 @@ import { useEffect, useMemo, useRef } from "react";
 import { newSendKey } from "../../lib/send-key";
 import { agentSendKey } from "../agents/AgentMessageComposer";
 import { type HeldSend, useHeldSend, useHeldSends } from "../conversation/held-sends";
+import { requestFor } from "../conversation/send-request";
 
 export interface LiveSendControls {
   /** The send the session holds - from this view or its Agents row - out, or refused. */
@@ -12,9 +13,9 @@ export interface LiveSendControls {
   /** Sends `body` as written in `delivery` under a key of its own, unless the session holds a
    *  send already, out or refused. */
   readonly send: (body: string, delivery: MessageDeliveryMode) => void;
-  /** Sends the refused message again as it was sent, under the key it was sent with. */
+  /** Sends the refused message again: as it was sent, under its own key, or, where the draft was
+   *  written over since - on this session's Agents row - that draft, under a key of its own. */
   readonly retry: () => void;
-  /** Drops a refused message. */
   readonly discard: () => void;
   /** Stops trying a late message once the attempt in flight settles. */
   readonly stop: () => void;
@@ -48,7 +49,21 @@ export function useLiveSend(sessionId: string, landed: () => void): LiveSendCont
     held,
     retry: () => {
       const refused = store.get(key);
-      if (refused?.status === "refused") store.send(key, refused.request);
+      if (refused?.status !== "refused") return;
+      // The row and this view share one send, so Retry sends the draft the store holds, which the
+      // row's composer writes what the reader typed over the refusal into: unedited, that is the
+      // refused request itself, key and picked mode included, so Dispatch makes one message of
+      // the two; edited, it is another message, in the mode this one went in, under a key of its
+      // own (`requestFor`).
+      const { sendKey: _sent, ...addressed } = refused.request;
+      store.send(
+        key,
+        requestFor(refused.request, {
+          ...addressed,
+          ask: refused.draft.ask,
+          draft: refused.draft.draft,
+        })
+      );
     },
     send: (body, delivery) => {
       // Read in the press's own task, so a press React has not yet rendered as held sends nothing.

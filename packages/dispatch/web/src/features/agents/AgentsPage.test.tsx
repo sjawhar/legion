@@ -1,6 +1,11 @@
 import { expect, jest, spyOn, test } from "bun:test";
 import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
-import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
+import {
+  focusManager,
+  onlineManager,
+  QueryClient,
+  QueryClientProvider,
+} from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
@@ -133,7 +138,11 @@ function renderAgents({
   issues?: IssueSummary[];
   messages?: MessageRead[];
 } = {}) {
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue(inboxRows);
   const listAgents = spyOn(api, "listAgents").mockResolvedValue(listedAgents);
   const listAgentMessages = spyOn(api, "listAgentMessages").mockResolvedValue(messages);
@@ -3436,6 +3445,216 @@ test("the Agents row's Retry of a live-view send re-sends it as it was; an edit 
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// W18. The row and the live view share one send, so a Retry pressed in the view sends the draft
+// the row wrote over the refusal: edited, that is another message, in the mode the refused one
+// went in, under a key of its own - never the stale text the refusal was made with.
+test("a live-view Retry sends the draft the Agents row wrote over the refusal", async () => {
+  const page = await renderPlannerLiveView();
+  try {
+    page.createAgentMessage.mockRejectedValueOnce(
+      new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
+    );
+    await sendFromLiveView("Status please");
+    await screen.findByTestId("agent-send-error");
+    const pressed = page.createAgentMessage.mock.calls[0]?.[1];
+
+    // The row holds the same send: the reader rewrites it there and goes back to the view, which
+    // is where the composer hands what they wrote back to the held send.
+    await act(async () => backToAgents());
+    const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
+    await act(async () => expand(planner, "Planner"));
+    const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    expect(field.value).toBe("Status please");
+    fireEvent.change(field, { target: { value: "Status please, now" } });
+    await act(async () => openLiveView("Planner"));
+
+    page.createAgentMessage.mockResolvedValueOnce(message("Status please, now"));
+    const held = await screen.findByTestId("agent-send-held");
+    expect(within(held).getByText("Your message: “Status please, now”")).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(within(held).getByRole("button", { name: "Retry" }));
+    });
+    await waitFor(() => expect(page.createAgentMessage).toHaveBeenCalledTimes(2));
+    const sent = page.createAgentMessage.mock.calls[1]?.[1];
+    expect(sent?.body).toBe("Status please, now");
+    expect(sent?.delivery).toBe(pressed?.delivery);
+    expect(sent?.idempotency_key).not.toBe(pressed?.idempotency_key);
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// W18. A held send's own mode is what the row warns about: the live view picked BTW outright, so
+// the row must not say the message goes as an Aside because that is what its own targets
+// advertise. The first edit makes the message the row's, in the row's mode, and the warning with
+// it.
+test("the Agents row warns in the mode a held live-view send went in, not its own", async () => {
+  const page = await renderPlannerLiveView();
+  const plainNotice = /does not advertise Send/;
+  try {
+    const mode = screen.getByRole("combobox", { name: "Delivery mode" }) as HTMLSelectElement;
+    fireEvent.change(mode, { target: { value: "btw" } });
+    await screen.findByPlaceholderText(/delivered as BTW/);
+    page.createAgentMessage.mockRejectedValueOnce(
+      new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
+    );
+    fireEvent.change(screen.getByPlaceholderText(/delivered as BTW/), {
+      target: { value: "Status please" },
+    });
+    await act(async () => {
+      fireEvent.click(
+        within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
+      );
+    });
+    await screen.findByTestId("agent-send-error");
+    expect(page.createAgentMessage.mock.calls[0]?.[1].delivery).toBe("btw");
+
+    await act(async () => backToAgents());
+    const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
+    await act(async () => expand(planner, "Planner"));
+    expect(within(planner).queryByText(plainNotice)).toBeNull();
+
+    // Edited, the message is the row's own: it goes in the row's plain mode, and says so.
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "Status please, now" },
+    });
+    expect(within(planner).getByText(plainNotice)).toBeTruthy();
+  } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// W8. What the reader writes over a refusal is the only copy of that message, and a reload must
+// keep it as last typed: the composer writes it back to the held send as the page goes, so the
+// page after the reload shows the edit rather than the words the refusal was made with.
+test("an edit typed over a refused row survives a reload", async () => {
+  const before = renderAgents();
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await act(async () => expand(planner, "Planner"));
+    before.createAgentMessage.mockRejectedValueOnce(
+      new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused the message" })
+    );
+    const field = within(planner).getByRole("textbox", { name: "Comment" });
+    fireEvent.change(field, { target: { value: "Status please" } });
+    await act(async () => {
+      fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
+    });
+    await within(planner).findByText("Couldn't send — Dispatch refused the message");
+
+    fireEvent.change(field, { target: { value: "Status please, now" } });
+    act(() => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+  } finally {
+    before.view.unmount();
+    before.restore();
+  }
+
+  reloadTab();
+  const after = renderAgents();
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await act(async () => expand(planner, "Planner"));
+    const field = within(planner).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" });
+    expect(field.value).toBe("Status please, now");
+    expect(within(planner).getByText("Couldn't send — Dispatch refused the message")).toBeTruthy();
+    expect(after.createAgentMessage).not.toHaveBeenCalled();
+  } finally {
+    after.view.unmount();
+    after.restore();
+  }
+});
+
+// W6. A kept send belongs to the person who pressed it: a tab alice left a send in, that bob
+// signs into, sends nothing of hers, shows no row for it, and drops what was kept.
+test("a send alice left behind is not resumed for bob, and is dropped", async () => {
+  const alice = renderAgents();
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await act(async () => expand(planner, "Planner"));
+    alice.createAgentMessage.mockReturnValueOnce(Promise.withResolvers<Message>().promise);
+    fireEvent.change(within(planner).getByRole("textbox", { name: "Comment" }), {
+      target: { value: "Status please" },
+    });
+    await act(async () => {
+      fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
+    });
+    await waitFor(() => expect(alice.createAgentMessage).toHaveBeenCalledTimes(1));
+  } finally {
+    alice.view.unmount();
+    alice.restore();
+  }
+
+  reloadTab();
+  const bob = renderAgents();
+  bob.whoAmI.mockResolvedValue({ event_head: "0", kind: "user", login: "bob" });
+  bob.queryClient.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "bob" });
+  try {
+    const region = await screen.findByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await act(async () => expand(planner, "Planner"));
+    expect(bob.createAgentMessage).not.toHaveBeenCalled();
+    expect(screen.queryByText("Your message: “Status please”")).toBeNull();
+    expect(
+      within(planner).getByRole<HTMLTextAreaElement>("textbox", { name: "Comment" }).value
+    ).toBe("");
+    await waitFor(() =>
+      expect(
+        Array.from({ length: window.sessionStorage.length }, (_, index) =>
+          window.sessionStorage.key(index)
+        ).filter((name) => name?.startsWith("dispatch.keyed-send:"))
+      ).toEqual([])
+    );
+  } finally {
+    bob.view.unmount();
+    bob.restore();
+  }
+});
+
+// W21. A send pressed while the browser is offline is tried, not parked: the attempt is made,
+// the composer says Dispatch has not confirmed it once the deadline passes and offers Stop
+// trying, and the message lands once the network is back. A mutation TanStack paused offline
+// would make no attempt, start no deadline and offer no way out.
+test("a send pressed offline goes late with Stop trying, and lands when the network returns", async () => {
+  const online = onlineManager.isOnline();
+  const page = await renderPlannerLiveView();
+  page.createAgentMessage.mockRejectedValue(new TypeError("Failed to fetch"));
+  jest.useFakeTimers();
+
+  try {
+    onlineManager.setOnline(false);
+    await sendFromLiveView("Status please");
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(1);
+    const held = screen.getByTestId("agent-send-held");
+    expect(within(held).getByRole("status").textContent).toBe("Sending…");
+
+    for (const wait of [1_000, 2_000, 4_000, 8_000, 15_000]) await tick(wait);
+    expect(within(held).getByRole("status").textContent).toBe(KEYED_SEND_LATE_TEXT);
+    expect(within(held).getByRole("button", { name: "Stop trying" })).toBeTruthy();
+    expect(page.createAgentMessage.mock.calls.length).toBeGreaterThan(1);
+
+    page.createAgentMessage.mockResolvedValueOnce(message("Status please"));
+    onlineManager.setOnline(true);
+    await tick(30_000);
+    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    expect(
+      new Set(page.createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).size
+    ).toBe(1);
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    onlineManager.setOnline(online);
     page.view.unmount();
     page.restore();
   }

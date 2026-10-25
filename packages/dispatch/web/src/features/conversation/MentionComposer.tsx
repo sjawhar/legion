@@ -81,6 +81,7 @@ import {
   SendStoppedError,
   type SentRequest,
   survivingMentions,
+  unedited,
 } from "./send-request";
 import { useAgents } from "./useAgents";
 import { useComposerSend } from "./useComposerSend";
@@ -110,6 +111,12 @@ interface AskOptionDraft {
   id: number;
   label: string;
 }
+
+/** How long after the last keystroke what the reader wrote over a refusal is written back to the
+ *  held send, which is what a reload restores (`keyed-send-storage.ts`). Short enough that a
+ *  reader who stops typing and reloads keeps their words, long enough that a burst of typing
+ *  writes once. */
+const KEEP_DRAFT_MS = 300;
 
 let nextAskOptionId = 0;
 
@@ -633,8 +640,11 @@ export function MentionComposer({
   // The Escape listener below reads it as it stands, so it is not re-bound each render for it.
   const cancelReplyNow = useRef(cancelReply);
   cancelReplyNow.current = cancelReply;
-  // What the reader wrote over a refusal goes back to the held send as this composer unmounts
-  // (`keep`, which a send still out ignores), so the composer that mounts next shows it.
+  // What the reader wrote over a refusal goes back to the held send (`keep`, which a send still
+  // out ignores), so the composer that mounts next shows it - and so a reload does: a refusal's
+  // draft is the only copy of that message, and the entry it is kept in is what survives the
+  // page (`keyed-send-storage.ts`). It is written as this composer unmounts, a short wait after
+  // each keystroke, and as the page goes, which no unmount follows.
   const keepDraft = useRef(() => {});
   keepDraft.current = () =>
     outgoing.keep({
@@ -642,6 +652,16 @@ export function MentionComposer({
       draft: { body, mentions, replacement },
     });
   useEffect(() => () => keepDraft.current(), []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: the draft's own fields are the trigger; the write reads them as they stand
+  useEffect(() => {
+    const write = window.setTimeout(() => keepDraft.current(), KEEP_DRAFT_MS);
+    return () => window.clearTimeout(write);
+  }, [askOptions, body, mentions, multiple, replacement, urgency]);
+  useEffect(() => {
+    const keepNow = () => keepDraft.current();
+    window.addEventListener("pagehide", keepNow);
+    return () => window.removeEventListener("pagehide", keepNow);
+  }, []);
   useEffect(() => {
     const form = formRef.current;
     if (form === null || dormant) return;
@@ -780,30 +800,34 @@ export function MentionComposer({
     );
     setConfirmingDiscard(false);
   };
+  /** The send as the composer's own state addresses and shapes it: what Send puts on the wire,
+   *  and what a held send is compared with to tell an untouched draft from an edited one. */
+  const composedRequest = (): Omit<SentRequest, "sendKey"> => ({
+    anchor,
+    ask: { multiple, options: submittedAskOptions(askOptions), urgency },
+    draft: { body, mentions, replacement },
+    edit:
+      edit === undefined
+        ? undefined
+        : { id: edit.id, save: saveEdit ?? ((id, text) => api.editComment(id, { body: text })) },
+    kind,
+    owner,
+    plainDelivery: plainMode,
+    replyTo,
+  });
   /** The send as it stands, for `sendRequest`: the fields' own text, since a keystroke in Send's
    *  task may not have rendered yet, and every prop and setting that addresses or shapes it - or,
    *  for a Retry of an unedited message to one session, `refused`, the refusal's own request, as
    *  it was sent (`requestFor`). */
-  const sentRequest = (refused: SentRequest | undefined): SentRequest => {
-    const request = {
-      anchor,
-      ask: { multiple, options: submittedAskOptions(askOptions), urgency },
+  const sentRequest = (refused: SentRequest | undefined): SentRequest =>
+    requestFor(refused, {
+      ...composedRequest(),
       draft: {
         body: textarea.current?.value ?? body,
         mentions,
         replacement: replacementTextarea.current?.value ?? replacement,
       },
-      edit:
-        edit === undefined
-          ? undefined
-          : { id: edit.id, save: saveEdit ?? ((id, text) => api.editComment(id, { body: text })) },
-      kind,
-      owner,
-      plainDelivery: plainMode,
-      replyTo,
-    } satisfies Omit<SentRequest, "sendKey">;
-    return requestFor(refused, request);
-  };
+    });
   const activeMentions = useMemo(() => survivingMentions(body, mentions), [body, mentions]);
   const effectiveTargets: readonly string[] =
     owner.kind === "session"
@@ -818,20 +842,37 @@ export function MentionComposer({
   // What a message with no command goes in: Send, or the mode every addressed session takes
   // when one of them refuses Send - an Aside to a Claude Code session.
   const plainMode = plainDelivery(targetOptions.map((option) => option.capabilities));
-  // Whether this draft goes in that plain mode: a reply to a thread keeps the thread's mode.
+  // The mode a send this composer holds - out, or refused - went in, where pressing Send or Retry
+  // now would send that very request again: the live view picks a mode outright, and the message
+  // goes in it, body and all, whichever surface shows it. Every warning below is about what
+  // pressing Send sends, so it reads that mode rather than this composer's own; the first edit
+  // makes the message this composer's, in the mode its own targets advertise.
+  const held = outgoing.held?.request;
+  const heldPicked =
+    held?.pickedDelivery !== undefined && unedited(held, composedRequest())
+      ? held.pickedDelivery
+      : undefined;
+  // Whether this draft goes in that plain mode: a reply to a thread keeps the thread's mode, and
+  // a picked mode is neither.
   const sendsPlain =
-    owner.kind === "session"
+    heldPicked === undefined &&
+    (owner.kind === "session"
       ? replyTo?.thread?.delivery === undefined
-      : replyTo?.parentKind !== "message" && activeMentions.length > 0;
+      : replyTo?.parentKind !== "message" && activeMentions.length > 0);
   const inheritedDelivery =
-    owner.kind === "session"
+    heldPicked ??
+    (owner.kind === "session"
       ? (replyTo?.thread?.delivery ?? plainMode)
       : replyTo?.parentKind === "message"
         ? replyTo.thread?.delivery
         : activeMentions.length > 0
           ? plainMode
-          : undefined;
-  const outbound = deliveryPlan(body, inheritedDelivery);
+          : undefined);
+  // A picked mode sends the body as written: no `/btw` or `/aside` at its start is a command.
+  const outbound =
+    heldPicked === undefined
+      ? deliveryPlan(body, inheritedDelivery)
+      : { body, delivery: heldPicked };
   // A closed owner takes no send: the composer is only still here for a send of its own that is
   // out, or its refusal, and Send says why it cannot go.
   const submitReason = closed

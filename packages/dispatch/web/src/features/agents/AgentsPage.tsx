@@ -1407,6 +1407,7 @@ export function AgentsPage(): ReactNode {
           {queue.rows.length === 0 ? null : (
             <BroadcastSends
               className="narrow-or-short:mt-3"
+              onDiscard={queue.dismiss}
               onRestore={(row) => {
                 queue.dismiss(row);
                 composition.restore(row.send);

@@ -1,5 +1,8 @@
+import type { QueryClient } from "@tanstack/react-query";
+
 import { ApiError } from "../../api/client";
-import { SendStoppedError } from "./send-request";
+import type { AuthenticatedUser } from "../../api/types";
+import { SendInterruptedError, SendStoppedError } from "./send-request";
 
 /**
  * Where a keyed send waits out a reload. A send that names itself to Dispatch by a key - a message
@@ -7,15 +10,33 @@ import { SendStoppedError } from "./send-request";
  * since Dispatch answers a repeat of the key with what the first request made; so the page keeps
  * every such send in `sessionStorage`, which a reload keeps and closing the tab drops, and resumes
  * it on load under its key. Each send is one entry, `dispatch.keyed-send:<key>`, in one versioned
- * format for both kinds, and an entry that does not parse - another version's, or damaged - is
- * dropped when the page loads. While any of them is unconfirmed the page asks the browser to
+ * format for both kinds, stamped with the login of the person who pressed it, and an entry that
+ * does not parse - another version's, or damaged - is dropped when the page loads, as is every
+ * entry of another person's. While any of them is unconfirmed the page asks the browser to
  * confirm leaving (`beforeunload`), since a closed tab would lose it.
  */
 
 const ENTRY_PREFIX = "dispatch.keyed-send:";
 
-/** The format's version: an entry of any other is dropped on load, never read. */
-const FORMAT_VERSION = 1;
+/** The format's version: an entry of any other is dropped on load, never read. Version 1 kept no
+ *  login, so no entry of it can be given back to the person who pressed it. */
+const FORMAT_VERSION = 2;
+
+/** How long after its press a send a reload interrupted is made again on its own. One kept longer
+ *  comes back refused (`SendInterruptedError`), for the reader to Retry under its key or discard:
+ *  a message they wrote that long ago may no longer be one they mean. */
+export const KEPT_SEND_RESUME_MS = 5 * 60_000;
+
+/** Whether a send pressed at `pressedAt` that a reload interrupted is made again on its own now. */
+export function resumesOnItsOwn(pressedAt: number, now = Date.now()): boolean {
+  return now - pressedAt <= KEPT_SEND_RESUME_MS;
+}
+
+/** The login of the person `client`'s app is signed in as (`["whoami"]`), which every kept send is
+ *  stamped with; undefined while no one is signed in, when nothing is kept. */
+export function signedInLogin(client: QueryClient): string | undefined {
+  return client.getQueryData<AuthenticatedUser>(["whoami"])?.login;
+}
 
 /** Which store a kept send belongs to: a message to one session, or a broadcast. */
 export type KeptKind = "broadcast" | "session";
@@ -24,8 +45,10 @@ export type KeptKind = "broadcast" | "session";
  *  out within its deadline, out past it, out while the reader stopped it, or refused. */
 export type KeptState = "late" | "queued" | "refused" | "sending" | "stopping";
 
-/** A refusal as it is kept: the reader stopped the send, Dispatch refused it, or another error. */
+/** A refusal as it is kept: the reader stopped the send, a reload interrupted it too long ago to be
+ *  made again on its own, Dispatch refused it, or another error. */
 export type KeptRefusal =
+  | { readonly kind: "interrupted" }
   | { readonly kind: "stopped" }
   | {
       readonly kind: "api";
@@ -85,7 +108,7 @@ export const shape = {
 } as const;
 
 const refusalShape = shape.either(
-  shape.record({ kind: shape.oneOf("stopped") }),
+  shape.record({ kind: shape.oneOf("interrupted", "stopped") }),
   shape.record({
     code: shape.nullable(shape.string),
     kind: shape.oneOf("api"),
@@ -100,6 +123,7 @@ const entryShape = shape.either(
   shape.record({
     key: shape.string,
     kind: shape.oneOf("broadcast", "session"),
+    login: shape.string,
     refusal: refusalShape,
     state: shape.oneOf("refused"),
     version: shape.oneOf(FORMAT_VERSION),
@@ -107,14 +131,19 @@ const entryShape = shape.either(
   shape.record({
     key: shape.string,
     kind: shape.oneOf("broadcast", "session"),
+    login: shape.string,
     refusal: shape.oneOf(null),
     state: shape.oneOf("late", "queued", "sending", "stopping"),
     version: shape.oneOf(FORMAT_VERSION),
   })
 );
 
+/** An entry as it is written: the send, the login of the person who pressed it, and the format. */
+type KeptEntry = KeptSend<unknown> & { readonly login: string; readonly version: number };
+
 /** How `error`, a send's refusal, is kept. */
 export function keptRefusal(error: Error): KeptRefusal {
+  if (error instanceof SendInterruptedError) return { kind: "interrupted" };
   if (error instanceof SendStoppedError) return { kind: "stopped" };
   if (error instanceof ApiError) {
     return { code: error.code ?? null, kind: "api", message: error.message, status: error.status };
@@ -125,6 +154,8 @@ export function keptRefusal(error: Error): KeptRefusal {
 /** The refusal `kept` names, rebuilt as the error the send was refused with. */
 export function refusalFrom(kept: KeptRefusal): Error {
   switch (kept.kind) {
+    case "interrupted":
+      return new SendInterruptedError();
     case "stopped":
       return new SendStoppedError();
     case "api":
@@ -150,16 +181,26 @@ export class KeyedSendStorage {
     this.#unload = unload;
   }
 
-  /** Keeps `sent` under its key, replacing what was kept there. */
-  keep<T>(sent: KeptSend<T>): void {
+  /** Keeps `sent` under its key for `login`, the person who pressed it, replacing what was kept
+   *  there. A send with no one signed in to stamp it with is not kept, nor is one the storage
+   *  refuses to write (full, or refused the page): what was kept under its key before is then
+   *  removed rather than left to stand for it, so a reload never resumes a state the send has
+   *  left - a send the reader stopped never comes back as one still being tried. */
+  keep<T>(sent: KeptSend<T>, login: string | undefined): void {
     if (this.#retired) return;
-    try {
-      this.#storage?.setItem(
-        `${ENTRY_PREFIX}${sent.key}`,
-        JSON.stringify({ ...sent, version: FORMAT_VERSION })
-      );
-    } catch {
-      // A full or refused storage loses only the send's reload; it is still sent.
+    const name = `${ENTRY_PREFIX}${sent.key}`;
+    if (login === undefined) {
+      this.#remove(name);
+    } else {
+      try {
+        this.#storage?.setItem(
+          name,
+          JSON.stringify({ ...sent, login, version: FORMAT_VERSION } satisfies KeptEntry)
+        );
+      } catch {
+        // The send is still sent; only its reload is lost.
+        this.#remove(name);
+      }
     }
     this.#confirm(sent.key, sent.state === "refused");
   }
@@ -167,23 +208,29 @@ export class KeyedSendStorage {
   /** Drops the send kept under `key`: it landed, or the reader dropped its refusal. */
   forget(key: string): void {
     if (this.#retired) return;
-    this.#storage?.removeItem(`${ENTRY_PREFIX}${key}`);
+    this.#remove(`${ENTRY_PREFIX}${key}`);
     this.#confirm(key, true);
   }
 
-  /** Every send kept for `kind` whose record `parse` accepts, handed its key. An entry that is not
-   *  one of this format's, or whose record `parse` refuses, is dropped. */
-  load<T>(kind: KeptKind, parse: (send: unknown, key: string) => T | undefined): KeptSend<T>[] {
+  /** Every send `login` kept for `kind` whose record `parse` accepts, handed its key. An entry that
+   *  is not one of this format's, one another person kept, or one whose record `parse` refuses, is
+   *  dropped; the other kind's entries of `login` stay for their store. */
+  load<T>(
+    kind: KeptKind,
+    login: string,
+    parse: (send: unknown, key: string) => T | undefined
+  ): KeptSend<T>[] {
     const storage = this.#storage;
     if (storage === undefined || this.#retired) return [];
     const loaded: KeptSend<T>[] = [];
     for (const name of this.#names(storage)) {
       const entry = this.#read(storage, name);
-      const ours = entry !== undefined && `${ENTRY_PREFIX}${entry.key}` === name;
+      const ours =
+        entry !== undefined && `${ENTRY_PREFIX}${entry.key}` === name && entry.login === login;
       if (ours && entry.kind !== kind) continue;
       const send = ours ? parse(entry.send, entry.key) : undefined;
       if (!ours || send === undefined) {
-        storage.removeItem(name);
+        this.#remove(name);
         continue;
       }
       loaded.push({ key: entry.key, kind, refusal: entry.refusal, send, state: entry.state });
@@ -191,16 +238,35 @@ export class KeyedSendStorage {
     return loaded;
   }
 
+  /** Drops every kept send, and stops asking to confirm leaving: the person who pressed them
+   *  signed out. A send still out goes on, and is kept again only once someone is signed in. */
+  clear(): void {
+    if (this.#retired) return;
+    this.#dropAll();
+  }
+
   /** Ends this storage, for the unit-test preload between tests: what it kept goes, and it keeps
    *  nothing more and asks nothing on leaving, whatever the stores it served still send. */
   retire(): void {
     this.#retired = true;
+    this.#dropAll();
+  }
+
+  #dropAll(): void {
     if (this.#unconfirmed.size > 0) {
       this.#unload.removeEventListener("beforeunload", this.#confirmLeaving);
     }
     this.#unconfirmed.clear();
     const storage = this.#storage;
-    if (storage !== undefined) for (const name of this.#names(storage)) storage.removeItem(name);
+    if (storage !== undefined) for (const name of this.#names(storage)) this.#remove(name);
+  }
+
+  #remove(name: string): void {
+    try {
+      this.#storage?.removeItem(name);
+    } catch {
+      // A storage that refuses even a removal holds nothing this page wrote.
+    }
   }
 
   /** The names of every entry kept, read before any is removed. */
@@ -210,10 +276,10 @@ export class KeyedSendStorage {
     );
   }
 
-  #read(storage: Storage, name: string): KeptSend<unknown> | undefined {
+  #read(storage: Storage, name: string): KeptEntry | undefined {
     try {
       const value: unknown = JSON.parse(storage.getItem(name) ?? "null");
-      return entryShape(value) ? (value as KeptSend<unknown>) : undefined;
+      return entryShape(value) ? (value as KeptEntry) : undefined;
     } catch {
       return undefined;
     }

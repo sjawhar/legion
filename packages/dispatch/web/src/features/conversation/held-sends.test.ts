@@ -1,12 +1,19 @@
 import { expect, jest, spyOn, test } from "bun:test";
-import { type MutationKey, QueryClient } from "@tanstack/react-query";
+import { type MutationKey, onlineManager, QueryClient } from "@tanstack/react-query";
 import { waitFor } from "@testing-library/react";
 
 import { type KeptTab, keptTab, UnloadTarget } from "../../__tests__/kept-sends-harness";
 import { ApiError, api, RequestTimeoutError } from "../../api/client";
 import type { Comment, Message, MessageDelivery } from "../../api/types";
 import { HeldSends, stoppable } from "./held-sends";
-import { KEYED_SEND_ATTEMPT_MS, SendStoppedError, type SentRequest } from "./send-request";
+import { KEPT_SEND_RESUME_MS, KeyedSendStorage } from "./keyed-send-storage";
+import {
+  KEYED_SEND_ATTEMPT_MS,
+  SEND_DEADLINE_MS,
+  SendInterruptedError,
+  SendStoppedError,
+  type SentRequest,
+} from "./send-request";
 
 const request: SentRequest = {
   anchor: undefined,
@@ -32,7 +39,7 @@ test("the held sends under a prefix are one array until a send beneath it change
   const createComment = spyOn(api, "createComment")
     .mockReturnValueOnce(cardReply.promise)
     .mockReturnValueOnce(docked.promise);
-  const store = new HeldSends(new QueryClient({ defaultOptions: { mutations: { retry: false } } }));
+  const store = new HeldSends(signedIn());
   const prefix: MutationKey = ["conversation-composer", "CORE-1", "thread-card"];
   const cardKey: MutationKey = [...prefix, "comment-1"];
   const dockedKey: MutationKey = ["conversation-composer", "CORE-2"];
@@ -96,6 +103,14 @@ const sentMessage = {
   id: "message-1",
 } as Message;
 
+/** A page's query client, signed in: the store stamps every kept send with this login and
+ *  resumes only this login's (W6), as the app's does. */
+function signedIn(login = "alice"): QueryClient {
+  const client = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+  client.setQueryData(["whoami"], { event_head: "0", kind: "user", login });
+  return client;
+}
+
 /** Lets every promise the store chained run as far as it goes without the clock moving. */
 async function settle(): Promise<void> {
   for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
@@ -129,7 +144,7 @@ test("a failed fetch is retried under the same key until Dispatch answers", asyn
     .mockRejectedValueOnce(new TypeError("Failed to fetch"))
     .mockRejectedValueOnce(new TypeError("Failed to fetch"))
     .mockResolvedValueOnce(sentMessage);
-  const store = new HeldSends(new QueryClient({ defaultOptions: { mutations: { retry: false } } }));
+  const store = new HeldSends(signedIn());
 
   try {
     await onFakeClock(async () => {
@@ -170,7 +185,7 @@ test("a 409 or 400 stops the retries and refuses", async () => {
     new ApiError(400, { code: "MESSAGE_INPUT", error: "delivery must be steer, aside or btw" }),
   ];
   const createAgentMessage = spyOn(api, "createAgentMessage");
-  const store = new HeldSends(new QueryClient({ defaultOptions: { mutations: { retry: false } } }));
+  const store = new HeldSends(signedIn());
 
   try {
     await onFakeClock(async () => {
@@ -210,7 +225,7 @@ test("a 2xx whose one attempt is still pending is asked again under the key unti
     .mockResolvedValueOnce(answer(plannerAttempt(1, "pending")))
     .mockResolvedValueOnce(answer(plannerAttempt(1, "sent")))
     .mockResolvedValueOnce(answer(plannerAttempt(1, "failed"), plannerAttempt(2, "pending")));
-  const store = new HeldSends(new QueryClient({ defaultOptions: { mutations: { retry: false } } }));
+  const store = new HeldSends(signedIn());
 
   try {
     await onFakeClock(async () => {
@@ -257,7 +272,7 @@ async function failUntilLate(): Promise<void> {
 // key, so Dispatch makes the message at most once. Until it is late there is nothing to stop.
 test("a late send to one session can be stopped, and Retry goes under its key", async () => {
   const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(refusal);
-  const store = new HeldSends(new QueryClient({ defaultOptions: { mutations: { retry: false } } }));
+  const store = new HeldSends(signedIn());
 
   try {
     await onFakeClock(async () => {
@@ -304,9 +319,7 @@ test("stopping lets the attempt in flight answer, and makes none after it", asyn
     for (const answer of ["lands", "fails"] as const) {
       createAgentMessage.mockReset().mockRejectedValue(refusal);
       const inFlight = Promise.withResolvers<Message>();
-      const store = new HeldSends(
-        new QueryClient({ defaultOptions: { mutations: { retry: false } } })
-      );
+      const store = new HeldSends(signedIn());
       await onFakeClock(async () => {
         store.send(agentKey, agentSend);
         await settle();
@@ -354,10 +367,7 @@ test("a send in flight survives a reload and is tried again under the same key",
   const createAgentMessage = spyOn(api, "createAgentMessage").mockReturnValueOnce(
     Promise.withResolvers<Message>().promise
   );
-  const before = new HeldSends(
-    new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
-    tab.page()
-  );
+  const before = new HeldSends(signedIn(), tab.page());
 
   try {
     before.send(agentKey, agentSend);
@@ -365,11 +375,8 @@ test("a send in flight survives a reload and is tried again under the same key",
 
     // The reload: a page of the same tab, which takes up what the one before it kept.
     createAgentMessage.mockResolvedValueOnce(sentMessage);
-    const after = new HeldSends(
-      new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
-      tab.page()
-    );
-    after.resume();
+    const after = new HeldSends(signedIn(), tab.page());
+    after.resume("alice");
     expect(after.get(agentKey)).toMatchObject({
       draft: { ask: agentSend.ask, draft: agentSend.draft },
       status: "sending",
@@ -383,7 +390,7 @@ test("a send in flight survives a reload and is tried again under the same key",
     ]);
     expect(tab.kept("send-1")).toBeUndefined();
     // Taken up once: a second call finds nothing more to send.
-    after.resume();
+    after.resume("alice");
     expect(createAgentMessage).toHaveBeenCalledTimes(2);
   } finally {
     createAgentMessage.mockRestore();
@@ -392,15 +399,12 @@ test("a send in flight survives a reload and is tried again under the same key",
 });
 
 // A send past its deadline before the reload is past it after: Stop trying is there at once. One
-// the reader was stopping lost its last attempt with the page, so it comes back stopped, its
-// Retry still under the same key.
+// the reader was stopping lost its last attempt with the page, so the page after it asks Dispatch
+// once more under the key (W9) and, Dispatch not taking it, ends it stopped.
 test("a late send resumes late, and one being stopped resumes stopped", async () => {
   const tab = keptTab();
   const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(refusal);
-  const before = new HeldSends(
-    new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
-    tab.page()
-  );
+  const before = new HeldSends(signedIn(), tab.page());
 
   try {
     await onFakeClock(async () => {
@@ -409,16 +413,12 @@ test("a late send resumes late, and one being stopped resumes stopped", async ()
       await failUntilLate();
       expect(keptState(tab, "send-1")).toEqual({ refusal: null, state: "late" });
 
-      const late = new HeldSends(
-        new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
-        tab.page()
-      );
-      late.resume();
+      const late = new HeldSends(signedIn(), tab.page());
+      late.resume("alice");
       expect(late.get(agentKey)?.status).toBe("late");
       expect(stoppable(late.get(agentKey))).toBe(true);
       await settle();
       expect(createAgentMessage.mock.calls.at(-1)?.[1].idempotency_key).toBe("send-1");
-
       // Stopped while its attempt is out, and the page reloads before that attempt answers.
       createAgentMessage.mockReturnValueOnce(Promise.withResolvers<Message>().promise);
       jest.advanceTimersByTime(1_000);
@@ -427,17 +427,20 @@ test("a late send resumes late, and one being stopped resumes stopped", async ()
       expect(keptState(tab, "send-1")).toEqual({ refusal: null, state: "stopping" });
       const calls = createAgentMessage.mock.calls.length;
 
-      const stopped = new HeldSends(
-        new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
-        tab.page()
-      );
-      stopped.resume();
+      const stopped = new HeldSends(signedIn(), tab.page());
+      stopped.resume("alice");
+      // W9. One attempt under the key, since the stopped send's own last attempt went with the
+      // page and Dispatch may have taken it; no attempt follows it.
+      expect(stopped.get(agentKey)).toMatchObject({ status: "late", stopping: true });
+      await settle();
+      expect(createAgentMessage).toHaveBeenCalledTimes(calls + 1);
+      expect(createAgentMessage.mock.calls.at(-1)?.[1].idempotency_key).toBe("send-1");
       expect(stopped.get(agentKey)?.status).toBe("refused");
       expect(stopped.get(agentKey)?.refusal).toBeInstanceOf(SendStoppedError);
       expect(keptState(tab, "send-1")).toEqual({ refusal: { kind: "stopped" }, state: "refused" });
       jest.advanceTimersByTime(30 * 60_000);
       await settle();
-      expect(createAgentMessage).toHaveBeenCalledTimes(calls);
+      expect(createAgentMessage).toHaveBeenCalledTimes(calls + 1);
     });
   } finally {
     createAgentMessage.mockRestore();
@@ -454,10 +457,7 @@ test("a refusal survives a reload with the draft written over it, until it is di
     error: "the key names another message",
   });
   const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValueOnce(verdict);
-  const before = new HeldSends(
-    new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
-    tab.page()
-  );
+  const before = new HeldSends(signedIn(), tab.page());
 
   try {
     before.send(agentKey, agentSend);
@@ -465,11 +465,8 @@ test("a refusal survives a reload with the draft written over it, until it is di
     const rewritten = { ask: agentSend.ask, draft: { ...agentSend.draft, body: "Status, now" } };
     before.keep(agentKey, rewritten);
 
-    const after = new HeldSends(
-      new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
-      tab.page()
-    );
-    after.resume();
+    const after = new HeldSends(signedIn(), tab.page());
+    after.resume("alice");
     const held = after.get(agentKey);
     expect(held).toMatchObject({ draft: rewritten, status: "refused", stopping: false });
     expect(held?.request).toEqual(agentSend);
@@ -500,10 +497,7 @@ test("leaving asks for confirmation only while a keyed send is unconfirmed", asy
   const createComment = spyOn(api, "createComment").mockReturnValueOnce(
     Promise.withResolvers<Comment>().promise
   );
-  const store = new HeldSends(
-    new QueryClient({ defaultOptions: { mutations: { retry: false } } }),
-    tab.page(unload)
-  );
+  const store = new HeldSends(signedIn(), tab.page(unload));
 
   try {
     store.send(["conversation-composer", "CORE-1"], request);
@@ -534,5 +528,244 @@ test("leaving asks for confirmation only while a keyed send is unconfirmed", asy
     createAgentMessage.mockRestore();
     createComment.mockRestore();
     tab.close();
+  }
+});
+
+// W6. A kept send belongs to the person who pressed it: the page another person signs in to
+// resumes none of it, sends nothing under its key, and drops what was kept, so a message one
+// person wrote is never sent from another's session.
+test("a kept send is another person's to resume, and is dropped unsent", async () => {
+  const tab = keptTab();
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockReturnValueOnce(
+    Promise.withResolvers<Message>().promise
+  );
+  const alice = new HeldSends(signedIn("alice"), tab.page());
+
+  try {
+    alice.send(agentKey, agentSend);
+    expect(tab.kept("send-1")).toMatchObject({ login: "alice" });
+
+    const bob = new HeldSends(signedIn("bob"), tab.page());
+    bob.resume("bob");
+    await settle();
+    expect(bob.get(agentKey)).toBeUndefined();
+    expect(createAgentMessage).toHaveBeenCalledTimes(1);
+    expect(tab.kept("send-1")).toBeUndefined();
+  } finally {
+    createAgentMessage.mockRestore();
+    tab.close();
+  }
+});
+
+/** The entry `key` as a page kept it, with `pressedAt` moved to `age` ms ago: a tab reopened
+ *  later, whose kept send was pressed before the reader closed it. */
+function aged(tab: KeptTab, key: string, age: number): void {
+  const kept = tab.kept(key) as { send: { pressedAt: number } };
+  kept.send.pressedAt = Date.now() - age;
+  tab.storage.setItem(`dispatch.keyed-send:${key}`, JSON.stringify(kept));
+}
+
+// W7. A send the page resumes is one the reader pressed a moment ago; one kept longer than five
+// minutes - a tab reopened after lunch - is not sent on its own. It comes back refused, saying
+// so, with the Retry that sends it under its own key and the Discard that drops it.
+test("a send kept under five minutes resumes, and an older one comes back refused", async () => {
+  const tab = keptTab();
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockReturnValue(
+    Promise.withResolvers<Message>().promise
+  );
+  const before = new HeldSends(signedIn(), tab.page());
+
+  try {
+    before.send(agentKey, agentSend);
+    aged(tab, "send-1", KEPT_SEND_RESUME_MS - 1_000);
+    const fresh = new HeldSends(signedIn(), tab.page());
+    fresh.resume("alice");
+    await settle();
+    expect(fresh.get(agentKey)?.status).toBe("sending");
+    expect(createAgentMessage).toHaveBeenCalledTimes(2);
+
+    aged(tab, "send-1", KEPT_SEND_RESUME_MS + 1_000);
+    const old = new HeldSends(signedIn(), tab.page());
+    old.resume("alice");
+    await settle();
+    const held = old.get(agentKey);
+    expect(held?.status).toBe("refused");
+    expect(held?.refusal).toBeInstanceOf(SendInterruptedError);
+    expect(held?.refusal?.message).toBe(
+      "Not sent: this page was closed before Dispatch confirmed it. Retry sends it under the same key, so it is delivered at most once."
+    );
+    expect(held?.request.sendKey).toBe("send-1");
+    expect(createAgentMessage).toHaveBeenCalledTimes(2);
+
+    // Retry sends that very request again, under the key Dispatch would answer it with.
+    expect(old.send(agentKey, held?.request ?? agentSend)).toBe(true);
+    await settle();
+    expect(createAgentMessage).toHaveBeenCalledTimes(3);
+    expect(createAgentMessage.mock.calls.at(-1)?.[1].idempotency_key).toBe("send-1");
+  } finally {
+    createAgentMessage.mockRestore();
+    tab.close();
+  }
+});
+
+// W9. The one attempt a resumed stopping send makes is Dispatch's chance to say it has the
+// message: when it has, the send lands and nothing is kept, as any landed send is.
+test("a stopping send Dispatch has taken lands on the reload's one attempt", async () => {
+  const tab = keptTab();
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(sentMessage);
+  const page = tab.page();
+  page.keep(
+    {
+      key: "send-1",
+      kind: "session",
+      refusal: null,
+      send: {
+        draft: { ask: agentSend.ask, draft: agentSend.draft },
+        mutationKey: agentKey.map(String),
+        pressedAt: Date.now(),
+        request: agentSend,
+      },
+      state: "stopping",
+    },
+    "alice"
+  );
+  const after = new HeldSends(signedIn(), tab.page());
+
+  try {
+    after.resume("alice");
+    await waitFor(() => expect(after.get(agentKey)).toBeUndefined());
+    expect(createAgentMessage).toHaveBeenCalledTimes(1);
+    expect(createAgentMessage.mock.calls[0]?.[1].idempotency_key).toBe("send-1");
+    expect(tab.kept("send-1")).toBeUndefined();
+  } finally {
+    createAgentMessage.mockRestore();
+    tab.close();
+  }
+});
+
+// W10. A storage that refuses the Stop's write must not leave the send kept as it was: the entry
+// goes instead, so the page after a reload resumes nothing rather than taking up a send the
+// reader stopped and making it again.
+test("a storage write that fails drops the entry rather than keeping the state before it", async () => {
+  const tab = keptTab();
+  let refuseWrites = false;
+  const refusing: Storage = {
+    clear: () => tab.storage.clear(),
+    getItem: (name) => tab.storage.getItem(name),
+    key: (index) => tab.storage.key(index),
+    get length() {
+      return tab.storage.length;
+    },
+    removeItem: (name) => tab.storage.removeItem(name),
+    setItem: (name, value) => {
+      if (refuseWrites) throw new Error("QuotaExceededError");
+      tab.storage.setItem(name, value);
+    },
+  };
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(refusal);
+  const store = new HeldSends(signedIn(), new KeyedSendStorage(refusing, new UnloadTarget()));
+
+  try {
+    await onFakeClock(async () => {
+      store.send(agentKey, agentSend);
+      await settle();
+      await failUntilLate();
+      expect(keptState(tab, "send-1")).toEqual({ refusal: null, state: "late" });
+
+      refuseWrites = true;
+      createAgentMessage.mockReturnValueOnce(Promise.withResolvers<Message>().promise);
+      jest.advanceTimersByTime(16_000);
+      await settle();
+      expect(store.stop(agentKey)).toBe(true);
+      expect(tab.kept("send-1")).toBeUndefined();
+    });
+  } finally {
+    createAgentMessage.mockRestore();
+    tab.close();
+  }
+});
+
+// W11. Every part of a kept send round-trips, the reply it answers included: an Agents row's
+// reply to a thread carries that thread's target, title and mode, and a message sent to the
+// thread after a reload must go to the same place in the same mode.
+test("a reply to a thread is kept and resumed whole", async () => {
+  const tab = keptTab();
+  const threaded: SentRequest = {
+    ...agentSend,
+    pickedDelivery: "aside",
+    replyTo: {
+      author: "Planner",
+      excerpt: "Can this ship?",
+      id: "message-9",
+      mentions: [{ target: "session:planner-session", title: "Planner" }],
+      parentKind: "message",
+      thread: { delivery: "btw", target: "session:planner-session", title: "Planner" },
+      to: "alice",
+    },
+    sendKey: "send-9",
+  };
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockReturnValue(
+    Promise.withResolvers<Message>().promise
+  );
+  const before = new HeldSends(signedIn(), tab.page());
+
+  try {
+    before.send(agentKey, threaded);
+    const after = new HeldSends(signedIn(), tab.page());
+    after.resume("alice");
+    await settle();
+    expect(after.get(agentKey)?.request).toEqual({
+      ...threaded,
+      anchor: undefined,
+      edit: undefined,
+    });
+    expect(createAgentMessage.mock.calls.at(-1)?.[1]).toEqual({
+      body: "Status please",
+      delivery: "aside",
+      idempotency_key: "send-9",
+      in_reply_to: "message-9",
+    });
+  } finally {
+    createAgentMessage.mockRestore();
+    tab.close();
+  }
+});
+
+// W21. A send pressed while the browser is offline is tried, not parked: its own retry loop is
+// what waits out a network that is down, so the attempt is made, the send goes late at its
+// deadline - where Stop trying is offered - and it lands once the network is back. TanStack's
+// default would pause the mutation instead: no attempt, no deadline, no Stop trying.
+test("a send pressed offline is tried, goes late and lands when the network returns", async () => {
+  const online = onlineManager.isOnline();
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
+    new TypeError("Failed to fetch")
+  );
+  const store = new HeldSends(signedIn());
+
+  try {
+    onlineManager.setOnline(false);
+    await onFakeClock(async () => {
+      store.send(agentKey, agentSend);
+      await settle();
+      expect(createAgentMessage).toHaveBeenCalledTimes(1);
+
+      jest.advanceTimersByTime(SEND_DEADLINE_MS);
+      await settle();
+      expect(store.get(agentKey)?.status).toBe("late");
+      expect(stoppable(store.get(agentKey))).toBe(true);
+      expect(createAgentMessage.mock.calls.length).toBeGreaterThan(1);
+
+      createAgentMessage.mockResolvedValueOnce(sentMessage);
+      onlineManager.setOnline(true);
+      jest.advanceTimersByTime(30_000);
+      await settle();
+      expect(store.get(agentKey)).toBeUndefined();
+    });
+    expect(
+      new Set(createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).size
+    ).toBe(1);
+  } finally {
+    onlineManager.setOnline(online);
+    createAgentMessage.mockRestore();
   }
 });

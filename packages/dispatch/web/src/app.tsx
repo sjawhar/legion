@@ -10,6 +10,7 @@ import type { AuthenticatedUser } from "./api/types";
 import { broadcastQueue } from "./features/agents/broadcast-queue";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { heldSends } from "./features/conversation/held-sends";
+import { keyedSendStorage } from "./features/conversation/keyed-send-storage";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
@@ -504,6 +505,10 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       // refetch immediately — a signed-out user must land on sign-in without a manual reload.
       void queryClient.resetQueries({ queryKey: ["whoami"] });
       queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "whoami" });
+      // A kept send belongs to the person who pressed it, so none outlives their session: the
+      // next person to sign in here resumes nothing of theirs, and the page stops asking to
+      // confirm leaving (`keyed-send-storage.ts`).
+      keyedSendStorage().clear();
     },
   });
   // Tabs within the same issue manage their own focus (roving tabindex); only a
@@ -747,12 +752,17 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 }
 
 function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
-  // Signed in, and before any page reads them, the keyed sends a reload interrupted go on under
-  // their keys, and their refusals show again (`keyed-send-storage.ts`). Each store takes them up
-  // once, so every later render calls nothing.
+  // Signed in, and before any page's own send, the keyed sends this person's reload interrupted
+  // go on under their keys, and their refusals show again (`keyed-send-storage.ts`). In an
+  // effect, not in the render: a resume sends requests and writes to the stores, which a render
+  // must not do, and React runs the render twice under StrictMode. Each store takes them up once,
+  // so a later effect does nothing.
   const queryClient = useQueryClient();
-  heldSends(queryClient).resume();
-  broadcastQueue(queryClient).resume();
+  const login = user.login;
+  useEffect(() => {
+    heldSends(queryClient).resume(login);
+    broadcastQueue(queryClient).resume(login);
+  }, [login, queryClient]);
   useEventFeed();
   return (
     <KeymapProvider>
@@ -762,14 +772,25 @@ function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
 }
 
 export function AuthGate(): ReactNode {
+  const queryClient = useQueryClient();
   const whoAmI = useQuery(whoAmIQuery());
+  // A sign-in check that comes back 401 ends this page's session: every read it holds was made
+  // for the person who has gone, and the sign-in that follows - in this tab or another - answers
+  // with an `event_head` of its own, which the feed resumes from. So the cache is emptied as a
+  // sign-out empties it, and the app that mounts next reads everything afresh rather than
+  // keeping rows older than its new head.
+  const signedOut = whoAmI.isError && isUnauthorized(whoAmI.error);
+  useEffect(() => {
+    if (!signedOut) return;
+    queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "whoami" });
+  }, [queryClient, signedOut]);
 
   if (whoAmI.isPending) {
     return <ShellSkeleton />;
   }
   // A definitive auth outcome always wins, even over stale "signed in" data from before a
   // session expired or was revoked — otherwise a revoked user keeps the authenticated shell.
-  if (whoAmI.isError && isUnauthorized(whoAmI.error)) {
+  if (signedOut) {
     return <SignInPage />;
   }
   if (whoAmI.data !== undefined) {

@@ -9,9 +9,11 @@ import {
   keptRefusal,
   keyedSendStorage,
   refusalFrom,
+  resumesOnItsOwn,
   shape,
+  signedInLogin,
 } from "../conversation/keyed-send-storage";
-import { SEND_DEADLINE_MS, SendStoppedError, sendUnderKey } from "../conversation/send-request";
+import { SEND_DEADLINE_MS, SendInterruptedError, sendUnderKey } from "../conversation/send-request";
 
 /** What one press of Send handed the queue: the request, and the selection it was pressed with,
  *  excluded sessions included, so Restore draft puts back the composer the human pressed. */
@@ -72,12 +74,15 @@ const keptBroadcast = shape.record({
  * outlives the Agents page and shows its outcome on the next visit. The requests go out one at a
  * time, in the order they were handed over: each waits for the one before it to be decided, either
  * way (`#line`), with the tab hidden or not. Each is tried under its key until Dispatch decides it
- * (`sendUnderKey`): a failed fetch, a timeout, a 5xx or a 429 is tried again, and the send is past
- * its deadline (`late`) once `SEND_DEADLINE_MS` passes without a verdict, when Stop trying ends
- * it. Every send not yet sent is kept across a reload, out or failed, and `resume` takes it up
- * again on load under its key, which Dispatch answers with the broadcast the first request made,
- * if it made one. A sent row stays until the page goes (`clearSent`); a failed one until Retry or
- * Restore draft takes it, since its row is the only copy of a message Send cleared from the
+ * (`sendUnderKey`): a failed fetch, a timeout, a 5xx or a 429 is tried again, as is a 2xx whose
+ * broadcast still has a recipient whose one attempt is pending - Dispatch delivers behind its
+ * answer, and a repeat under the key resumes a recipient a dead sender left owed - and the send is
+ * past its deadline (`late`) once `SEND_DEADLINE_MS` passes without a verdict, when Stop trying
+ * ends it. Every send not yet sent is kept across a reload, out or failed, for the person who
+ * pressed it, and `resume` takes it up again on load under its key, which Dispatch answers with
+ * the broadcast the first request made, if it made one. A sent row stays until the page goes
+ * (`clearSent`); a failed one until Retry, Restore draft or - for one a reload interrupted too
+ * long ago - Discard takes it, since its row is the only copy of a message Send cleared from the
  * composer.
  */
 export class BroadcastQueue {
@@ -145,65 +150,82 @@ export class BroadcastQueue {
   }
 
   /**
-   * Takes up, once, the broadcasts a reload interrupted (`keyed-send-storage.ts`), in the order
-   * they were pressed: one not yet sent joins the line again under its key, past its deadline
-   * already if it was then, and a failure shows again with Retry and Restore draft, as does a send
-   * the reader was stopping, whose last attempt went with the page. The app calls this once signed
-   * in.
+   * Takes up, once, the broadcasts a reload interrupted that `login`, the person signed in,
+   * pressed (`keyed-send-storage.ts`), in the order they were pressed; another person's are
+   * dropped unsent. One not yet sent and pressed within `KEPT_SEND_RESUME_MS` joins the line again
+   * under its key, past its deadline already if it was then; one the reader was stopping, whose
+   * last attempt went with the page, is asked once more under its key, and is sent if Dispatch
+   * takes it, or ends stopped. One pressed longer ago is not sent on its own: it shows failed
+   * (`SendInterruptedError`), with Retry under its key, Restore draft and Discard. A failure shows
+   * again with Retry and Restore draft. The app calls this once signed in.
    */
-  resume(): void {
+  resume(login: string): void {
     if (this.#resumed) return;
     this.#resumed = true;
     const kept = this.#kept
-      .load("broadcast", (send, key) =>
+      .load("broadcast", login, (send, key) =>
         keptBroadcast(send) && (send as KeptBroadcast).send.input.idempotency_key === key
           ? (send as KeptBroadcast)
           : undefined
       )
       .sort((a, b) => a.send.send.pressed - b.send.send.pressed);
+    const now = Date.now();
     for (const {
       refusal,
       send: { send, submittedAt },
       state,
     } of kept) {
       this.#presses = Math.max(this.#presses, send.pressed);
-      if (state === "refused" || state === "stopping") {
-        this.#joined += 1;
-        this.#replace(this.#joined, {
-          error: refusal === null ? new SendStoppedError() : refusalFrom(refusal),
-          id: this.#joined,
-          send,
-          status: "failed",
-          submittedAt,
-        });
-      } else {
-        this.#join(send, submittedAt, state === "late");
+      if (state !== "refused" && resumesOnItsOwn(submittedAt, now)) {
+        this.#join(send, submittedAt, state === "queued" ? "sending" : state);
+        continue;
       }
+      this.#joined += 1;
+      this.#replace(this.#joined, {
+        error:
+          state === "refused" && refusal !== null
+            ? refusalFrom(refusal)
+            : new SendInterruptedError(),
+        id: this.#joined,
+        send,
+        status: "failed",
+        submittedAt,
+      });
     }
   }
 
-  /** Puts `send` at the back of the line; `late` takes its turn as a send already past its
-   *  deadline. */
-  #join(send: QueuedSend, submittedAt: number, late = false): void {
+  /** Puts `send` at the back of the line, to take its turn within its deadline (`sending`), as a
+   *  send already past it (`late`), or as one past it the reader has stopped (`stopping`), which
+   *  makes one attempt and no other. */
+  #join(
+    send: QueuedSend,
+    submittedAt: number,
+    from: "late" | "sending" | "stopping" = "sending"
+  ): void {
     this.#joined += 1;
     const id = this.#joined;
     const stop = new AbortController();
+    if (from === "stopping") stop.abort();
     this.#stops.set(id, stop);
     this.#replace(id, { id, send, status: "queued", submittedAt });
     // A turn never rejects; were one to, the line still goes on to the next.
-    this.#line = this.#line.then(() => this.#send(id, stop.signal, late)).catch(() => undefined);
+    this.#line = this.#line.then(() => this.#send(id, stop.signal, from)).catch(() => undefined);
   }
 
   /** The send `id`'s turn on the line: tried under its key until Dispatch decides it. */
-  async #send(id: number, signal: AbortSignal, late: boolean): Promise<void> {
+  async #send(
+    id: number,
+    signal: AbortSignal,
+    from: "late" | "sending" | "stopping"
+  ): Promise<void> {
     const queued = this.#find(id);
     if (queued === undefined) return;
     const { send, submittedAt } = queued;
     this.#replace(
       id,
-      late
-        ? { id, send, status: "late", stopping: false, submittedAt }
-        : { id, send, status: "sending", submittedAt }
+      from === "sending"
+        ? { id, send, status: "sending", submittedAt }
+        : { id, send, status: "late", stopping: from === "stopping", submittedAt }
     );
     const deadline = setTimeout(() => {
       if (this.#find(id)?.status === "sending") {
@@ -213,7 +235,19 @@ export class BroadcastQueue {
     try {
       const created = await sendUnderKey(
         (bounds) => api.createBroadcast(send.input, bounds),
-        signal
+        signal,
+        // Dispatch answers before it delivers, so a recipient whose one attempt is pending is not
+        // yet the outcome: a repeat under the key resumes it if its sender died, and leaves it to
+        // a live one. A recipient with more than one attempt was retried from its page, which
+        // Dispatch never resumes, so that answer is as it is.
+        ({ recipients }) =>
+          recipients.every(
+            ({
+              message: {
+                deliveries: [only, ...more],
+              },
+            }) => only?.state !== "pending" || more.length > 0
+          )
       );
       this.#replace(id, { created, id, send, status: "sent", submittedAt });
       for (const recipient of created.recipients) {
@@ -247,24 +281,28 @@ export class BroadcastQueue {
     for (const listener of this.#listeners) listener();
   }
 
-  /** Keeps the send under `key` as `row` shows it, or lets it go once sent or off the strip. */
+  /** Keeps the send under `key` as `row` shows it, for the person signed in, or lets it go once
+   *  sent or off the strip. */
   #remember(row: BroadcastSendRow | undefined, key: string | undefined): void {
     if (row === undefined || row.status === "sent") {
       if (key !== undefined) this.#kept.forget(key);
       return;
     }
-    this.#kept.keep<KeptBroadcast>({
-      key: row.send.input.idempotency_key,
-      kind: "broadcast",
-      refusal: row.status === "failed" ? keptRefusal(row.error) : null,
-      send: { send: row.send, submittedAt: row.submittedAt },
-      state:
-        row.status === "failed"
-          ? "refused"
-          : row.status === "late" && row.stopping
-            ? "stopping"
-            : row.status,
-    });
+    this.#kept.keep<KeptBroadcast>(
+      {
+        key: row.send.input.idempotency_key,
+        kind: "broadcast",
+        refusal: row.status === "failed" ? keptRefusal(row.error) : null,
+        send: { send: row.send, submittedAt: row.submittedAt },
+        state:
+          row.status === "failed"
+            ? "refused"
+            : row.status === "late" && row.stopping
+              ? "stopping"
+              : row.status,
+      },
+      signedInLogin(this.#client)
+    );
   }
 }
 

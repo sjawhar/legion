@@ -28,7 +28,7 @@ test("signing out shows the sign-in page without a reload and ends the event fee
     if (!signedIn) {
       throw new ApiError(401, { error: "unauthorized" });
     }
-    return { kind: "user", login: "alice" };
+    return { event_head: "0", kind: "user", login: "alice" };
   });
   const logout = spyOn(api, "logout").mockImplementation(async () => {
     signedIn = false;
@@ -159,7 +159,11 @@ test("project routes render the project page and a project document route", asyn
       removeEventListener: () => {},
       removeListener: () => {},
     }) as MediaQueryList) as typeof window.matchMedia;
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
@@ -240,7 +244,11 @@ test("the Inbox page links to the answers page, which renders at /answers", asyn
       removeEventListener: () => {},
       removeListener: () => {},
     }) as MediaQueryList) as typeof window.matchMedia;
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
@@ -340,6 +348,56 @@ test("a failed identity refetch keeps the cached user's sidebar preference", asy
     }
   }
 });
+
+// W16. A sign-in check that comes back 401 ends this page's session, so every read it holds goes,
+// as a sign-out's do: the sign-in that follows answers with an `event_head` of its own, which the
+// feed resumes from, and a row read before it would be older than that head with nothing to
+// bring it up to date. A transient failure (above) is not that: it keeps what the page holds.
+test("a whoami 401 drops every other read the page holds", async () => {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const whoAmI = spyOn(api, "whoAmI").mockRejectedValue(new ApiError(401, { error: "no session" }));
+  const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
+  const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
+  const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
+  const listProjects = spyOn(api, "listProjects").mockResolvedValue([]);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  queryClient.setQueryData(["whoami"], { event_head: "41", kind: "user", login: "alice" });
+  queryClient.setQueryData(["issue", "CORE-1"], { key: "CORE-1", title: "Read before the 401" });
+  const view = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider client={queryClient}>
+        <AuthGate />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+
+  try {
+    await screen.findByRole("link", { name: "Sign in with Google" });
+    await waitFor(() => expect(queryClient.getQueryData(["issue", "CORE-1"])).toBeUndefined());
+    // The check itself stays, so the gate keeps showing sign-in rather than reading it again.
+    expect(queryClient.getQueryState(["whoami"])?.status).toBe("error");
+  } finally {
+    view.unmount();
+    getInbox.mockRestore();
+    getMyState.mockRestore();
+    listIssues.mockRestore();
+    listProjects.mockRestore();
+    whoAmI.mockRestore();
+    window.matchMedia = originalMatchMedia;
+  }
+});
+
 test("desktop shell persists collapsed sidebars and gives the main region the full layout", async () => {
   const sidebarStorageKey = "dispatch.shell.sidebar:alice";
   const marginStorageKey = "dispatch.shell.margin:alice";
@@ -362,7 +420,11 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
   window.localStorage.removeItem(sidebarStorageKey);
   window.localStorage.removeItem(marginStorageKey);
   window.localStorage.removeItem(marginWidthStorageKey);
-  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" });
+  const whoAmI = spyOn(api, "whoAmI").mockResolvedValue({
+    event_head: "0",
+    kind: "user",
+    login: "alice",
+  });
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const listIssues = spyOn(api, "listIssues").mockResolvedValue([]);
@@ -446,7 +508,7 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
 
 /** The shell at `/`, signed in as alice, its event feed subscribed on the page's live socket;
  *  returns the teardown. */
-async function renderSignedIn(whoAmI: () => Promise<{ kind: "user"; login: string }>) {
+async function renderSignedIn(whoAmI: () => Promise<AuthenticatedUser>) {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({
@@ -485,6 +547,7 @@ async function renderSignedIn(whoAmI: () => Promise<{ kind: "user"; login: strin
 test("the connection pill follows the live socket: none while it connects, Reconnecting… once lost, and a Reload once two minutes pass", async () => {
   const sockets = installFakeLiveSockets();
   const teardown = await renderSignedIn(async () => ({
+    event_head: "0",
     kind: "user",
     login: "alice",
   }));
@@ -539,7 +602,7 @@ test("a live socket refused once the person is signed out takes the page to sign
   let signedIn = true;
   const teardown = await renderSignedIn(async () => {
     if (!signedIn) throw new ApiError(401, { error: "unauthorized" });
-    return { kind: "user", login: "alice" };
+    return { event_head: "0", kind: "user", login: "alice" };
   });
   try {
     act(() => sockets.latest().open());

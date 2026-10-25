@@ -211,8 +211,11 @@ export function AgentConversationPage(): ReactNode {
       ) : null}
       {held === undefined ? null : (
         <div className="mt-2 space-y-1" data-testid="agent-send-held">
+          {/* The draft the store holds, which is what Retry sends: the one sent, and, once
+              refused, whatever was written over it since - on this session's Agents row, which
+              shares this send. */}
           <p className={`line-clamp-2 break-words text-sm ${textPrimaryOnCanvas}`}>
-            Your message: “{held.request.draft.body}”
+            Your message: “{held.draft.draft.body}”
           </p>
           <div className="flex flex-wrap items-center gap-3">
             {held.status === "refused" ? (

@@ -201,7 +201,7 @@ function sendKeyFor(refused: SentRequest | undefined, next: Omit<SentRequest, "s
 
 /** Whether `next` is the refused send unedited: the same draft - its text, accepted mentions and a
  *  suggestion's replacement, and an ask's fields - to the same place, in the same kind. */
-function unedited(refused: SentRequest, next: Omit<SentRequest, "sendKey">): boolean {
+export function unedited(refused: SentRequest, next: Omit<SentRequest, "sendKey">): boolean {
   return (
     refused.kind === next.kind &&
     JSON.stringify(refused.owner) === JSON.stringify(next.owner) &&
@@ -255,11 +255,24 @@ function pause(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
  *  it: the reader pressed Stop trying. Not Dispatch's refusal: the message may have reached it, and
  *  a Retry under the same key is answered with that message rather than a second one. */
 export class SendStoppedError extends Error {
+  constructor(
+    message = "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once."
+  ) {
+    super(message);
+    this.name = "SendStoppedError";
+  }
+}
+
+/** A keyed send a reload interrupted longer ago than `KEPT_SEND_RESUME_MS`
+ *  (`keyed-send-storage.ts`), which the page does not make again on its own: the reader may no
+ *  longer mean it. It stopped as a stopped send does, so it offers what a stopped send offers - a
+ *  Retry under the same key, and Discard. */
+export class SendInterruptedError extends SendStoppedError {
   constructor() {
     super(
-      "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once."
+      "Not sent: this page was closed before Dispatch confirmed it. Retry sends it under the same key, so it is delivered at most once."
     );
-    this.name = "SendStoppedError";
+    this.name = "SendInterruptedError";
   }
 }
 
