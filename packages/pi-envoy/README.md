@@ -338,8 +338,9 @@ rules refusals that the agent overrode.
 **The Dispatch record.** The entry above reaches only the machine the session ran on. A session
 that counts the rule decisions over a fortnight — a standing session holding a Dispatch token and
 nothing else — reads them from Dispatch instead: every gated call whose rules check ran (every
-entry with a `ruleOutcome`) is published to a Dispatch project document of the session's own,
-`askgate-decisions-<session id>.md`.
+entry with a `ruleOutcome`) and every call the agent sent anyway (a rebuttal or the breaker, whose
+record has `ruleOutcome: null` and the refusal's own `target`) are published to a Dispatch project
+document of the session's own, `askgate-decisions-<session id>.md`.
 
 - **What it carries.** The time, the session, `source` (`pod` for a Legion role's session, which
   `LEGION_ISSUE` names, and `machine` for every other), the project, `tool`, `target`, `rule`,

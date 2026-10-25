@@ -593,7 +593,8 @@ function decision(e: {
   target?: string;
   rule?: string;
   outcome?: string;
-  ruleOutcome?: string;
+  /** Null is an override's own: a call the agent sent anyway, which no rules check judged. */
+  ruleOutcome?: string | null;
   ruleError?: string;
 }): string {
   return JSON.stringify({
@@ -604,7 +605,8 @@ function decision(e: {
     tool: "bash",
     target: e.target ?? null,
     rule: e.rule ?? null,
-    ruleOutcome: e.ruleOutcome ?? (e.rule === undefined ? "none" : "match"),
+    ruleOutcome:
+      e.ruleOutcome === undefined ? (e.rule === undefined ? "none" : "match") : e.ruleOutcome,
     ruleError: e.ruleError ?? null,
     ruleTextMissing: false,
     ruleAsksCut: 0,
@@ -660,7 +662,7 @@ const POD_DOCUMENT = decisionDocument(POD_SESSION, [
     source: "pod",
     target: ASK_1,
     outcome: "rebuttal",
-    ruleOutcome: "none",
+    ruleOutcome: null,
   }),
   decision({
     time: at(3),
@@ -713,14 +715,14 @@ const DAY_REPORT: DispatchReport = {
   sessions: 2,
   unparsedLines: 0,
   total: {
-    calls: 7,
+    calls: 6,
     refusals: 3,
     byRule: { no_change: 2, untried_access: 1 },
     overrides: 1,
     errors: 2,
   },
   pod: {
-    calls: 4,
+    calls: 3,
     refusals: 2,
     byRule: { no_change: 1, untried_access: 1 },
     overrides: 1,
@@ -826,13 +828,64 @@ describe("the Dispatch reader", () => {
     expect(text).toContain("unreadable documents: 0");
     expect(text).toContain("sessions: 2");
     expect(text).toContain("unparsed lines: 0");
-    expect(text).toContain("rules calls: 7 (pod 4, machine 3)");
+    expect(text).toContain("rules calls: 6 (pod 3, machine 3)");
     expect(text).toContain("refusals: 3 (pod 2, machine 1)");
     expect(text).toContain("rule no_change: 2 (pod 1, machine 1)");
     expect(text).toContain("rule untried_access: 1 (pod 1, machine 0)");
     expect(text).toContain("overrides: 1 (pod 1, machine 0)");
     expect(text).toContain("rules errors: 2 (pod 1, machine 1)");
-    expect(text).toContain("rules error rate: 28.6% (pod 25.0%, machine 33.3%)");
+    expect(text).toContain("rules error rate: 33.3% (pod 33.3%, machine 33.3%)");
+  });
+
+  test("an override counts on the refusal it overrode and in none of the rules call counts", async () => {
+    const markdown = decisionDocument(POD_SESSION, [
+      decision({
+        time: at(1),
+        session: POD_SESSION,
+        source: "pod",
+        rule: "no_change",
+        target: ASK_1,
+      }),
+      // The agent sent the refused call again with a rebuttal: the gate answered it before either
+      // model call, so the record carries no rules outcome and only its target pairs the two.
+      decision({
+        time: at(2),
+        session: POD_SESSION,
+        source: "pod",
+        target: ASK_1,
+        outcome: "rebuttal",
+        ruleOutcome: null,
+      }),
+      decision({
+        time: at(3),
+        session: POD_SESSION,
+        source: "pod",
+        target: SPEC,
+        ruleOutcome: "error",
+        ruleError: "502 from the provider",
+      }),
+    ]);
+    const { read, report } = await reportOf(
+      [{ name: `askgate-decisions-${POD_SESSION}.md`, markdown }],
+      SINCE
+    );
+    // The override is a record like any other: three records read, none of them unparsed.
+    expect(read.records).toHaveLength(3);
+    expect(report.unparsedLines).toBe(0);
+    expect(report.pod).toEqual({
+      calls: 2,
+      refusals: 1,
+      byRule: { no_change: 1, untried_access: 0 },
+      overrides: 1,
+      errors: 1,
+    });
+    const text = dispatchReportLines(report, false);
+    expect(text).toContain("rules calls: 2 (pod 2, machine 0)");
+    expect(text).toContain("overrides: 1 (pod 1, machine 0)");
+    expect(text).toContain("rules errors: 1 (pod 1, machine 0)");
+    // One of the two rules calls errored. The override is in neither the count nor its divisor,
+    // which a denominator of three records would have made 33.3%.
+    expect(text).toContain("rules error rate: 50.0% (pod 50.0%, machine n/a)");
   });
 });
 

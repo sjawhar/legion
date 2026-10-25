@@ -41,6 +41,27 @@ const REFUSAL: GateEntry = {
   model: "anthropic/claude-fable-5-1",
 };
 
+/**
+ * An override's entry, as the gate builds one: a call the agent sent anyway with a rebuttal of its
+ * own, or the third attempt on one target, answered before either model call — so no rules check
+ * judged it, and the line the agent wrote is on the entry, which the record may no more carry than
+ * an ask's words.
+ */
+const OVERRIDE: GateEntry = {
+  advisor: "AskGate",
+  tool: "dispatch_ask",
+  path: "xd://dispatch_ask",
+  toolCallId: "t3",
+  decision: "allow",
+  outcome: "rebuttal",
+  verdictMode: "block",
+  latencyMs: 2,
+  revisesForKey: 2,
+  argsDigest: "a9f1c0",
+  target: "dispatch_ask issue=X-1",
+  rebuttal: "the cache path moves with this change, so the ask stands",
+};
+
 /** The Dispatch a record is written to: what each call was given, and what it answers. */
 function fakeDispatch(answers: Partial<RecordClient> = {}, id = "doc-1") {
   const uploads: Array<{ project: string; name: string; content: string; actor?: unknown }> = [];
@@ -113,6 +134,27 @@ const recordsIn = (markdown: string) =>
     ([, line]) => JSON.parse(line as string) as Record<string, unknown>
   );
 
+/** The record's keys, in the order the line is written in: every record carries these and no more. */
+const RECORD_KEYS = [
+  "time",
+  "session",
+  "source",
+  "project",
+  "tool",
+  "target",
+  "rule",
+  "ruleOutcome",
+  "ruleError",
+  "ruleTextMissing",
+  "ruleAsksCut",
+  "decision",
+  "outcome",
+  "verdictMode",
+  "ruleLatencyMs",
+  "charterLatencyMs",
+  "plugin",
+];
+
 describe("the AskGate decision record", () => {
   test("the session's first decision uploads its document, and the second appends to that document", async () => {
     const dispatch = fakeDispatch({}, "doc-7");
@@ -161,25 +203,7 @@ describe("the AskGate decision record", () => {
     await harness({ client: dispatch.client }).write(REFUSAL);
     const record = recordsIn(dispatch.uploads[0]?.content ?? "")[0] as Record<string, unknown>;
 
-    expect(Object.keys(record)).toEqual([
-      "time",
-      "session",
-      "source",
-      "project",
-      "tool",
-      "target",
-      "rule",
-      "ruleOutcome",
-      "ruleError",
-      "ruleTextMissing",
-      "ruleAsksCut",
-      "decision",
-      "outcome",
-      "verdictMode",
-      "ruleLatencyMs",
-      "charterLatencyMs",
-      "plugin",
-    ]);
+    expect(Object.keys(record)).toEqual(RECORD_KEYS);
     expect(record).toEqual({
       time: "2026-10-25T09:15:30.250Z",
       session: SESSION,
@@ -272,12 +296,49 @@ describe("the AskGate decision record", () => {
     expect(none.uploads).toEqual([]);
   });
 
-  test("a call whose rules check never ran writes nothing", async () => {
+  test("a rebuttal and the breaker each record the override, with no rules outcome of its own", async () => {
+    for (const outcome of ["rebuttal", "breaker"] as const) {
+      const dispatch = fakeDispatch();
+      const g = harness({ client: dispatch.client });
+      expect(await g.write(REFUSAL)).toBeUndefined();
+      expect(await g.write({ ...OVERRIDE, outcome })).toBeUndefined();
+      // Appended to the refusal's own document, carrying the refusal's target: that target, in
+      // that session, is the whole of what pairs the override with what it overrode.
+      expect(dispatch.uploads).toHaveLength(1);
+      const record = recordsIn(dispatch.edits[0]?.markdown ?? "")[0] as Record<string, unknown>;
+      expect(Object.keys(record)).toEqual(RECORD_KEYS);
+      expect(record).toMatchObject({
+        target: "dispatch_ask issue=X-1",
+        rule: null,
+        ruleOutcome: null,
+        ruleError: null,
+        ruleTextMissing: false,
+        ruleAsksCut: 0,
+        decision: "allow",
+        outcome,
+        ruleLatencyMs: null,
+        charterLatencyMs: null,
+      });
+      // Neither the ask's words nor the line the agent wrote to override the refusal travels with
+      // the record; both name the cache path, and the document holds it nowhere.
+      expect(dispatch.edits[0]?.markdown).not.toContain("cache path");
+      for (const key of ["rebuttal", "reason", "ruleQuote"]) expect(record).not.toHaveProperty(key);
+    }
+  });
+
+  test("a call that is neither rules-checked nor an override writes nothing", async () => {
     const dispatch = fakeDispatch();
     const g = harness({ client: dispatch.client });
-    expect(
-      await g.write({ ...REFUSAL, decision: "allow", rule: undefined, ruleOutcome: undefined })
-    ).toBeUndefined();
+    for (const outcome of ["verdict", "halted", "skipped"] as const)
+      expect(
+        await g.write({
+          ...REFUSAL,
+          decision: "allow",
+          outcome,
+          rule: undefined,
+          ruleOutcome: undefined,
+        })
+      ).toBeUndefined();
     expect(g.asked).toEqual([]);
     expect(dispatch.uploads).toEqual([]);
     expect(dispatch.edits).toEqual([]);

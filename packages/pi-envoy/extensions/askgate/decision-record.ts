@@ -5,9 +5,11 @@
 // other session can read.
 //
 // What it records: every gated call whose rules check ran, which is every entry carrying a
-// `ruleOutcome` — the refusals, the overrides, and the denominator of the error rate. A call with
-// no rules check in it (no new ask, an unreadable command, a rebuttal, the breaker, a session with
-// no model role) records nothing.
+// `ruleOutcome` — the refusals and the denominator of the error rate — and every call the agent
+// sent anyway, whose `outcome` is `rebuttal` or `breaker`: the gate answers those before any model
+// call, so no rules check judged them and their `ruleOutcome` is null, and the record's `target`
+// is what pairs each with the refusal it overrode. A call that is neither (no new ask, an
+// unreadable command, a session with no model role) records nothing.
 //
 // What it never carries: no ask text, no quote, no reason, no reviewed arguments. `DecisionRecord`
 // is the whole of it, which is why a document of these needs no privacy decision before it ships.
@@ -73,7 +75,7 @@ export interface RecordedDecision {
   verdictMode: string;
   target?: string;
   rule?: string;
-  /** Set exactly on a call whose rules check ran, which is the call this module records. */
+  /** Set exactly on a call whose rules check ran; unset on an override, which none judged. */
   ruleOutcome?: string;
   ruleError?: string;
   ruleTextMissing?: true;
@@ -92,7 +94,8 @@ export interface DecisionRecord {
   tool: string;
   target: string | null;
   rule: string | null;
-  ruleOutcome: string;
+  /** The rules check's outcome, and null on an override: the call no rules check judged. */
+  ruleOutcome: string | null;
   ruleError: string | null;
   ruleTextMissing: boolean;
   ruleAsksCut: number;
@@ -134,9 +137,12 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
   const documents = new Map<string, Promise<string>>();
 
   return async ({ entry, sessionId, directory, signal }) => {
-    // Exactly the calls whose rules check ran; a call without one is no decision to count.
-    const ruleOutcome = entry.ruleOutcome;
-    if (ruleOutcome === undefined) return undefined;
+    // The calls whose rules check ran, and the calls the agent sent anyway — a rebuttal or the
+    // breaker, which the gate answers with no check of its own — are the decisions to count; a
+    // call that is neither is none.
+    const ruleOutcome = entry.ruleOutcome ?? null;
+    const override = entry.outcome === "rebuttal" || entry.outcome === "breaker";
+    if (ruleOutcome === null && !override) return undefined;
     // The session's own setting, else the Legion pod's project — a pod has no envoy.json, so its
     // environment is the only setting it can carry — else no record at all. Upper-cased, because a
     // Dispatch project key is `^[A-Z][A-Z0-9]{1,9}$` and every other spelling is a 404, while a

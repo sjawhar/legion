@@ -528,7 +528,9 @@ export function parseRecordLine(line: string): ReportRecord | null {
   const ruleOutcome = value.ruleOutcome;
   if (!Number.isFinite(Date.parse(time)) || session === "") return null;
   if (source !== "pod" && source !== "machine") return null;
-  if (typeof ruleOutcome !== "string") return null;
+  // Null on an override — the record of a call the agent sent anyway, which no rules check judged
+  // — and a string on a rules call; a line holding anything else there is no record at all.
+  if (ruleOutcome !== null && typeof ruleOutcome !== "string") return null;
   return {
     time,
     session,
@@ -609,7 +611,10 @@ export async function readDecisionDocuments(
 
 /** The day's counts over one set of records: one source's, or every source together. */
 export interface DecisionCounts {
-  /** The rules calls, which are the records themselves: the error rate's denominator. */
+  /**
+   * The rules calls: the records a rules check judged, which is the error rate's denominator. An
+   * override is a record of its own and none of them, so overriding a refusal never moves it.
+   */
   calls: number;
   /** Records with a rule: the calls the rules check refused. */
   refusals: number;
@@ -642,8 +647,9 @@ function countDecisions(
   overridden: ReadonlySet<ReportRecord>
 ): DecisionCounts {
   const refusals = records.filter((record) => record.rule !== null);
+  const calls = records.filter((record) => record.ruleOutcome !== null);
   return {
-    calls: records.length,
+    calls: calls.length,
     refusals: refusals.length,
     byRule: Object.fromEntries(
       tally(
@@ -652,8 +658,8 @@ function countDecisions(
       ).map((count) => [count.name, count.count])
     ),
     overrides: refusals.filter((record) => overridden.has(record)).length,
-    errors: records.filter(
-      (record) => record.ruleError !== null || ERROR_OUTCOMES.includes(record.ruleOutcome)
+    errors: calls.filter(
+      (record) => record.ruleError !== null || ERROR_OUTCOMES.includes(record.ruleOutcome as string)
     ).length,
   };
 }
@@ -689,8 +695,9 @@ function bySource(report: DispatchReport, count: (counts: DecisionCounts) => num
 
 export function formatDispatchReport(report: DispatchReport): string[] {
   return [
-    "A rules call is one decision record: one gated call whose rules check ran.",
-    "A rules refusal is a record with a rule. It was overridden when the next record on its target, in its session, is a rebuttal or a breaker.",
+    "A rules call is one decision record whose rules check ran; every count below but the overrides is over those alone.",
+    "An override is the other record a document holds: a refused call the agent sent again, which no rules check judged and which no rules call count holds.",
+    "A rules refusal is a rules call with a rule. It was overridden when the next record on its target, in its session, is a rebuttal or a breaker.",
     "A document that could not be read, and a line that is not a record, are counted below: the decisions they held are missing from every other count.",
     `project: ${report.project}`,
     `since: ${report.since}`,
