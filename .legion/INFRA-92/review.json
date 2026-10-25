@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-92",
+  "completed": "2026-10-25T01:55:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 3,
+  "minor": 3,
+  "reviewedHead": "193b37d52057d0760039dc022b213ec3fa9bdc68",
+  "codeHead": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/agents/AgentsPage.tsx:640-642, packages/dispatch/e2e/keyboard-agents-pin.e2e.ts:62, packages/dispatch/e2e/keyboard-agents-picker.e2e.ts:852",
+      "description": "The row above md now renders `<host> · <last path segment>`, so eight locators in two untouched specs that match a row by its whole directory text resolve to nothing. Read on GitHub, not inferred: Legion Envoy and Contracts run 40148254772, job dispatch, at b790a592c539 — 10 failed / 1434 passed (42.2m); keyboard-agents-pin.e2e.ts:173, :223, :272, :322, :361, :396, :542 under [chromium] and keyboard-agents-picker.e2e.ts:835 under [chromium], [webkit] and [firefox], each a 30 s locator timeout. The before-leg run 40143159250 at 4a134cac6ddb failed three rows and none of these, so the change caused them. The implementer's and the tester's page proof were both scoped with -g \"an agent row shows the whole session name\", which is why neither saw it. Fix: point those locators at [data-agent-dir], the hook this change added, or at the text the row now shows."
+    },
+    {
+      "severity": "important",
+      "file": "packages/claude-envoy/hooks/hooks.json:35-46, packages/claude-envoy/scripts/build.ts:27-31",
+      "description": "Every user prompt in every Claude Code session now pays the load of an 811,698-byte bundle to write one small file, and Claude Code blocks the prompt on the hook. Measured in this pod at the reviewed head: `bun dist/session-hook.js session-title` 166/185/179 ms against 65/66/65 ms for a bare bun script. The three modes share one ESM entrypoint, so zod, the Dispatch client and session-settings are evaluated whatever argv[2] says; the title mode needs node:fs and a JSON.parse. Fix: one more line in BUNDLE_ENTRYPOINTS and one args change in hooks.json."
+    },
+    {
+      "severity": "important",
+      "file": "packages/claude-envoy/src/session-identity.ts:159-174, packages/claude-envoy/src/envoy-channel-server.ts:810",
+      "description": "pruneStaleSessionTitles rethrows every readdir error but ENOENT, and startChannelSession awaits it unguarded before the heartbeat timer is installed, so an unreadable ${CLAUDE_PLUGIN_DATA}/titles stops the channel server from starting in service of a cosmetic title. Everything else on this path degrades instead (readChosenTitleSync swallows every error, the hook always exits 0). The file's own pattern for best-effort startup work is at envoy-channel-server.ts:799-803."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/claude-envoy/README.md:375-376",
+      "description": "States a behaviour the code does not have: a name that is \"more than one line\" does not fall back — oneLine (src/session-title.ts:60) collapses the newline and the joined name is used, which tests/session-title.test.ts pins and the tester's own probe reported. Drop the clause."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/dispatch/web/src/features/agents/AgentsPage.tsx:642,728, packages/dispatch/web/src/features/shell/useDialog.ts:9",
+      "description": "One breakpoint stated twice and pinned by nothing: PHONE_VIEWPORT_QUERY is (max-width: 767px) while the same element's md: classes switch at 768 px. In the 1-pixel band between them (browser zoom, a fractional device-pixel ratio) the row takes the laptop's string in the phone's layout. Cosmetic — the whole path stays in the title attribute — but the two must agree for ever and nothing makes them."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/claude-envoy/src/session-identity.ts:57-59",
+      "description": "encodeURIComponent does not escape a dot, and the title file takes no suffix, so a session id of \".\" or \"..\" leaves the titles directory. roleStateFile escapes the same way but appends .json, which is what saves it. No exploit path — the id is Claude Code's own UUID — so hardening: give the title file a suffix as the role file has, or refuse an id that encodes to \".\" or \"..\"."
+    }
+  ],
+  "ciRead": {
+    "codeHead": "b790a592c53939d33ebaa0a6640fad63ffa5f0c5",
+    "readAt": "2026-10-25T01:45:00Z",
+    "requiredSet": ["lint", "typecheck", "test", "pr-title"],
+    "requiredResult": "all four completed success at b790a592c539 (Tests run 40148254737, PR Title run 40148349908). The compare b790a592c539...193b37d52057 lists only .legion/ paths, so these are the checks that stand for the code reviewed.",
+    "nonRequired": "Legion Envoy and Contracts run 40148254772 settled failure after the tester read it: job dispatch failed with the ten browser rows above. It is not in main's required set, so the daemon will not move the issue for it; this review does."
+  },
+  "thermo": {
+    "head": "193b37d52057d0760039dc022b213ec3fa9bdc68",
+    "deepReview": "CHANGES — one High (the ten broken e2e rows), one Low (the README claim), one Minor (the breakpoint band), two hardening items (the dot in the session id, the unguarded prune).",
+    "codeQuality": "CHANGES — the duplicated breakpoint and its prop drilling, the five-condition mode dispatch, the per-prompt bundle load; low: the two prunes' duplication, removeChosenTitle as a pass-through."
+  }
+}
