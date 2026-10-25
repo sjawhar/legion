@@ -463,6 +463,7 @@ describe("session_copy's destination", () => {
     ["a `/`", "sub/dest"],
     ["a `/` that climbs", "../dest"],
     ["a byte outside [A-Za-z0-9._-]", "dest x"],
+    ["a leading `-`, which a later consumer could read as an option", "-rf"],
   ])("a STEM of %s is refused by name before any key is listed, and nothing is written", (_, bad) => {
     const c = copyInto(
       `${stem}/`,
@@ -472,7 +473,7 @@ describe("session_copy's destination", () => {
     );
     expect(c.r.code).toBe(1);
     expect(c.r.stderr).toBe(
-      `the sessions under ${stem}/ are not copied: their directory's name '${bad}' is not a plain name of [A-Za-z0-9._-] other than . and .. in ${c.base}\n`
+      `the sessions under ${stem}/ are not copied: their directory's name '${bad}' is not a plain name of [A-Za-z0-9._-] other than . and .., and not starting with -, in ${c.base}\n`
     );
     // No listing ran, so no name was derived; nothing appeared anywhere.
     expect(c.r.sql).toBe("");
@@ -569,7 +570,7 @@ if session_copy "\${pair_session%.jsonl}/" review-pair "$(basename "$pair_sessio
     expect(r.code).toBe(0);
     expect(r.stdout).toBe("session_copy failed 1\n");
     expect(r.stderr).toBe(
-      `the sessions under ${pairSession}/ are not copied: their directory's name '..' is not a plain name of [A-Za-z0-9._-] other than . and .. in ${r.out}/review-pair\n`
+      `the sessions under ${pairSession}/ are not copied: their directory's name '..' is not a plain name of [A-Za-z0-9._-] other than . and .., and not starting with -, in ${r.out}/review-pair\n`
     );
     expect(r.sql).toBe("");
     expect(readFileSync(join(r.out, "run.json"), "utf8")).toBe(runJson);

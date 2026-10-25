@@ -3712,9 +3712,14 @@ floor is an 8-vCPU, 64 GiB type whose allocatable is about 7.9 CPU and 60.8 GiB:
 issue pod fits, two per node (7.9 / 3 by cpu, where 60.8 / 19 would place three), cpu the binding
 dimension. On GKE Autopilot each issue and controller pod tends to get a node of its own instead
 ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)), so node count there tracks pod count rather
-than this two-per-node packing. A pod relaunched onto another node waits for its `ReadWriteOnce`
-volume to detach from the old one, which shows as transient `FailedAttachVolume` or `Multi-Attach`
-events until the old pod is gone; then it runs on.
+than this two-per-node packing. The **controller's** pod, whose Sandbox owns its claim, is the one
+that waits on a volume when it is relaunched onto another node: its `ReadWriteOnce` volume must
+detach from the old node first, which shows as transient `FailedAttachVolume` or `Multi-Attach`
+events until the old pod is gone; then it runs on. An **issue** pod waits on neither: its disk is
+the pod's own generic ephemeral volume, so a replacement takes no predecessor's claim and nothing
+detaches (INFRA-80). What it may wait on instead is the predecessor's claim being *reaped* — the
+kubelet and the garbage collector removing it with its pod — which is a different mechanism with
+different events, and which [The disk dies with its pod](#the-disk-dies-with-its-pod) covers.
 
 Under gVisor the per-container cgroup changes nothing inside the sandbox: `runsc` sizes the sandbox
 from the pod's cgroup, so inside a pod `nproc` is max(2, ⌈Σ cpu limits⌉) — except on GKE Autopilot,

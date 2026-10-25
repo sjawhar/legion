@@ -1014,9 +1014,13 @@ session_copy() {
       echo "the sessions under $prefix are not copied: '$area' is no evidence directory session_copy writes in" >&2
       return 1 ;;
   esac
+  # A leading `-` is refused with the rest: every use here quotes the name and ends its command's
+  # options (`mkdir -p --`, `realpath -m --`), but a name that looks like an option is this class's
+  # classic shape, and the point of anchoring the destination is not to depend on what a later
+  # consumer of these paths happens to do with them.
   case $stem in
-    "" | . | .. | *[!A-Za-z0-9._-]*)
-      echo "the sessions under $prefix are not copied: their directory's name '$stem' is not a plain name of [A-Za-z0-9._-] other than . and .. in $root" >&2
+    "" | . | .. | -* | *[!A-Za-z0-9._-]*)
+      echo "the sessions under $prefix are not copied: their directory's name '$stem' is not a plain name of [A-Za-z0-9._-] other than . and .., and not starting with -, in $root" >&2
       return 1 ;;
   esac
   root=$(realpath -m -- "$root") && dest=$(realpath -m -- "$root/$stem") || return 1
@@ -3563,8 +3567,10 @@ begin issue-independence
 # in Dispatch and sets them todo (new_child): no `legion` label, since the daemon enters a child of
 # a live tree itself (workflow's recordChildUnderLiveTree) and starts its planner under tree 1's
 # open gate, and that planner holds too. The root and its two children then run at once, each in an
-# issue pod of its own: three Sandboxes, three distinct Bound PVCs each selected by the issue label
-# its Sandbox's claim template put on it, no affinity on any of the three pods, and no pod able to
+# issue pod of its own: three Sandboxes, three distinct Bound PVCs each read by name and owned by
+# the pod it belongs to (pod_disk, `<pod>-issue`: the disk is the pod's own generic ephemeral
+# volume, and the API server prunes every label off a Sandbox's claim template, so no label selects
+# one), no affinity on any of the three pods, and no pod able to
 # read another issue's workspace, the root's and child 1's each way. Where the three land is the
 # scheduler's: with no affinity they bin-pack where the pool has room, so two or more nodes are
 # asserted only when preflight read the NodePool's instance bounds as holding no two of the run's
