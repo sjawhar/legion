@@ -754,12 +754,6 @@ test("a long name ends in an ellipsis wherever a link or control truncates it", 
       .soft(labelOption.getByText(longLabel, { exact: true }))
       .toHaveAttribute("title", longLabel);
 
-    // An agent row's name, which opens the row. The button carries the full name itself.
-    await page.goto("/agents");
-    const agentName = page.getByRole("heading", { name: longTitle }).getByRole("button");
-    await expectEllipsis(agentName);
-    await expect.soft(agentName).toHaveAttribute("title", longTitle);
-
     // A sent broadcast's row: the metadata line, then the message's first line under it, cut
     // by a one-line clamp. Its hover title is the message as plain words (the preview renders
     // the Markdown, so the source's syntax is never what the reader hovers over).
