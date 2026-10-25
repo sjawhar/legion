@@ -12,6 +12,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 
 	"github.com/sjawhar/envoy/internal/dispatch/agentsecrets"
@@ -31,8 +32,11 @@ func (s *server) requireAgentSecrets(w http.ResponseWriter) (*agentsecrets.Clien
 
 // relayBrokerResponse writes the broker's answer verbatim: its raw JSON body on success, its
 // exact status and body for a *agentsecrets.Error (the browser must see the broker's own status
-// and code, e.g. 409 RECORD_TERMINAL — Dispatch never re-wraps it), or 503
-// AGENT_SECRETS_UNAVAILABLE for anything else (a transport failure).
+// and code, e.g. 409 RECORD_TERMINAL — Dispatch never re-wraps it), 500
+// AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE for a call that stopped at Dispatch's own ServiceAccount
+// token, or 503 AGENT_SECRETS_UNAVAILABLE for anything else (a transport failure). The token
+// gets its own code because the broker was never asked: the fix is in Dispatch's deployment, and
+// the log line naming the file is the operator's only pointer to it.
 func relayBrokerResponse(w http.ResponseWriter, body json.RawMessage, err error) {
 	if err != nil {
 		var brokerErr *agentsecrets.Error
@@ -40,6 +44,12 @@ func relayBrokerResponse(w http.ResponseWriter, body json.RawMessage, err error)
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(brokerErr.Status)
 			_, _ = w.Write(brokerErr.Body)
+			return
+		}
+		var tokenErr *agentsecrets.AccountTokenError
+		if errors.As(err, &tokenErr) {
+			slog.Error("dispatch: cannot read its ServiceAccount token for the secrets broker", "path", tokenErr.Path, "error", tokenErr.Err)
+			writeError(w, "AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE", http.StatusInternalServerError, "Dispatch cannot read its own ServiceAccount token for the secrets broker")
 			return
 		}
 		writeError(w, "AGENT_SECRETS_UNAVAILABLE", http.StatusServiceUnavailable, "the secrets broker is unreachable")

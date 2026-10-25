@@ -235,14 +235,13 @@ func TestASetProxyIsRemoteReach(t *testing.T) {
 }
 
 // remoteLookingURL reaches the test's own NATS, as the same user, by an address of this machine
-// that is not loopback, which is what a NATS on another machine looks like to the refusal. No test
-// reaches a NATS it did not start.
+// that is not loopback, which is what a NATS on another machine looks like to the refusal. The
+// test rig's servers listen on loopback alone, so the address is one a relay of this test's own
+// holds on that interface, which carries the connection to the server at uri: a connect that the
+// refusal lets through still reaches the NATS the test started, and no test reaches a NATS it did
+// not start.
 func remoteLookingURL(t *testing.T, uri string) string {
 	t.Helper()
-	parsed, err := url.Parse(uri)
-	if err != nil {
-		t.Fatalf("read the test server's URL %q: %v", uri, err)
-	}
 	addresses, err := net.InterfaceAddrs()
 	if err != nil {
 		t.Fatalf("list this machine's addresses: %v", err)
@@ -252,8 +251,7 @@ func remoteLookingURL(t *testing.T, uri string) string {
 		if !ok || network.IP.IsLoopback() || network.IP.To4() == nil {
 			continue
 		}
-		parsed.Host = net.JoinHostPort(network.IP.String(), parsed.Port())
-		return parsed.String()
+		return startRelayProxyFrom(t, network.IP.String(), uri).url()
 	}
 	t.Skip("no non-loopback IPv4 address on this machine to reach the test server by")
 	return ""

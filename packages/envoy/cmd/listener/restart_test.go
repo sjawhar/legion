@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -23,15 +22,13 @@ import (
 // because the consumer is gone either way (kvwatch.Watcher.End, LEGION-278). Every ERROR line
 // fails the test.
 func TestListenerFollowsTheInterestRegistryAcrossNATSRestarts(t *testing.T) {
-	ctr, uri := testnats.StartRestartable(t)
+	server, uri := testnats.Start(t)
 	listener := startListenerProcess(t, cmdtest.Build(t, "envoy-listener"), uri, "restart-test")
 	listener.waitHealthy(t)
 
 	for restart := 1; restart <= 3; restart++ {
-		testnats.Stop(t, ctr)
-		if err := ctr.Start(context.Background()); err != nil {
-			t.Fatalf("restart %d: start NATS again: %v", restart, err)
-		}
+		server.Stop(t)
+		server.Start(t)
 		deadline := time.Now().Add(30 * time.Second)
 		for strings.Count(listener.Output.String(), "envoy nats reconnected") < restart {
 			if time.Now().After(deadline) {

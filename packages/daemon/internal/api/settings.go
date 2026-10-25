@@ -160,9 +160,18 @@ type PluginsSettings struct {
 // ProjectSettings is one `projects.<KEY>` entry; its repositories are Dispatch's mapping, which
 // the state's `repositories` shows, never this file's.
 type ProjectSettings struct {
-	MergeQueueRole string        `json:"merge_queue_role,omitempty"`
-	Merge          MergeSettings `json:"merge"`
-	SlackChannels  []string      `json:"slack_channels"`
+	MergeQueueRole string           `json:"merge_queue_role,omitempty"`
+	Merge          MergeSettings    `json:"merge"`
+	SlackChannels  []string         `json:"slack_channels"`
+	Deploys        []DeploySettings `json:"deploys"`
+}
+
+// DeploySettings is one `projects.<KEY>.deploys` entry as the file writes it: the repository as
+// `<owner>/<name>`, the workflow's path and the step whose success is a deploy.
+type DeploySettings struct {
+	Repo     string `json:"repo"`
+	Workflow string `json:"workflow"`
+	Step     string `json:"step"`
 }
 
 // MergeSettings is a project's `merge` policy: the by-hand expressions as written, never compiled.
@@ -251,9 +260,13 @@ func SettingsOf(cfg config.Config) Settings {
 			MergeQueueRole: project.MergeQueueRole,
 			Merge:          MergeSettings{ByHand: make([]string, len(project.Merge.ByHand))},
 			SlackChannels:  stringsOf(project.SlackChannels),
+			Deploys:        make([]DeploySettings, len(project.Deploys)),
 		}
 		for i, pattern := range project.Merge.ByHand {
 			entry.Merge.ByHand[i] = pattern.Expression
+		}
+		for i, deploy := range project.Deploys {
+			entry.Deploys[i] = DeploySettings{Repo: deploy.Repo.String(), Workflow: deploy.Workflow, Step: deploy.Step}
 		}
 		settings.Projects[key] = entry
 	}

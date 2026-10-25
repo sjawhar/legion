@@ -82,9 +82,11 @@ func (issuePod) claimToken(project, issue string, role claim.Role) (claim.Token,
 }
 
 // prepare refuses a spec with no repository, which the workspace is provisioned from, and resolves
-// the workspace's place on the issue's disk. It expects nothing of that disk: it is created with
-// the pod and deleted with it (INFRA-80), so every launch, a resume included, provisions its
-// workspace afresh from the issue's pushed branch while the session continues in the database.
+// the workspace's place on the issue's disk. It runs at every launch and expects nothing of that
+// disk, which is created with the pod and deleted with it (INFRA-80): only a new or replacement pod
+// provisions its workspace (provision, which relaunch runs only when it replaces the pod), and a
+// role launched into the live pod finds the workspace the roles before it left. docs/kubernetes.md,
+// "The disk dies with its pod", states which launch is which.
 func (issuePod) prepare(l *launch) error {
 	spec := l.spec
 	if spec.Repository.IsZero() {

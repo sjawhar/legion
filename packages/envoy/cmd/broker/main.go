@@ -33,6 +33,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
@@ -74,14 +75,14 @@ const policyRefresh = 5 * time.Minute
 // (policyRefresh) and nothing else.
 const rereadListenWait = 5 * time.Second
 
-// oauthSecretTimeout bounds oauthstore.Store.Secret, the one boot call that runs after the bind:
-// an insert ... on conflict do nothing and a select on a one-row table. It needs a bound of its
-// own because it runs on serving, which no signal cancels - a pod the load balancer may already
-// be sending requests to has to drain rather than die mid-request - and a hang there is a pod
-// holding a bound listening socket with no srv.Serve behind it until the kubelet's SIGKILL at
-// the end of the grace period. Ten seconds is far above any contention two statements against a
-// one-row table ever meet, and far below the 60-second shutdownTimeout the grace period already
-// has to cover, so it can only fire on a database that has stopped answering.
+// oauthSecretTimeout bounds oauthstore.Store.Secret, one of the boot calls that run after the
+// bind: an insert ... on conflict do nothing and a select on a one-row table. It needs a bound
+// of its own because it runs on serving, which no signal cancels - a pod the load balancer may
+// already be sending requests to has to drain rather than die mid-request - and a hang there is
+// a pod holding a bound listening socket with no srv.Serve behind it until the kubelet's SIGKILL
+// at the end of the grace period. Ten seconds is far above any contention two statements against
+// a one-row table ever meet, and far below the 60-second shutdownTimeout the grace period
+// already has to cover, so it can only fire on a database that has stopped answering.
 //
 // The headroom is measured, not assumed. Two sessions running these two statements at the same
 // moment against a fresh database - the contention a cold two-pod boot makes on
@@ -415,10 +416,36 @@ func main() {
 	oauthSecret, err := oauthStore.Secret(secretCtx)
 	cancelSecret()
 	fatal(err)
+	// The exchange's listed identities and the issuers whose tokens it accepts as a subject
+	// token. Both halves are optional and the grant is composed either way: a broker told about
+	// no issuer accepts no subject token at all, which the line below says once at boot rather
+	// than leaving an operator to read it out of a refusal.
+	exchangePolicy, err := exchange.NewSet(cfg.ExchangeAccounts, cfg.ExchangeWorkflows)
+	fatal(err)
+	exchangeConfig := oauth.ExchangeConfig{Policy: exchangePolicy}
+	if cfg.ExchangeK8sAudience != "" {
+		keys, err := exchangeKeys(serving, cfg.K8sOIDCIssuer)
+		fatal(err)
+		exchangeConfig.Kubernetes = oauth.IssuerConfig{Issuer: cfg.K8sOIDCIssuer, Audience: cfg.ExchangeK8sAudience, Keys: keys}
+	}
+	if cfg.ExchangeGitHubIssuer != "" {
+		keys, err := exchangeKeys(serving, cfg.ExchangeGitHubIssuer)
+		fatal(err)
+		exchangeConfig.GitHub = oauth.IssuerConfig{Issuer: cfg.ExchangeGitHubIssuer, Audience: cfg.ExchangeGitHubAudience, Keys: keys}
+	}
+	if cfg.ExchangeK8sAudience == "" && cfg.ExchangeGitHubIssuer == "" {
+		slog.Info("token exchange", "state", "unconfigured", "detail", "no subject token issuer is set, so no pod or workflow run exchanges")
+	} else {
+		slog.Info("token exchange", "state", "on", "kubernetes", cfg.ExchangeK8sAudience != "", "github", cfg.ExchangeGitHubIssuer != "",
+			"accounts", len(cfg.ExchangeAccounts), "workflows", len(cfg.ExchangeWorkflows))
+	}
 	// verification_uri is Dispatch's machine-login page, where the person types the code.
 	provider, err := oauth.New(oauth.Config{
-		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL, RefreshLifetime: credentialLifetime,
-		VerificationURL: cfg.MachineLoginURL, ProofSkew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
+		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL,
+		AccessLifetime:  time.Duration(cfg.AccessTokenSeconds) * time.Second,
+		RefreshLifetime: credentialLifetime, VerificationURL: cfg.MachineLoginURL,
+		ProofSkew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
+		Exchange:  exchangeConfig,
 	}, oauthStore)
 	fatal(err)
 	mach := &machine.Service{
@@ -464,7 +491,8 @@ func main() {
 	// their own next five-minute reload (policyRefresh) anyway. Neither the caller's 200 nor the
 	// process is worth failing over a notification Postgres would not take.
 	notify := reread.Notifier(st.Pool, senderID)
-	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken, RereadOverallLimit: rereadOverall,
+	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, RereadOverallLimit: rereadOverall,
+		APIAccounts: cfg.APIAccounts, AccountTokens: pod,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
@@ -662,6 +690,16 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
+}
+
+// exchangeKeys reads issuer's published signing keys, the source the RFC 8693 exchange resolves a
+// subject token's own key against. It takes the same boot deadline discovery does: an issuer that
+// accepts the connection and never answers refuses the boot rather than hanging it with no health
+// endpoint serving. No key is fetched here; the first subject token reads the set.
+func exchangeKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
+	discovery, cancel := context.WithTimeout(ctx, oidc.DiscoveryTimeout)
+	defer cancel()
+	return oidc.NewKeys(discovery, issuer)
 }
 
 // kindMinters is the broker's minter for each kind: the GitHub App minter for github-app secrets

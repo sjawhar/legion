@@ -432,18 +432,36 @@ type ReadyMerge struct {
 
 func (ReadyMerge) OutboxKind() OutboxKind { return OutboxKindReadyMerge }
 
-// CheckCompare wakes a production check from a build: a GitHub compare of the check's merge
-// commit with Build, the commit a daemon boot or a Dispatch start reported itself built from,
-// which the executor runs as the implement App and which starts the look Look when the build
-// contains the merge. Cause names what asked for it (`daemon boot`, `dispatch start` or
-// `dispatch build`), for the look's wake. OpenedAt is the check instance the compare was queued
-// for (ProductionCheck.OpenedAt): the executor compares nothing once a later merge replaced it;
-// zero names no instance and is not fenced.
+// CheckCompare wakes a production check from a build or from a deploy run, whichever of Build and
+// Deploy it carries (exactly one). Build is the commit a daemon boot or a Dispatch start reported
+// itself built from: the executor runs a GitHub compare of the check's merge commit with it, as the
+// implement App, and starts the look Look when the build contains the merge. Deploy is a completed
+// run attempt of a deploy workflow the project names (`projects.<KEY>.deploys`): the executor reads
+// the run and its jobs from GitHub, and wakes the check once for each job whose named step succeeded
+// after the pull request merged. Cause names what asked for it (`daemon boot`, `dispatch start`,
+// `dispatch build` or `deploy run`), for the look's wake. OpenedAt is the check instance the
+// compare was queued for (ProductionCheck.OpenedAt): the executor compares nothing once a later
+// merge replaced it; zero names no instance and is not fenced. A row queued before Deploy existed
+// carries a build and no deploy, and decodes as it did.
 type CheckCompare struct {
-	Look     int       `json:"look"`
-	Cause    string    `json:"cause"`
-	Build    string    `json:"build"`
-	OpenedAt time.Time `json:"openedAt,omitzero"`
+	Look     int        `json:"look"`
+	Cause    string     `json:"cause"`
+	Build    string     `json:"build,omitempty"`
+	Deploy   *DeployRun `json:"deploy,omitempty"`
+	OpenedAt time.Time  `json:"openedAt,omitzero"`
+}
+
+// DeployRun is the deploy workflow run a CheckCompare reads: attempt Attempt of GitHub Actions run
+// Run, of the configured Workflow (its `.github/workflows/` path) and Step (the step whose success
+// is a deploy), on Branch, the issue's recorded default branch. The executor holds the run GitHub
+// returns to each of them, since anyone holding an Envoy bearer can publish the envelope the row
+// was queued from.
+type DeployRun struct {
+	Run      int64  `json:"run"`
+	Attempt  int    `json:"attempt"`
+	Workflow string `json:"workflow"`
+	Step     string `json:"step"`
+	Branch   string `json:"branch"`
 }
 
 func (CheckCompare) OutboxKind() OutboxKind { return OutboxKindCheckCompare }
@@ -688,8 +706,14 @@ func validateOutboxPayload(payload OutboxPayload) error {
 		if value.Look <= 0 {
 			return fmt.Errorf("check compare requires the look it starts")
 		}
-		if value.Build == "" || value.Cause == "" {
-			return fmt.Errorf("check compare requires the build commit and what asked for it")
+		if (value.Build == "" && value.Deploy == nil) || value.Cause == "" {
+			return fmt.Errorf("check compare requires the build commit and what asked for it, or a deploy run in place of the build commit")
+		}
+		if value.Build != "" && value.Deploy != nil {
+			return fmt.Errorf("check compare carries both a build commit and a deploy run; it compares exactly one")
+		}
+		if deploy := value.Deploy; deploy != nil && (deploy.Run <= 0 || deploy.Attempt <= 0 || deploy.Workflow == "" || deploy.Step == "" || deploy.Branch == "") {
+			return fmt.Errorf("check compare's deploy run requires a positive run and attempt and its workflow, step and branch")
 		}
 	case CheckLook:
 		if value.Look <= 0 {

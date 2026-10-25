@@ -142,8 +142,8 @@ func TestAPersonRevokesTheirOwnMachineLogin(t *testing.T) {
 			t.Fatalf("revoke %s = %d %s, want %d %s", tc.name, status, body, tc.status, tc.code)
 		}
 	}
-	if status, body := ts.req(t, http.MethodPost, revokePath, nil, map[string]any{"approver": testApprover}); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "UI_INVALID" {
-		t.Fatalf("revoke without the UI bearer = %d %s, want 401 UI_INVALID", status, body)
+	if status, body := ts.req(t, http.MethodPost, revokePath, nil, map[string]any{"approver": testApprover}); status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKEN_INVALID" {
+		t.Fatalf("revoke with no ServiceAccount token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, body)
 	}
 	if status, body := ts.ui(t, http.MethodGet, "/v1/launcher-credentials", nil); status != http.StatusBadRequest || decode[wireError](t, body).Code != "APPROVER_REQUIRED" {
 		t.Fatalf("list naming no one = %d %s, want 400 APPROVER_REQUIRED", status, body)

@@ -747,13 +747,13 @@ asked again with a backoff (half a second, doubling to four seconds) for up to 3
 `postgres` the URL file read afresh each time, since that file is a projection something else may
 replace — and only then refuses the start.
 Neither `workspace-init` looks for a session file, and neither is told to expect one: there is no
-disk on which a session could be waiting. So every launch of a claim — a resume in a pod of its
-own making, and a resume in a pod created after the last one went — provisions its workspace from
-the issue's pushed branch (`legion/<issue>`, or the repository's default branch when none was
-pushed) and continues its own session from the table; anything it had not pushed went with the
-pod before it. A child issue re-admitted as a root of its own keeps its roles' sessions the same
-way (`Machine.Retree`): they are rows, and no disk is carried into the new tree ([The disk dies
-with its pod](#the-disk-dies-with-its-pod)).
+disk on which a session could be waiting. A launch that creates the issue's pod provisions its
+workspace from the issue's pushed branch and continues its own session from the table; a role
+launched into the pod already running provisions nothing and continues its session in the
+workspace the roles before it left. Which launch is which, and what goes with a pod, is stated
+once in [The disk dies with its pod](#the-disk-dies-with-its-pod). A child issue re-admitted as a
+root of its own keeps its roles' sessions the same way (`Machine.Retree`): they are rows, and no
+disk is carried into the new tree.
 
 An agent whose workspace is newer than its session is told so before its next turn. Provisioning
 records when it created a workspace, in the workspace's own `.jj/legion-created`, which jj never
@@ -1211,8 +1211,9 @@ cleanup took its Sandbox, one that had left the workflow before the close (a par
 close does not hand over), finds no Sandbox and makes one at its next launch; its re-pointed
 claim still names its session (`Retree`, `internal/supervise/lifecycle.go`, keeps it: the
 supervisor knows nothing of Sandboxes, and a check there would race the cleanup), which the
-session table holds and the role resumes. That launch provisions its workspace from the issue's
-branch, as every launch does now, and nothing is reported lost — the same path a root
+session table holds and the role resumes. That launch creates the issue's pod, so it provisions
+its workspace from the issue's branch, as every new pod does ([The disk dies with its
+pod](#the-disk-dies-with-its-pod)), and nothing is reported lost — the same path a root
 re-admitted after its own tree's close takes.
 
 Before the daemon opens its store, so before any schema write, image probe or reconcile, it checks
@@ -3873,13 +3874,26 @@ CodeGraph index and each role's state home with Oh My Pi's logs under it. None o
 next pod. What does reach it is what lives elsewhere — each role's session, a row in the session
 database ([Selecting the store](#selecting-the-store)); the issue's branch on GitHub,
 `legion/<KEY>`, which every pushed turn is in; the issue's record in the daemon's own Postgres;
-and the repository's cache, which fills the next pod's feed. So every launch provisions the
-workspace afresh from the issue's pushed branch — the same two init containers, doing the same
-work as on the issue's first pod ([Anatomy of a Sandbox pod](#anatomy-of-a-sandbox-pod)) — and
-every agent resumed into a workspace newer than its session's last write is told so before its
+and the repository's cache, which fills the next pod's feed.
+
+A pod's lifetime is not a role's, and this paragraph is the one place that says how they differ.
+A pod is created by a launch — the issue's first, one that finds no live pod (after a suspension,
+say), or one that must replace the pod (the first end above) — and provisions its workspace from
+the issue's pushed branch (`legion/<KEY>`, or the repository's default branch when none was
+pushed) with the same two init containers every new pod runs ([Anatomy of a Sandbox
+pod](#anatomy-of-a-sandbox-pod)); it then lives until one of the ends above, and its disk dies
+with it. A role launched while that pod is live and nothing above replaces it starts in that pod
+and provisions nothing: no init container runs, the daemon mints no provisioning token, and the
+role finds the workspace as the roles before it left it, unpushed work included (`relaunch`,
+`internal/runtime/sandbox/relaunch.go`, which provisions only inside the branch that replaces the
+pod; `TestRoleStartsShareOneIssuePodAndDoNotReinitializeIt`). In an issue's ordinary run that is
+five of its six roles: the first launch creates the pod and the other five start into it. So only
+a new or replacement pod provisions afresh, and an agent resumed into a pod created after the one
+it last worked in finds a workspace newer than its session's last write; it is told so before its
 next turn, by `LEGION_WORKSPACE_RECREATED` and the message its plugin saves from it ([Selecting
-the store](#selecting-the-store)). An agent's unpushed work is lost with the pod, which is why a
-phase pushes what it has done.
+the store](#selecting-the-store)). An agent's unpushed work is lost with the pod, at one of the
+ends above and never at a role start into a live pod, which is why a phase pushes what it has
+done.
 
 A near-full disk slows jj's working-copy snapshot before a push, which is why `legion push`'s
 grant lives `credential.pushTTL` (5 minutes) in place of the usual 60 seconds
