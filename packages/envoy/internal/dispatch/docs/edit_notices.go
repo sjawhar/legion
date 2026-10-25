@@ -12,6 +12,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/dispatch/duty"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
+	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
@@ -45,8 +46,10 @@ const openEditNotice = `
 // Every writer of a version that can list a person calls it in its own transaction, after it took
 // the document owner's lock (lockArtifactOwner) and wrote the version, so the row's lock comes
 // second; the sweep (sendEditNotice) takes the two in the same order. Those writers are the
-// settlement, NamedVersion and SnapshotVersion: a person's edit an agent's version captures before
-// the settlement runs is in that version, and the settlement then has nothing of it to version.
+// settlement, NamedVersion, SnapshotVersion and a person's rebuild (RebuildDocument): a person's
+// edit an agent's version captures before the settlement runs is in that version, and the
+// settlement then has nothing of it to version. An upload writes its version through no room and
+// lists its uploader alone; it opens no window, and the plan leaves it out on purpose.
 //
 // The notice's last editor is latest, the room's latest edit source when the version's authors
 // were taken (authorCapture.latest), when the version lists it as a person; otherwise the last
@@ -219,6 +222,12 @@ func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, 
 		return false, err
 	}
 	if beforeFound && afterFound {
+		if serverStateOnly(before, after) {
+			// An answer, a resolve or a retraction wrote only the server's own attributes of a
+			// typed block, as the person who made it: that change reaches the spec's writers as
+			// its own ask event, so the window goes with no notice, as a closed issue's does.
+			return false, tx.Commit(ctx)
+		}
 		payload.Diff, payload.DiffTruncated = text.UnifiedDiffCut(before, after, editNoticeDiffBytes)
 	}
 	payload.ArtifactID = artifactID
@@ -236,6 +245,29 @@ func (s *Service) sendEditNotice(ctx context.Context, artifactID string) (bool, 
 	}
 	s.events.Publish(appended)
 	return true, nil
+}
+
+// serverStateOnly reports whether two stored versions differ only in the attributes the server
+// keeps on its typed blocks: an ask's state, who answered it and when, the options selected and
+// the answer's words. Both are compared with those attributes at their defaults
+// (pmdoc.StripServerOwnedAttrs), so a version a person's answer or resolve wrote is no edit of
+// theirs. pmdoc.EqualOutsideServerState is not enough here: it counts the selection and the
+// answer as caller text, which they are for the growth check, so an answer would still send a
+// notice. Block ids are left out too (pmdoc.Node.Equal): a stored version carries only a typed
+// block's id, and each parse mints the others afresh. A version that does not read back is not
+// judged, and its notice goes.
+func serverStateOnly(before, after string) bool {
+	beforeTree, err := pmdoc.ParseRendering(before)
+	if err != nil {
+		return false
+	}
+	afterTree, err := pmdoc.ParseRendering(after)
+	if err != nil {
+		return false
+	}
+	pmdoc.StripServerOwnedAttrs(beforeTree)
+	pmdoc.StripServerOwnedAttrs(afterTree)
+	return beforeTree.Equal(afterTree)
 }
 
 // editNoticeVersionMarkdown reads the markdown of artifactID's version number, and reports whether that

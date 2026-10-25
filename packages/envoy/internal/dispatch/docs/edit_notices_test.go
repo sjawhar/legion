@@ -769,3 +769,112 @@ func TestEditNoticeSweepSkipsDeletedArtifact(t *testing.T) {
 		t.Fatalf("the sweep logged an error for a deleted document:\n%s", logs.String())
 	}
 }
+
+// answerDecision answers the harness's ask as the answer route does: the row first, then the
+// block's server-owned attributes, written as the person who answered.
+func answerDecision(t *testing.T, service *Service, artifactID, askID string, person model.Actor) {
+	t.Helper()
+	answeredAt := time.Date(2026, 10, 25, 9, 0, 0, 0, time.UTC)
+	answerJSON, err := json.Marshal(model.AskAnswer{User: person.ID, Selected: []string{"REST"}, At: answeredAt})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `update asks set state = 'answered', answer = $2 where id = $1`, askID, answerJSON); err != nil {
+		t.Fatalf("answer the indexed ask: %v", err)
+	}
+	if err := joinedSetBlockAttributes(service, artifactID, "decision", map[string]any{
+		"state": "answered", "answered_by": person.ID, "answered_at": answeredAt.Format(time.RFC3339Nano), "selected": []string{"REST"},
+	}, person); err != nil {
+		t.Fatalf("write the answered block's attributes: %v", err)
+	}
+}
+
+// A person's answer to an ask block changes only the block's server state, and its own event
+// (ask.answered) already reaches the spec's writers: the version it leaves sends no edit notice,
+// and the window it opened goes.
+func TestEditNoticeAnAnswerAloneSendsNone(t *testing.T) {
+	service, artifactID, askID, settle, _ := blockAskHarness(t)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	answerDecision(t, service, artifactID, askID, alice)
+	settle()
+	if _, open := readEditNotice(t, service, artifactID); !open {
+		t.Fatal("the answer's version opened no window; this test needs one to show the sweep drops it")
+	}
+	makeEditNoticeDue(t, service.store, artifactID)
+	if sent, err := service.sendDueEditNotices(context.Background()); err != nil || sent != 0 {
+		t.Fatalf("sweep after an answer alone = %d sent, %v; want none sent", sent, err)
+	}
+	if edits := humanEdits(t, service.store, artifactID); len(edits) != 0 {
+		t.Fatalf("an answer alone sent %d edit notices, want none: %+v", len(edits), edits)
+	}
+	if _, open := readEditNotice(t, service, artifactID); open {
+		t.Fatal("the answer's notice row is still there, want it dropped")
+	}
+}
+
+// A person's resolve of an ask block changes only its server state too, and sends no notice.
+func TestEditNoticeAResolveAloneSendsNone(t *testing.T) {
+	service, artifactID, askID, settle, _ := blockAskHarness(t)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	resolution, err := json.Marshal(model.AskResolution{Kind: "resolved", Reason: "Waived.", Actor: alice, At: time.Now().UTC()})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.store.Pool.Exec(context.Background(), `update asks set state = 'resolved', resolution = $2 where id = $1`, askID, resolution); err != nil {
+		t.Fatalf("resolve the indexed ask: %v", err)
+	}
+	if err := joinedSetBlockAttributes(service, artifactID, "decision", map[string]any{"state": "resolved"}, alice); err != nil {
+		t.Fatalf("resolve the block: %v", err)
+	}
+	settle()
+	if _, open := readEditNotice(t, service, artifactID); !open {
+		t.Fatal("the resolve's version opened no window; this test needs one to show the sweep drops it")
+	}
+	makeEditNoticeDue(t, service.store, artifactID)
+	if sent, err := service.sendDueEditNotices(context.Background()); err != nil || sent != 0 {
+		t.Fatalf("sweep after a resolve alone = %d sent, %v; want none sent", sent, err)
+	}
+	if edits := humanEdits(t, service.store, artifactID); len(edits) != 0 {
+		t.Fatalf("a resolve alone sent %d edit notices, want none", len(edits))
+	}
+}
+
+// An answer and a typed edit in one quiet window send exactly one notice, whose diff holds the
+// typed edit.
+func TestEditNoticeAnAnswerAndATypedEditSendOne(t *testing.T) {
+	service, artifactID, askID, settle, _ := blockAskHarness(t)
+	alice := model.Actor{Kind: "user", ID: "alice@example.com"}
+	answerDecision(t, service, artifactID, askID, alice)
+	settle()
+	editAsConnectedPeer(t, service, artifactID, 1, alice, replaceRun("no drift.", "no drift at all."))
+	settle()
+	makeEditNoticeDue(t, service.store, artifactID)
+	if sent, err := service.sendDueEditNotices(context.Background()); err != nil || sent != 1 {
+		t.Fatalf("sweep after an answer and a typed edit = %d sent, %v; want 1 sent", sent, err)
+	}
+	edits := humanEdits(t, service.store, artifactID)
+	if len(edits) != 1 || !strings.Contains(edits[0].payload.Diff, "no drift at all.") {
+		t.Fatalf("edit notices = %+v, want one whose diff holds the typed edit", edits)
+	}
+}
+
+// A person's rebuild writes a version that lists them, and opens the window as any person's
+// version does.
+func TestEditNoticeAPersonsRebuildOpensTheWindow(t *testing.T) {
+	database := storetest.Open(t)
+	artifactID := createDocument(t, database, "before\n")
+	service := New(Deps{Store: database, Persistence: &rebuildCaptureStore{VersionedStore: NewPgVersioned(database), invalid: true}})
+	t.Cleanup(func() { _ = service.Shutdown(context.Background()) })
+	replacement := "replacement\n"
+	_, written, err := rebuildDocument(t, service, artifactID, &replacement)
+	if err != nil || !written.Wrote {
+		t.Fatalf("rebuild = %+v, %v; want a version written", written, err)
+	}
+	row, open := readEditNotice(t, service, artifactID)
+	if !open {
+		t.Fatal("a person's rebuild opened no edit notice")
+	}
+	if row.to != written.Version.Number || !slices.Equal(row.editors, []string{"alice"}) {
+		t.Fatalf("notice = to %d editors %v, want to %d naming alice", row.to, row.editors, written.Version.Number)
+	}
+}
