@@ -4,6 +4,11 @@
 
 ### Added
 
+- `SearchCoverage`, `SearchCoverageKinds` and `SearchCoverageCounts`, the body of
+  `GET /api/v1/search/coverage`: the configured embedder's identity, place (`bedrock` or `azure`)
+  and model, and per kind and in total how many searchable items have a current vector, lack one or
+  failed, with the oldest lacking item's wait (INFRA-393). `SearchResponse.degraded`'s doc names the
+  model service rather than Bedrock.
 - The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
   `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
   still names a person who has signed in, and `dispatch_whoami` says a session under the shared
