@@ -4,6 +4,18 @@
 
 ### Added
 
+- A project's default assignee, the last step of an issue create's assignee chain: an issue created
+  with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
+  it, goes to the person the project names; nothing already filed, and no create that names an
+  assignee or `null`, changes. A default that no longer names a person who has signed in is
+  ignored rather than refused, so a create never fails on a stale one. A person sets it on the
+  Settings page through
+  `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee`
+  `{assignee}` (an email of someone who has signed in, or `null` to clear it; otherwise
+  `400 ASSIGNEE_NOT_ALLOWED`, and a body without `assignee`, or whose `assignee` is neither a
+  string nor null, is `400 INVALID_PROJECT`), which appends
+  `settings.project_default_assignee.updated`. Both routes are human-only and no agent command,
+  flag or route sets a project's default.
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
   releases nothing and ends the grant for good, as a kind change found before the read does, so a
@@ -548,6 +560,16 @@
 
 ### Changed
 
+- A failed NATS reconnect attempt is logged, where it was silent: one WARN a minute per
+  connection, `envoy nats reconnect attempt failed`, naming the client, the servers it was
+  configured with and the error, with the first failure of an outage logged at once. nats.go
+  retries about once a second forever, so a broker that is down left no line at all in the
+  process's log, and thousands of identical lines would name the outage no better (INFRA-182).
+- A cache watcher that ends on its own logs `<cache> watcher stopped` at WARN, where it was an
+  ERROR. The ERROR is now `<cache> watcher was not repaired`, logged once with the bucket, the
+  recorded error and a `reason` of `repair failed` or `no repair within 1m0s`, and only when a
+  repair has failed or none has run within a minute, so a stop the self-health rebuild repairs a
+  moment later no longer raises one (INFRA-182).
 - **Breaking:** once any secret with a `kind` tag holds a value, roll the secrets broker forward,
   never back past this release. A broker before kinds reads no `kind` tag and would serve the
   secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes
@@ -722,6 +744,12 @@
   pod in that namespace whose spec names no account runs as it and can get a token for the broker's
   audience, so the binding proves nothing about which pods are the service's. Bind each service to
   a dedicated account its pods set as `serviceAccountName` before taking this release.
+- `BROKER_SERVICES` may name one service for several accounts, one entry each, and a pod running
+  as any of them is that service's own session. Each account still proves one service, and an
+  account given twice is still refused, now naming the account and its one service when both
+  entries name the same service. Rollback: a broker before this release refuses a
+  `BROKER_SERVICES` that names a service twice at start-up (`must give each service once`), and
+  the broker is one pod, so roll the image back only together with the setting.
 - **Breaking:** a renewal (`POST /v1/enrollments/{id}/renew`) of an enrollment that has ended,
   lapsed or never existed answers `401 ENROLLMENT_NOT_LIVE` where it answered `401 PROOF_INVALID`;
   the renew route alone answers it, and every other session route still answers a not-live proof
@@ -1097,6 +1125,19 @@
 
 ### Fixed
 
+- A listener whose durable consumer was deleted and created again under it, so that the durable
+  delivers to some other subscription, reports itself unhealthy and binds the durable again
+  instead of receiving nothing while every check passed. `GET /healthz` answers `503`
+  `unhealthy` with `durable consumer unavailable: not bound to this listener's subscription`,
+  and the self-health monitor treats an unbound durable as terminal: it confirms the reading
+  with a second one, rebinds, and reports success only once the server itself reports this
+  listener bound (INFRA-182).
+- No NATS server URL the bus logs carries its userinfo: `envoy nats reconnected` and the refusal
+  of a NATS server that is not this machine's wrote the configured URL whole, and nats.go
+  authenticates with a URL's userinfo, a user name alone as a token and `user:password` as a
+  password, so `NATS_URLS=nats://user:password@host:4222` put the password in the process's log.
+  Each URL is now written without its userinfo, as `envoy nats reconnect attempt failed` writes
+  its servers (INFRA-182).
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
   but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
   which replaces a machine's own credentials for every program that uses them. A write under

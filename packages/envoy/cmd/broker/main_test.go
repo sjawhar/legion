@@ -62,10 +62,11 @@ func TestNonZeroPortPublicURLIsFineInProduction(t *testing.T) {
 	}
 }
 
-// TestTheRequestMachineCarriesTheServiceAccounts pins the one place the broker hands
+// TestTheRequestMachineCarriesTheServicesByAccount pins the one place the broker hands
 // BROKER_SERVICES' accounts to the request decisions: the Machine newRequestMachine builds from a
-// config holds the config's ServiceAccounts, without which no pod is ever a service's.
-func TestTheRequestMachineCarriesTheServiceAccounts(t *testing.T) {
+// config holds the config's ServicesByAccount, keyed by account so one service may have several,
+// without which no pod is ever a service's.
+func TestTheRequestMachineCarriesTheServicesByAccount(t *testing.T) {
 	cfg, err := config.Load(func(name string) string {
 		return map[string]string{
 			"BROKER_DATABASE_URL":        "postgres://unused",
@@ -74,15 +75,19 @@ func TestTheRequestMachineCarriesTheServiceAccounts(t *testing.T) {
 			"BROKER_UI_TOKEN":            "ui-token",
 			"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
 			"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
-			"BROKER_SERVICES":            "example-service=system:serviceaccount:example:example-sa",
+			"BROKER_SERVICES":            "example-service=system:serviceaccount:example:example-sa example-service=system:serviceaccount:example:another-sa",
 		}[name]
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	m := newRequestMachine(cfg, nil, nil, nil, nil)
-	if want := map[string]string{"example-service": "system:serviceaccount:example:example-sa"}; !maps.Equal(m.ServiceAccounts, want) {
-		t.Fatalf("request Machine's ServiceAccounts = %v, want %v", m.ServiceAccounts, want)
+	want := map[string]string{
+		"system:serviceaccount:example:example-sa": "example-service",
+		"system:serviceaccount:example:another-sa": "example-service",
+	}
+	if !maps.Equal(m.ServicesByAccount, want) {
+		t.Fatalf("request Machine's ServicesByAccount = %v, want %v", m.ServicesByAccount, want)
 	}
 	for _, kind := range policy.Kinds {
 		if m.Minters[kind] == nil {

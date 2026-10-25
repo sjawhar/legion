@@ -31,10 +31,10 @@ const MintFailedMessage = "broker: mint failed"
 // nil for a grant that lasts until its session ends. Every call re-checks the
 // enrollment and the grant, re-verifies the grant's whole approval chain (VerifyChain), and — when
 // the policy has changed since the grant's request was decided, or any granted name is a service's
-// (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts) — that the
-// current policy still allows the session, with the names its operator withheld from it, every
-// granted name under the login that decided it (stillAllowed), and that no granted name's
-// max-grant is now shorter than the lifetime the grant's request signed (overMaxGrant). A
+// (anyServiceOwned: the policy's version does not cover which service BROKER_SERVICES' accounts
+// prove) — that the current policy still allows the session, with the names its operator withheld
+// from it, every granted name under the login that decided it (stillAllowed), and that no granted
+// name's max-grant is now shorter than the lifetime the grant's request signed (overMaxGrant). A
 // stored secret releases its frozen source. A kind secret reads that same stored source and
 // passes its value to the kind's minter. Once every value is read, each stored one is checked
 // against the policy as it stands then (recheckStoredSources), so a retag that lands during the
@@ -75,7 +75,7 @@ func (m *Machine) Values(ctx context.Context, grantID, enrollmentID string) (map
 	// mints for the github-owners the grant was just checked against, never a later read's.
 	set := m.Policy.Get()
 	if policyVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
 		if err != nil {
 			return nil, nil, err
 		}
@@ -496,11 +496,12 @@ func writtenBeforeMigration13(alias string) string {
 // migration 0013: writtenBeforeMigration13), against a still-live grant (not revoked, not expired)
 // under this enrollment is returned as-is, with no new request row and no new record, as long as
 // the policy it was decided under is still current and no granted name is a service's
-// (anyServiceOwned: the policy's version does not cover BROKER_SERVICES' accounts), or the current
-// policy still allows it to the session (stillAllowed, the check Values makes), and its whole
-// approval chain still verifies (VerifyChain, the same check Values makes). A caller that already
-// holds a live grant for these exact names never re-asks a human who already approved it, a policy
-// tightened since then is never bypassed by reuse, and neither is a chain that no longer verifies.
+// (anyServiceOwned: the policy's version does not cover which service BROKER_SERVICES' accounts
+// prove), or the current policy still allows it to the session (stillAllowed, the check Values
+// makes), and its whole approval chain still verifies (VerifyChain, the same check Values
+// makes). A caller that already holds a live grant for these exact names never re-asks a human
+// who already approved it, a policy tightened since then is never bypassed by reuse, and neither
+// is a chain that no longer verifies.
 // No live grant holds a withheld name nobody approved: the withhold ended each one (withhold).
 func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names []string, lifetime *int, set *policy.Set) (Request, bool, error) {
 	id, err := matchingRequest(ctx, m.Store.Pool, `select r.id, array_agg(s.name) from requests r
@@ -522,7 +523,7 @@ func (m *Machine) reuseLiveGrant(ctx context.Context, enr enrollmentRow, names [
 		return Request{}, false, err
 	}
 	if rulesVersion != set.Version || anyServiceOwned(set, granted) {
-		requester, err := enr.requester(ctx, m.Store.Pool, m.ServiceAccounts)
+		requester, err := enr.requester(ctx, m.Store.Pool, m.ServicesByAccount)
 		if err != nil {
 			return Request{}, false, err
 		}

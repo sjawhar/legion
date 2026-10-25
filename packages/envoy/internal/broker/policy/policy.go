@@ -311,8 +311,11 @@ type Requester struct {
 	// for a pod.
 	Operator string
 	// Service is the service of the machine login that enrolled the session, set only when the
-	// session is a pod whose verified service account is the one BROKER_SERVICES binds that service
-	// to (requests.enrollmentRow.requester); empty otherwise.
+	// session is a pod whose verified service account is one of the accounts BROKER_SERVICES maps to
+	// that same service (requests.enrollmentRow.requester); empty otherwise. A service may list
+	// several accounts, but each account is listed once and proves exactly one service, since a
+	// machine login's service is its own claim and only the pod's account can prove it: an account
+	// listed for another service, or for none, proves nothing here.
 	Service string
 	// Withheld is the names the session's operator withheld from it by revoking a grant of them
 	// the session got without asking (requests.Machine.RevokeByApprover). Evaluate answers each as
