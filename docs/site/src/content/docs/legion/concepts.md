@@ -310,8 +310,9 @@ about in a Dispatch ask on Legion's daily report issue, naming the issue, the pu
 merge commit, what it drove and what failed, so you decide whether it needs an issue.
 The record lives on the pull request alone: Dispatch refuses a write on a closed issue.
 
-Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes with its
-conversation and the issue's volume kept, and the daemon wakes the check — the pod comes back and
+Nothing waits for the deploy: a `pending` look ends, the implementer's pod goes — and its disk
+with it, since an issue's disk belongs to its pod — while its conversation is kept in the session
+database, and the daemon wakes the check — a new pod comes back and
 the same agent takes the next look — when Dispatch's delivery timeline reports the pull request
 deployed (its `issue.deployed` event), or, for Legion's own repository, when a Legion daemon boots
 or Dispatch starts on a build that contains the merge. A look is bounded at two hours, and the
@@ -319,11 +320,14 @@ whole check at `production_check_hours` (336, fourteen days, by default): the wa
 the last look, and a `pending` there closes the check as not run, which the implementer writes on
 the pull request. `legion state` prints how many checks are open and the oldest of them.
 
-A child's close releases its pod at once and its volume when the check closes; a root's close frees
-its admission slot, and the finished tree **lingers** for `linger_hours` (72 by default) with its
-workspace kept, in case work resumes; then its pods and volume are deleted, once no member's check
-is open. Setting a done root back to `todo` runs it again as a new generation, starting from its
-architect.
+A child's close deletes its pod, and the disk goes with it; a root's close frees
+its admission slot, and the finished tree **lingers** for `linger_hours` (72 by default) in case
+work resumes, each member's conversation kept in the session database; then its Sandboxes are
+deleted, once no member's check
+is open. What a stop keeps is the conversation and whatever was pushed to the issue's branch: a
+workspace lives as long as the pod it was provisioned in, and the next pod provisions it again
+from that branch. Setting a done root back to `todo` runs it again as a new generation, starting
+from its architect.
 
 ## Supervision
 
