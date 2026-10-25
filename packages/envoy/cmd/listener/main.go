@@ -854,9 +854,9 @@ func main() {
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
 	// the listener. Terminal watcher/consumer failures are rebuilt immediately;
 	// after three failed recovery intervals, SIGTERM enters the bounded shutdown
-	// path and exits non-zero for Docker to replace the listener. The rebuild runs under
-	// monitorCtx, so the shutdown's monitorCancel ends a rebind still waiting for the server and
-	// the 10 s shutdown budget is never held by one.
+	// path and exits non-zero for Docker to replace the listener. The durable probe and a rebuild's
+	// rebind wait run under monitorCtx, each JetStream read included, so the shutdown's monitorCancel
+	// cuts a read the server has not answered and the 10 s shutdown budget is held by neither.
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
 	probeDurable := func() error { return durableProbe(monitorCtx, client, consumer) }
 	monitorDone := make(chan struct{})

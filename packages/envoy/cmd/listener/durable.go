@@ -264,6 +264,13 @@ const durableProbeConfirm = 250 * time.Millisecond
 // that is load-bearing: a JetStream deadline or a reconnect gap must not count as a probe failure,
 // because the monitor splits its transient and terminal counts on exactly that.
 //
+// Each read runs under ctx, so the shutdown's cancellation cuts a read the server has not
+// answered rather than leaving it to run out. ctx carries no deadline of its own, so nats.go puts
+// the JetStream handle's 10 s MaxWait (internal/bus/nats.go:247) under it, and a read stays
+// bounded as it was before. A read ctx cuts fails with ctx's own error, context.Canceled or
+// context.DeadlineExceeded, which is no ErrConsumerNotFound and so reads as success like any
+// other unclassified error.
+//
 // An unbound read is confirmed by a second read, because one is not enough: the rebuild
 // unsubscribes the live handle before it binds (internal/bus/nats.go:341-348), so a single stale
 // answer taken during somebody else's rebuild would cost this listener a working subscription, and
@@ -276,7 +283,7 @@ func durableProbe(ctx context.Context, client *bus.Client, consumer string) erro
 		if read > 0 && waitUnlessDone(ctx, durableProbeConfirm) != nil {
 			return nil
 		}
-		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
+		info, err := client.JS().ConsumerInfo(bus.Stream, consumer, nats.Context(ctx))
 		if err != nil {
 			if errors.Is(err, nats.ErrConsumerNotFound) {
 				return err
@@ -293,8 +300,11 @@ func durableProbe(ctx context.Context, client *bus.Client, consumer string) erro
 // The rebind pair is deliberately far shorter than the startup pair above. durableBindInterval and
 // durableBindDeadline (2 s / 135 s) wait out a rolling deploy's old task holding the durable; these
 // run inside the self-health monitor, whose rebuild is synchronous and which shutdownListener waits
-// for inside the one 10 s budget it shares with the HTTP stop (main.go:911-931), so a rebind that
-// cannot land must give up long before that budget is spent.
+// for inside the one 10 s budget it shares with the HTTP stop (main.go:930-950), so a rebind that
+// cannot land must give up long before that budget is spent. awaitDurableBound keeps to the
+// deadline even against a server that never answers: each read is cut where the deadline falls,
+// not at the JetStream handle's 10 s MaxWait (internal/bus/nats.go:247), which would stretch the
+// 3 s here to 13 s.
 const (
 	durableRebindInterval = 250 * time.Millisecond
 	durableRebindDeadline = 3 * time.Second
@@ -303,22 +313,26 @@ const (
 // awaitDurableBound waits until the server itself reports consumer delivering to client's own
 // subscription, so a rebuild reports success only once the binding exists rather than once the
 // subscribe call returned. It returns ctx.Err() when ctx ends first and an error wrapping
-// errDurableUnbound, naming how long it waited, once deadline passes.
+// errDurableUnbound, naming how long it waited, once deadline passes. Each read runs under ctx and
+// ends no later than deadline, so neither a cancellation nor the deadline waits on a read the
+// server has not answered.
 func awaitDurableBound(ctx context.Context, client *bus.Client, consumer string, interval, deadline time.Duration) error {
 	start := time.Now()
 	for {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		info, err := client.JS().ConsumerInfo(bus.Stream, consumer)
-		if err == nil && !durableUnbound(info, client) {
-			return nil
-		}
 		waited := time.Since(start)
 		if waited >= deadline {
 			return fmt.Errorf("durable %s %w after %s", consumer, errDurableUnbound, waited.Round(time.Millisecond))
 		}
-		if err := waitUnlessDone(ctx, min(interval, deadline-waited)); err != nil {
+		readCtx, cancel := context.WithTimeout(ctx, deadline-waited)
+		info, err := client.JS().ConsumerInfo(bus.Stream, consumer, nats.Context(readCtx))
+		cancel()
+		if err == nil && !durableUnbound(info, client) {
+			return nil
+		}
+		if err := waitUnlessDone(ctx, min(interval, deadline-time.Since(start))); err != nil {
 			return err
 		}
 	}
