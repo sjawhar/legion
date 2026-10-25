@@ -150,14 +150,20 @@ the session re-reads the getters, unthrottled since they are in-memory, on every
 (a replay, and each watch the relay re-arms every ten seconds), on `turn_start`, on
 `retry_fallback_applied`, and in `runTypedInput` after `sendUserInput` settles and before the reply
 is posted, so the header shows a switch's result before its answer arrives. The publisher
-(`setSettings`) keeps the frame and publishes it only when it changed and a viewer is attached; the
-refresh has its own `try`/`catch`, so a getter that throws never blocks a replay answer. A replay
+(`setSettings`) keeps the frame and publishes it only when it changed and a viewer is attached, and
+a control message that arms a publisher nobody was watching also sends the settings and commands
+frames as they stand (`publishState`): a page held open while the session is relaunched with
+`--resume` gets no replay from the new process, only the relay's re-arming watches. The refresh has
+its own `try`/`catch`, so a getter that throws never blocks a replay answer. A replay
 ends with the history, then `settings`, then `commands` last; the settings frame is paid for first
 and whole, the commands keep the prefix that fits in what is left, and the history takes what
 remains. A model id is a few tens of bytes, so 5,000 models fit the 512 KiB budget with room for the
 commands; a list larger than the whole budget leaves no room for anything else, and a replay over
 the NATS server's `max_payload` fails to publish, which the control pump logs. A change of session
-id (`watchAgentStream`) resets the publisher, settings included.
+id (`watchAgentStream`) resets the publisher, settings included, but never its `seq` counter, which
+starts at the clock's milliseconds × 1,000: the page keeps a `settings` or `commands` frame only when
+its `seq` beats the one it applied, and a page held open while the session is relaunched with
+`--resume` holds the earlier process's numbers, so every later process must count above them.
 
 The record's limit: it keys on the attempt a frame names, so a forger who reads `message.created`
 (every authenticated caller's event stream carries it, and Dispatch publishes it before its own

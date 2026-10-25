@@ -27,6 +27,16 @@
 
 ### Fixed
 
+- A live view held open while its session is relaunched with `--resume` now shows the resumed
+  process's model, thinking level and command changes. Two things stopped it. Every process
+  numbered its agent-stream frames from 0, and the page keeps a `settings` or `commands` frame only
+  when its `seq` beats the one it already applied, so it ignored everything the resumed process sent
+  below the earlier process's count: the publisher now seeds `seq` from its clock (milliseconds ×
+  1,000) and never moves it back on a reset, so a later process of the session numbers above every
+  frame an earlier one sent. And the page's relay asks the new process for no replay, only re-arms
+  it with bare watches, so the settings and commands the process read before the first watch never
+  reached the page: a control message that arms a publisher nobody was watching now also sends the
+  settings and commands as they stand (INFRA-195).
 - A pass or a role move that never settles no longer stops the registration heartbeat. Both serial
   queues (`passes`, `roleMoves`) give each task a deadline, never shorter than the heartbeat
   interval: past it the caller's call rejects, the queue starts the next task, and the abandoned

@@ -182,9 +182,11 @@ export interface AgentStreamSettingsUnreported {
 export type AgentStreamSettings = AgentStreamSettingsReported | AgentStreamSettingsUnreported;
 
 /**
- * One frame. `seq` is the session's own monotonic counter: frames for one message arrive in any
- * order the host's concurrent handlers produce them, so a viewer applies a frame only when its
- * `seq` beats the one it already holds for that id.
+ * One frame. `seq` is the session's own monotonic counter, monotonic across the session's
+ * processes too: a session relaunched with `--resume` numbers its frames above every frame the
+ * earlier process sent, so a page held open across the relaunch keeps applying them. Frames for one
+ * message arrive in any order the host's concurrent handlers produce them, so a viewer applies a
+ * frame only when its `seq` beats the one it already holds for that id.
  */
 export type AgentStreamFrame =
   | {

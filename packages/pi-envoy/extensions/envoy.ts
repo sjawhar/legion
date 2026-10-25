@@ -1515,8 +1515,13 @@ export default function envoyExtension(pi: PiApi): void {
             request.type === "replay" && reply !== undefined
               ? JSON.stringify(agentStream.replay(session))
               : undefined;
+          // A viewer arming a session nobody was watching is sent the settings and commands as
+          // they stand: what was read before it arrived was kept unpublished, and a page held open
+          // while this session was relaunched gets no replay from this process (`publishState`).
+          const arming = !agentStream.watched;
           agentStream.noteViewer();
           agentStreamViewerAttached = true;
+          if (arming) agentStream.publishState(agentStreamFramesSubject(session));
           if (answer === undefined || reply === undefined) continue;
           connection?.publish(reply, codec.encode(answer));
         } catch (error) {

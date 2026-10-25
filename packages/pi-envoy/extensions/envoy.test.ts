@@ -9814,9 +9814,11 @@ describe("envoy OMP extension", () => {
         await fixture.handlers.get("message_start")?.({ message }, context);
         await fixture.handlers.get("message_end")?.({ message }, context);
 
+        // The watch that armed the stream also sent the settings it kept (`publishState`).
         const frames = natsState.published
           .filter((published) => published.subject === "agentstream.ses_delivery.frames")
-          .map((published) => JSON.parse(new TextDecoder().decode(published.data)));
+          .map((published) => JSON.parse(new TextDecoder().decode(published.data)))
+          .filter((frame) => frame.kind === "message");
         expect(frames.map((frame) => [frame.message.id, frame.message.dispatchMessageId])).toEqual([
           ["u10", tag],
           ["u10", tag],
@@ -10715,10 +10717,37 @@ describe("envoy OMP extension", () => {
       session.model = { id: "claude-opus-5", provider: "anthropic" };
       control.push(JSON.stringify({ type: "watch", v: 1 }));
       await settle();
+      // The first is what the watch that armed the stream sent (`publishState`).
       expect(publishedSettings().map((frame) => frame.model)).toEqual([
+        "anthropic/claude-opus-5",
         "openai/gpt-5.5",
         "anthropic/claude-opus-5",
       ]);
+    });
+
+    // A page held open while its session is relaunched with `--resume` already has its relay's
+    // replay answer, so the new process hears only the relay's bare watches: the first of them must
+    // send what this process read before it, or the header keeps the earlier process's values.
+    test("the first bare watch a relaunched process hears sends the settings it read before it", async () => {
+      const session = liveSession();
+      const { context, fixture } = await bootDirectSession("settings-frame-relaunched");
+      session.level = "high";
+      await fixture.handlers.get("turn_start")?.({}, context);
+      expect(publishedSettings()).toEqual([]);
+      const control = natsState.controls.get("agentstream.ses_delivery.control");
+      if (control === undefined) throw new Error("the agent stream's control was not subscribed");
+
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      await settle();
+      expect(publishedSettings()).toEqual([
+        expect.objectContaining({
+          thinking: { level: "high", levels: ["off", "auto", "low", "high"] },
+        }),
+      ]);
+
+      control.push(JSON.stringify({ type: "watch", v: 1 }));
+      await settle();
+      expect(publishedSettings()).toHaveLength(1);
     });
 
     for (const [event, payload] of [
@@ -10736,7 +10765,10 @@ describe("envoy OMP extension", () => {
         session.model = { id: "gpt-5.5", provider: "openai" };
         await fixture.handlers.get(event)?.(payload, context);
 
-        expect(publishedSettings().map((frame) => frame.model)).toEqual(["openai/gpt-5.5"]);
+        expect(publishedSettings().map((frame) => frame.model)).toEqual([
+          "anthropic/claude-opus-5",
+          "openai/gpt-5.5",
+        ]);
       });
     }
 
@@ -10754,7 +10786,8 @@ describe("envoy OMP extension", () => {
       await replayedSettings("inbox-settings-typed-input");
       const repliesWhenPublished: number[] = [];
       natsState.onPublish = (subject) => {
-        if (subject === settingsSubject && publishedSettings().length > 0) {
+        // Past the one the watch that armed the stream sent (`publishState`).
+        if (subject === settingsSubject && publishedSettings().length > 1) {
           repliesWhenPublished.push(replies.length);
         }
       };
@@ -10762,7 +10795,10 @@ describe("envoy OMP extension", () => {
       agent.push(directDispatchEnvelope("steer", "settings-frame-typed-input"));
       await replied(1);
 
-      expect(publishedSettings().map((frame) => frame.model)).toEqual(["openai/gpt-5.5"]);
+      expect(publishedSettings().map((frame) => frame.model)).toEqual([
+        "anthropic/claude-opus-5",
+        "openai/gpt-5.5",
+      ]);
       expect(repliesWhenPublished).toEqual([0]);
     });
 

@@ -121,6 +121,16 @@ function jsonBytes(value: unknown): number {
   return encoder.encode(JSON.stringify(value)).length;
 }
 
+/**
+ * Sequence numbers each millisecond of a publisher's clock is worth. A viewer keeps a frame only
+ * when its `seq` beats the one it already applied, and a page held open while its session is
+ * relaunched (`--resume`) keeps everything the earlier process sent, so a later process must start
+ * above any number an earlier one reached: seeding from `now() * SEQ_PER_MS` does that unless the
+ * earlier one averaged more than a thousand records a millisecond. `Date.now() * 1000` stays below
+ * `Number.MAX_SAFE_INTEGER` until the year 2255.
+ */
+const SEQ_PER_MS = 1_000;
+
 /** `provider/id` combined (e.g. `anthropic/claude-opus-5`), or undefined when either is missing or
  *  empty — an empty string still satisfies `typeof x === "string"`, and combining one anyway would
  *  publish a malformed `/claude-opus-5` or `anthropic/`. Never capped: a settings frame names the
@@ -283,7 +293,9 @@ export class AgentStreamPublisher {
   /** When each message was last put on the wire, so a token storm costs one frame per
    *  `snapshotIntervalMs` rather than one per delta. */
   readonly #publishedAt = new Map<string, number>();
-  #seq = 0;
+  /** The last sequence number handed out. Seeded from the clock, so it is monotonic across the
+   *  session's processes as well as within one: see `SEQ_PER_MS`. `reset` never touches it. */
+  #seq: number;
   #watchedUntil = 0;
   /** The slash commands the session takes from Dispatch, capped and each name once, before the
    *  byte fit; undefined for a session whose host cannot run typed input, which publishes none. */
@@ -299,6 +311,7 @@ export class AgentStreamPublisher {
 
   constructor(deps: AgentStreamPublisherDeps) {
     this.#deps = deps;
+    this.#seq = Math.trunc(deps.now()) * SEQ_PER_MS;
   }
 
   /** A viewer asked for this session: publish for the next `AGENT_STREAM_WATCH_TTL_MS`. */
@@ -306,14 +319,35 @@ export class AgentStreamPublisher {
     this.#watchedUntil = this.#deps.now() + AGENT_STREAM_WATCH_TTL_MS;
   }
 
+  /**
+   * Publishes the settings and the command list as they stand, while a viewer is attached. The
+   * caller sends them to a viewer that has just armed a publisher nobody was watching: what this
+   * process read before then was kept without being published, and a viewer does not always read
+   * it from a replay. A page held open while its session is relaunched with `--resume` gets no
+   * replay from the new process — its relay already had an answer and only re-arms it — so without
+   * this its header keeps the earlier process's values until the next change. A viewer that also
+   * replays is sent the same frames twice under the same `seq`, and keeps one.
+   */
+  publishState(subject: string): void {
+    if (!this.watched) return;
+    if (this.#settings !== undefined) {
+      this.#deps.publish(subject, JSON.stringify(this.#settingsFrame(this.#settings)));
+    }
+    if (this.#commands !== undefined) {
+      this.#deps.publish(subject, JSON.stringify(this.#commandsFrame(this.#commands)));
+    }
+  }
+
   get watched(): boolean {
     return this.#deps.now() < this.#watchedUntil;
   }
 
   /**
-   * Forget everything: the session under this publisher has been replaced. `/new`, `/resume`, a
-   * fork and a tree navigation all move the session id while the extension instance lives on,
-   * and a viewer opening the new id must not be served the previous conversation.
+   * Forget everything but the sequence counter: the session under this publisher has been
+   * replaced. `/new`, `/resume`, a fork and a tree navigation all move the session id while the
+   * extension instance lives on, and a viewer opening the new id must not be served the previous
+   * conversation. The counter carries on, so a session resumed back into this process still
+   * numbers its frames above what a page held open on it already applied.
    */
   reset(): void {
     this.#history.clear();
