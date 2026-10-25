@@ -868,6 +868,10 @@ func (r *liveRig) checkSameAgentNegative() error {
 		return err
 	}
 	beforeOwn := len(roleIncarnations(before, second.role))
+	// absent is a session *name* the table does not hold, not a place on any disk: it keeps the
+	// ompSessionsDir spelling only because that is the shape Oh My Pi recorded sessions under, and
+	// the launcher refuses it from the table before any child runs — nothing creates or needs this
+	// directory, which no pod mounts any more.
 	absent := ompSessionsDir + "/absent-" + SandboxName(second.token) + "-" + string(second.role) + ".jsonl"
 	_, err = r.resume(second, absent)
 	if err == nil {

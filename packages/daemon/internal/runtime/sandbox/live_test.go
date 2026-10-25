@@ -931,7 +931,12 @@ func newLiveRig(t *testing.T, env liveEnv) *liveRig {
 		}
 		r.claims = append(r.claims, &liveClaim{
 			token: token, tree: c.tree, issue: c.issue, role: c.role, name: c.name,
-			marker:  ompSessionsDir + "/" + SandboxName(token) + ".marker",
+			// The marker sits at the root of the issue's volume: TreeRoot is the one path every
+			// role container of the pod mounts read-write (manifest.go's role mounts), so the six
+			// roles of an issue share the one file, and it is the pod's own ephemeral disk, so it
+			// dies with the pod — the property this file's header claims. No pod mounts
+			// ompSessionsDir any more, which is why the marker is not there.
+			marker:  TreeRoot + "/" + SandboxName(token) + ".marker",
 			session: ompSessionsDir + "/" + SandboxName(token) + "-" + string(c.role) + ".jsonl",
 		})
 	}
