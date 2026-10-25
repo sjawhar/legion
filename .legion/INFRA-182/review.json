@@ -2,21 +2,15 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-182",
-  "completed": "2026-10-25T08:37:00Z",
-  "decision": "changes_requested",
-  "round": 3,
-  "reviewedCodeHead": "29ebf098c578",
+  "completed": "2026-10-25T09:50:00Z",
+  "decision": "approved",
+  "round": 4,
+  "reviewedCodeHead": "93b84d82e4c5a3221cab2d8faabd4553d65625cd",
   "critical": 0,
-  "important": 1,
+  "important": 0,
   "minor": 0,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/bus/remote_nats_test.go:56,89,118",
-      "description": "Round 2's change to the remote-NATS refusal (internal/bus/reach.go:48, natsURLWithoutUserinfo, 2281e62aabbc) broke three existing tests that this PR did not update: TestConnectOwningStreamRefusesANATSServerThatIsNotThisMachines, TestDialRefusesANATSServerThatIsNotThisMachines and TestConnectRefusesANATSServerThatIsNotThisMachines. Each one asserts that the refusal contains `remote`, a testnats URL that carries user:password, verbatim. They failed in envoy-go-race at dd2fb2b41ecf (run 40173085050, job 121111427588; remote_nats_test.go:56, :89, :118: `refusal \"bus: refusing a NATS server that is not this machine's: nats://10.1.1.85:32771 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)\" does not name ... the server ***10.1.1.85:32771`). The production code is unchanged since then, and remote_nats_test.go is unchanged at this head, so the next envoy-go and envoy-go-race runs will fail the same way. Fix: assert that the refusal names the address without userinfo, keep the override assertion, and assert that neither the user nor the password is present. Keep the redaction."
-    }
-  ],
-  "roundTwoFindings": "PRRT_kwDORFy7ds6v_jdd (the unguarded log capture) is fixed in 29ebf098c578 and accepted, with a reply on the thread.",
-  "ci": "Code head 29ebf098c578 (compare to 5cda7902: only .legion/ changed), read 08:29Z: every job queued except Docs (success) and Worker Image (in progress). At dd2fb2b41ecf, envoy-go-race failed on the three remote_nats tests above, and envoy-go, envoy-smoke, envoy-infra-go, dispatch and pi-legion were cancelled. A request for changes does not wait on CI.",
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality at 5cda7902: both CHANGES on the remote_nats assertions alone. Their repository-wide consumer search (packages/envoy, packages/daemon, scripts, docs, CI) found no other test or consumer that depends on the old URL rendering, the old watcher-stopped ERROR level or the health body. The round's test-helper delta is sound."
+  "keyFindings": [],
+  "roundThreeFindings": "PRRT_kwDORFy7ds6v_r00 is fixed in 93b84d82e4c5 and accepted: checkRefusal (remote_nats_test.go:262-302) asserts that the refusal names the server without userinfo and names the override, that it has no @, and that neither part of the credential appears as a whole token. reach.go is unchanged.",
+  "ci": "Code head 93b84d82e4c5. The compare to 737965671b30 lists only .legion/ files. The required lint, typecheck, test and pr-title are success. Legion Envoy and Contracts run 40177636362: envoy-go (121123064645) and envoy-go-race (121123064791) are success, with cmd/listener, internal/bus and internal/kvwatch ok. Those packages hold A1-A5's tests, and none of them has a skip path except remote_nats's no-IPv4 skip, which does not fire on that runner (it failed there last round). envoy-smoke, envoy-e2e-local, envoy-infra-go, dispatch* and pi-legion are success too.",
+  "scope": "The architect narrowed this round to the remote_nats fix and the container CI lanes. This round's delta is test-only, and the production code is unchanged since d29ce4b7, which both thermonuclear agents audited with no production finding (again at 5cda7902). So no new pair ran on a delta with no runtime code."
 }
