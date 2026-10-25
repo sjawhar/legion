@@ -2063,7 +2063,8 @@ export interface CreateIssueInput {
   readonly labels?: string[];
   readonly priority?: IssuePriority | null;
   /** The email of a person who has signed in; omitted, the server picks the creating person, the
-   *  personal token's owner, or the parent's assignee. */
+   *  personal token's owner, the parent's assignee, or the project's default assignee when that
+   *  still names a person who has signed in. */
   readonly assignee?: string;
   /** The issue's own component attachment; omitted, it inherits its parent's. */
   readonly components?: IssueComponentsInput;

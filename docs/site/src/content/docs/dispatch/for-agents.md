@@ -53,7 +53,9 @@ goes through a `dispatch` command.
 
 Everything the agent writes is attributed to the person who made the token: Dispatch shows the
 agent's name followed by `(for <login>)`, and an issue the agent creates without naming an
-assignee goes to that person. `dispatch issue` names the assignee Dispatch chose. `dispatch whoami`
+assignee goes to that person. An agent on the shared token has no such person, so its issue takes
+its parent's assignee instead, and where no parent names one, the project's default assignee, set
+on the Settings page. `dispatch issue` names the assignee Dispatch chose. `dispatch whoami`
 tells the agent who Dispatch takes it for.
 
 ## The commands

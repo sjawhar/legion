@@ -77,7 +77,8 @@ exercise a criterion end to end, building that path is a child issue of this tre
   relationship from `--parent`. Keep the returned issue keys in ordered waves; a child is
   inert until released. Do not pass `--assignee`: the default keeps the tree's questions in one
   Inbox — under the shared token a child inherits its parent's assignee (the human who
-  answers the tree's asks); under a personal token it goes to that token's owner, whom
+  answers the tree's asks), and where no parent names one the project's default assignee, which
+  a person sets on the Settings page; under a personal token it goes to that token's owner, whom
   `dispatch whoami` names. Set it only when a human told you a specific person owns that child.
 
 A change across repositories gets one child per repository, each created with

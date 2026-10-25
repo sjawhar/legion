@@ -2662,7 +2662,7 @@ export async function executeDispatchTool(
     // A Dispatch that predates verified service tokens omits the field entirely.
     const service = identity.kind === "agent" ? (identity.service ?? null) : null;
     const unowned =
-      "no owner, so issues you create without an assignee are unassigned (or inherit their parent's).";
+      "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
     return {
       text:
         owner !== null
@@ -2789,7 +2789,8 @@ export async function executeDispatchTool(
         ];
         const href = new URL(`/issues/${encodeURIComponent(created.key)}`, linkBase).toString();
         // Dispatch picks the assignee when the call names none (the creating person, the personal
-        // token's owner, or the parent's), so the line says whom it answered.
+        // token's owner, the parent's, or the project's default), so the line says whom it
+        // answered.
         const assigned =
           created.assignee === undefined
             ? ""

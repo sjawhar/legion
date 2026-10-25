@@ -4,6 +4,10 @@
 
 ### Added
 
+- The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
+  `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
+  still names a person who has signed in, and `dispatch_whoami` says a session under the shared
+  token creates issues that fall to the parent's assignee and then to that default.
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`

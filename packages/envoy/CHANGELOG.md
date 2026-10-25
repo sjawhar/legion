@@ -4,6 +4,15 @@
 
 ### Added
 
+- A project's default assignee, the last step of an issue create's assignee chain: an issue created
+  with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
+  it, goes to the person the project names, and is unassigned only where the project names none. A
+  default that no longer names a person who has signed in is ignored rather than refused, so a
+  create never fails on a stale one. A person sets it on the Settings page through
+  `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee`
+  `{assignee}` (an email of someone who has signed in, or `null` to clear it; otherwise
+  `400 ASSIGNEE_NOT_ALLOWED`), which appends `settings.project_default_assignee.updated`. Both
+  routes are human-only and no agent command, flag or route sets a project's default.
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
   releases nothing and ends the grant for good, as a kind change found before the read does, so a
