@@ -2,93 +2,95 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-92",
-  "completed": "2026-10-25T06:30:00Z",
-  "round": 2,
-  "verdict": "fail",
+  "completed": "2026-10-25T09:55:00Z",
+  "round": 3,
+  "verdict": "pass",
+  "runNote": "The first attempt at this round's browser projects started at 07:16 and was lost when the issue's pod was replaced at about 08:05 (new pod uid c6aa38ab, generation 2); the container's own /tmp went with it, including this rig's Postgres data directory. The issue volume survived, so the rig's program files at /legion/scratch/dispatch-e2e-rig/pg17 and the Playwright browsers at /legion/scratch/cache/ms-playwright needed neither reinstall nor download. The projects were re-run whole from 08:07, and the plugin measurements below, taken before the replacement at this same code head, stand as they were taken. That is the gap in this round's timeline.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Every claim in implement.json at 398af3d484a2 was re-run here at code head 1e510bb95874, not read. Its browser claim: I ran the whole chromium project myself, 721 passed / 0 failed in 55.4 minutes, the same number it reports, and then the whole iphone project (616 passed, 1 failed, 126 skipped, 51.2 minutes) and chromium-plain-http (4 passed), which it could not complete. The one iphone failure is e2e/phone.e2e.ts:393, dispatch://INFRA-95's row, and I proved it nondeterministic rather than citing the issue: three runs of that row alone at this same head gave fail, pass, fail. Its plugin claim: bash packages/claude-envoy/scripts/smoke-session-title.sh passed here, all four cases, with its main@origin control. Its hook-cost claim is the one correction — see hookCost below; the ~115 ms is genuinely gone, but 'nothing measurable' over bare Bun is not what this machine shows.",
-    "corrections": [
-      "implement.json's third proof entry says the new hook 'costs bare Bun start-up plus nothing measurable'. Measured here in the same loop: the new bundle 73 / 74 / 79 ms, a bare `bun` script that only exits 45 / 52 / 54 ms, the old shared bundle 179 / 193 / 197 ms. So the hook costs about 25 ms over bare Bun, not nothing; the reviewer's ~115 ms of overhead is gone either way."
-    ]
+    "how": "Every claim of implement.json at 80d324defedc was re-run here at code head 6d42d4911eaf. Its page claim: rather than its filtered agents.e2e.ts run, the whole chromium project (720 passed, 2 failed, 22 skipped, 53.2 minutes), the whole iphone project (617 passed, 1 failed, 126 skipped, 45.9 minutes) and chromium-plain-http (4 passed); the three failures are classified below and none is this change's. Its floor claim: measured again at 768, 1024, 1280 and 1440 — the ordinary row's directory is 192 x 16 px at every one of them, its text whole under assertWhole, its title the full path. Its role-guard claim: re-run against a real listener on four shapes rather than its one, with main@origin as the control. Its smoke: PASS with its main@origin control. Its restated hook timing I did not re-measure: the quantity moves with pod load, the interleaved n=12 sample is the honest form of it, and nothing of this round changed that bundle.",
+    "beyondIt": "The two rows that pin the page are green in both profiles in the whole-project runs: agents.e2e.ts:1717 with its new visible-plus-assertWhole laptop branch, and my round-two red row at agents.e2e.ts:1807, which passes unmodified. The implementer did not touch :1807."
   },
-  "failures": [
-    {
-      "criterion": "The Agents page layout, spec section 'The Agents page layout': 'The directory gives up the width: at a laptop's width it shrinks to its last path segment and keeps the full path on hover.' Beside the 64-character name the spec sizes the row against, the directory is given no width at all at a laptop's width, so neither the segment nor the hover reaches the person.",
-      "evidence": "Measured in a real Chromium at this head, 1280x800: the row whose title is the spec's own name64 renders its [data-agent-dir] span at 0x16 px with isVisible() false, while the identical row with the title 'Short' renders it at 397x16 px and visible. Its heading is 562x40, two lines, so the name has taken the whole row. At 1440 the same long-name row recovers to 158 px, and at 767 and below both rows show the whole path on their own line, so the loss is the md layout alone. The committed row at agents.e2e.ts:1717 passes over it because toHaveText and toHaveAttribute both succeed on a zero-width element — CI's dispatch job is green at this head for that reason. Red test: 'an agent row's directory is still shown beside the longest name in use, so its path stays one hover away', packages/dispatch/e2e/agents.e2e.ts:1802, committed at c2f5c526c51e. It fails under chromium with 'the directory beside the 64-character name is 0px wide, against 397px in the same row with a short name' and passes under iphone, where the directory keeps its own line. Command: cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e_p PATH=<pg17>/bin:$PATH LD_LIBRARY_PATH=<pg17 libs> ./node_modules/.bin/playwright test --config e2e/playwright.config.ts e2e/agents.e2e.ts --project chromium --project iphone -g 'directory is still shown beside the longest name' → 1 failed, 1 passed."
-    }
-  ],
-  "failed": 1,
+  "failures": [],
+  "failed": 0,
   "proof": [
     {
-      "criterion": "The ten browser rows the first round broke pass again, and nothing else in the suite moved (reviewer finding 1).",
-      "surface": "Dispatch's own browser suite in a real Chromium in this pod, the whole chromium project rather than a filter, against PostgreSQL 17.11 with pgvector at /legion/scratch/dispatch-e2e-rig/pg17 and the Playwright cache at /legion/scratch/cache/ms-playwright.",
-      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e_c ./node_modules/.bin/playwright test --config e2e/playwright.config.ts --project chromium",
-      "observed": "721 passed, 0 failed, 55.4 minutes (04:09:46 to 05:05:15 UTC), every spec from activity.e2e.ts to writes.e2e.ts, the eight rows the reviewer named included. The iphone project then ran whole: 616 passed, 126 skipped, 1 failed, 51.2 minutes; chromium-plain-http: 4 passed.",
-      "headSha": "398af3d484a287556c025836b1bdc8b20744ff5b",
-      "negativeControl": "The one iphone failure, e2e/phone.e2e.ts:393, re-run three times alone at this same head: fail, pass, fail. A row that decides differently on one unchanged head is dispatch://INFRA-95's flake and not this change's, and it is the control that the suite's other 1,341 rows settle deterministically."
+      "criterion": "Both sentences the spec promises at a laptop's width hold at once: the whole 64-character name, and a directory that is painted, readable and hoverable — the round-two failure, fixed.",
+      "surface": "Dispatch's own browser suite in a real Chromium in this pod, the whole projects rather than a filter, against PostgreSQL 17.11 with pgvector at /legion/scratch/dispatch-e2e-rig/pg17 and the Playwright cache at /legion/scratch/cache/ms-playwright.",
+      "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e_c ./node_modules/.bin/playwright test --config e2e/playwright.config.ts --project chromium, then the same for --project iphone and --project chromium-plain-http",
+      "observed": "chromium 720 passed / 2 failed / 22 skipped (53.2m, 08:07:04-09:00:16 UTC); iphone 617 passed / 1 failed / 126 skipped (45.9m); chromium-plain-http 4 passed. agents.e2e.ts:1717 and agents.e2e.ts:1807 both green in chromium and in iphone. The three failures are the flakes and the known row recorded in notThisChange; each was re-run three times alone at this head to classify it.",
+      "headSha": "80d324defedc9db4cdee90809f0f440d7922745a",
+      "negativeControl": "My round-two measurement at the previous head is the control the defect supplied: the same row's directory was 0 x 16 px and not visible at 1280 and 158 px at 1440. It is 192 px at both now, and the red row that measured it passes unmodified."
     },
     {
-      "criterion": "The chosen name still registers, a rename still replaces it, an unnamed session keeps the fallback, and the dispatch command carries the same name — after the title helpers moved module and the title file gained its .txt suffix.",
-      "surface": "The committed bundles run as Claude Code runs them, including the new dist/session-title-hook.js, against a real nats-server with JetStream and an Envoy listener built from this tree, read back through the listener's GET /v1/sessions.",
+      "criterion": "The floor holds across widths, and the directory cannot take the row away from the name — the mirror of the defect, which the architect asked to have attacked because dropping md:truncate was a behaviour nobody specified.",
+      "surface": "A throwaway spec in the same rig, run in the chromium project at 768, 1024, 1280 and 1440 and in the iphone project at 390, seeding rows the committed suite does not: a 204-character last segment, a 59-character machine name, both at once beside a 2,000-character name, a 2,000-character name alone, dir '/' and dir ''.",
+      "command": "bunx playwright test --config e2e/playwright.config.ts e2e/zz-floor-probe.e2e.ts --project chromium --project iphone (deleted after the run; not in the tree)",
+      "observed": "The ordinary row's directory is exactly 192 x 16 px at 768, 1024, 1280 and 1440, reads 'build-host · features' whole under assertWhole and carries the full path in its title. A 204-character last segment grows the directory past its floor to 253 px at 768, 451 at 1280 and 611 at 1440 and wraps it to two or three lines (48-96 px tall) while the short name beside it keeps its 112 px, the row staying 98-158 px tall. A 59-character machine name: 253-508 px, one or two lines, row 46-106 px. Both long at once: the directory holds its 192 px floor and wraps to 688 px tall, beside a heading of 800-2,680 px — so the wall is the name's and not the directory's. dir '/' and dir '' are kept as they are rather than shown empty. assertPageFits held at all four laptop widths, and assertWhole over the shortened directory and over both monstrous directories found nothing clipped.",
+      "headSha": "80d324defedc9db4cdee90809f0f440d7922745a",
+      "negativeControl": "1440 against 1280 in the same run: at the previous head those read 158 px and 0 px, so a fix that only worked at the wider width would show as an unequal pair. Both read 192."
+    },
+    {
+      "criterion": "An unreadable or unusable role file costs the session its role and nothing else: the channel server stays up, registered, and still beating (the architect's queued item, and the crash I reproduced in round two on this head and on main@origin alike).",
+      "surface": "The committed dist/envoy-channel.js run as Claude Code runs it, against a real nats-server with JetStream and an Envoy listener built from this tree.",
+      "command": "a throwaway probe over four shapes — the role file at mode 000, the roles directory at mode 000, a role file holding text that is not JSON, and a directory standing where the role file should be — each run against this head and the first two also against main@origin's bundle in the same run",
+      "observed": "On this head, all four: the process alive after 8 s, the listener holding the session's chosen name, and a rename recorded afterwards reaching the listener within the heartbeat, so the timer is armed. Exactly one stderr line each, naming the file and the reason — 'envoy-channel: could not restore the role from <…>/roles/<id>.json (EACCES: permission denied, open …); the session starts without one', and the same line with 'JSON Parse error: Unexpected identifier \"this\"' and with 'EISDIR: illegal operation on a directory, read'. No delete, no rename, no retry.",
+      "headSha": "80d324defedc9db4cdee90809f0f440d7922745a",
+      "negativeControl": "main@origin's dist/envoy-channel.js in the same run, both permission cases: the process dead with 'Claude Envoy channel server failed: EACCES: permission denied, open …/roles/<id>.json', the listener still listing the session — the row on the Agents page that never beats again, which this guard removes.",
+      "note": "The garbage-JSON and directory-in-place shapes are beyond the implementer's own probe, which ran the permission case alone; the guard holds for the class, not just for EACCES."
+    },
+    {
+      "criterion": "The chosen name still registers, a rename still replaces it, an unnamed session keeps the fallback, and the dispatch command carries the same name — after the row's floor change and the role guard.",
+      "surface": "The committed bundles, dist/session-title-hook.js included, against a real nats-server with JetStream and an Envoy listener built from this tree, read back through GET /v1/sessions.",
       "command": "bash packages/claude-envoy/scripts/smoke-session-title.sh",
-      "observed": "PASS: the listener held 'eeny meeny', then 'miny moe' after a UserPromptSubmit payload went through the new separate bundle, then 'probe-project smoke-ti' when the name was taken away, and the dispatch stamp held 'miny moe'.",
-      "headSha": "398af3d484a287556c025836b1bdc8b20744ff5b",
-      "negativeControl": "The script's last case: the same recorded name against main@origin's dist/envoy-channel.js registered the folder-and-short-id fallback and not the chosen name."
-    },
-    {
-      "criterion": "The new standalone UserPromptSubmit hook keeps the silent-stdout, always-exit-0 contract with a hand-written payload check in place of zod (reviewer finding 2), and its title file stays inside the state directory (finding 6).",
-      "surface": "The committed packages/claude-envoy/dist/session-title-hook.js (5,369 bytes), run with Claude Code's hook environment and a payload on stdin.",
-      "command": "a tester probe running the bundle over nineteen payloads, then ls of the titles directory",
-      "observed": "Every one exited 0 with an empty stdout: malformed JSON, empty stdin, a JSON array, a bare string, a number, null, a missing session_id, an empty session_id, a numeric session_id, and a null, numeric or object session_title, each with one stderr line naming the field. A good name was recorded, a blank one removed the record, and a 100,000-character name was written whole. A session id of '.' wrote titles/..txt and '..' wrote titles/...txt, both inside the directory, which is what the .txt suffix buys; '../../../../tmp/pwn2' wrote titles/..%2F..%2F..%2F..%2Ftmp%2Fpwn2.txt and created no /tmp/pwn2.",
-      "headSha": "398af3d484a287556c025836b1bdc8b20744ff5b",
-      "negativeControl": "CLAUDE_PLUGIN_DATA unset: exit 0, nothing on stdout, nothing on stderr. A read-only titles directory: exit 0, nothing on stdout, one stderr line 'envoy: could not record the session title — EACCES: permission denied'."
-    },
-    {
-      "criterion": "One pruneStateDirectory serves all three state directories with liveness and age as its predicates, including the role files that were never pruned (the fast-follow the architect asked for in this round).",
-      "surface": "A live channel server started against a real listener with a state directory seeded by hand.",
-      "command": "a tester probe seeding roles/old.json and roles/fresh.json, a 31-day-old and a fresh title, sessions/999999 (a dead pid), sessions/<live pid> and sessions/not-a-pid, then starting the committed dist/envoy-channel.js",
-      "observed": "After one startup: roles/old.json gone, roles/fresh.json present, the 31-day-old title gone, the fresh title present, sessions/999999 gone, the live pid's directory present, and sessions/not-a-pid present — the regex guard keeping a directory whose name is not a number.",
-      "headSha": "398af3d484a287556c025836b1bdc8b20744ff5b",
-      "negativeControl": "The fresh entries in the same sweep: a run that deleted everything, or nothing, would show the same list for both."
+      "observed": "PASS, all four cases: 'eeny meeny', then 'miny moe' after the UserPromptSubmit payload, then 'probe-project smoke-ti' with the name taken away, and the dispatch stamp holding 'miny moe'.",
+      "headSha": "80d324defedc9db4cdee90809f0f440d7922745a",
+      "negativeControl": "The script's last case: main@origin's dist/envoy-channel.js registered the folder-and-short-id fallback and not the chosen name."
     }
   ],
-  "startupSweepAttack": {
-    "why": "The architect asked for this one explicitly: reviewer finding 3's goal is that an unreadable state directory must never stop the channel server from starting.",
-    "method": "chmod 000 on one state directory at a time, the committed dist/envoy-channel.js against main@origin's bundle as the control, both with a real nats-server and listener.",
-    "sessionsDirectory": "Fixed by this change. main@origin exits: 'Claude Envoy channel server failed: EACCES: permission denied, scandir \"<state>/pd/sessions\"'. This head stays up and writes one line: 'envoy-channel: could not prune stale session state (EACCES: permission denied, scandir \"<state>/pd/sessions\")'. Its heartbeat then reports 'registry heartbeat failed (EACCES ... open \"<state>/pd/sessions/<pid>/session-id\"); retrying every heartbeat' each beat, so the session stays registered under the name it started with while that directory cannot be read.",
-    "rolesDirectory": "Not fixed, and identical on both bundles: 'Claude Envoy channel server failed: EACCES: permission denied, open \"<state>/pd/roles/<session id>.json\"', the process exits, and the Agents page keeps a row that never beats again. The cause is not a sweep: restoreRole runs in the serialized block at packages/claude-envoy/src/envoy-channel-server.ts:804-807, above the best-effort prune loop, and readPersistedRole tolerates a missing file but not an unreadable one. Pre-existing — the control proves it — so it is not a failure of this round, and the architect has decided (Envoy, 2026-10-25T04:11:36Z) that the two-line fix lands in this pull request rather than as a separate issue.",
-    "healthyDirectories": "The sweep results in the fourth proof entry above."
+  "acceptedTrade": {
+    "what": "A name far longer than any in use makes a very tall row: a 2,000-character name gives a heading 720 to 2,680 px tall depending on the width, and the row with it.",
+    "why": "The architect settled this and asked that the reasoning be recorded rather than left as his say-so. The longest name in use anywhere today is 64 characters, which is the size the spec names and the size the row is built for; at that size the heading takes two lines. The alternative is a clamp, and a clamp reintroduces exactly what this issue removes — text cut off where a person cannot read it — and would fail the unclipped guarantee the acceptance rests on. So an absurd name buys an absurd row and no name a person would type does. Measured here: 64 characters gives a heading of 370 x 40 at 1280 and 530 x 40 at 1440, two lines, with the directory at its 192 px floor beside it."
   },
-  "hookCost": {
-    "newBundleMs": [73, 74, 79],
-    "bareBunMs": [45, 52, 54],
-    "oldSharedBundleMs": [179, 193, 197],
-    "note": "Three runs each, same loop, same machine, under this pod's load. The reviewer's ~115 ms of overhead is gone; about 25 ms over bare Bun remains, which the implement handoff calls 'nothing measurable'."
+  "notThisChange": [
+    "e2e/board.e2e.ts:780, 'one URL-backed filter strip drives List and Board alike and survives a reload', failed once in the chromium project with a strict-mode violation: getByText('Labelled card') matched two elements at board.e2e.ts:798. Re-run three times alone at this head: pass, pass, pass. A locator race under full-suite load; it passed in the round-two whole-project run, and nothing of this change touches the Board.",
+    "e2e/hover-preview.e2e.ts:40 failed once in the chromium project on the 30-second test timeout, with no assertion failing. Re-run three times alone at this head: pass, pass, pass. Load, not behaviour.",
+    "e2e/phone.e2e.ts:393, 'an inline link keeps its line and grows its hit box without covering its neighbours', failed once in the iphone project and three times out of three when re-run alone on this pod, always on the same assertion, phone.e2e.ts:545, expect(line.onUpperTextBottom).toBe('Upper line') receiving 'not-a-link'. It is dispatch://INFRA-95's row and it is not this change's: it failed in CI's before-leg run 40143159250 at head 4a134cac6ddb, which carried none of this change, and it passed in my round-two re-runs at a head that carried all of it. What is new is only that it is red every time on this pod generation rather than one time in two, which is worth INFRA-95 knowing.",
+    "packages/claude-envoy's 'queryTmux is bounded even by a tmux that ignores SIGTERM' is the gVisor spawn-timeout host behaviour the stream lead settled as a retro learning. I did not re-run the package's unit suite: it is CI's, and CI is green at this head."
+  ],
+  "findingOutsideTheIssue": {
+    "what": "On a 390 px phone, one live session with a 59-character machine id zooms the Agents page out to 615 px. The element responsible is the page's own 'Agent filters' fieldset and its select of machine names, measured at 591 px wide; the agent rows themselves fit at 390 px with every monstrous fixture I gave them.",
+    "notOurs": "This pull request touches no part of that filter — the only line of AgentsPage.tsx it changes anywhere near it is the row's own '{machineAndDir}' — so the behaviour is pre-existing and a long machine name triggers it.",
+    "where": "Published to the project controller, notifications.role.legion-infra-controller, on the architect's instruction (Envoy, 2026-10-25T07:17:06Z): no ask, no issue filed by me; the controller decides what becomes of it."
   },
   "ciRead": {
-    "head": "1e510bb95874db89c4efcb891c92e8d2483bf141",
-    "readAt": "2026-10-25T06:28:00Z",
+    "head": "6d42d4911eaf67c527648979375ea87f3471ee14",
+    "readAt": "2026-10-25T09:52:00Z",
     "runs": [
-      "Tests run 40159598370 — success",
-      "Legion Envoy and Contracts run 40159598269 — success, the dispatch browser job included",
-      "PR Title run 40159598271 — success",
-      "Docs run 40159598266 — success"
+      "Tests run 40171411290 — success",
+      "Legion Envoy and Contracts run 40171411249 — success, its dispatch browser job included, which is my round-two red row passing there too",
+      "Docs run 40171411278 — success",
+      "PR Title run 40171411323 — success"
     ],
-    "note": "Green everywhere, including the browser job, which is why the collapsed directory had to be found by measuring the element rather than by reading CI: the committed row's assertions pass on a zero-width element. The static work — lint, types and the unit suites — is CI's and was not re-run here."
+    "note": "The static work — lint, types and the unit and integration suites — is CI's and was not re-run here."
   },
   "notProven": [
     "That Claude Code itself sends session_title, and that the daemon's seeded '/rename Legion <role> · <KEY>' (packages/daemon/internal/claudebridge/bridge.go:196-198) makes a pane read as its role and issue. Claude Code cannot run in a Legion issue pod, so every hook payload in every run here is JSON the harness writes in the documented shape.",
     "The webkit, webkit-iphone, firefox and firefox-download-navigation projects. Playwright's host validation refuses to start those engines in this pod for want of system libraries no agent can install without root; CI covers them and is green at this head.",
     "A session whose Envoy or inbound messages are off stamps its title once at startup, so a later rename does not reach its Dispatch attribution. Unchanged behaviour for every title, not this change's."
   ],
-  "knownHostBehaviour": [
-    "packages/claude-envoy/tests/session-title.test.ts's 'queryTmux is bounded even by a tmux that ignores SIGTERM' is red about a third of full-suite runs in a pod because Bun 1.3.14's spawnSync timeout misses its kill under gVisor, which the implementer reproduced on a bare sleep with no Legion code. Not this change's, and the architect has sent it to the controller. I did not re-run the package's unit suite: it is CI's, and CI is green at this head."
-  ],
-  "previousRound": {
-    "round": 1,
-    "verdict": "pass",
-    "head": "485db1c056d83304336ec530bb092124a6250751",
-    "summary": "The plugin half was driven on a real listener and attacked with hostile names and hook payloads; the page half was driven in a real Chromium here, green at that head and red with AgentsPage.tsx restored to main@origin. Both proofs stand; the page proof of that round ran the new row alone under -g, which is how the ten keyboard rows the reviewer later found were missed, and is why this round ran the whole projects."
-  }
+  "previousRounds": [
+    {
+      "round": 1,
+      "verdict": "pass",
+      "head": "485db1c056d83304336ec530bb092124a6250751",
+      "summary": "The plugin half driven on a real listener and attacked with hostile names and payloads; the page half driven in a real Chromium here, green at that head and red with AgentsPage.tsx restored to main@origin. Its page proof ran the new row alone under -g, which is how the ten keyboard rows the reviewer found were missed."
+    },
+    {
+      "round": 2,
+      "verdict": "fail",
+      "head": "398af3d484a287556c025836b1bdc8b20744ff5b",
+      "summary": "The whole chromium project reproduced the implementer's 721/0, but the directory beside the 64-character name measured 0 x 16 px and not visible at 1280, against 397 px in the same row with a short name, so neither the shortened segment nor its hover reached the person. Pinned by the red row at agents.e2e.ts:1807, which this round's floor makes pass unmodified. The sweep attack found the sessions directory fixed and the roles directory still fatal, which became this round's role guard."
+    }
+  ]
 }
