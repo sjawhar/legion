@@ -1035,13 +1035,16 @@
   each object read with those names in that rank and then its remaining keys alphabetically, so a
   section's own text precedes its fields and a button's label its hidden value — joined by line
   feeds, and the summary shows the first line. Blocks come before attachments because Slack
-  renders a block as the message body and an attachment after it, and an attachment's `fields`
-  entry arrives as one line, `title: value`, so no label is left without its value. An app that
+  renders a block as the message body and an attachment after it. An app that
   posts a formatted message leaves `text` empty and puts the words in `blocks` or `attachments`,
   and such a wake used to carry a summary ending in `: ` and a payload with no words in it at all;
-  an image-only post now carries the `alt_text` Slack renders in the image's place. A string
-  exactly equal to one already delivered is not delivered twice, each line of the message's own
-  text counting as delivered, and a `rich_text` block that says nothing that text does not say
+  an image-only post now carries the `alt_text` Slack renders in the image's place. A string an
+  object has already shown under another of its own names is not shown twice, so an attachment
+  whose `fallback` repeats its `title` is one line; two objects saying the same thing are two
+  things a reader sees, so a message whose fields read `Passed 3`, `Failed 0`, `Skipped 0` keeps
+  both counts of `0` and two attachments both reading `ok` keep both. A string equal to the
+  message's own text, or to one of its lines, is dropped wherever it sits,
+  and a `rich_text` block that says nothing that text does not say
   already is left unread — that tree is the Slack client's structured copy of a person's words,
   and it is the one block kind the walk knows by name, which is why a message composed in a client
   reads as it did, the `&`, `<` and `>` its author typed included. An app's own rich text, which
