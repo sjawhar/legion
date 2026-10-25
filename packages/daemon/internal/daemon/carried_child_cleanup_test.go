@@ -235,8 +235,8 @@ func (f *carriedCleanup) cleanupAndSweep() {
 		t.Fatalf("the old tree's cleanup: %v", err)
 	}
 	for _, name := range []string{f.rootSandbox, f.childSandbox} {
-		if got := api.mode(name); got != "deleted" || api.pvc(name) {
-			t.Fatalf("Sandbox %s after the cleanup = %s (pvc %t), want it deleted with everything it owned", name, got, api.pvc(name))
+		if got := api.mode(name); got != "deleted" || api.disk(name) {
+			t.Fatalf("Sandbox %s after the cleanup = %s (disk %t), want it deleted with its pod and that pod's disk", name, got, api.disk(name))
 		}
 	}
 	if live, err := f.st.TreeLive(f.ctx, "legion", f.rootKey); err != nil || live {
@@ -251,13 +251,12 @@ func (f *carriedCleanup) cleanupAndSweep() {
 }
 
 // launchedChildSandbox puts the Sandbox the child's own tree's launch creates into the API, under
-// the child's tree and owning no volume claim template, as this runtime now makes one for an
-// issue: the launch itself needs a controller to finish, which the fixture has none of, and what
-// the sweep judges is the Sandbox the API holds.
+// the child's tree, as this runtime makes one for an issue: the launch itself needs a controller
+// to finish, which the fixture has none of, and what the sweep judges is the Sandbox the API
+// holds.
 func (f *carriedCleanup) launchedChildSandbox(uid string) {
 	f.t.Helper()
 	s := issueSandbox(f.childSandbox, uid, f.childKey, f.childKey)
-	delete(s["spec"].(map[string]any), "volumeClaimTemplates")
 	f.api.mu.Lock()
 	defer f.api.mu.Unlock()
 	f.api.objects[f.childSandbox] = s

@@ -24,8 +24,10 @@ import (
 // status's: a child closed as done by a human has every claim closed (issue_close); one closed at
 // its merge has five claims closed and its implementer kept for the production check the merge
 // opens, whose close writes the suspension (merge_close_test.go); and one parked in backlog,
-// icebox or triage has every claim suspended. Either way its pod goes, and its Sandbox with it,
-// in the one IssueSuspend its leave writes.
+// icebox or triage has every claim suspended, and its pod goes with the Sandbox the one
+// IssueSuspend its leave writes deletes. The merged child writes none at its close: its
+// implementer and pod stay for the production check's first look, and the suspension comes with
+// the check's pause or close (merge_close_test.go, which asserts zero here).
 func TestAChildLeavingTheWorkflowNeverClosesItsTree(t *testing.T) {
 	for _, tc := range []struct {
 		name   string

@@ -211,8 +211,8 @@ func TestALingeringMembersMergeClosesItAndWakesItsCheck(t *testing.T) {
 }
 
 // A child closed as done with no pull request — a human's done on an issue short of its merge —
-// has nothing to check in production: today's close, every claim closed and the Sandbox released
-// with its volume, and no check, no look and no bound.
+// has nothing to check in production: today's close, every claim closed and the Sandbox deleted
+// with the pod and the disk that pod owns, and no check, no look and no bound.
 func TestAChildClosedAsDoneWithNoPullRequestOpensNoCheck(t *testing.T) {
 	pool := migratedPool(t)
 	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion", Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Implementing, Generation: 7, Status: "in_progress", Rank: "U", LastDispatchSeq: 1})

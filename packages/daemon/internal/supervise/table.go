@@ -1092,7 +1092,8 @@ func operatorRetry(m *Machine, ctx context.Context, ev Event) error {
 // stop ends one claim: the runtime releases it, and it retires. A release that fails changes
 // nothing, so the stop can be asked again. The tree's root claim ends only with its tree: a
 // retired root would leave the orphan sweep's known set, which would then take whatever the
-// runtime holds for the root issue — under a sandbox, its Sandbox and the volume it owns. Any other
+// runtime holds for the root issue — under a sandbox, its Sandbox, and with it the pod and the
+// disk that pod owns. Any other
 // stop of it is refused, naming the operator's close when it is that close which ends the tree.
 func stop(m *Machine, ctx context.Context, _ Event) error {
 	if !m.claim.treeRoot() {
@@ -1111,13 +1112,17 @@ func stop(m *Machine, ctx context.Context, _ Event) error {
 func treeClose(m *Machine, ctx context.Context, _ Event) error { return m.end(ctx) }
 
 // issueClose is the workflow's close of a child issue as done: it releases the claim through the
-// runtime, which under Agent Sandbox deletes the issue's Sandbox, and with it the pod and the
-// pod's own disk, since that Sandbox owns no volume (INFRA-80). The claim ends as a tree close
-// ends it, and the session it recorded goes first — the session is a row in the session database
-// rather than a file on any disk, so what is dropped is the record of which session this claim
-// held. Nothing of the workspace is recovered, and a later start of the issue, re-entered by a
-// person's todo, is a fresh spawn on a pod and a disk of its own. A release that fails changes
-// nothing, so the close can be asked again.
+// runtime, which ends at most this role's process and forgets the claim. It deletes no issue
+// Sandbox — under Agent Sandbox a release deletes only the controller's, whose Sandbox is that
+// claim's and nothing else (Runtime.Release, releaseControllerSandbox) — so an issue's pod and the
+// disk it owns go with the separately fenced IssueSuspend, or with the tree cleanup once every
+// claim of the tree has retired. That is why a merged close leaves the implementer's pod standing:
+// its five siblings take this close and no IssueSuspend is queued (workflow/linger.go). The claim
+// ends as a tree close ends it, and the session it recorded goes first — the session is a row in
+// the session database rather than a file on any disk, so what is dropped is the record of which
+// session this claim held. Nothing of the workspace is recovered, and a later start of the issue,
+// re-entered by a person's todo, is a fresh spawn on a pod and a disk of its own. A release that
+// fails changes nothing, so the close can be asked again.
 func issueClose(m *Machine, ctx context.Context, _ Event) error {
 	if err := m.release(ctx); err != nil {
 		return err

@@ -41,20 +41,25 @@ import (
 )
 
 // issueSandboxAPI is the Kubernetes API as the daemon's issue closes see it: the project's
-// Sandboxes by name, each with the volume claim it owns, and no pod — there is no controller, so a
-// Sandbox's operatingMode is the daemon's request to the real Sandbox controller, not a claim about
-// that controller's pods. A list honours its label selector's `key=value` terms. Every Sandbox
-// delete is recorded with its options and, with foreground propagation, takes the PVC the Sandbox
-// owns as garbage collection would; a create gives the new Sandbox a uid and is recorded, and one
-// asking for a Service gets the headless Service the controller makes for it (controllerService),
-// sent to every watch of Services; a patch applies the daemon's JSON patch, refusing one whose uid
-// or resourceVersion test fails; role Secrets are accepted and forgotten; and every PVC request is
-// counted, since the restricted daemon identity has none.
+// Sandboxes by name, each with the disk of the pod it stands for, and no pod — there is no
+// controller, so a Sandbox's operatingMode is the daemon's request to the real Sandbox controller,
+// not a claim about that controller's pods. A list honours its label selector's `key=value` terms.
+// Every Sandbox delete is recorded with its options and, with foreground propagation, takes the
+// disk of the Sandbox's pod as garbage collection would, through the pod to the claim it owns; a
+// create gives the new Sandbox a uid and is recorded, and one asking for a Service gets the
+// headless Service the controller makes for it (controllerService), sent to every watch of
+// Services; a patch applies the daemon's JSON patch, refusing one whose uid or resourceVersion
+// test fails; role Secrets are accepted and forgotten; and every PVC request is counted, since the
+// restricted daemon identity has none.
 type issueSandboxAPI struct {
 	mu      sync.Mutex
 	objects map[string]map[string]any
-	// pvcs are the volume claims the Sandboxes own, by Sandbox name, while they exist.
-	pvcs        map[string]bool
+	// disks are the disks of the Sandboxes' pods, by Sandbox name, while they exist: an issue pod's
+	// disk is its own generic ephemeral volume, whose claim `<pod>-issue` the pod owns, and the
+	// fixture makes neither pod nor claim, so a Sandbox's arrival stands for its pod's disk and only
+	// the Sandbox's foreground delete, which garbage collection carries through the pod to the
+	// claim, takes it.
+	disks       map[string]bool
 	deletes     map[string]metav1.DeleteOptions
 	created     []string
 	pvcRequests int
@@ -79,21 +84,22 @@ func controllerService(name, uid string) map[string]any {
 	}
 }
 
-// issueSandbox is a Running issue Sandbox of tree and issue as the API holds it, owning its volume.
+// issueSandbox is a Running issue Sandbox of tree and issue as the API holds it, owning no volume
+// claim template: its pod's disk is the pod's own.
 func issueSandbox(name, uid, tree, issue string) map[string]any {
 	return map[string]any{
 		"apiVersion": "agents.x-k8s.io/v1beta1", "kind": "Sandbox",
 		"metadata": map[string]any{"name": name, "namespace": "legion", "uid": uid, "resourceVersion": "1", "generation": float64(1),
 			"labels": map[string]any{"legion.dev/project": "legion", "legion.dev/tree": tree, "legion.dev/issue": issue}},
-		"spec": map[string]any{"operatingMode": "Running", "volumeClaimTemplates": []any{map[string]any{"metadata": map[string]any{"name": "issue"}}}},
+		"spec": map[string]any{"operatingMode": "Running"},
 	}
 }
 
 func newIssueSandboxAPI(sandboxes ...map[string]any) *issueSandboxAPI {
-	a := &issueSandboxAPI{objects: map[string]map[string]any{}, pvcs: map[string]bool{}, deletes: map[string]metav1.DeleteOptions{}, services: map[string]map[string]any{}}
+	a := &issueSandboxAPI{objects: map[string]map[string]any{}, disks: map[string]bool{}, deletes: map[string]metav1.DeleteOptions{}, services: map[string]map[string]any{}}
 	for _, s := range sandboxes {
 		name := s["metadata"].(map[string]any)["name"].(string)
-		a.objects[name], a.pvcs[name] = s, true
+		a.objects[name], a.disks[name] = s, true
 	}
 	return a
 }
@@ -194,7 +200,7 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		a.uids++
 		meta["uid"], meta["resourceVersion"], meta["generation"] = fmt.Sprintf("sandbox-uid-created-%d", a.uids), "1", float64(1)
-		a.objects[name], a.pvcs[name] = object, true
+		a.objects[name], a.disks[name] = object, true
 		a.created = append(a.created, name)
 		if spec, _ := object["spec"].(map[string]any); spec["service"] == true {
 			service := controllerService(name, meta["uid"].(string))
@@ -255,7 +261,7 @@ func (a *issueSandboxAPI) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			a.deletes[name] = options
 			delete(a.objects, name)
 			if options.PropagationPolicy != nil && *options.PropagationPolicy == metav1.DeletePropagationForeground {
-				delete(a.pvcs, name)
+				delete(a.disks, name)
 			}
 			_ = json.NewEncoder(w).Encode(metav1.Status{Status: "Success"})
 		default:
@@ -316,11 +322,11 @@ func (a *issueSandboxAPI) uid(name string) string {
 	return object["metadata"].(map[string]any)["uid"].(string)
 }
 
-// pvc is whether the volume claim the Sandbox owns still exists.
-func (a *issueSandboxAPI) pvc(name string) bool {
+// disk is whether the disk of the Sandbox's pod, the claim that pod owns, still exists.
+func (a *issueSandboxAPI) disk(name string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.pvcs[name]
+	return a.disks[name]
 }
 
 // deleted is the options of the Sandbox's delete, and whether one was requested.
@@ -635,7 +641,7 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 		return left
 	}
 
-	// (a) The done child: its claims closed, its Sandbox and volume gone, its parent untouched.
+	// (a) The done child: its claims closed, its Sandbox and its pod's disk gone, its parent untouched.
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-done", intake.DispatchIssue{Key: done.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.closed", Status: "done", Title: done.Title, Parent: root.Key, Rank: "V"}, engine, admission); err != nil {
 		t.Fatal(err)
 	}
@@ -650,11 +656,11 @@ func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	if options.Preconditions == nil || options.Preconditions.UID == nil || *options.Preconditions.UID != "sandbox-uid-done" {
 		t.Fatalf("done child's Sandbox delete preconditions = %+v, want fenced to uid sandbox-uid-done", options.Preconditions)
 	}
-	if api.pvc(doneSandbox) {
-		t.Fatal("the done child's volume claim survived its Sandbox's foreground delete")
+	if api.disk(doneSandbox) {
+		t.Fatal("the done child's pod's disk survived its Sandbox's foreground delete")
 	}
-	if got := api.mode(rootSandbox); got != "Running" || !api.pvc(rootSandbox) || api.uid(rootSandbox) != "sandbox-uid-root" {
-		t.Fatalf("root Sandbox after the child's close = %s (pvc %t, uid %s), want the same Sandbox Running with its volume", got, api.pvc(rootSandbox), api.uid(rootSandbox))
+	if got := api.mode(rootSandbox); got != "Running" || !api.disk(rootSandbox) || api.uid(rootSandbox) != "sandbox-uid-root" {
+		t.Fatalf("root Sandbox after the child's close = %s (disk %t, uid %s), want the same Sandbox Running with its pod and that pod's disk", got, api.disk(rootSandbox), api.uid(rootSandbox))
 	}
 	if _, touched := api.deleted(rootSandbox); touched || api.pvcRequests != 0 {
 		t.Fatalf("the child's close deleted the root's Sandbox (%t) or sent %d PVC requests, want neither", touched, api.pvcRequests)

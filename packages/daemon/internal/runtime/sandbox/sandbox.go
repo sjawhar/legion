@@ -762,8 +762,8 @@ func (r *Runtime) setMode(ctx context.Context, s *sandbox, mode string) error {
 
 // Release is a claim-scoped operation: it ends at most the recorded role process and forgets the
 // claim from this runtime. It never suspends or deletes an issue Sandbox, even when this runtime
-// sees no sibling role: the issue's Sandbox, its Secrets and its volume are the tree cleanup's
-// alone (CleanupTree), which runs once every stored claim of the tree has retired. The project
+// sees no sibling role: the issue's Sandbox and its Secrets — and with the Sandbox the pod and the
+// disk that pod owns — are the tree cleanup's alone (CleanupTree), which runs once every stored claim of the tree has retired. The project
 // controller's Sandbox belongs to the controller's claim and nothing else, so releasing that claim
 // deletes it (releaseControllerSandbox).
 func (r *Runtime) Release(ctx context.Context, k runtime.Known) error {
