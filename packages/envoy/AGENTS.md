@@ -680,19 +680,19 @@ delay later) and during a shutdown, which leaves the settlement to the next proc
 opens while a settlement runs, or after its timer has fired, takes the settlement over and arms it
 when it ends, whether or not it changed anything (`openLiveWrite`). The stale-room evictor's close
 (`closeRoomBehindHead`) and this one both reserve the room under its state lock in the same hold
-that found no write in flight (`reserveRoomCloseLocked`), and until the close has forgotten the
-state the room's writer slot is refused, `503 DOC_SERVICE_UNAVAILABLE` as on a failed room, rather
-than handed to a write the close would forget, whose commit would move the reloaded room's cursor
-past an update that room never took. The close reaches only the instance that was checked, never a
-room that replaced it: ygo's `CloseRoom` closes whatever room the name holds, and ygo's idle sweep
-retires a room without the close gate, so the close checks the instance again inside a
-`Server.Apply` on the room, which the sweep never retires, with the close gate held
-(`closeRoomInstance`); a room the sweep or another close retired first is left to the room that
-holds the document now, the reservation is lifted, and the settlement is armed again on it. A
-named or snapshot version whose room is behind the head, read under the document's advisory lock,
-is rendered from the stored document instead (`storedTree`), and neither it nor a version over a
-cold fork lists the room's in-flight credits (`withoutInflight`): the store holds none of those
-changes, and an append the gate refuses is credited again when its browser resends it.
+that found no write in flight (`reserveRoomCloseLocked`), and until the close has returned the
+room's writer slot is refused, `503 DOC_SERVICE_UNAVAILABLE` as on a failed room, rather than
+handed to a write that would fork the instance the close retires, whose commit would move the
+reloaded room's cursor past an update that room never took. The close reaches only the instance
+that was checked, never a room that replaced it: ygo's `CloseRoom` closes whatever room the name
+holds, and ygo's idle sweep retires a room without the close gate, so the close checks the
+instance again inside a `Server.Apply` on the room, which the sweep never retires, with the close
+gate held (`closeRoomInstance`); a room the sweep or another close retired first is left to the
+room that holds the document now, the reservation is lifted, and the settlement is armed again on
+it. A named or snapshot version whose room is behind the head, read under the document's advisory
+lock, is rendered from the stored document instead (`storedTree`), and neither it nor a version
+over a cold fork lists the room's in-flight credits (`withoutInflight`): the store holds none of
+those changes, and an append the gate refuses is credited again when its browser resends it.
 What is per-process is the room: while a room is resident in one process it receives none of the
 other's updates, so presence and cursors show only the peers on that process. Every durable
 change notifies `dispatch_doc_changed` from inside the transaction holding the room's advisory

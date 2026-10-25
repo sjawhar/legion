@@ -1155,7 +1155,13 @@
   settle delay late. The close now keeps the record while anything holds it and forgets it when
   nothing does, as every other end of a room does. Only a failed room's record still goes, since
   it carries the failure, and the browsers that joined while it was evicted are handed to the
-  record registered in its place.
+  record registered in its place. A room that loads onto a kept record takes the latest edit
+  source the stored document names, none included, unless the record recorded a newer one, so
+  another process's edit that several browsers could have made is not credited to whoever edited
+  here before; the closed room's settlement failures end with its generation rather than once the
+  close returns, so they never wipe the failures of the room that replaced it; and the
+  browser-test harness's quiesce drops the edit source of the settlement it cancels, so the
+  record of a document it truncates away is not kept for ever.
 
 - A burst of device logins no longer stalls the secrets broker's database pool. Each
   `POST /v1/oauth/device_authorization` held its provider transaction's pooled connection while

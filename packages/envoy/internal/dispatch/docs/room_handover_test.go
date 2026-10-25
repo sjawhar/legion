@@ -241,3 +241,158 @@ func TestAForcedCloseKeepsWhatTheRoomThatReplacedItLoaded(t *testing.T) {
 		}
 	})
 }
+
+// A forced close keeps the closed room's record while something holds it, and the latest edit
+// source it records is one such holder. The room that loads next reads the document's
+// pending-settlement row, and that row names the source as the store has it: another process's
+// edit that two browsers could have made names none. The load takes the row's answer in place of
+// the one the record kept from the room that went, or the settlement after it names the earlier
+// editor on its version and events rather than SettlementActor.
+func TestARoomLoadedOntoAKeptRecordTakesTheStoredEditSource(t *testing.T) {
+	alice := model.Actor{Kind: "user", ID: "alice"}
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	seedServiceText(t, service, artifactID, "before")
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("load the document's room: %v", err)
+	}
+	waitForLandedAppends(t, service, artifactID)
+	service.recordActor(t, artifactID, alice)
+	// The other process's edit, which several browsers there could have made, names no source.
+	if _, err := service.store.Pool.Exec(context.Background(), `
+		insert into doc_settlements_pending (artifact_id, last_actor) values ($1, null)
+		on conflict (artifact_id) do update set last_actor = null
+	`, artifactID); err != nil {
+		t.Fatalf("record the other process's edit as naming no source: %v", err)
+	}
+	if err := service.Evict(context.Background(), artifactID); err != nil {
+		t.Fatalf("evict the document's room: %v", err)
+	}
+	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+		t.Fatalf("reload the document's room: %v", err)
+	}
+
+	state := service.room(artifactID)
+	state.mu.Lock()
+	lastActor := state.lastActor
+	credit := settlementAuthors(state, map[string]model.Actor{actorKey(alice): alice})
+	state.mu.Unlock()
+	if lastActor != nil {
+		t.Fatalf("the reloaded room keeps %+v as the latest edit source, want none, as the stored row names", lastActor)
+	}
+	if credit.actor != SettlementActor {
+		t.Fatalf("the settlement would name %+v on its version, want %+v", credit.actor, SettlementActor)
+	}
+}
+
+// rowIsCurrent is how a load tells whether the pending-settlement row it read can stand for the
+// record's latest edit source: not once the record recorded a source after the mark, nor while it
+// held a browser edit whose append has yet to write the row. A settlement or an open write records
+// no source, so it never keeps the record's: the warm-up of a reopened document's settlement is
+// the load that must read the row.
+func TestALoadTakesTheStoredEditSourceOnlyWhenNothingNewerIsRecorded(t *testing.T) {
+	quietState := func() *roomState { return newRoomState() }
+	for _, row := range []struct {
+		name    string
+		mark    func(service *Service, room string) editSourceMark
+		after   func(state *roomState) *roomState
+		current bool
+	}{
+		{"nothing recorded since the mark", func(s *Service, room string) editSourceMark { return s.markEditSource(room) },
+			func(state *roomState) *roomState { return state }, true},
+		{"a source recorded after the mark", func(s *Service, room string) editSourceMark { return s.markEditSource(room) },
+			func(state *roomState) *roomState { state.creditSeq.Add(1); return state }, false},
+		{"a record registered after the mark with no source", func(*Service, string) editSourceMark { return editSourceMark{quiet: true} },
+			func(*roomState) *roomState { return quietState() }, true},
+		{"a record registered after the mark with a source", func(*Service, string) editSourceMark { return editSourceMark{quiet: true} },
+			func(*roomState) *roomState { fresh := quietState(); fresh.creditSeq.Add(1); return fresh }, false},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			state := quietState()
+			service.rooms.Store(artifactID, state)
+			mark := row.mark(service, artifactID)
+			current := mark.rowIsCurrent(row.after(state))
+			service.rooms.Delete(artifactID)
+			if current != row.current {
+				t.Fatalf("rowIsCurrent = %t, want %t", current, row.current)
+			}
+		})
+	}
+	for _, held := range []struct {
+		name    string
+		hold    func(state *roomState)
+		current bool
+	}{
+		{"an in-flight credit", func(state *roomState) { state.inflight[1] = &inflightCredit{seq: 1} }, false},
+		{"an update persistence has not taken", func(state *roomState) { state.pendingUpdates = 1 }, false},
+		{"a durable append", func(state *roomState) { state.durableAppends.Add(1) }, false},
+		{"a running settlement", func(state *roomState) { state.settling = 1 }, true},
+		{"an open write", func(state *roomState) { state.liveWriter = &liveWrite{} }, true},
+	} {
+		t.Run("the record held "+held.name+" at the mark", func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			state := quietState()
+			held.hold(state)
+			service.rooms.Store(artifactID, state)
+			current := service.markEditSource(artifactID).rowIsCurrent(state)
+			// The planted hold is no real work, so the record leaves before the service shuts down.
+			service.rooms.Delete(artifactID)
+			if current != held.current {
+				t.Fatalf("rowIsCurrent = %t with %s held at the mark, want %t", current, held.name, held.current)
+			}
+		})
+	}
+}
+
+// The record a forced close keeps can hold the failures of the room that replaced the closed one
+// by the time the close returns: that room loaded onto it and its settlement ran. The close counts
+// none of them as the closed room's, so a third failure of the replacement still fails it.
+func TestAForcedCloseKeepsTheFailuresOfTheRoomThatReplacedIt(t *testing.T) {
+	for _, closer := range []struct {
+		name  string
+		force func(t *testing.T, service *Service, artifactID string, live *crdt.Doc)
+	}{
+		{"the stale-room evictor's close", func(t *testing.T, service *Service, artifactID string, live *crdt.Doc) {
+			if _, err := service.closeRoomBehindHead(context.Background(), artifactID, live); err != nil {
+				t.Fatalf("close the room the evictor found behind the head: %v", err)
+			}
+		}},
+		{"Evict", func(t *testing.T, service *Service, artifactID string, _ *crdt.Doc) {
+			if err := service.Evict(context.Background(), artifactID); err != nil {
+				t.Fatalf("evict the document's room: %v", err)
+			}
+		}},
+	} {
+		t.Run(closer.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "before")
+			if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {
+				t.Fatalf("load the document's room: %v", err)
+			}
+			waitForLandedAppends(t, service, artifactID)
+			live := service.srv.GetDoc(artifactID)
+			state := service.room(artifactID)
+			state.mu.Lock()
+			state.settleFailures = 2
+			state.mu.Unlock()
+			service.afterRoomClosed = func(room string) {
+				if room != artifactID {
+					return
+				}
+				// The replacement room's first settlement failed while the close ran.
+				state.mu.Lock()
+				state.settleFailures++
+				state.mu.Unlock()
+			}
+			closer.force(t, service, artifactID, live)
+			state.mu.Lock()
+			failures := state.settleFailures
+			state.mu.Unlock()
+			if failures != 1 {
+				t.Fatalf("the kept record counts %d settlement failures, want the replacement's one: the closed room's two end with it, the replacement's stand", failures)
+			}
+		})
+	}
+}

@@ -405,7 +405,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	}
 	// The load takes no advisory lock, which a durable writer can hold for as long as its
 	// transaction runs: the row it reads is written whole by each writer's transaction, so a
-	// plain read sees one writer's commit or the one before it.
+	// plain read sees one writer's commit or the one before it. What the record has recorded by
+	// then is taken first, so an edit source recorded after the read is told from one before it.
+	mark := s.markEditSource(room)
 	owed, lastActor, err := readOwedSettlement(ctx, rooms, room)
 	if err != nil {
 		return err
@@ -448,9 +450,20 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	// edit source the settlement names. A closed room keeps the row; it settles only after its
 	// issue reopens. A room that failed again while this load ran leaves the row for its own
 	// replacement.
-	if owed && open && lastActor != nil {
+	//
+	// The row is that source as the store has it, so it replaces whatever the record held for a
+	// room that has gone (a forced close keeps the record, evictRoom): a row naming none - an edit
+	// any of several connected browsers could have made - leaves the settlement its own actor
+	// rather than the last source an earlier room saw, and no row leaves no source, as on a fresh
+	// record. The record keeps its own when the row may be older than it (rowIsCurrent).
+	switch {
+	case !open || !mark.rowIsCurrent(state):
+	case owed && lastActor != nil:
 		state.lastActor = lastActor
 		state.unsettled = true
+	default:
+		state.lastActor = nil
+		state.unsettled = false
 	}
 	if state.failed == nil && open && owed && !state.settleWarming {
 		s.scheduleSettleLocked(room, state)

@@ -86,8 +86,7 @@ type roomState struct {
 	failedDone chan struct{}
 	// reloading marks a state whose room a close is about to retire because the room stands behind
 	// the durable head (reserveRoomCloseLocked): no transaction takes its writer slot from then on
-	// (openLiveWrite), until the close forgets the state with the room or, when the close did not
-	// close the room it checked (retired or replaced first, or the close refused), lifts the mark
+	// (openLiveWrite), until the close has returned, whether or not it closed the room it checked
 	// (closeReservedRoom).
 	reloading bool
 	// released marks a state the service has forgotten (forgetLocked), so a lookup that found it
@@ -189,8 +188,9 @@ func (s *Service) releaseIfUnusedLocked(room string, state *roomState) {
 
 // forgetLocked takes state, room's, out of the service: a lookup that already found it skips it
 // (lookUpState). An in-flight credit the state still holds is reached through its update's
-// UpdateCredit, which holds the state, so a forced eviction (evictRoom) that forgets the state
-// before that update's append lands loses nothing the append writes. Its caller holds state.mu.
+// UpdateCredit, which holds the state, so a failed room's eviction (handOverFailedRoomLocked) that
+// forgets the state before that update's append lands loses nothing the append writes. Its caller
+// holds state.mu.
 func (s *Service) forgetLocked(room string, state *roomState) {
 	state.released = true
 	s.rooms.CompareAndDelete(room, state)
@@ -280,9 +280,9 @@ func (s *Service) hasPendingUpdates(room string) bool {
 }
 
 // finishDurableAppend ends a durable append recordUpdateClass counted on state, the record that
-// counted it (consumeUpdateClass answers it). A forced close that hands its room's record over
-// leaves that count on the record it dropped (handOverClosedRoomLocked), so a late append of the
-// closed room's never takes the replacement's count below zero.
+// counted it (consumeUpdateClass answers it). A failed room's eviction registers a new record in
+// place of the one that counted the append (handOverFailedRoomLocked), so a late append of the
+// failed room's never takes that new record's count below zero.
 func (s *Service) finishDurableAppend(room string, state *roomState) {
 	state.mu.Lock()
 	state.durableAppends.Add(-1)
@@ -317,6 +317,45 @@ func (s *Service) hasWriteInFlight(room string) bool {
 // writeInFlightLocked is hasWriteInFlight for a state its caller holds state.mu on.
 func (state *roomState) writeInFlightLocked() bool {
 	return state.liveWriter != nil || state.durableAppends.Load() > 0 || state.settling > 0
+}
+
+// editSourceMark is where room's record stood, as to its latest edit source, when a room's load
+// was about to read the document's pending-settlement row: the record then registered, nil for
+// none; how many edit sources it had recorded (creditSeq, which every recorder of one moves:
+// creditContentChange, Ledger.credit, a seed); and whether it held a browser edit whose append
+// has yet to write that row (quiet when it held none).
+type editSourceMark struct {
+	state *roomState
+	seq   uint64
+	quiet bool
+}
+
+// markEditSource marks where room's record stands before its load reads the pending-settlement
+// row (onLoadDocument).
+func (s *Service) markEditSource(room string) editSourceMark {
+	state := s.lockExistingState(room)
+	if state == nil {
+		return editSourceMark{quiet: true}
+	}
+	defer s.unlockState(room, state)
+	quiet := len(state.inflight) == 0 && state.pendingUpdates == 0 && state.durableAppends.Load() == 0
+	return editSourceMark{state: state, seq: state.creditSeq.Load(), quiet: quiet}
+}
+
+// rowIsCurrent is whether the pending-settlement row a load read after mark is at least as new as
+// the latest edit source state holds, so the load may take the row's in its place. A committed
+// write writes the row in its transaction and records the source once it commits (Ledger.credit),
+// so a source it recorded by the mark is in the row the load read, and one it recorded after moved
+// creditSeq. A browser edit records its source first (creditContentChange) and writes the row when
+// its append lands, so the row is not current while the record held such an edit at the mark: its
+// credit, its update or its append. A settlement records no source, so neither a running one nor
+// an open write keeps the record's: the settlement whose warm-up runs this very load reads the
+// row's. A record registered after the mark counts from none. Its caller holds state.mu.
+func (mark editSourceMark) rowIsCurrent(state *roomState) bool {
+	if mark.state != state {
+		mark = editSourceMark{quiet: true}
+	}
+	return mark.quiet && state.creditSeq.Load() == mark.seq
 }
 
 func (s *Service) roomFailure(room string) error {
