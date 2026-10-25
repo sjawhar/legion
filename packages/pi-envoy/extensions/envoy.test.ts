@@ -154,6 +154,9 @@ const natsState = {
   connectedNames: [] as string[],
   /** What each connect was given: its servers, and whether it carried an nkey authenticator. */
   connects: [] as { readonly servers: readonly string[]; readonly authenticated: boolean }[],
+  /** Each connection `close()` was called on, by the name its dial carried: a dial nothing holds
+   *  is never drained, and with `maxReconnectAttempts: -1` it outlives every session. */
+  closedNames: [] as string[],
   failConnects: 0,
   /** Every connection reports itself closed, as one NATS dropped does. */
   connectionsClosed: false,
@@ -200,8 +203,13 @@ mock.module("nats", () => ({
     if (natsState.realConnect) {
       return realConnect(options as unknown as Parameters<typeof realConnect>[0]);
     }
+    let closed = false;
     return {
-      isClosed: () => natsState.connectionsClosed,
+      isClosed: () => closed || natsState.connectionsClosed,
+      close: async () => {
+        closed = true;
+        natsState.closedNames.push(name);
+      },
       drain: async () => {
         natsState.drainStarted = true;
         if (natsState.drainHangs) await Promise.withResolvers<never>().promise;
@@ -413,6 +421,10 @@ afterEach(async () => {
   delete process.env.ENVOY_RESUBSCRIBE_DELAY_MS;
   natsState.connectedNames.length = 0;
   natsState.connects.length = 0;
+  natsState.closedNames.length = 0;
+  // A test aborted at Bun's own timeout never runs its `finally`: a connect left parked here
+  // would park every later test's connect for the rest of the process.
+  natsState.heldConnect = undefined;
   natsState.published.length = 0;
   natsState.onPublish = undefined;
   natsState.failPublishes = 0;
@@ -4432,6 +4444,10 @@ describe("envoy OMP extension", () => {
     let failingHandBacks = 0;
     // Runs as the listener takes a hand-back (an unsubscribe), before it answers.
     let handBackHook: (() => void) | undefined;
+    // A hand-back of `topic` under `session`, held at the listener until its `release`.
+    let handBackGate:
+      | { topic: string; session: string; reached: () => void; release: Promise<void> }
+      | undefined;
     // The listener's holder per role, and its rule for a soft claim: it takes the role only when
     // the role is unheld, already held by the claimant, or held by the session it names as its
     // predecessor (every holder here is live).
@@ -4506,6 +4522,16 @@ describe("envoy OMP extension", () => {
         return response({ role, holder, last_seen: lastSeen.get(holder) ?? 1 });
       }
       if (url.pathname === "/v1/interests/unsubscribe") {
+        if (
+          handBackGate !== undefined &&
+          body?.session_id === handBackGate.session &&
+          (body?.topics ?? []).includes(handBackGate.topic)
+        ) {
+          const { reached, release } = handBackGate;
+          handBackGate = undefined;
+          reached();
+          await release;
+        }
         if (failingHandBacks > 0) {
           failingHandBacks -= 1;
           return new Response(JSON.stringify({ error: "listener failed" }), { status: 500 });
@@ -4655,6 +4681,12 @@ describe("envoy OMP extension", () => {
       roleReadGate = { role, reached: reached.resolve, release: release.promise };
       return { reached: reached.promise, release: release.resolve };
     };
+    const gateHandBack = (topic: string, session: string) => {
+      const reached = Promise.withResolvers<void>();
+      const release = Promise.withResolvers<void>();
+      handBackGate = { topic, session, reached: reached.resolve, release: release.promise };
+      return { reached: reached.promise, release: release.resolve };
+    };
     const holdRegistration = (session: string) => {
       const reached = Promise.withResolvers<void>();
       const release = Promise.withResolvers<void>();
@@ -4689,6 +4721,7 @@ describe("envoy OMP extension", () => {
       gate,
       gateInterest,
       gateRoleRead,
+      gateHandBack,
       holdRegistration,
       failClaims,
       failHandBacks,
@@ -6449,6 +6482,68 @@ describe("envoy OMP extension", () => {
     for (let step = 0; step < 10; step += 1) await drain();
     expect(holders.has("reviewer")).toBe(false);
     expect(holders.get("legion-controller")).toBe("ses_oi");
+  });
+
+  // An abandoned hand-back loop walks a live `Map`: a hold a session event inserts behind its
+  // iterator belongs to the move that replaced it, not to it. Taking it deletes a hold nothing
+  // then hands back, and — when it names the role the abandoned move wanted — makes this process
+  // believe it holds a role no live move ever claimed: the session would take that role's tasks
+  // while the listener names another session for it.
+  test("a settle abandoned mid-hand-back leaves the hold a session event inserted behind it", async () => {
+    // The waits are real: the role move is abandoned on a real timer, read as the move starts.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 200 }, async () => {
+      const { fixture, live, context, handedBack, roleTool, holdRegistration, gateHandBack, tick } =
+        await gatedRoleFixture("abandoned-settle-keeps-inserted", "ses_ak");
+      const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+      // A `/new` gives up legion-controller; its pass waits at its registration, so nothing has
+      // handed that hold back yet.
+      const registering = holdRegistration("ses_ak_b");
+      await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+      const switched = fixture.handlers.get("session_switch")?.(
+        { reason: "new" },
+        live("ses_ak_b", { fresh: true })
+      );
+      await registering.reached;
+      // The model claims another role in the new session, which is what the next pass wants.
+      expect((await roleTool.execute("", { role: "release-captain" })).isError).not.toBe(true);
+
+      // That pass hands the old hold back, and is abandoned at its deadline while the listener
+      // still holds the call.
+      const handingBack = gateHandBack("notifications.role.legion-controller", "ses_ak");
+      tick();
+      await handingBack.reached;
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // A second `/new` lands while that hand-back is still in flight: it ends release-captain
+      // and inserts its hold behind the abandoned loop's iterator, outside both queues. Its own
+      // pass waits at its registration, so only the abandoned loop could take it.
+      const next = holdRegistration("ses_ak_c");
+      await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+      const again = fixture.handlers.get("session_switch")?.(
+        { reason: "new" },
+        live("ses_ak_c", { fresh: true })
+      );
+      await next.reached;
+      handingBack.release();
+      for (let step = 0; step < 10; step += 1) await drain();
+
+      // The abandoned loop adopted none of it: this process holds no role, so the next claim
+      // releases none.
+      expect((await roleTool.execute("", { role: "reviewer" })).details).toEqual({
+        role: "reviewer",
+      });
+      // And the hold that event inserted is still pending: the pass that replaced the abandoned
+      // one hands it back as it settles.
+      const settledSoFar = handedBack.length;
+      registering.release();
+      next.release();
+      await switched;
+      await again;
+      for (let step = 0; step < 10; step += 1) await drain();
+      expect(handedBack.slice(settledSoFar)).toContain(
+        "notifications.role.release-captain@ses_ak_b"
+      );
+    });
   });
 
   test("a role the model claims again in a /new before its pass is carried by a fork that follows", async () => {
@@ -8287,7 +8382,9 @@ describe("envoy OMP extension", () => {
     // tick must fire the regain hook, which is what re-runs a Legion worker's daemon ready call.
     // Once, not once per tick: each extra regain is another claims/ready round-trip.
     // The wait is real: the queue abandons its task on a real timer, read at the task's start.
-    await withEnvoyTimings({ passDeadlineMs: 200 }, async () => {
+    // The deadline is never shorter than the refresh interval, so the interval names 25 ms for
+    // a 200 ms deadline to stand; every tick here is hand-driven, so none of them fires on it.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 200 }, async () => {
       const role = "legion-controller";
       let wedgeRegistration = false;
       const answered = Promise.withResolvers<void>();
@@ -8355,9 +8452,15 @@ describe("envoy OMP extension", () => {
     // not record a role claim the listener has since given elsewhere, must not reopen a subject a
     // newer pass closed, and must not take over the stream control of the session the host is on
     // now — a viewer watching that session would go deaf, and the pane would believe it holds a
-    // role nothing recorded.
-    await withEnvoyTimings({ passDeadlineMs: 200 }, async () => {
+    // role nothing recorded. The claim the listener did grant it is real all the same: nothing in
+    // this process names it, so a later pass must hand it back, or the role stays pinned at the
+    // listener to a live session that refuses its traffic for the life of the process.
+    // The wait is real: the queue abandons its task on a real timer, read at the task's start,
+    // and the deadline is never shorter than the refresh interval the heartbeat names.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 200 }, async () => {
       const roleClaims: unknown[] = [];
+      /** Each hand-back the listener took, as `<topic>@<the session it was held under>`. */
+      const handedBack: string[] = [];
       let wedgeClaim = false;
       const claimAnswered = Promise.withResolvers<void>();
       globalThis.fetch = async (input, init) => {
@@ -8378,6 +8481,14 @@ describe("envoy OMP extension", () => {
             dir: "/tmp/envoy-omp-test",
             topics: [`notifications.role.${body.role}`],
           });
+        }
+        if (url.pathname === "/v1/interests/unsubscribe") {
+          const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+            readonly session_id: string;
+            readonly topics: readonly string[];
+          };
+          for (const topic of body.topics) handedBack.push(`${topic}@${body.session_id}`);
+          return response({});
         }
         return responseWithRegistration(input, init, {});
       };
@@ -8414,7 +8525,8 @@ describe("envoy OMP extension", () => {
 
         claimAnswered.resolve();
         for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
-        // The listener did hear the abandoned claim; this process recorded nothing of it.
+        // The listener did hear the abandoned claim, and granted it: this process recorded
+        // nothing of it in the transcript, and the live role is the one the newer move took.
         expect(roleClaims).toEqual([
           { session_id: "ses_fenced_b", role: "release-captain" },
           { session_id: "ses_fenced_b", role: "reviewer" },
@@ -8436,10 +8548,59 @@ describe("envoy OMP extension", () => {
           moved,
           "reviewer"
         );
+
+        // The hold the listener granted the abandoned move is this process's to give back: a
+        // later pass hands it back under the session it was granted for, and nothing else.
+        await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, moved);
+        for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
+        expect(handedBack).toEqual(["notifications.role.release-captain@ses_fenced_b"]);
       } finally {
-        natsState.heldConnect = undefined;
         connected.resolve();
         claimAnswered.resolve();
+      }
+    });
+  });
+
+  // A pass abandoned while its NATS dial is in flight must not put that dial in the shared
+  // connection: the shutdown drains that field alone, and `maxReconnectAttempts: -1` keeps
+  // anything else reconnecting for the life of the process. The dial that loses the race is
+  // closed where it loses, never dropped on the floor.
+  test("a dial abandoned mid-flight is closed, and the connection a newer pass made stands", async () => {
+    // The wait is real: the pass is abandoned on a real timer, read at the pass's start.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 200 }, async () => {
+      globalThis.fetch = async (input, init) => responseWithRegistration(input, init, {});
+      // Each row loads its own instance of the extension, as every row in this file does.
+      const { default: envoyExtension } = await import("./envoy.ts?abandoned-dial-closed");
+      const fixture = createPi();
+      const connected = Promise.withResolvers<void>();
+      try {
+        // The first session's pass parks in its dial and is abandoned at its deadline.
+        natsState.heldConnect = connected.promise;
+        envoyExtension(fixture.pi);
+        await fixture.handlers.get("session_start")?.({}, sessionContext("ses_dial_a"));
+        natsState.heldConnect = undefined;
+
+        // A newer pass dials for the session the host is on now, and settles.
+        const moved = sessionContext("ses_dial_b");
+        await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
+        expect(natsState.connectedNames).toEqual(["omp-ses_dial_a", "omp-ses_dial_b"]);
+        expect(natsState.closedNames).toEqual([]);
+
+        // The abandoned pass's dial answers at last, and loses.
+        connected.resolve();
+        for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
+        expect(natsState.closedNames).toEqual(["omp-ses_dial_a"]);
+
+        // The shared connection is still the one the newer pass made: a subscription taken now
+        // opens on it, with no dial of its own.
+        const subscribeTool = fixture.tools.find((tool) => tool.name === "envoy_subscribe");
+        if (subscribeTool === undefined) throw new Error("envoy_subscribe was not registered");
+        await subscribeTool.execute("", { topics: ["team.dialled"] });
+        expect(natsState.controls.get("team.dialled")?.active()).toBe(true);
+        expect(natsState.connectedNames).toEqual(["omp-ses_dial_a", "omp-ses_dial_b"]);
+        expect(natsState.closedNames).toEqual(["omp-ses_dial_a"]);
+      } finally {
+        connected.resolve();
       }
     });
   });
