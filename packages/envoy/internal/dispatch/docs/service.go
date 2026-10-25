@@ -683,7 +683,7 @@ func (s *Service) Shutdown(ctx context.Context) error {
 				settles = owes
 			}
 			if settles {
-				s.settleRoomWithin(drainCtx, room.name, room.generation)
+				s.settleRoomWithin(drainCtx, room.name, room.generation, nil)
 			}
 			if room.connected {
 				if err := s.srv.CloseRoom(room.name, true); err != nil && !errors.Is(err, websocket.ErrRoomNotFound) {
@@ -1095,7 +1095,7 @@ func (credit settlementVersionCredit) consumeAskAuthors(blockIDs []string) {
 }
 
 func (s *Service) settleRoom(room string, generation uint64) {
-	s.settleRoomWithin(context.Background(), room, generation)
+	s.settleRoomWithin(context.Background(), room, generation, nil)
 }
 
 // settleRoomWithin settles room under parent. A timer's settlement runs under no deadline; the one
@@ -1104,8 +1104,18 @@ func (s *Service) settleRoom(room string, generation uint64) {
 // document's pending-settlement row leaves it to resume (onLoadDocument, RunSettlementResumption).
 // So does a settlement that has to write into a room Shutdown has begun closing, which refuses the
 // write (allowInject).
-func (s *Service) settleRoomWithin(parent context.Context, room string, generation uint64) {
+//
+// failed, when not nil, is handed every reason the settlement stopped short in place of the retry
+// a timer's settlement schedules, for a caller that runs it synchronously and answers for its
+// outcome itself (SettleIssueDocuments). One that wrote into the room still fails the room, whose
+// reload arms the settlement again. A settlement that finds nothing to do, or that another one
+// supersedes, reports nothing: its caller reads the pending-settlement row instead.
+func (s *Service) settleRoomWithin(parent context.Context, room string, generation uint64, failed func(error)) {
 	retry := func(err error) {
+		if failed != nil {
+			failed(err)
+			return
+		}
 		if parent.Err() != nil {
 			slog.Warn("dispatch: document settlement stopped at the shutdown budget", "room", room, "error", err)
 			return
@@ -1115,6 +1125,15 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 			return
 		}
 		s.retrySettle(room, generation, err)
+	}
+	// retrySoon leaves a settlement that met updates the room has not stored yet to run again in a
+	// moment, or reports it.
+	retrySoon := func(err error) {
+		if failed != nil {
+			failed(err)
+			return
+		}
+		s.retrySettleSoon(room)
 	}
 	state := s.lockState(room)
 	if s.stopping.Load() || state.closed || state.failed != nil || state.roomGeneration != generation {
@@ -1165,7 +1184,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 				slog.Warn("dispatch: skip shutdown document settlement before persistence queue drains", "room", room, "error", err)
 				return
 			}
-			s.retrySettleSoon(room)
+			retrySoon(fmt.Errorf("wait for the room's updates to reach persistence: %w", err))
 			return
 		}
 	}
@@ -1178,7 +1197,7 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 				slog.Warn("dispatch: skip shutdown document settlement before durable append", "room", room, "error", err)
 				return
 			}
-			s.retrySettleSoon(room)
+			retrySoon(fmt.Errorf("wait for the room's updates to become durable: %w", err))
 			return
 		}
 	}
@@ -1229,6 +1248,10 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 	if s.hasPendingUpdates(room) {
 		if s.shuttingDown(room) {
 			slog.Warn("dispatch: skip shutdown document settlement with undurable updates", "room", room)
+			return
+		}
+		if failed != nil {
+			failed(errors.New("the room holds updates its persistence has not taken"))
 			return
 		}
 		s.scheduleSettle(room)
@@ -1327,6 +1350,9 @@ func (s *Service) settleRoomWithin(parent context.Context, room string, generati
 		if len(slots) > 0 {
 			s.discardSuppressedPersistence(room, slots...)
 			s.failRoom(room, err)
+			if failed != nil {
+				failed(err)
+			}
 			return
 		}
 		retry(err)
