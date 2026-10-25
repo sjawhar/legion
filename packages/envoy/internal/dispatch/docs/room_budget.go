@@ -2,16 +2,19 @@ package docs
 
 import (
 	"cmp"
+	"container/list"
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
+	"runtime/debug"
 	"slices"
+	"strconv"
 	"sync"
 	"sync/atomic"
 
 	"github.com/jackc/pgx/v5"
-
-	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
+	"golang.org/x/sync/singleflight"
 )
 
 // roomBudgetBytes is the most heap the open rooms are charged together (roomCharge): 2 GiB of the
@@ -20,8 +23,12 @@ import (
 // the request path's, the cold reads' cache's (documentReadBudget, 256 MiB, which this does not
 // count) and the slack that limit leaves the collector. At the measured cost of a room
 // (bytesOfHeapAnElement) it holds thirty-nine edited documents of a mebibyte of prose (57,600
-// elements, 54 MB each) and refuses the fortieth, and holds thirty-four at the element bound (62 MB
-// each) (TestTheRoomBudgetsArithmeticAtTheBound).
+// elements, 54 MB each), and since an admission reserves its stored version's count at that same
+// price (storedRoomReservation), an empty budget admits thirty-nine of them and refuses the
+// fortieth. No room has a ceiling: a mebibyte of the densest markdown measured, which goldmark
+// stops counting, is priced at more than the whole budget (bytesOfHeapAByteAtTheDensest), and
+// what answers a room that heavy is the hook's refusal of every insert while nothing can be closed
+// (peer_update.go:44-58), not a cap on its charge (TestTheRoomBudgetsArithmetic).
 const roomBudgetBytes = 2 << 30
 
 // bytesOfHeapAnElement is the heap one copy of a document holds for each element its rendering
@@ -34,6 +41,36 @@ const roomBudgetBytes = 2 << 30
 // (room_heap_test.go). TestAResidentRoomsHeapPerByteOfItsMarkdown measures rooms of each size,
 // read and edited, and fails once a copy's heap an element leaves 0.85x to 1.3x of this.
 const bytesOfHeapAnElement = 470
+
+// bytesOfHeapAByteAtTheDensest is the densest price: the heap one copy of a document is charged
+// for each byte of a rendering pmdoc.MeasureDocument could not finish counting (DocumentSize.Counted
+// false, elementsPastCounting), which is the most elements a byte of rendered markdown makes, as
+// this repository measures it, at bytesOfHeapAnElement each. That is the one thing it prices
+// (copyHeap): MeasureDocument answers such a rendering with no elements at all, and charged as
+// that, the heaviest room in the pod would look free. Every rendering it finishes is charged its
+// count.
+//
+// The bytes it prices are always a rendering - a room's (renderedReplica.publishSize), or a stored
+// version, which is stored as its rendering (pmdoc/parse.go:120-122) - so what it is measured on is
+// the rendering of each dense shape pmdoc's own tests build and of each of this repository's
+// markdown files (TestNoMarkdownPricesPastTheDensestPrice), and it is set from the figure at a
+// mebibyte, the size of document the budget is there for. The densest there is empty items of
+// alternating bullet lists, `- \n\n* \n\n`, each item a list of its own: 2.2501 elements a byte at
+// 1 MiB and at 64 KiB alike, which at 470 bytes an element is 1,057.6 bytes of heap a byte,
+// rounded up here, so a mebibyte of it is priced at 2,218,786,816 bytes for two copies, more than
+// the whole budget. Measured on the markdown a caller sends rather than on its rendering, the same
+// shape is 4.5 elements a byte, since its rendering is twice as long. Of the repository's 846
+// files in the schema the densest rendering is a fixture of empty list items,
+// pmdoc/testdata/corpus/nested-empty-items.md, at 1.37 elements a byte.
+//
+// A small document can be denser a byte than this: the densest measured overall is a lone empty
+// list item, a list, its item and the paragraph the item is read as holding, nine elements in a
+// rendering of three bytes, 3.0 a byte. That is acceptable because its absolute cost is small -
+// nine elements are about 4 KB of heap whatever their density. Nor is it the most any markdown
+// makes at a mebibyte: nested containers, which none of pmdoc's shapes build, render denser,
+// `- - \n\n* - \n\n` at 3.0 elements a byte, and a document of them that goldmark stops counting
+// is priced under what it holds.
+const bytesOfHeapAByteAtTheDensest = 1_058
 
 // errRoomBudgetFull is the refusal of a browser the open rooms leave no room for (reserveRoom). It
 // is answered with DocumentBusyCloseCode, the transient close: the next attempt finds the bytes
@@ -69,9 +106,8 @@ type roomBudget struct {
 	sweep func()
 	// full is raised by a sweep that leaves the budget over, having closed every room it could.
 	full atomic.Bool
-	// weighing lets one admission at a time count the elements of a stored document
-	// (storedRoomWeight).
-	weighing chan struct{}
+	// stored holds the counts admissions made of the stored versions (storedRoomReservation).
+	stored storedCounts
 }
 
 // budgetedRoom is what the budget holds for one document: charges, the instances of its room ygo
@@ -90,36 +126,56 @@ type budgetedRoom struct {
 // what it deletes rather than freeing it. What no rendering shows - those tombstones - is what the
 // charge does not see; the room's own retirement a minute after its last use, and the compaction
 // that folds its updates as it closes, reclaim it.
+//
+// What a room is charged has a lifecycle. Its admission reserves the count of its stored version
+// at both copies (roomReservation); its load, once the rendering it loaded with is counted
+// (keepReplica), replaces that reservation with this charge (load); and each count the measurer
+// makes on its cadence after that replaces the charge again (measured). A count that lands clears
+// only the update bytes charged up to the rendering it measured, never those charged since, and a
+// rendering published without a count of its own (renderedReplica.publishSize) clears none.
 type roomCharge struct {
 	budget *roomBudget
 	room   string
-	// elements is the room's latest count (renderedReplica.elements), and copies 1 until the room
-	// takes its first update and 2 from then on.
-	elements, copies int64
+	// heap is what one copy of the room's latest measured document is priced at (copyHeap), and
+	// copies 1 until the room takes its first update and 2 from then on.
+	heap, copies int64
 	// updates is the bytes of every update the room has taken since it loaded, and measuredAt what
-	// it was at the rendering elements counts.
+	// it was at the rendering heap prices.
 	updates, measuredAt int64
 	weight              int64
 	retired             bool
 }
 
-// roomReservation is a socket's admission to a room that has not loaded: the weight of its stored
-// document, held from the admission until the room loads, when the room's own charge replaces it,
-// or until the socket's handler returns, whichever comes first.
+// roomReservation is a socket's admission to a room that has not loaded: the count of the stored
+// version at both copies (storedRoomReservation), held from the admission until the room loads,
+// when the room's own charge replaces it, or until the socket's handler returns, whichever comes
+// first.
 type roomReservation struct {
 	room    string
 	weight  int64
 	settled bool
 }
 
-// roomWeight is what a room of elements elements at copies copies, which has taken updates bytes
-// since they were counted, is charged. A count past the element bound - a rendering goldmark
-// stopped counting (elementsPastCounting), or a document a browser carried past the bound, which
-// every server write then refuses to grow (growth.go:139-150) - is charged at the bound, so no room
-// is charged more than about 62 MB at two copies, beside its update bytes. A room that renders no
-// markdown (sizeUnmeasured) is charged its update bytes alone.
-func roomWeight(elements, copies, updates int64) int64 {
-	return min(max(elements, 0), pmdoc.MaxDocumentElements)*bytesOfHeapAnElement*copies + updates
+// roomWeight is what a room is charged whose one copy holds heap (copyHeap), at copies copies,
+// and which has taken updates bytes of updates since heap was measured.
+func roomWeight(heap, copies, updates int64) int64 {
+	return heap*copies + updates
+}
+
+// copyHeap is the heap one copy of a document is priced at whose rendering is bytes long and makes
+// elements elements (renderedReplica.size): its count at bytesOfHeapAnElement, or, for a rendering
+// goldmark stopped counting (elementsPastCounting), its bytes at the densest price. Nothing caps
+// it: a room is charged what its document holds, however heavy. A room that renders no markdown
+// (sizeUnmeasured) is priced at nothing, and charged its update bytes alone.
+func copyHeap(bytes, elements int64) int64 {
+	switch {
+	case bytes == sizeUnmeasured || elements == sizeUnmeasured:
+		return 0
+	case elements == elementsPastCounting:
+		return bytes * bytesOfHeapAByteAtTheDensest
+	default:
+		return elements * bytesOfHeapAnElement
+	}
 }
 
 // join reports whether room has a loaded instance the budget charges, which a socket joins with
@@ -187,9 +243,11 @@ func (b *roomBudget) release(reservation *roomReservation) {
 	b.dropIfEmptyLocked(reservation.room, entry)
 }
 
-// load charges room's newly loaded instance, of elements elements at one copy, in place of every
-// reservation its admissions hold.
-func (b *roomBudget) load(room string, elements int64) *roomCharge {
+// load charges room's newly loaded instance, whose one copy is priced at heap (copyHeap) from the
+// count of the rendering it loaded with, in place of every reservation its admissions hold: the
+// room's own document at one copy replaces its stored version at two, and the two documents differ
+// only by the updates stored since that version was cut.
+func (b *roomBudget) load(room string, heap int64) *roomCharge {
 	b.mu.Lock()
 	defer b.unlock()
 	entry := b.entry(room)
@@ -197,7 +255,7 @@ func (b *roomBudget) load(room string, elements int64) *roomCharge {
 		b.settleLocked(reservation)
 	}
 	entry.reservations = nil
-	charge := &roomCharge{budget: b, room: room, elements: elements, copies: 1}
+	charge := &roomCharge{budget: b, room: room, heap: heap, copies: 1}
 	entry.charges = append(entry.charges, charge)
 	b.reweighLocked(charge)
 	return charge
@@ -227,17 +285,18 @@ func (c *roomCharge) updatesTaken() int64 {
 	return c.updates
 }
 
-// measured re-bases the room's charge on a count of elements for the rendering published when the
-// room had taken updates bytes of updates: the update bytes taken before that rendering are in the
-// count, and only those taken since stay beside it. A replica no room's load charged has nothing to
-// re-base.
-func (c *roomCharge) measured(elements, updates int64) {
+// measured re-bases the room's charge on heap (copyHeap), the price of a count of the rendering
+// published when the room had taken updates bytes of updates: the update bytes taken before that
+// rendering are in the count, and only those taken since stay beside it. Only a count lands here
+// (renderedReplica.storeCounted); a rendering whose bytes alone are published re-bases nothing. A
+// replica no room's load charged has nothing to re-base.
+func (c *roomCharge) measured(heap, updates int64) {
 	if c == nil {
 		return
 	}
 	c.budget.mu.Lock()
 	defer c.budget.unlock()
-	c.elements = elements
+	c.heap = heap
 	c.measuredAt = updates
 	c.budget.reweighLocked(c)
 }
@@ -364,18 +423,18 @@ func (b *roomBudget) reweighLocked(charge *roomCharge) {
 	if charge.retired {
 		return
 	}
-	weight := roomWeight(charge.elements, charge.copies, charge.updates-charge.measuredAt)
+	weight := roomWeight(charge.heap, charge.copies, charge.updates-charge.measuredAt)
 	b.used += weight - charge.weight
 	charge.weight = weight
 }
 
 // reserveRoom admits a browser's socket to room's document against the room budget, before anything
 // loads the document (ServeHTTP). A room already charged admits it with nothing reserved: the
-// browser joins a room whose heap is counted. Otherwise it reserves what the stored document would
-// cost at both copies, since a browser's first keystroke takes the room's second copy in its update
-// observer, where nothing can refuse it. The reservation is made before the load, not when the room
-// has loaded: fifty browsers could otherwise pass an unreserved check and each build a whole cold
-// copy before any of their rooms exists.
+// browser joins a room whose heap is counted. Otherwise it reserves what the stored document will
+// cost at both copies (storedRoomReservation), since a browser's first keystroke takes the room's
+// second copy in its update observer, where nothing can refuse it. The reservation is made before
+// the load, not when the room has loaded: fifty browsers could otherwise pass an unreserved check
+// and each build a whole cold copy before any of their rooms exists.
 //
 // A budget already past its limit refuses at once, without reading the document, and so does one
 // this document's reservation would pass; either starts a sweep on a goroutine of its own
@@ -389,45 +448,182 @@ func (s *Service) reserveRoom(ctx context.Context, room string) (*roomReservatio
 	if err := s.budget.refusal(); err != nil {
 		return nil, err
 	}
-	weight, err := s.storedRoomWeight(ctx, room)
+	weight, err := s.storedRoomReservation(ctx, room)
 	if err != nil {
 		return nil, err
 	}
 	return s.budget.reserve(room, weight)
 }
 
-// storedRoomWeight is what room's stored document costs at both copies: its latest version's
-// markdown, counted (pmdoc.MeasureDocument). The store holds no count of a document's elements, so
-// this is one parse for each socket admitted to a room not yet open, never one for each keystroke.
-// One admission counts at a time: the parse holds up to about 130 MiB for a mebibyte of the heaviest
-// shape (pmdoc/elements.go:31-37), and a burst of fifty admissions parsing at once would hold the
-// heap the budget is there to keep. A document with no version yet weighs nothing.
-func (s *Service) storedRoomWeight(ctx context.Context, room string) (int64, error) {
-	var markdown string
+// storedRoomReservation is what an admission to room reserves: its latest version's stored
+// markdown, counted (pmdoc.MeasureDocument) and priced as a loaded room's rendering is (copyHeap),
+// at both copies. A version is stored as its rendering (pmdoc/parse.go:120-122), so this is the
+// count the room's load makes of the rendering it loads with (keepReplica) wherever no update has
+// been stored since that version, and that count replaces this reservation (roomBudget.load). So
+// a mebibyte of prose reserves about the 54 MB it costs once counted
+// (TestAnAdmissionReservesTheCountOfItsStoredVersion), where its bytes at the densest price would
+// reserve 2.2 GB, past the whole budget, and refuse it on an empty pod. Only markdown
+// MeasureDocument cannot finish is priced from its bytes (bytesOfHeapAByteAtTheDensest). A
+// document with no version yet reserves nothing.
+//
+// The count is a whole goldmark parse: about 89 ms for a mebibyte, and up to about 130 MiB of heap
+// for a mebibyte of the heaviest shape (pmdoc/elements.go:31-37). It is paid on the path a person
+// reaches when they open a document, once for each version in each process, since the count is
+// kept (storedCounts) - never on a keystroke, and never inside a room's update observer. The
+// admissions that miss one version at once share one count, the others waiting for the one that
+// counts, and counts of different documents run one at a time (storedCounts.counting), so a burst
+// of admissions holds one parse's heap rather than one for each. Only the latest version's number
+// is read on every admission; its markdown is read only to count it.
+func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64, error) {
+	var number int64
 	err := s.queryFrom(ctx).QueryRow(ctx, `
-		select coalesce(markdown, '') from artifact_versions where artifact_id = $1 order by number desc limit 1
-	`, room).Scan(&markdown)
+		select number from artifact_versions where artifact_id = $1 order by number desc limit 1
+	`, room).Scan(&number)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return 0, nil
 	}
 	if err != nil {
-		return 0, fmt.Errorf("read the document's latest version: %w", err)
+		return 0, fmt.Errorf("read the number of the document's latest version: %w", err)
 	}
+	if heap, ok := s.budget.stored.get(room, number); ok {
+		return roomWeight(heap, 2, 0), nil
+	}
+	flight := s.budget.stored.flights.DoChan(room+"@"+strconv.FormatInt(number, 10), func() (any, error) {
+		return s.countStoredVersion(ctx, room, number)
+	})
 	select {
-	case s.budget.weighing <- struct{}{}:
 	case <-ctx.Done():
 		return 0, ctx.Err()
+	case result := <-flight:
+		if result.Err != nil {
+			return 0, result.Err
+		}
+		return roomWeight(result.Val.(int64), 2, 0), nil
 	}
-	defer func() { <-s.budget.weighing }()
-	return roomWeight(countElements(markdown), 2, 0), nil
+}
+
+// countStoredVersion is the price of one copy of room's version number (copyHeap), counted from its
+// stored markdown and kept (storedCounts.put), unless an admission that started its count before
+// this one's miss has kept it already. It runs once for each version however many admissions miss
+// it at once (storedRoomReservation), so it belongs to the version rather than to the admission
+// that started it: it reads on a context no admission's end cancels, bounded as a cold read's fold
+// is (coldReadTimeout), and through the pool rather than any caller's transaction, and an
+// admission whose request ends returns at once and leaves the count to the others. Its error is
+// the read's, or a panic recovered from the parse: singleflight re-panics an unrecovered panic of
+// a call it has waiters for in a goroutine nothing can recover, as foldDocument says.
+func (s *Service) countStoredVersion(ctx context.Context, room string, number int64) (heap int64, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("counting the stored document panicked: %v\n%s", recovered, debug.Stack())
+			slog.Error("dispatch: counting a stored document for its admission panicked", "room", room, "error", err)
+		}
+	}()
+	counts := &s.budget.stored
+	if heap, ok := counts.get(room, number); ok {
+		return heap, nil
+	}
+	readCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), coldReadTimeout)
+	defer cancel()
+	var markdown string
+	if err := s.store.Pool.QueryRow(readCtx, `
+		select coalesce(markdown, '') from artifact_versions where artifact_id = $1 and number = $2
+	`, room, number).Scan(&markdown); err != nil {
+		return 0, fmt.Errorf("read the document's version %d: %w", number, err)
+	}
+	counts.counting.Lock()
+	defer counts.counting.Unlock()
+	if counts.beforeCount != nil {
+		counts.beforeCount(room, number)
+	}
+	heap = copyHeap(int64(len(markdown)), countElements(markdown))
+	counts.put(&storedCount{room: room, number: number, heap: heap})
+	return heap, nil
+}
+
+// storedCountsHeld is the most documents whose stored version's count is kept (storedCounts). An
+// entry is an id and two integers, a few hundred bytes with its list element and its map slot, so
+// 4,096 of them hold about a mebibyte, and counting entries bounds their weight: the cold reads'
+// cache weighs each of its entries (documentRead.weight) because they run from bytes to
+// megabytes, and these do not vary. A document the bound has dropped costs its next admission one
+// parse again, nothing more.
+const storedCountsHeld = 4_096
+
+// storedCounts keeps, for each document an admission counted, the price of one copy of its latest
+// stored version (countStoredVersion), the most recently admitted first, for at most
+// storedCountsHeld documents. It is shaped as the cold reads' cache is (documentReads,
+// read_cache.go:82-142): one mutex, a map into a list kept in the order of use, one entry for a
+// document, a newer version's count replacing an older one's, and a singleflight group, so that
+// the admissions missing one version at once share one count rather than each parsing it.
+//
+// Unlike that cache's renderings, a count never goes stale, and needs no stamp: a version's
+// markdown is written once, by the insert that makes the version (api/artifacts.go:296,
+// api/issue_create.go:349), and no running server rewrites it - the other writes to
+// artifact_versions move a file's content (files/backfill.go:177,215) or are migrations, which run
+// before it serves - so the count of a document's version number is that version's for as long as
+// it stands. An entry is used only for the version the store names latest at the admission.
+type storedCounts struct {
+	mu      sync.Mutex
+	entries map[string]*list.Element
+	order   *list.List
+	// flights counts each (document, version) once however many admissions miss it at once.
+	flights singleflight.Group
+	// counting lets one count run at a time, of whichever documents.
+	counting sync.Mutex
+	// beforeCount runs in a count once it has read the version's markdown and before it parses it.
+	// Nil outside tests; tests use it to count the parses and to hold one while admissions arrive.
+	beforeCount func(room string, number int64)
+}
+
+// storedCount is the price of one copy of room's version number (copyHeap).
+type storedCount struct {
+	room         string
+	number, heap int64
+}
+
+// get is the price of one copy of room's version number when it is kept, which it marks the most
+// recently used.
+func (c *storedCounts) get(room string, number int64) (int64, bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	element, ok := c.entries[room]
+	if !ok {
+		return 0, false
+	}
+	count := element.Value.(*storedCount)
+	if count.number != number {
+		return 0, false
+	}
+	c.order.MoveToFront(element)
+	return count.heap, true
+}
+
+// put keeps count as its document's, in place of a count of an older version, then drops the least
+// recently used past storedCountsHeld. A count of an older version than the one kept is dropped
+// instead: a slow count must not put back a version the store has moved past.
+func (c *storedCounts) put(count *storedCount) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.entries == nil {
+		c.entries, c.order = make(map[string]*list.Element), list.New()
+	}
+	if element, ok := c.entries[count.room]; ok {
+		if element.Value.(*storedCount).number > count.number {
+			return
+		}
+		c.order.Remove(element)
+	}
+	c.entries[count.room] = c.order.PushFront(count)
+	if c.order.Len() > storedCountsHeld {
+		delete(c.entries, c.order.Remove(c.order.Back()).(*storedCount).room)
+	}
 }
 
 // chargeLoadedRoom charges room's newly loaded instance, whose replica has just published its
 // load's count (keepReplica), in place of the reservations of the sockets admitted to it, and
 // hands the replica the charge its counts re-base from then on (renderedReplica.storeCounted).
 func (s *Service) chargeLoadedRoom(room string, replica *renderedReplica) *roomCharge {
-	_, elements, _ := replica.size()
-	charge := s.budget.load(room, elements)
+	bytes, elements, _ := replica.size()
+	charge := s.budget.load(room, copyHeap(bytes, elements))
 	replica.sizeMu.Lock()
 	replica.charge = charge
 	replica.sizeMu.Unlock()

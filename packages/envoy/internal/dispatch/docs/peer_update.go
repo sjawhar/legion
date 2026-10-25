@@ -42,11 +42,20 @@ import (
 // when it crosses, and this is all that is claimed here.
 //
 // The hook has a third state, which is the room budget's rather than the document's: while the
-// open rooms are past their budget and nothing can be closed (roomBudget.full), an update that
-// would grow its document is refused in every room with the transient DocumentBusyCloseCode, so
-// the rooms already open cannot swell past what the budget admitted them at. That refusal is not
-// the document's own bound and is not folded into it: 4413 is permanent and the editor drops the
-// refused edit, where 4503 is transient and the editor keeps it, to send once the pressure passes.
+// open rooms are past their budget and nothing can be closed (roomBudget.full), only an update
+// that inserts nothing is admitted, in every room, and anything else is refused with the transient
+// DocumentBusyCloseCode. Bytes cannot be that test. The hook no longer counts elements, and the
+// elements are what the heap follows (bytesOfHeapAnElement): a mebibyte of markdown can make
+// 786,432 of them (pmdoc/elements.go:16-29), so an update can leave a document as long as it was,
+// or shorter, and still multiply what its room holds. What an update inserts is what can add an
+// element, so an update that inserts nothing is the one update that cannot grow the room.
+//
+// That state therefore decodes every update a browser sends, which the other two do not pay for a
+// keystroke under the bound. That is right: it runs only under pressure, while the budget is over
+// and nothing can be closed, and the alternative to paying a decode there is the pod running out
+// of memory. That refusal is not the document's own bound and is not folded into it: 4413 is
+// permanent and the editor drops the refused edit, where 4503 is transient and the editor keeps
+// it, to send once the pressure passes.
 
 // maxPeerInsertAtTheBound is the most new content one update may carry into a document already at
 // or over the bound: enough for the editor's own derived writes - heading ids, list labels, anchor
@@ -91,13 +100,13 @@ const maxMessageBytes = 24 << 20
 // is under maxPeerInsertAtTheBound, or, past the creep cap, only when it carries nothing new at
 // all; either refusal is the document's own, DocumentTooLargeCloseCode.
 //
-// While the room budget is full (roomBudget.full), the update is decoded in every room, and one
-// that carries anything the room does not already hold is refused with DocumentBusyCloseCode: that
-// is an update that would grow the document, and one that inserts nothing can only shrink it or
-// leave it as it is. An update does not say what it deletes without the document to measure it
-// against, so an edit that replaces text with less of it is refused too, as the creep cap refuses
-// it. The signal is one atomic load, so the peer's read loop takes neither the budget's lock nor a
-// room's state lock for it.
+// While the room budget is full (roomBudget.full), the update is decoded in every room, and only
+// one that carries nothing the room does not already hold is admitted: one that inserts anything
+// is refused with DocumentBusyCloseCode, whatever it leaves the document's bytes at, since an
+// insert of fewer bytes than it deletes can still add elements. An update does not say what it
+// deletes without the document to measure it against, so an edit that replaces text with less of
+// it is refused too, as the creep cap refuses it. The signal is one atomic load, so the peer's read
+// loop takes neither the budget's lock nor a room's state lock for it.
 //
 // A room with no measurement at all is a document that left the Proof schema while it was live,
 // which the socket path refuses to open in the first place (refuseOutsideSchema, websocket.go:175):

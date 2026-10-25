@@ -551,7 +551,7 @@ func New(deps Deps) *Service {
 		timers:            make(map[uint64]*time.Timer),
 		unrecordedMarkTTL: unrecordedMarkTTL,
 		reads:             newDocumentReads(documentReadBudget),
-		budget:            roomBudget{limit: roomBudgetBytes, weighing: make(chan struct{}, 1)},
+		budget:            roomBudget{limit: roomBudgetBytes},
 	}
 	service.budget.sweep = service.sweepRooms
 	adapter := &servicePersistenceAdapter{store: persist, service: service}

@@ -219,7 +219,14 @@ func newRoomReleaseService(t *testing.T) (*Service, *store.Store) {
 // owes no settlement.
 func createDocuments(t *testing.T, database *store.Store, n int) []string {
 	t.Helper()
-	tree, err := pmdoc.Parse("Room cap probe.")
+	return createDocumentsHolding(t, database, n, "Room cap probe.")
+}
+
+// createDocumentsHolding is createDocuments with source's document in place of the paragraph: its
+// Proof state stored, and a first version holding its rendering.
+func createDocumentsHolding(t *testing.T, database *store.Store, n int, source string) []string {
+	t.Helper()
+	tree, err := pmdoc.Parse(source)
 	if err != nil {
 		t.Fatalf("parse seed document: %v", err)
 	}

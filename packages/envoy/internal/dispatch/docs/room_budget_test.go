@@ -4,8 +4,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -24,12 +28,13 @@ import (
 
 // A room is charged its latest count at its copies, plus the bytes of the updates it has taken
 // since that count: one copy until its first update and two from then on, and each count replaces
-// the last rather than adding to it, so the charge falls when the document does. A socket's
-// reservation is replaced by its room's charge when the room loads, and the charge goes when ygo
-// retires the room.
+// the last rather than adding to it, so the charge falls when the document does. A rendering
+// goldmark could not finish counting is priced from its bytes at the densest price, past the
+// element bound and never at nothing. A socket's reservation is replaced by its room's charge when
+// the room loads, and the charge goes when ygo retires the room.
 func TestARoomsChargeIsItsLatestCountAtItsCopiesPlusTheUpdatesSince(t *testing.T) {
 	budget := &roomBudget{limit: roomBudgetBytes}
-	charge := budget.load("room", 1_000)
+	charge := budget.load("room", copyHeap(10_000, 1_000))
 	requireCharged(t, budget, charge, 1_000*bytesOfHeapAnElement, "a room that has taken no update holds one copy")
 
 	charge.took(100, true)
@@ -39,13 +44,21 @@ func TestARoomsChargeIsItsLatestCountAtItsCopiesPlusTheUpdatesSince(t *testing.T
 
 	// The count of the rendering published once the room had taken 100 bytes re-bases the charge
 	// there: the 50 bytes taken since stay beside it.
-	charge.measured(800, 100)
+	charge.measured(copyHeap(8_000, 800), 100)
 	requireCharged(t, budget, charge, 2*800*bytesOfHeapAnElement+50, "a count of a smaller document lowers the charge")
-	charge.measured(800, 150)
+	charge.measured(copyHeap(8_000, 800), 150)
 	requireCharged(t, budget, charge, 2*800*bytesOfHeapAnElement, "a count of the latest rendering leaves no update bytes beside it")
-	charge.measured(elementsPastCounting, 150)
-	requireCharged(t, budget, charge, 2*pmdoc.MaxDocumentElements*bytesOfHeapAnElement, "a rendering goldmark stopped counting is charged at the element bound")
-	charge.measured(sizeUnmeasured, 150)
+
+	// A rendering MeasureDocument leaves uncounted answers no elements at all; priced as that, the
+	// heaviest room in the pod would be free. It is priced from its bytes at the densest price,
+	// with no ceiling at the element bound.
+	const uncounted = 64 << 10
+	charge.measured(copyHeap(uncounted, elementsPastCounting), 150)
+	requireCharged(t, budget, charge, 2*uncounted*bytesOfHeapAByteAtTheDensest, "a rendering goldmark stopped counting is priced from its bytes at the densest price")
+	if atTheBound := roomWeight(copyHeap(pmdoc.MaxDocumentBytes, pmdoc.MaxDocumentElements), 2, 0); charge.weight <= atTheBound {
+		t.Fatalf("an uncounted 64 KiB rendering is charged %d bytes, want more than the %d of a document at the element bound", charge.weight, atTheBound)
+	}
+	charge.measured(copyHeap(sizeUnmeasured, sizeUnmeasured), 150)
 	requireCharged(t, budget, charge, 0, "a room that renders no markdown is charged its update bytes alone")
 
 	budget.retire("room")
@@ -54,17 +67,21 @@ func TestARoomsChargeIsItsLatestCountAtItsCopiesPlusTheUpdatesSince(t *testing.T
 		t.Fatalf("the budget holds %d bytes over %d rooms once the room retired, want nothing", budget.used, len(budget.rooms))
 	}
 
-	reservation, err := budget.reserve("other", 3_000)
-	if err != nil || reservation == nil || budget.used != 3_000 {
-		t.Fatalf("a reservation held %d bytes (%v), want 3000", budget.used, err)
+	// The reservation an admission makes, its stored version's count at both copies, is replaced
+	// at the room's load by the charge of the room's own document at one copy, here one an update
+	// stored since that version has made smaller.
+	reserved := roomWeight(copyHeap(3_000, 30), 2, 0)
+	reservation, err := budget.reserve("other", reserved)
+	if err != nil || reservation == nil || budget.used != reserved {
+		t.Fatalf("a reservation held %d bytes (%v), want %d", budget.used, err, reserved)
 	}
-	other := budget.load("other", 10)
+	other := budget.load("other", copyHeap(3_000, 10))
 	if budget.used != 10*bytesOfHeapAnElement || len(budget.rooms["other"].reservations) != 0 {
 		t.Fatalf("the loaded room is charged %d bytes beside %d reservations, want its own %d alone",
 			budget.used, len(budget.rooms["other"].reservations), 10*bytesOfHeapAnElement)
 	}
 	budget.release(reservation)
-	if joined, err := budget.reserve("other", 3_000); joined != nil || err != nil || budget.used != other.weight {
+	if joined, err := budget.reserve("other", reserved); joined != nil || err != nil || budget.used != other.weight {
 		t.Fatalf("a socket joining a charged room reserved %v (%v), and the budget holds %d bytes, want nothing reserved", joined, err, budget.used)
 	}
 
@@ -83,22 +100,93 @@ func TestARoomsChargeIsItsLatestCountAtItsCopiesPlusTheUpdatesSince(t *testing.T
 	}
 }
 
-// The budget's arithmetic at the shapes its design is stated in: a room at the element bound,
-// edited, is the most a room's count is charged, and the budget holds thirty-four of them; a room
-// of a mebibyte of prose (57,600 elements, TestAResidentRoomsHeapPerByteOfItsMarkdown's shape),
-// edited, is charged 54 MB, and the budget refuses the fortieth.
-func TestTheRoomBudgetsArithmeticAtTheBound(t *testing.T) {
+// A room's charge follows its renderings through the measurer: a count that lands replaces the
+// charge and clears the update bytes the room had taken when the counted rendering was published,
+// never the bytes taken since, and a rendering whose bytes are published without a count of its
+// own clears nothing. A room whose rendering the counter cannot finish is charged from that
+// rendering's bytes at the densest price, at its load and at a later count alike.
+func TestARoomsUpdateBytesAreClearedOnlyUpToTheRenderingACountMeasured(t *testing.T) {
+	service := &Service{budget: roomBudget{limit: roomBudgetBytes}}
+	service.measurer.interval = noInterval
+	// Each count the measurer starts is handed over here and held until the test releases it.
+	counting, release := make(chan string, 2), make(chan struct{}, 2)
+	service.measurer.beforeCount = func(markdown string) {
+		counting <- markdown
+		<-release
+	}
+	// Empty items of alternating bullet lists, each a list of its own, are the densest rendering
+	// measured (bytesOfHeapAByteAtTheDensest), and a mebibyte of them makes more nodes than
+	// goldmark builds before MeasureDocument stops counting.
+	dense := func(kibibytes int) string { return strings.Repeat("- \n\n* \n\n", kibibytes<<7) }
+	loaded, counted, later := dense(1024), headings(1), dense(1152)
+	for _, rendering := range []string{loaded, later} {
+		if elements := countElements(rendering); elements != elementsPastCounting {
+			t.Fatalf("a dense rendering of %d bytes counts %d elements, want it past counting", len(rendering), elements)
+		}
+	}
+	countedHeap := copyHeap(int64(len(counted)), countElements(counted))
+	if countedHeap <= 0 || countedHeap == int64(len(later))*bytesOfHeapAByteAtTheDensest {
+		t.Fatalf("the counted rendering prices %d bytes, want a price no other rendering here has", countedHeap)
+	}
+
+	replica := service.keepReplica(newDocumentCopy(), &loaded)
+	charge := service.chargeLoadedRoom("room", replica)
+	requireCharged(t, &service.budget, charge, int64(len(loaded))*bytesOfHeapAByteAtTheDensest,
+		"a room loaded with a rendering the counter cannot finish is priced from its bytes at the densest price")
+
+	charge.took(100, true)
+	replica.publishSize(&counted)
+	if markdown := <-counting; markdown != counted {
+		t.Fatal("the measurer started on a rendering the room did not publish")
+	}
+	// The count of counted is in flight. What the room takes now, and a rendering published while
+	// that count runs, which publishes its bytes at once and waits for a count of its own, leave
+	// the charge as it was: the bytes alone clear nothing.
+	charge.took(50, true)
+	replica.publishSize(&later)
+	if bytes, _, _ := replica.size(); bytes != int64(len(later)) {
+		t.Fatalf("the room published %d bytes, want the later rendering's %d at once", bytes, len(later))
+	}
+	requireCharged(t, &service.budget, charge, 2*int64(len(loaded))*bytesOfHeapAByteAtTheDensest+150,
+		"a rendering published without a count clears no update bytes")
+
+	// The count of counted lands: it holds the 100 bytes taken before it was published, and not
+	// the 50 taken since, which stay beside it until the count of later holds them.
+	release <- struct{}{}
+	if markdown := <-counting; markdown != later {
+		t.Fatal("the measurer's second count is not of the later rendering")
+	}
+	requireCharged(t, &service.budget, charge, 2*countedHeap+50,
+		"a count clears the update bytes taken up to the rendering it measured, and no more")
+	release <- struct{}{}
+	service.measurer.waitIdle()
+	requireCharged(t, &service.budget, charge, 2*int64(len(later))*bytesOfHeapAByteAtTheDensest,
+		"the latest rendering's count, past counting, prices its bytes at the densest price and clears every update byte it holds")
+	// A live room's update observer holds its replica, which the measurer holds weakly
+	// (elementMeasurer); nothing else here does, so a count could otherwise land on nothing.
+	runtime.KeepAlive(replica)
+}
+
+// The budget's arithmetic at the shapes its design is stated in. A room of a mebibyte of prose
+// (57,600 elements, TestAResidentRoomsHeapPerByteOfItsMarkdown's shape), edited, is charged 54 MB
+// once counted, and since an admission reserves the same count at the same two copies
+// (storedRoomReservation), the budget admits thirty-nine such documents and refuses the fortieth.
+// There is no ceiling on one room: a mebibyte of the densest rendering, which goldmark stops
+// counting and which is priced from its bytes (bytesOfHeapAByteAtTheDensest), is more than the
+// whole budget at both copies, so the budget admits none, and the pressure rule is what answers a
+// room grown that heavy (peer_update.go:44-58).
+func TestTheRoomBudgetsArithmetic(t *testing.T) {
 	for _, shape := range []struct {
 		name           string
-		elements       int64
+		heap           int64
 		weight, admits int64
 	}{
-		{"a room at the element bound", pmdoc.MaxDocumentElements, 61_603_840, 34},
-		{"a room of a mebibyte of prose", 57_600, 54_144_000, 39},
+		{"a room of a mebibyte of prose", copyHeap(pmdoc.MaxDocumentBytes, 57_600), 54_144_000, 39},
+		{"a mebibyte of the densest rendering", copyHeap(pmdoc.MaxDocumentBytes, elementsPastCounting), 2_218_786_816, 0},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
-			if weight := roomWeight(shape.elements, 2, 0); weight != shape.weight {
-				t.Fatalf("an edited room of %d elements is charged %d bytes, want %d", shape.elements, weight, shape.weight)
+			if weight := roomWeight(shape.heap, 2, 0); weight != shape.weight {
+				t.Fatalf("an edited room of %d bytes of heap a copy is charged %d bytes, want %d", shape.heap, weight, shape.weight)
 			}
 			budget := &roomBudget{limit: roomBudgetBytes}
 			admitted := int64(0)
@@ -119,6 +207,237 @@ func TestTheRoomBudgetsArithmeticAtTheBound(t *testing.T) {
 	}
 }
 
+// The densest price (bytesOfHeapAByteAtTheDensest) is the most elements a byte of rendered
+// markdown makes, measured here over the dense shapes pmdoc's own tests build
+// (pmdoc/elements_test.go: the shapes its gate, its refusal of a mebibyte and its spelling of
+// every node type use) and over this repository's markdown files, and this fails once any shape
+// prices higher at a mebibyte than the constant does. What is measured is each one's rendering,
+// since that is what the budget prices: a version is stored as its rendering
+// (pmdoc/parse.go:120-122), and a room's replica publishes its own.
+//
+// MeasureDocument stops counting at twice the element bound, so a mebibyte of a dense shape is
+// counted in pieces, each a document of its own of up to 8 KiB of the shape, rendered and measured
+// whole, until their renderings reach the size: the sum counts the head and the containers each
+// piece opens once for each piece, which errs on the dense side. A unit that needs an id of its
+// own takes its index within its piece. The densest at a mebibyte, at 64 KiB and overall - every
+// shape at those sizes and as a lone unit, and every file at its own size - is logged.
+func TestNoMarkdownPricesPastTheDensestPrice(t *testing.T) {
+	type shape struct {
+		name, head, tail string
+		unit             func(index int) string
+	}
+	repeated := func(name, unit string) shape {
+		return shape{name: name, unit: func(int) string { return unit }}
+	}
+	numbered := func(name, format string) shape {
+		return shape{name: name, unit: func(index int) string { return fmt.Sprintf(format, index) }}
+	}
+	shapes := []shape{
+		repeated(")_", ")_"),
+		repeated("a_", "a_"),
+		repeated("a_b*", "a_b*"),
+		repeated("a*b*", "a*b*"),
+		repeated("[a", "[a"),
+		repeated("a line feed per character", "a\n"),
+		repeated("paragraphs", "a\n\n"),
+		repeated("list items", "- a\n"),
+		repeated("empty list items", "-\n"),
+		repeated("empty items of alternating bullet lists", "-\n*\n"),
+		repeated("empty items of alternating ordered lists", "1.\n1)\n"),
+		repeated("list items opening with a heading", "- # a\n"),
+		repeated("hard breaks", "a  \n"),
+		repeated("backslash hard breaks", "a\\\n"),
+		repeated("headings", "# a\n"),
+		repeated("empty headings", "#\n"),
+		repeated("empty quotes", ">\n\n"),
+		repeated("quotes", "> a\n\n"),
+		repeated("empty fences", "```\n```\n"),
+		repeated("fences", "```\na\n```\n"),
+		repeated("rules", "***\n"),
+		repeated("images", "![](u)"),
+		repeated("images with alt text", "![a](u)"),
+		repeated("linked images", "[![](u)](v)"),
+		repeated("inline HTML tags", "<b>"),
+		repeated("inline HTML spans", "<b>a</b>"),
+		repeated("inline HTML around emphasis", "<b>*a*</b>"),
+		{name: "HTML comments", head: "a", unit: func(int) string { return "<!---->" }},
+		{name: "a two-column table", head: "| a | b |\n| - | - |\n", unit: func(int) string { return "| x | y |\n" }},
+		{name: "empty table rows", head: "| a |\n| - |\n", unit: func(int) string { return "| |\n" }},
+		{name: "empty four-column rows", head: "| a | b | c | d |\n| - | - | - | - |\n", unit: func(int) string { return "| | | | |\n" }},
+		repeated("header-only tables", "| a |\n| - |\n\n"),
+		repeated("empty three-column header-only tables", "| | | |\n| - | - | - |\n\n"),
+		repeated(`\~a`, `\~a`),
+		repeated(`)\_`, `)\_`),
+		repeated(`\)\_`, `\)\_`),
+		repeated(`\[a`, `\[a`),
+		repeated("&#95;a", "&#95;a"),
+		numbered("empty footnote definitions", "[^%d]:\n"),
+		numbered("footnote definitions", "[^%d]: a\n"),
+		{name: "footnote references", tail: "\n\n[^a]: b\n", unit: func(int) string { return "[^a]" }},
+		repeated("empty callouts", ":::callout{}\n:::\n\n"),
+		repeated("callouts", ":::callout{}\na\n:::\n\n"),
+		numbered("empty asks", ":::ask{#ask-%d}\n:::\n\n"),
+		numbered("asks", ":::ask{#ask-%d}\nq\n:::\n\n"),
+	}
+	type density struct {
+		elements, bytes int64
+		name            string
+	}
+	denser := func(worst *density, name string, elements, bytes int64) {
+		if bytes > 0 && (worst.bytes == 0 || elements*worst.bytes > worst.elements*bytes) {
+			*worst = density{elements: elements, bytes: bytes, name: name}
+		}
+	}
+	perByte := func(d density) float64 { return float64(d.elements) / float64(d.bytes) }
+	// renderingOf is markdown read and rendered as a room would hold it, or the error that says it
+	// is no document's rendering at all: markdown outside the Proof schema.
+	renderingOf := func(markdown string) (string, error) {
+		tree, err := pmdoc.ParseRendering(markdown)
+		if err != nil {
+			return "", err
+		}
+		return documentMarkdown(tree)
+	}
+	const pieceBytes = 8 << 10
+	// at is what shape's renderings make, in pieces, once they reach size bytes; a piece measured
+	// once is not measured again, which every piece of a repeated unit is but the last. Every piece
+	// of a shape is a document in the schema, and counted whole.
+	at := func(s shape, size int64) (int64, int64) {
+		t.Helper()
+		measured := map[string][2]int64{}
+		var elements, bytes int64
+		for bytes < size {
+			var piece strings.Builder
+			piece.WriteString(s.head)
+			for index := 0; piece.Len()+len(s.tail) < pieceBytes; index++ {
+				piece.WriteString(s.unit(index))
+			}
+			piece.WriteString(s.tail)
+			got, ok := measured[piece.String()]
+			if !ok {
+				rendering, err := renderingOf(piece.String())
+				if err != nil {
+					t.Fatalf("%s: a piece of %d bytes is no document's rendering: %v", s.name, piece.Len(), err)
+				}
+				counted := pmdoc.MeasureDocument(rendering)
+				if !counted.Counted {
+					t.Fatalf("%s: a piece's rendering of %d bytes makes more nodes than MeasureDocument builds; measure it in smaller pieces", s.name, len(rendering))
+				}
+				got = [2]int64{int64(counted.Elements), int64(counted.Bytes)}
+				measured[piece.String()] = got
+			}
+			elements += got[0]
+			bytes += got[1]
+		}
+		return elements, bytes
+	}
+	var atAMebibyte, at64KiB, overall, densestFile density
+	for _, s := range shapes {
+		elements, bytes := at(s, pmdoc.MaxDocumentBytes)
+		denser(&atAMebibyte, s.name, elements, bytes)
+		denser(&overall, s.name+" at a mebibyte", elements, bytes)
+		if price, densest := elements*bytesOfHeapAnElement, bytes*bytesOfHeapAByteAtTheDensest; price > densest {
+			t.Errorf("a mebibyte of %s renders to %d bytes making %d elements, %d bytes of heap a copy, past the %d the densest price gives it",
+				s.name, bytes, elements, price, densest)
+		}
+		elements, bytes = at(s, 64<<10)
+		denser(&at64KiB, s.name, elements, bytes)
+		denser(&overall, s.name+" at 64 KiB", elements, bytes)
+		// A lone unit of some shapes reads as something else - a lone `<b>` is an HTML block,
+		// which the schema refuses - and is no document's rendering to weigh.
+		if rendering, err := renderingOf(s.head + s.unit(0) + s.tail); err == nil {
+			if size := pmdoc.MeasureDocument(rendering); size.Counted {
+				denser(&overall, "a lone unit of "+s.name, int64(size.Elements), int64(size.Bytes))
+			}
+		}
+	}
+	root := repositoryRoot(t)
+	files, unread := 0, 0
+	for _, file := range repositoryMarkdown(t, root) {
+		markdown, err := os.ReadFile(file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		name, err := filepath.Rel(root, file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		rendering, err := renderingOf(string(markdown))
+		if err != nil {
+			unread++ // markdown outside the Proof schema is no document's rendering
+			continue
+		}
+		size := pmdoc.MeasureDocument(rendering)
+		if !size.Counted {
+			t.Errorf("%s: its rendering of %d bytes makes more nodes than MeasureDocument builds", name, len(rendering))
+			continue
+		}
+		files++
+		denser(&overall, name, int64(size.Elements), int64(size.Bytes))
+		denser(&densestFile, name, int64(size.Elements), int64(size.Bytes))
+		if size.Bytes >= 64<<10 {
+			denser(&at64KiB, name, int64(size.Elements), int64(size.Bytes))
+		}
+	}
+	if files < 100 {
+		t.Fatalf("the walk read %d markdown files in this repository (%d outside the schema), want the hundreds it holds", files, unread)
+	}
+	t.Logf("the densest rendering at a mebibyte is %s at %.4f elements a byte, %.1f bytes of heap a byte; the densest price is %d",
+		atAMebibyte.name, perByte(atAMebibyte), perByte(atAMebibyte)*bytesOfHeapAnElement, bytesOfHeapAByteAtTheDensest)
+	t.Logf("the densest rendering at 64 KiB is %s at %.4f elements a byte", at64KiB.name, perByte(at64KiB))
+	t.Logf("the densest rendering overall is %s at %.4f elements a byte (%d elements in %d bytes), over %d shapes and %d of this repository's markdown files (%d outside the schema)",
+		overall.name, perByte(overall), overall.elements, overall.bytes, len(shapes), files, unread)
+	t.Logf("the densest rendering of this repository's markdown files is %s at %.4f elements a byte (%d elements in %d bytes)",
+		densestFile.name, perByte(densestFile), densestFile.elements, densestFile.bytes)
+}
+
+// repositoryRoot is the directory this repository's Go workspace sits in, found by walking up from
+// the package the test runs in.
+func repositoryRoot(t *testing.T) string {
+	t.Helper()
+	root, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for {
+		if _, err := os.Stat(filepath.Join(root, "go.work")); err == nil {
+			return root
+		}
+		parent := filepath.Dir(root)
+		if parent == root {
+			t.Fatal("no go.work above this package: the repository root is what the walk starts from")
+		}
+		root = parent
+	}
+}
+
+// repositoryMarkdown is every markdown file under root, skipping the trees nothing in this
+// repository wrote - its dependencies, its version control, the caches each leaves - as pmdoc's
+// own walk of them does (pmdoc/elements_test.go:263-288).
+func repositoryMarkdown(t *testing.T, root string) []string {
+	t.Helper()
+	var files []string
+	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if name := entry.Name(); path != root && (strings.HasPrefix(name, ".") || name == "node_modules" || name == "vendor") {
+				return fs.SkipDir
+			}
+			return nil
+		}
+		if strings.HasSuffix(entry.Name(), ".md") {
+			files = append(files, path)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return files
+}
+
 func requireCharged(t *testing.T, budget *roomBudget, charge *roomCharge, want int64, what string) {
 	t.Helper()
 	if charge.weight != want || budget.used != want {
@@ -129,8 +448,9 @@ func requireCharged(t *testing.T, budget *roomBudget, charge *roomCharge, want i
 // Every way out of the document socket's handler returns the reservation its admission made, and
 // the one way that keeps the socket hands it to the room's own charge when the room loads: a socket
 // refused outside the schema, one whose admission load fails, one the budget refuses, and one that
-// joins its room. The reservation is the stored document's count at both copies, held while the
-// handler loads the document.
+// joins its room. The reservation is the stored version's count at both copies, held while the
+// handler loads the document, and the room's load replaces it with the count of the rendering it
+// loaded with, at one copy: the same document here, so half the reservation.
 func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 	database := storetest.Open(t)
 	watch := &admissionWatchStore{VersionedStore: NewPgVersioned(database), held: make(map[string][]int64)}
@@ -140,7 +460,8 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 	t.Cleanup(httpServer.Close)
 	ids := createDocuments(t, database, 4)
 	outside, failing, refused, joined := ids[0], ids[1], ids[2], ids[3]
-	reserved := roomWeight(countElements(latestVersionMarkdown(t, database, joined)), 2, 0)
+	stored := latestVersionMarkdown(t, database, joined)
+	reserved := roomWeight(copyHeap(int64(len(stored)), countElements(stored)), 2, 0)
 	if reserved <= 0 {
 		t.Fatalf("the stored document reserves %d bytes, want some", reserved)
 	}
@@ -180,10 +501,14 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 		}
 		waitFor(t, 10*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(joined) != nil })
 		watch.requireHeldAtLoad(t, joined, reserved)
-		loaded := roomWeight(countElements(renderedLive(t, service, joined)), 1, 0)
+		rendering := renderedLive(t, service, joined)
+		loaded := roomWeight(copyHeap(int64(len(rendering)), countElements(rendering)), 1, 0)
 		requireNothingReserved(t, service)
 		if used := budgetUsed(service); used != loaded {
 			t.Fatalf("the budget holds %d bytes for the open room, want its own charge at one copy, %d", used, loaded)
+		}
+		if roomWeight(loaded, 2, 0) != reserved {
+			t.Fatalf("the room's count charges %d bytes at one copy, want half the %d its admission reserved from the same document at two", loaded, reserved)
 		}
 		leaveDocument(connection)
 		if err := service.Evict(context.Background(), joined); err != nil {
@@ -193,6 +518,168 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 			t.Fatalf("the budget holds %d bytes once the room retired, want none", used)
 		}
 	})
+}
+
+// An admission reserves its stored version counted, at both copies, as the room it opens is priced
+// once loaded (storedRoomReservation). A mebibyte of prose, the shape
+// TestAResidentRoomsHeapPerByteOfItsMarkdown weighs, is admitted to an empty budget, and what it
+// reserves is within 1.05x of what its room is charged once loaded and edited, at two copies. The
+// two are not one figure by construction: the admission counts the markdown the version stored,
+// and the room counts the rendering of the document it decoded from the stored updates, so they
+// agree only as far as that rendering spells the document as the stored one does - here, with no
+// update stored since the version, exactly; past that, by the updates stored since.
+//
+// The count is kept for the version: a second admission and the socket's own parse nothing, and
+// a new version is counted again. A version MeasureDocument cannot finish counting is priced from
+// its bytes at the densest price, and a mebibyte of it is refused at admission.
+func TestAnAdmissionReservesTheCountOfItsStoredVersion(t *testing.T) {
+	const factor = 1.05
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	var parses atomic.Int64
+	service.budget.stored.beforeCount = func(string, int64) { parses.Add(1) }
+	httpServer := httptest.NewServer(http.HandlerFunc(service.ServeHTTP))
+	t.Cleanup(httpServer.Close)
+	room := createDocumentsHolding(t, database, 1, residentRoomMarkdown(t, pmdoc.MaxDocumentBytes))[0]
+	stored := latestVersionMarkdown(t, database, room)
+	started := time.Now()
+	elements := countElements(stored)
+	t.Logf("the stored version is %d bytes of prose making %d elements, counted in %s", len(stored), elements, time.Since(started))
+	if elements == elementsPastCounting {
+		t.Fatal("a mebibyte of prose is past counting, want it counted")
+	}
+
+	reservation, err := service.reserveRoom(ctx, room)
+	if err != nil || reservation == nil {
+		t.Fatalf("a mebibyte of prose was refused at admission to an empty budget: %v", err)
+	}
+	if want := roomWeight(copyHeap(int64(len(stored)), elements), 2, 0); reservation.weight != want || parses.Load() != 1 {
+		t.Fatalf("the admission reserved %d bytes after %d parses, want its count at two copies, %d, after one", reservation.weight, parses.Load(), want)
+	}
+	service.budget.release(reservation)
+	again, err := service.reserveRoom(ctx, room)
+	if err != nil || again == nil || again.weight != reservation.weight || parses.Load() != 1 {
+		t.Fatalf("a second admission reserved %v (%v) after %d parses, want the same %d bytes and no second parse", again, err, parses.Load(), reservation.weight)
+	}
+	service.budget.release(again)
+
+	connection, err := dialDocument(httpServer.URL, room)
+	if err != nil {
+		t.Fatalf("open the document: %v", err)
+	}
+	waitFor(t, 30*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(room) != nil })
+	requireNothingReserved(t, service)
+	loaded := budgetUsed(service)
+	edited := roomWeight(loaded, 2, 0)
+	ratio := float64(reservation.weight) / float64(edited)
+	t.Logf("a mebibyte of prose reserves %d bytes at admission; its room is charged %d bytes loaded, at one copy, and %d edited, at two (%.4fx); its bytes at the densest price would reserve %d",
+		reservation.weight, loaded, edited, ratio, roomWeight(int64(len(stored))*bytesOfHeapAByteAtTheDensest, 2, 0))
+	if ratio < 1/factor || ratio > factor {
+		t.Fatalf("the admission reserved %d bytes, %.4fx the %d its room costs once counted, want within %.2fx", reservation.weight, ratio, edited, factor)
+	}
+	if parses.Load() != 1 {
+		t.Fatalf("the socket's admission parsed the stored version again (%d parses), want the kept count", parses.Load())
+	}
+	leaveDocument(connection)
+	if err := service.Evict(ctx, room); err != nil {
+		t.Fatal(err)
+	}
+
+	appendVersion := func(markdown string) {
+		t.Helper()
+		if _, err := database.Pool.Exec(ctx, `
+			insert into artifact_versions (artifact_id, number, markdown, authors)
+			select $1, coalesce(max(number), 0) + 1, $2, '[]' from artifact_versions where artifact_id = $1
+		`, room, markdown); err != nil {
+			t.Fatalf("store a new version: %v", err)
+		}
+	}
+	const second = "A second version.\n"
+	appendVersion(second)
+	next, err := service.reserveRoom(ctx, room)
+	if want := roomWeight(copyHeap(int64(len(second)), countElements(second)), 2, 0); err != nil || next == nil || next.weight != want || parses.Load() != 2 {
+		t.Fatalf("an admission to a new version reserved %v (%v) after %d parses, want its own count, %d, after a second parse", next, err, parses.Load(), want)
+	}
+	service.budget.release(next)
+
+	// Empty items of alternating bullet lists, each a list of its own, are the densest rendering
+	// measured, and a mebibyte of them makes more nodes than goldmark builds before
+	// MeasureDocument stops counting.
+	uncountable := strings.Repeat("- \n\n* \n\n", 1024<<7)
+	if countElements(uncountable) != elementsPastCounting {
+		t.Fatal("a mebibyte of the densest rendering was counted, want it past counting")
+	}
+	appendVersion(uncountable)
+	densest := roomWeight(int64(len(uncountable))*bytesOfHeapAByteAtTheDensest, 2, 0)
+	if weight, err := service.storedRoomReservation(ctx, room); err != nil || weight != densest || parses.Load() != 3 {
+		t.Fatalf("a version past counting reserves %d bytes (%v) after %d parses, want its bytes at the densest price at two copies, %d, after a third", weight, err, parses.Load(), densest)
+	}
+	if refused, err := service.reserveRoom(ctx, room); refused != nil || !errors.Is(err, errRoomBudgetFull) || parses.Load() != 3 {
+		t.Fatalf("an admission to a mebibyte past counting reserved %v (%v) after %d parses, want a refusal from the kept count", refused, err, parses.Load())
+	}
+	requireNothingReserved(t, service)
+}
+
+// Two admissions to one document no room holds, at the same moment, parse its stored version once:
+// the second waits for the count the first started rather than starting its own
+// (storedRoomReservation), and both reserve that count.
+func TestTwoAdmissionsAtOnceCountTheStoredVersionOnce(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	room := createDocuments(t, database, 1)[0]
+	stored := latestVersionMarkdown(t, database, room)
+	var parses atomic.Int64
+	counting, release := make(chan struct{}, 2), make(chan struct{})
+	service.budget.stored.beforeCount = func(string, int64) {
+		parses.Add(1)
+		counting <- struct{}{}
+		<-release
+	}
+	type admission struct {
+		reservation *roomReservation
+		err         error
+	}
+	admissions := make(chan admission, 2)
+	admit := func() {
+		reservation, err := service.reserveRoom(ctx, room)
+		admissions <- admission{reservation, err}
+	}
+	go admit()
+	select {
+	case <-counting:
+	case <-time.After(10 * time.Second):
+		t.Fatal("the first admission never started its count")
+	}
+	go admit()
+	// Give the second admission a chance to reach the count the first holds, as the cold reads'
+	// test gives its followers (TestCancelledColdReaderLeavesTheFoldForOtherReaders).
+	time.Sleep(20 * time.Millisecond)
+	select {
+	case early := <-admissions:
+		t.Fatalf("an admission returned %v (%v) while the count was held, want it waiting for that count", early.reservation, early.err)
+	default:
+	}
+	close(release)
+	want := roomWeight(copyHeap(int64(len(stored)), countElements(stored)), 2, 0)
+	for range 2 {
+		select {
+		case got := <-admissions:
+			if got.err != nil || got.reservation == nil || got.reservation.weight != want {
+				t.Fatalf("an admission reserved %v (%v), want the stored version's count at two copies, %d", got.reservation, got.err, want)
+			}
+			defer service.budget.release(got.reservation)
+		case <-time.After(10 * time.Second):
+			t.Fatal("an admission never returned once the count was released")
+		}
+	}
+	if parses.Load() != 1 {
+		t.Fatalf("two admissions at once parsed the stored version %d times, want once", parses.Load())
+	}
+	if used := budgetUsed(service); used != 2*want {
+		t.Fatalf("the budget holds %d bytes, want both admissions' %d", used, 2*want)
+	}
 }
 
 // Over the budget, the sweep closes the rooms nothing is still using and leaves the ones something

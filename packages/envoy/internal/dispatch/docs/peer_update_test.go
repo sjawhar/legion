@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 
@@ -122,6 +123,32 @@ func TestAPeerUpdateIsWeighedAgainstTheRoomsLastMeasurement(t *testing.T) {
 			applied: true,
 		},
 		{
+			name:     "an update that leaves the document no longer but adds elements while the room budget is full is refused as transient",
+			markdown: ordinary,
+			busy:     true,
+			update:   peerReshaping,
+			refused:  contracts.DocumentBusyCloseCode,
+		},
+		{
+			name:       "a 7 KiB insert at the byte bound while the room budget is full is refused as transient",
+			markdown:   atTheBound,
+			leastBytes: pmdoc.MaxDocumentBytes,
+			busy:       true,
+			update: func(t *testing.T, room *crdt.Doc) []byte {
+				return peerTyping(t, room, strings.Repeat("p", 7<<10))
+			},
+			refused: contracts.DocumentBusyCloseCode,
+		},
+		{
+			name:       "a delete at the byte bound while the room budget is full applies",
+			markdown:   atTheBound,
+			leastBytes: pmdoc.MaxDocumentBytes,
+			busy:       true,
+			update:     func(t *testing.T, room *crdt.Doc) []byte { return peerDeleting(t, room, 64) },
+			applied:    true,
+			changes:    true,
+		},
+		{
 			name:       "a 9 KiB paste at the byte bound while the room budget is full is the document's own refusal",
 			markdown:   atTheBound,
 			leastBytes: pmdoc.MaxDocumentBytes,
@@ -231,6 +258,47 @@ func peerDeleting(t *testing.T, room *crdt.Doc, characters int) []byte {
 	t.Helper()
 	browser, from := peerDocument(t, room)
 	browser.Transact(func(txn *crdt.Transaction) { from.Delete(txn, 0, characters) })
+	return crdt.EncodeStateAsUpdateV1(browser, room.StateVector())
+}
+
+// peerReshaping is the update a browser sends that cuts the room's first paragraph short and adds
+// one-word paragraphs after it, leaving the document's rendering no longer than it was while it
+// makes more elements: the update a test of its bytes would admit, and which grows what the room
+// holds all the same.
+func peerReshaping(t *testing.T, room *crdt.Doc) []byte {
+	t.Helper()
+	browser, _ := peerDocument(t, room)
+	before, err := renderDocument(browser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tree, err := treeOf(browser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := slices.IndexFunc(tree.Children, func(block *pmdoc.Node) bool { return block.Type == "paragraph" })
+	if first < 0 {
+		t.Fatal("the document holds no paragraph to cut short")
+	}
+	tree.Children[first].Children = []*pmdoc.Node{{Type: "text", Text: "One."}}
+	var added []*pmdoc.Node
+	for range 8 {
+		added = append(added, &pmdoc.Node{Type: "paragraph", Children: []*pmdoc.Node{{Type: "text", Text: "a"}}})
+	}
+	tree.Children = slices.Insert(tree.Children, first+1, added...)
+	pmdoc.EnsureBlockIDs(tree)
+	fragment := browser.GetXmlFragment(fragmentName)
+	if err := browser.TransactE(func(txn *crdt.Transaction) error { return pmdoc.Update(txn, fragment, tree) }); err != nil {
+		t.Fatal(err)
+	}
+	after, err := renderDocument(browser)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(after) > len(before) || countElements(after) <= countElements(before) {
+		t.Fatalf("the reshaped document renders %d bytes making %d elements, from %d making %d: want no more bytes and more elements",
+			len(after), countElements(after), len(before), countElements(before))
+	}
 	return crdt.EncodeStateAsUpdateV1(browser, room.StateVector())
 }
 

@@ -367,14 +367,18 @@ const sizeUnmeasured = -1
 
 // elementsPastCounting is what elements holds for a rendering goldmark stopped building: it makes
 // more elements than one document may hold, by how many is unknown (pmdoc.MeasureDocument), so the
-// room budget charges it at the element bound (roomWeight).
+// room budget prices it from its bytes at the densest price (copyHeap), never at the element bound
+// and never at nothing.
 const elementsPastCounting = math.MaxInt64
 
 // publishSize publishes markdown's size, the rendering the update observer is keeping as the
 // replica's own (updateChangesMarkdown). A rendering the room could not read publishes no size at
 // once. Any other publishes its bytes at once and hands its elements to the service's measurer
 // (elementMeasurer), replacing the rendering the room already had waiting there, if any; the
-// measurer counts it once the room's last count is roomCountInterval old.
+// measurer counts it once the room's last count is roomCountInterval old. The bytes alone re-base
+// nothing in the room budget: the update bytes the room has taken by now are cleared from its
+// charge only once the count of this rendering lands (storeCounted), since until then the charge
+// still prices an older rendering that does not hold them.
 func (r *renderedReplica) publishSize(markdown *string) {
 	if markdown == nil {
 		r.publishCounted(nil, 0)

@@ -487,8 +487,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	s.unlockState(room, state)
 	replica := s.keepReplica(doc, contentMarkdown)
 	// The room's charge in the room budget replaces the reservations of the sockets admitted to it
-	// (reserveRoom), from the count its load just made (keepReplica). From here every update the
-	// room takes is charged until a later count of its rendering re-bases the charge (roomCharge).
+	// (reserveRoom), which counted the stored version at two copies, with the count its load just
+	// made of the room's own document at one (keepReplica). From here every update the room takes is
+	// charged until a later count of its rendering re-bases the charge (roomCharge).
 	charge := s.chargeLoadedRoom(room, replica)
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold

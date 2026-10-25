@@ -148,7 +148,7 @@ func (m *elementMeasurer) count(replica weak.Pointer[renderedReplica]) {
 	}
 	elements := countElements(*markdown)
 	if held := replica.Value(); held != nil {
-		held.storeCounted(elements, publication, updates)
+		held.storeCounted(int64(len(*markdown)), elements, publication, updates)
 	}
 }
 
@@ -192,22 +192,26 @@ func takeUncounted(replica weak.Pointer[renderedReplica]) (*string, uint64, int6
 	return markdown, r.uncountedAt, r.uncountedUpdates
 }
 
-// storeCounted stores elements, the count of the rendering the replica's publication-th publication
-// made when the room had taken updates bytes of updates, and re-bases the room's charge on it
-// (roomCharge.measured), unless a later publication has already stored a count of its own: the
-// room's load, or a rendering the room could not read. Those are newer than this count, and a
-// count landing after them would put an older document's weight back on the room.
-func (r *renderedReplica) storeCounted(elements int64, publication uint64, updates int64) {
+// storeCounted stores elements, the count of the bytes-long rendering the replica's publication-th
+// publication made when the room had taken updates bytes of updates, and re-bases the room's charge
+// on its price (copyHeap, roomCharge.measured), unless a later publication has already stored a
+// count of its own: the room's load, or a rendering the room could not read. Those are newer than
+// this count, and a count landing after them would put an older document's weight back on the
+// room. The update bytes it clears are those the room had taken when the counted rendering was
+// published, never the bytes taken since, which the rendering does not hold.
+func (r *renderedReplica) storeCounted(bytes, elements int64, publication uint64, updates int64) {
 	r.sizeMu.Lock()
 	defer r.sizeMu.Unlock()
 	if publication > r.settled {
 		r.elements.Store(elements)
-		r.charge.measured(elements, updates)
+		r.charge.measured(copyHeap(bytes, elements), updates)
 	}
 }
 
 // countElements is the element half of markdown's measurement as the room budget charges it:
-// elementsPastCounting for markdown goldmark stopped counting.
+// elementsPastCounting for markdown goldmark stopped counting, which the budget prices from its
+// bytes at the densest price instead (copyHeap). MeasureDocument answers such markdown with no
+// elements at all, and charged as that, the heaviest room in the pod would look free.
 func countElements(markdown string) int64 {
 	size := pmdoc.MeasureDocument(markdown)
 	if !size.Counted {
