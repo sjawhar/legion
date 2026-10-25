@@ -41,8 +41,9 @@ const (
 type fakeGitHubApp struct {
 	installations map[string]string
 	tokenMints    int
-	// commit is the sha every branch resolves to; branchMissing answers 404
-	// instead. files is keyed by file name inside architecture.SourceDir.
+	// commit is the sha every branch resolves to; branchMissing answers 422
+	// instead, as GitHub does for a branch that does not exist. files is keyed
+	// by file name inside architecture.SourceDir.
 	commit        string
 	files         map[string]string
 	branchMissing bool
@@ -86,7 +87,9 @@ func (f *fakeGitHubApp) handler(t *testing.T) http.Handler {
 	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
 		if f.branchMissing {
-			w.WriteHeader(http.StatusNotFound)
+			w.Header().Set("Content-Type", "application/json; charset=utf-8")
+			w.WriteHeader(http.StatusUnprocessableEntity)
+			fmt.Fprintf(w, `{"message":"No commit found for SHA: %s","documentation_url":"https://docs.github.com/rest/commits/commits#get-a-commit","status":"422"}`, r.PathValue("branch"))
 			return
 		}
 		// As GitHub does: the bare sha for Accept: application/vnd.github.sha, JSON otherwise.

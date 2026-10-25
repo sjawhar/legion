@@ -45,8 +45,8 @@ var (
 	// ErrNoPullRequestsRead is an installation whose Pull requests permission is
 	// missing or "none" (LEGION-567's reconcile needs it to read merged PRs).
 	ErrNoPullRequestsRead = errors.New("the installation lacks Pull requests: read")
-	// ErrNoBranch is GitHub's 404/422 for the configured branch: the branch does
-	// not exist (or the repository vanished under the installation token).
+	// ErrNoBranch is GitHub's 422 for a configured branch that does not exist,
+	// or its 404 for a repository it cannot find or the installation cannot see.
 	ErrNoBranch = errors.New("the branch does not exist")
 	// ErrTreeTruncated is GitHub's truncated=true on a tree read: the
 	// directory exceeds the tree API caps (100k entries / 7 MB), so the
@@ -634,9 +634,10 @@ func (c *Client) request(ctx context.Context, method, target, authorization, acc
 
 // Ref resolves branch to its commit SHA under an installation token
 // (`GET /repos/{owner}/{repo}/commits/{branch}`) — one call that also proves
-// the branch exists. GitHub answers a branch that does not exist (also an
-// empty repository or a malformed ref) with 422, and a repository that is not
-// found or not visible to the installation with 404; both are ErrNoBranch.
+// the branch exists. GitHub answers a branch that does not exist with 422 and
+// a repository it cannot find or the installation cannot see with 404; both
+// are ErrNoBranch. An empty repository answers 409 per GitHub's docs, which
+// passes through as a read error.
 // It asks for the SHA alone (`Accept: application/vnd.github.sha`), so the
 // commit's file list, which GitHub's JSON answer carries, never counts
 // against responseLimit. An answer that is not one 40-hex SHA is an error,

@@ -49,11 +49,20 @@ func writeCommit(w http.ResponseWriter, r *http.Request, sha string) {
 	fmt.Fprintf(w, `{"sha":%q}`, sha)
 }
 
+// writeNoCommit answers the commits route as GitHub does for a branch that
+// does not exist: 422 with its JSON error body.
+func writeNoCommit(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(http.StatusUnprocessableEntity)
+	fmt.Fprintf(w, `{"message":"No commit found for SHA: %s","documentation_url":"https://docs.github.com/rest/commits/commits#get-a-commit","status":"422"}`, r.PathValue("branch"))
+}
+
 // fakeSource is the GitHub App surface a sync walks: installation lookup,
 // token mint, branch commit, the architecture directory's subtree, and blob
 // reads. files is keyed by the file name inside SourceDir; the subtree sha is
 // derived from the files, so identical files under a new commit answer the
-// same sha exactly like git would.
+// same sha exactly like git would. branchMissing answers the commits route as
+// GitHub does for a branch that does not exist: 422 (see writeNoCommit).
 type fakeSource struct {
 	t              *testing.T
 	installationID int64
@@ -104,7 +113,7 @@ func (f *fakeSource) handler() http.Handler {
 	})
 	mux.HandleFunc("GET /repos/{owner}/{repo}/commits/{branch}", func(w http.ResponseWriter, r *http.Request) {
 		if f.branchMissing {
-			w.WriteHeader(http.StatusNotFound)
+			writeNoCommit(w, r)
 			return
 		}
 		writeCommit(w, r, f.commit)
