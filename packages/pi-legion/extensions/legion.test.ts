@@ -1546,13 +1546,15 @@ describe("Legion OMP extension", () => {
       stop_hook_active: false,
       signal,
     });
-    /** An assistant message that ran a real tool call, as the host hands it to `message_end`. */
+    /** An assistant message that ran a real tool call, as Oh My Pi hands it to `message_end`: its
+     * tool-call block is `toolCall` (`packages/pi-envoy/src/agent-stream.ts` reads the same
+     * shape), not Claude Code's `tool_use`. */
     const ranTool = {
       message: {
         role: "assistant",
         content: [
           { type: "text", text: "Reading the file." },
-          { type: "tool_use", id: "toolu_1", name: "read", input: { file_path: "main.py" } },
+          { type: "toolCall", id: "toolu_1", name: "read", arguments: { file_path: "main.py" } },
         ],
       },
     };
@@ -1709,9 +1711,13 @@ describe("Legion OMP extension", () => {
       // and no timer is armed for it.
       expect(steered(worker)).toEqual([]);
       expect(worker.timers).toEqual([]);
+      // The settle records what the worker said, so a relaunch's architect notice can still
+      // quote it, and the continuation then records its count.
+      const said = "I pushed the change and CI is green.";
       expect(recorded(worker)).toEqual([
         { state: "open", count: 0, reported: false },
-        { state: "open", count: 1, reported: false },
+        { state: "open", count: 0, reported: false, lastMessage: said },
+        { state: "open", count: 1, reported: false, lastMessage: said },
       ]);
     });
 
@@ -1745,7 +1751,12 @@ describe("Legion OMP extension", () => {
       expect(steered(worker)).toEqual([]);
       await fires(worker);
       expect(steered(worker)).toEqual([steeredReminder(REMINDER)]);
-      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 2, reported: false });
+      expect(recorded(worker).at(-1)).toEqual({
+        state: "open",
+        count: 2,
+        reported: false,
+        lastMessage: "Still pushing.",
+      });
     });
 
     // The continuation's own turn is one the worker was told to call a tool in, so it very often
@@ -1758,7 +1769,12 @@ describe("Legion OMP extension", () => {
       expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
 
       await hook(worker.handlers, "message_end")(ranTool, worker.context);
-      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 0, reported: false });
+      expect(recorded(worker).at(-1)).toEqual({
+        state: "open",
+        count: 0,
+        reported: false,
+        lastMessage: "Pushed.",
+      });
 
       expect(await worker.settles("Read the file.")).toBeUndefined();
       expect(worker.timers.map((timer) => timer.delayMs)).toEqual([
@@ -1780,9 +1796,12 @@ describe("Legion OMP extension", () => {
       expect(steered(worker)).toEqual([steeredReminder(REMINDER), steeredReminder(REMINDER)]);
       expect(recorded(worker)).toEqual([
         { state: "open", count: 0, reported: false },
-        { state: "open", count: 1, reported: false },
-        { state: "open", count: 2, reported: false },
-        { state: "open", count: 3, reported: false },
+        { state: "open", count: 0, reported: false, lastMessage: "Thinking about it." },
+        { state: "open", count: 1, reported: false, lastMessage: "Thinking about it." },
+        { state: "open", count: 1, reported: false, lastMessage: "Still thinking about it." },
+        { state: "open", count: 2, reported: false, lastMessage: "Still thinking about it." },
+        { state: "open", count: 2, reported: false, lastMessage: "Nearly there." },
+        { state: "open", count: 3, reported: false, lastMessage: "Nearly there." },
       ]);
     });
 
@@ -1825,7 +1844,12 @@ describe("Legion OMP extension", () => {
 
         await hook(worker.handlers, event)(message, worker.context);
 
-        expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 0, reported: false });
+        expect(recorded(worker).at(-1)).toEqual({
+          state: "open",
+          count: 0,
+          reported: false,
+          lastMessage: "Still pushing.",
+        });
         expect(await worker.settles("Back at it.")).toEqual(followUp("handoff_complete"));
       });
     }
@@ -1840,7 +1864,13 @@ describe("Legion OMP extension", () => {
       // is over.
       expect(worker.timers.map((timer) => timer.delayMs)).toEqual([DEFAULT_STALL_LIMITS.waitingMs]);
       expect(steered(worker)).toEqual([]);
-      expect(recorded(worker).at(-1)).toEqual({ state: "waiting", count: 0, reported: false });
+      const waiting = "Pushed.\nWAITING: CI on the pull request";
+      expect(recorded(worker).at(-1)).toEqual({
+        state: "waiting",
+        count: 0,
+        reported: false,
+        lastMessage: waiting,
+      });
 
       await fires(worker);
 
@@ -1850,7 +1880,12 @@ describe("Legion OMP extension", () => {
       expect(REMINDER).toContain("This reminder repeats at the end of every turn");
       expect(REMINDER).not.toContain("until a new event arrives");
       // The wait is over, so the phase is open again and the reminder is counted.
-      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 1, reported: false });
+      expect(recorded(worker).at(-1)).toEqual({
+        state: "open",
+        count: 1,
+        reported: false,
+        lastMessage: waiting,
+      });
     });
 
     test("a resumed worker's open phase is reminded by a timer, carrying the count it restored", async () => {
@@ -1865,6 +1900,25 @@ describe("Legion OMP extension", () => {
 
       expect(steered(resumed)).toEqual([steeredReminder(REMINDER)]);
       expect(recorded(resumed)).toEqual([{ state: "open", count: 3, reported: false }]);
+    });
+
+    // What the worker said before the relaunch rides the record with the count, so the architect
+    // notice a resume reminder earns can still quote it: the process that heard it is gone.
+    test("a resumed worker's record carries what it last said before the relaunch", async () => {
+      const resumed = await bootStalling({
+        branch: branchAt({
+          state: "open",
+          count: 2,
+          reported: false,
+          lastMessage: "Still pushing the change.",
+        }),
+      });
+
+      await fires(resumed);
+
+      expect(recorded(resumed)).toEqual([
+        { state: "open", count: 3, reported: false, lastMessage: "Still pushing the change." },
+      ]);
     });
 
     test("a resume whose turn started before its timer fired is reminded by nothing", async () => {
@@ -1906,7 +1960,12 @@ describe("Legion OMP extension", () => {
       expect(steered(worker)).toEqual([]);
       expect(worker.timers).toEqual([]);
       // Nothing was put in front of the worker, so nothing is counted.
-      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 0, reported: false });
+      expect(recorded(worker).at(-1)).toEqual({
+        state: "open",
+        count: 0,
+        reported: false,
+        lastMessage: "I think I already completed.",
+      });
     });
 
     test("a daemon that does not answer the record check reminds all the same: the check fails open", async () => {
@@ -1917,7 +1976,12 @@ describe("Legion OMP extension", () => {
       await worker.arrives(assignment);
 
       expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
-      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 1, reported: false });
+      expect(recorded(worker).at(-1)).toEqual({
+        state: "open",
+        count: 1,
+        reported: false,
+        lastMessage: "Pushed.",
+      });
     });
 
     test("a request_backward_move closes the phase too: the next settle sends nothing", async () => {
@@ -2105,7 +2169,12 @@ describe("Legion OMP extension", () => {
         },
       });
       expect(await worker.settles("Noted the new session id.")).toBeUndefined();
-      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 1, reported: false });
+      expect(recorded(worker).at(-1)).toEqual({
+        state: "open",
+        count: 1,
+        reported: false,
+        lastMessage: "Noted the new session id.",
+      });
 
       await worker.arrives(envoyEvent);
       expect(await worker.settles("Read the answer.")).toEqual(followUp("handoff_complete"));

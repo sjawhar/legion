@@ -48105,6 +48105,7 @@ function phaseStallFrom(data) {
       return;
   }
 }
+var LAST_MESSAGE_LIMIT = 500;
 function phaseStallReportFrom(data) {
   const reported = "reported" in data && data.reported === true;
   const key = "reportKey" in data && typeof data.reportKey === "string" ? data.reportKey : undefined;
@@ -48117,17 +48118,18 @@ function phaseStallEntryFrom(data) {
   if (stall === undefined)
     return;
   const report2 = phaseStallReportFrom(data);
+  const lastMessage = "lastMessage" in data && typeof data.lastMessage === "string" ? data.lastMessage.slice(0, LAST_MESSAGE_LIMIT) : "";
   return {
     state: stall.state,
     count: stall.count,
     reported: report2.reported,
-    ...report2.reportKey === undefined ? {} : { reportKey: report2.reportKey }
+    ...report2.reportKey === undefined ? {} : { reportKey: report2.reportKey },
+    ...lastMessage === "" ? {} : { lastMessage }
   };
 }
 
 // ../pi-shared/src/phase-reminder.ts
 var RECORD_READ_BOUND_MS = 5000;
-var LAST_MESSAGE_LIMIT = 500;
 function roleUnheld(error48) {
   if (!(error48 instanceof EnvoyApiError) || error48.details.status !== 404)
     return false;
@@ -48158,13 +48160,14 @@ function createPhaseReminder(deps) {
   let generation = 0;
   let turnRunning = false;
   let continued = false;
-  let lastAssistantText = "";
+  let lastMessage = "";
   let recorded = "";
   const entryOf = () => ({
     state: stall.state,
     count: stall.count,
     reported,
-    ...reportKey === undefined ? {} : { reportKey }
+    ...reportKey === undefined ? {} : { reportKey },
+    ...lastMessage === "" ? {} : { lastMessage }
   });
   const writeEntry = () => {
     const entry = entryOf();
@@ -48230,20 +48233,19 @@ function createPhaseReminder(deps) {
     reportKey ??= randomUUID2();
     writeEntry();
     const phase = record3?.phase ?? "unknown";
-    const head = lastAssistantText.slice(0, LAST_MESSAGE_LIMIT);
     const reminders = stall.count;
     try {
       const live = record3?.architect !== undefined && record3.architect.state !== "retired" && record3.architect.state !== "failed";
       const topic = ROLE_TOPIC_PREFIX + roleToken(deps.project ?? "", live ? claim.issue : claim.tree, "architect");
       await publish({
         topic,
-        message: `The ${claim.role} of ${claim.issue} has let ${reminders} phase reminders go unanswered: ` + `its turns keep ending with the phase ${phase} still open and no successful ` + `handoff_complete, and nothing it does clears the reminder. What it last said was: ${head}`,
+        message: `The ${claim.role} of ${claim.issue} has let ${reminders} phase reminders go unanswered: ` + `its turns keep ending with the phase ${phase} still open and no successful ` + `handoff_complete, and nothing it does clears the reminder. ` + `What it last said was: ${lastMessage}`,
         payload: JSON.stringify({
           issue: claim.issue,
           role: claim.role,
           phase,
           reminders,
-          lastMessage: head
+          lastMessage
         }),
         idempotencyKey: reportKey,
         sourceSessionID: claim.sessionID
@@ -48291,6 +48293,7 @@ function createPhaseReminder(deps) {
       stall = entry === undefined ? { state: "closed", count: 0 } : { state: entry.state, count: entry.count };
       reported = entry?.reported ?? false;
       reportKey = entry?.reportKey;
+      lastMessage = entry?.lastMessage ?? "";
       recorded = JSON.stringify(entryOf());
     },
     armResumeReminder: () => {
@@ -48310,7 +48313,8 @@ function createPhaseReminder(deps) {
     settle: async (text, options) => {
       turnRunning = false;
       generation += 1;
-      lastAssistantText = text;
+      if (stall.state !== "closed")
+        lastMessage = text.slice(0, LAST_MESSAGE_LIMIT);
       const before = stall.count;
       const reminder = advance({ kind: "settle", lastAssistantText: text });
       if (stall.state === "waiting") {
@@ -48373,8 +48377,11 @@ function stallLimits(env, log) {
 
 // ../pi-shared/src/workspace-recreated.ts
 var WORKSPACE_RECREATED_VARIABLE = "LEGION_WORKSPACE_RECREATED";
+function workspaceRecreated(environment) {
+  return environment[WORKSPACE_RECREATED_VARIABLE] === "true";
+}
 function workspaceRecreatedNotice(environment, issue2) {
-  if (environment[WORKSPACE_RECREATED_VARIABLE] !== "true")
+  if (!workspaceRecreated(environment))
     return;
   return {
     id: crypto.randomUUID(),
@@ -48483,6 +48490,10 @@ function createPhaseHookEndpoint(deps) {
     entry = next;
     writePhaseStallRecord(deps.stateFile, next, recreatedNoticeSent, deps.log);
   };
+  if (recreatedNoticeSent && !workspaceRecreated(deps.env)) {
+    recreatedNoticeSent = false;
+    saveRecord(entry);
+  }
   let timer;
   const dropTimer = () => {
     if (timer === undefined)

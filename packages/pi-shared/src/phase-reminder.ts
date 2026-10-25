@@ -5,6 +5,7 @@ import { messageFor } from "@legion/envoy-client/errors";
 import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport";
 import type { ClaimCapability } from "./legion-phase-ops";
 import {
+  LAST_MESSAGE_LIMIT,
   type PhaseStallEntry,
   type PhaseStallInput,
   type PhaseStallState,
@@ -88,9 +89,6 @@ export interface PhaseReminder {
  * its fetch, and `session_stop` is a hook the host awaits, so the check bounds the read itself. */
 export const RECORD_READ_BOUND_MS = 5_000;
 
-/** The head of the worker's last message the architect notice carries. */
-const LAST_MESSAGE_LIMIT = 500;
-
 /** The listener's "no live session holds that role": a 404 whose body names `unclaimed` or
  * `holder_lapsed` (`packages/envoy/cmd/listener/api.go`). The next delivered reminder tries the
  * same notice again, under the same idempotency key. */
@@ -139,8 +137,10 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
    * continuation per run: the run then settles, the daemon sees the turn end, and the next
    * reminder comes from the timer with its delay. */
   let continued = false;
-  /** What the worker said as its last turn settled: the architect notice quotes its head. */
-  let lastAssistantText = "";
+  /** The head of what the worker said as its last turn settled: the architect notice quotes it,
+   * and it rides the record, so a notice the resume reminder of a relaunched worker earns still
+   * names what the worker said before the relaunch. */
+  let lastMessage = "";
   /** The entry last saved or restored, so only a change of the recorded value is saved. */
   let recorded = "";
 
@@ -149,6 +149,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
     count: stall.count,
     reported,
     ...(reportKey === undefined ? {} : { reportKey }),
+    ...(lastMessage === "" ? {} : { lastMessage }),
   });
 
   const writeEntry = (): void => {
@@ -229,7 +230,6 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
     reportKey ??= randomUUID();
     writeEntry();
     const phase = record?.phase ?? "unknown";
-    const head = lastAssistantText.slice(0, LAST_MESSAGE_LIMIT);
     const reminders = stall.count;
     try {
       // An issue whose own architect claim is live owns this worker; otherwise the tree's does.
@@ -245,14 +245,15 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
         message:
           `The ${claim.role} of ${claim.issue} has let ${reminders} phase reminders go unanswered: ` +
           `its turns keep ending with the phase ${phase} still open and no successful ` +
-          `handoff_complete, and nothing it does clears the reminder. What it last said was: ${head}`,
+          `handoff_complete, and nothing it does clears the reminder. ` +
+          `What it last said was: ${lastMessage}`,
         // The listener refuses an object here: the facts travel as a JSON string.
         payload: JSON.stringify({
           issue: claim.issue,
           role: claim.role,
           phase,
           reminders,
-          lastMessage: head,
+          lastMessage,
         }),
         idempotencyKey: reportKey,
         sourceSessionID: claim.sessionID,
@@ -309,6 +310,7 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       // neither repeats one the listener accepted nor mints a second key for one it refused.
       reported = entry?.reported ?? false;
       reportKey = entry?.reportKey;
+      lastMessage = entry?.lastMessage ?? "";
       recorded = JSON.stringify(entryOf());
     },
     armResumeReminder: () => {
@@ -326,7 +328,9 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
     settle: async (text, options) => {
       turnRunning = false;
       generation += 1;
-      lastAssistantText = text;
+      // Only a phase that is not closed can earn the notice that quotes these words, so a closed
+      // one records none: a finished worker's chatter writes nothing.
+      if (stall.state !== "closed") lastMessage = text.slice(0, LAST_MESSAGE_LIMIT);
       const before = stall.count;
       const reminder = advance({ kind: "settle", lastAssistantText: text });
       // Every outcome but the continuation ends the run here, so the next one may continue again.

@@ -23,6 +23,14 @@ export interface WorkspaceRecreatedNotice {
   readonly content: string;
 }
 
+/** Whether the launcher of the process whose environment is `environment` recreated its
+ * workspace. It decides this afresh for every launch. */
+export function workspaceRecreated(
+  environment: Readonly<Record<string, string | undefined>>
+): boolean {
+  return environment[WORKSPACE_RECREATED_VARIABLE] === "true";
+}
+
 /**
  * The notice for a Legion session on `issue` whose environment is `environment`, undefined when its
  * launcher said nothing was recreated.
@@ -31,7 +39,7 @@ export function workspaceRecreatedNotice(
   environment: Readonly<Record<string, string | undefined>>,
   issue: string
 ): WorkspaceRecreatedNotice | undefined {
-  if (environment[WORKSPACE_RECREATED_VARIABLE] !== "true") return undefined;
+  if (!workspaceRecreated(environment)) return undefined;
   return {
     id: crypto.randomUUID(),
     content:

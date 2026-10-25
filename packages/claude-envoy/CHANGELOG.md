@@ -114,8 +114,9 @@
   session; every later one is written into the session over the bridge's inbox from a timer, so the
   turn boundary the daemon reads stays intact. A WAITING reply buys a quiet wait, the count of
   unanswered reminders resets on any tool call or inbound turn, and a run of them tells the issue's
-  architect over this server's own Envoy client. The record — the phase, the count and the
-  architect notice's key — is `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json`, written
+  architect over this server's own Envoy client. The record — the phase, the count, the architect
+  notice's key and the head of what the worker last said, which that notice quotes even after a
+  relaunch — is `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json`, written
   before each hook answers and read again when Claude Code restarts the server inside the same
   `claude` process; a file the Go bridge wrote reads as an open phase with no reminder yet. The
   four `LEGION_STALL_*` numbers come from the worker's environment. The hook entries are the Legion
@@ -125,7 +126,8 @@
   over the same inbox the reminders use, as an Oh My Pi worker is
   (`LEGION_WORKSPACE_RECREATED`): it reconciles against its committed handoff before new work
   rather than finding the workspace quietly empty. Whether the notice has been sent rides in the
-  same state file, so a restarted server does not repeat it.
+  same state file, so a server Claude Code restarts inside one `claude` process does not repeat
+  it, and a launch that recreated nothing clears it, so a later recreation is told again.
 - The Legion worker image carries this package's committed build at `/opt/legion/claude-envoy`, so
   a phase worker a deployment puts on Claude Code now runs under `runtime: kubernetes` as well as
   tmux: its pod's command is `legion claude-bridge -- claude -p …`, its one MCP server is that

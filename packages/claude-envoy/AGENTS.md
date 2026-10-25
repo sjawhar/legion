@@ -105,14 +105,17 @@ does not answer, stands between it and a reminder telling it to complete again.
 **The state file.** This host has no transcript entry to record in, so the record is
 `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json` (`phaseStallFile`), written whole
 through a temporary file in the same directory renamed into place, before the hook answers. It
-carries the shared entry — `state` (`closed`, `open`, `waiting`), `count`, `reported` and the
-architect notice's `reportKey` — and one key only this host keeps, `recreatedNoticeSent`. A
+carries the shared entry — `state` (`closed`, `open`, `waiting`), `count`, `reported`, the
+architect notice's `reportKey` and `lastMessage`, the head of what the worker last said, which the
+notice quotes after a relaunch — and one key only this host keeps, `recreatedNoticeSent`. A
 missing file is a fresh session; an unreadable one, one that is not JSON, or one holding no state
 this build knows is one `warn` and a fresh start. A file the build now in the pods wrote holds
 `{"state":"quiet"}` or `{"state":"text-call"}`, which read as an open phase with no reminder yet,
 so a session carried across the cutover is reminded rather than left alone. Claude Code may
 restart this server inside the same `claude` process, which is why the count is on disk and not
-in memory alone.
+in memory alone, and the only reason `recreatedNoticeSent` is: a launch whose
+`LEGION_WORKSPACE_RECREATED` is not `true` clears it, so the next launch that recreates the
+workspace is told again.
 
 **Its inputs.** The four numbers come from the worker's own environment, which the daemon fills
 from its own under both runtimes: `LEGION_STALL_REMINDER_MS` (300000, how long after a settle a

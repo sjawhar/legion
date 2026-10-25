@@ -92,7 +92,8 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   task. A reply whose line starts WAITING buys a quiet wait and then the same reminder again, and
   a worker the daemon relaunched into an open phase is reminded from a timer, since nothing else
   would wake it. The count of reminders the worker did nothing about drops to zero as soon as it
-  runs a tool call or anything reaches the session, and a run of unanswered ones tells the issue's
+  runs a tool call — Oh My Pi's `toolCall` block, not only Claude Code's `tool_use` — or anything
+  reaches the session, and a run of unanswered ones tells the issue's
   architect over Envoy — once, under one idempotency key kept until the count resets, retried while
   no live session holds that role. Four variables, read from the worker's own environment (the
   daemon passes on whichever its own holds, to a pane and to a pod alike), tune it:
@@ -101,7 +102,10 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   and the default. The state machine, the runner and the numbers now live in `@legion/pi-shared`
   (`phase-stall.ts`, `phase-reminder.ts`, `stall-limits.ts`), which `@sjawhar/claude-envoy` drives
   from Claude Code's own hooks, so one machine serves both harnesses and the Go bridge's copy of it
-  is gone. The transcript entry keeps its `legion-phase-stall` name, and a session resumed on an
+  is gone. The transcript entry keeps its `legion-phase-stall` name and its `state`, and now also
+  carries the head of the worker's last message, so the notice a relaunched worker's resume
+  reminder earns still says what it last said; an entry an earlier build wrote, without it, still
+  reads. A session resumed on an
   entry this build does not know — `{"state":"quiet"}` or `{"state":"text-call"}`, what the build
   now in the pods wrote — reads as an open phase with no reminder yet, so it is reminded rather
   than left alone. Daemon API contract 36 carries the four variables (and, in a pod, Claude Code's

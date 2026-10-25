@@ -424,10 +424,12 @@ starting, a settle, a session change, the phase closing, a reminder going out), 
 defence against two timers reminding twice.
 
 A count of reminders the worker has done nothing about climbs by one per delivered reminder and
-drops to zero as soon as anything happens — a real tool call in the settling message, the daemon's
-assignment, an Envoy delivery. At `LEGION_STALL_ARCHITECT_AFTER` the session tells the architect
-that owns the issue over Envoy (its own while its architect claim is live, else the tree's), once
-per run of reminders: the notice carries the issue, role, phase, the count and the head of the
+drops to zero as soon as anything happens — a real tool call in the settling message (a `toolCall`
+block, Oh My Pi's name for it; `assistantRanTool` also takes Claude Code's `tool_use`), the
+daemon's assignment, an Envoy delivery. At `LEGION_STALL_ARCHITECT_AFTER` the session tells the
+architect that owns the issue over Envoy (its own while its architect claim is live, else the
+tree's), once per run of reminders: the notice carries the issue, role, phase, the count and the
+head of the
 worker's last message under one idempotency key, minted at the first attempt and kept until the
 count resets, so a listener that holds no architect session yet is tried again by the next
 reminder. A reminder is dropped when the daemon's record says this role no longer works this phase
@@ -443,9 +445,11 @@ the daemon passes on whichever its own environment holds, to a pane and to a pod
 alone can never reach it). A value that is not an integer of that minimum is one `warn` and the
 default.
 
-The state, the count and whether the architect was told are appended to the
-transcript (`legion-phase-stall` entries) and restored at `session_start`, so a worker relaunched with
-`--resume` keeps them. The machine, the runner and the four numbers live once, in
+The state, the count, whether the architect was told, and the head of what the worker last said
+(`lastMessage`, at most the 500 characters the notice quotes) are appended to the transcript
+(`legion-phase-stall` entries) and restored at `session_start`, so a worker relaunched with
+`--resume` keeps them, and the notice its resume reminder earns still names its last words. The
+machine, the runner and the four numbers live once, in
 `@legion/pi-shared` (`phase-stall.ts`, `phase-reminder.ts`, `stall-limits.ts`): this entry is the
 Oh My Pi host, and `packages/claude-envoy/src/legion-phase-hook.ts` is the Claude Code one, driven
 by Claude Code's own hooks over a state file (`packages/claude-envoy/AGENTS.md`).

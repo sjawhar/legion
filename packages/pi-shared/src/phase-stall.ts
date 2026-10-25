@@ -141,7 +141,11 @@ export function inboundKind(message: unknown): "assignment" | "inbound-event" | 
   return undefined;
 }
 
-/** The text blocks of an assistant message, joined; empty for anything else. */
+/** The text blocks of an assistant message, joined; empty for anything else. A text block is
+ * `{ type: "text", text }` on both hosts' shapes: Oh My Pi's own message model, which `message_end`
+ * and `session_stop` hand the plugin (`packages/pi-envoy/src/agent-stream.ts` reads it the same
+ * way), and Claude Code's, whose `Stop` hook hands its host the last message as a string, so that
+ * host never comes here. */
 export function assistantText(message: unknown): string {
   if (typeof message !== "object" || message === null) return "";
   if (!("role" in message) || message.role !== "assistant" || !("content" in message)) return "";
@@ -161,15 +165,24 @@ export function assistantText(message: unknown): string {
 }
 
 /** Whether a settled assistant message ran at least one real tool call: its `content` holds a
- * `tool_use` block. The plugin reads this from the host's `message_end`; it registers no
- * `tool_call` hook, so nothing it does can block or shape a call the worker makes. */
+ * tool-call block. The plugin reads this from the host's `message_end`; it registers no
+ * `tool_call` hook, so nothing it does can block or shape a call the worker makes.
+ *
+ * Two block names are accepted because the hosts disagree on it: Oh My Pi's `message_end` hands a
+ * `toolCall` block (`{ type: "toolCall", id, name, arguments }`, the shape
+ * `packages/pi-envoy/src/agent-stream.ts` reads), and Claude Code names the same thing `tool_use`
+ * (its stream-json, which `packages/daemon/internal/claudebridge/bridge.go` reads). Matching only
+ * `tool_use` once left a working Oh My Pi worker reported to its architect as stalled. */
 export function assistantRanTool(message: unknown): boolean {
   if (typeof message !== "object" || message === null) return false;
   if (!("role" in message) || message.role !== "assistant" || !("content" in message)) return false;
   if (!Array.isArray(message.content)) return false;
   return message.content.some(
     (block: unknown) =>
-      typeof block === "object" && block !== null && "type" in block && block.type === "tool_use"
+      typeof block === "object" &&
+      block !== null &&
+      "type" in block &&
+      (block.type === "toolCall" || block.type === "tool_use")
   );
 }
 
@@ -218,15 +231,23 @@ function lastPhaseStallData(branch: readonly unknown[]): object | undefined {
   return undefined;
 }
 
-/** What one recorded entry carries. The machine never reads `reported` and `reportKey`, and each
- * host persists them its own way — the Oh My Pi transcript entry, the Claude Code state file —
- * but they ride the same record, so a relaunch mid-run neither repeats an accepted notice nor
- * loses the key a refused one is retried under. */
+/** The head of the worker's last message the architect notice quotes, and so all of it the record
+ * keeps: a file and a transcript written on every settle hold no more than the notice can use. */
+export const LAST_MESSAGE_LIMIT = 500;
+
+/** What one recorded entry carries. The machine never reads `reported`, `reportKey` and
+ * `lastMessage`, and each host persists them its own way — the Oh My Pi transcript entry, the
+ * Claude Code state file — but they ride the same record, so a relaunch mid-run neither repeats an
+ * accepted notice, nor loses the key a refused one is retried under, nor sends one that has
+ * forgotten what the worker last said. */
 export interface PhaseStallEntry {
   readonly state: PhaseStall;
   readonly count: number;
   readonly reported: boolean;
   readonly reportKey?: string;
+  /** The head (`LAST_MESSAGE_LIMIT`) of what the worker said as its last turn settled; absent
+   * while it has said nothing, and in a record an earlier build wrote. */
+  readonly lastMessage?: string;
 }
 
 /** Whether the architect has already been told about the run of reminders one record belongs to,
@@ -250,11 +271,16 @@ export function phaseStallEntryFrom(data: object | undefined): PhaseStallEntry |
   const stall = phaseStallFrom(data);
   if (stall === undefined) return undefined;
   const report = phaseStallReportFrom(data);
+  const lastMessage =
+    "lastMessage" in data && typeof data.lastMessage === "string"
+      ? data.lastMessage.slice(0, LAST_MESSAGE_LIMIT)
+      : "";
   return {
     state: stall.state,
     count: stall.count,
     reported: report.reported,
     ...(report.reportKey === undefined ? {} : { reportKey: report.reportKey }),
+    ...(lastMessage === "" ? {} : { lastMessage }),
   };
 }
 

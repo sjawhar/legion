@@ -11,7 +11,7 @@ import {
 } from "@legion/pi-shared/phase-reminder"
 import { type PhaseStallEntry, phaseStallEntryFrom } from "@legion/pi-shared/phase-stall"
 import { stallLimits } from "@legion/pi-shared/stall-limits"
-import { workspaceRecreatedNotice } from "@legion/pi-shared/workspace-recreated"
+import { workspaceRecreated, workspaceRecreatedNotice } from "@legion/pi-shared/workspace-recreated"
 import { z } from "zod"
 import { configuredValue } from "./claude-session"
 
@@ -171,7 +171,9 @@ export interface PhaseStallRecord {
   /** The phase and count the file holds, or undefined when it holds none this build knows. */
   readonly entry: PhaseStallEntry | undefined
   /** Whether this launch's recreated-workspace notice has already been written into the session
-   * (`recreatedNoticeSent` in the file); false for a record that names no such key. */
+   * (`recreatedNoticeSent` in the file); false for a record that names no such key. It outlives
+   * only a server Claude Code restarts inside one `claude` process: a launch that recreated
+   * nothing clears it (`createPhaseHookEndpoint`). */
   readonly recreatedNoticeSent: boolean
 }
 
@@ -273,6 +275,14 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
     entry = next
     writePhaseStallRecord(deps.stateFile, next, recreatedNoticeSent, deps.log)
   }
+  // The key exists only so a server Claude Code restarts inside one `claude` process, whose
+  // environment is still its launch's, does not repeat that launch's notice. The launcher decides
+  // `LEGION_WORKSPACE_RECREATED` afresh for every launch, so a launch that recreated nothing
+  // clears it, and the next launch that recreates the workspace again is told again.
+  if (recreatedNoticeSent && !workspaceRecreated(deps.env)) {
+    recreatedNoticeSent = false
+    saveRecord(entry)
+  }
 
   /** The one timer this server has armed, or undefined when none is. One at a time: arming the
    * next drops it, and so does the server's `stop`. */
@@ -349,9 +359,10 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
    * D29: a worker whose launcher recreated its workspace is told so, as an Oh My Pi one is, over
    * the same inbox the reminders use. Once per launch: the record it is written in is the one the
    * phase and count live in, so a server Claude Code restarts inside the same `claude` process
-   * does not repeat it. The record lands before the line does — a notice a broken socket loses is
-   * one notice lost, while one written twice is the thing it must not be — and the line is noted
-   * as written, so the turn it starts counts as an inbound event and leaves a closed phase closed.
+   * does not repeat it, and a launch that recreated nothing clears it again. The record lands
+   * before the line does — a notice a broken socket loses is one notice lost, while one written
+   * twice is the thing it must not be — and the line is noted as written, so the turn it starts
+   * counts as an inbound event and leaves a closed phase closed.
    */
   const sendRecreatedNotice = (issue: string): void => {
     if (recreatedNoticeSent) return

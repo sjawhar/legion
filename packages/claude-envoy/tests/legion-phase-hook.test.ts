@@ -160,9 +160,11 @@ test("a turn settling on an open phase is blocked once, with the reminder, and t
       }),
     ).toEqual({ decision: "block", reason: REMINDER })
     // The record check reads the daemon before the reminder is counted, and the count is on disk
-    // by the time the hook answers: a reminder the worker has been given is never uncounted.
-    expect(recordAtDaemonRead()).toEqual({ state: "open", count: 0, reported: false })
-    expect(await record()).toEqual({ state: "open", count: 1, reported: false })
+    // by the time the hook answers: a reminder the worker has been given is never uncounted. What
+    // the worker said rides the record with it, for a relaunch's architect notice to quote.
+    const said = { reported: false, lastMessage: "I pushed the branch." }
+    expect(recordAtDaemonRead()).toEqual({ state: "open", count: 0, ...said })
+    expect(await record()).toEqual({ state: "open", count: 1, ...said })
 
     // The second settle of the run lets the turn end and carries its reminder from the timer, so
     // the daemon sees the turn end and can deliver a queued task.
@@ -176,7 +178,12 @@ test("a turn settling on an open phase is blocked once, with the reminder, and t
     expect(inbox).toEqual([])
     await waitFor(async () => inbox.length > 0, "the timer's reminder to reach the inbox")
     expect(inbox).toEqual([REMINDER])
-    expect(await record()).toEqual({ state: "open", count: 2, reported: false })
+    expect(await record()).toEqual({
+      state: "open",
+      count: 2,
+      reported: false,
+      lastMessage: "Still here.",
+    })
   } finally {
     await close()
   }
@@ -194,13 +201,14 @@ test("a settle that says what it waits on buys the quiet wait, and is reminded o
         lastAssistantMessage: "WAITING on CI to go green on the branch.",
       }),
     ).toEqual({})
-    expect(await record()).toEqual({ state: "waiting", count: 0, reported: false })
+    const waiting = { reported: false, lastMessage: "WAITING on CI to go green on the branch." }
+    expect(await record()).toEqual({ state: "waiting", count: 0, ...waiting })
     // Nothing is sent into the wait itself.
     await Bun.sleep(30)
     expect(inbox).toEqual([])
     await waitFor(async () => inbox.length > 0, "the reminder the wait earned")
     expect(inbox).toEqual([REMINDER])
-    expect(await record()).toEqual({ state: "open", count: 1, reported: false })
+    expect(await record()).toEqual({ state: "open", count: 1, ...waiting })
     // One reminder, not a second from the same wait.
     await Bun.sleep(60)
     expect(inbox).toEqual([REMINDER])
@@ -221,10 +229,11 @@ test("a turn that ended on an API error is settled, answered {} and reminded fro
     expect(
       await endpoint.handle({ event: "StopFailure", lastAssistantMessage: "I pushed the branch." }),
     ).toEqual({})
-    expect(await record()).toEqual({ state: "open", count: 0, reported: false })
+    const said = { reported: false, lastMessage: "I pushed the branch." }
+    expect(await record()).toEqual({ state: "open", count: 0, ...said })
     await waitFor(async () => inbox.length > 0, "the reminder the failed turn earned")
     expect(inbox).toEqual([REMINDER])
-    expect(await record()).toEqual({ state: "open", count: 1, reported: false })
+    expect(await record()).toEqual({ state: "open", count: 1, ...said })
   } finally {
     await close()
   }
@@ -267,9 +276,10 @@ test("the prompt that carries this endpoint's own reminder does not reset its co
       {},
     )
     await waitFor(async () => inbox.length > 0, "the timer's reminder to reach the inbox")
-    expect(await record()).toEqual({ state: "open", count: 2, reported: false })
+    const said = { reported: false, lastMessage: "Still here." }
+    expect(await record()).toEqual({ state: "open", count: 2, ...said })
     expect(await endpoint.handle({ event: "UserPromptSubmit", prompt: inbox[0] ?? "" })).toEqual({})
-    expect(await record()).toEqual({ state: "open", count: 2, reported: false })
+    expect(await record()).toEqual({ state: "open", count: 2, ...said })
   } finally {
     await close()
   }
@@ -387,6 +397,7 @@ test("the architect is told at the threshold, asked again when no session holds 
       count: 3,
       reported: true,
       reportKey: refused.reportKey,
+      lastMessage: "Still here.",
     })
 
     // Accepted once is told once: the run's later reminders add no second notice.
@@ -415,7 +426,12 @@ test("a timer whose turn has started again writes nothing", async () => {
     // Three times the 20 ms the armed reminder was waiting for.
     await Bun.sleep(60)
     expect(inbox).toEqual([])
-    expect(await record()).toEqual({ state: "open", count: 0, reported: false })
+    expect(await record()).toEqual({
+      state: "open",
+      count: 0,
+      reported: false,
+      lastMessage: "Still here.",
+    })
   } finally {
     await close()
   }
