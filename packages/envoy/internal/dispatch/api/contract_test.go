@@ -19,6 +19,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"strings"
 	"testing"
 	"time"
@@ -26,8 +27,10 @@ import (
 	"github.com/google/uuid"
 
 	brokerapi "github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
@@ -102,14 +105,16 @@ func newContractRig(t *testing.T) *contractRig {
 		Audience:   brokerServer.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(brokerStore, brokerServer.URL, time.Minute)
+	provider := brokertest.NewOAuthProvider(t, brokerStore)
 	mach := &machine.Service{
 		Store: brokerStore, Enroll: enr, Policy: cur,
 		Audience: brokerServer.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
-		Replay: enr.Replay,
+		OAuth: provider, Replay: enr.Replay,
 	}
 	brokerapi.Register(brokerMux, brokerapi.Deps{
 		PublicURL: brokerServer.URL, UIToken: contractUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
+		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	})
@@ -549,8 +554,8 @@ func TestAnAutomaticGrantIsListedRevokedAndThenAsksItsOwner(t *testing.T) {
 	}
 }
 
-// approveMachineLogin logs approver's own machine in as a person does: the machine posts its
-// signed login, naming approver in its login_hint, straight to the broker; approver looks its code
+// approveMachineLogin logs approver's own machine in as a person does: the machine asks the
+// broker's device authorization for its signed login, naming approver in its login_hint; approver looks its code
 // up through Dispatch (ruling 13's one selector), which answers the pending launcher_credential
 // record; an approval without the code is refused CODE_REQUIRED; and approver's approval with the
 // same code mints a launcher credential. It returns the launcher credential the approval minted and
@@ -563,7 +568,7 @@ func (rig *contractRig) approveMachineLogin(t *testing.T, approver, host string)
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
-	code, recordID := rig.startMachineLogin(t, compact, approver)
+	code, recordID := rig.startMachineLogin(t, machineKey, compact, approver)
 	approvePath := "/api/v1/credential-requests/" + recordID + "/approve"
 	noCode := dispatchRequest(t, rig.Dispatch, http.MethodPost, approvePath, map[string]any{}, approver)
 	if noCode.Code != http.StatusBadRequest || decodeBody[contractError](t, noCode).Code != "CODE_REQUIRED" {
@@ -580,23 +585,45 @@ func (rig *contractRig) approveMachineLogin(t *testing.T, approver, host string)
 	return *approved.CredentialID, machineKey
 }
 
-// startMachineLogin posts the machine's signed login straight to the broker and has looker look
-// its code up through Dispatch, which must answer the pending launcher_credential record. It
-// returns the code and the record's id.
-func (rig *contractRig) startMachineLogin(t *testing.T, compact, looker string) (code, recordID string) {
+// startMachineLogin asks the broker's device authorization for the machine's signed login, with
+// dpop_jkt key's thumbprint as the helper sends it, and has looker look its user code up through
+// Dispatch, which must answer the pending launcher_credential record. It returns the code and the
+// record's id.
+func (rig *contractRig) startMachineLogin(t *testing.T, key *ecdsa.PrivateKey, compact, looker string) (code, recordID string) {
 	t.Helper()
-	status, body := rig.brokerReq(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
+	status, body := rig.deviceAuthorize(t, key, compact)
 	var created struct {
-		Code string `json:"code"`
+		UserCode string `json:"user_code"`
 	}
-	if err := json.Unmarshal(body, &created); status != http.StatusAccepted || err != nil || created.Code == "" {
-		t.Fatalf("POST /v1/launcher-credentials = %d %s (%v), want a code", status, body, err)
+	if err := json.Unmarshal(body, &created); status != http.StatusOK || err != nil || created.UserCode == "" {
+		t.Fatalf("POST /v1/oauth/device_authorization = %d %s (%v), want a user code", status, body, err)
 	}
-	looked := rig.lookupMachineLogin(t, created.Code, looker)
+	looked := rig.lookupMachineLogin(t, created.UserCode, looker)
 	if looked.Kind != "launcher_credential" || looked.State != "pending" {
 		t.Fatalf("machine-lookup = %+v, want a pending launcher_credential record", looked)
 	}
-	return created.Code, looked.RecordID
+	return created.UserCode, looked.RecordID
+}
+
+// deviceAuthorize posts compact, signed by key, to the broker's POST /v1/oauth/device_authorization
+// as the helper's `machine login` does, answering the status and body.
+func (rig *contractRig) deviceAuthorize(t *testing.T, key *ecdsa.PrivateKey, compact string) (int, []byte) {
+	t.Helper()
+	jkt, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{"client_id": {oauthwire.ClientID}, "scope": {oauthwire.Scope}, "request": {compact}, "dpop_jkt": {jkt}}
+	response, err := http.Post(rig.BrokerURL+"/v1/oauth/device_authorization", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatalf("POST /v1/oauth/device_authorization: %v", err)
+	}
+	defer response.Body.Close()
+	body, err := io.ReadAll(response.Body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return response.StatusCode, body
 }
 
 // lookupMachineLogin looks a machine login up by its code through Dispatch, as looker.
@@ -768,12 +795,13 @@ func TestAServicesTokenLoginIsListedAndRevokedByAnyoneThroughDispatch(t *testing
 		}
 	}
 
-	compact, err := record.Sign(contractSigningKey(t), rig.BrokerURL,
+	daemonKey := contractSigningKey(t)
+	compact, err := record.Sign(daemonKey, rig.BrokerURL,
 		[]record.AuthorizationDetail{{Type: "launcher_credential", Identifier: "cluster.example", Service: "legion-daemon"}}, "", "", nil, time.Now())
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
-	status, body := rig.brokerReq(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
+	status, body := rig.deviceAuthorize(t, daemonKey, compact)
 	if status != http.StatusBadRequest || !strings.Contains(string(body), "SERVICE_LOGS_IN_WITH_TOKEN") {
 		t.Fatalf("a service's device-code login = %d %s, want 400 SERVICE_LOGS_IN_WITH_TOKEN", status, body)
 	}
@@ -789,7 +817,7 @@ func TestAPersonsMachineLoginIsTheirsAloneToApproveThroughDispatch(t *testing.T)
 	if err != nil {
 		t.Fatalf("record.Sign: %v", err)
 	}
-	code, recordID := rig.startMachineLogin(t, compact, contractOther)
+	code, recordID := rig.startMachineLogin(t, machineKey, compact, contractOther)
 	resp := dispatchRequest(t, rig.Dispatch, http.MethodPost, "/api/v1/credential-requests/"+recordID+"/approve", map[string]any{"code": code}, contractOther)
 	if resp.Code != http.StatusForbidden || decodeBody[contractError](t, resp).Code != "NOT_APPROVER" {
 		t.Fatalf("approve %s's machine login as %s = %d %s, want 403 NOT_APPROVER", contractApprover, contractOther, resp.Code, resp.Body.String())

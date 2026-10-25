@@ -54,6 +54,10 @@ type Config struct {
 	// path. Required. Every signed proof and request object names it, so a client's
 	// AGENT_SECRETS_URL must be exactly this.
 	PublicURL string
+	// BROKER_MACHINE_LOGIN_URL: the absolute http(s) URL of the page where a person types a
+	// machine login's code (Dispatch's /credentials/machine). Required. The device grant's
+	// verification_uri names it, so a machine shows its person where to go.
+	MachineLoginURL string
 	// BROKER_UI_TOKEN, BROKER_UI_TOKEN_FILE: the bearer token Dispatch's server presents on the
 	// broker's approval routes, given directly or as a file whose trimmed contents win over the
 	// variable. Required. It vouches for the approver each decision names, so only Dispatch's
@@ -110,13 +114,6 @@ type Config struct {
 	// authenticating once its entry is gone. Needs BROKER_K8S_OIDC_ISSUER, whose tokens it trusts.
 	// Unset, no service logs in with a token.
 	ServiceLogins map[string]string
-	// BROKER_MINT_TARGETS: the minted secrets the broker serves, whitespace-separated
-	// <NAME>=<service account email>=<owner email> entries. A minted secret is served only when
-	// its name is listed here, its mint-service-account tag is the listed account, its owner tag
-	// the listed owner and its tier human, so only that person approves a token, under that name,
-	// for the account. Keyed by name. Needs BROKER_SECRETS_STORE gcp-secret-manager, the only
-	// store that mints. Unset, no minted secret is served.
-	MintTargets map[string]policy.MintTarget
 	// BROKER_K8S_OIDC_ISSUER: the issuer of the Kubernetes service-account tokens pods enroll
 	// with. Set it with BROKER_K8S_OIDC_AUDIENCE, or neither, in which case no pod can enroll.
 	K8sOIDCIssuer string
@@ -135,8 +132,9 @@ type Config struct {
 	// BROKER_PROOF_SKEW_SECONDS: how far the issue time of a signed proof or request object may
 	// differ from the broker's clock.
 	ProofSkewSeconds int
-	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login's credential lasts once
-	// approved; past it the machine logs in again, with a new key, a new code and a new approval.
+	// BROKER_LAUNCHER_CREDENTIAL_SECONDS: how long a machine login lasts without a refresh. An
+	// approval mints its credential for this long, and each refresh moves its expiry to this long
+	// from then; past it the machine logs in again, with a new key, a new code and a new approval.
 	LauncherCredentialSeconds int
 	// BROKER_SWEEP_SECONDS: how often the broker ends the enrollments whose lease lapsed and expires
 	// the pending requests and machine logins nobody decided in time.
@@ -165,6 +163,9 @@ const noRulesFile = "the broker reads each secret's owner and tier from the secr
 // its grant lasts until the requesting session ends.
 const noGrantCap = "a request's --ttl chooses a shorter grant lifetime, otherwise its grant lasts until the requesting session ends"
 
+// noMintTargets is why BROKER_MINT_TARGETS is gone: each secret's kind tag names its minter.
+const noMintTargets = "the broker no longer mints service account tokens; a secret's kind tag selects what it mints"
+
 // removedVars are environment variables the broker no longer reads. A stale deployment still
 // setting one must fail loudly rather than silently running on configuration that means nothing
 // any more.
@@ -180,6 +181,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_RULES_S3_URI", noRulesFile},
 	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
 	{"BROKER_MAX_GRANT_SECONDS", noGrantCap},
+	{"BROKER_MINT_TARGETS", noMintTargets},
 }
 
 // serviceAccountPattern is a Kubernetes service account's subject, the one a pod's projected token
@@ -326,6 +328,7 @@ func Load(getenv func(string) string) (Config, error) {
 		ListenAddr:         orDefault(getenv("BROKER_LISTEN_ADDR"), "127.0.0.1:13380"),
 		DatabaseURL:        getenv("BROKER_DATABASE_URL"),
 		PublicURL:          getenv("BROKER_PUBLIC_URL"),
+		MachineLoginURL:    getenv("BROKER_MACHINE_LOGIN_URL"),
 		SecretsStore:       orDefault(getenv("BROKER_SECRETS_STORE"), secrets.StoreAWS),
 		SecretsPrefix:      getenv("BROKER_SECRETS_PREFIX"),
 		K8sOIDCIssuer:      getenv("BROKER_K8S_OIDC_ISSUER"),
@@ -348,6 +351,7 @@ func Load(getenv func(string) string) (Config, error) {
 	cfg.SecretsKMSKey = getenv(keyVar)
 	for _, req := range []struct{ name, value string }{
 		{"BROKER_DATABASE_URL", cfg.DatabaseURL}, {"BROKER_PUBLIC_URL", cfg.PublicURL},
+		{"BROKER_MACHINE_LOGIN_URL", cfg.MachineLoginURL},
 		{"BROKER_SECRETS_PREFIX", cfg.SecretsPrefix}, {keyVar, cfg.SecretsKMSKey},
 	} {
 		if strings.TrimSpace(req.value) == "" {
@@ -360,6 +364,9 @@ func Load(getenv func(string) string) (Config, error) {
 	}
 	if parsed, err := url.Parse(cfg.PublicURL); err != nil || parsed.Scheme == "" || parsed.Host == "" || parsed.Path != "" {
 		return Config{}, fmt.Errorf("BROKER_PUBLIC_URL must be an absolute URL with no path: %q", cfg.PublicURL)
+	}
+	if parsed, err := url.Parse(cfg.MachineLoginURL); err != nil || (parsed.Scheme != "https" && parsed.Scheme != "http") || parsed.Host == "" {
+		return Config{}, fmt.Errorf("BROKER_MACHINE_LOGIN_URL must be an absolute http(s) URL: %q", cfg.MachineLoginURL)
 	}
 	switch cfg.SecretsStore {
 	case secrets.StoreAWS:
@@ -413,22 +420,6 @@ func Load(getenv func(string) string) (Config, error) {
 	if len(cfg.ServiceLogins) > 0 && cfg.K8sOIDCIssuer == "" {
 		return Config{}, fmt.Errorf("BROKER_SERVICE_LOGINS needs BROKER_K8S_OIDC_ISSUER and BROKER_K8S_OIDC_AUDIENCE, whose tokens its accounts log in with")
 	}
-	for _, text := range strings.Fields(getenv("BROKER_MINT_TARGETS")) {
-		parts := strings.Split(text, "=")
-		if len(parts) != 3 || !policy.ValidName(parts[0]) || !policy.ValidMintTarget(parts[1]) || !policy.ValidPersonOwner(parts[2]) {
-			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS entry %q is not <NAME>=<service account email>=<owner email>", text)
-		}
-		if _, dup := cfg.MintTargets[parts[0]]; dup {
-			return Config{}, fmt.Errorf("BROKER_MINT_TARGETS names %s twice", parts[0])
-		}
-		if cfg.MintTargets == nil {
-			cfg.MintTargets = map[string]policy.MintTarget{}
-		}
-		cfg.MintTargets[parts[0]] = policy.MintTarget{Account: parts[1], Owner: parts[2]}
-	}
-	if len(cfg.MintTargets) > 0 && cfg.SecretsStore != secrets.StoreGCP {
-		return Config{}, fmt.Errorf("BROKER_MINT_TARGETS needs BROKER_SECRETS_STORE=%s, the only store that mints", secrets.StoreGCP)
-	}
 	token, err := secretValue(getenv, "BROKER_UI_TOKEN")
 	if err != nil {
 		return Config{}, err
@@ -450,7 +441,7 @@ func Load(getenv func(string) string) (Config, error) {
 	}{
 		{"BROKER_LEASE_SECONDS", &cfg.LeaseSeconds, 900, 1, 3600},
 		{"BROKER_PROOF_SKEW_SECONDS", &cfg.ProofSkewSeconds, 60, 1, 300},
-		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 604800, 1, 2592000},
+		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
 	}
 	for _, i := range ints {

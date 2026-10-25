@@ -5,9 +5,13 @@ package main
 
 import (
 	"bufio"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -48,6 +52,18 @@ func registerAndWait(sock string) {
 
 func env(m map[string]string) func(string) string { return func(k string) string { return m[k] } }
 
+// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
+// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "ash")
+	if err != nil {
+		t.Fatalf("make a temporary directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {
 	cfg, err := loadConfig(env(map[string]string{"HOME": "/home/u", "XDG_RUNTIME_DIR": "/run/user/7"}))
 	if err != nil {
@@ -61,12 +77,32 @@ func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	if cfg.Socket != "/run/user/7/agent-secrets/helper.sock" || cfg.StatePath != "/run/user/7/agent-secrets/sessions.json" ||
-		cfg.OperatorFile != "/home/u/.config/agent-secrets/operator" {
+		cfg.OperatorFile != "/home/u/.config/agent-secrets/operator" || cfg.MachineFile != "/home/u/.config/agent-secrets/machine.json" {
 		t.Fatalf("defaults: %+v", cfg)
 	}
-	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_HELPER_SOCK": "/tmp/x/h.sock"}))
+	cfg, _ = loadConfig(env(map[string]string{"HOME": "/home/u", "AGENT_SECRETS_URL": "https://s", "AGENT_SECRETS_HELPER_SOCK": "/tmp/x/h.sock", "AGENT_SECRETS_MACHINE_FILE": "/tmp/x/m.json"}))
 	if cfg.StatePath != "/tmp/x/sessions.json" {
 		t.Fatalf("state sits beside the socket: %q", cfg.StatePath)
+	}
+	if cfg.MachineFile != "/tmp/x/m.json" {
+		t.Fatalf("AGENT_SECRETS_MACHINE_FILE must name the machine file: %q", cfg.MachineFile)
+	}
+}
+
+// TestServeRefusesAMachineFileThatDoesNotParse: a machine file that is there but is not a machine
+// login stops serve before it listens, naming the file, rather than serving with no login.
+func TestServeRefusesAMachineFileThatDoesNotParse(t *testing.T) {
+	dir := t.TempDir()
+	machineFile := filepath.Join(dir, "machine.json")
+	if err := os.WriteFile(machineFile, []byte("not a login"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{URL: "https://s", Socket: dir + "/h.sock", OperatorFile: dir + "/none", MachineFile: machineFile, StatePath: dir + "/s.json"}
+	if err := serve(cfg); err == nil || !strings.Contains(err.Error(), machineFile) {
+		t.Fatalf("serve on an unreadable machine file: %v; want an error naming %s", err, machineFile)
+	}
+	if _, err := os.Stat(cfg.Socket); err == nil {
+		t.Fatal("serve listened despite the unreadable machine file")
 	}
 }
 
@@ -74,8 +110,8 @@ func TestConfigDerivesDefaultsAndServeRequiresURL(t *testing.T) {
 // startup refusal: the unit always serves now, full stop — no TokenFile, and a missing
 // OperatorFile does not stop it from listening and answering `sessions` either.
 func TestServeStartsWithoutCredentialAndAnswersSessions(t *testing.T) {
-	dir := t.TempDir()
-	cfg := config{URL: "https://s", Socket: dir + "/h.sock", OperatorFile: dir + "/none", StatePath: dir + "/s.json"}
+	dir := shortTempDir(t)
+	cfg := config{URL: "https://s", Socket: dir + "/h.sock", OperatorFile: dir + "/none", MachineFile: dir + "/machine.json", StatePath: dir + "/s.json"}
 	done := make(chan error, 1)
 	go func() { done <- serve(cfg) }()
 	t.Cleanup(func() {
@@ -103,8 +139,9 @@ func TestServeStartsWithoutCredentialAndAnswersSessions(t *testing.T) {
 	}
 }
 
-// fakeBroker answers the broker routes a logged-in helper calls: a machine login that issues at
-// once with a week's expiry, enrollments, and revokes.
+// fakeBroker answers the broker routes a logged-in helper calls: a machine login, as an OAuth
+// device grant, that issues on the first token poll with a week's expiry, enrollments, and
+// revokes.
 func fakeBroker(t *testing.T) *httptest.Server {
 	t.Helper()
 	reply := func(w http.ResponseWriter, status int, v any) {
@@ -114,11 +151,12 @@ func fakeBroker(t *testing.T) *httptest.Server {
 	}
 	var enrollments atomic.Int64
 	mux := http.NewServeMux()
-	mux.HandleFunc("POST /v1/launcher-credentials", func(w http.ResponseWriter, _ *http.Request) {
-		reply(w, http.StatusAccepted, map[string]string{"pending_id": "pending-1", "code": "KQ7M-X4PZ"})
+	mux.HandleFunc("POST /v1/oauth/device_authorization", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, http.StatusOK, map[string]any{"device_code": "device-1", "user_code": "KQ7M-X4PZ", "verification_uri": "https://s", "expires_in": 900, "interval": 1})
 	})
-	mux.HandleFunc("GET /v1/launcher-credentials/pending-1", func(w http.ResponseWriter, _ *http.Request) {
-		reply(w, http.StatusOK, map[string]string{"state": "issued", "credential_id": "lcred-1", "expires_at": time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)})
+	mux.HandleFunc("POST /v1/oauth/token", func(w http.ResponseWriter, _ *http.Request) {
+		reply(w, http.StatusOK, map[string]any{"access_token": "access-1", "token_type": "DPoP", "expires_in": 900, "refresh_token": "refresh-1",
+			"credential_id": "lcred-1", "credential_expires_at": time.Now().Add(7 * 24 * time.Hour).UTC().Format(time.RFC3339)})
 	})
 	mux.HandleFunc("POST /v1/enrollments", func(w http.ResponseWriter, _ *http.Request) {
 		reply(w, http.StatusCreated, map[string]string{"enrollment_id": fmt.Sprintf("enr-%d", enrollments.Add(1)), "lease_expires_at": time.Now().Add(15 * time.Minute).UTC().Format(time.RFC3339Nano)})
@@ -157,7 +195,7 @@ func registerChild(t *testing.T, sock string) {
 // `pkill -f "agent-secrets-helper serve"` matches the unit's helper too) stops the helper as
 // systemd's own stop does, with exit 0, since a non-zero exit would leave every stop failed. The
 // unit's journal then says only that it ended, so the helper's last line names the signal, how
-// many sessions it had and that it held a launcher credential, which the next start does not.
+// many sessions it had and that it held a launcher credential.
 func TestServeNamesTheSignalItStopsOn(t *testing.T) {
 	binary := filepath.Join(t.TempDir(), "agent-secrets-helper")
 	if out, err := exec.Command("go", "build", "-o", binary, ".").CombinedOutput(); err != nil {
@@ -171,7 +209,7 @@ func TestServeNamesTheSignalItStopsOn(t *testing.T) {
 		{syscall.SIGINT, "interrupt"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			dir := t.TempDir()
+			dir := shortTempDir(t)
 			stderr, err := os.Create(filepath.Join(dir, "stderr"))
 			if err != nil {
 				t.Fatal(err)
@@ -246,5 +284,125 @@ func TestServeNamesTheSignalItStopsOn(t *testing.T) {
 				t.Fatalf("stderr after %s:\n%s\nwant a line carrying %s", tc.sig, logged(), want)
 			}
 		})
+	}
+}
+
+// TestClaimSocketRefusesALiveHelperAndClearsAStaleSocket: serve never takes over a socket another
+// helper answers on (the error names it, and the socket still answers), and removes one nothing
+// answers on, as a helper that died leaves.
+func TestClaimSocketRefusesALiveHelperAndClearsAStaleSocket(t *testing.T) {
+	sock := filepath.Join(shortTempDir(t), "h.sock")
+	ln, err := net.Listen("unix", sock)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if lock, err := claimSocket(sock); err == nil || !strings.Contains(err.Error(), sock) {
+		lock.Close()
+		t.Fatalf("claimSocket on a live socket: %v; want an error naming %s", err, sock)
+	}
+	if conn, err := net.Dial("unix", sock); err != nil {
+		t.Fatalf("the live socket stopped answering: %v", err)
+	} else {
+		conn.Close()
+	}
+	ln.(*net.UnixListener).SetUnlinkOnClose(false)
+	ln.Close()
+	if _, err := os.Stat(sock); err != nil {
+		t.Fatalf("the stale socket is not there to clear: %v", err)
+	}
+	lock, err := claimSocket(sock)
+	if err != nil {
+		t.Fatalf("claimSocket on a stale socket: %v", err)
+	}
+	defer lock.Close()
+	if _, err := os.Stat(sock); !os.IsNotExist(err) {
+		t.Fatalf("the stale socket is still there: %v", err)
+	}
+	if info, err := os.Stat(sock + ".lock"); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("the socket's lock file: %v %v; want it there, 0600", info, err)
+	}
+}
+
+// TestClaimSocketRefusesWhatIsNotASocket: a regular file at the socket's path (a misconfigured
+// AGENT_SECRETS_HELPER_SOCK) is refused, naming it, and left as it was.
+func TestClaimSocketRefusesWhatIsNotASocket(t *testing.T) {
+	sock := filepath.Join(t.TempDir(), "h.sock")
+	if err := os.WriteFile(sock, []byte("mine"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if lock, err := claimSocket(sock); err == nil || !strings.Contains(err.Error(), sock) {
+		lock.Close()
+		t.Fatalf("claimSocket on a regular file: %v; want an error naming %s", err, sock)
+	}
+	if data, err := os.ReadFile(sock); err != nil || string(data) != "mine" {
+		t.Fatalf("the regular file now reads %q (%v); want it untouched", data, err)
+	}
+}
+
+// TestASecondServeNeverSpendsTheRefreshToken: while one helper holds the socket's claim (before
+// it has even listened), a second serve on the same socket exits with an error naming the socket,
+// and never reaches the broker, so it never spends the refresh token the first one holds.
+func TestASecondServeNeverSpendsTheRefreshToken(t *testing.T) {
+	dir := t.TempDir()
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineFile := filepath.Join(dir, "machine.json")
+	kept := &helper.MachineFile{Key: key, CredentialID: "lcred-1", ExpiresAt: time.Now().Add(time.Hour), RefreshToken: "refresh-1"}
+	if err := kept.Save(machineFile); err != nil {
+		t.Fatal(err)
+	}
+	cfg := config{URL: srv.URL, Socket: dir + "/h.sock", OperatorFile: dir + "/none", MachineFile: machineFile, StatePath: dir + "/s.json"}
+	first, err := claimSocket(cfg.Socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	if err := serve(cfg); err == nil || !strings.Contains(err.Error(), cfg.Socket) {
+		t.Fatalf("a second serve: %v; want an error naming %s", err, cfg.Socket)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("the second serve made %d broker calls; want none", n)
+	}
+}
+
+// TestASecondServeOnTheSameMachineFileNeverSpendsItsRefreshToken: while one helper holds the
+// machine file's claim, a serve on another socket but the same machine file exits with an error
+// naming the file and never reaches the broker, so it never spends the login's refresh token.
+func TestASecondServeOnTheSameMachineFileNeverSpendsItsRefreshToken(t *testing.T) {
+	dir := t.TempDir()
+	var calls atomic.Int64
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	}))
+	t.Cleanup(srv.Close)
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	machineFile := filepath.Join(dir, "machine.json")
+	kept := &helper.MachineFile{Key: key, CredentialID: "lcred-1", ExpiresAt: time.Now().Add(time.Hour), RefreshToken: "refresh-1"}
+	if err := kept.Save(machineFile); err != nil {
+		t.Fatal(err)
+	}
+	first, err := claimMachineFile(machineFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Close()
+	cfg := config{URL: srv.URL, Socket: dir + "/other.sock", OperatorFile: dir + "/none", MachineFile: machineFile, StatePath: dir + "/s.json"}
+	if err := serve(cfg); err == nil || !strings.Contains(err.Error(), machineFile) {
+		t.Fatalf("a serve on a claimed machine file: %v; want an error naming %s", err, machineFile)
+	}
+	if n := calls.Load(); n != 0 {
+		t.Fatalf("the second serve made %d broker calls; want none", n)
 	}
 }

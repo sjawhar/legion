@@ -277,8 +277,8 @@ Compaction (`Compact`, which ygo runs as a room closes and as the server shuts d
 runs over every document every 24 hours, `CompactAll`) folds the whole log into one row holding
 that state (`compactKeep`), whose `content_changed` says whether any row it folded past the latest
 version's cursor changed content. A compacted `doc_updates`, and any backup of it taken later,
-therefore holds no text a write deleted: text deleted before a version captured it is gone (Sami's
-decision, LEGION-496).
+therefore holds no text a write deleted: text deleted before a version captured it is gone (the
+operator's decision, LEGION-496).
 
 Each `doc_updates` row records `content_changed` - whether the update changed the document's
 rendered markdown, the only document content a version stores (`pmdoc.Render` of the tree before and
@@ -1845,7 +1845,7 @@ from and that ask's document.
 - A reply joins its thread the same way on both write paths. `threadHeadOf` (`api/comment_create.go`) climbs `reply_to` from an already-locked comment to the head of its thread and, when that head is an ask, the reply stores the ask's `ask_id` with `reply_to` null and the reply's `turn`; `POST .../comments` reaches it through `normalizeCommentThreadTarget`, which validates the request's `reply_to` first, and `POST /api/v1/comments/{id}/reply` calls it directly with the comment it already holds locked, so a session answering a mention inside an ask's thread lands in that thread instead of in a `reply_to` chain no ask read selects (`store/migrations/0043_comment_reply_ask_id.up.sql` moves the rows written before that, and gives each the turn 0028 gave every other ask reply). `comment.delivery` payloads carry the `ask_id` of the comment they report on, so a receipt names the thread it changed. Neither event is published to the ask's followers: `publishFollowerRoutes` routes `ask.answered`, `ask.edited`, `ask.handed_back`, `ask.resolved` and `comment.created`/`resolved`/`reopened`/`edited` with an `ask_id`, and no other type.
 - Keep Envoy API-level with OpenCode. Do not add DB introspection or OpenCode-specific hidden coupling unless there is no API path.
 - Dispatch caps (`CAP_EXCEEDED` 400) read `<field> is N characters over the M-character limit (L/M)` (`capExceededError`, UTF-16 units) or `<field> is N over the M-item limit (C/M)` for counts; `GET /asks/{id}`, `/comments/{id}`, and `/issues/{key}/messages/{id}` answer a non-uuid id with 400 `<KIND>_ID_INPUT` (`requireUUIDPath`); a document-edit quote miss (`TARGET_NOT_FOUND`) names the three nearest blocks and a `# Title` quote selects a heading. The outbox `payload_summary` of `ask.answered` is the answer rendering (`<selected> - <text>`), not the question.
-- The comment, comment-edit, message and broadcast body cap is `contracts.DispatchBodyMax` (32,000 UTF-16 units), generated from `DISPATCH_BODY_MAX` in `packages/contracts` rather than spelled here: `comment_create.go`, `comment_actions.go`, `messages.go` and `broadcasts.go` are its four enforcement sites, each refusing with the `CAP_EXCEEDED` wording above. Change it in `packages/contracts/src/dispatch-tools.ts` and regenerate (`bun run gen:go` there), never in `internal/contracts/generated.go`; the same constant generates the Legion daemon's `dispatch.MessageBodyLimit`, from which `record.MessagePostLimit` (31,956) subtracts the outbox marker, so a server older than a daemon of the same release refuses what that daemon posts.
+- The comment, comment-edit, message and broadcast body cap is `contracts.DispatchBodyMax` (32,000 UTF-16 units), generated from `DISPATCH_BODY_MAX` in `packages/contracts` rather than spelled here: `comment_create.go`, `comment_actions.go`, `messages.go` and `broadcasts.go` are its four enforcement sites, each refusing with the `CAP_EXCEEDED` wording above. Change it in `packages/contracts/src/dispatch-tools.ts` and regenerate (`bun run gen:go` there), never in `internal/contracts/generated.go`; the same constant generates the Legion daemon's `dispatch.MessageBodyLimit`, from which `record.MessagePostLimit` (31,956) subtracts the outbox marker, so a server older than a daemon of the same release refuses what that daemon posts. Never raise `DISPATCH_BODY_MAX` past `maxInputChars` in `internal/dispatch/embed/embed.go`, the rune limit a comment or message body is embedded at: past it the body's tail is dropped from search by meaning with no error, and `.github/scripts/check-body-embed-limit.sh` fails the build when the body cap exceeds it; that check also requires one line of each package guide (this bullet, and the body-limit row of `packages/contracts/AGENTS.md`) to name both constants, so keep this bullet one line however long it grows. The declaration comments that pair the two constants - `maxInputChars`'s comment in `embed.go` and the `DISPATCH_BODY_MAX` JSDoc in `dispatch-tools.ts` - are confirmed by a human at review, not by the check: reading a comment out of a file cannot tell comment text from a `//` or `/*` inside a string literal without parsing the language, and a gate that can report agreement it has not established is worse than one that does not try.
 - Caller text PostgreSQL cannot store (`text.Storable`) is refused before anything is written (`api/storable_text.go`, positions in UTF-16 units from 1): a U+0000, which neither its text nor its jsonb holds, is `400 NUL_CHARACTER` reading `<field> holds a NUL character (U+0000) at character N, which Dispatch cannot store`, and a byte that is not UTF-8, which its text does not hold, is `400 INVALID_UTF8` reading `<field> holds a byte that is not UTF-8 (0xFF) at character N, which Dispatch cannot store`. A name the caller wrote (a JSON member's, a query parameter's, a multipart field's) is named with a U+0000 in it written as the six characters `\u0000`, so no refusal sends the character back. The input layer checks once, not each route: `decodeJSON` walks every string and member name of the body it decoded (`unstorableJSON`, naming `title`, `options[1].label`, `ops[0].attributes.title`), and so do the two readers that read a JSON body themselves (an artifact upload's, a credential relay's); JSON carries no byte that is not UTF-8 past decoding, which writes it as U+FFFD, so these refuse only a U+0000. A multipart upload checks every field, its markdown file (`file`) and a binary file part's `Content-Type`, which it stores as the artifact's type (`file Content-Type`; a markdown file stores no part header); `Register` wraps every route, the document websocket's too, so a path or query parameter is refused before its handler runs (`refuseUnstorableParameters`: `path parameter session_id`, `query parameter label`; a query with no percent escape is not parsed for it); and the document websocket refuses, before the upgrade, a U+0000 in the actor JSON its bearer names in the `X-Dispatch-Actor` header (`docs.ActorHeader`, `refuseUnstorableActor`: `X-Dispatch-Actor.id`). The check covers every parameter, field and member a request carries, including ones no handler reads. A new reader of caller text goes through one of these.
 - Listener message APIs preserve the human `message` as a one-line `payload_summary` of at most 160 characters; when it differs, the complete message is `payload`. A supplied `payload` for `/v1/messages/publish` wins over the derived value.
 - Ghost Wispr only publishes `session_started`, `session_ended`, and `summary_ready`; other verified events should return 200, log the skip, and not publish.
@@ -2265,20 +2265,16 @@ two slots, so the binary is never rolled back past it once a slotted enrollment 
 An enrollment's kind is `session` (an agent session on a machine its person logged in: the
 helper's own, or a key a launcher such as agentbox brings through the helper's
 `enroll-session-key`) or `pod`; migration 0012 rewrote every stored `box`/`host` to `session`.
-Each side still meets the other's old shape until every running client is on this release, and
-each fallback names its removal condition at its definition: the broker records an old helper's
-`host`/`box` as `session` and logs `an enrollment named a legacy kind` (`api/handlers_enroll.go`,
-`legacyKinds`: gone after 30 days of no such line from the production broker); the helper asks an
-older broker, which answers `session` `400 INVALID_KIND`, once more as `host` or `box`
-(`helper/broker.go`, `enroll`: gone once the production broker records `session`); the CLI asks an
-older helper, which answers `unknown op enroll-session-key`, its `enroll-box`/`unenroll-box`
-(`cmd/agent-secrets/enroll.go`, `oldHelperSessionKeyOps`: gone once no helper older than this
-release runs); the helper answers an older CLI's `enroll-box`/`unenroll-box` as the kind-free pair
-and logs `a client asked a legacy op` (`helper/server.go`, `oldCLISessionKeyOps`: gone once
-dotfiles' pin is at this release and no helper has logged that line for 30 days); and
-`enroll --helper` accepts agentbox's `--kind box` but refuses every other `--kind`
-(`cmd/agent-secrets/enroll.go`, `cmdEnroll`: gone once dotfiles' pin is legion-envoy 10 or later
-and `scripts/agentbox` on dotfiles' main passes no `--kind`).
+`POST /v1/enrollments` takes only `session` and `pod` (`400 INVALID_KIND` otherwise): the `host`
+and `box` of a helper before legion-envoy 10 are refused, since such a helper can no longer log in
+again. No reader of stored data needs them: the `enrollments` kind constraint admits only the
+two, and a record body that predates 0012 keeps its `box`/`host` as text its id hashes, which
+`record.ParseBody` reads without checking the kind. The helper still asks an older broker, which
+answers `session` `400 INVALID_KIND`, once more as `host` or `box` (`helper/broker.go`, `enroll`:
+gone once the production broker records `session`). The CLI and helper speak only the kind-free
+pair: the helper answers `enroll-box` and `unenroll-box`, the ops of a CLI before legion-envoy 10,
+`BAD_REQUEST unknown op <op>`; the CLI asks a helper nothing else; and `enroll` takes no `--kind`,
+so `--kind box` is a usage error (exit 2) naming the flag.
 `enroll.Service.verifyPodToken` verifies a pod's projected token (issuer, audience, signature,
 expiry, a pod UID named) for both `Create` and `Renew`, before either opens a transaction. A pod's
 `POST /v1/enrollments/{id}/renew` carries its current token as `pod_token`, which must name the
@@ -2381,9 +2377,37 @@ one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
-SHA-256 of every served secret's name, owner, tier and source (its ARN, its Secret Manager
-resource name, or `gcp-token:<service account>` for a minted secret: `policy.Secret.Source`), is recorded on every request, and a
-live grant is re-checked once it has moved, and always while any granted name is a service's,
+SHA-256 of every served secret's name, owner, tier, source, max grant and GitHub owners, is
+recorded on every request. A kind source is `mint:<kind>:<store source>` (`policy.KindSource`, read
+back by `policy.ParseKindSource`). A grant ends for good when a release finds its secret's kind
+changed (a moved source) or its lifetime over the current max-grant (`Machine.endGrant`); a change
+reverted before any release finds it leaves the grant as it was, and to end a grant, revoke it.
+`policy.Kinds`, `ValidKind`,
+`ParseMaxGrant` and `ParseGitHubOwners` are the one statement of which kinds exist, what a max grant
+is and how a `github-owners` list reads (logins separated by white space, as `BROKER_SERVICES`
+separates its entries, a form an AWS tag value and a Secret Manager annotation both hold; a comma
+is refused `ErrGitHubOwnersComma`), and `policy.GitHubOwnersFor` (with `KindNeedsGitHubOwners`)
+the one statement of which kind needs owners, which the loader, `policytest.KindSecret` and
+`agent-secrets secret` create and retag all apply. A `github-app` secret whose `github-owners`
+names no account is refused `github-owners-missing`, and one whose list holds a comma
+`github-owners-malformed`.
+`Secret.MaxGrant` is a `time.Duration` (0: none) and `Secret.GitHubOwners` the lowercased, sorted,
+single-spaced list as one string, so a `Secret` compares equal to an unchanged reread of itself.
+`Values` takes one policy snapshot for its re-check and passes the same snapshot's owners to the
+minter in a `secrets.MintRequest`, and `secrets.GitHubApp.Mint` asks GitHub for no token for an
+installation on an account they do not list, nor for a record with no positive installation id.
+Once its reads are done, `Values` checks every name whose frozen source is a stored one against the
+policy as it stands then (`recheckStoredSources`): a retag to a kind reread during the reads ends
+the grant for good, and one the policy no longer serves pauses it, so a release never returns what
+the secret stores once it is a kind. A minter's error names an upstream status by its number and a
+failed call by its class (`transportFailure`), never Go's transport text, the reason phrase or the
+body, and a Google `error_subtype` only when it is `invalid_rapt` or `rapt_required`
+(`googleReauthSubtypes`), else `unknown`.
+`policy.TagRollbackGuard` and `RollbackGuardValue` (`mint-service-account: kind-secret`) are what
+`agent-secrets secret` writes beside every kind, so a broker of legion-envoy-v13.19.0 to the
+release before kinds refuses the secret (`mint-target-malformed`) rather than serve its stored key;
+this broker never reads the tag (`TestTheRollbackGuardIsRefusedByEarlierBrokersAndIgnoredHere`).
+A live grant is re-checked once the version moves, and always while any granted name is a service's,
 since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
 stored bodies must still parse. `policy.NewSet` is the one place a `Version` is computed, ascending
@@ -2411,7 +2435,10 @@ refuses - is `policy.ErrNameInvalid` before any store call,
 before the writer lock and before a miss-path reread token (`Loader.secretName`, which
 `Current.CheckName` answers from and both `LoadOne` and its callers' pre-checks ask). The public
 `POST /v1/secrets/{name}/reread` (`rereadSecret`, which any caller may send right after a write) is
-`RefreshOne` over HTTP, answering `{name, served, reason}`, `400 SECRET_NAME_INVALID` for such a
+`RefreshOne` over HTTP, answering `{name, served, reason, kind}` (`kind`: the kind the broker serves
+the secret as, `Secret.Kind`, absent for a stored secret; nothing else of the tags, since the route
+is public), which `agent-secrets secret retag` compares with the kind it wrote and exits 1 on a
+mismatch (`rereadRetag`: a stale metadata read still serves the old kind), `400 SECRET_NAME_INVALID` for such a
 name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a reread whose own
 request ended first; the public `GET /v1/settings`
 answers the store (`store`: `secrets.StoreAWS` or `secrets.StoreGCP`), the prefix and, per store,
@@ -2432,17 +2459,50 @@ secrets), and a write also refuses any ARN but `assumed-role/AWSReservedSSO_*/<s
 account (`requireWriteSignIn`, naming the ARN, in any AWS partition). `--owner me` is that session
 name lowercased; create and retag refuse it before writing unless it matches the broker's email
 rule (`policy.ValidPersonOwner`). GCP: loads the person's Application Default Credentials
-(`gcloud auth application-default login`) and calls Secret Manager itself under
-`cloud.google.com/go/secretmanager`, so IAM in that project decides what the person may read or
-write. GCP's requireAccount is a no-op, unlike AWS's: every call already names
-`projects/<project number>/...` explicitly, so a wrong-project identity gets a real refusal from
-the API itself rather than silently reading another project's secrets - the hazard AWS's
-`ListSecrets` (which takes no project parameter) has and GCP's calls do not.
-A write also refuses an identity whose ADC JSON is not a person's `authorized_user` type - a
-service account key file, or a GCE/GKE metadata-server or workload identity, whose ADC carries no
-JSON at all - (`gcpBackend.requireWriteSignIn`). `--owner me` is
-the Google userinfo endpoint's `email` for the signed-in Application Default Credentials,
-lowercased.
+(`google.FindDefaultCredentials`: the file `GOOGLE_APPLICATION_CREDENTIALS` names whenever it is
+set, else `~/.config/gcloud/application_default_credentials.json` whatever `CLOUDSDK_CONFIG` says,
+else the metadata server) and calls Secret Manager itself under `cloud.google.com/go/secretmanager`,
+so IAM in that project decides what the person may read or write. A load that fails while
+`GOOGLE_APPLICATION_CREDENTIALS` is set names that variable and advises no sign-in, since no other
+file is read while it is set; one that fails while it is unset signs every form, a read included,
+in with the person's gcloud login instead (`gcloudLogin`). GCP's requireAccount is a no-op, unlike
+AWS's: every call already names `projects/<project number>/...` explicitly, so a wrong-project
+identity gets a real refusal from the API itself rather than silently reading another project's
+secrets - the hazard AWS's `ListSecrets` (which takes no project parameter) has and GCP's calls do
+not. A write runs only under a person's own Google Account sign-in (`gcpBackend.requireWriteSignIn`,
+reached only through `connectWriter`): ADC of type `authorized_user` write as they are; under any
+other ADC - a service account key file, a workload identity federation credential (a dev box's
+own), a workforce identity federation sign-in, or a GCE/GKE metadata-server identity (GKE Workload
+Identity's too), whose ADC carries no JSON at all - it signs the backend in with the person's
+gcloud login, redialing Secret Manager under it (`signIn`) and leaving the machine's ADC as they
+are, unless `GOOGLE_APPLICATION_CREDENTIALS` named them, a choice it refuses rather than overrides.
+Reads under a machine's ADC run under it. `gcloudLogin` borrows the login through gcloud's own
+interface, never its credential files: the first `gcloud` on PATH (`exec.LookPath`) lists its
+logins (`gcloud auth list --format=json`); a person's is an account named by a plain email the
+broker accepts as a person owner (`personAccount`: `policy.ValidPersonOwner`), never a
+`.gserviceaccount.com` one or a workload or workforce identity federation login, which gcloud
+names by a `principal://` identifier; it takes the one `CLOUDSDK_CORE_ACCOUNT` names when that is
+one of them, else the only one, refusing none (naming `gcloud auth login`) or several (naming
+each, and `CLOUDSDK_CORE_ACCOUNT`). Its tokens are `gcloudTokenArgs`,
+`gcloud auth print-access-token --format=value[private](token) --impersonate-service-account=
+--access-token-file= --credential-file-override= <account>`, behind `oauth2.ReuseTokenSource`, each
+taken to last `gcloudTokenLife` (5 minutes: gcloud prints no expiry, and refreshes a token within
+300 s of its expiry before printing it). gcloud prints a command's output through its logger, whose
+file handler keeps a copy in `logs/` under gcloud's configuration directory, so the `private`
+format attribute writes the token to the console stream alone, and every gcloud run has
+`CLOUDSDK_CORE_DISABLE_FILE_LOGGING=1` and `CLOUDSDK_CORE_DISABLE_PROMPTS=1`. The empty flags
+clear impersonation, an access token file and a credential file override, whichever of the
+environment and the configuration file sets them (a flag outranks both, and an empty value turns
+the property off), and `gcloudEnv` drops `gcloudIdentityOverrides` (`CLOUDSDK_AUTH_ACCESS_TOKEN`,
+which gcloud reads directly, and the three properties' variables); a write still refuses a token
+whose userinfo `email` is not the chosen account, compared case-insensitively. gcloud reads
+`/dev/null`, never the CLI's standard input (a secret's value), and no error carries its token. A
+refusal names what it found (`gcpCredsFound`: the credentials' `type` or the metadata server,
+never a file path) and never advises `gcloud auth application-default login`, which replaces a
+machine's own ADC for every program that uses it. `--owner me` is the Google userinfo endpoint's
+`email` for the sign-in the write runs under, lowercased. A command a form prints for running
+again starts with `GOOGLE_APPLICATION_CREDENTIALS=…` when that was set, and with
+`CLOUDSDK_CORE_ACCOUNT=…` when it chose the gcloud login (`signInPrefix`).
 `create` and `set` check the sign-in before they read the value: at a terminal they read one line
 with echo off (`readHidden`, `secret_prompt_unix.go`), printing the label on stderr only once the
 reader holds the terminal with echo off, so a prompt started with `&` shows nothing over the
@@ -2535,18 +2595,40 @@ bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins
 ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
 restoration.
 
-AWS `create` writes on the settings' key with both tags
-and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
-one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
-secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are
+`secret.go` builds the one tag map a write sends (`optionalTags`), owner and tier plus `kind`,
+`github-owners` and `max-grant` when the command names them, and the rollback guard beside a kind,
+under the broker's own rules (`policy.ValidKind`, `policy.ParseGitHubOwners`, `policy.ParseMaxGrant`),
+and each backend writes a map it does not read into (`create(tags)`, `setTags`, `removeTags`).
+AWS `create` writes on the settings' key with those tags and no `ClientRequestToken` (the SDK sets
+one). A `retag` is one write: it either sets tags or removes them, never both, and refuses `none`
+beside another change before any read or write, so a refused call never leaves it half applied.
+Either reads the secret's tags once (`currentTags`, a `heldTags` with GCP's etag) and builds from
+them the tags the secret will hold once the write lands (`after`), and applies the github-owners
+rule to those once (`checkGitHubOwnersFor`), as create applies it to its flags, so neither writes a
+`github-app` secret without owners. Each writes against that read: GCP sends the held annotations,
+changed, with the held etag, so a concurrent writer's change refuses the write
+(`errTagsChanged`); AWS's tag calls take no condition, so its `setTags` and `removeTags` read the
+tags back (`awsBackend.raceCheck`) and, when another writer left a kind/owners pair the broker
+refuses, restore the tags read and answer `errTagsChanged` too, and the retag exits 1 naming the
+race. A retag on AWS is safe only with one writer at a time. The retag form lives in
+`secret_retag.go`.
+One that sets tags sends owner and tier in one `TagResource`, plus `kind`
+(with the rollback guard), `github-owners` and `max-grant` when the command sets them, so an IAM
+condition on the request's tags sees them;
+one that removes tags (`--kind none`, which also removes the rollback guard, `--github-owners
+none`, `--max-grant none`) is one `UntagResource` of those keys. On
+`AccessDenied` for a retag that sets tags on a
+secret held shared, or a retag to `--owner shared`, it adds that a shared secret's owner and tier are
 an administrator's to change (a person's own secret may be made shared where their access allows
 the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
 recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. GCP `create` creates
-the secret with automatic replication under the broker's `kms_key_name` and both tags as
-annotations (owner and tier are annotations, never labels, so they carry no GCP label naming
-rules), then adds the value as its first version; `set` adds a version to a secret already held;
-`retag` sends both annotations in one `UpdateSecret` (field mask `annotations`), so a partial
-update can never leave one stale; `delete` sets `expire_time` to now plus 30 days in one
+the secret with automatic replication under the broker's `kms_key_name` and owner, tier and any
+named kind, `github-owners`, max grant and the rollback guard beside a kind as annotations (never
+labels, so they carry no GCP label naming rules),
+then adds the value as its first version; `set` adds a version to a secret already held;
+`retag` writes the same change into the annotations it read in one
+`UpdateSecret` (field mask `annotations`, with that read's etag), preserving every annotation it
+does not change; `delete` sets `expire_time` to now plus 30 days in one
 `UpdateSecret` (field mask `expire_time`) and prints it - GCP has no separate recovery window the
 way AWS does: the secret and every version stay readable and restorable until that moment, and GCP
 deletes them for good once it passes, with no further restore - and `restore` clears `expire_time`
@@ -2563,9 +2645,9 @@ that date never waits past the purge (`earliestPurge` is the one place `DeletedD
 GCP's deletion moment is `expire_time` itself, the exact purge moment, so `show` and `list` print
 only it, with no separate earliest-purge line. The forms' unit tests run in-process against
 `secrets.Local` and a fake STS and broker (`secret_test.go`) for AWS, and against a fake Secret
-Manager gRPC server and fake Application Default Credentials (`secret_gcp_test.go`) for GCP; AWS's
-`secret_e2e_test.go` runs create, delete, restore and retag against `brokertest.NewRig`'s real
-broker.
+Manager gRPC server, fake Application Default Credentials and a stub `gcloud` alone on `PATH`
+(`secret_gcp_test.go`) for GCP; AWS's `secret_e2e_test.go` runs create, delete, restore and retag
+against `brokertest.NewRig`'s real broker.
 
 The client finds its session in `AGENT_SECRETS_KEY_DIR` (a box's or pod's `key.pem` and
 `enrollment`) or `AGENT_SECRETS_HELPER_SOCK` (a machine session's helper), beside `AGENT_SECRETS_URL`.
@@ -2582,9 +2664,110 @@ answers locally, with no broker call and no registration, whether the calling pr
 session identity (exit 0 for a `key.pem`, a fresh marker, or the helper's sign probe answering OK
 or NOT_ENROLLED; exit 1 otherwise, with a notice when a helper is expected but cannot be asked),
 for callers that choose between the broker and another backend. A helper holding no launcher
-credential, from every restart until the operator logs the machine in, enrolls no one: its sign
+credential (never logged in, or after it dropped its login, below, until the operator logs the
+machine in again) enrolls no one: its sign
 and sign-request answer NO_CREDENTIAL, so `identity` exits 1 and every other command fails, each
 with the same not-logged-in notice naming `agent-secrets machine login`.
+
+The machine login is an OAuth 2.0 device authorization grant on the broker's own endpoints
+(`helper.Broker.Login`, client id `agent-secrets-helper`): a fresh P-256 key signs a
+`launcher_credential` request object naming the host and the operator file's login as
+`login_hint`, sent to `POST /v1/oauth/device_authorization` with the key's thumbprint as
+`dpop_jkt`; the CLI prints the user code and where to type it (`AGENT_SECRETS_APPROVE_URL`'s
+`/credentials/machine` when set, else the answer's `verification_uri`, which the socket's `login`
+answer relays), and the helper polls `POST /v1/oauth/token` with DPoP
+proofs from that key (`pollLogin`, `dpop.go`) until the person decides. An approval's token answer
+carries the refresh token and the broker's extras `credential_id` and `credential_expires_at`; the
+helper writes them with the key to `AGENT_SECRETS_MACHINE_FILE` (default
+`~/.config/agent-secrets/machine.json`, mode 0600, its directory created 0700 when the helper
+creates it, written through a fresh `os.CreateTemp` file renamed over it, so no planted path is
+followed; `helper.MachineFile`, whose `validate` both load and save check) before it installs the
+credential. A refresh whose answer the file cannot take is still installed (the old token is
+spent), and the failed save removes the file at once (`unsaveFile`; an unlink works on a full
+disk), since it names the rotated-away token and the helper cannot know how long ago that token
+was first rotated (a restart loses that), logging at ERROR that the login is held only in memory
+and a restart before the next good save needs a new approval. Until a save lands, the helper
+retries only the save every 15 s (`retrySave`) and makes no token request on any path (the
+refresh loop, `Start`, `settleRefused`); a save that lands writes the file back. When even the
+unlink fails (a read-only filesystem) the helper logs at ERROR that a restart before the disk is
+writable again presents a spent token, which the broker revokes as a reuse, ending the machine's
+sessions. A refresh that finds the credential already dropped returns `errNoOutcome`, which the
+loop treats as no outcome (`retrySchedule.after`): it neither resets the backoff nor clears
+`unknown`.
+`LoadMachineFile` refuses a file whose mode grants group or other any access, or that another
+user owns, naming it and `chmod 600`. `serve` first takes an exclusive flock on `<socket>.lock`
+(0600, beside the socket; `claimSocket`), then one on `<machine file>.lock` (`claimMachineFile`),
+and holds both for its lifetime, so a second `serve` on the socket, or on the machine file with
+any socket, exits 2 naming it, before any refresh; with the socket lock held it refuses a path at
+the socket that is not a unix socket or that a helper still answers on, and removes a socket only
+when a dial is refused. It then runs `Broker.Start` before it listens: Start first removes any
+`.machine-*.json.tmp` an interrupted save left beside the file, and a kept file is refreshed once,
+within 5 s, before it is installed, so the socket still listens inside `register`'s 10 s wait
+(answered: saved and installed `issued` with no code, or, when the save failed, installed and
+the file removed, its save retried 15 s later; `invalid_grant`: dropped and the file deleted, so a login the broker answered as ended is
+never resumed; an outcome the helper did not learn, the 5 s bound passing among them: the kept
+login installed as `issued`, though the broker may have ended it, and retried by the loop). A file
+that is there but is
+not exactly one machine login stops `serve`, naming the file. The refresh loop refreshes at half
+the time left until the held credential's expiry, at most every 24 h, rescheduled whenever a
+credential is installed; a refresh the broker did not answer (any transport error: a refused,
+unanswered or unresolved dial, a timeout, a lost answer, a cancelled request) or answered 5xx is
+retried every 15 s, with no backoff (`retrySchedule`), and so is every refresh after it until the
+broker settles one (a success or `invalid_grant`), answered 4xx and 429s between included (its
+`unknown` flag); otherwise a 429 (the token endpoint's rate limit) waits its `Retry-After`, at
+least 15 s and at most a minute, and keeps the login, and any other refusal but `invalid_grant`
+waits a minute, doubling to an hour. A token answer naming no new refresh token (`x/oauth2` copies
+the presented one into an answer without the field) is an error answer: nothing is saved, and the
+refresh is retried. A lost answer keeps the login only while a
+retry lands inside the broker's five-minute rotation grace: retrying every 15 s lands one there
+whenever the outage is shorter, and an outage longer than the grace right after a lost answer makes
+the next retry a reuse, which revokes the machine and ends its sessions. The cost is one request
+every 15 s per machine during an outage.
+A 401
+`LAUNCHER_INVALID` on a launcher call drops the credential and wakes the loop, which refreshes the
+dropped login at once: `invalid_grant` deletes the file; an answer keeps the rotated login in it,
+since that 401 can also be a proof the broker could not verify; an answer whose save fails is
+installed, so the helper keeps working, and the file removed, as a refresh's is; while a login is
+unsaved, the settlement retries only its save before any refresh.
+Each refresh spends the refresh token
+for a new one (they rotate, and a reused one ends the whole family), saves the file, and swaps in
+the credential with the new expiry; a broker `invalid_grant` (revoked, lapsed, or a reused token)
+drops the login and deletes the file. A machine login installed while the helper held another
+credential, or after a 401 `LAUNCHER_INVALID` dropped one (`refusedCred`), retires that one
+(`retireReplaced`: `POST /v1/operator/machines/{id}/retire`
+signed with that credential's own launcher proof, `enroll.Service.RetireCredential`: its expiry set
+to now and its OAuth tokens deleted in one transaction, so a retired refresh token presented later
+is a plain `invalid_grant` that revokes nothing, its sessions left running and renewing with
+their own proofs), best effort, logging a failure at WARN. The
+helper speaks no other login than the device grant, and the broker serves no other for a person's
+machine.
+`agent-secrets-helper install [--url URL] [--restart-with-sessions]` (`install.go`) writes the
+helper's user unit to `helper.UnitPath` (`$XDG_CONFIG_HOME/systemd/user/agent-secrets-helper.service`,
+else `~/.config/…`), with `ExecStart=<this binary, symlinks resolved> serve`,
+`Environment=AGENT_SECRETS_URL=<url>`, an `Environment=` line for each of
+`AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and `AGENT_SECRETS_MACHINE_FILE` set in
+its environment, and `Restart=always`, refusing a URL, value or path a unit line
+would split or expand, and a relative path in any of those three variables (naming it: the
+unit's helper runs in another working directory). First, a helper answering on the socket while `systemctl --user
+is-active agent-secrets-helper.service` is not `active` was started some other way: `install`
+lists its sessions and exits 2 (`stop it, then re-run install`), writing and starting nothing,
+whether or not the unit file already matches. Then it writes the unit when its bytes differ, and
+runs `systemctl --user daemon-reload` and `enable --now` when it wrote it or the unit is not
+active. Last, it restarts a helper that was already answering when `--restart-with-sessions` is
+given, even with the unit unchanged, or, without it, only when the unit changed and the
+`drain` op finds it has no sessions (it then refuses every later register and
+`enroll-session-key` `DRAINING` until it exits or is sent `undrain`, so none starts between the
+check and the restart; `agent-secrets register` retries `DRAINING` every 250 ms until the larger
+of its 10 s connect patience and `--wait` has passed, and `agent-secrets enroll --helper` for 30 s
+(`enrollRetryingDrain`), so a session or box launched then registers or enrolls with the
+restarted helper; a restart that fails after a drain sends `undrain` and exits with the
+restart's error). An unchanged, active unit without the flag does nothing. With sessions it prints them and
+`not restarted: <n> sessions are registered; a restart ends their grants. Re-run with
+--restart-with-sessions.` and exits 0. A helper older than `drain` answers it `unknown op`; it
+cannot refuse a register before the restart, so `install` never restarts it without
+`--restart-with-sessions`: it prints its `sessions`, then `not restarted: the running
+agent-secrets-helper predates drain, …`, and exits 0. `agent-secrets` reads that unit file as "the
+helper is installed" (`helperInstalled`).
 
 `agent-secrets renew --pod-token-file FILE` is the pod renewer: it re-reads and trims the
 projected token before every broker request, and sends it as `pod_token`. A blank or unreadable
@@ -2606,7 +2789,7 @@ lease, and the next renewal is `ENROLLMENT_NOT_LIVE`); `POD_TOKEN_EXPIRED`, retr
 the file holds next; and any other `PROOF_INVALID`, since a clock or URL correction can make the
 next proof valid.
 
-The login that installs a credential wakes every registered session's enrollment retry, so those
+The login that installs a credential, a resumed one included, wakes every registered session's enrollment retry, so those
 sessions reach the broker within about a second of it rather than when a backoff of up to a minute
 comes round. A session whose renew the broker refuses `ENROLLMENT_NOT_LIVE` (its lease lapsed, or
 an older broker's `PROOF_INVALID` saying `not live`) stops counting as enrolled at once, and its
@@ -2629,31 +2812,36 @@ exits 0 and prints `issued`, and stderr names the most recent login and its code
 (`credential_held` beside `login_state`, the most recent login's state, which `machine login`'s
 own poll reads). A helper from before that field reports only the most recent login, so there a
 denied re-login still reads `denied` and exits 1 until the helper restarts on a release that
-carries it. While a credential is held, login-status's last stderr line says when it expires and
-how long that is from now (`credential_expires_at`, from the `expires_at` the broker's issued poll
-carries); the broker has no renewal, so a new machine login a human approves must replace it before
-then, and a helper or broker from before that field gets a line saying the expiry is unknown.
+carries it. While a credential is held, login-status's last stderr line says when it lapses and
+how long that is from now (`credential_expires_at`, from the expiry the broker's latest token
+answer named): `the machine login renews itself; without a refresh it lapses at <RFC 3339> (in
+<d>d<h>h<m>m)`, and a helper or broker from before that field gets a line saying the expiry is
+unknown.
 With no credential held, login-status exits 1 and prints the most recent login's state
 (`pending`, `denied`, `expired`, or `none` before any login), except once the helper drops the
 held credential, because the broker refuses it (401 `LAUNCHER_INVALID`, which it answers for an
 expired or revoked credential and for any launcher proof it cannot verify, such as clock skew or
-an `AGENT_SECRETS_URL` that is not the broker's public URL) or because it reaches the expiry the
-broker named: from then until a login starts or settles, the helper reports every state but
+an `AGENT_SECRETS_URL` that is not the broker's public URL), refuses its refresh (`invalid_grant`),
+or because it reaches the expiry the broker last named: from then until a login starts or settles,
+the helper reports every state but
 `pending` as `expired` (`login_state`), the word the dotfiles launcher gate matches, so an older
 client exits 1 on it too, with `login_refused` and the cause (`credential_dropped`). Stderr says
 why the helper holds no credential in the words its journal uses for the same state
 (`helper.NoCredentialReason`): a login awaiting approval, the cause it dropped the credential for,
 a broker refusal on a helper from before `credential_dropped` (which sets `login_refused` only for
 one), a denied login, a login that expired before anyone approved it, or no login since the
-helper started. A re-login pending at the drop reports its own outcome once it settles, so its
+helper started and none kept in its machine file. A re-login pending at the drop reports its own outcome once it settles, so its
 `machine login` prints `denied` for a denial. The helper logs every change of the credential:
 `machine login issued` (credential id, its `expires_at`, and the operator the login was signed
-with) when a login installs one, a WARN that it expires soon a day before its expiry (at once when
-less is left), and one ERROR when it drops it, `<cause>; cleared: no session can enroll until a
-human approves a new machine login`, the cause being `the launcher credential reached its expiry`
-(with the expiry) or `the broker refused the launcher credential (…)` (with the broker's code); a
-broker that names no expiry gets a WARN that the helper cannot warn ahead. A refusal of a
-credential a newer login has already replaced drops nothing, and the enrollment it failed retries
+with) when a login installs one, `the helper resumed the machine login it kept` at start,
+`machine login refreshed` (credential id, new `expires_at`) on each refresh, a WARN when a refresh
+did not reach the broker and an ERROR when the refreshed login could not be written to the file, a
+WARN that it lapses soon a day before its expiry (at once when less is left), and one ERROR when it
+drops it, `<cause>; cleared: no session can enroll until a human approves a new machine login`, the
+cause being `the launcher credential reached its expiry` (with the expiry), `the broker refused the
+launcher credential (…)` (with the broker's code) or `the broker refused the machine login's
+refresh: it was revoked, lapsed, or its refresh token was reused`. A refusal of a
+credential a newer login or a refresh has already replaced drops nothing, and the enrollment it failed retries
 at once with the new one after the ordinary `enroll failed; retrying` WARN. While it holds none,
 every enrollment attempt, a session's or an `enroll-session-key`'s (and every revoke a re-pinned or lapsed
 session needs before it enrolls), logs at ERROR `session cannot enroll` with that `why`; an
@@ -2661,7 +2849,8 @@ attempt that failed for want of a credential a login has installed since logs th
 SIGINT or SIGTERM, from systemd or anything else, stops the helper with exit 0 after a WARN
 `agent-secrets-helper stopping on a signal` naming the signal, how many sessions it had
 registered (`sessions`) and whether it held a launcher credential (`launcher_credential`); the
-dotfiles unit restarts it unless systemd itself stopped it (`Restart=always`). The helper writes
+unit `install` writes restarts it unless systemd itself stopped it (`Restart=always`), and the
+restarted helper resumes its machine file. The helper writes
 these lines to stderr as slog text, so journald stores the ERROR lines at priority 6 (info), and
 `journalctl -p err` does not list them.
 `agent-secrets --version` and `agent-secrets-helper --version` print the release tag the release
@@ -2714,6 +2903,8 @@ never the URL; `cmd/broker` then loads the AWS config once, before `store.Open`,
 imports no AWS SDK), whose pool `BeforeConnect` mints an RDS IAM token per new connection),
 `BROKER_PUBLIC_URL` (required; absolute URL, no path —
 the broker's own address, the request object's `aud` and the launcher proof's `htu`),
+`BROKER_MACHINE_LOGIN_URL` (required; absolute http(s) URL — Dispatch's `/credentials/machine`
+page, the device grant's `verification_uri`, where a person types a machine login's code),
 `BROKER_UI_TOKEN[_FILE]` (required — the 32-byte bearer shared with exactly Dispatch's server; it
 proves the caller is Dispatch, and Dispatch vouches for the approving login each decision names),
 `BROKER_SECRETS_STORE` (optional; `aws-secrets-manager`, the default, or `gcp-secret-manager`:
@@ -2730,10 +2921,8 @@ entries, each name `record.ValidService`'s form, not `shared` and given once, an
 to one name, never a namespace's `default` account (every pod there that names no account runs as
 it) — any other entry is refused naming it, and an account given twice names both; unset,
 `Config.ServiceAccounts` is nil and no service is registered),
-`BROKER_MINT_TARGETS` (optional; whitespace-separated `<NAME>=<service account email>=<owner email>`
-entries, keyed by name in `Config.MintTargets`: the minted secrets served, each only with that
-account in its `mint-service-account` tag, that owner and the human tier; refused under any store
-but `gcp-secret-manager` and beside `BROKER_FAKE_SECRETS_FILE`; unset, no minted secret is served),
+`BROKER_MINT_TARGETS` (removed; startup refuses it because a secret's `kind` tag now selects what
+the broker mints),
 `BROKER_SERVICE_LOGINS` (optional; whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>`
 entries, the ServiceAccounts that log in as a service with their own token, each account given
 once and named exactly, keyed by account in `Config.ServiceLogins`; read by the same parser as
@@ -2745,8 +2934,10 @@ it; needs `BROKER_K8S_OIDC_ISSUER`; unset, no service logs in with a token),
 through Envoy's `/v1/messages/send`, sent with `BROKER_ENVOY_TOKEN` — read only when the URL is
 set, and not itself required at startup), `BROKER_LEASE_SECONDS` (default 900, max 3600),
 `BROKER_PROOF_SKEW_SECONDS` (default 60, max 300), `BROKER_LAUNCHER_CREDENTIAL_SECONDS`
-(default 604800, max 2592000 — a minted launcher credential's own lifetime; past it the holder
-re-runs login, new key, new code, new human approval), `BROKER_SWEEP_SECONDS` (default 5, max 60 —
+(default and max 2592000, 30 days — how long a machine login lasts without a refresh: an approval
+mints its credential for this long, and each refresh of its device login moves its expiry to this
+long from then; past it the machine logs in again, new key, new code, new human approval),
+`BROKER_SWEEP_SECONDS` (default 5, max 60 —
 `requests.Sweeper`'s tick interval, the poller's replacement), and `BROKER_TRUSTED_PROXY_HEADER`
 (optional; names a request header, e.g. `X-Forwarded-For`, the launcher-credential and reread rate
 limiters' per-address buckets trust for the caller's real address (`clientAddress`) — its last
@@ -2770,7 +2961,8 @@ literal password), and `BROKER_RULES_FILE`, `BROKER_RULES_S3_URI` and
 `BROKER_RULES_RELOAD_SECONDS` (each secret's own tags are the policy, so there is no rules file) —
 so a stale deployment fails loudly rather than silently running on configuration that means
 nothing any more. It also refuses: a missing required variable; a `BROKER_PUBLIC_URL` that isn't an
-absolute URL with no path; a `BROKER_SECRETS_STORE` that is neither store's name; with the AWS
+absolute URL with no path; a `BROKER_MACHINE_LOGIN_URL` that isn't an absolute http(s) URL; a
+`BROKER_SECRETS_STORE` that is neither store's name; with the AWS
 store, a `BROKER_SECRETS_PREFIX` that does not end in `/`, starts with one or holds white space,
 and a `BROKER_SECRETS_KMS_KEY_ARN` that is not a key ARN (an alias can be pointed elsewhere, and a
 bare key id names no account); with the GCP store, a prefix not of its form (a project id in place
@@ -2814,7 +3006,7 @@ literal that is not
 a documented `exit*` constant or another such function's result. The CLI reference is the built
 binaries' own `--help`, so every form must answer `-h` with exit 0.
 
-`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 28 HTTP routes —
+`internal/broker/api/routes_table.go`'s `routes()` is the one list of the broker's 29 HTTP routes —
 a new route is a new row there, never a bare `mux.HandleFunc` — and its own comment says the
 contract for every row is the broker's design overview. Each row's handler is
 wrapped by the adapter for its authentication (`public`, `launcherAuth`, `sessionAuth`, `uiAuth`),
@@ -2837,12 +3029,13 @@ reload; a reread spends a token from either bucket only when both allow it
 (`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
 with the refusing limit's `Retry-After`), and the
-unauthenticated `POST /v1/launcher-credentials` is rate limited per source address (see
-bucket keys on the signed request object itself (`launcherLoginKey`): `person:<login>`, the person
+unauthenticated `POST /v1/oauth/device_authorization` spends its source address's bucket before
+the provider does any work, then verifies the request object locally and spends a per-login
+bucket keyed on the signed request object itself (`launcherLoginKey`): `person:<login>`, the person
 the `login_hint` names; a request naming a service is refused `400 SERVICE_LOGS_IN_WITH_TOKEN` before
-any bucket. An attacker naming a specific victim operator repeatedly can still lock out that
+any per-login bucket. An attacker naming a specific victim operator repeatedly can still lock out that
 operator's machine logins at a low rate; this is inherent to a per-login limit on an
-unauthenticated route and is an accepted risk, not a bug. A request object `Login` refuses (a
+unauthenticated route and is an accepted risk, not a bug. A request object `LoginDevice` refuses (a
 person's login with no `login_hint`, or `anyone`, a replayed `jti`) is `400 REQUEST_INVALID`.
 `POST /v1/launcher-credentials/token`, a service's token login, spends its source address's bucket
 before the token verifies (`refuseAddress`), whatever account the token claims, since a refused
@@ -2864,7 +3057,7 @@ was minted, and maps its subject through `BROKER_SERVICE_LOGINS` (`enroll.Servic
 keyed by exact subject, no wildcard) to the one service it logs in as; a subject not listed, or
 listed for another service than the request names, is `403 ACCOUNT_NOT_LISTED`, an expired token
 `401 TOKEN_EXPIRED`, any other verification failure `401 TOKEN_INVALID`, a request object that does
-not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `Login`
+not verify or repeats a `jti` `400 REQUEST_INVALID` (`verifyLauncherRequest`, the check `LoginDevice`
 shares), a key another live credential holds `409 KEY_HOLDS_LIVE_CREDENTIAL`, and a broker with no
 issuer `404 TOKEN_LOGIN_OFF`. `enroll.Service.IssueTokenLogin` writes the credential. Each subject
 holds one live launcher credential (migration 0015, `launcher_credentials.subject`, its partial
@@ -2915,7 +3108,7 @@ lowercase login against it, with `service` the one the record's signed request o
 but `anyone` itself deciding a machine login whose request names a service, whatever its record
 stored (a broker before that rule stored the person its `login_hint` named), and an `agent_secret`
 record whose approver is `anyone`; no login deciding a person's machine login whose approver is
-`anyone` (one a binary from before `Login` refused that hint could have opened); and a decision
+`anyone` (one a binary from before the login refused that hint could have opened); and a decision
 recording the canonical login it returns. `record.ChainVerifier`
 (`chain.go`, built per record kind by `store.Store.ChainVerifier`, whose `Kind` also selects that
 rule, so a record of one kind never backs the other's credential) is
@@ -2955,8 +3148,8 @@ folded into an ordinary `deny` decision — no request row is written either, ma
 time" wording; a name needing approval that names a *different* approver than an
 already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; the grant lasts
 the request object's `lifetime_seconds` (`record.ValidLifetime`: 1 to the int32 the column holds;
-refused on a machine login; a request naming a minted secret must sign at most 3600, else
-`400 MINT_REQUIRES_LIFETIME` before anything is written), or, when it names none, until its session ends (`grants.expires_at`
+refused on a machine login; a secret with `max-grant` refuses a missing or longer lifetime as
+`400 GRANT_REQUIRES_LIFETIME` before anything is written), or, when it names none, until its session ends (`grants.expires_at`
 null, migration 0013; `requests.grantUnexpired` is the one liveness test). Reuse matches the
 lifetime, except that a no-lifetime request takes the live grant of a request written before
 migration 0013 was applied (`requests.writtenBeforeMigration13`: lifetime 43200 and `created_at`
@@ -3002,21 +3195,28 @@ reads it as pending only then; a decided record's terminal event names the decis
 cancelled with no cancelled event on its record, the shape an ended enrollment's requests had
 before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
 pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver
-`anyone`) for every approver. `Values` releases a
-live grant's values, each read from the secret its request froze (its source: the ARN, or the
-Secret Manager resource name), or, for a minted secret's `gcp-token:<account>` source, minted for
-that account (`Machine.MintToken`, lasting the shorter of an hour and the grant's remaining life)
-once `Current.StillMinted` finds the store still serving it so (held 30 s per name), re-checking the
-enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
-since the grant was decided, or any granted name is a service's (`anyServiceOwned`: the version does
-not cover `BROKER_SERVICES`' accounts) — that the current policy still allows every granted name
+`anyone`) for every approver. `Values` releases a live grant's values, each read from the secret
+its request froze (its source: the ARN, or the Secret Manager resource name). A kind source is
+`mint:<kind>:<source>`: `Machine.release` parses it (`policy.ParseKindSource`; a malformed one is
+`policy.ErrKindSourceMalformed`), reads `<source>` through the store's own `Read`, and passes that
+value to `Machine.Minters[kind]`. It never returns the stored value. A minter's failure is
+`requests.ErrMintFailed`, `502 MINT_FAILED` carrying the minter's own message (never an upstream's text), and one ERROR line
+for the operator, `broker: mint failed` (`requests.MintFailedMessage`) with the name, the kind and
+`class=` `stored-value`, `refused` or `upstream` (`secrets.MintErrorClass`). The usual re-check
+then verifies the enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the
+policy version moved since the grant was decided, or any granted name is a service's
+(`anyServiceOwned`: the version does not cover `BROKER_SERVICES`' accounts) — that the current
+policy still allows every granted name
 (`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
 automatically, or that it now wants approved by someone the request's `decided_by` login is not,
 all refuse, so an approved grant outlives an owner change only while its approver may still
 approve the secret, or once the new tags give its session the secret without asking; a name
 withheld from the session that its request got automatically is judged as an approval by
 `decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
-let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
+let approve it), and that no granted name's `max-grant` is now shorter than the request's lifetime
+(`overMaxGrant`, which ends the grant for good, `GRANT_NOT_LIVE`, as a moved source does, through
+`Machine.endGrant`; `currentPolicyAdmits` refuses approving such a
+pending request `NOT_APPROVER`); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
 scheduled for deletion, which Secrets Manager keeps until its recovery window passes and answers
 `GetSecretValue` for with `InvalidRequestException` rather than `ResourceNotFoundException`
 (`secrets.AWS.Read` reads both as `ErrNotFound`, `secrets.GCP.Read` reads `NOT_FOUND` and a disabled or destroyed latest version's `FAILED_PRECONDITION` the same way, and `secrets.Local` answers each as it does).
@@ -3069,15 +3269,14 @@ value itself is read fresh from
 the `secrets.Store` on release and never persisted.
 
 `internal/broker/machine.Service` decides the other kind of credential request: a typed-code
-machine login. `Login` verifies a machine's signed request object (exactly one `launcher_credential`
-authorization detail naming no service, and a `login_hint`, the approving operator's email, never
-`anyone`; a detail naming a `service` is `400 SERVICE_LOGS_IN_WITH_TOKEN` at the route and
-`machine.ErrServiceLogsInWithToken` here, since a service logs in with its token, below), mints an
-eight-symbol confirmation code (`XXXX-XXXX`) and a separate opaque
-`pending_id` the machine polls with, and writes the record plus its `machine_login_polls` row
-(keyed by the pending id's own SHA-256 hash, never the raw capability). The operator's UI resolves a
-pending login by that human-readable code alone (`LookupByCode` / `POST /v1/machine-logins/lookup`)
-— never the machine's opaque pending id — and this is the *only* route that selects a machine
+machine login, which a person's machine opens through the OAuth device grant (`LoginDevice`,
+below). Its request object carries exactly one `launcher_credential` authorization detail naming no
+service, and a `login_hint`, the approving operator's email, never `anyone`; a detail naming a
+`service` is `400 SERVICE_LOGS_IN_WITH_TOKEN` (`machine.ErrServiceLogsInWithToken`), since a
+service logs in with its token, below. The record's code is the provider's eight-symbol user code
+(`XXXX-XXXX`). The operator's UI resolves a pending login by that human-readable code alone
+(`LookupByCode` / `POST /v1/machine-logins/lookup`, which, like the decision's code check, takes the
+code as typed: `oauth.NormalizeUserCode`), and this is the *only* route that selects a machine
 record (ruling 13: a direct link can never approve a machine login, only the typed code selects
 it), so `code` is required and checked again on the decision itself, before the approver
 (`400 CODE_REQUIRED` / `403 CODE_MISMATCH`). `ApplyDecision` locks the record's row (`for no key
@@ -3097,11 +3296,49 @@ embedded JWK, never a bearer token), with lifetime `BROKER_LAUNCHER_CREDENTIAL_S
 from the decision, so a crash between minting and recording the decision never orphans a
 credential no decision names. Approving a login whose key already holds a live launcher credential
 under another record (a machine that signed two logins with one key) is `409
-KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. `Read` (the machine's own
-poll, `GET /v1/launcher-credentials/{pending}`) answers only the record's state and, once issued,
-the minted credential's id and `expires_at` — no token is ever returned; the credential is usable
-only with proofs signed by the key the request object embedded. The broker has no renewal route:
-past `expires_at` the machine logs in again, with a new key, a new code and a new human approval.
+KEY_HOLDS_LIVE_CREDENTIAL`, and that record stays pending. No token is ever returned by a decision;
+the credential is usable only with proofs signed by the key the request object embedded. The
+earlier login, `POST /v1/launcher-credentials` and its poll `GET /v1/launcher-credentials/{pending}`,
+is gone (the POST `405`, since `GET /v1/launcher-credentials` remains, the poll `404`), and migration 0017 dropped its `machine_login_polls` table; a record such a broker
+opened and left pending is still decided by its code, and having no device code
+(`decideDevice`'s `oauth2.ErrNotFound`), records nothing on the provider.
+
+A person's machine logs in through `LoginDevice`, the OAuth provider's (`internal/broker/oauth`,
+storage `internal/broker/oauthstore`, migration 0016) device authorization step behind
+`POST /v1/oauth/device_authorization`: the request object and refusals above, its
+`dpop_jkt` required to be the object's key thumbprint, and the record's code the provider's user
+code. It runs in the provider's transaction, and so does its request object's `jti`
+(`enroll.Service.Replay` writes in the transaction its context carries, `oauthstore.TxFrom`, and on
+the pool only when it carries none): a device login holds that transaction's one pooled
+connection and never waits for a second, which a burst of logins as large as the pool would
+otherwise turn into a stall of every database route, `/healthz` among them
+(`TestDeviceLoginsNeedOnlyTheirTransactionsConnection`). Every step the provider's transactions
+run (`LoginDevice`, the token hooks, `Store.Reused`, `ApproveDevice` inside `ApplyDecision`)
+writes through the transaction it is handed, never the pool. `ApplyDecision` records each
+decision on the device code too (`decideDevice`), so the machine's poll of `POST /v1/oauth/token`
+gets `access_denied` or, on approval, a DPoP-bound token pair (RFC 9449) whose answer carries
+`credential_id` and `credential_expires_at` (`TokenHooks`). A refresh grant first moves the
+credential's expiry to
+`BROKER_LAUNCHER_CREDENTIAL_SECONDS` from now (`Refreshed`, under the credential's row lock) and
+is refused `invalid_grant` when the credential is revoked or past its expiry; the device code
+grant takes the same row lock without moving the expiry (`Live`) and is refused the same way, so
+a login revoked between its approval and its poll issues nothing. Only that ending
+(`oauth.ErrLoginEnded`, which `machine.ErrNotLive` wraps) is `invalid_grant`; any other failure
+of those steps (a lost database connection) is `500 server_error`, which the helper retries.
+Both run only in the token request's transaction, refusing without one. Refresh tokens
+rotate: a replaced one stays redeemable for five minutes (`oauthstore.refreshGrace`) so a lost
+answer can be retried, and redeeming it again within that time ends the tokens its earlier
+redemption issued, so the family has one live branch. One redeemed after its grace is a reuse: it
+revokes its whole family and, in the same transaction, the launcher credential the family names
+(`oauthstore.Store.Reused`, which is `enroll.RevokeReusedCredential`: revoked_at, its sessions and
+grants ended, audit actor `broker:refresh-token-reuse`), so a copied key enrolls nothing more. A revoke
+(`enroll.Service.RevokeCredential`) ends the credential's tokens in its own transaction
+(`oauthstore.EndCredential`), so the machine's next refresh is refused. Each sweeper tick
+(`requests.Sweeper`) runs `oauthstore.Store.Sweep`: it deletes device codes an hour past their
+expiry (a late poll still answers `expired_token`), DPoP proofs, nonces and access tokens past
+theirs, and a refresh token family only once none of its rows is still redeemable, so a replay
+of a rotated token still finds its family while any descendant lives. Each kind goes row by row
+in batches of 1,000, at most 10 batches per tick; a larger backlog finishes on later ticks.
 
 `GET /v1/launcher-credentials?approver=<email>` lists the machine logins a person may revoke that
 can still reach a secret (id, host, service, `approved_by`, issued, expires, `expired`): every
@@ -3160,7 +3397,15 @@ is refused every one, `403 SERVICE_CREDENTIAL` (`operatorOf`). Every row an oper
 names the calling machine login, `record.LauncherActor(<credential id>)`, whose own row names its
 operator, since no Dispatch sign-in vouched for it; a UI revoke names `record.HumanActor(<login>)`.
 Revoking the calling credential itself ends that machine's access: its next launcher proof is
-`401 LAUNCHER_INVALID`.
+`401 LAUNCHER_INVALID`. `POST /v1/operator/machines/{id}/retire` (`retireOperatorMachine`) is the
+helper's after a new login replaced the calling one: `{id}` must be the calling credential (`403
+NOT_CALLING_CREDENTIAL` otherwise; it needs no operator, so it is the one machine route a service's
+login is not refused), and `enroll.Service.RetireCredential` sets its `expires_at` to now and deletes
+its OAuth tokens in one transaction (an inactive token would take the reuse path and revoke the
+credential), writing one `launcher_credential.retired` audit row, while its
+enrollments keep running: a session renews with its own proof, as an expired credential's
+sessions do. It answers `204`, but a credential already expired or revoked fails the route's
+launcher authentication first, so retiring one already ended answers `401 LAUNCHER_INVALID`.
 
 `internal/broker/enroll.Service.AuthenticateLauncher` is `proof.Verifier`'s `LookupLauncher` hook: a
 launcher proof's `lid` claim resolves a live, unexpired `launcher_credentials` row and then

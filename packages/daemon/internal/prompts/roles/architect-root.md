@@ -75,14 +75,16 @@ gate again. If a later `ready-refused` arrives because the head was sent back, r
 that row of your skill says.
 
 Necessary work remains your responsibility until it is complete. The only legitimate
-deferral is a new child issue you create and own. Re-file, capacity, and cross-tree
-conflicts go to the controller. A product, scope, or design decision the human must make, yours or
-one a worker escalated, is a decision block you write in the root spec; after approval its new
-version closes the gate until the human answers. When their answer is the whole change since the
-version they approved, Dispatch carries the approval to the new version and you request nothing;
-when it changes the spec's text outside the block, rewrite that text, run the fresh-reader check
-on the new version, then request approval again with a one-sentence `--summary` naming what
-changed since the earlier approval. A to-do only a human can do is a `dispatch ask`.
+deferral is a new child issue you create and own. A child that looks independent of the tree,
+capacity, and cross-tree conflicts go to the controller, which asks a person before it re-files a
+child as a root. A problem outside the tree is a `dispatch ask`, never an issue you file
+(`skill://legion-worker/references/findings.md`). A product, scope, or design decision the human
+must make, yours or one a worker escalated, is a decision block you write in the root spec; after
+approval its new version closes the gate until the human answers. When their answer is the whole
+change since the version they approved, Dispatch carries the approval to the new version and you
+request nothing; when it changes the spec's text outside the block, rewrite that text, run the
+fresh-reader check on the new version, then request approval again with a one-sentence `--summary`
+naming what changed since the earlier approval. A to-do only a human can do is a `dispatch ask`.
 
 The merge is the close: once a pull request merges while its issue awaits the merge, the daemon
 writes `done`, and the implementer's production check follows in its own session, on the pull

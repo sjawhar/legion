@@ -2,7 +2,6 @@
 package config
 
 import (
-	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"maps"
 	"os"
@@ -21,6 +20,7 @@ func validEnv() map[string]string {
 	return map[string]string{
 		"BROKER_DATABASE_URL":        "postgres://x",
 		"BROKER_PUBLIC_URL":          "https://secrets.internal.example",
+		"BROKER_MACHINE_LOGIN_URL":   "https://dispatch.internal.example/credentials/machine",
 		"BROKER_UI_TOKEN":            "ui-token",
 		"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
 		"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
@@ -33,6 +33,22 @@ func TestLoadRequiresDatabaseURL(t *testing.T) {
 	_, err := Load(env(e))
 	if err == nil || !strings.Contains(err.Error(), "BROKER_DATABASE_URL") {
 		t.Fatalf("expected BROKER_DATABASE_URL refusal, got %v", err)
+	}
+}
+
+// TestLoadRequiresMachineLoginURL: the page a person types a machine login's code into is
+// required, and must be an absolute http(s) URL, since the device grant names it to the machine.
+func TestLoadRequiresMachineLoginURL(t *testing.T) {
+	for _, v := range []string{"", "/credentials/machine", "dispatch.example/credentials/machine", "ftp://dispatch.example/x", "https:///x"} {
+		e := validEnv()
+		e["BROKER_MACHINE_LOGIN_URL"] = v
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_MACHINE_LOGIN_URL") {
+			t.Errorf("Load(BROKER_MACHINE_LOGIN_URL=%q) = %v, want a refusal naming it", v, err)
+		}
+	}
+	cfg, err := Load(env(validEnv()))
+	if err != nil || cfg.MachineLoginURL != "https://dispatch.internal.example/credentials/machine" {
+		t.Fatalf("Load = (%q, %v), want the machine login URL", cfg.MachineLoginURL, err)
 	}
 }
 
@@ -96,7 +112,7 @@ func TestLoadReadsUITokenFileAheadOfValue(t *testing.T) {
 		t.Fatalf("token file must win: got %d-byte token, want the %d-byte file value", len(cfg.UIToken), len("tok-from-file"))
 	}
 	if cfg.LeaseSeconds != 900 || cfg.ProofSkewSeconds != 60 ||
-		cfg.LauncherCredentialSeconds != 604800 || cfg.SweepSeconds != 5 {
+		cfg.LauncherCredentialSeconds != 2592000 || cfg.SweepSeconds != 5 {
 		t.Fatalf("defaults wrong: LeaseSeconds=%d ProofSkewSeconds=%d LauncherCredentialSeconds=%d SweepSeconds=%d",
 			cfg.LeaseSeconds, cfg.ProofSkewSeconds, cfg.LauncherCredentialSeconds, cfg.SweepSeconds)
 	}
@@ -358,24 +374,10 @@ func TestLoadReadsTheSecretStore(t *testing.T) {
 		t.Fatalf("Load(gcp) = %+v, %v", cfg, err)
 	}
 
-	const sa = "agent-admin@example-project.iam.gserviceaccount.com"
-	const entry = "ADMIN_GCP_TOKEN=" + sa + "=sami@example.com"
 	e := gcp()
-	e["BROKER_MINT_TARGETS"] = " " + entry + "\n"
-	if cfg, err = Load(env(e)); err != nil || cfg.MintTargets["ADMIN_GCP_TOKEN"] != (policy.MintTarget{Account: sa, Owner: "sami@example.com"}) || len(cfg.MintTargets) != 1 {
-		t.Fatalf("Load(BROKER_MINT_TARGETS) = %v, %v", cfg.MintTargets, err)
-	}
-	for _, bad := range []string{sa + "=sami@example.com", "admin_gcp_token=" + sa + "=sami@example.com", "ADMIN_GCP_TOKEN=" + sa + "=Sami", "ADMIN_GCP_TOKEN=admin@example-project.iam.gserviceaccount.com=sami@example.com", entry + " " + entry} {
-		e := gcp()
-		e["BROKER_MINT_TARGETS"] = bad
-		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_MINT_TARGETS") {
-			t.Errorf("BROKER_MINT_TARGETS = %q: err = %v, want a refusal naming the setting", bad, err)
-		}
-	}
-	e = validEnv()
-	e["BROKER_MINT_TARGETS"] = entry
-	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), secrets.StoreGCP) {
-		t.Errorf("BROKER_MINT_TARGETS under the AWS store: err = %v, want a refusal naming %s", err, secrets.StoreGCP)
+	e["BROKER_MINT_TARGETS"] = "ANY_OLD_VALUE"
+	if _, err := Load(env(e)); err == nil || !strings.HasPrefix(err.Error(), "BROKER_MINT_TARGETS is removed; ") {
+		t.Fatalf("Load(BROKER_MINT_TARGETS) = %v, want a refusal naming the removed setting", err)
 	}
 
 	for name, tc := range map[string]struct {

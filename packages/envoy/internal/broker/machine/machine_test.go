@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"errors"
+	"net/url"
 	"regexp"
 	"testing"
 	"time"
@@ -14,6 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/oauth"
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
@@ -29,8 +32,8 @@ const (
 	testApprover = "sjawhar"
 )
 
-// codePattern is the confirmation code's own shape: eight symbols from confirmationAlphabet
-// (a 32-symbol subset of A-Z2-9 with the easily-confused characters removed) as XXXX-XXXX.
+// codePattern is the confirmation code's own shape: eight symbols from oauth.NewUserCode's
+// alphabet (a 32-symbol subset of A-Z2-9 with the easily-confused characters removed) as XXXX-XXXX.
 var codePattern = regexp.MustCompile(`^[A-Z2-9]{4}-[A-Z2-9]{4}$`)
 
 // newFixture wires a Service against a fresh Postgres schema: a real enroll.Service wired with
@@ -70,14 +73,43 @@ func signMachineLogin(t *testing.T, loginHint, identifier, service string) (comp
 	return compact
 }
 
+// openLogin opens a person's machine login for compact as a device authorization does: LoginDevice
+// in a transaction of its own, with dpop_jkt the request object's key thumbprint and a fresh user
+// code, which it answers. A refused login rolls back and answers LoginDevice's error.
+func openLogin(t *testing.T, svc *Service, compact string) (code string, err error) {
+	t.Helper()
+	ctx := context.Background()
+	code, err = oauth.NewUserCode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var jkt string
+	if obj, err := record.VerifyRequestObject(compact, svc.Audience, svc.Skew, time.Now()); err == nil {
+		jkt = obj.Thumbprint
+	}
+	tx, err := svc.Store.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer tx.Rollback(ctx)
+	form := url.Values{"request": {compact}, "dpop_jkt": {jkt}}
+	if err := svc.LoginDevice(oauthstore.WithTx(ctx, tx), form, code); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		t.Fatal(err)
+	}
+	return code, nil
+}
+
 // approvedCredential logs a fresh machine in and approves it as testApprover, returning the
 // record id and the minted credential's id.
 func approvedCredential(t *testing.T, svc *Service) (recordID, credentialID string) {
 	t.Helper()
 	ctx := context.Background()
-	_, code, err := svc.Login(ctx, signMachineLogin(t, testApprover, "example-host-devbox", ""))
+	code, err := openLogin(t, svc, signMachineLogin(t, testApprover, "example-host-devbox", ""))
 	if err != nil {
-		t.Fatalf("Login: %v", err)
+		t.Fatalf("LoginDevice: %v", err)
 	}
 	view, err := svc.LookupByCode(ctx, code)
 	if err != nil {
@@ -91,11 +123,11 @@ func approvedCredential(t *testing.T, svc *Service) (recordID, credentialID stri
 }
 
 // TestLoginIssuesAKeyBoundCredentialOnTypedCodeApproval drives the whole machine-login flow end
-// to end: a machine signs its own request object, Login opens a pending record and mints a
+// to end: a machine signs its own request object, LoginDevice opens a pending record under the
 // typed code, LookupByCode shows it to the approving human, ApplyDecision mints the credential
-// once the record's approver decides it, Read reports it issued — with no token anywhere in any
-// response — and the resulting credential authenticates a proof.SignLauncher proof by the very
-// key the machine signed its login with, never by another.
+// once the record's approver decides it, expiring CredentialLifetime after the approval — with no
+// token anywhere in any response — and the resulting credential authenticates a
+// proof.SignLauncher proof by the very key the machine signed its login with, never by another.
 func TestLoginIssuesAKeyBoundCredentialOnTypedCodeApproval(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
@@ -111,9 +143,9 @@ func TestLoginIssuesAKeyBoundCredentialOnTypedCodeApproval(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	pendingID, code, err := svc.Login(ctx, compact)
+	code, err := openLogin(t, svc, compact)
 	if err != nil {
-		t.Fatalf("Login: %v", err)
+		t.Fatalf("LoginDevice: %v", err)
 	}
 	if !codePattern.MatchString(code) {
 		t.Fatalf("code = %q, want the shape XXXX-XXXX", code)
@@ -137,16 +169,16 @@ func TestLoginIssuesAKeyBoundCredentialOnTypedCodeApproval(t *testing.T) {
 		t.Fatalf("ApplyDecision = state=%q credentialID=%q, want issued and a credential id", state, credentialID)
 	}
 
-	readState, readCredentialID, readExpiresAt, err := svc.Read(ctx, pendingID)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
+	if state, issued, err := svc.recordState(ctx, view.RecordID); err != nil || state != "issued" || issued != credentialID {
+		t.Fatalf("recordState = %q %q, %v; want issued %q", state, issued, err, credentialID)
 	}
-	if readState != "issued" || readCredentialID != credentialID {
-		t.Fatalf("Read = %q %q, want issued %q", readState, readCredentialID, credentialID)
+	// The credential expires CredentialLifetime after the approval.
+	var expiresAt time.Time
+	if err := svc.Store.Pool.QueryRow(ctx, `select expires_at from launcher_credentials where id=$1`, credentialID).Scan(&expiresAt); err != nil {
+		t.Fatal(err)
 	}
-	// The credential expires CredentialLifetime after the approval, and the machine's poll says when.
-	if earliest, latest := beforeDecision.Add(svc.CredentialLifetime), afterDecision.Add(svc.CredentialLifetime); readExpiresAt.Before(earliest.Truncate(time.Microsecond)) || readExpiresAt.After(latest) {
-		t.Fatalf("Read expires_at = %s, want between %s and %s", readExpiresAt, earliest, latest)
+	if earliest, latest := beforeDecision.Add(svc.CredentialLifetime), afterDecision.Add(svc.CredentialLifetime); expiresAt.Before(earliest.Truncate(time.Microsecond)) || expiresAt.After(latest) {
+		t.Fatalf("expires_at = %s, want between %s and %s", expiresAt, earliest, latest)
 	}
 
 	// The key-bound credential authenticates a proof.SignLauncher proof by the same machine key
@@ -186,9 +218,9 @@ func TestApplyDecisionTakesTheCodeThenOnlyTheApproversLogin(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
 
-	pendingID, code, err := svc.Login(ctx, signMachineLogin(t, testApprover, "example-host-devbox", ""))
+	code, err := openLogin(t, svc, signMachineLogin(t, testApprover, "example-host-devbox", ""))
 	if err != nil {
-		t.Fatalf("Login: %v", err)
+		t.Fatalf("LoginDevice: %v", err)
 	}
 	view, err := svc.LookupByCode(ctx, code)
 	if err != nil {
@@ -203,8 +235,8 @@ func TestApplyDecisionTakesTheCodeThenOnlyTheApproversLogin(t *testing.T) {
 			t.Fatalf("ApplyDecision(approve=%v, mallory, right code) = %v, want record.ErrNotApprover", approve, err)
 		}
 	}
-	if state, _, _, err := svc.Read(ctx, pendingID); err != nil || state != "pending" {
-		t.Fatalf("Read after refused decisions = %q, %v, want pending", state, err)
+	if state, _, err := svc.recordState(ctx, view.RecordID); err != nil || state != "pending" {
+		t.Fatalf("recordState after refused decisions = %q, %v, want pending", state, err)
 	}
 
 	if state, _, err := svc.ApplyDecision(ctx, view.RecordID, true, "  SJawhar ", code); err != nil || state != "issued" {
@@ -221,21 +253,19 @@ func TestApplyDecisionTakesTheCodeThenOnlyTheApproversLogin(t *testing.T) {
 }
 
 // TestLoginRefusesAReplayedRequestObject pins that a captured signed machine-login request
-// object cannot be resubmitted: Login checks the object's own jti through the same Replay seam
+// object cannot be resubmitted: LoginDevice checks the object's own jti through the same Replay seam
 // requests.Machine.Create uses (proof_jtis), so a second submission of the identical request
 // object within its freshness window is refused rather than minting a second pending record and
 // confirmation code each time — a confirmation-fatigue/notification-spam vector against the
 // named operator, since the record's code differs every call even with a byte-identical request.
 func TestLoginRefusesAReplayedRequestObject(t *testing.T) {
 	svc := newFixture(t)
-	ctx := context.Background()
-
 	compact := signMachineLogin(t, testApprover, "example-host-devbox", "")
-	if _, _, err := svc.Login(ctx, compact); err != nil {
-		t.Fatalf("first Login: %v", err)
+	if _, err := openLogin(t, svc, compact); err != nil {
+		t.Fatalf("first LoginDevice: %v", err)
 	}
-	if _, _, err := svc.Login(ctx, compact); !errors.Is(err, record.ErrRequestInvalid) {
-		t.Fatalf("second Login with the same request object = %v, want record.ErrRequestInvalid (replayed jti)", err)
+	if _, err := openLogin(t, svc, compact); !errors.Is(err, record.ErrRequestInvalid) {
+		t.Fatalf("second LoginDevice with the same request object = %v, want record.ErrRequestInvalid (replayed jti)", err)
 	}
 }
 
@@ -247,8 +277,8 @@ func TestLoginRefusesAnyoneAsItsOperator(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
 	for _, hint := range []string{record.AnyoneApprover, " Anyone ", "", "  "} {
-		if _, _, err := svc.Login(ctx, signMachineLogin(t, hint, "example-host-devbox", "")); !errors.Is(err, record.ErrRequestInvalid) {
-			t.Fatalf("Login(login_hint %q) = %v, want record.ErrRequestInvalid", hint, err)
+		if _, err := openLogin(t, svc, signMachineLogin(t, hint, "example-host-devbox", "")); !errors.Is(err, record.ErrRequestInvalid) {
+			t.Fatalf("LoginDevice(login_hint %q) = %v, want record.ErrRequestInvalid", hint, err)
 		}
 	}
 	var records int
@@ -258,7 +288,7 @@ func TestLoginRefusesAnyoneAsItsOperator(t *testing.T) {
 }
 
 // TestAMachineLoginNamingAnyoneIsDecidedByNoOne pins the other half: a machine login whose
-// approver is record.AnyoneApprover, which a binary from before Login refused that hint could
+// approver is record.AnyoneApprover, which a binary from before the login refused that hint could
 // open, is decided by no login, so no signed-in person can approve another's machine as their own.
 func TestAMachineLoginNamingAnyoneIsDecidedByNoOne(t *testing.T) {
 	svc := newFixture(t)
@@ -388,8 +418,8 @@ func TestAServiceDeviceCodeLoginIsRefused(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
 	for _, hint := range []string{"", testApprover} {
-		if _, _, err := svc.Login(ctx, signMachineLogin(t, hint, "cluster", "legion-daemon")); !errors.Is(err, ErrServiceLogsInWithToken) {
-			t.Fatalf("Login(a service's login, login_hint %q) = %v, want ErrServiceLogsInWithToken", hint, err)
+		if _, err := openLogin(t, svc, signMachineLogin(t, hint, "cluster", "legion-daemon")); !errors.Is(err, ErrServiceLogsInWithToken) {
+			t.Fatalf("LoginDevice(a service's login, login_hint %q) = %v, want ErrServiceLogsInWithToken", hint, err)
 		}
 	}
 	var records int
@@ -546,16 +576,18 @@ func TestExpirePendingMarksOverdueLoginsExpired(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
 
-	overdueCompact := signMachineLogin(t, testApprover, "overdue-host", "")
-	overduePending, _, err := svc.Login(ctx, overdueCompact)
+	overdueCode, err := openLogin(t, svc, signMachineLogin(t, testApprover, "overdue-host", ""))
 	if err != nil {
-		t.Fatalf("Login(overdue): %v", err)
+		t.Fatalf("LoginDevice(overdue): %v", err)
+	}
+	overdueView, err := svc.LookupByCode(ctx, overdueCode)
+	if err != nil {
+		t.Fatalf("LookupByCode(overdue): %v", err)
 	}
 
-	decidedCompact := signMachineLogin(t, testApprover, "decided-host", "")
-	_, decidedCode, err := svc.Login(ctx, decidedCompact)
+	decidedCode, err := openLogin(t, svc, signMachineLogin(t, testApprover, "decided-host", ""))
 	if err != nil {
-		t.Fatalf("Login(decided): %v", err)
+		t.Fatalf("LoginDevice(decided): %v", err)
 	}
 	decidedView, err := svc.LookupByCode(ctx, decidedCode)
 	if err != nil {
@@ -569,8 +601,8 @@ func TestExpirePendingMarksOverdueLoginsExpired(t *testing.T) {
 		t.Fatalf("ExpirePending: %v", err)
 	}
 
-	if state, _, _, err := svc.Read(ctx, overduePending); err != nil || state != "expired" {
-		t.Fatalf("Read(overdue) = %q, %v, want expired", state, err)
+	if state, _, err := svc.recordState(ctx, overdueView.RecordID); err != nil || state != "expired" {
+		t.Fatalf("recordState(overdue) = %q, %v, want expired", state, err)
 	}
 	if state, _, err := svc.recordState(ctx, decidedView.RecordID); err != nil || state != "denied" {
 		t.Fatalf("recordState(decided) = %q, %v, want denied (ExpirePending must not overwrite a real decision)", state, err)
@@ -586,9 +618,9 @@ func TestApplyDecisionRefusesALoginPastItsExpiry(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
 	svc.PendingTTL = -time.Minute
-	_, code, err := svc.Login(ctx, signMachineLogin(t, testApprover, "example-host-devbox", ""))
+	code, err := openLogin(t, svc, signMachineLogin(t, testApprover, "example-host-devbox", ""))
 	if err != nil {
-		t.Fatalf("Login: %v", err)
+		t.Fatalf("LoginDevice: %v", err)
 	}
 	view, err := svc.LookupByCode(ctx, code)
 	if err != nil {
@@ -630,9 +662,9 @@ func TestApplyDecisionRefusesALoginPastItsExpiry(t *testing.T) {
 func TestASweepWhileADecisionHoldsItsRowLockCommits(t *testing.T) {
 	svc := newFixture(t)
 	ctx := context.Background()
-	_, code, err := svc.Login(ctx, signMachineLogin(t, testApprover, "example-host-devbox", ""))
+	code, err := openLogin(t, svc, signMachineLogin(t, testApprover, "example-host-devbox", ""))
 	if err != nil {
-		t.Fatalf("Login: %v", err)
+		t.Fatalf("LoginDevice: %v", err)
 	}
 	view, err := svc.LookupByCode(ctx, code)
 	if err != nil {

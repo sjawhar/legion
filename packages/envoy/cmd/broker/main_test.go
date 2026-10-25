@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/config"
+	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
@@ -33,6 +34,7 @@ const testUIToken = "test-token-0123456789abcdef0123456789abcdef"
 // namespace it serves and the key every secret there is on.
 var productionEnv = []string{
 	"BROKER_UI_TOKEN=" + testUIToken,
+	"BROKER_MACHINE_LOGIN_URL=https://dispatch.example/credentials/machine",
 	"BROKER_SECRETS_PREFIX=example/agent-secrets/",
 	"BROKER_SECRETS_KMS_KEY_ARN=arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
 }
@@ -68,6 +70,7 @@ func TestTheRequestMachineCarriesTheServiceAccounts(t *testing.T) {
 		return map[string]string{
 			"BROKER_DATABASE_URL":        "postgres://unused",
 			"BROKER_PUBLIC_URL":          "https://secrets.internal.example",
+			"BROKER_MACHINE_LOGIN_URL":   "https://dispatch.example/credentials/machine",
 			"BROKER_UI_TOKEN":            "ui-token",
 			"BROKER_SECRETS_PREFIX":      "example/agent-secrets/",
 			"BROKER_SECRETS_KMS_KEY_ARN": "arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab",
@@ -80,6 +83,14 @@ func TestTheRequestMachineCarriesTheServiceAccounts(t *testing.T) {
 	m := newRequestMachine(cfg, nil, nil, nil, nil)
 	if want := map[string]string{"example-service": "system:serviceaccount:example:example-sa"}; !maps.Equal(m.ServiceAccounts, want) {
 		t.Fatalf("request Machine's ServiceAccounts = %v, want %v", m.ServiceAccounts, want)
+	}
+	for _, kind := range policy.Kinds {
+		if m.Minters[kind] == nil {
+			t.Errorf("request Machine has no minter for kind %q, which the policy serves", kind)
+		}
+	}
+	if len(m.Minters) != len(policy.Kinds) {
+		t.Errorf("request Machine has %d minters for %d kinds: %v", len(m.Minters), len(policy.Kinds), m.Minters)
 	}
 }
 

@@ -89,13 +89,21 @@ func cmdRegister(args []string, stdout, stderr io.Writer) int {
 }
 
 // registerWithPatience retries the connection while the helper is absent (it may be starting
-// with the user manager at boot), for patience at most.
+// with the user manager at boot), for patience at most, and retries a DRAINING answer (a helper
+// install is about to restart) until the larger of patience and the --wait seconds has passed, so
+// the session registers with the restarted helper rather than launching with no broker identity.
 func registerWithPatience(sock string, wait int, patience time.Duration) (helper.Response, error) {
-	deadline := time.Now().Add(patience)
+	start := time.Now()
+	deadline := start.Add(patience)
+	drainDeadline := start.Add(max(patience, time.Duration(wait)*time.Second))
 	for {
 		resp, err := helper.Call(sock, helper.Request{Op: "register", WaitSeconds: wait}, time.Duration(wait+10)*time.Second)
 		if err == nil {
 			if !resp.OK {
+				if resp.Code == helper.CodeDraining && time.Now().Before(drainDeadline) {
+					time.Sleep(250 * time.Millisecond)
+					continue
+				}
 				return resp, fmt.Errorf("%s: %s", resp.Code, resp.Error)
 			}
 			return resp, nil

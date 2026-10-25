@@ -10,20 +10,27 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 )
 
-// LauncherLimits bounds POST /v1/launcher-credentials and POST /v1/launcher-credentials/token, the
-// routes an unauthenticated caller can use to make the broker do work on their behalf. Every
-// source address has its own token bucket (PerAddress), and so does every person a machine login's
-// login_hint names and every account a verified token login proves (PerLogin). A token login
-// spends its address's bucket before its token is verified, since a refused token signature makes
-// the verifier fetch the issuer's keys again, and its account's only after; a machine login
-// verifies its request object locally first, to read the person its bucket is keyed on, then
-// spends both. So a flood from one address cannot keep the broker verifying tokens or writing
-// machine logins, a flood naming one operator cannot bury that operator's pending machine logins,
-// and one account cannot log in faster than its bucket allows. A daemon behind an address others
-// share is held to that address's bucket too: BROKER_TRUSTED_PROXY_HEADER keys the bucket on the
-// caller's own address behind a proxy, and the daemon renews its credential halfway through its
-// life, which carries it through brief contention for that bucket, not through a caller that keeps
-// it drained until the credential expires.
+// LauncherLimits bounds POST /v1/oauth/device_authorization and POST
+// /v1/launcher-credentials/token, the login routes an unauthenticated caller can use to make the
+// broker do work on their behalf. Every source address has its own token bucket (PerAddress), and
+// so does every person a machine login's login_hint names and every account a verified token login
+// proves (PerLogin). A token login spends its address's bucket before its token is verified, since
+// a refused token signature makes the verifier fetch the issuer's keys again, and its account's
+// only after; a device login spends its address's bucket before the provider does any work, then
+// verifies its request object locally to read the person its bucket is keyed on and spends that.
+// So a flood from one address cannot keep the broker verifying tokens or writing machine logins, a
+// flood naming one operator cannot bury that operator's pending machine logins, and one account
+// cannot log in faster than its bucket allows. A daemon behind an address others share is held to
+// that address's bucket too: BROKER_TRUSTED_PROXY_HEADER keys the bucket on the caller's own
+// address behind a proxy, and the daemon renews its credential halfway through its life, which
+// carries it through brief contention for that bucket, not through a caller that keeps it drained
+// until the credential expires.
+//
+// The per-login bucket, keyed on the request object's own claims rather than the caller's
+// address, is unaffected by trustedProxyHeader and remains a smaller, accepted risk. A person's
+// machine login spends its own person:<login> bucket, so an attacker naming a specific victim
+// operator repeatedly can lock out that operator's machine logins at a low rate. This is inherent
+// to a per-login limit on an unauthenticated route.
 type LauncherLimits struct {
 	PerAddress ratelimit.Limit
 	PerLogin   ratelimit.Limit
@@ -36,6 +43,12 @@ var DefaultLauncherLimits = LauncherLimits{
 	PerAddress: ratelimit.Limit{Every: 30 * time.Second, Burst: 10},
 	PerLogin:   ratelimit.Limit{Every: time.Minute, Burst: 5},
 }
+
+// DefaultTokenLimit bounds POST /v1/oauth/token per source address, in a bucket of its own: a
+// burst of 60 and two a second. A machine polls its device code every five seconds while its
+// person decides and refreshes about once a day, so even many machines behind one address
+// never meet it; a flood from one address is refused before the provider does any work.
+var DefaultTokenLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 60}
 
 // DefaultRereadLimit bounds POST /v1/secrets/{name}/reread per source address: a person's write
 // burst passes; a flood cannot make the broker hammer DescribeSecret.
@@ -96,23 +109,6 @@ func clientAddress(r *http.Request, trustedProxyHeader string) string {
 	return address
 }
 
-// refuse writes 429 RATE_LIMITED and reports true when r's source address, or the login key it
-// names (launcherLoginKey), has no request left in its bucket, with the Retry-After of the slower
-// of the two buckets.
-//
-// The per-login bucket, keyed on the request object's own claims rather than the caller's address,
-// is unaffected by trustedProxyHeader and remains a smaller, accepted risk. A person's machine
-// login spends its own person:<login> bucket, so an attacker naming a specific victim operator
-// repeatedly can lock out that operator's machine logins at a low rate. This is inherent to a
-// per-login limit on an unauthenticated route.
-func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, login string) bool {
-	if !l.addressAllows(r) || !l.perLogin.AllowAt(login, time.Now()) {
-		refuseWithRetryAfter(w, max(l.perAddress.Every(), l.perLogin.Every()), "too many launcher credential requests; try again later")
-		return true
-	}
-	return false
-}
-
 // refuseAddress writes 429 RATE_LIMITED and reports true when r's source address has no request
 // left in its bucket: POST /v1/launcher-credentials/token's first limit, spent before the token is
 // verified.
@@ -140,6 +136,12 @@ func (l *launcherLimiter) addressAllows(r *http.Request) bool {
 	return l.perAddress.AllowAt(clientAddress(r, l.trustedProxyHeader), time.Now())
 }
 
+// tokenAllows spends one request of r's source address's token-endpoint bucket, reporting
+// whether it had one.
+func (s *server) tokenAllows(r *http.Request) bool {
+	return s.tokenLimiter.AllowAt(clientAddress(r, s.deps.TrustedProxyHeader), time.Now())
+}
+
 // refuseReread writes 429 RATE_LIMITED and reports true when r's source address, or the broker as
 // a whole, has no reread left in its bucket, naming the refusing bucket's Retry-After. A reread
 // spends a token in each bucket only when both allow it (ratelimit.Keyed.AllowBothAt): one address
@@ -156,10 +158,14 @@ func (s *server) refuseReread(w http.ResponseWriter, r *http.Request) bool {
 }
 
 // refuseWithRetryAfter answers 429 RATE_LIMITED with the Retry-After a bucket refilled one every
-// every names: whole seconds rounded up, and never 0, which would invite an immediate retry the
-// bucket would refuse again.
+// every names (retryAfterSeconds).
 func refuseWithRetryAfter(w http.ResponseWriter, every time.Duration, msg string) {
-	seconds := max(int((every+time.Second-1)/time.Second), 1)
-	w.Header().Set("Retry-After", strconv.Itoa(seconds))
+	w.Header().Set("Retry-After", strconv.Itoa(retryAfterSeconds(every)))
 	writeError(w, http.StatusTooManyRequests, "RATE_LIMITED", msg)
+}
+
+// retryAfterSeconds is the Retry-After a bucket refilled one every every names: whole seconds
+// rounded up, and never 0, which would invite an immediate retry the bucket would refuse again.
+func retryAfterSeconds(every time.Duration) int {
+	return max(int((every+time.Second-1)/time.Second), 1)
 }

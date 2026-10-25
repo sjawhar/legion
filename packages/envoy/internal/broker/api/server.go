@@ -3,12 +3,14 @@
 package api
 
 import (
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
+	"net/url"
 	"regexp"
 	"strings"
 	"time"
@@ -17,6 +19,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
@@ -45,7 +48,8 @@ type Deps struct {
 	// (BROKER_SECRETS_KMS_KEY_ARN), with its region and account, or the GCP store's Cloud KMS key
 	// name (BROKER_SECRETS_KMS_KEY_NAME).
 	SecretsKMSKey string
-	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
+	// LauncherLimits bounds POST /v1/oauth/device_authorization and POST
+	// /v1/launcher-credentials/token; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
 	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
 	// DefaultRereadLimit.
@@ -53,11 +57,23 @@ type Deps struct {
 	// RereadOverallLimit bounds that route across every caller at once; nil means
 	// DefaultRereadOverallLimit.
 	RereadOverallLimit *ratelimit.Limit
+	// TokenLimit bounds POST /v1/oauth/token per source address; nil means DefaultTokenLimit.
+	TokenLimit *ratelimit.Limit
 	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
 	// per-address buckets trust for the real client address; empty means keying on r.RemoteAddr,
 	// correct only when the broker is reached directly rather than through a reverse proxy or load
 	// balancer. See limits.go's clientAddress.
 	TrustedProxyHeader string
+	// OAuth is the machine login's OAuth provider. POST /v1/oauth/device_authorization and POST
+	// /v1/oauth/token are mounted only when it is set, with DeviceLogin and both TokenHooks, which
+	// it then requires (Register panics without them).
+	OAuth *oauth.Provider
+	// DeviceLogin opens a device login's record from the device authorization request's form and
+	// the user code the provider minted, in the provider's transaction (oauthstore.TxFrom on ctx);
+	// an error refuses the request (deviceLoginRefusal maps it to the broker's code).
+	DeviceLogin func(ctx context.Context, form url.Values, userCode string) error
+	// TokenHooks are the broker's steps around each token the provider issues.
+	TokenHooks oauth.TokenHooks
 }
 
 type server struct {
@@ -68,9 +84,14 @@ type server struct {
 	// neither.
 	rereadLimiter *ratelimit.Keyed
 	rereadOverall *ratelimit.Bucket
+	// tokenLimiter is TokenLimit applied per source address (clientAddress).
+	tokenLimiter *ratelimit.Keyed
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
+	if deps.OAuth != nil && (deps.MachineLogin == nil || deps.DeviceLogin == nil || deps.TokenHooks.Before == nil || deps.TokenHooks.After == nil) {
+		panic("api: Deps.OAuth needs MachineLogin, DeviceLogin and both TokenHooks")
+	}
 	limits := DefaultLauncherLimits
 	if deps.LauncherLimits != nil {
 		limits = *deps.LauncherLimits
@@ -83,13 +104,21 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.RereadOverallLimit != nil {
 		rereadOverall = *deps.RereadOverallLimit
 	}
+	token := DefaultTokenLimit
+	if deps.TokenLimit != nil {
+		token = *deps.TokenLimit
+	}
 	s := &server{
 		deps:            deps,
 		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
 		rereadLimiter:   ratelimit.NewKeyed(reread),
 		rereadOverall:   ratelimit.NewBucket(rereadOverall),
+		tokenLimiter:    ratelimit.NewKeyed(token),
 	}
 	for _, route := range routes() {
+		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {
+			continue
+		}
 		mux.HandleFunc(route.Method+" "+route.Pattern, func(w http.ResponseWriter, r *http.Request) {
 			who, ok := s.authenticate(w, r, route.Handler.auth)
 			if !ok {
@@ -99,6 +128,9 @@ func Register(mux *http.ServeMux, deps Deps) {
 		})
 	}
 }
+
+// oauthRoutes prefixes the routes the OAuth provider serves, which Register mounts only with one.
+const oauthRoutes = "/v1/oauth/"
 
 // authenticate proves who r comes from, as auth requires, or writes the refusal. A bad or missing
 // credential is a 401; a store that cannot answer is a 503 naming it, never mistaken for a bad

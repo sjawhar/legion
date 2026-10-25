@@ -60,17 +60,64 @@ stop_daemon() {
 root=$(cd "$(dirname "$0")/../.." && pwd)
 trap cleanup EXIT
 mkdir -p "$work/state" "$work/xdg" "$work/home"
-export XDG_STATE_HOME="$work/xdg" # the registry lands here, never in the devbox's real one
-project="E2E$$$(date +%s)"        # daemon_boot counts per project; a fresh key makes boots==1 true on any store
+# The daemon runs from here, so mise resolves its tmux from here too, whatever directory the run
+# was started from.
+cd "$root/packages/daemon"
+# lib/rig.sh's real_bin_path calls it inside $(…), which would swallow a message on stdout.
+fail() {
+  echo "$*" >&2
+  exit 1
+}
+# wait_healthz [SUFFIX] polls the daemon ($pid) on $port for 10 s. A daemon that exits first stops
+# the run at once, naming the daemon's exit status, rather than after the full wait.
+wait_healthz() {
+  local i status=0
+  for i in $(seq 1 50); do
+    curl -fs "http://127.0.0.1:$port/healthz" >/dev/null && return 0
+    if ! kill -0 "$pid" 2>/dev/null; then
+      wait "$pid" || status=$?
+      pid= # reaped: cleanup must not signal a number the kernel may reuse
+      echo "daemon exited ($status) before it answered /healthz${1:-}"
+      exit 1
+    fi
+    sleep 0.2
+  done
+  echo "daemon never answered /healthz${1:-}"
+  exit 1
+}
+# shellcheck source-path=SCRIPTDIR source=lib/rig.sh
+. "$root/scripts/e2e/lib/rig.sh"
+# A devbox's first tmux can be a wrapper script or a mise shim. mise runs it from the daemon's
+# working directory, under the daemon's tmux environment, which moves the XDG directories under the
+# state directory; this run's own HOME (pane_home, below) has the same effect. From a working
+# directory under the operator's real HOME, mise then finds that HOME's config as a parent
+# directory's config with no trust record, so it exits 1. The daemon's boot scrubs its private tmux
+# server's environment (`tmux show-environment`) and reads that exit as a failure, not as no
+# server, so boot refuses.
+# So when the first tmux is a script or mise itself, the run's PATH, and so the daemon's, starts
+# with the real binary (lib/rig.sh, real_bin_path), which fails loudly when mise cannot name it.
+# CI's tmux is the runner's apt binary, which this leaves alone. mise reads which configs are
+# trusted under XDG_STATE_HOME, so this runs before the run moves that.
+first_tmux=$(command -v tmux || true)
+mise_bin=$(command -v mise || true)
+if [ -n "$first_tmux" ] && {
+  [ "$(head -c 2 "$first_tmux")" = "#!" ] || {
+    [ -n "$mise_bin" ] && [ "$(readlink -f "$first_tmux")" = "$(readlink -f "$mise_bin")" ]
+  }
+}; then
+  PATH="$(real_bin_path "$work/realbin" tmux):$PATH"
+fi
 command -v tmux >/dev/null || {
   echo "tmux is required: the Go daemon supervises under tmux and refuses to start without it"
   exit 1
 }
+export XDG_STATE_HOME="$work/xdg" # the registry lands here, never in the devbox's real one
+project="E2E$$$(date +%s)"        # daemon_boot counts per project; a fresh key makes boots==1 true on any store
 # A port this run holds alone, so a daemon of another run is never mistaken for this one's, and
 # below the kernel's ephemeral range, so no socket the run opens before the daemon binds can take
 # it (scripts/e2e/lib/free-port.sh). The restart reuses it.
 port=$(bash "$root/scripts/e2e/lib/free-port.sh")
-cd "$root/packages/daemon" && go build -o "$work/legion" ./cmd/legion
+go build -o "$work/legion" ./cmd/legion
 bash "$root/scripts/e2e/lib/built-from.sh" "$root" "$work/legion" | sed 's/^/   /'
 
 # CI passes its service's DSN; the devbox brings its own container on an ephemeral port.
@@ -186,14 +233,7 @@ grep -q 'hunter2' "$work/refusal.log" && {
 # 2. starts, answers, restarts against the same store
 "${pane_home[@]}" "$work/legion" start --config "$work/legion.yaml" &
 pid=$!
-for i in $(seq 1 50); do
-  curl -fs "http://127.0.0.1:$port/healthz" >/dev/null && break
-  [ "$i" = 50 ] && {
-    echo "daemon never answered /healthz"
-    exit 1
-  }
-  sleep 0.2
-done
+wait_healthz
 "$work/legion" state --json --port "$port" >"$work/state1.json"
 jq -e --arg p "$project" \
   '.daemon.project == $p and .daemon.boots == 1 and .admission.cap == 4 and (.issues | length) == 0' \
@@ -246,14 +286,7 @@ stop_daemon SIGTERM
 
 "${pane_home[@]}" "$work/legion" start --config "$work/legion.yaml" &
 pid=$!
-for i in $(seq 1 50); do
-  curl -fs "http://127.0.0.1:$port/healthz" >/dev/null && break
-  [ "$i" = 50 ] && {
-    echo "daemon never answered /healthz after restart"
-    exit 1
-  }
-  sleep 0.2
-done
+wait_healthz " after restart"
 "$work/legion" state --json --port "$port" >"$work/state2.json"
 jq -e '.daemon.boots == 2' "$work/state2.json" || {
   echo "the restart did not record a second boot"

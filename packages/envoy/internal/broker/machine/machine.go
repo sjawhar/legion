@@ -1,37 +1,39 @@
 // Package machine implements machine logins. A person's machine (an operator's box) logs in
-// through a typed-code approval flow that mints a key-bound launcher credential: it signs a
-// credential-request object carrying a single launcher_credential authorization detail, naming the
-// operator it logs in as in its login_hint, and polls Login's pendingID for that person to approve
-// the confirmation code Login also mints. Machine-login records are decided here, not in
-// requests.Machine: ApplyDecision takes the deciding human's Dispatch login and the typed code and,
-// on approval, mints the credential directly — there is no Dispatch ask anywhere in this flow, and
-// no bearer token in any response. A service (the Legion daemon, whose pods it enrolls) logs in
-// with its own projected Kubernetes ServiceAccount token instead (TokenLogin), and no person
-// approves it.
+// through an OAuth device grant (LoginDevice) whose typed-code approval mints a key-bound launcher
+// credential: it signs a credential-request object carrying a single launcher_credential
+// authorization detail, naming the operator it logs in as in its login_hint, and that person
+// approves the user code the device authorization minted. Machine-login records are decided here,
+// not in requests.Machine: ApplyDecision takes the deciding human's Dispatch login and the typed
+// code and, on approval, mints the credential directly — there is no Dispatch ask anywhere in this
+// flow, and no bearer token in any response. A service (the Legion daemon, whose pods it enrolls)
+// logs in with its own projected Kubernetes ServiceAccount token instead (TokenLogin), and no
+// person approves it.
 package machine
 
 import (
 	"context"
-	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"time"
 
+	"authelia.com/provider/oauth2"
 	"github.com/go-jose/go-jose/v4"
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/oauth"
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store"
 )
 
 var (
-	// ErrNotFound is returned by Read and ApplyDecision when no record matches the given
-	// pending id / record id.
+	// ErrNotFound is returned by ApplyDecision and LookupByCode when no record matches the given
+	// record id or code.
 	ErrNotFound = errors.New("machine login not found")
 	// ErrCodeMismatch is ApplyDecision's refusal when the caller's code does not match the
 	// record's own: the human is deciding a different login than the one their terminal or
@@ -47,6 +49,10 @@ var (
 	// already holds a live launcher credential under another record: a machine signed two logins
 	// with one key and the first was approved. The record stays pending.
 	ErrKeyHoldsLiveCredential = errors.New("this machine login's key already holds a live launcher credential")
+	// ErrNotLive is Refreshed's and Live's refusal for a launcher credential that is revoked or
+	// past its expiry: a refresh never revives a login that has ended. It is an
+	// oauth.ErrLoginEnded, so the token endpoint refuses it invalid_grant.
+	ErrNotLive = fmt.Errorf("%w: this machine login's credential is revoked or expired", oauth.ErrLoginEnded)
 )
 
 type Service struct {
@@ -55,13 +61,20 @@ type Service struct {
 	// Policy is the secret policy, whose version a machine-login record carries.
 	Policy *policy.Current
 
-	Audience           string
-	Skew               time.Duration
-	PendingTTL         time.Duration
+	Audience   string
+	Skew       time.Duration
+	PendingTTL time.Duration
+	// CredentialLifetime is how long a minted credential lasts, and how far each refresh of its
+	// device login moves its expiry.
 	CredentialLifetime time.Duration
 
+	// OAuth is the device grant a person's machine logs in through; nil when the broker runs none.
+	// ApplyDecision records each decision on it, so the machine's token poll learns the outcome.
+	OAuth *oauth.Provider
+
 	// Replay records a request object's jti (the proof_jtis table), answering false when it was
-	// already seen. Wired to enroll.Service.Replay in production, exactly like
+	// already seen, in the transaction ctx carries (oauthstore.TxFrom) and on the pool when it
+	// carries none. Wired to enroll.Service.Replay in production, exactly like
 	// requests.Machine.Replay: without it a captured signed machine-login request object could be
 	// resubmitted repeatedly within its freshness window, each call minting a fresh pending record
 	// and confirmation code — a confirmation-fatigue/notification-spam vector against the named
@@ -72,42 +85,6 @@ type Service struct {
 // jtiRetentionMargin is how long past a request object's expiry its jti is remembered, mirroring
 // proof.Verifier's and requests.Machine's own retention margin.
 const jtiRetentionMargin = time.Minute
-
-// confirmationAlphabet has 32 symbols, none easily confused with another (no 0/O, no 1/I), so a
-// random byte maps onto it without bias.
-const confirmationAlphabet = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-
-// confirmationCode is eight random symbols from confirmationAlphabet as XXXX-XXXX.
-func confirmationCode() (string, error) {
-	raw := make([]byte, 8)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
-	}
-	code := make([]byte, 0, 9)
-	for i, b := range raw {
-		if i == 4 {
-			code = append(code, '-')
-		}
-		code = append(code, confirmationAlphabet[int(b)%len(confirmationAlphabet)])
-	}
-	return string(code), nil
-}
-
-// hashPendingID is the sha256 of a pending id — machine_login_polls' primary key, so the raw
-// capability a machine polls with is never itself stored.
-func hashPendingID(raw string) []byte {
-	sum := sha256.Sum256([]byte(raw))
-	return sum[:]
-}
-
-// randomPendingID mints the opaque capability a machine polls Read with.
-func randomPendingID() (string, error) {
-	raw := make([]byte, 32)
-	if _, err := rand.Read(raw); err != nil {
-		return "", err
-	}
-	return base64.RawURLEncoding.EncodeToString(raw), nil
-}
 
 // embeddedJWK extracts the raw JWK embedded in a request object's JWS header. It is called only
 // after record.VerifyRequestObject already checked that JWS's signature and structure, so
@@ -152,18 +129,48 @@ func (s *Service) verifyLauncherRequest(ctx context.Context, compact string, now
 	return obj, nil
 }
 
-// Login verifies a signed machine credential-request object and opens a pending record for a
-// human to approve or deny. authorization_details must carry exactly one launcher_credential
-// entry, and it must name no service (ErrServiceLogsInWithToken): a service logs in with its own
-// Kubernetes token (TokenLogin), never through a code a person approves. A person's machine login
-// must carry a login_hint naming the person who decides it and whose machine it becomes, so never
-// record.AnyoneApprover.
-// Nothing here touches Dispatch; the record and its poll row are the whole state, and rate
-// limiting this unauthenticated route is the api layer's job, not this one's.
-func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, code string, err error) {
+// LoginDevice opens a person's machine login as an OAuth device authorization: the provider's
+// onRequest, run in the transaction ctx carries (oauthstore.TxFrom) with the device request's form
+// and the user code the provider minted. form's request is the machine's signed request object
+// (verifyPersonLogin, its jti recorded, so a replay is refused), and its dpop_jkt must be that
+// object's key thumbprint, so the tokens the login is issued are bound to the key its credential
+// is (record.ErrRequestInvalid otherwise). The jti, like the record, is written in that
+// transaction (Replay reads it from ctx), so a login holds the one pooled connection its
+// transaction took and never waits for another, and a refused login leaves no jti behind. The
+// record's code is the user code; the machine polls with its device code. The record also carries
+// the request object, its approver, the credential lifetime an approval mints (CredentialLifetime),
+// the policy version, and an expiry PendingTTL after now.
+func (s *Service) LoginDevice(ctx context.Context, form url.Values, userCode string) error {
+	tx, ok := oauthstore.TxFrom(ctx)
+	if !ok {
+		return errors.New("machine: LoginDevice runs in the provider's transaction")
+	}
 	now := time.Now()
-	var approver string
-	_, err = s.verifyLauncherRequest(ctx, compactRequest, now, func(obj record.RequestObject) error {
+	compact := form.Get("request")
+	approver, err := s.verifyPersonLogin(ctx, compact, now, form.Get("dpop_jkt"))
+	if err != nil {
+		return err
+	}
+	body := record.Body{
+		Request:         compact,
+		Approver:        approver,
+		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-", Operator: ""},
+		LifetimeSeconds: new(int(s.CredentialLifetime.Seconds())),
+		RulesVersion:    s.Policy.Get().Version,
+		ExpiresAt:       now.Add(s.PendingTTL).UTC().Truncate(time.Second),
+		Code:            userCode,
+	}
+	_, err = tx.Exec(ctx, `insert into credential_requests (id, body, kind, approver, code, expires_at) values ($1,$2,'launcher_credential',$3,$4,$5)`,
+		body.ID(), body.Canonical(), body.Approver, body.Code, body.ExpiresAt)
+	return err
+}
+
+// verifyPersonLogin verifies a person's machine login request object at now (verifyLauncherRequest)
+// and answers the approver its login_hint names. A request naming a service is
+// ErrServiceLogsInWithToken, and one naming no person, or record.AnyoneApprover, or whose key
+// thumbprint is not dpopJKT, is record.ErrRequestInvalid, each checked before the jti is recorded.
+func (s *Service) verifyPersonLogin(ctx context.Context, compact string, now time.Time, dpopJKT string) (approver string, err error) {
+	_, err = s.verifyLauncherRequest(ctx, compact, now, func(obj record.RequestObject) error {
 		if obj.Service() != "" {
 			return ErrServiceLogsInWithToken
 		}
@@ -174,48 +181,12 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 		if approver == record.AnyoneApprover {
 			return fmt.Errorf("%w: a person's machine login's login_hint names its operator, never %q", record.ErrRequestInvalid, record.AnyoneApprover)
 		}
+		if dpopJKT != obj.Thumbprint {
+			return fmt.Errorf("%w: dpop_jkt is not the request object's key thumbprint", record.ErrRequestInvalid)
+		}
 		return nil
 	})
-	if err != nil {
-		return "", "", err
-	}
-
-	code, err = confirmationCode()
-	if err != nil {
-		return "", "", err
-	}
-	pendingID, err = randomPendingID()
-	if err != nil {
-		return "", "", err
-	}
-
-	body := record.Body{
-		Request:         compactRequest,
-		Approver:        approver,
-		Enrollment:      record.Enrollment{Kind: "-", RuntimeID: "-", Operator: ""},
-		LifetimeSeconds: new(int(s.CredentialLifetime.Seconds())),
-		RulesVersion:    s.Policy.Get().Version,
-		ExpiresAt:       now.Add(s.PendingTTL).UTC().Truncate(time.Second),
-		Code:            code,
-	}
-	recordID := body.ID()
-
-	tx, err := s.Store.Pool.Begin(ctx)
-	if err != nil {
-		return "", "", err
-	}
-	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `insert into credential_requests (id, body, kind, approver, code, expires_at) values ($1,$2,'launcher_credential',$3,$4,$5)`,
-		recordID, body.Canonical(), body.Approver, body.Code, body.ExpiresAt); err != nil {
-		return "", "", err
-	}
-	if _, err := tx.Exec(ctx, `insert into machine_login_polls (pending_id_hash, record_id) values ($1,$2)`, hashPendingID(pendingID), recordID); err != nil {
-		return "", "", err
-	}
-	if err := tx.Commit(ctx); err != nil {
-		return "", "", err
-	}
-	return pendingID, code, nil
+	return approver, err
 }
 
 // ApplyDecision decides a pending machine login. code must match the record's own — a wrong code
@@ -230,8 +201,8 @@ func (s *Service) Login(ctx context.Context, compactRequest string) (pendingID, 
 // expires_at before the sweeper got to it — is ErrLoginExpired, both checked under the record's
 // row lock before anything is minted, so a second decision, one racing the first and one after
 // expiry all answer the same way. Approval mints the
-// credential — bound to the request object's own key (thumbprint and embedded JWK), with lifetime
-// CredentialLifetime counted from the decision — in the same transaction that records the
+// credential — bound to the request object's own key (thumbprint and embedded JWK), with the lifetime
+// its record names (LoginDevice) counted from the decision — in the same transaction that records the
 // decision, so a crash between the two never orphans a credential no decision names. A key that
 // already holds a live credential under another record is ErrKeyHoldsLiveCredential, and the
 // record stays pending.
@@ -264,7 +235,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	if err != nil {
 		return "", "", err
 	}
-	if code != storedCode {
+	if oauth.NormalizeUserCode(code) != storedCode {
 		return "", "", ErrCodeMismatch
 	}
 
@@ -277,7 +248,7 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	}
 
 	// now is the record's own creation time: the request object's iat and exp bound how fresh it
-	// had to be when Login accepted it, never how long the login may wait for its decision.
+	// had to be when its login was opened, never how long the login may wait for its decision.
 	obj, err := record.VerifyRequestObject(body.Request, s.Audience, s.Skew, createdAt)
 	if err != nil {
 		return "", "", err
@@ -334,6 +305,9 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	} else if err != nil {
 		return "", "", err
 	}
+	if err := s.decideDevice(ctx, tx, body.Code, approve, recordID, credID, login, obj.Details[0].Identifier); err != nil {
+		return "", "", err
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return "", "", err
 	}
@@ -343,26 +317,131 @@ func (s *Service) ApplyDecision(ctx context.Context, recordID string, approve bo
 	return "denied", "", nil
 }
 
-// Read answers a machine's own poll: the record's current state and, once issued, its minted
-// credential's id and the moment that credential expires (CredentialLifetime from the approval),
-// so the machine can say ahead of time that it needs a new login — never a token.
-func (s *Service) Read(ctx context.Context, pendingID string) (state, credentialID string, expiresAt time.Time, err error) {
-	var recordID string
-	err = s.Store.Pool.QueryRow(ctx, `select record_id from machine_login_polls where pending_id_hash=$1`, hashPendingID(pendingID)).Scan(&recordID)
-	if errors.Is(err, pgx.ErrNoRows) {
-		return "", "", time.Time{}, ErrNotFound
+// decideDevice records a decision on the device login whose user code is code, in tx: an
+// approval's session names the record, the minted credential, the operator and the host. A record
+// with no device code (oauth2.ErrNotFound: one an earlier broker's POST /v1/launcher-credentials
+// opened, still pending at the deploy) has nothing to record; a device code past its lifetime
+// (oauth2.ErrInvalidGrant) is ErrLoginExpired, and the decision rolls back. A broker with no OAuth
+// provider records nothing.
+func (s *Service) decideDevice(ctx context.Context, tx pgx.Tx, code string, approve bool, recordID string, credID *string, login, host string) error {
+	if s.OAuth == nil {
+		return nil
 	}
+	extra := map[string]any{"record_id": recordID, "operator": login, "host": host}
+	if credID != nil {
+		extra[oauthwire.ExtraCredentialID] = *credID
+	}
+	err := s.OAuth.ApproveDevice(oauthstore.WithTx(ctx, tx), code, approve, extra)
+	switch {
+	case errors.Is(err, oauth2.ErrNotFound):
+		return nil
+	case errors.Is(err, oauth2.ErrInvalidGrant):
+		return ErrLoginExpired
+	}
+	return err
+}
+
+// Refreshed moves a live launcher credential's expiry to CredentialLifetime from now, as its
+// device login refreshes, and answers the new expiry. A credential revoked or already past its
+// expiry is ErrNotLive and is left as it is. Expiry is compared with clock_timestamp(), the
+// statement's own moment, not now(), the transaction's start, so a retire (expires_at set to its
+// now) that commits after the token request's transaction began still ends the login for it. It
+// runs only in the transaction ctx carries (oauthstore.TxFrom), and its update holds the
+// credential's row lock until that transaction ends: a revoke (enroll.Service.RevokeCredential
+// locks the same row) either commits first, so the update finds no live row, or waits for the
+// refresh's tokens to commit and then ends them.
+func (s *Service) Refreshed(ctx context.Context, credentialID string) (time.Time, error) {
+	tx, err := tokenTx(ctx)
 	if err != nil {
-		return "", "", time.Time{}, err
+		return time.Time{}, err
 	}
-	state, credentialID, err = s.recordState(ctx, recordID)
-	if err != nil || state != "issued" {
-		return state, credentialID, time.Time{}, err
+	var expires time.Time
+	err = tx.QueryRow(ctx, `update launcher_credentials set expires_at = now() + make_interval(secs => $2)
+		where id = $1 and revoked_at is null and expires_at > clock_timestamp() returning expires_at`, credentialID, s.CredentialLifetime.Seconds()).Scan(&expires)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return time.Time{}, ErrNotLive
 	}
-	if err := s.Store.Pool.QueryRow(ctx, `select expires_at from launcher_credentials where id=$1`, credentialID).Scan(&expiresAt); err != nil {
-		return "", "", time.Time{}, err
+	return expires, err
+}
+
+// Live holds a launcher credential's row lock until the transaction ctx carries
+// (oauthstore.TxFrom) ends, leaving its expiry as it is; a credential revoked or past its expiry
+// (against clock_timestamp(), as in Refreshed) is ErrNotLive. A revoke
+// (enroll.Service.RevokeCredential locks the same row) either commits first, so Live finds no live
+// row, or waits for the device code grant's tokens to commit and then ends them.
+func (s *Service) Live(ctx context.Context, credentialID string) error {
+	tx, err := tokenTx(ctx)
+	if err != nil {
+		return err
 	}
-	return state, credentialID, expiresAt, nil
+	var one int
+	err = tx.QueryRow(ctx, `select 1 from launcher_credentials
+		where id = $1 and revoked_at is null and expires_at > clock_timestamp() for no key update`, credentialID).Scan(&one)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrNotLive
+	}
+	return err
+}
+
+// tokenTx is the token request's transaction ctx carries (oauthstore.TxFrom): the row locks the
+// token hooks take hold only within it, so there is no running without one.
+func tokenTx(ctx context.Context) (pgx.Tx, error) {
+	tx, ok := oauthstore.TxFrom(ctx)
+	if !ok {
+		return nil, errors.New("machine: the token hooks run in the provider's transaction")
+	}
+	return tx, nil
+}
+
+// TokenHooks are the device login's token hooks, run in the token request's transaction: a
+// refresh moves its credential's expiry first (Refreshed), the device code grant locks the
+// credential's row as it is (Live), and either is refused when the credential has ended; every
+// answer carries credential_id and credential_expires_at (RFC 3339) as the credential's row holds
+// it in that transaction: the minted expiry on the device code grant, the one Refreshed moved it
+// to on a refresh.
+func (s *Service) TokenHooks() oauth.TokenHooks {
+	var hooks oauth.TokenHooks
+	hooks.Before = func(ctx context.Context, grant oauth2.GrantType, extra map[string]any) error {
+		id, err := credentialOf(extra)
+		if err != nil {
+			return err
+		}
+		switch grant {
+		case oauth2.GrantTypeRefreshToken:
+			_, err = s.Refreshed(ctx, id)
+			return err
+		case oauth2.GrantTypeDeviceCode:
+			return s.Live(ctx, id)
+		default:
+			return fmt.Errorf("machine: a device login has no %q grant", grant)
+		}
+	}
+	hooks.After = func(ctx context.Context, _ oauth2.GrantType, extra map[string]any) (map[string]any, error) {
+		id, err := credentialOf(extra)
+		if err != nil {
+			return nil, err
+		}
+		tx, err := tokenTx(ctx)
+		if err != nil {
+			return nil, err
+		}
+		var expires time.Time
+		if err := tx.QueryRow(ctx, `select expires_at from launcher_credentials where id=$1`, id).Scan(&expires); err != nil {
+			return nil, err
+		}
+		return map[string]any{oauthwire.ExtraCredentialID: id, oauthwire.ExtraCredentialExpiresAt: expires.UTC().Format(time.RFC3339)}, nil
+	}
+	return hooks
+}
+
+// credentialOf is the launcher credential a device login's session extra names. A session naming
+// none has no login to refresh, so it is an oauth.ErrLoginEnded.
+func credentialOf(extra map[string]any) (string, error) {
+	id, ok := extra[oauthwire.ExtraCredentialID].(string)
+	if !ok || id == "" {
+		return "", fmt.Errorf("%w: the login's session names no credential", oauth.ErrLoginEnded)
+	}
+	return id, nil
 }
 
 // recordState answers a record's current state ("pending" absent any terminal event, else the
@@ -398,13 +477,12 @@ type RecordView struct {
 }
 
 // LookupByCode resolves a pending machine login by its confirmation code, for the operator's own
-// UI: it never needs the machine's opaque pending id, only the code its terminal or dashboard
-// shows.
+// UI: the code its terminal or dashboard shows.
 func (s *Service) LookupByCode(ctx context.Context, code string) (RecordView, error) {
 	var id, canonical, approver string
 	var createdAt, expiresAt time.Time
 	err := s.Store.Pool.QueryRow(ctx, `select id, body, approver, created_at, expires_at from credential_requests
-		where code=$1 and kind='launcher_credential' order by created_at desc limit 1`, code).
+		where code=$1 and kind='launcher_credential' order by created_at desc limit 1`, oauth.NormalizeUserCode(code)).
 		Scan(&id, &canonical, &approver, &createdAt, &expiresAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return RecordView{}, ErrNotFound

@@ -77,17 +77,33 @@ proved instead.
 A launcher (a person's machine helper, or the Legion daemon) cannot enroll anything until the
 broker has issued it a **launcher credential**: a credential bound to a key the launcher holds, never
 a token, which the launcher uses by signing with that key. A person's machine gets one when that
-person approves a **machine login**, which works like a device code:
+person approves a **machine login**, an OAuth 2.0 device authorization grant (RFC 8628) on the
+broker's own endpoints:
 
 1. The machine generates a fresh key and asks the broker to log in (`agent-secrets machine login`
-   asks the helper to), naming the person who should approve it (the helper reads that person's
-   Dispatch login from `AGENT_SECRETS_OPERATOR_FILE`).
+   asks the helper to, which calls `POST /v1/oauth/device_authorization`), naming the person who
+   should approve it (the helper reads that person's Dispatch login from
+   `AGENT_SECRETS_OPERATOR_FILE`).
 2. The broker answers with an eight-character confirmation code, `XXXX-XXXX`, which the machine
-   prints.
+   prints, and the machine polls `POST /v1/oauth/token` for the decision.
 3. The person types the code into Dispatch, sees which machine is asking, and approves or denies it.
    Only the typed code selects a machine login: no link can approve one, and anyone else is refused
    `NOT_APPROVER`, since the machine's sessions act as that person.
-4. On approval the broker mints the launcher credential bound to the machine's key.
+4. On approval the broker mints the launcher credential bound to the machine's key, and the
+   machine's next poll gets a refresh token for it, bound to the same key (DPoP, RFC 9449).
+
+The helper keeps the login (its key, the credential's id and expiry, and the current refresh
+token) in `AGENT_SECRETS_MACHINE_FILE` (`~/.config/agent-secrets/machine.json` by default),
+readable only by its user, so a restarted helper resumes it. It refreshes the login when it starts,
+before it resumes it, and at most a day apart after: each refresh spends the refresh token for a new one and moves the
+credential's expiry to `BROKER_LAUNCHER_CREDENTIAL_SECONDS` from then. A refresh token it has
+replaced still works for five minutes, so a refresh the broker did not answer (its answer lost, a
+timeout, the broker unreachable) or answered with a 5xx is retried every 15 s for as long as that
+lasts. Spent after the five minutes, it is a reuse: the broker ends every refresh token of
+the login and revokes the machine's credential as a revoke does, ending every session it enrolled,
+and the helper holding it drops it at its next refresh. A newer login of the same machine instead
+retires the one it replaced: that login can no longer refresh or enroll a session, and the
+sessions it enrolled keep running.
 
 A service, such as the Legion daemon, logs in with its own projected Kubernetes ServiceAccount
 token instead, and no person approves it: the broker verifies the token as it verifies a pod's,
@@ -99,18 +115,20 @@ service logs in again before then and at every restart; a running daemon proves 
 each login, and a restart brings a new one. A device-code login that names a service is refused
 `SERVICE_LOGS_IN_WITH_TOKEN`.
 
-A person's launcher credential lasts `BROKER_LAUNCHER_CREDENTIAL_SECONDS`. It may be revoked from
-Dispatch's machine-login page by the person who approved it and no one else, or from any of their
-machines under its machine login (`agent-secrets machine revoke`), before or after it expires,
-which also ends every session it enrolled
+A person's launcher credential lapses `BROKER_LAUNCHER_CREDENTIAL_SECONDS` after its approval or
+its last refresh, so a machine whose helper keeps reaching the broker stays logged in. It may be
+revoked from Dispatch's machine-login page by the person who approved it and no one else, or from
+any of their machines under its machine login (`agent-secrets machine revoke`), before or after it
+expires, which also ends every session it enrolled and every refresh token it holds
 ([end a machine's login](/legion/broker/guides/revoke-a-session/#end-a-machines-login)). Its
 sessions outlive its expiry: a session renews its lease with its own key, never with the machine's
 credential, so a box keeps working after the machine's credential expires, and the page lists an
 expired login, marked as expired with sessions still running, until its last session ends. Whoever
-approved a person's machine login is its operator. The helper keeps its key in memory only, so a
-helper restart, like an expired or revoked credential, means logging the machine in again. A
-machine login nobody decides expires after 15 minutes, a fixed time rather than a setting
-(`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A service's login has no
+approved a person's machine login is its operator. A lapsed or revoked login means logging the
+machine in again. A machine login nobody decides expires after 15 minutes, a fixed time rather than
+a setting (`machineLoginPendingTTL` in `packages/envoy/cmd/broker/main.go`). A machine logs in
+through the device grant alone: the earlier `POST /v1/launcher-credentials` login answers
+`405 Method Not Allowed` and its poll `GET /v1/launcher-credentials/{pending}` `404`. A service's login has no
 operator, so the machine-login page lists it for everyone signed in, and anyone may revoke it, which
 ends every pod it enrolled at once: a service login a person approved through a code before
 services logged in with their tokens, until it expires, and a service's token login, which names no
@@ -132,7 +150,7 @@ store (`BROKER_SECRETS_STORE`: AWS Secrets Manager, or Google Cloud Secret Manag
 namespace, `BROKER_SECRETS_PREFIX` (such as `production/agent-secrets/`, or
 `projects/<project number>/secrets/agent-secrets-`), encrypted with one agent-secrets key
 (`BROKER_SECRETS_KMS_KEY_ARN` in AWS KMS, or `BROKER_SECRETS_KMS_KEY_NAME` in Cloud KMS), and
-marked with its owner and its tier, as AWS tags or as Secret Manager annotations:
+marked with tags or annotations:
 
 - **Its name** under the prefix is the name a session asks for, in lowercase with each underscore a
   hyphen: `production/agent-secrets/deel-api-key`, or
@@ -141,10 +159,26 @@ marked with its owner and its tier, as AWS tags or as Secret Manager annotations
 - **`owner`** is `shared`, a person's email in lowercase, the email they sign in to Dispatch with,
   or a service the broker is configured with (`BROKER_SERVICES`).
 - **`tier`** is `agent` or `human`.
+- **`kind`** is absent for a stored secret. It is `github-app` for a GitHub App key, or
+  `google-login` for a Google authorized-user login. A secret with a kind must have a current value.
+- **`github-owners`** is required on a `github-app` secret, and read on no other kind. It lists
+  the GitHub accounts the broker mints installation tokens for, separated by spaces
+  (`acme-org ada`) and compared without regard to case, a form both stores hold. A comma, or an
+  entry no GitHub login can be (one that does not start with an ASCII letter or digit, holds
+  anything but ASCII letters, digits and hyphens, is over 39 characters, or is the word `none`), is
+  refused `github-owners-malformed`. A public App can be installed by any account, so an
+  installation on an account the list does not
+  name gets no token. A `github-app` secret without the tag, or with one that names no account, is
+  refused `github-owners-missing`.
+- **`max-grant`** is optional. It is a Go duration of at least one second. A request for that
+  secret must use `--ttl` no longer than the tag.
+- **`mint-service-account`** is written by `agent-secrets secret` beside every kind, with the value
+  `kind-secret`, and this broker never reads it. It makes the brokers before kinds, from
+  legion-envoy-v13.19.0 on, refuse a kind secret rather than serve its stored key.
 
-In Secret Manager the two are annotations rather than labels because a label's value cannot hold
-an email (`@` and `.` are outside its alphabet), and the broker compares the owner with a Dispatch
-login byte for byte; an annotation holds the email as it is.
+In Secret Manager these fields are annotations rather than labels because a label's value cannot
+hold an email (`@` and `.` are outside its alphabet), and the broker compares the owner with a
+Dispatch login byte for byte. An annotation holds the email as it is.
 
 People write the secrets and their tags, not the broker: `agent-secrets secret` creates and
 changes them under the person's own cloud sign-in, both stores
@@ -219,15 +253,17 @@ followed by a reread. A read that fails (Secrets Manager or KMS out of reach) is
 last good read stays in force. The broker leaves out a secret it cannot serve, and logs it by name
 on every read
 ([Operating the broker](/legion/broker/operate/#health-and-logs)): a missing or malformed `owner`
-or `tier` tag (an email with a capital letter is malformed), a name that is not in the form above,
-a secret encrypted with any key but the agent-secrets key, the AWS-managed key included, or a
-secret with no current value (created without one, so none of its versions carries the
-`AWSCURRENT` label). A request for a secret left out is refused `UNKNOWN_SECRET` before anyone is
-asked to approve it, and a live grant of it releases nothing until the broker serves the secret
-again.
+or `tier` tag (an email with a capital letter is malformed), an unknown `kind`, a `github-app`
+secret whose `github-owners` names no account or holds a comma, a malformed
+`max-grant`, a name that is not in the form above, a secret encrypted with any key but the
+agent-secrets key, the AWS-managed key included, or a secret with no current value (created without
+one, so none of its versions carries the `AWSCURRENT` label). A request for a secret left out is
+refused `UNKNOWN_SECRET` before anyone is asked to approve it, and a live grant of it releases
+nothing until the broker serves the secret again.
 
-The policy's **version** is the SHA-256 of every served secret's name, owner, tier and ARN, recorded
-on every request.
+The policy's **version** is the SHA-256 of every served secret's name, owner, tier, source and max
+grant, recorded on every request. A kind secret's source names its kind, so a kind change moves the
+version too.
 
 ## Requests and grants
 
@@ -241,17 +277,35 @@ reason of at most 400 characters. The broker evaluates every name
   secret, asked for by anyone but that service, is denied.
 - Names that need approval must all need the same approver, else the request is refused
   `MIXED_APPROVERS`; request them separately.
-- A **minted** secret carries a `mint-service-account` tag naming a Google service account
-  (`<name>@<project>.iam.gserviceaccount.com`) and holds no enabled version: each release mints a fresh
-  access token for that account, lasting the shorter of an hour and what is left of the grant. The
-  broker serves one only when `BROKER_MINT_TARGETS` lists its name with that account and the
-  secret's owner, and the secret is human-tier, so only that owner approves a token, under a name
-  they chose, for the account; otherwise it is refused `mint-target-not-listed`
-  (`mint-target-malformed` for a tag that is not a service account's email, `minted-has-value` for
-  one holding a version). A request naming one must ask for at most an hour (`--ttl 1h`), else it
-  is refused `MINT_REQUIRES_LIFETIME`. Each release rereads the secret, at most once every 30
-  seconds, so deleting or retagging it stops minting within that. Only the GCP store mints;
-  [Operating the broker](/legion/broker/operate/) says how to create one.
+- A **kind secret** has `kind=github-app` or `kind=google-login` and a current stored value. A
+  GitHub App value holds an App identifier and private key. Its release returns a JSON object with
+  one installation token for each installation of the App that is not suspended and is on an
+  account its `github-owners` tag lists. A Google login
+  value holds an `authorized_user` refresh-token credential. Its release returns a bare access
+  token. The broker reads the stored value for each release, as it reads any secret, and mints from
+  it. It never returns the stored App key or refresh token. A token lasts about an hour, so a client
+  keeps the release until its `expires_at` rather than asking again for each use. A deleted kind
+  secret stops releasing as any deleted secret does. A release GitHub or Google refuses, such as a
+  Google login that needs a new sign-in, is refused `MINT_FAILED` with the upstream's HTTP status
+  code, Google's `invalid_rapt` or `rapt_required` subtype (any other is named `unknown`), or the
+  class of a failed call, never the upstream's own text, and the broker logs it for its operator.
+  A grant ends for good when a release finds its secret's kind changed
+  (removed, or changed to the other kind) or its lifetime over the current `max-grant`: that
+  release answers `GRANT_NOT_LIVE` and writes a `grant.revoked` audit row by
+  `broker:release-recheck`, and the session asks again. A release of a stored secret checks the
+  policy again once it has read the store, so a retag to a kind reread during that read releases
+  nothing and ends the grant the same way: retag a stored secret to a kind, and wait for the broker
+  to serve it, before storing its App key or login. A change reverted before any release finds
+  it leaves the grant as it was: it was approved for that secret, kind and source, and its next
+  release mints a token of that same kind from that same frozen source, never the stored value. To
+  end a grant, revoke it. A kind secret the broker stops serving, such as one whose
+  `github-owners` is removed or malformed, stops releasing until the secret is served again.
+- A secret with `max-grant` needs `--ttl` no longer than that duration. A request with no `--ttl`,
+  or a longer one, is refused `GRANT_REQUIRES_LIFETIME` before the broker writes a request. A
+  `max-grant` set or lowered later holds what came before it to the new bound: a release that finds
+  a live grant lasting longer ends it for good (`GRANT_NOT_LIVE`), and a pending request that asked
+  for longer is no one's to approve (`NOT_APPROVER`), so its session cancels it and asks again
+  within the bound.
 - When every name is automatic, the request is granted at once.
 - Otherwise it is **pending**, and the broker writes a credential-request record for the approver to
   decide. A session has at most one pending request for each secret: an identical request from the
@@ -267,10 +321,11 @@ reason of at most 400 characters. The broker evaluates every name
 A granted request yields a **grant**: the session's right to read those values until the grant
 ends. A grant lasts until its session ends, unless the request asks for a shorter lifetime
 (`agent-secrets NAME --ttl 2m -- command`, or `agent-secrets request NAME --ttl 2m`), which it then
-lasts counted from the moment it is granted. There is no other limit. The approver sees the
-lifetime the request asked for before deciding it. While a grant lives, a new request from the
-same session for exactly the same names and the same lifetime gets the same grant back, without
-asking anyone again, as long as the current policy still allows it.
+lasts counted from the moment it is granted. A secret with `max-grant` requires that shorter
+lifetime and bounds it. The approver sees the lifetime the request asked for before deciding it.
+While a grant lives, a new request from the same session for exactly the same names and the same
+lifetime gets the same grant back, without asking anyone again, as long as the current policy still
+allows it.
 
 The broker never stores a value. Each time a session reads a grant, the broker checks that the
 session is still enrolled, the grant is live, its approval still verifies, and the current policy

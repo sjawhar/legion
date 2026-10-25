@@ -21,9 +21,9 @@ import (
 )
 
 // Request is the client's one line. Op is register, sign, sign-request, sign-launcher,
-// unregister, sessions, login, login-status, enroll-session-key or unenroll-session-key; an older
-// CLI's enroll-box and unenroll-box are answered as the last two (oldCLISessionKeyOps). A field
-// the helper does not read is ignored, so that CLI's "kind" costs nothing.
+// unregister, sessions, login, login-status, enroll-session-key, unenroll-session-key, or an
+// installer's drain and undrain; an unrecognized op is answered BAD_REQUEST, `unknown op <op>`. A
+// field the helper does not read is ignored.
 type Request struct {
 	Op              string   `json:"op"`
 	Method          string   `json:"method,omitempty"`           // sign, sign-launcher: the HTTP method of the broker call
@@ -50,11 +50,12 @@ type Response struct {
 	RuntimeID           string        `json:"runtime_id,omitempty"`
 	Operator            string        `json:"operator,omitempty"`
 	State               string        `json:"state,omitempty"`                 // register: enrolling | enrolled
+	VerificationURI     string        `json:"verification_uri,omitempty"`      // login: where a person types the code, the broker's device authorization verification_uri; empty from a helper before this field
 	LoginState          string        `json:"login_state,omitempty"`           // login/login-status: the most recent login's pending|issued|denied|expired; expired whenever LoginRefused and that login is not pending
 	CredentialHeld      bool          `json:"credential_held,omitempty"`       // login-status: the helper holds a launcher credential, whatever the most recent login's state
-	CredentialExpiresAt string        `json:"credential_expires_at,omitempty"` // login-status: RFC3339, when the held credential expires; empty while none is held or its broker did not say
-	LoginRefused        bool          `json:"login_refused,omitempty"`         // login-status: the helper dropped the credential it held (the broker refused it, or it reached the expiry the broker named), and no login has started or settled since
-	CredentialDropped   string        `json:"credential_dropped,omitempty"`    // login-status: why, set exactly when LoginRefused (dropRefused or dropExpired); a helper from before this field sends LoginRefused alone
+	CredentialExpiresAt string        `json:"credential_expires_at,omitempty"` // login-status: RFC3339, when the held credential lapses without a refresh; empty while none is held
+	LoginRefused        bool          `json:"login_refused,omitempty"`         // login-status: the helper dropped the credential it held (the broker refused it or its refresh, or it reached its expiry), and no login has started or settled since
+	CredentialDropped   string        `json:"credential_dropped,omitempty"`    // login-status: why, set exactly when LoginRefused (dropRefused, dropRefreshRefused or dropExpired); a helper from before this field sends LoginRefused alone
 	LeaseExpires        string        `json:"lease_expires,omitempty"`         // enroll-session-key: RFC3339Nano
 	Proof               string        `json:"proof,omitempty"`                 // sign: a session proof; sign-launcher: a launcher proof of the machine credential
 	CredentialID        string        `json:"credential_id,omitempty"`         // sign-launcher: the machine credential the proof names, so a machine revoke can tell this machine's own login
@@ -69,8 +70,11 @@ type Response struct {
 const (
 	// dropRefused: the broker answered a launcher proof 401 LAUNCHER_INVALID (clearOnInvalid).
 	dropRefused = "the broker refused the launcher credential (expired or revoked, or a proof it could not verify, such as clock skew or an AGENT_SECRETS_URL mismatch)"
-	// dropExpired: the credential reached the expiry the broker named when it issued it
-	// (watchExpiry).
+	// dropRefreshRefused: the broker answered the machine login's refresh invalid_grant
+	// (Broker.refresh), and the helper deleted its machine file.
+	dropRefreshRefused = "the broker refused the machine login's refresh: it was revoked, lapsed, or its refresh token was reused"
+	// dropExpired: the credential reached the expiry the broker last named, with no refresh moving
+	// it (watchExpiry).
 	dropExpired = "the launcher credential reached its expiry"
 )
 
@@ -94,7 +98,7 @@ func NoCredentialReason(loginState string, refused bool, dropped string) string 
 	case loginState == "expired":
 		return "the most recent machine login expired before anyone approved it"
 	case loginState == "":
-		return "no machine login since the helper started; a restart discards the launcher credential"
+		return "no machine login since the helper started, and none kept on this machine"
 	default:
 		return "the most recent machine login is " + loginState
 	}
@@ -121,9 +125,11 @@ const (
 	// enrolling: the helper holds a launcher credential, and its enroll loop has not succeeded yet.
 	CodeNotEnrolled = "NOT_ENROLLED"
 	// CodeNoCredential answers sign, sign-request or sign-launcher while the helper holds no
-	// launcher credential, from every restart until the operator logs the machine in: it enrolls no
-	// one, so a session has no broker identity, and the operator's shell has no machine login to
-	// act as. A register reply for such a session carries it too, beside OK.
+	// launcher credential: the machine was never logged in, its machine file is gone, or the broker
+	// refused its login (revoked, lapsed, or a reused refresh token), until the operator logs the
+	// machine in. A restart resumes a kept login, so it alone does not cause this. The helper then
+	// enrolls no one, so a session has no broker identity, and the operator's shell has no machine
+	// login to act as. A register reply for such a session carries it too, beside OK.
 	CodeNoCredential = "NO_CREDENTIAL"
 	// CodeInSession answers sign-launcher from a process inside a registered session's process
 	// tree, or one whose ancestry the helper cannot follow to init (a parent it cannot read, a
@@ -154,6 +160,9 @@ const (
 	// CodeSign answers sign, sign-request or sign-launcher when signing the proof or the request
 	// object failed; the error says why.
 	CodeSign = "SIGN"
+	// CodeDraining answers register and enroll-session-key once `drain` found no sessions: the
+	// helper is about to be restarted, and the caller should retry against the new one.
+	CodeDraining = "DRAINING"
 )
 
 const maxLine = 64 << 10
@@ -167,6 +176,19 @@ func DefaultSocket(getenv func(string) string) string {
 		dir = "/run/user/" + strconv.Itoa(os.Getuid())
 	}
 	return filepath.Join(dir, "agent-secrets", "helper.sock")
+}
+
+// UnitName is the helper's systemd user unit.
+const UnitName = "agent-secrets-helper.service"
+
+// UnitPath is where `agent-secrets-helper install` writes the helper's user unit: under
+// $XDG_CONFIG_HOME, default $HOME/.config. Its presence says the helper is installed here.
+func UnitPath(getenv func(string) string) string {
+	dir := getenv("XDG_CONFIG_HOME")
+	if dir == "" {
+		dir = filepath.Join(getenv("HOME"), ".config")
+	}
+	return filepath.Join(dir, "systemd", "user", UnitName)
 }
 
 // Call sends one request and reads one reply, all within timeout, the dial included (the dial

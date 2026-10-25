@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"slices"
 	"strings"
 	"time"
 
@@ -25,13 +26,15 @@ import (
 )
 
 // secretsAPI is the Secrets Manager calls the secret forms make: ListSecrets and DescribeSecret to
-// read, and the five writes. *secretsmanager.Client and secrets.Local both satisfy it.
+// read, and writes for values, tags and deletion. *secretsmanager.Client and secrets.Local satisfy
+// it.
 type secretsAPI interface {
 	secretsmanager.ListSecretsAPIClient
 	DescribeSecret(ctx context.Context, in *secretsmanager.DescribeSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.DescribeSecretOutput, error)
 	CreateSecret(ctx context.Context, in *secretsmanager.CreateSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.CreateSecretOutput, error)
 	PutSecretValue(ctx context.Context, in *secretsmanager.PutSecretValueInput, o ...func(*secretsmanager.Options)) (*secretsmanager.PutSecretValueOutput, error)
 	TagResource(ctx context.Context, in *secretsmanager.TagResourceInput, o ...func(*secretsmanager.Options)) (*secretsmanager.TagResourceOutput, error)
+	UntagResource(ctx context.Context, in *secretsmanager.UntagResourceInput, o ...func(*secretsmanager.Options)) (*secretsmanager.UntagResourceOutput, error)
 	DeleteSecret(ctx context.Context, in *secretsmanager.DeleteSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.DeleteSecretOutput, error)
 	RestoreSecret(ctx context.Context, in *secretsmanager.RestoreSecretInput, o ...func(*secretsmanager.Options)) (*secretsmanager.RestoreSecretOutput, error)
 }
@@ -116,15 +119,6 @@ func checkSettingsKeyARN(settings Settings) error {
 	return nil
 }
 
-// ownerTierTags is the owner and tier tags, which create and retag always send together
-// (cmdSecretRetag says why).
-func ownerTierTags(owner, tier string) []smtypes.Tag {
-	return []smtypes.Tag{
-		{Key: aws.String(policy.TagOwner), Value: aws.String(owner)},
-		{Key: aws.String(policy.TagTier), Value: aws.String(tier)},
-	}
-}
-
 // isAccessDenied reports whether err is AWS's AccessDeniedException, which the SDK answers as a
 // generic API error: secretsmanager's types declare no type for it.
 func isAccessDenied(err error) bool {
@@ -153,6 +147,10 @@ func (b *awsBackend) requireWriteSignIn(ctx context.Context) (string, error) {
 	return requireWriteSignIn(ctx, b.st, b.settings)
 }
 
+// signInPrefix is empty: an AWS sign-in a printed command needs is its --profile, which
+// pipeCommand writes itself.
+func (b *awsBackend) signInPrefix() string { return "" }
+
 func (b *awsBackend) list(ctx context.Context) ([]secretView, error) {
 	views := []secretView{}
 	pages := secretsmanager.NewListSecretsPaginator(b.sm, &secretsmanager.ListSecretsInput{
@@ -169,14 +167,12 @@ func (b *awsBackend) list(ctx context.Context) ([]secretView, error) {
 			if !strings.HasPrefix(id, b.settings.SecretsPrefix) {
 				continue // the name filter matched more than the namespace
 			}
-			tags := secrets.TagMap(e.Tags)
 			views = append(views, secretView{
 				Name: b.displayName(id), SecretName: id,
-				Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
 				HasValue: secrets.HasCurrentVersion(e.SecretVersionsToStages),
 				Created:  e.CreatedDate, LastChanged: e.LastChangedDate,
 				Deleted: e.DeletedDate, EarliestPurge: earliestPurge(e.DeletedDate),
-			})
+			}.withTags(secrets.TagMap(e.Tags)))
 		}
 	}
 	return views, nil
@@ -187,23 +183,21 @@ func (b *awsBackend) show(ctx context.Context, slug string) (secretView, error) 
 	if err != nil {
 		return secretView{}, err
 	}
-	tags := secrets.TagMap(out.Tags)
 	return secretView{
 		Name: b.displayName(aws.ToString(out.Name)), SecretName: aws.ToString(out.Name),
-		Owner: tags[policy.TagOwner], Tier: tags[policy.TagTier],
 		HasValue: secrets.HasCurrentVersion(out.VersionIdsToStages),
 		Created:  out.CreatedDate, LastChanged: out.LastChangedDate,
 		Deleted: out.DeletedDate, EarliestPurge: earliestPurge(out.DeletedDate),
 		Versions: out.VersionIdsToStages,
-	}, nil
+	}.withTags(secrets.TagMap(out.Tags)), nil
 }
 
-func (b *awsBackend) create(ctx context.Context, slug, owner, tier, value string) error {
+func (b *awsBackend) create(ctx context.Context, slug string, tags map[string]string, value string) error {
 	_, err := b.sm.CreateSecret(ctx, &secretsmanager.CreateSecretInput{
 		Name:         aws.String(b.id(slug)),
 		KmsKeyId:     aws.String(b.settings.KMSKeyARN),
 		SecretString: aws.String(value),
-		Tags:         ownerTierTags(owner, tier),
+		Tags:         secrets.TagList(tags),
 	})
 	return err
 }
@@ -215,21 +209,82 @@ func (b *awsBackend) set(ctx context.Context, slug, value string) error {
 	return err
 }
 
-func (b *awsBackend) currentTags(ctx context.Context, slug string) (owner, tier string, err error) {
+func (b *awsBackend) currentTags(ctx context.Context, slug string) (heldTags, error) {
 	held, err := b.sm.DescribeSecret(ctx, &secretsmanager.DescribeSecretInput{SecretId: aws.String(b.id(slug))})
 	if err != nil {
-		return "", "", err
+		return heldTags{}, err
 	}
-	tags := secrets.TagMap(held.Tags)
-	return tags[policy.TagOwner], tags[policy.TagTier], nil
+	return heldTags{tags: secrets.TagMap(held.Tags)}, nil
 }
 
-func (b *awsBackend) retag(ctx context.Context, slug, owner, tier string) error {
+// setTags writes tags in one TagResource, which keeps every tag it does not name. TagResource takes
+// no condition on held, so the write checks its own race afterwards (raceCheck).
+func (b *awsBackend) setTags(ctx context.Context, slug string, held heldTags, tags map[string]string) error {
+	if err := b.tag(ctx, slug, tags); err != nil {
+		return err
+	}
+	return b.raceCheck(ctx, slug, held)
+}
+
+// removeTags removes keys in one UntagResource, which takes no condition on held either, and checks
+// its own race afterwards (raceCheck).
+func (b *awsBackend) removeTags(ctx context.Context, slug string, held heldTags, keys []string) error {
+	if err := b.untag(ctx, slug, keys); err != nil {
+		return err
+	}
+	return b.raceCheck(ctx, slug, held)
+}
+
+func (b *awsBackend) tag(ctx context.Context, slug string, tags map[string]string) error {
 	_, err := b.sm.TagResource(ctx, &secretsmanager.TagResourceInput{
 		SecretId: aws.String(b.id(slug)),
-		Tags:     ownerTierTags(owner, tier),
+		Tags:     secrets.TagList(tags),
 	})
 	return err
+}
+
+func (b *awsBackend) untag(ctx context.Context, slug string, keys []string) error {
+	_, err := b.sm.UntagResource(ctx, &secretsmanager.UntagResourceInput{
+		SecretId: aws.String(b.id(slug)),
+		TagKeys:  keys,
+	})
+	return err
+}
+
+// raceCheck is how a tag write on AWS, whose tag calls take no condition, keeps the github-owners
+// rule when another writer retags the same secret between the write's read (held) and the write
+// itself: it reads the tags back, and when the kind and github-owners there are a pair the broker
+// refuses (policy.GitHubOwnersFor), it restores held's tags and answers errTagsChanged wrapping
+// errTagsRestored, naming what it found. A retag on AWS is therefore safe only with one writer at
+// a time: the restore takes back the other writer's change too. It answers nil when the pair is
+// one the broker serves.
+func (b *awsBackend) raceCheck(ctx context.Context, slug string, held heldTags) error {
+	now, err := b.currentTags(ctx, slug)
+	if err != nil {
+		return fmt.Errorf("the retag was written, but reading its tags back failed, so whether another write left it a kind without the GitHub owners it needs is unknown: %w", err)
+	}
+	kind, owners := now.tags[policy.TagKind], now.tags[policy.TagGitHubOwners]
+	if _, err := policy.GitHubOwnersFor(kind, owners); err == nil {
+		return nil
+	}
+	raced := fmt.Errorf("%w, leaving kind %q with github-owners %q, which the broker refuses; a retag on AWS is safe only with one writer at a time", errTagsChanged, kind, owners)
+	var extra []string
+	for key := range now.tags {
+		if _, ok := held.tags[key]; !ok {
+			extra = append(extra, key)
+		}
+	}
+	slices.Sort(extra)
+	if len(held.tags) > 0 {
+		err = b.tag(ctx, slug, held.tags)
+	}
+	if err == nil && len(extra) > 0 {
+		err = b.untag(ctx, slug, extra)
+	}
+	if err != nil {
+		return fmt.Errorf("%w; restoring the tags this retag read failed: %w; set them again once the other writer is done", raced, err)
+	}
+	return fmt.Errorf("%w: %w", raced, errTagsRestored)
 }
 
 func (b *awsBackend) delete(ctx context.Context, slug string) (*time.Time, error) {

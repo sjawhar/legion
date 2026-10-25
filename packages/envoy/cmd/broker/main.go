@@ -31,6 +31,8 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauth"
+	"github.com/sjawhar/envoy/internal/broker/oauthstore"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
@@ -108,15 +110,9 @@ func main() {
 	// Secrets Manager's fields), Secrets Manager under the AWS SDK's credential chain, or Secret
 	// Manager under Application Default Credentials.
 	var secretStore secrets.Store
-	// mintToken mints a minted secret's value. Only the GCP store mints (config.Load refuses
-	// BROKER_MINT_TARGETS under any other), and without targets no minted secret is served.
-	var mintToken func(context.Context, string, time.Duration) (string, error)
 	var credentials string
 	switch {
 	case fakeSecrets != "":
-		if len(cfg.MintTargets) > 0 {
-			fatal(fmt.Errorf("BROKER_MINT_TARGETS needs Secret Manager itself, not BROKER_FAKE_SECRETS_FILE, since only it mints"))
-		}
 		local, err := secrets.LocalFromFile(fakeSecrets)
 		fatal(err)
 		// The file's kms_key_id names the agent-secrets key as the selected store configures it.
@@ -129,16 +125,12 @@ func main() {
 		fatal(err)
 		defer client.Close()
 		secretStore, credentials = secrets.NewGCP(client, cfg.SecretsKMSKey), "application-default"
-		if len(cfg.MintTargets) > 0 {
-			mintToken, err = secrets.NewGCPTokenMinter(ctx)
-			fatal(err)
-		}
 	default:
 		sm := secretsmanager.NewFromConfig(awsCfg)
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
-	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts)), MintTargets: cfg.MintTargets}
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
@@ -182,12 +174,22 @@ func main() {
 	enr := &enroll.Service{Store: st, Lease: time.Duration(cfg.LeaseSeconds) * time.Second, Pod: pod, ServiceLogins: cfg.ServiceLogins}
 	enr.Chain = enroll.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	reqMachine := newRequestMachine(cfg, st, current, secretStore, enr.Replay)
-	reqMachine.MintToken = mintToken
+	credentialLifetime := time.Duration(cfg.LauncherCredentialSeconds) * time.Second
+	oauthStore := oauthstore.New(st.Pool)
+	oauthStore.Reused = enroll.RevokeReusedCredential
+	oauthSecret, err := oauthStore.Secret(ctx)
+	fatal(err)
+	// verification_uri is Dispatch's machine-login page, where the person types the code.
+	provider, err := oauth.New(oauth.Config{
+		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL, RefreshLifetime: credentialLifetime,
+		VerificationURL: cfg.MachineLoginURL, ProofSkew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
+	}, oauthStore)
+	fatal(err)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: current,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
-		PendingTTL: machineLoginPendingTTL, CredentialLifetime: time.Duration(cfg.LauncherCredentialSeconds) * time.Second,
-		Replay: enr.Replay,
+		PendingTTL: machineLoginPendingTTL, CredentialLifetime: credentialLifetime,
+		OAuth: provider, Replay: enr.Replay,
 	}
 
 	var waker func(context.Context, string, string, string)
@@ -204,7 +206,7 @@ func main() {
 		}
 	}
 	sweeper := &requests.Sweeper{
-		Enrollments: enr, Machine: reqMachine, MachineLogins: mach,
+		Enrollments: enr, Machine: reqMachine, MachineLogins: mach, OAuth: oauthStore,
 		Interval: time.Duration(cfg.SweepSeconds) * time.Second, Wake: waker,
 	}
 	go sweeper.Run(ctx)
@@ -218,6 +220,7 @@ func main() {
 	}
 	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken, RereadOverallLimit: rereadOverall,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
+		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: cfg.SecretsStore, SecretsPrefix: cfg.SecretsPrefix,
 		SecretsKMSKey:      cfg.SecretsKMSKey,
@@ -292,7 +295,19 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
 		ServiceAccounts: cfg.ServiceAccounts,
+		Minters:         kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
+}
+
+// kindMinters is the broker's minter for each kind: the GitHub App minter for github-app secrets
+// and the Google login minter for google-login ones. Its arguments are the production minters in
+// newRequestMachine; a test passes ones aimed at its own endpoints, so wiring a kind to the wrong
+// minter fails it.
+func kindMinters(githubApp secrets.GitHubApp, googleLogin secrets.GoogleLogin) map[string]requests.Minter {
+	return map[string]requests.Minter{
+		policy.KindGitHubApp:   githubApp.Mint,
+		policy.KindGoogleLogin: googleLogin.Mint,
+	}
 }

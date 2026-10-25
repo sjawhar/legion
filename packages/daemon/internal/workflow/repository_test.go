@@ -125,7 +125,7 @@ func TestARecordedIssueKeepsItsRepositoryAndSaysAnEditIsNotApplied(t *testing.T)
 	if child == nil || child.Repo != "acme/tools" || child.DefaultBranch != "release/v7.1" || child.Generation != 2 {
 		t.Fatalf("child = %#v, want it re-entered at generation 2 on acme/tools at release/v7.1", child)
 	}
-	want := "Legion keeps acme/tools as this issue's repository; the change to acme/widgets in Dispatch is not applied — an issue's repository is fixed when Legion records it. Create a new issue for acme/widgets instead."
+	want := "Legion keeps acme/tools as this issue's repository; the change to acme/widgets in Dispatch is not applied — an issue's repository is fixed when Legion records it. Work on acme/widgets needs an issue of its own, which a person decides on."
 	var kept []outboxEntry
 	for _, message := range outboxOf(t, pool, "dispatch_message") {
 		if strings.HasPrefix(message.payload["body"].(string), "Legion keeps") {

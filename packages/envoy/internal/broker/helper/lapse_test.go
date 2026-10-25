@@ -511,10 +511,10 @@ func recordedID(t *testing.T, state string, pid int) string {
 	return ""
 }
 
-// TestARestartWithNoLoginKeepsThePriorEnrollmentOnDisk: a restart discards the launcher
-// credential, so a re-pinned session's prior enrollment cannot be revoked until the next login.
-// Until then the saved record must still name it, as a lapsed id; before, Recover's save wrote
-// the re-pinned session with no enrollment id at all.
+// TestARestartWithNoLoginKeepsThePriorEnrollmentOnDisk: a restart with no machine login kept on
+// disk holds no launcher credential, so a re-pinned session's prior enrollment cannot be revoked
+// until the next login. Until then the saved record must still name it, as a lapsed id; before,
+// Recover's save wrote the re-pinned session with no enrollment id at all.
 func TestARestartWithNoLoginKeepsThePriorEnrollmentOnDisk(t *testing.T) {
 	state := filepath.Join(t.TempDir(), "sessions.json")
 	pid := recordPrior(t, state, "enr-prior")

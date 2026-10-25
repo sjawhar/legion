@@ -33,6 +33,18 @@ type rig struct {
 	parentOf atomic.Pointer[func(int) (int, error)]
 }
 
+// shortTempDir is a temporary directory short enough to hold a unix socket: a socket path is
+// bounded at 108 bytes, and t.TempDir()'s path includes the test name, cut to 64 bytes.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "hlp")
+	if err != nil {
+		t.Fatalf("make a temporary directory: %v", err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return dir
+}
+
 // newRig builds and serves a rig whose Broker holds no machine credential yet: the caller must
 // log it in (see rig.login) before any Enroll — machine session or box — can succeed, since Task
 // 1's Broker fails closed until a human has run `agent-secrets machine login`. startRig below
@@ -54,7 +66,7 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 	}
 	r.srv = &Server{
 		Registry: NewRegistry(statePath),
-		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, HTTP: f.srv.Client(), Log: log},
+		Broker:   &Broker{URL: f.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: f.srv.Client(), Log: log},
 		Hostname: "testhost",
 		Log:      log,
 		MinRenew: 50 * time.Millisecond,
@@ -71,7 +83,7 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 		}
 		return PeerOf(conn)
 	}
-	r.sock = filepath.Join(t.TempDir(), "helper.sock")
+	r.sock = filepath.Join(shortTempDir(t), "helper.sock")
 	ln, err := net.ListenUnix("unix", &net.UnixAddr{Name: r.sock, Net: "unix"})
 	if err != nil {
 		t.Fatal(err)
@@ -95,19 +107,18 @@ func newLoggedRig(t *testing.T, statePath string, log *slog.Logger) *rig {
 				sess.peer.Close()
 			}
 		}
-		// Registry.Save holds saveMu for its whole WriteFile+Rename. Taking it here — and
-		// never releasing it — blocks any Save already in flight (or about to start: a
-		// retire() that removed its session above before this sweep ever saw it, or an
-		// enrollLoop between setEnrolled and its own save() a few lines later) until that
-		// write finishes, before the context is canceled and TempDir's own cleanup can run. A
-		// later Save() attempt simply blocks forever on this held lock, harmlessly, until the
-		// test binary itself exits — nothing else in this test needs the registry again.
-		r.srv.Registry.saveMu.Lock()
+		// Close lets a Save already in flight finish and makes every later one (a retire() that
+		// removed its session above before this sweep saw it, or an enrollLoop between
+		// setEnrolled and its own save()) write nothing, before the context is canceled and
+		// TempDir's own cleanup can run. The Broker's Close does the same for its machine file,
+		// which an approved login's poll may still be saving.
+		r.srv.Registry.Close()
+		r.srv.Broker.Close()
 		cancel()
 		// Serve's own ctx.Done() watcher goroutine closes (and so unlinks) the unix socket
 		// asynchronously; wait for Serve itself to return — which only happens after that
-		// Close — so the socket is gone before this test's t.TempDir() cleanup removes the
-		// directory it lives in.
+		// Close — so the socket is gone before shortTempDir's cleanup removes the directory it
+		// lives in.
 		<-served
 	})
 	r.srv.Recover(ctx)
@@ -142,6 +153,62 @@ func (r *rig) call(t *testing.T, req Request) Response {
 		t.Fatal(err)
 	}
 	return resp
+}
+
+// TestDrainRefusesARegisterThatArrivesAfterIt: a drain that finds no sessions leaves a helper
+// that refuses every later register and enroll-session-key, so none can lose its grants to the
+// restart drain licensed.
+func TestDrainRefusesARegisterThatArrivesAfterIt(t *testing.T) {
+	r := startRig(t, "")
+	if d := r.call(t, Request{Op: "drain"}); !d.OK || len(d.Sessions) != 0 {
+		t.Fatalf("drain: %+v", d)
+	}
+	for _, op := range []string{"register", "enroll-session-key"} {
+		resp := r.call(t, Request{Op: op, RuntimeID: "rt", Thumbprint: "tp"})
+		if resp.OK || resp.Code != CodeDraining || resp.Error != "the helper is restarting; retry" {
+			t.Fatalf("%s after drain: %+v", op, resp)
+		}
+	}
+	if s := r.call(t, Request{Op: "sessions"}); len(s.Sessions) != 0 {
+		t.Fatalf("a session registered after drain: %+v", s)
+	}
+}
+
+// TestUndrainTakesSessionsAgain: undrain, install's undo of a drain whose restart failed, leaves
+// a helper that registers sessions again.
+func TestUndrainTakesSessionsAgain(t *testing.T) {
+	r := startRig(t, "")
+	if d := r.call(t, Request{Op: "drain"}); !d.OK || !r.srv.Registry.Draining() {
+		t.Fatalf("drain: %+v", d)
+	}
+	if u := r.call(t, Request{Op: "undrain"}); !u.OK {
+		t.Fatalf("undrain: %+v", u)
+	}
+	if r.srv.Registry.Draining() {
+		t.Fatal("the helper is still draining after undrain")
+	}
+	if resp := r.call(t, Request{Op: "register"}); resp.Code == CodeDraining {
+		t.Fatalf("register after undrain: %+v", resp)
+	}
+}
+
+// TestDrainWithSessionsSetsNothing: a drain that finds sessions answers them and leaves the
+// helper taking registrations.
+func TestDrainWithSessionsSetsNothing(t *testing.T) {
+	r := startRig(t, "")
+	if resp := r.call(t, Request{Op: "register"}); !resp.OK && resp.Code != CodeNoCredential {
+		t.Fatalf("register: %+v", resp)
+	}
+	d := r.call(t, Request{Op: "drain"})
+	if !d.OK || len(d.Sessions) != 1 {
+		t.Fatalf("drain: %+v", d)
+	}
+	if r.srv.Registry.Draining() {
+		t.Fatal("drain with a session marked the helper draining")
+	}
+	if resp := r.call(t, Request{Op: "register"}); resp.Code == CodeDraining {
+		t.Fatalf("register after a drain with sessions: %+v", resp)
+	}
 }
 
 func TestRegisterPinsCallerEnrollsAndSigns(t *testing.T) {
@@ -431,7 +498,7 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 	time.Sleep(100 * time.Millisecond)
 	// A second helper on the same state and the same fake broker.
 	of := operatorFile(t, "ada@example.com")
-	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
+	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
@@ -490,12 +557,13 @@ func TestRecoverRepinsLiveSessionsWithFreshKeys(t *testing.T) {
 		}
 	}
 	// srv2 isn't fenced by startRig's own t.Cleanup (it's a second, manually-constructed
-	// server); apply the same fence directly here. Registry.Save holds saveMu for its whole
-	// WriteFile+Rename, so taking it here — and never releasing it — blocks any of srv2's own
-	// Save calls (still possibly in flight or not yet started, e.g. an enrollLoop between
-	// setEnrolled and its own save() a few lines later) until they finish, before this test
-	// returns and t.TempDir() removes the state directory those writes go into.
-	srv2.Registry.saveMu.Lock()
+	// server); apply the same fence directly here. Close waits for any of srv2's own Save calls
+	// in flight and makes every later one (not yet started, e.g. an enrollLoop between
+	// setEnrolled and its own save() a few lines later) write nothing, before this test returns
+	// and t.TempDir() removes the state directory those writes go into. The Broker's Close does
+	// the same for its machine file.
+	srv2.Registry.Close()
+	srv2.Broker.Close()
 }
 
 // TestRecoverRevokesThePriorEnrollmentBeforeReenrolling is the regression for the Important
@@ -551,7 +619,7 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 	r.fake.revokeFirstDelay = 300 * time.Millisecond
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "ada@example.com")
-	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
+	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
@@ -596,7 +664,8 @@ func TestRecoverRevokesThePriorEnrollmentBeforeReenrolling(t *testing.T) {
 			sess.peer.Close()
 		}
 	}
-	srv2.Registry.saveMu.Lock()
+	srv2.Registry.Close()
+	srv2.Broker.Close()
 }
 
 // TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff is the regression for
@@ -654,7 +723,7 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 	r.fake.revokeFailFirst = failAlways
 	r.fake.mu.Unlock()
 	of := operatorFile(t, "ada@example.com")
-	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, HTTP: r.fake.srv.Client()},
+	srv2 := &Server{Registry: NewRegistry(state), Broker: &Broker{URL: r.fake.srv.URL, OperatorFile: of, MachineFile: machineFilePath(t), HTTP: r.fake.srv.Client()},
 		Hostname: "testhost", PeerOf: PeerOf, Log: slog.Default(), MinRenew: time.Second}
 	if _, err := srv2.Broker.Login(context.Background(), "testhost"); err != nil {
 		t.Fatalf("srv2 login: %v", err)
@@ -722,7 +791,8 @@ func TestRecoverFallsBackToIndependentRevokeIfTheRepinnedSessionEndsMidBackoff(t
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
-	srv2.Registry.saveMu.Lock()
+	srv2.Registry.Close()
+	srv2.Broker.Close()
 }
 
 func TestRecoverDropsDeadRecords(t *testing.T) {
@@ -904,9 +974,8 @@ func TestUnregisterRejectsAPeerWhosePIDChangedDuringTheAncestryWalk(t *testing.T
 }
 
 // delayingTransport delays a request whose path contains match, letting a test hold the fake's
-// GET /v1/launcher-credentials/{pending} poll open long enough to observe a machine login sit
-// "pending" — the fake otherwise answers "issued" on its very first poll, closing that window
-// before a second socket round trip could ever land inside it.
+// token endpoint poll open long enough to observe a machine login sit "pending" past a second
+// socket round trip.
 type delayingTransport struct {
 	http.RoundTripper
 	delay time.Duration
@@ -933,7 +1002,7 @@ func TestLoginOverTheSocketReturnsTheCodeAndEnrollSessionKeyWorksAfterIssue(t *t
 	r.srv.Broker.HTTP = &http.Client{Transport: &delayingTransport{
 		RoundTripper: r.fake.srv.Client().Transport,
 		delay:        300 * time.Millisecond,
-		match:        "/v1/launcher-credentials/",
+		match:        "/v1/oauth/token",
 	}}
 	before := r.call(t, Request{Op: "enroll-session-key", RuntimeID: "box-1", Thumbprint: "tp-1"})
 	if before.OK || before.Code != CodeEnrollFailed || !strings.Contains(before.Error, "agent-secrets machine login") {

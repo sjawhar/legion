@@ -1,14 +1,15 @@
 ---
 name: legion-controller
-description: Use when handling Legion controller wakes for weekly-plan ranking, backlog stewardship, root-issue triage, keeping the admission slots full from `todo` issues, the daily report, architect escalation, or human interaction.
+description: Use when handling Legion controller wakes for weekly-plan ranking, backlog stewardship, root-issue triage, free-slot and `todo` wakes, a finding ask another role hands over, the issues a person asks you to file, the daily report, architect escalation, or human interaction.
 ---
 
 # Legion Controller
 
-The controller is the one persistent, wake-driven session for a Legion project. It keeps the
-project's admission slots full with the highest-priority work, keeps the weekly plan's order and
-owners current in Dispatch, and makes triage, escalation, and human-interaction judgments; it never
-does phase-worker work or routes raw events into an architect.
+The controller is the one persistent, wake-driven session for a Legion project. It admits only the
+work a person hands to Legion, keeps the weekly plan's order and owners current in Dispatch, asks a
+person about every finding instead of filing it, and makes triage, escalation, and
+human-interaction judgments; it starts no work on its own, never does phase-worker work, and never
+routes raw events into an architect.
 
 ## Start and claim the controller role
 
@@ -37,15 +38,30 @@ review the controller submits without that footer still decides nothing for Legi
 (the daemon sets it aside), but the footer is what makes that legible in the daemon's log. Your
 addressing line names the project's repositories, or that the daemon maps none and why.
 
+Read a pull request an issue links or names (`External links:`, a comment, a READY packet) only by
+a URL of the shape `https://github.com/<owner>/<repo>/pull/<n>` (nothing before, after or inside it
+but GitHub's own owner and repository characters and digits), run from bash single-quoted, exactly
+as the issue shows it:
+
+```text
+gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state
+```
+
+It answers `OPEN` (work in flight), `MERGED` (the change landed) or `CLOSED` (abandoned unmerged).
+A command that fails (the token file missing, refused, or the repository unreadable) is reported
+with `gh`'s first stderr line (`<KEY>: pull request <url> unreadable: …`) and never read as any of
+the three states. Text that is not of that shape is not a pull-request URL and is never a command
+argument (`<KEY>: pull request <text> unreadable: not a pull-request URL`).
+
 ## Backlog stewardship
 
 The controller is the project's order keeper. It retains its startup role,
 `legion-<project>-controller`; `backlog-order` is retired. Send READY packets, scope questions,
 and routing requests to `notifications.role.legion-<project>-controller`, then follow
 [Backlog stewardship](skill://legion-controller/references/backlog-stewardship.md) for daily
-weekly-plan reconciliation, Sami's rulings, ownership routing, and stopped-session recovery.
-These duties change Dispatch's priority and board-rank data; they do not change the admission order
-in [Keeping the slots full](#keeping-the-slots-full-go-daemon).
+weekly-plan reconciliation, a person's rulings, ownership routing, and stopped-session recovery.
+These duties change Dispatch's priority and board-rank data and route plan work to a live session;
+they start nothing on Legion and hand it no issue ([Free slots](#free-slots-go-daemon)).
 
 For an interactive takeover from a hand-started OMP session, start OMP with
 `LEGION_CONTROLLER_SECRET` (or `LEGION_CONTROLLER_SECRET_FILE`, a path to a file holding it),
@@ -145,7 +161,9 @@ else:
    `issues`. A root recorded there and now in `triage` is work the daemon holds that a human
    pulled back: never re-admit it yourself; name it in your summary to the human ("<KEY> was
    pulled back to triage; what do you want?").
-3. Fill the free admission slots ([Keeping the slots full](#keeping-the-slots-full-go-daemon)).
+3. Catch up on the report issue
+   ([finding asks](skill://legion-controller/references/finding-asks.md#catch-up-at-every-start)),
+   and name the free slots in your summary: a free slot is no reason to take an issue ([Free slots](#free-slots-go-daemon)).
 4. Post the day's report when this is your first turn of the UTC day
    ([Daily report](#daily-report-go-daemon)).
 
@@ -158,15 +176,31 @@ since its project may be shared with humans and other agents. It never admits a 
 without the label, and wakes you for a root in `triage` only while the root carries it and is
 unrecorded: on its creation with the label, and on each change to it after that while it stays
 in triage, the change that adds the label included (the dashboard creates an issue without
-labels, so a human adds it from the issue header). Two parties hand work over: a person, who sets
-the label from the issue header, and you, when you fill a free slot (below). You label an issue
-only when you take it or file it for Legion, so the label means Legion has the issue or had it.
-A person's label is their decision: never take it off. A child needs no label: it runs under its
+labels, so a human adds it from the issue header). Work reaches Legion only by a person's decision:
+a person sets the label from the issue header, or asks you to (a direct message, a Slack request
+that asks Legion to do the work, their answer to a finding ask, or a ruling of theirs the weekly
+plan records with its link, [Backlog stewardship](#backlog-stewardship)), and you set it for them.
+You label an issue only then, so the label means a person handed Legion the issue, or did once. A
+person's label is their decision: never take it off. A child needs no label: it runs under its
 tree's architect once its root is admitted. `set_status` to `todo` admits a root, or a child
 outside a live tree (admitted as a root of its own), only while it carries the label, so an issue
-you hand over or file for Legion to run carries it first (`--label` on `dispatch issue-update` or
-`dispatch issue`). Taking the label off a waiting root drops it from the waiting line; taking it
-off an admitted tree does not stop it ([reading admission](skill://legion-controller/references/admission.md)).
+a person hands over carries it first. Taking the label off a waiting root drops it from the
+waiting line; taking it off an admitted tree does not stop it
+([reading admission](skill://legion-controller/references/admission.md)).
+
+To label an existing issue for a person, keep the labels it has, which `Labels:` lists (`none` is
+no labels): the `--label` flags replace the whole set, so a label you leave out is removed. Pass
+each label single-quoted, exactly as `Labels:` shows it. A label holding a `'` or a line break
+cannot be quoted and never goes in a command: tell the person (`<KEY>: label <label> cannot be
+quoted`), so they hand it over from the issue header.
+
+```text
+dispatch issue-update --issue <KEY> --label '<each current label>' --label legion
+```
+
+In `todo` the label admits it. In `triage`, triage it in the same turn, from step 3 of [New issue
+triage](#new-issue-triage): the person's request is its handover. Elsewhere, `set_status` it to
+`todo` only when the person asked Legion to start it now.
 
 ## Trees waiting on a root claim (Go daemon)
 
@@ -179,139 +213,77 @@ tell that tree's architect to claim again with `envoy_publish` to `notifications
 claim token, `issues.<KEY>.architect.locator.claim` in `read_state`. A claim that is its architect's
 own, or one that still holds, needs nothing.
 
-## Keeping the slots full (Go daemon)
+## Free slots (Go daemon)
 
-Picking the next work is your job: nobody hand-feeds issues to Legion. Keep every admission slot
-filled with the highest-priority concrete issue Legion can take. The unit of Legion work is a
-leaf, an issue with no children, never an umbrella that holds other issues.
+A free slot is no reason to take an issue, and nothing reconsiders `backlog` or `icebox` on its
+own. Work reaches Legion only when a person hands it over
+([Issues handed to Legion](#issues-handed-to-legion-go-daemon)), and a labelled root in `todo`
+takes the next free slot through the daemon's waiting line (`admission.waiting`) without you, so a
+park means "should not run now", and a parked root keeps its `legion` label. Never label an issue
+nobody asked you to hand over, and never set a parked issue back to `todo` to fill a slot. A
+person's parked issue moves only when that person asks. These are every move to `todo` you make:
 
-**When.** At every start (step 3 above), and on each of the Go daemon's walk wakes. The daemon
-sends each only while a controller is registered, and none while one of the same kind is still
-unsent:
+- a root a person handed over, at triage ([New issue triage](#new-issue-triage));
+- an issue a person asks you to start ([Issues handed to Legion](#issues-handed-to-legion-go-daemon));
+- a tree you re-admit after its architect failed (the `worker-died` row), or parked after a hold
+  (the `held` row) once the hold's cause is checked and gone, or a person asks;
+- stopped-session work a person's ruling in the weekly plan moves to Legion
+  ([backlog stewardship](skill://legion-controller/references/backlog-stewardship.md)).
+
+The daemon still wakes you about the slots. It sends each wake only while a controller is
+registered, and none while one of the same kind is still unsent:
 
 - `slot-free on <KEY>`: the daemon released `<KEY>`'s slot, because its tree finished or left the
-  workflow, and the slot is free by **How many** below.
+  workflow, and no waiting root took it.
 - `todo on <KEY>`: `<KEY>`, an issue nobody handed to Legion, changed while in `todo` and a slot
-  was free, so it may be a new candidate. The daemon holds it back half a minute and folds the
-  events of that window into it. Walk the whole list, not only `<KEY>`.
+  was free; the daemon holds it back half a minute and folds the events of that window into it.
+  It is not Legion's: take nothing.
 - `tick on <PROJECT>`: the daemon's periodic wake, a minute after it starts and then every
-  `controller_wake_interval_seconds` (an hour by default), whatever the slots. An earlier walk
-  that found nothing, a day with no event, and [a tree waiting on a root
-  claim](#trees-waiting-on-a-root-claim-go-daemon) all get a turn from it. Its payload's
-  `openCapabilities`, when present, names the open capability rows: the deployment capabilities
-  (the secrets broker, model fallback, every role's CPU and memory limits) the deployment's own
-  configuration leaves open with no decision recorded, and the live capabilities (`subagents`,
-  `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) a running
-  session's own check at its start failed. `read_state` lists every row under `capabilities`, each
-  open one with its `detail`: on a deployment row, with the `configLine` to write into
-  `legion.yaml` (`capabilities.decided.<name>: "<reason>"`); on a live row, naming each failing
-  session (its pod or pane, its role, its issue) and the fact its check found, with no
-  `configLine`, since nothing in `legion.yaml` decides a live row. Name them in the day's report.
-  A gap is the operator's to close or to decide — a live one the operator's or the issue's
-  architect's to fix in the session's environment — never yours, and it never stops the walk.
+  `controller_wake_interval_seconds` (an hour by default), whatever the slots. A day with no event
+  and [a tree waiting on a root claim](#trees-waiting-on-a-root-claim-go-daemon) get a turn from
+  it. Its payload's `openCapabilities`, when present, names the open capability rows: the
+  deployment capabilities (the secrets broker, model fallback, every role's CPU and memory limits,
+  the pool's capacity at boot) its configuration leaves undecided, and the live capabilities
+  (`subagents`, `web-search`, `mcp`, `repository-extensions`, `dispatch-envoy-tools`, `github`) a
+  running session's own check failed. `read_state` lists every row under `capabilities`, each
+  open one with its `detail` (a deployment row's `configLine` for `legion.yaml`; a live row's
+  failing session and fact). Name them in the day's report: a gap is the operator's to close or
+  decide, a live one the operator's or the issue's architect's to fix in the session's
+  environment, never yours.
 
-**Scope first.** The scope the deployment instructions state decides which issues are candidates
-at all, before anything below. When they say you hand Legion no issue yourself, or that Legion
-runs only issues someone else sets to `todo`, the walk takes nothing: stop here, whatever slots
-are free. When they narrow the scope (a repository, a kind of change), a candidate outside it is
-skipped (the last row of the table below). With no scope stated, every issue of the project is in
-scope.
+On each, read the daemon's state with `read_state`: the free slots are `admission.cap` minus the
+roots in `admission.active` and in `admission.waiting`. Name them in your summary, take nothing for
+them, and do the rest of the turn ([Turn discipline](#turn-discipline)).
 
-**How many.** Read the daemon's state with `read_state`. The free slots are `admission.cap` minus the roots in
-`admission.active` and in `admission.waiting` (a waiting root takes the next slot before anything you add). With none free, stop.
+## Findings, and the issues you file
 
-**Candidates.** The project's open `todo` issues, roots and children alike, that have no children
-at all and do not carry the `legion` label. Ready work is `todo` (`skill://dispatch`, "Choosing
-what to work on"): take the top ready issue, highest priority first, then board rank. An issue that
-waits on a deploy or a decision belongs in `backlog`, so the walk takes nothing from `backlog` or
-`triage`. The Go daemon runs only labelled roots, so every root it ran since the daemon required
-the label carries it: a labelled root in `todo` is the daemon's to admit or queue, one in `triage`
-is yours to triage (step 2 above), and one anywhere else was parked by Legion or by a person. A
-child you take becomes a root of its own: the daemon admits a labelled `todo` child whose tree
-Legion does not run as a new tree. The `dispatch issues` rows show no labels and no children, so
-the listing below filters neither: both are checked on each candidate (the table's first rows).
-List the `todo` issues one priority at a time, `--priority 0` first, then `1`, `2`, `3`, and
-`none` (no priority) last, keeping the listing's order within each, which is the board's rank:
+You file an issue only when a person asks you to: in a direct message, in a Slack request
+([Slack mentions](skill://legion-controller/references/slack-mentions.md)), or in their answer to a
+finding ask. The one issue you file unasked is the report issue. Anything else is a finding: a
+problem you find, and one a session or role sends you as text. For each, open a `dispatch ask` on
+your report issue ([Daily report](#daily-report-go-daemon) finds it, creates it when there is none,
+and reopens it when it is closed), as `skill://legion-worker/references/findings.md` says. Then
+file nothing until a person answers. A problem is not Legion's because Legion found it: the ask
+names where the fix belongs. Follow another role's finding ask, act on each finding ask's answer,
+and catch up on the report issue at every start, as
+[finding asks](skill://legion-controller/references/finding-asks.md) says.
 
-```text
-dispatch issues --project <PROJECT> --status todo --priority 0 --limit 250 --offset 0
-```
+Every issue you file for a person carries one line in its spec, which [New issue
+triage](#new-issue-triage) reads: `Filed for <person> at their request: <request>`. The request,
+and the person it names, are:
 
-When the first line ends `(showing 1-250 of N)`, the next page is `--offset 250`, then `500`. Read
-pages only as far as you need: stop listing once the free slots are filled. `<PROJECT>` is the
-Dispatch project key, the prefix of this deployment's issue keys (`PROJ-12` → `PROJ`), which is
-also `daemon.project` in `read_state`: the project key exactly as `legion.yaml` writes it.
-A row that shows `claimed by …` and does not end its claim with `· not running` (the route, when
-the row shows one, comes after the claim) is claimed, as the table below says: skip it without
-reading it.
+- an answer to an ask: `dispatch://<REPORT KEY>/ask/<id>`, for the person who answered it;
+- a Slack request: `Slack <channel_id> message <ts>`, for the mention's `<@user_id>`;
+- a direct message: `direct message <id>`, with the id its frame's `reply_with` names after
+  `--in-reply-to`, for the frame's `actor`. One that arrives as your own user turn shows no id:
+  write `direct message to session <your session id>`, for the person by the name they gave, else
+  `the person who messaged this session`.
 
-**Walk.** Take the remaining rows in that order until the free slots are filled. Read each one with
-`dispatch read --issue <KEY>` and skip it when any of these holds. `dispatch read` shows only
-the issue's last 10 events, so the rows that read `Events:` are best-effort: the pull-request row
-leans on `External links:`, and the label row is the one that never depends on history.
-
-| Skip when | How you check it |
-|---|---|
-| It carries the `legion` label | `Labels:` lists `legion`, in any case. Legion has the issue or had it, as **Candidates** above says. |
-| It has any child | `dispatch read --ref dispatch://<KEY>/children` lists any child, open or `done`. It is an umbrella, and a finished umbrella is still no leaf. That also skips an issue whose only child is done, which is accepted. Its open children are candidates themselves, each in its own place in the order. |
-| An ancestor is Legion's | Follow `Links:` up through each `child_of` parent, reading each one, and skip when any ancestor carries the `legion` label or is recorded under `issues` in `read_state`, whatever its status: a Legion tree, running or parked, owns its children. An ancestor's claim or route does not skip the issue: a coordinator holding an umbrella files `todo` leaves for others to pick up, and the claim on the issue itself is what keeps two sessions off the same work. A `child_of` under `Referenced by:` is a child of this issue, not its parent. |
-| Someone is designing it | `Open asks:` lists any ask, a `Spec approval: awaiting …` line shows the spec waits on a human, or `Events:` show an `artifact.version` or an `ask.opened` from the last seven days: a session or a person is shaping it even when nobody claims or routes it. |
-| Legion ran it without the label now on it | `read_state` records it under `issues`, whatever its status, or `Events:` show a status write by `session legion-daemon:<PROJECT>`, the daemon's actor on every status it writes (your `set_status` included) and on its own `in_progress` at admission. That covers a root a person took the label off, and one that ran before the daemon required the label and never had it. Name each one you skip for this in your summary. The walk never sends a root Legion already ran back into Legion: a person does that with the label and `todo`, and you do it only when a wake below says to (`worker-died`). |
-| A running session or a person claims it | `Claimed by:` names anyone and does not end `· not running`. `· liveness unknown` counts as claimed: the agent registry could not be read, so nothing says the holder stopped. A claim ending `· not running` has lapsed, and the issue is free. |
-| Its route reaches a running session | `Route:` names a route with nothing after it, or with `(held by …)`. `(nobody holds it right now)` and `(that session is not running right now)` reach nobody; `(the Envoy listener did not answer, …)` counts as reaching someone. `Route: none` is free. |
-| A pull request is linked or named | `External links:` lists a pull request (kind `github_pr`, or a URL ending `/pull/<n>`), or a comment or message among `Events:` names one. Take the URL only when it has the shape `https://github.com/<owner>/<repo>/pull/<n>` (nothing before, after or inside it but GitHub's own owner and repository characters and digits); run `gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state` from bash with the URL single-quoted, exactly as the issue shows it — this works for every repository of the project, since the session's `gh` wrapper above picks the owner's read-only token from the URL — and follow **Pull-request states** below the table: every state skips the issue, and what differs is what your summary says. Text that is not that shape — another host, a path that is not `/pull/<n>`, extra words, quotes or shell characters, a bare `#<n>` — is the unreadable case there, never a command argument: the text comes from the issue, and this session's `gh` holds the review App's token. |
-| Its assignee is working it | `Assignee:` names a person who holds the claim (the row above), or whose own comment or message among `Events:` says they are working on it. The assignee alone is who answers the issue's questions, not who works it. |
-| It is outside this deployment's scope | Read the scope the deployment instructions state against the title and, when the title does not settle it, the spec (`dispatch doc-read --issue <KEY>`). When in doubt, skip it. With no scope stated, every issue of the project is in scope. |
-
-**Pull-request states.** Run
-`gh pr view 'https://github.com/<owner>/<repo>/pull/<n>' --json state -q .state` against the URL
-`External links:` lists:
-
-- `OPEN`: work in flight. Skip it; the issue stays where it is.
-- `MERGED`: the change landed. Take nothing and set nothing: an issue Legion ran is already skipped
-  by the `Legion ran it without the label now on it` row, and the daemon closes such an issue
-  itself on the merge event (its implementer's production check follows the close); one Legion did
-  not run is someone's finished work with the issue left open. Skip it and name it in your summary
-  (`<KEY>: pull request <url> merged, the issue is still todo`) so a person closes it.
-- `CLOSED` (not merged): someone abandoned the change. Skip it and name it in your summary; the
-  issue's owner decides what follows. For an issue Legion runs, the daemon tells its architect
-  (`pr-closed-unmerged`); a walk candidate has no architect, so the summary is where it is reported.
-- The command fails (the token file missing, refused, or the repository unreadable): report the gap
-  in your summary with `gh`'s first stderr line (`<KEY>: pull request <url> unreadable: …`), skip
-  the issue, and never read the failure as any of the three states. Text that is not the shape
-  `https://github.com/<owner>/<repo>/pull/<n>` is not a pull-request URL and is never run as a
-  command argument: skip the issue and name it in your summary
-  (`<KEY>: pull request <text> unreadable: not a pull-request URL`).
-
-A person who wants Legion on it anyway hands it over themselves: the label, then `todo`.
-
-**Take.** For each candidate that passes, in order:
-
-1. Add the label and keep the labels it has, which `Labels:` lists (`none` is no labels). The
-   `--label` flags replace the whole set, so a label you leave out is removed. Pass each label
-   single-quoted, exactly as `Labels:` shows it; a label holding a `'` or a line break cannot be
-   single-quoted and is never put in a command: skip the issue and name it in your summary
-   (`<KEY>: label <label> cannot be quoted`) so a person hands it over themselves.
-
-   ```text
-   dispatch issue-update --issue <KEY> --label '<each current label>' --label legion
-   ```
-
-2. It is already in `todo`, so the label admits it: the daemon records it and gives it the free
-   slot, or queues it in `admission.waiting`. It needs no status write.
-3. Post one short comment that says Legion took it, who is asked at its design gate, and how to
-   undo the take, naming the assignee with the sentence [New issue triage](#new-issue-triage)
-   step 4 gives (which follows the design gate policy):
-
-   ```text
-   dispatch comment --issue <KEY> --body-file - <<'EOF'
-   Legion took this issue: it was the highest-priority open issue nobody else was working on. Assigned to <login>, who will get this tree's questions and its design approval. To stop Legion, move the issue to backlog. To keep Legion off it for good, also take the legion label off; taking the label off alone does not stop a tree that has started.
-   EOF
-   ```
-
-The daemon admits each root when Dispatch's event reaches it; the next `read_state`
-shows it in `admission.active`. When the candidates run out with slots still free, leave those
-slots free and say so in your summary.
+Each `curl` in this skill and its references reads `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`, which
+`legion controller start` sets only when `controller.yaml` names `dispatch_url`. A read that fails
+or prints no JSON array admits nothing and acts on nothing, and an assignment that does not print
+the issue with its new `assignee` leaves it unassigned (`400 ASSIGNEE_NOT_ALLOWED` names an email
+nobody has signed in to Dispatch with). Name either, with its first line, in your summary.
 
 ## Daily report (Go daemon)
 
@@ -321,22 +293,35 @@ change and why, and what is running.
 **Where.** On the issue the deployment instructions name for Legion's reports. With none named,
 on the project's `Legion daily report` issue:
 `dispatch search --query '"Legion daily report"' --project <PROJECT>` finds it. When it
-does not exist, create it once and park it in `icebox`, so nobody takes it as work; it never
-carries the `legion` label:
+does not exist, create it once (the one issue you file unasked) and park it in `icebox`, so nobody
+takes it as work; it never carries the `legion` label. It holds every finding ask, so assign it to
+the person who answers for the project: the one the deployment instructions name, else the owner
+`dispatch whoami` names:
 
 ```text
-dispatch issue --project <PROJECT> --title 'Legion daily report' --spec-file - <<'EOF'
+dispatch issue --project <PROJECT> --title 'Legion daily report' --assignee '<email>' --spec-file - <<'EOF'
 ## Summary
 
-Legion's controller posts one message here each day: what Legion finished, what it closed without a change and why, and what is running. This issue is not work, so it carries no `legion` label and stays in icebox.
+Legion's controller posts one message here each day: what Legion finished, what it closed without a change and why, and what is running. Legion's agents also ask here whether a problem they found outside their own work needs an issue. This issue is not work, so it carries no `legion` label and stays in icebox.
 EOF
 legion({ op: "set_status", issue: "<report KEY>", status: "icebox" })
 ```
 
+With no person known, leave out `--assignee`. While the issue's `Assignee:` says `unassigned`,
+each report opens with one sentence asking a person to take the issue from its header, since its
+asks reach only the Inbox's `Unassigned` filter.
+
+Each time you read it, keep it answerable. `Status: done` means someone closed it: Dispatch
+refuses an ask or a message there (`409 ISSUE_CLOSED`) and hides its open asks, so reopen it with
+`set_status` to `icebox` and say so in the day's report. `Assignee: unassigned`, with a person
+known, means assign it, naming your session (`dispatch whoami` names it):
+`curl -sS -X PATCH -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" -H 'Content-Type: application/json' -d '{"assignee": "<email>", "actor": {"kind": "session", "id": "<session id>"}}' "$DISPATCH_URL/api/v1/issues/<REPORT KEY>"`.
+
 **When.** On your first turn of each UTC day, whatever it is: your start, or a wake of any kind.
 While you are registered, the daemon's `tick` gives you a turn at least every
 `controller_wake_interval_seconds`. After the turn's own work, read the report issue with
-`dispatch read`, and post when its `Events:` show no `message.created` from today.
+`dispatch read`, keep it answerable as above, and post when its `Events:` show no
+`message.created` from today.
 
 **What.** One `dispatch message --issue <report KEY> --body-file -` of at most 2,000 characters,
 since it is a report rather than a log of the day, written as `skill://dispatch`'s "Writing for
@@ -354,9 +339,8 @@ the human" says: every issue by its key and title, every pull request by its URL
   on that holder: its architect started nothing and asked them to release it or take the issue
   back. Nothing in `read_state` records that, so read the tree's issue (its `Claimed by:` line
   and the ask or message the architect opened) before you name it.
-- **The slots and the walk.** The free slots, as **How many** counts them, then this turn's walk
-  when it made one: what it took, and how many candidates each row of the table skipped, so a
-  reader can see why a free slot stays empty.
+- **Free slots.** The free slots, as [Free slots](#free-slots-go-daemon) counts them: each stays
+  free until a person hands Legion an issue.
 - **Open capabilities.** Each row of `capabilities` in `read_state` whose `status` is
   `open` (the `tick` payload's `openCapabilities`): its name, its `detail`, and, on a deployment
   row, its `configLine`, the `legion.yaml` line that records a decision. A live row a running
@@ -372,17 +356,18 @@ and the highest-priority issues.
 
 Deployment instructions, when present, are the operator's standing rules for this project's
 repositories — required checks, deploy/smoke commands, code-owner expectations, and standing roles
-you may consult. They override this skill's defaults where they conflict, and may narrow which
-issues the walk takes, but never widen it past `todo` issues or change the order it takes them in:
-highest priority first, then board rank ([Keeping the slots full](#keeping-the-slots-full-go-daemon)).
+you may consult. They override this skill's defaults where they conflict and may narrow what you
+label for Legion (a request outside the scope they state gets no label), but never hand Legion work
+themselves: an issue reaches Legion only when a person hands it over
+([Issues handed to Legion](#issues-handed-to-legion-go-daemon)).
 
 ## Turn discipline
 
 - **Direct user message always first.** If this turn includes a direct user message, answer
   it before handling every other wake.
-- **Sami's rulings.** A direct Dispatch message from Sami is a ruling: after answering it, run
-  the full [Backlog stewardship](#backlog-stewardship) reconciliation and record the current rule
-  in the weekly plan.
+- **A person's rulings.** A direct Dispatch message to this controller from a person is a ruling:
+  after answering it, run the full [Backlog stewardship](#backlog-stewardship) reconciliation and
+  record the current rule in the weekly plan.
 - **One wake = one turn.** Handle exactly the wake's implication, then end the turn. Never
   poll, idle-loop, or wait for another event. Two additions, after any direct user message: every
   turn first rechecks the [trees waiting on a root
@@ -402,15 +387,17 @@ highest priority first, then board rank ([Keeping the slots full](#keeping-the-s
 
 | Wake | Content | Controller action |
 |---|---|---|
-| New issue created in the Dispatch project, status `triage`: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above); the start procedure above catches one sent while no controller ran | issue key + triage context (incl. pre-existing children) | Triage: `set_status` to `todo` to admit, or to `backlog`/`icebox` to park |
-| `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify a free slot in `read_state`, then fill it ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
-| `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Verify a free slot, then walk the whole `todo` list ([Keeping the slots full](#keeping-the-slots-full-go-daemon)) |
+| New issue created in the Dispatch project, status `triage`: `triage on <KEY>` (payload `{kind: "triage"}`) on the controller topic, for an unrecorded root carrying the `legion` label only ("Issues handed to Legion" above); the start procedure above catches one sent while no controller ran | issue key + triage context (incl. pre-existing children) | Triage: read who set the label; admit (`set_status` to `todo`) only a root a person handed over, park one to `backlog`/`icebox`, and ask the person about any other ([New issue triage](#new-issue-triage)) |
+| `slot-free on <KEY>` from the Go daemon (payload `{kind: "slot-free"}`) | the root whose slot the daemon released with no waiting root to take it | Verify the free slots in `read_state` and name them in your summary; take nothing ([Free slots](#free-slots-go-daemon)) |
+| `todo on <KEY>` from the Go daemon (payload `{kind: "todo"}`) | an issue not handed to Legion that changed while in `todo` and a slot stood free, sent half a minute later | Take nothing: an issue nobody handed to Legion is not Legion's ([Free slots](#free-slots-go-daemon)) |
 | `unslotted on <KEY>` from the Go daemon (payload `{kind: "unslotted", reason}`) | a root that held no slot and waited for none: a person or another session moved it from `todo` to the status `reason` names while it waited, so the daemon took it out of the workflow (`issues.<KEY>.phase` is `done`) and starts nothing for it ([reading admission](skill://legion-controller/references/admission.md)) | Re-admit nothing yourself: the move was someone else's, and `dispatch read` shows who claims it now. Name it in your summary to the human ("<KEY> left Legion's waiting line: it was set to <status> while it waited for a slot, so Legion let it go; `todo` with the `legion` label queues it again") |
-| `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick", openCapabilities?: [<name>, …]}`) | the project key; the daemon's periodic wake, whatever the slots; `openCapabilities` names the deployment capabilities with no decision, each with its detail and `capabilities.decided.<name>` line under `capabilities` in `read_state`, and the live capabilities a running session's check failed, each with the detail naming the session (pod or pane), role, issue and fact, and no `configLine` | Recheck the trees waiting on a claim, then walk if a slot is free — a gap never stops the walk; post the day's report if this is the day's first turn, naming each open capability in it (the operator closes or decides a deployment row; the operator or the issue's architect fixes a live row's session; you take no other action) |
-| Architect escalation (controller-actionable only: re-file a child as a root issue, capacity, cross-tree conflicts) | request + context | Judge and act; the owning architect writes an issue-design decision as a decision block and opens `dispatch ask` only for a human to-do |
+| `tick on <PROJECT>` from the Go daemon (payload `{kind: "tick", openCapabilities?: [<name>, …]}`) | the project key; the daemon's periodic wake, whatever the slots; `openCapabilities` names the deployment capabilities with no decision, each with its detail and `capabilities.decided.<name>` line under `capabilities` in `read_state`, and the live capabilities a running session's check failed, each with the detail naming the session (pod or pane), role, issue and fact, and no `configLine` | Recheck the trees waiting on a claim and name the free slots in your summary; post the day's report if this is the day's first turn, naming each open capability in it (the operator closes or decides a deployment row; the operator or the issue's architect fixes a live row's session; you take no other action) |
+| Architect escalation (a child that looks independent of its tree, capacity, a cross-tree conflict) | request + context | Judge it; a child is re-filed as a root only on a person's answer to your ask ([Architect escalation](#architect-escalation)); the owning architect writes an issue-design decision as a decision block and opens its own finding asks |
+| A finding ask's reference (`dispatch://<KEY>/ask/<id>`) on the controller topic, or the answer to a finding ask you follow | the ask, or its answer | Follow the ask; file only what a person's answer asks for ([finding asks](skill://legion-controller/references/finding-asks.md)) |
+| A finding sent to you as text | the problem and its evidence | Open a `dispatch ask` for it and file nothing ([Findings, and the issues you file](#findings-and-the-issues-you-file)) |
 | Mention | GitHub PR @mention text | Answer, or route to the owning issue's architect role |
 | Slack mention (`from: slack`) | the mention's `channel_id`, `user_id`, `text`, `ts`, `thread_ts` | Nothing when your `Slack channels:` line does not name its `channel_id`; otherwise answer in its thread with `slack_post`: a state question from `read_state`, a work request filed as a Dispatch issue, an architect's question routed to that architect ([Slack mentions](skill://legion-controller/references/slack-mentions.md)) |
-| `held on <KEY>` from the Go daemon (payload `{kind: "held", phase, role?, reason?}`) | the held issue, the phase it left, and the role whose claim failed, or `reason: "escalated"` | Verify the hold in `read_state` (the issue's phase is `held`). Without `reason`, a phase worker's launches or prompts ran out and the tree's architect decides retry or escalate: no action. With `reason: "escalated"` (on the record, `issues.<KEY>.holdReason` is `escalated`), the architect sent it to you: handle it as an architect escalation below. Parking the tree is `set_status` of the root to `backlog`; setting the root back to `todo` later re-admits it as a new generation, which starts again from its architect |
+| `held on <KEY>` from the Go daemon (payload `{kind: "held", phase, role?, reason?}`) | the held issue, the phase it left, and the role whose claim failed, or `reason: "escalated"` | Verify the hold in `read_state` (the issue's phase is `held`). Without `reason`, a phase worker's launches or prompts ran out and the tree's architect decides retry or escalate: no action. With `reason: "escalated"` (on the record, `issues.<KEY>.holdReason` is `escalated`), the architect sent it to you: handle it as an architect escalation below. Parking the tree is `set_status` of the root to `backlog`; setting the root back to `todo` re-admits it as a new generation, which starts again from its architect, and you do that only once the hold's cause is checked and gone, or a person asks |
 | `worker-died on <KEY>` from the Go daemon with `role: "architect"` | the tree root whose architect's claim failed, and the phase the root was in | The tree's architect ran out of launches or prompts and the daemon relaunches nothing; every other notice of the tree goes to that architect, so nobody inside the tree can act. Verify in `read_state` (`issues.<KEY>.architect.state` is `failed`); if the root's phase is `done`, the tree is already parked: no action. Otherwise re-admit the tree (`set_status` of the root to `backlog`, then to `todo`: a new generation, whose architect starts again with fresh budgets) or leave it parked and say why on the issue |
 | Direct user message | — | Always first |
 
@@ -422,25 +409,32 @@ highest priority first, then board rank ([Keeping the slots full](#keeping-the-s
    Note the `Assignee:` line: that human answers the tree's asks, and their Inbox opens on
    the issues they hold. Never reassign during triage — who holds an issue is the humans'
    decision, made from the issue header.
-2. If it should run now, admit the root issue:
+2. Read who handed it over. `dispatch read` does not show who set a label, so list the issue's
+   events: `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<issue>/events?limit=200"`.
+   The first `issue.created` or `issue.updated` event whose `payload.labels` holds `legion` (in
+   any case) set it, and its `actor` is who. A person's label (`actor.kind` is `user`) hands it
+   over. So does your own filing for a person: its spec as filed (`dispatch doc-read --issue
+   <issue> --version 1`) holds the line `Filed for <person> at their request: <request>`
+   ([Findings, and the issues you file](#findings-and-the-issues-you-file)), and its `actor` is a
+   session that is yours: this one, which `dispatch whoami` names, or, for a request that is an
+   ask, the one whose reply under that ask (`dispatch read --ref`) starts `Filed dispatch://<this
+   KEY>` after a newest answer of `File it for Legion`, which holds across your restarts. Any other
+   filing hands over nothing: leave the issue in `triage` and ask the person on your report issue
+   whether Legion should take it, naming the issue and who labelled it, with the options `Admit
+   it` and `Leave it`. On `Admit it`, admit it below; either way reply under the ask `Admitted
+   dispatch://<KEY>` or `Not admitted: <reason>`, as for a finding ask.
+3. If a person handed it over and it should run now, admit the root issue:
 
    ```text
    legion({ op: "set_status", issue: "<issue>", status: "todo" })
    ```
 
-3. If it should deliberately wait, move it to a parked status instead of leaving it in
-   `triage`:
-
-   ```text
-   legion({ op: "set_status", issue: "<issue>", status: "backlog" })
-   ```
-
-   (or `icebox` for longer-term deferral). Dispatch status is the durable record; there is no
-   other marker to maintain, beyond the `legion` label, which parking leaves in
-   place. A root never waits for capacity in `backlog`: in `todo` the
-   daemon's admission queue holds it (`admission.waiting`), so park only a root that should not
-   run now. Do not triage a system-created child as a root issue.
-4. When you post a triage note (a `dispatch comment` on the issue saying what you decided and
+4. If it should deliberately wait, park it (`set_status` to `backlog`, or `icebox` for
+   longer-term deferral) instead of leaving it in `triage`. Dispatch status is the durable record;
+   parking leaves the `legion` label in place. Park only a root that should not run now: in
+   `todo` the daemon's admission queue holds it for a slot. Do not triage a system-created child
+   as a root issue.
+5. When you post a triage note (a `dispatch comment` on the issue saying what you decided and
    why), name who will be asked with the assignee sentence: `Assigned to <login>, who will get
    this tree's questions and its design approval`, or, when the `Assignee:` line says
    `unassigned`, `Unassigned — nobody's Inbox shows this tree's questions or its design approval
@@ -451,35 +445,31 @@ highest priority first, then board rank ([Keeping the slots full](#keeping-the-s
    its design approval" (and "or its design approval") from the sentence. An unassigned root
    still runs; its architect's asks reach no default Inbox list, only the `Unassigned` filter.
 
-## Backlog eligibility
-
-Nothing reconsiders `backlog` or `icebox` on its own: [Keeping the slots
-full](#keeping-the-slots-full-go-daemon) takes only `todo` issues, since an issue that waits on a
-deploy or a decision belongs in `backlog` (`skill://dispatch`, "Choosing what to work on"). A
-handed-over root waits for a slot in `todo`, where the daemon's
-admission queue holds it (`admission.waiting`), so a park means "should not run now", and a
-parked root keeps its `legion` label. A parked issue runs again when a person sets it to `todo`,
-or when a wake tells you to re-admit it (`worker-died`).
-
 ## Architect escalation
 
-Only decide controller-actionable escalations: re-filing independent work, capacity, and
-cross-tree conflicts. The owning architect writes an issue-design decision as a decision block and
-uses `dispatch ask` only for a human to-do, not the controller.
+Three matters come to you from a tree's architect: a child that looks independent of its tree,
+capacity, and a cross-tree conflict. The owning architect writes an issue-design decision as a
+decision block and opens its own finding asks, not the controller.
 
-For an independence judgment, verify the child and its parent against current daemon state
-and the Dispatch issue. If the work belongs in an independent root:
+For a child that looks independent, verify the child and its parent against current daemon state
+and the Dispatch issue. When it still looks independent, ask a person whether to re-file it, as
+[Findings, and the issues you file](#findings-and-the-issues-you-file) says: the ask names the
+child, why it looks independent and the root you would file, with the three options (`File an
+issue` re-files it as a root a person takes, `File it for Legion` as a root Legion runs, `Do not
+file` keeps it in its tree). Only on the person's yes:
 
-1. File a **fresh root issue** with `dispatch issue --project <KEY> --title '<title>' --spec-file -`
-   (no `--parent`; add `--label legion`, without which it is never admitted).
-   `--project` is the issue key's prefix before `-<n>` (e.g. `LEGSMOKE-3` → `LEGSMOKE`): the
-   project key exactly as `legion.yaml` writes it, which `read_state` shows as
+1. File the root with `dispatch issue --project <KEY> --title '<title>' --spec-file -` (no
+   `--parent`), its spec citing the ask and carrying its `Filed for` line ([Findings, and the issues
+   you file](#findings-and-the-issues-you-file)); add `--label legion` only when the answer asks
+   Legion to run it. `--project` is the issue key's prefix before `-<n>` (e.g. `LEGSMOKE-3` → `LEGSMOKE`):
+   the project key exactly as `legion.yaml` writes it, which `read_state` shows as
    `daemon.project`. It is not the lowercase project token in role names such as
    `legion-<project>-controller`.
-2. Park the child (`set_status` to `icebox`) and leave
-   a pointer to the new root issue. The controller's capability is `todo`/`backlog`/`icebox`
-   only — only the owning architect or the daemon closes an issue as `done`.
-3. Admit or deliberately backlog the new root through the normal triage procedure.
+2. Park the child (`set_status` to `icebox`) and leave a pointer to the new root issue. The
+   controller's capability is `todo`/`backlog`/`icebox` only — only the owning architect or the
+   daemon closes an issue as `done`.
+3. A root filed with the label opens in `triage` and is triaged as any labelled root
+   ([New issue triage](#new-issue-triage)).
 
 Never promote a child in place. Resolve capacity and cross-tree conflicts from verified
 state, routing design decisions back to the owning architect when they are not controller
