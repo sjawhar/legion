@@ -26,6 +26,20 @@
   `409 MESSAGE_KEY_REUSED` with `message_id`. The delivery runs after commit on a context detached
   from the request, so an aborted request cannot cancel it, and a deploy lets it finish: shutdown
   waits for the request, and the listener client's receipt timeout bounds it.
+- `GET /auth/whoami` answers `event_head`, the newest committed event id as of the sign-in check
+  (INFRA-292). A page's first events subscription on `/ws/live` resumes from it, so a change
+  committed between that answer and the socket opening reaches the page instead of being lost
+  until something else refreshed it. The sign-in check comes first: a caller who is not signed in
+  is `401 NO_IDENTITY` and the head is never read, and a signed-in caller whose head cannot be
+  read is `503 EVENT_HEAD_UNAVAILABLE`.
+- A broadcast reaches every recipient across a deploy or a crash (INFRA-258). Each recipient's
+  delivery runs on a context detached from the request's and is registered with the server's
+  background wait, so a shutdown waits for it where the server's lifetime used to cancel it, each
+  recipient bounded by the listener client's receipt timeout; and a repeat under a held
+  `idempotency_key` sends every recipient the broadcast still owes - one with no attempt at all,
+  and one whose single attempt is pending under a claim that has lapsed - before it answers
+  `200`, as a repeated send to one session does. A recipient whose pending attempt a live claim
+  holds is left to the sender holding it.
 
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
@@ -1121,6 +1135,11 @@
 
 ### Fixed
 
+- Dispatch answers every JSON timestamp in UTC, whatever zone its process runs in: the database
+  pool scans `timestamptz` in UTC and a time the server makes itself is taken in UTC, where a
+  server on a host in another zone answered that zone's offset (`…T08:11:37-07:00`) and a reader
+  comparing two timestamps as strings, as the dashboard and its tests do, ordered them by the
+  text rather than the moment. A deployment that already ran with `TZ=UTC` sees no change.
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
   but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
   which replaces a machine's own credentials for every program that uses them. A write under
