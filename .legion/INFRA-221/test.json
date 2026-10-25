@@ -2,29 +2,37 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-221",
-  "completed": "2026-10-25T06:59:42Z",
-  "round": 10,
+  "completed": "2026-10-25T07:06:46Z",
+  "round": 11,
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 10 is four pointer lines under docs/solutions/, so the proof is the text. Re-ran the heading count myself on line-joined text: each of the INFRA-42, INFRA-43, INFRA-44 and LEGION-695 notes names `The test: where it lands, and what it leaves resolving` exactly once, the three 'still the step'/'hold this recipe' notes say 'both conditions', and the heading exists once in skills/legion-worker/references/tools.md (:82). `jj diff --from 7bcd7767e4df --to 0ca8d9696150 --name-only` lists only .legion/ and the four notes, so tools.md, docs/kubernetes.md, the site page, AGENTS.md, every Go file and the Dockerfile are byte-identical to the round-9 head; `diff -r skills/legion-worker packages/claude-envoy/legion/skills/legion-worker` and `cmp` of the architect SKILL.md are clean. The implementer's claims about the four lines hold; the failures below are in a fifth INFRA-221 note this round did not touch and in the bullet one of the four lines vouches for."
+    "how": "Re-ran the implementer's round-11 checks myself at b4ebc2dd74e2ad31e87c5786057e4e126157c5b7: over line-joined text of every docs/solutions note carrying INFRA-221, each of the five (LEGION-695, INFRA-42, INFRA-43, INFRA-44, LEGION-748) names the tools.md heading once and a condition ('both conditions' or 'first condition') once, and neither 'about scope' nor 'passes the test' occurs in any of them. `gh pr view 2085/2088 --json mergedAt` gives 2026-10-21T06:29:42Z and 03:32:31Z, the times the INFRA-44 note now states; manifest.go:734-736 sets TMPDIR, GOCACHE and GOMODCACHE in roleEnvironment; in this container they are /legion/scratch/tmp, /legion/go/build and /legion/go/mod, all on the 49G /legion volume, while /tmp is on the container's `/`. The INFRA-43 note's new subshell form was driven, not read (proof entry 2)."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "Every INFRA-221 pointer note names the rule by both conditions (or the tools.md heading), keeps only what is local to it, and agrees with the section it names and with the other notes (round 8's finding 2, applied to every note, not four).",
-      "evidence": "`docs/solutions/testing/a-throwaway-sandbox-repository-probes-workflow-semantics-with-a-control-job-and-every-production-first-step-rides-the-same-run-and-a-reimplementation-is-differentialled-against-its-oracle-first-LEGION-748.md`:66-71, the fifth INFRA-221 note, still reads 'That line is about scope, which gives this item a second reason to be superseded' and cites the LEGION-695 note as 'a harness that passes the test'. Both are now false against the tree: (1) tools.md:82-99 makes the line two conditions, and the item it supersedes (`$HOME/.local` installs, :50-54) fails the first, location, condition before scope arises — tools.md:158-165 (:164) says an install under `$HOME` 'fails the first condition ... however little else it changes'; a role that takes 'the line is about scope' from this note scopes an extraction under `$HOME` and believes it sanctioned, which is round 7's finding 1 again; (2) this round's own edit to `docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md`:43-47 says that recipe's `/tmp` build 'fails the first condition', so LEGION-748 cites as passing the test a harness its target now says fails it. Shown by: `python3` over line-joined text of every docs/solutions note containing INFRA-221 — LEGION-748 is the one with 0 occurrences of the heading and the one containing 'about scope'. Fix: name both conditions by the heading as the other four do, give the `$HOME` location as the first reason, and cite LEGION-695 for its hand-over (a note, not an environment) only. No red test: a test asserting a learning note's wording is a source-text test, which this repository's rules forbid."
+      "criterion": "Each of the five INFRA-221 notes names the rule by both conditions under the tools.md heading, keeps only what is local to it, and agrees with that section and with the other notes (round 10's two failures).",
+      "surface": "The tree at code head b4ebc2dd74e2ad31e87c5786057e4e126157c5b7: the five notes read standing alone, against skills/legion-worker/references/tools.md (:82-100, :158-165, :182-186) and roleEnvironment in packages/daemon/internal/runtime/sandbox/manifest.go.",
+      "command": "python3 over line-joined text of each docs/solutions note containing INFRA-221: count('The test: where it lands, and what it leaves resolving'), count('both conditions')+count('first condition'), 'about scope' in text, 'passes the test' in text; jj diff -r b4ebc2dd74e2 --git; sed -n 731,737p manifest.go; gh pr view 2085|2088 --repo sjawhar/legion --json mergedAt; echo $TMPDIR $GOCACHE $GOMODCACHE; df -h /tmp $TMPDIR $GOCACHE $GOMODCACHE.",
+      "observed": "1/1/False/False for all five notes. LEGION-748 now gives both failures of the superseded item (installs under $HOME, the container's filesystem; a PATH handed to processes that never named it) and cites LEGION-695 for its hand-over only, which that note says stands. INFRA-44 now says the premise expired with #2085 (06:29:42Z) after #2088 (03:32:31Z), both times matching GitHub; TMPDIR, GOCACHE and GOMODCACHE resolve on /legion with nobody exporting them. INFRA-43 now tells a role to source env.sh in the same invocation as the harness command. tools.md, the bundle, the site page, AGENTS.md, the Go files and the Dockerfile are unchanged since round 9 (`jj diff --from f16d24a8ddf4 --to cc3311d45009 --name-only` lists only the three notes and implement.json).",
+      "headSha": "b4ebc2dd74e2ad31e87c5786057e4e126157c5b7",
+      "negativeControl": "At the previous code head b82e5899a5e4 the same script gives the LEGION-748 note 0 for the heading and True for both 'about scope' and 'passes the test' — the two strings round 10 failed — so the count discriminates."
     },
     {
-      "criterion": "Each pointer line agrees with the section it names.",
-      "evidence": "`docs/solutions/testing/a-pod-harness-moves-tmpdir-too-and-the-failure-mode-is-a-silent-kill-INFRA-44.md`:138-141's INFRA-221 note says 'that staging is still the step' of the bullet at :131-137, whose premise (:133) is 'No role container sets `TMPDIR`, so they default to `/tmp`'. The section the note names lists `TMPDIR` among 'the variables the runtime actually sets for you' (tools.md:87), and the code agrees: `roleEnvironment` sets `{Name: \"TMPDIR\", Value: scratchRoot + \"/tmp\"}` (packages/daemon/internal/runtime/sandbox/manifest.go:734). Observed in this role container: `echo $TMPDIR` -> `/legion/scratch/tmp`, and `df -h /tmp /legion/scratch/tmp` puts /tmp on the container's `/` and TMPDIR on the 49G `/legion` volume, with no export by anyone. The bullet was true when written (#2088 merged 2026-10-21 03:32Z) and went stale three hours later (#2085, 06:29Z, added the variable); this round's note re-endorses it four days after. A reader of the note is told to export by hand what the runtime already exports, on a premise that is false. Fix (one clause): the note says the runtime now sets `TMPDIR` onto the issue's volume (`roleEnvironment`), so the staging the bullet asks for is done for you and the export is needed only where something unsets it."
+      "criterion": "The INFRA-43 note's instruction — source the env file in the same invocation as the harness command — leaves nothing resolving through the root in the shell a role goes on working in.",
+      "surface": "This tester's role container: bash, with a throwaway harness root and env.sh under $TMPDIR (on the issue's volume), removed afterwards.",
+      "command": "bash -c '(. $d/env.sh && hpsql && echo inside LD=$LD_LIBRARY_PATH); echo after subshell: $(command -v hpsql || echo none) LD=${LD_LIBRARY_PATH:-unset}; . $d/env.sh; echo after bare source: $(command -v hpsql) LD=$LD_LIBRARY_PATH'",
+      "observed": "Inside the subshell the harness binary ran (`harness-psql`) with LD_LIBRARY_PATH set to the root; after it, `command -v hpsql` -> none and LD_LIBRARY_PATH unset.",
+      "headSha": "b4ebc2dd74e2ad31e87c5786057e4e126157c5b7",
+      "negativeControl": "The bare `. env.sh` the note's previous wording allowed ('every role source the env file') left `hpsql` resolving at the root and LD_LIBRARY_PATH set in the working shell — the ambient prefix the test's second condition refuses."
     }
   ],
-  "failed": 2,
-  "ciRead": "At the code head b82e5899a5e486366001d2cea990d3dc6b683b43 (markdown under docs/solutions/ only), `gh api repos/sjawhar/legion/commits/b82e5899…/check-runs` at the time of this round: typecheck in_progress; build, changes, lint, test and five pr-title runs queued; one pr-title cancelled. Cited as running; not waited on and not re-run. The handoff head 0ca8d9696150 carries no check runs, right for a .legion/-only push. The previous code head 21c0047b30ea had lint, typecheck, test and pr-title, the four the base requires, all success, and no Go file or Dockerfile changed since.",
+  "ciRead": "At code head b4ebc2dd74e2ad31e87c5786057e4e126157c5b7 (markdown under docs/solutions/ only), `gh api repos/sjawhar/legion/commits/b4ebc2dd…/check-runs`: lint in_progress; build (pending and queued), changes, test, typecheck and pr-title queued; one pr-title cancelled. Cited as running; not waited on and not re-run. The last code head with settled CI, 21c0047b30ea, had lint, typecheck, test and pr-title — the four the base requires — all success, and no Go file or Dockerfile has changed since.",
   "observations": [
-    "The image half and the committed bundle were confirmed, not re-driven: no file outside docs/solutions/ and .legion/ changed since the round-9 head, where the image Job and the bundle diff were run.",
-    "The consolidated statement was not reopened: tools.md is byte-identical to the round-9 head, and its heading occurs once.",
-    "The LEGION-695 note's `-k /tmp/pgsock` socket directory is not a finding: a unix socket writes nothing the ephemeral limit charges, and the 108-byte socket path limit is a reason to keep it short.",
-    "Not a finding, for whoever fixes the first failure: tools.md:182-186 calls LEGION-695 'the illustration' of 'the same test passed again' — true of its hand-over, which that note says stands, but a reader opening it now meets a recipe whose placement fails the first condition; 'the illustration of the hand-over' would say exactly what it is cited for."
+    "Image half and bundle confirmed, not re-driven: nothing outside docs/solutions/ and .legion/ changed since the round-9 head, where the image Job and the bundle diff were run.",
+    "The consolidated statement was not reopened: tools.md is byte-identical to the round-9 head.",
+    "The INFRA-44 note's 'only an explicit `/tmp` path still lands on the container's filesystem' reads within the TMPDIR bullet it annotates; writes under $HOME land there too, as the paragraph after it and tools.md:158-165 say. Not a finding: in place it is about what TMPDIR staging leaves behind."
   ],
   "previousRounds": [
     {
@@ -89,6 +97,13 @@
       "verdict": "pass",
       "handoffCommit": "4e5e344bbaa2be195b0c88e3d33589b66124ab7d",
       "summary": "The scope test is stated once under its own heading (28 of 33 sentences verbatim from the previous head); the two non-pointer surfaces read true alone; image half and bundle held."
+    },
+    {
+      "round": 10,
+      "head": "b82e5899a5e486366001d2cea990d3dc6b683b43",
+      "verdict": "fail",
+      "handoffCommit": "f16d24a8ddf4",
+      "summary": "Two one-clause failures: the LEGION-748 note still said 'That line is about scope' and called LEGION-695 'a harness that passes the test'; the INFRA-44 note re-endorsed the false premise 'No role container sets TMPDIR'."
     }
   ]
 }
