@@ -272,6 +272,13 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 		return shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 	}
 	body, _ := json.Marshal(command)
+	// refuse is how a start that cannot run answers: the refusal is remembered under the command's
+	// id, so a retry of that id is answered with it rather than tried again.
+	refuse := func(message string) shimwire.LauncherStartResult {
+		result := shimwire.LauncherStartResult{ID: command.ID, Error: message}
+		m.remember(command.ID, body, result)
+		return result
+	}
 	m.mu.Lock()
 	if prior, ok := m.requests[command.ID]; ok {
 		result, matches := prior.result.(shimwire.LauncherStartResult)
@@ -296,24 +303,18 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	// lookup reaches the table through and which the child must find already bound.
 	dir, err := m.writeFiles(command)
 	if err != nil {
-		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
-		m.remember(command.ID, body, result)
-		return result
+		return refuse(err.Error())
 	}
 	proxy, clientURL, err := m.startSession(ctx, command.Generation, dir)
 	if err != nil {
 		endSession(proxy, dir)
-		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
-		m.remember(command.ID, body, result)
-		return result
+		return refuse(err.Error())
 	}
 	recreated := false
 	if command.ResumeFile != "" {
 		if recreated, err = resumable(env, command.ResumeFile, clientURL, m.cfg.Stderr); err != nil {
 			endSession(proxy, dir)
-			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
-			m.remember(command.ID, body, result)
-			return result
+			return refuse(err.Error())
 		}
 	}
 	env = mergeEnv(env, []string{WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
@@ -326,9 +327,7 @@ func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shi
 	if err := cmd.Start(); err != nil {
 		m.mu.Unlock()
 		endSession(proxy, dir)
-		result := shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("start child: %v", err)}
-		m.remember(command.ID, body, result)
-		return result
+		return refuse(fmt.Sprintf("start child: %v", err))
 	}
 	active := &child{generation: command.Generation, pid: cmd.Process.Pid, dir: dir, proxy: proxy, done: make(chan struct{})}
 	m.child = active
@@ -424,9 +423,9 @@ func generationDir(private string, generation uint64) string {
 // runs when it is called, so everything already in the private directory — an earlier
 // generation's credentials a crashed launcher never removed, or a directory, file or symlink the
 // previous generation's agent planted toward the shared workspace — is removed without being
-// followed; the directory is made owner-only and each file is created exclusively without
-// following a link, so no credential is written anywhere but that directory. An error names the
-// file, never its bytes.
+// followed; the directory is made owner-only and each file is written as writeCredential writes
+// one, so no credential is written anywhere but that directory. An error names the file, never its
+// bytes.
 func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 	entries, err := os.ReadDir(m.cfg.PrivateDir)
 	if err != nil {
@@ -442,19 +441,28 @@ func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 		return "", fmt.Errorf("make credential directory for generation %d: %v", command.Generation, err)
 	}
 	for name, content := range command.Files {
-		file, err := os.OpenFile(filepath.Join(dir, name), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
-		if err == nil {
-			_, err = file.WriteString(content)
-			if closeErr := file.Close(); err == nil {
-				err = closeErr
-			}
-		}
-		if err != nil {
+		if err := writeCredential(filepath.Join(dir, name), content); err != nil {
 			_ = os.RemoveAll(dir)
 			return "", fmt.Errorf("write credential %s for generation %d: %v", name, command.Generation, err)
 		}
 	}
 	return dir, nil
+}
+
+// writeCredential writes content to path the one way anything of a generation's is written: created
+// exclusively, owner-only, and never following a link, so a credential lands in the generation's
+// own directory and nowhere else, and never through a file or symlink already at that path. The
+// error it returns names neither the file nor its bytes; each caller names the file itself.
+func writeCredential(path, content string) error {
+	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return err
+	}
+	_, err = file.WriteString(content)
+	if closeErr := file.Close(); err == nil {
+		err = closeErr
+	}
+	return err
 }
 
 // startSession gives a generation its session database, when one is configured: the connection URL
@@ -470,14 +478,7 @@ func (m *manager) startSession(ctx context.Context, generation uint64, dir strin
 		return nil, "", nil
 	}
 	endpoint := ompsessions.Endpoint{SocketDir: dir, Database: m.cfg.SessionDatabase.Name, User: m.cfg.SessionDatabase.User}
-	file, err := os.OpenFile(filepath.Join(dir, ompsessions.DSNFileName), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
-	if err == nil {
-		_, err = file.WriteString(endpoint.AgentURL())
-		if closeErr := file.Close(); err == nil {
-			err = closeErr
-		}
-	}
-	if err != nil {
+	if err := writeCredential(filepath.Join(dir, ompsessions.DSNFileName), endpoint.AgentURL()); err != nil {
 		return nil, "", fmt.Errorf("write the session database URL for generation %d: %v", generation, err)
 	}
 	proxy, err := sessionproxy.Start(ctx, sessionproxy.Config{

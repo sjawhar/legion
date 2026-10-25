@@ -1,6 +1,10 @@
 package ompsessions
 
-import "net/url"
+import (
+	"net/url"
+	"slices"
+	"strings"
+)
 
 // StoreKind is which session store a deployment runs (runtime.kubernetes.session_store).
 type StoreKind string
@@ -34,14 +38,32 @@ type Store struct {
 // (project:region:instance), the database in it, and the IAM login a pod signs in as.
 type Database struct{ Instance, Name, User string }
 
+// ValidInstance reports whether name is a Cloud SQL instance's connection name,
+// project:region:instance: exactly three segments, none of them empty. It is the one rule, which
+// both the loader that reads the instance from the file and the proxy that dials it hold to.
+func ValidInstance(name string) bool {
+	segments := strings.Split(name, ":")
+	return len(segments) == 3 && !slices.Contains(segments, "")
+}
+
 // InDatabase is whether a session is a row rather than a file, which both database kinds are: then
 // nothing a volume holds says anything about a session.
 func (s Store) InDatabase() bool { return s.Kind == StorePostgres || s.Kind == StoreCloudSQLIAM }
 
+// DSNSecretKey is the providers Secret's key that holds the session database's URL, "" unless the
+// store is the postgres one: under cloudsql-iam no pod mounts a session key, since each pod signs
+// in to the instance as itself and there is no URL to keep anywhere.
+func (s Store) DSNSecretKey() string {
+	if s.Kind != StorePostgres {
+		return ""
+	}
+	return s.DSNSecret
+}
+
 // SocketName is libpq's own name for a unix socket of a Postgres server on port 5432. pgx and
 // libpq address such a socket by its directory and compose this name themselves, where Bun's
-// client is handed the socket whole, so the name must be stated here for both spellings and for
-// the launcher that binds it.
+// client is handed the socket whole, so the name must be stated here for the agent's spelling
+// (AgentURL) and for the launcher that binds it (Socket).
 const SocketName = ".s.PGSQL.5432"
 
 // DSNFileName is the file DSNFileVariable points at: the providers mount's projection of the

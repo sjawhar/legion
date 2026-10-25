@@ -1185,19 +1185,19 @@ func readSessionDatabase(value *yaml.Node) (ompsessions.Database, error) {
 		return ompsessions.Database{}, err
 	}
 	var database ompsessions.Database
-	for _, member := range []struct {
-		name, why string
-		into      *string
-	}{
-		{"instance", ": the Cloud SQL instance the pod's session proxy dials", &database.Instance},
-		{"name", ": the database in that instance", &database.Name},
-		{"user", ": the IAM login each pod signs in as", &database.User},
-	} {
-		if *member.into, err = requiredString(fields[member.name], sessionDatabaseKey+"."+member.name, member.why); err != nil {
-			return ompsessions.Database{}, err
-		}
+	if database.Instance, err = requiredString(fields["instance"], sessionDatabaseKey+".instance",
+		": the Cloud SQL instance the pod's session proxy dials"); err != nil {
+		return ompsessions.Database{}, err
 	}
-	if segments := strings.Split(database.Instance, ":"); len(segments) != 3 || slices.Contains(segments, "") {
+	if database.Name, err = requiredString(fields["name"], sessionDatabaseKey+".name",
+		": the database in that instance"); err != nil {
+		return ompsessions.Database{}, err
+	}
+	if database.User, err = requiredString(fields["user"], sessionDatabaseKey+".user",
+		": the IAM login each pod signs in as"); err != nil {
+		return ompsessions.Database{}, err
+	}
+	if !ompsessions.ValidInstance(database.Instance) {
 		return ompsessions.Database{}, fmt.Errorf("%s.instance %q must be the Cloud SQL instance's connection name, project:region:instance", sessionDatabaseKey, database.Instance)
 	}
 	return database, nil

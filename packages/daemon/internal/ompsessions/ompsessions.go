@@ -1,7 +1,7 @@
 // Package ompsessions is Oh My Pi's SQL session table as Legion uses it, and the settled
-// runtime.kubernetes.session_store the daemon reads it under (store.go: the union, the names Oh My
-// Pi's two session variables point at, and the two URL spellings of one unix-socket endpoint). The
-// table is Oh My Pi's own (sql-session-storage.ts at
+// runtime.kubernetes.session_store the daemon reads it under (store.go: the union, the file name
+// DSNFileVariable points at, libpq's own name for a unix socket, and the two URL spellings of one
+// unix-socket endpoint). The table is Oh My Pi's own (sql-session-storage.ts at
 // the release .omp-pin names): it creates and migrates omp_session_files and
 // omp_session_files_parts when it starts, keys a session by the path its file would have had (the
 // session file a claim records), and reads a session as the row's content followed by its parts in

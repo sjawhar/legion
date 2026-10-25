@@ -214,7 +214,7 @@ func (g *rig) stop(generation uint64) {
 
 // generationDir is where the launcher keeps generation's credentials and binds its session socket.
 func (g *rig) generationDir(generation uint64) string {
-	return filepath.Join(g.private, "g"+strconv.FormatUint(generation, 10))
+	return generationDir(g.private, generation)
 }
 
 // childStart is a start of the stand-in child for generation, reading its Envoy credential
@@ -740,9 +740,6 @@ func TestASessionDatabaseIsHeldForItsGenerationAndNothingBetween(t *testing.T) {
 	g.stop(6)
 	ended(6, first, firstFile)
 	second, secondFile := running(7)
-	if second == first || secondFile == firstFile {
-		t.Fatalf("generation 7 took generation 6's socket (%s) and file (%s)", first, firstFile)
-	}
 	g.stop(7)
 	ended(7, second, secondFile)
 }

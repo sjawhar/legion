@@ -17,10 +17,11 @@ import (
 	"io"
 	"net"
 	"path/filepath"
-	"strings"
 	"sync"
 
 	"cloud.google.com/go/cloudsqlconn"
+
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 )
 
 // Dialer is the upstream the proxy dials for each accepted connection: the Cloud SQL connector in
@@ -80,8 +81,7 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 	if !filepath.IsAbs(cfg.Socket) {
 		return nil, fmt.Errorf("sessionproxy: Socket %q is not an absolute path", cfg.Socket)
 	}
-	if segments := strings.Split(cfg.Instance, ":"); len(segments) != 3 ||
-		segments[0] == "" || segments[1] == "" || segments[2] == "" {
+	if !ompsessions.ValidInstance(cfg.Instance) {
 		return nil, fmt.Errorf("sessionproxy: Instance %q is not a project:region:instance connection name", cfg.Instance)
 	}
 
@@ -177,7 +177,8 @@ func (p *Proxy) accept(ctx context.Context) {
 
 // serve gives one accepted connection an upstream of its own and copies between them. The dial is
 // per connection on purpose: the connector mints the connection's credential as it dials, from a
-// certificate cache it keeps refreshed, so every connection carries a freshly minted one.
+// certificate cache it keeps refreshed, so every connection carries a freshly minted one. serve
+// already runs on a goroutine of its own, so only the other copy direction takes one.
 func (p *Proxy) serve(ctx context.Context, client net.Conn) {
 	upstream, err := p.dialer.Dial(ctx, p.instance)
 	if err != nil {
@@ -194,18 +195,17 @@ func (p *Proxy) serve(ctx context.Context, client net.Conn) {
 			_ = upstream.Close()
 		})
 	}
+	// Either direction ending closes both ends, which ends the other; serve returns only once both
+	// have, so the connection is in flight for exactly as long as it is copied for.
 	var copies sync.WaitGroup
-	copies.Add(2)
+	copies.Add(1)
 	go func() {
 		defer copies.Done()
 		defer stop()
 		_, _ = io.Copy(upstream, client)
 	}()
-	go func() {
-		defer copies.Done()
-		defer stop()
-		_, _ = io.Copy(client, upstream)
-	}()
+	_, _ = io.Copy(client, upstream)
+	stop()
 	copies.Wait()
 }
 

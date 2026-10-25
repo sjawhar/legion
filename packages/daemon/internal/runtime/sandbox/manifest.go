@@ -617,7 +617,7 @@ func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
 	for _, name := range r.providersSecrets {
 		items = append(items, corev1.KeyToPath{Key: name, Path: name})
 	}
-	if key := sessionSecretKey(r.sessionStore); key != "" {
+	if key := r.sessionStore.DSNSecretKey(); key != "" {
 		items = append(items, corev1.KeyToPath{Key: key, Path: ompsessions.DSNFileName})
 	}
 	return []corev1.Volume{{Name: providersVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
@@ -626,27 +626,17 @@ func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
 		[]corev1.VolumeMount{{Name: providersVolume, MountPath: ProvidersDir, ReadOnly: true}}
 }
 
-// sessionSecretKey is the providers Secret's key that holds the session database's URL, "" unless
-// store is the postgres one: under cloudsql-iam no pod mounts a session key, since each pod signs
-// in to the instance as itself and there is no URL to keep anywhere.
-func sessionSecretKey(store ompsessions.Store) string {
-	if store.Kind != ompsessions.StorePostgres {
-		return ""
-	}
-	return store.DSNSecret
-}
-
 // mountsProviders reports whether every pod mounts the providers Secret: some provider key,
 // providers secret, or session database URL key is configured.
 func (r *Runtime) mountsProviders() bool {
-	return len(r.providerKeys) > 0 || len(r.providersSecrets) > 0 || sessionSecretKey(r.sessionStore) != ""
+	return len(r.providerKeys) > 0 || len(r.providersSecrets) > 0 || r.sessionStore.DSNSecretKey() != ""
 }
 
 // providersKeys are the providers Secret's keys every pod mounts, sorted: what the image probe
 // names when the kubelet cannot mount one.
 func (r *Runtime) providersKeys() []string {
 	keys := slices.Concat(slices.Collect(maps.Values(r.providerKeys)), r.providersSecrets)
-	if key := sessionSecretKey(r.sessionStore); key != "" {
+	if key := r.sessionStore.DSNSecretKey(); key != "" {
 		keys = append(keys, key)
 	}
 	slices.Sort(keys)
@@ -658,7 +648,7 @@ func (r *Runtime) providersKeys() []string {
 // the providers directory as the shim does, from exporting the URL into Oh My Pi's environment.
 // Under cloudsql-iam the probe's pod mounts no session key, so it is told no pointer either.
 func (r *Runtime) sessionDSNPointer() []corev1.EnvVar {
-	if sessionSecretKey(r.sessionStore) == "" {
+	if r.sessionStore.DSNSecretKey() == "" {
 		return nil
 	}
 	return []corev1.EnvVar{{Name: ompsessions.DSNFileVariable, Value: providersDSNFile}}

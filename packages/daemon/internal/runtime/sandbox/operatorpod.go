@@ -97,14 +97,14 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // and would replace one Oh My
 // Pi's environment gains after (the pod baseline), and skips one whose `<NAME>_FILE` pointer the
 // pod sets (shim.ReadProviderEnv); and it must read neither a providers secret's key nor the
-// providers Secret's key that holds the session database's URL (sessionSecretKey, which the
+// providers Secret's key that holds the session database's URL (Store.DSNSecretKey, which the
 // postgres store alone has: under cloudsql-iam each pod signs in as itself and mounts no session
 // key at all), which the shim would export into Oh My Pi's environment under the provider key's
 // name. launchSecrets are the secrets every launch's spec carries, by name, and providersSecrets
 // those of them the providers Secret carries, none of which may be the session database's URL
 // key. configure runs it, and the daemon before its boot and for `legion start --check-config`.
 func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecrets, providersSecrets []string, store ompsessions.Store) error {
-	sessionDSNKey := sessionSecretKey(store)
+	sessionDSNKey := store.DSNSecretKey()
 	if slices.Contains(providersSecrets, sessionDSNKey) {
 		return fmt.Errorf("runtime.kubernetes.session_dsn_secret %s is the providers Secret's key the pod mounts as the launch secret %s: name a key of its own for the session database's URL",
 			sessionDSNKey, sessionDSNKey)

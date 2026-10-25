@@ -186,14 +186,24 @@ func (r *Runtime) movedStream(pod *corev1.Pod, container string) (movedAddress, 
 		return movedAddress{}, false
 	}
 	command := pod.Spec.Containers[i].Command
-	flag := slices.Index(command, connectFlag)
-	if flag < 0 || flag+1 >= len(command) {
+	held, ok := flagValue(command, connectFlag)
+	if !ok {
 		return movedAddress{}, false
 	}
-	if held, handed := command[flag+1], kubeletEscape(r.streamURL); held != handed {
+	if handed := kubeletEscape(r.streamURL); held != handed {
 		return movedAddress{connectFlag, namedURL(held), namedURL(handed)}, true
 	}
 	return movedAddress{}, false
+}
+
+// flagValue is the value command gives flag, the argument that follows it; ok is whether command
+// carries the flag with a value at all.
+func flagValue(command []string, flag string) (string, bool) {
+	i := slices.Index(command, flag)
+	if i < 0 || i+1 >= len(command) {
+		return "", false
+	}
+	return command[i+1], true
 }
 
 // movedEnrollment compares the agent-secrets volumes a generation of role started now runs against
@@ -291,7 +301,7 @@ func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 		proxy[i] = kubeletEscape(value)
 	}
 	held := sessionStoreInPod(pod)
-	handed := sessionStoreName(r.sessionStore.Kind, sessionSecretKey(r.sessionStore), proxy)
+	handed := sessionStoreName(r.sessionStore.Kind, r.sessionStore.DSNSecretKey(), proxy)
 	if held == handed {
 		return movedAddress{}, false
 	}
@@ -321,16 +331,16 @@ func sessionStoreInPod(pod *corev1.Pod) string {
 }
 
 // sessionProxyFlagsIn are the session proxy's flags command carries, in the order sessionProxyFlags
-// writes them, nil when it carries none of them: a pod created under any other store, and the
-// containers of every pod that run no launcher.
+// writes them, nil unless it carries all three of them with a value each: a pod created under any
+// other store, and the containers of every pod that run no launcher, carry none.
 func sessionProxyFlagsIn(command []string) []string {
 	proxy := make([]string, 0, 2*len(sessionProxyFlagNames))
 	for _, flag := range sessionProxyFlagNames {
-		i := slices.Index(command, flag)
-		if i < 0 || i+1 >= len(command) {
+		value, ok := flagValue(command, flag)
+		if !ok {
 			return nil
 		}
-		proxy = append(proxy, flag, command[i+1])
+		proxy = append(proxy, flag, value)
 	}
 	return proxy
 }

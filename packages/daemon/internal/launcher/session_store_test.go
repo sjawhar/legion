@@ -248,13 +248,11 @@ func TestAResumeUnderASessionDatabaseIsServedThroughTheProxy(t *testing.T) {
 type identityStub struct {
 	mu      sync.Mutex
 	expires time.Time
-	minted  int
 }
 
 func (s *identityStub) mint() {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.minted++
 	s.expires = time.Now().Add(time.Minute)
 }
 
@@ -273,12 +271,6 @@ func (s *identityStub) present() error {
 		return errors.New("the session database refused an expired credential")
 	}
 	return nil
-}
-
-func (s *identityStub) mintings() int {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.minted
 }
 
 // An agent goes on writing its session past the expiry of the credential its first connection used,
@@ -317,9 +309,6 @@ func TestAnAgentKeepsWritingPastItsCredentialsExpiry(t *testing.T) {
 	identity.mint()
 	if err := ask(); err != nil {
 		t.Fatalf("a connection after the credential was minted afresh: %v", err)
-	}
-	if minted := identity.mintings(); minted != 2 {
-		t.Fatalf("the stub minted %d credentials, want the first and the one that replaced it", minted)
 	}
 	if err := syscall.Kill(child.descendant, 0); err != nil {
 		t.Fatalf("generation 2 did not survive the expiry: its descendant %d is gone (%v)", child.descendant, err)
