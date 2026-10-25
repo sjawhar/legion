@@ -1141,6 +1141,32 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	}
 }
 
+// The four stall limits a phase worker's reminder runs on reach a pod as ordinary entries of the
+// worker process's environment: the daemon merges the ones it holds into the spec's Env (the
+// daemon package's workerSpawnSpec), and Env travels verbatim as plain pairs of the generation's
+// start command (launchEnvironment), so nothing of them is this runtime's own — they are no part
+// of runtimeOwned, which a spec may not set.
+func TestTheWorkerContainersEnvCarriesTheStallLimits(t *testing.T) {
+	r, err := configure(testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	limits := map[string]string{
+		"LEGION_STALL_REMINDER_MS":     "45000",
+		"LEGION_STALL_WAITING_MS":      "900000",
+		"LEGION_STALL_RESUME_MS":       "15000",
+		"LEGION_STALL_ARCHITECT_AFTER": "3",
+	}
+	spec := workerSpec(t)
+	maps.Copy(spec.Env, limits)
+	env := envOf(workerOf(t, r, spec))
+	for name, want := range limits {
+		if env[name] != want {
+			t.Errorf("the worker container's %s = %q, want %q", name, env[name], want)
+		}
+	}
+}
+
 // handedAddresses is exactly the addresses a role process launched now carries, every optional
 // address configured: each address-valued argument of every launcher's command and of the
 // generation's worker-shim argv (the words before `--`), by its flag, and each address-valued

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/registry"
+	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/testnats"
 )
 
@@ -1063,20 +1064,34 @@ func TestStartCheckConfigRefusesARequestItCannotRender(t *testing.T) {
 
 // --check-config's plugins line names the pair runtime.kubernetes.plugins sets, "from
 // legion.yaml", or, absent that, this binary's linked pair, "from the binary"; absent both, the
-// gap (TestStartCheckConfigReportsTheConfigurationsCapabilityGaps's pluginsGap).
+// gap (TestStartCheckConfigReportsTheConfigurationsCapabilityGaps's pluginsGap). When
+// worker_backends runs any role on Claude Code, the line gains one sentence naming those roles,
+// whose plugin is the worker image's and never an install.
 func TestStartCheckConfigNamesTheResolvedPluginPair(t *testing.T) {
 	legionState(t)
+	const claudeSentence = ". Claude Code runs implementer, tester, whose plugin is the worker image's: " +
+		"a plugin-contract change for such a role is answered by a new image, not by an install."
+	const claudeRoles = "worker_backends: {implementer: claude, tester: claude}\n"
 	for _, tc := range []struct {
 		name, extra, legion, envoy, want string
+		claude                           bool
 	}{
 		{"the file's own pair", "    plugins: {pi_legion: 9.7.0, pi_envoy: 9.6.1}\n", "", "",
-			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from legion.yaml)\n"},
+			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from legion.yaml)\n", false},
 		{"the binary's linked pair, the file setting none", "", "9.7.0", "9.6.1",
-			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from the binary)\n"},
+			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from the binary)\n", false},
 		{"the file's pair wins over the binary's", "    plugins: {pi_legion: 9.7.1, pi_envoy: 9.6.2}\n", "9.7.0", "9.6.1",
-			"plugins: @sjawhar/pi-legion 9.7.1 @sjawhar/pi-envoy 9.6.2 (from legion.yaml)\n"},
+			"plugins: @sjawhar/pi-legion 9.7.1 @sjawhar/pi-envoy 9.6.2 (from legion.yaml)\n", false},
+		{"the Claude Code roles' plugin is the image's", "    plugins: {pi_legion: 9.7.0, pi_envoy: 9.6.1}\n" + claudeRoles, "", "",
+			"plugins: @sjawhar/pi-legion 9.7.0 @sjawhar/pi-envoy 9.6.1 (from legion.yaml)" + claudeSentence + "\n", true},
+		{"the Claude Code roles are named beside the gap too", claudeRoles, "", "",
+			"plugins: none — set runtime.kubernetes.plugins or run a release build; " +
+				"a daemon that knows none relaunches no process on another plugin contract" + claudeSentence + "\n", true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.claude {
+				claudeInKubernetes(t)
+			}
 			linkedLegion, linkedEnvoy := piLegionVersion, piEnvoyVersion
 			t.Cleanup(func() { piLegionVersion, piEnvoyVersion = linkedLegion, linkedEnvoy })
 			piLegionVersion, piEnvoyVersion = tc.legion, tc.envoy
@@ -1092,6 +1107,25 @@ func TestStartCheckConfigNamesTheResolvedPluginPair(t *testing.T) {
 			}
 		})
 	}
+}
+
+// claudeInKubernetes lets a check of a configuration that runs a role on Claude Code pass the
+// loader while the runtime still refuses one: runtime.Backends names tmux alone as Claude Code's
+// runtime, and the loader refuses a role on a backend this runtime does not launch
+// (config.checkWorkerBackends). The pod's path is built before that entry is widened — the
+// refusal is lifted once the whole of it is in place — so a test that drives the lane adds
+// kubernetes to the entry for its own duration and puts the entry back after. It is a no-op once
+// the entry names kubernetes itself. No test of this package runs in parallel with another.
+func claudeInKubernetes(t *testing.T) {
+	t.Helper()
+	entry := runtime.Backends[runtime.BackendClaude]
+	if entry.LaunchedBy("kubernetes") {
+		return
+	}
+	restored := entry
+	entry.Runtimes = append(slices.Clone(entry.Runtimes), "kubernetes")
+	runtime.Backends[runtime.BackendClaude] = entry
+	t.Cleanup(func() { runtime.Backends[runtime.BackendClaude] = restored })
 }
 
 // --check-config prints one more plain line, after Config OK and the capability gaps and before
