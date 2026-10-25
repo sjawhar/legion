@@ -73,12 +73,12 @@ Specs: dispatch://INFRA-258 and dispatch://INFRA-292.
   closes with 4001 (`LiveSocketMaxAgeClose`). The page opens a new socket at once and resumes every
   subscription from its cursor, and shows nothing to the user. No connection lives forever, even
   if a later browser pools WebSockets like HTTP.
-- **Deadlines on ordinary requests.** A GET the page makes whose response headers have not arrived
-  after `REQUEST_DEADLINE_MS` (30 s, `packages/dispatch/web/src/api/client.ts`) is aborted and
-  fails with `RequestTimeoutError`, so a request stalled inside the browser fails and is retried
-  instead of hanging the page. The body it then downloads has an idle deadline of its own:
-  `REQUEST_IDLE_DEADLINE_MS` (30 s), restarted by every chunk, so a slow body that keeps arriving
-  succeeds and one that stops mid-download fails rather than waiting for ever.
+- **Deadlines on ordinary requests.** A GET the page makes is held to `REQUEST_DEADLINE_MS`
+  (30 s, `packages/dispatch/web/src/api/client.ts`) of silence rather than to a total: that long
+  for its response's headers, then that long again for each piece of its body, the timer starting
+  over as every chunk arrives. A request stalled inside the browser, and a body that stops
+  mid-download, both fail with `RequestTimeoutError` and are retried instead of hanging the page,
+  while a slow body that keeps arriving downloads however long it takes.
 - **An idempotency key on every send** (`idempotency_key`, with `409 MESSAGE_KEY_REUSED`, or
   `409 BROADCAST_KEY_REUSED` for a broadcast, for a key reused on a different request). The page
   retries a send to one session, and a broadcast, under its key until Dispatch confirms it
