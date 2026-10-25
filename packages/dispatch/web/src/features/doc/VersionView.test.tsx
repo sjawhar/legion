@@ -4,6 +4,7 @@ import { act, fireEvent, render, waitFor, within } from "@testing-library/react"
 import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { watchLinkClicks } from "../../__tests__/link-clicks";
 import type { CreateEditor } from "./editor";
 import { DocumentRuntime } from "./runtime";
 import { VersionView } from "./VersionView";
@@ -108,24 +109,6 @@ test("VersionView renders a typed callout with the fetched block schema", async 
     view.unmount();
   }
 });
-
-/** Whether the browser would follow the last click on a link in `root`, read as the click leaves
- * the link. happy-dom follows one nothing prevented by moving the test's page, so each click is
- * prevented there, after the app's own handling. */
-function watchLinkClicks(root: HTMLElement): () => boolean | undefined {
-  let followed: boolean | undefined;
-  for (const link of root.querySelectorAll("a")) {
-    link.addEventListener("click", (event) => {
-      followed = !event.defaultPrevented;
-      event.preventDefault();
-    });
-  }
-  return () => {
-    const last = followed;
-    followed = undefined;
-    return last;
-  };
-}
 
 test("VersionView opens a dispatch:// link in the app, a text link or a linked picture", async () => {
   const markdown = "See [CORE-2](dispatch://CORE-2) and [![x](a.png)](dispatch://CORE-3)";

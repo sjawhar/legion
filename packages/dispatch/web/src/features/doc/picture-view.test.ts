@@ -27,10 +27,10 @@ function picture(src: string, alt = "") {
   return schema.node("image", { alt, src });
 }
 
-const noCaret: PictureEditor = { editable: () => true, placeCaretAfter: () => {} };
+const editableEditor: PictureEditor = { editable: () => true, placeCaretAfter: () => {} };
 
 function wrapper(src: string, alt = ""): HTMLElement {
-  const { dom } = pictureView(picture(src, alt), document, noCaret);
+  const { dom } = pictureView(picture(src, alt), document, editableEditor);
   if (!(dom instanceof HTMLElement) || dom.tagName !== "SPAN") {
     throw new Error(`the view's dom is not a wrapper span: ${(dom as Element).outerHTML}`);
   }
@@ -181,7 +181,7 @@ test("a picture from elsewhere, or a reference the grammar refuses, is drawn by 
     "logo.png",
     "dispatch://not a reference",
   ]) {
-    const view = pictureView(picture(source, "logo"), document, noCaret);
+    const view = pictureView(picture(source, "logo"), document, editableEditor);
     const dom = view.dom as HTMLElement;
 
     expect(dom.tagName).toBe("IMG");

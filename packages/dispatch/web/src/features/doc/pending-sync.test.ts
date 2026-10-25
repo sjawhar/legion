@@ -9,6 +9,7 @@ import {
 } from "y-prosemirror";
 import * as Y from "yjs";
 
+import { installOpenSockets, OpenSocket } from "../../__tests__/open-socket";
 import { type DocumentConnection, loadDocumentTransport } from "./connection";
 import { openPendingEdits, type PendingEdits, type PendingKey } from "./pending-edits";
 import { type PendingState, type PendingSync, startPendingSync } from "./pending-sync";
@@ -252,7 +253,13 @@ test("a read-only first sync applies nothing and keeps the saved edits", async (
   expect(doc.getText("t").toString()).toBe("shared");
   expect(Y.encodeStateVector(doc)).toEqual(before);
   expect((await rowsOf(artifact)).length).toBe(1);
-  expect(states.at(-1)).toEqual({ count: 1, readOnly: true, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    readOnly: true,
+    rebuiltAt: undefined,
+    stored: true,
+    strippedAt: undefined,
+  });
 });
 
 test("a restore that parks on a scratch document is dropped, reported, and leaves the live document alone", async () => {
@@ -304,7 +311,13 @@ test("a restore that merges is recorded under the new client and the old rows ar
 
   expect(doc.getText("t").toString()).toBe("shared saved");
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
-  expect(states.at(-1)).toEqual({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    readOnly: false,
+    rebuiltAt: undefined,
+    stored: true,
+    strippedAt: undefined,
+  });
 });
 
 test("a stale saved row does not discard another row that still applies", async () => {
@@ -435,7 +448,13 @@ test("a saved row the editor with the image's link made applies and keeps the li
   expect(imageOf(doc).getAttribute("link")).toBe("https://u.com");
   expect(imageOf(doc).getAttribute("linkTitle")).toBe("t");
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
-  expect(states.at(-1)).toEqual({ count: 1, readOnly: false, rebuiltAt: undefined, stored: true });
+  expect(states.at(-1)).toEqual({
+    count: 1,
+    readOnly: false,
+    rebuiltAt: undefined,
+    stored: true,
+    strippedAt: undefined,
+  });
 });
 
 test("a first sync deletes every row it handled in one IndexedDB write", async () => {
@@ -575,35 +594,9 @@ test("an edit recorded while a SyncStep2 acknowledgement is clearing stays track
   }
 });
 
-/** A socket already open, as the browser's is once it connects; the test plays the server. */
-class OpenSocket extends EventTarget {
-  static opened: OpenSocket[] = [];
-  binaryType = "blob";
-  readonly readyState: number = 1;
-  readonly sent: Uint8Array[] = [];
-
-  constructor(readonly url: string) {
-    super();
-    OpenSocket.opened.push(this);
-    queueMicrotask(() => this.dispatchEvent(new Event("open")));
-  }
-
-  close(): void {}
-
-  send(data: Uint8Array): void {
-    this.sent.push(new Uint8Array(data));
-  }
-
-  receive(data: Uint8Array): void {
-    this.dispatchEvent(new MessageEvent("message", { data: data.slice().buffer }));
-  }
-}
-
 test("a real provider's edit typed on an open socket is cleared by its own acknowledgement", async () => {
   const artifact = artifactId();
-  const realSocket = globalThis.WebSocket;
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
-  OpenSocket.opened = [];
+  const restoreSockets = installOpenSockets();
   let connection: DocumentConnection | undefined;
   let synced = false;
   try {
@@ -639,17 +632,15 @@ test("a real provider's edit typed on an open socket is cleared by its own ackno
     await waitFor(async () => expect(await rowsOf(artifact)).toEqual([[artifact, clientId, 2]]));
   } finally {
     connection?.destroy();
-    globalThis.WebSocket = realSocket;
+    restoreSockets();
   }
 });
 
 test("a document whose browser keeps no edits says so, and still connects", async () => {
   const realStorage = globalThis.indexedDB;
-  const realSocket = globalThis.WebSocket;
   const logged = spyOn(console, "error").mockImplementation(() => {});
   Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: undefined });
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
-  OpenSocket.opened = [];
+  const restoreSockets = installOpenSockets();
   let connection: DocumentConnection | undefined;
   const pending: PendingState[] = [];
   try {
@@ -664,11 +655,13 @@ test("a document whose browser keeps no edits says so, and still connects", asyn
     });
     await waitFor(() => expect(OpenSocket.opened).toHaveLength(1));
     await waitFor(() =>
-      expect(pending).toEqual([{ count: 0, readOnly: false, rebuiltAt: undefined, stored: false }])
+      expect(pending).toEqual([
+        { count: 0, readOnly: false, rebuiltAt: undefined, stored: false, strippedAt: undefined },
+      ])
     );
   } finally {
     connection?.destroy();
-    globalThis.WebSocket = realSocket;
+    restoreSockets();
     Object.defineProperty(globalThis, "indexedDB", { configurable: true, value: realStorage });
     logged.mockRestore();
   }

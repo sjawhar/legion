@@ -2,6 +2,7 @@ import { expect, test } from "bun:test";
 import { DOCUMENT_EDITOR_SCHEMA_VERSION } from "@legion/contracts";
 import { waitFor } from "@testing-library/react";
 
+import { installOpenSockets, OpenSocket } from "../../__tests__/open-socket";
 import {
   colorForLogin,
   connectionLabel,
@@ -34,7 +35,13 @@ test("a read-only Hocuspocus admission signals a schema reload", () => {
 });
 
 test("pending document labels describe retained, read-only, rebuilt, stripped, and unretained edits", () => {
-  const retained = { count: 2, readOnly: false, rebuiltAt: undefined, stored: true };
+  const retained = {
+    count: 2,
+    readOnly: false,
+    rebuiltAt: undefined,
+    stored: true,
+    strippedAt: undefined,
+  };
   expect(connectionLabel("offline", pendingNotice("offline", retained))).toBe(
     "offline · 2 edits saved in this browser, not sent yet."
   );
@@ -57,30 +64,8 @@ test("pending document labels describe retained, read-only, rebuilt, stripped, a
   );
 });
 
-/** A socket already open, as the browser's is once it connects, keeping every frame it is sent. */
-class OpenSocket extends EventTarget {
-  static opened: OpenSocket[] = [];
-  binaryType = "blob";
-  readonly readyState: number = 1;
-  readonly sent: Uint8Array[] = [];
-
-  constructor(readonly url: string) {
-    super();
-    OpenSocket.opened.push(this);
-    queueMicrotask(() => this.dispatchEvent(new Event("open")));
-  }
-
-  close(): void {}
-
-  send(data: Uint8Array): void {
-    this.sent.push(new Uint8Array(data));
-  }
-}
-
 test("a document connection presents its schema version and the bundle's editor schema", async () => {
-  const realSocket = globalThis.WebSocket;
-  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
-  OpenSocket.opened = [];
+  const restoreSockets = installOpenSockets();
   let connection: DocumentConnection | undefined;
   try {
     const connect = await loadDocumentTransport();
@@ -105,6 +90,6 @@ test("a document connection presents its schema version and the bundle's editor 
     expect(query.get("editor_schema")).toBe(String(DOCUMENT_EDITOR_SCHEMA_VERSION));
   } finally {
     connection?.destroy();
-    globalThis.WebSocket = realSocket;
+    restoreSockets();
   }
 });

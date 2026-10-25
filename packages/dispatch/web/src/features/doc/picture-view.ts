@@ -117,10 +117,13 @@ export function pictureView(
     return { dom };
   }
   const { named, route } = picture;
-  // The anchor of the picture's link, if the schema draws one. Its `<img>` is not used, so it is
-  // drawn without the source: the browser would try to fetch `dispatch://`.
-  const drawn = schemaDOM(node.type.create({ ...node.attrs, src: "" }), document);
-  const wrapper = drawn.nodeName === "A" ? drawn : undefined;
+  // The anchor of the picture's link, if it has one the schema draws. Its `<img>` is not used, so
+  // it is drawn without the source: the browser would try to fetch `dispatch://`.
+  const drawn =
+    typeof node.attrs.link === "string" && node.attrs.link !== ""
+      ? schemaDOM(node.type.create({ ...node.attrs, src: "" }), document)
+      : undefined;
+  const wrapper = drawn?.nodeName === "A" ? drawn : undefined;
   const dom = document.createElement("span");
   dom.dataset.dispatchDocPicture = buildDispatchReference(route);
   let link: HTMLAnchorElement | undefined;

@@ -36,10 +36,10 @@ import {
 import type { Transformer } from "unified";
 import { dispatchHrefAttribute } from "../../dispatch-links";
 
-export const LINK_ATTR = "link";
-export const LINK_TITLE_ATTR = "linkTitle";
-export const LINK_DOM_ATTR = "data-link";
-export const LINK_TITLE_DOM_ATTR = "data-link-title";
+const LINK_ATTR = "link";
+const LINK_TITLE_ATTR = "linkTitle";
+const LINK_DOM_ATTR = "data-link";
+const LINK_TITLE_DOM_ATTR = "data-link-title";
 
 interface MdastNode {
   type: string;
@@ -107,17 +107,19 @@ function isAnchorAroundOneImage(element: Element | null): element is Element {
   return content.length === 1 && (content[0] as Node).nodeName.toLowerCase() === "img";
 }
 
-function linkAttrsFromDom(img: Element): { link: string; linkTitle: string } {
+function linkAttrsFromDom(img: Element): { [LINK_ATTR]: string; [LINK_TITLE_ATTR]: string } {
   const own = img.getAttribute(LINK_DOM_ATTR);
-  if (own) return { link: own, linkTitle: img.getAttribute(LINK_TITLE_DOM_ATTR) ?? "" };
+  if (own) {
+    return { [LINK_ATTR]: own, [LINK_TITLE_ATTR]: img.getAttribute(LINK_TITLE_DOM_ATTR) ?? "" };
+  }
   const parent = img.parentElement;
   if (isAnchorAroundOneImage(parent)) {
     return {
-      link: parent.getAttribute("href") ?? "",
-      linkTitle: parent.getAttribute("title") ?? "",
+      [LINK_ATTR]: parent.getAttribute("href") ?? "",
+      [LINK_TITLE_ATTR]: parent.getAttribute("title") ?? "",
     };
   }
-  return { link: "", linkTitle: "" };
+  return { [LINK_ATTR]: "", [LINK_TITLE_ATTR]: "" };
 }
 
 const imageParseRule: TagParseRule = {
@@ -137,7 +139,7 @@ const imageParseRule: TagParseRule = {
 };
 
 /** The commonmark image with a `link` and a `linkTitle`. */
-export const linkedImageSchema = imageSchema.extendSchema((prev) => (ctx): NodeSchema => {
+const linkedImageSchema = imageSchema.extendSchema((prev) => (ctx): NodeSchema => {
   const base = prev(ctx);
   return {
     ...base,
@@ -226,7 +228,7 @@ function skipAnchorAroundOneImage(rule: TagParseRule): TagParseRule {
 }
 
 /** The commonmark link mark, leaving an anchor around one image to `linkedImageSchema`. */
-export const linkedImageLinkSchema = linkSchema.extendSchema((prev) => (ctx): MarkSchema => {
+const linkedImageLinkSchema = linkSchema.extendSchema((prev) => (ctx): MarkSchema => {
   const base = prev(ctx);
   return {
     ...base,

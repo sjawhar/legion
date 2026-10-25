@@ -105,7 +105,10 @@ function pictureSerializer(schema: Schema): DOMSerializer {
           return image(node);
         }
         const { named, route } = picture;
-        const link = linkAttributes(image(node));
+        const link =
+          typeof node.attrs.link === "string" && node.attrs.link !== ""
+            ? linkAttributes(image(node))
+            : undefined;
         if (link !== undefined) {
           return [
             "a",

@@ -17,7 +17,7 @@ export interface PendingState {
    * When the oldest row dropped for removing an image's link was saved: an editor built before
    * the image kept its link made it. Undefined until a first sync drops one.
    */
-  strippedAt?: number;
+  strippedAt: number | undefined;
   /** Whether this browser has an IndexedDB store for these edits. */
   stored: boolean;
 }

@@ -71,7 +71,7 @@ type syncedPeer struct {
 // its own over documentService, with the admission query a current dashboard sends.
 func connectBrowserPeer(t *testing.T, documentService *docs.Service, artifactID string) *syncedPeer {
 	t.Helper()
-	return connectBrowserPeerWith(t, documentService, artifactID, docstest.AdmissionQuery(pmdoc.SchemaVersion()))
+	return connectBrowserPeerWith(t, documentService, artifactID, "")
 }
 
 // connectBrowserPeerWith connects as connectBrowserPeer does, sending query, the admission query of

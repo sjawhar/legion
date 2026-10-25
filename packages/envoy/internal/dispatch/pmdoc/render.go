@@ -778,6 +778,11 @@ func isAngleURLLink(node *Node, marks []Mark, escapePipes bool) bool {
 	return false
 }
 
+// linkTail writes the end of a link or image after its text: the destination and title.
+func linkTail(destination, title string, escapePipes bool) string {
+	return "](" + escapeLinkDestination(destination, escapePipes) + titleSuffix(title, escapePipes) + ")"
+}
+
 func escapeLinkDestination(href string, escapePipes bool) string {
 	if escapePipes {
 		href = escapeTableLinkDestination(href)

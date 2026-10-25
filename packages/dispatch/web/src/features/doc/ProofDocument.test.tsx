@@ -3,6 +3,7 @@ import { act, fireEvent, screen, waitFor, within } from "@testing-library/react"
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { watchLinkClicks } from "../../__tests__/link-clicks";
 import {
   answerTextReadsWithTheSeededText,
   artifact,
@@ -199,24 +200,6 @@ test("ProofDocument opens a hover card for a dispatch:// link in the live editor
   }
 });
 
-/** Whether the browser would follow the last click on a link in `root`, read as the click leaves
- * the link. happy-dom follows one nothing prevented by moving the test's page, so each click is
- * prevented there, after the app's own handling. */
-function watchLinkClicks(root: HTMLElement): () => boolean | undefined {
-  let followed: boolean | undefined;
-  for (const link of root.querySelectorAll("a")) {
-    link.addEventListener("click", (event) => {
-      followed = !event.defaultPrevented;
-      event.preventDefault();
-    });
-  }
-  return () => {
-    const last = followed;
-    followed = undefined;
-    return last;
-  };
-}
-
 test("ProofDocument navigates in-app from a picture linked to a dispatch:// target, under the picture's node selection", async () => {
   const { editors, sync, view } = renderProofDocument();
 
@@ -278,7 +261,13 @@ test("ProofDocument reports connection status and pending edits through the tool
     act(() => status("connected"));
     await waitFor(() => expect(toolbar.current?.connection).toBe("connected"));
     act(() => {
-      pending({ count: 2, readOnly: false, rebuiltAt: undefined, stored: true });
+      pending({
+        count: 2,
+        readOnly: false,
+        rebuiltAt: undefined,
+        stored: true,
+        strippedAt: undefined,
+      });
       status("offline");
     });
     await waitFor(() =>
@@ -287,6 +276,7 @@ test("ProofDocument reports connection status and pending edits through the tool
         readOnly: false,
         rebuiltAt: undefined,
         stored: true,
+        strippedAt: undefined,
       })
     );
     await waitFor(() => expect(toolbar.current?.connection).toBe("offline"));
