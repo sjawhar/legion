@@ -19,13 +19,13 @@ The first line is the verdict, with the short sha of the head you reviewed (`git
 
 Put nothing before it: a PR gate reads only the first line of a posted report.
 
-Then one entry per finding: `path:line`, the smell, the cost it adds, and the remedy, so the author can act on it without asking. Report few findings, each one you are sure of: a long list hides the ones that block. Order them so the costliest is read first: step 2's structural regressions and missed code-judo moves, then rows 2-3, 7-8, 1, 9-10, then the rest. Write each as a plain request, for example: `this adds another special-case branch to an already busy flow. Move it into its own function.`
+Then one entry per finding: `path:line`, the smell, the cost it adds, and the remedy, so the author can act on it without asking. Report few findings, each one you are sure of: a long list hides the ones that block. Order them so the costliest is read first: step 2's structural regressions and missed code-judo moves, then rows 2-3, 7-8, 1, 9-10, then the rest. Write each as a plain request: `this adds another special-case branch to an already busy flow. Move it into its own function.`
 
 ## Steps
 
 1. Read the diff and each changed file around its hunks. Flag lines the diff adds or changes, and existing code it makes harder to follow, such as a function it lengthens or adds a branch or parameter to. A finding on code the diff leaves alone blocks the PR for work it did not cause.
 2. Look for the code-judo move first: a restructure onto the existing architecture that deletes whole branches, helpers, modes, conditionals or layers. A structural fix often removes the line-level findings with it.
-3. For a refactor, count the concepts (the types, functions, flags and modes) a reader must know before and after. A move that keeps the count is not a simplification: say so, rather than accept a cleaner version of the same idea. When the problem is structural, do not suggest a rename, because the rename hides the finding that matters.
+3. For a refactor, count the concepts (the types, functions, flags and modes) a reader must know before and after. A move that keeps the count is not a simplification: say so, rather than accept a cleaner version of the same idea. When the problem is structural, do not suggest a rename, which hides the finding that matters.
 4. Check every hunk against the table below, because each row is a smell this review blocks on. For file size, compare `git show <base>:<path> | wc -l` with `wc -l <path>`; `<base>` is the range start your brief names, else `git merge-base HEAD origin/<default branch>`.
 5. Before you report a finding, quote its line at the reviewed head. For a boundary, type or duplicate-helper claim, also read the callers (`grep` the symbol) and the existing helper you name. A finding built on a misread costs the author a round.
 6. Report only a cost you can name (the table's Cost column). A preference or a micro-optimization with no such cost is not a finding. When a structural finding exists, leave out naming and style nits, because they bury it.
@@ -50,6 +50,6 @@ Then one entry per finding: `path:line`, the smell, the cost it adds, and the re
 
 ## Approval bar
 
-- A structural regression, a hacky or magic abstraction, or a boundary leak blocks whatever the PR says, because no evidence makes the code easier to change.
+- A structural regression, a hacky or magic abstraction, a boundary leak, or a missed obvious decomposition blocks whatever the PR says, because no evidence makes the code easier to change.
 - Every other finding blocks, and the verdict is CHANGES, unless the PR gives evidence that the simpler form fails: a caller it breaks, a measured cost, or a constraint outside the diff that the PR names with `path:line` or a link. "It works" and "tests pass" are no such evidence, because this review judges structure, not behavior.
-- State a blocking finding as blocking, directly and without rudeness. A finding phrased as "maybe" or "consider" reads as optional and gets skipped.
+- State a blocking finding as blocking, directly and without rudeness. A "maybe" or "consider" finding reads as optional and gets skipped.
