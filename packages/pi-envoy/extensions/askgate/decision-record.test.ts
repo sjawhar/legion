@@ -228,18 +228,24 @@ describe("the AskGate decision record", () => {
     }
   });
 
-  test("the project falls back to LEGION_PROJECT, and with neither set nothing reaches Dispatch", async () => {
+  test("the project falls back to LEGION_PROJECT, upper-cased as a project key is", async () => {
     const own = fakeDispatch();
     await harness({
-      env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA", LEGION_PROJECT: "LEGION" },
+      env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA", LEGION_PROJECT: "legion" },
       client: own.client,
     }).write(REFUSAL);
+    expect(own.uploads[0]?.project).toBe("INFRA");
     expect(recordsIn(own.uploads[0]?.content ?? "")[0]).toMatchObject({ project: "INFRA" });
 
+    // A pod's LEGION_PROJECT is the daemon's lower-cased project name, and Dispatch answers 404
+    // to every spelling of a project key but the uppercase one.
     const pod = fakeDispatch();
-    await harness({ env: { LEGION_PROJECT: "LEGION" }, client: pod.client }).write(REFUSAL);
+    await harness({ env: { LEGION_PROJECT: "legion" }, client: pod.client }).write(REFUSAL);
+    expect(pod.uploads[0]?.project).toBe("LEGION");
     expect(recordsIn(pod.uploads[0]?.content ?? "")[0]).toMatchObject({ project: "LEGION" });
+  });
 
+  test("with neither project set nothing reaches Dispatch", async () => {
     const none = fakeDispatch();
     for (const env of [{}, { OMP_ASKGATE_RECORD_PROJECT: "", LEGION_PROJECT: " " }]) {
       const g = harness({ env, client: none.client });

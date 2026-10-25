@@ -138,9 +138,12 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
     const ruleOutcome = entry.ruleOutcome;
     if (ruleOutcome === undefined) return undefined;
     // The session's own setting, else the Legion pod's project — a pod has no envoy.json, so its
-    // environment is the only setting it can carry — else no record at all.
-    const project =
-      nonEmpty(deps.env.OMP_ASKGATE_RECORD_PROJECT) ?? nonEmpty(deps.env.LEGION_PROJECT);
+    // environment is the only setting it can carry — else no record at all. Upper-cased, because a
+    // Dispatch project key is `^[A-Z][A-Z0-9]{1,9}$` and every other spelling is a 404, while a
+    // pod's LEGION_PROJECT is the daemon's lower-cased project name.
+    const project = (
+      nonEmpty(deps.env.OMP_ASKGATE_RECORD_PROJECT) ?? nonEmpty(deps.env.LEGION_PROJECT)
+    )?.toUpperCase();
     if (project === undefined) return undefined;
     // A Legion role's session is the one the daemon gives an issue to work, so LEGION_ISSUE is the
     // test that tells a pod's decisions from those made on a person's machine; the counts split on it.
