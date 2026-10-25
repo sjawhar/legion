@@ -2,7 +2,6 @@ package kvwatch_test
 
 import (
 	"context"
-	"os/exec"
 	"strings"
 	"testing"
 	"time"
@@ -239,18 +238,15 @@ func TestAFailedConsumerDeleteAtTheEndIsAnError(t *testing.T) {
 // End is bounded by its context: against a server that does not answer, it returns at the
 // deadline and logs the unanswered delete as an ERROR rather than holding the shutdown.
 func TestEndIsBoundedByItsContext(t *testing.T) {
-	ctr, uri := testnats.Start(t)
+	srv, uri := testnats.Start(t)
 	_, kv := bucket(t, uri)
 	logger, records := jsonLogger(t)
 	w := kvwatch.New("test cache", kv, newSeen().apply, func() {}, kvwatch.WithLogger(logger))
 	w.Start()
 	eventually(t, "the first scan", w.Ready)
 
-	id := ctr.GetContainerID()
-	if out, err := exec.Command("docker", "pause", id).CombinedOutput(); err != nil {
-		t.Fatalf("pause NATS: %v: %s", err, out)
-	}
-	t.Cleanup(func() { _ = exec.Command("docker", "unpause", id).Run() })
+	thaw := srv.Freeze(t)
+	t.Cleanup(thaw)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()

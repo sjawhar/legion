@@ -417,8 +417,9 @@ type CheckView struct {
 }
 
 // CheckWakeView is what woke a production check's latest look: Kind names the cause (`merge`,
-// `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`), Detail the
-// cause's own detail (the run and its completion, or the build's commit), and At when.
+// `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
+// Detail the cause's own detail (the run and its completion, the deploy workflow's run, attempt,
+// job and step success, or the build's commit), and At when.
 type CheckWakeView struct {
 	Kind   string    `json:"kind"`
 	Detail string    `json:"detail"`
