@@ -2,58 +2,38 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-184",
-  "completed": "2026-10-25T05:35:00Z",
+  "completed": "2026-10-25T06:20:00Z",
   "proof": [
     {
-      "criterion": "The round's own work: GitHub reported the pull request CONFLICTING/DIRTY, so it computed no merge ref and started no `on: pull_request` run at any head. The base is merged forward and the pull request is mergeable again.",
-      "surface": "GitHub's own view of pull request 2157, and the jj workspace at LEGION_WORKSPACE.",
-      "command": "`gh pr view 2157 --json mergeable,mergeStateStatus,headRefOid` before and after; the merge itself `base=$(gh pr view 2157 -R sjawhar/legion --json baseRefName -q '.baseRefName | @json') && jj -R \"$LEGION_WORKSPACE\" new legion/INFRA-184 \"${base}@origin\" -m \"merge: resolve conflict against main@origin\"`, then the fingerprint of `skill://legion-worker/references/conflicts-and-rewrites.md` at each tip.",
-      "observed": "Before: `CONFLICTING` / `DIRTY` at ac732c83a04f, with `gh pr checks` reporting no check on the branch. After the forward merge and push: `MERGEABLE` / `BLOCKED` at 7c2788c89869 (blocked on the required review alone). The fingerprint moved e4df7ab68056… → c1d1a6c11c38… — **changed**, not unchanged, because the resolution carries one content change; both numbers and that verdict are posted on the pull request (comment 6393946942).",
+      "criterion": "This round's whole work: the tester's failure was GitHub failing to pull a service-container image on the required `Tests` run at the code head, not the change. The red is cleared by one re-run and by no commit.",
+      "surface": "GitHub Actions on pull request 2157, at code head 7c2788c89869f6d1eb48dc75fba998a6f10b8e05.",
+      "command": "`gh api repos/sjawhar/legion/actions/jobs/121086489962` to read the failing step, then `gh run rerun 40165810727 --repo sjawhar/legion --failed` once, then `gh api repos/sjawhar/legion/rules/branches/main` and `gh api repos/sjawhar/legion/commits/7c2788c89869…/check-runs` to read the outcome against the base's required set.",
+      "observed": "The failing job 121086489962's only failed step was `Initialize containers` — `Docker pull failed with exit code 1` after two backoff retries — so the job ended before a test ran, while `typecheck` and `lint` of the same run passed. After attempt 2: `main` requires `lint`, `typecheck`, `test` and `pr-title`, and all four are `success` at the code head (`test` 121088976702, `lint` 121088977663, `typecheck` 121088977440, `pr-title` 121086747575). No commit was pushed for it.",
       "headSha": "7c2788c89869f6d1eb48dc75fba998a6f10b8e05",
-      "negativeControl": "The merge is a forward merge of the bookmark with `main@origin`, never a rebase: `jj log -r 'ancestors(@, 3)'` shows 7c2788c89869 descending from both ac732c83a04f and 6e66210b7732, so no commit already pushed moved and `jj git push` reported a plain fast-forward (`move forward from ac732c83a04f to 7c2788c89869`), not a backwards move."
+      "negativeControl": "The re-run changed no code and no head: the code head is the same 7c2788c89869 the tester drove, and the branch head moved only by handoff commits carrying `skip-checks: true`. The same job that died in `Initialize containers` passed on attempt 2 with nothing else altered, which is what distinguishes an image-pull failure from a test failure."
     },
     {
-      "criterion": "The conflict resolution keeps review round 1's fix rather than letting the merge undo it: `TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails` must still reach the failure it guards, on main's rewritten shape.",
-      "surface": "The Go test as the repository runs it, against the rig's Postgres 17 with pgvector.",
-      "command": "`cd packages/envoy && DISPATCH_TEST_DATABASE_URL=… go test ./internal/dispatch/api/ -run TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails -count=1 -v`",
-      "observed": "Both of main's cases emit the warning whose absence made the test vacuous — `WARN dispatch: write advice omitted route=\"POST /api/v1/issues/{key}/asks\" issue=ADVFAIL-1 query=session_writes_since_human error=\"… statement timeout (SQLSTATE 57014)\"` and the same for ADVFAIL-2, twice over, once per case — and both subtests pass: `an_allowance_no_database_can_meet_still_answers_with_an_envelope` and `a_generous_allowance_finds_the_answered_question_and_records_it`.",
+      "criterion": "The change itself was already proven at this head and is unchanged by this round.",
+      "surface": "The `dispatch` command an agent runs, against `packages/dispatch/e2e/run-server.sh` servers on a real Postgres 17 with pgvector — one built from the merged tree, one from 7bf2759c6e17 — plus the repository's Go and TypeScript suites.",
+      "command": "`bash /tmp/infra-184/prove.sh`; `go test ./internal/dispatch/api/... ./internal/dispatch/model/...`; `gofmt -l`, `go vet`, `go build ./...`; `bunx biome check`; `tsc --noEmit` for contracts, envoy-client and claude-envoy; `bun test`; `bun run check-dist`.",
+      "observed": "All four acceptance criteria with their negative controls: 36 assertions, 0 failures. The whole `internal/dispatch/api` package green in 583 s and `model` green; gofmt, vet and build clean; biome and three tsc runs clean; 490 bun tests pass; `check-dist` matches a fresh build. The tester drove the same head independently and reported verify.sh 66, break2.sh 13 and boom.sh 19 assertions, all 0 failures, including the `parentDepthCap` boundary at 32 links and a forced label-walk failure that left the claim standing.",
       "headSha": "7c2788c89869f6d1eb48dc75fba998a6f10b8e05",
-      "negativeControl": "Main's own version of the file, read at `main@origin` before the merge, files both of its asks with `dispatchRequest(…, \"alice\")`: a user actor, which `writeAdvice` answers before `computeWriteAdvice`, so the armed hook fires in neither case and the warning appears for neither. That is the state a mechanical take-main would have restored, and it is why this resolution is a content change rather than a take-both."
-    },
-    {
-      "criterion": "A1 (R1). Three sessions post twice each; the sixth post reports two writes for its own session and prints no cadence line; the same run on the commit before the change reports six and prints \"Stop posting here until a human replies.\"",
-      "surface": "The `dispatch` command an agent runs (this branch's CLI rebuilt from the merged tree), against `packages/dispatch/e2e/run-server.sh` servers on a real Postgres 17 with pgvector: port 8777 built from the merged tree, port 8778 built from 7bf2759c6e17.",
-      "command": "bash /tmp/infra-184/prove.sh (section A1).",
-      "observed": "The sixth run printed its `Posted message …` line alone and recorded session_writes_since_human = 2.",
-      "headSha": "7c2788c89869f6d1eb48dc75fba998a6f10b8e05",
-      "negativeControl": "The same six posts against the pre-change server recorded 6 and printed the stop line."
-    },
-    {
-      "criterion": "A2 (R1), A3 (R2) both halves and A4 (R3), re-run whole on the merged head rather than argued from the fingerprint, because main moved 120 files (+6470/−1908) since the fork point 7bf2759c6e17 and an unchanged-diff argument covers no semantic clash with its new code.",
-      "surface": "The same two servers and the same branch CLI.",
-      "command": "bash /tmp/infra-184/prove.sh (all sections), plus `go test ./internal/dispatch/api/... ./internal/dispatch/model/...`, `gofmt -l`, `go vet`, `go build ./...`, `bunx biome check`, `tsc --noEmit` for contracts, envoy-client and claude-envoy, `bun test`, and `bun run check-dist`.",
-      "observed": "prove.sh: **36 assertions, 0 failures**. The whole `internal/dispatch/api` package green in 583 s and `model` green; gofmt, vet and build clean; biome and three tsc runs clean; 490 bun tests pass; `check-dist` matches a fresh build, so main's merge moved no generated byte.",
-      "headSha": "7c2788c89869f6d1eb48dc75fba998a6f10b8e05",
-      "negativeControl": "Every criterion's own control ran with it: the unlabelled issue still answers `issue-update` on claim and release, the unlabelled triage issue still prints `is still in triage` with `legion_managed_status=false`, the same comment on a labelled triage issue against the pre-change server prints the line, `--artifact plan.md` leaves the spec alone, and `--project` with no artifact is refused."
+      "negativeControl": "Each criterion ran with its own control: the unlabelled issue still answers `issue-update`, the unlabelled triage issue still prints `is still in triage` with `legion_managed_status=false`, the same comment on a labelled triage issue against the pre-change server prints the line, `--artifact plan.md` leaves the spec alone, and `--project` with no artifact is refused. The tester added the counterfactual for the merge resolution: main's own copy of `suggestions_test.go`, run on this head's server, passes with no `write advice omitted` warning at all, while the resolved copy emits four."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/dispatch/api/suggestions_test.go — the one conflicting path, resolved inside the merge commit: main's structure, both of its cases and its `suggestionAllowance` work kept, with the session actor re-applied to each case's two ask filings and a comment saying why the actor must be a session",
-    "the merge commit also brings main's 120 changed files into the branch; `packages/envoy/AGENTS.md` and `packages/envoy/internal/dispatch/api/write_advice_test.go` auto-merged clean and needed no hand resolution"
+    "none — this round pushed no code. A red that failed on its own is re-run, never answered with a commit."
   ],
   "trickyParts": [
-    "Main's rewrite (116821ebfebc, #2158, merged 02:07Z — before this branch's 04:48Z commit, so a genuine crossing) did not move the test, it reshaped it, and its two new cases carry the same user actor the review found. Taking either side alone loses something: main's side loses review round 1's fix, this branch's side loses main's two cases and its allowance fix. The resolution is the only one that keeps both, and it is a content change — the fingerprint says `changed` and the pull request comment says so plainly rather than presenting the merge as a confirmation.",
-    "The merge is `jj new legion/INFRA-184 \"main@origin\"` from the bookmark, never from `@` and never `jj rebase`: `@` was an empty undescribed commit above the handoff commit, and jj refuses to push a commit with no description, while a rebase in this shared clone would rewrite every descendant of the chain's fork point, another tree's branch included."
+    "The checks sit on the code head 7c2788c89869 and not on the pull request's head, because the handoff commits above it carry `skip-checks: true` and start no run. `gh pr checks 2157` therefore answers `no checks reported on the branch`, which reads like missing CI and is not: read the commit below the head, or `gh api repos/{owner}/{repo}/commits/<code head>/check-runs`."
   ],
-  "deviations": [
-    "The committed plan (`.legion/INFRA-184/plan.json`, reaffirmed for generation 3) records departure 2, \"a fourth wrong text, out of scope here\". Spec version 5 overturned it and version 6 settled how, so the spec, not the plan's departure 2, is the current scope.",
-    "The spec's Acceptance names `packages/dispatch/e2e/run-server.sh`, which is the plan's own recorded departure from `bun run dispatch:local`.",
-    "The Go suite's Postgres was initialised with `--locale-provider=icu --icu-locale=en-US` rather than the plan's `--locale=C`, because the api package's rank test refuses to run on a byte-order database (rank_test.go:317)."
+  "deviations": [],
+  "openQuestions": [
+    "Reported to the architect rather than retried a third time: the same `Initialize containers` image-pull failure has now hit two different jobs at this head — `test` of `Tests` run 40165810727 (cleared by the re-run above) and `envoy-go-race` of `Legion Envoy and Contracts` run 40165810733, whose first attempt died the same way and which I re-ran once (attempt 2 queued when this was written). `envoy-go-race` is not in `main`'s required set, so it blocks nothing. The architect's standing instruction is that two image-pull failures in a row are a finding for a person rather than a thing to retry again; this is two distinct jobs with one failure each rather than one job failing twice, so I re-ran the second once and reported it instead of deciding that myself."
   ],
-  "openQuestions": [],
   "discoveredComplexity": [
-    "A conflicting pull request is a CI blackout, not merely a merge nuisance: GitHub computes no merge ref and starts no workflow triggered `on: pull_request` for any activity on it, so the reviewer can read no checks and READY would refuse the head. The tester recorded that as this round's failure, which is the right call — the behaviour was never implicated.",
-    "Decided, not open (the architect ruled at 2026-10-25T04:28Z): no route gate on the triage walk. A freshly created issue is always in triage and the client suppresses the triage line for `dispatch_issue`, so a session's `dispatch issue` resolves `legion_managed_status` for an answer nothing reads; gating it needs the route or the tool inside `computeWriteAdvice`, which the server does not have, and it would still fire for `dispatch issue-update --status triage`. The rule that stands is the spec's: resolve the answer where the issue is in triage.",
-    "`legion_managed_status` is three-valued on both surfaces and absent means the same in both: not asked (a write past triage, a non-session actor) or not answered (a failed walk). Every reader compares it `=== true`; a `=== false` would invert on a mid-rollout server."
+    "Decided, not open (the architect ruled at 2026-10-25T04:28Z): no route gate on the triage walk. The rule that stands is the spec's — resolve the answer where the issue is in triage.",
+    "`legion_managed_status` is three-valued on both surfaces and absent means the same in both: not asked (a write past triage, a non-session actor) or not answered (a failed walk). Every reader compares it `=== true`.",
+    "The conflict round's resolution is recorded on the pull request with both fingerprints and the verdict `changed`: main's rewrite of `TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails` still filed both asks as a user actor, so the session actor had to be re-applied to its two cases rather than taking either side whole."
   ]
 }
