@@ -2668,9 +2668,9 @@ operator projects one through `runtime.kubernetes.pod.volumes`
 are the gate for everything below:
 
 ```sh
-kubectl auth can-i create jobs      # may this role start a workload at all
-kubectl auth can-i create services  # may it give one a name on the network
-kubectl auth can-i get services     # `kubectl apply` reads the live object before it creates one
+kubectl -n <namespace> auth can-i create jobs      # may this role start a workload at all
+kubectl -n <namespace> auth can-i create services  # may it give one a name on the network
+kubectl -n <namespace> auth can-i get services     # `kubectl apply` reads the live object before it creates one
 ```
 
 The third is not a duplicate of the second. `kubectl apply` is client-side by default and reads
@@ -2696,9 +2696,17 @@ unconditional and its only `kubectl delete job` is after the Service steps, whic
 four-processor workload nobody removes, sitting on the namespace's shared quota until its
 deadline runs out.
 
-The namespace is the role's own and is never written down: the projected credential names it in
-`/var/run/secrets/kubernetes.io/serviceaccount/namespace`, which is the namespace `kubectl` uses
-by default, so no command here passes `-n`.
+`<namespace>` is the namespace the workload runs in, and each command names it because a pod's
+`kubectl` has no kubeconfig and takes its default namespace from the pod instead: `POD_NAMESPACE`
+when that is set, else the `namespace` file the projected credential carries
+(`/var/run/secrets/kubernetes.io/serviceaccount/namespace`), else `default`. Without `-n`, the gate
+answers for whatever namespace the pod's projection names, which a role cannot see from this page
+and cannot assume is the workload's. In a pod projected as this deployment projects one, that file
+names the workload's namespace, so the form without `-n` answers as `-n <namespace>` does, which is
+why it reads as working; the same account asked with `-n` the namespace Legion's own pods run in
+answers `no` to all three (measured from a role container on 2026-10-25). The sequence below
+passes no `-n` and runs in that default namespace, so the gate's answers hold for it only where
+the default is `<namespace>`.
 
 The rules the workload must satisfy. Every one but the last is enforced by the namespace's
 admission rather than by anyone's good behaviour; the last is enforced by nothing, which is why
@@ -2849,11 +2857,16 @@ kubectl delete job "$workload"                                     # takes its p
 kubectl get jobs,pods,svc                                          # its Job and Service gone, its pod soon after
 ```
 
-That check is `python3`, which the image carries, because **the role container has no client for
-any of these servers**: `psql`, `redis-cli` and their kind are not in the image
-([Worker image](#worker-image)), a role may not `exec` into the workload's pod, and installing
-one in its own pod is the withheld `operator-setup` capability. What it proves is what a role
-needs first: that the address resolves and the port answers.
+That check is `python3`, which the image carries, because **the role container had no client for
+any of these servers** when it was written ([Worker image](#worker-image)), a role may not `exec`
+into the workload's pod, and installing one in its own pod is the withheld `operator-setup`
+capability. The first of those three reasons has since changed, and only the first: the image
+this repository builds carries `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` from
+dispatch://INFRA-221's merge on 2026-10-25 onward, and a role has them once its deployment pins a
+digest built from that merge or a later commit of `main` ([Pin by digest, never by
+tag](#pin-by-digest-never-by-tag)) — a role on an older digest still has none of them, and
+`python3` runs on both. What it proves is what a role needs first: that the address resolves and
+the port answers.
 
 It loops because `kubectl wait` cannot tell a role the server is listening. The pod carries no
 readiness probe, so `condition=Ready` means the container started, and a database spends its
