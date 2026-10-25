@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"maps"
@@ -1662,6 +1663,49 @@ func TestLastBytesKeepsTheEndOfTheTail(t *testing.T) {
 			t.Fatalf("lastBytes of an exactly-keep stream was not returned unchanged (len %d, want %d)", len(got), keep)
 		}
 	})
+}
+
+// tailBytes holds a log's newest keep bytes and no more, however long the log: a log of a hundred
+// times keep is read to its end, its last keep bytes come back with the cut reported, and the
+// buffer never grew past the 2×keep it started with, so a log's size never decides what the daemon
+// holds (readLog's memory, which io.ReadAll let a 2000-line tail grow to its whole size).
+func TestTailBytesHoldsOnlyTheNewestBytes(t *testing.T) {
+	const keep = 4 << 10
+	var log strings.Builder
+	for i := 0; log.Len() < 100*keep; i++ {
+		fmt.Fprintf(&log, "line %d %s\n", i, strings.Repeat("x", i%300))
+	}
+	full := log.String()
+	counted := &countingReader{r: strings.NewReader(full)}
+	got, cut, err := tailBytes(counted, keep)
+	if err != nil {
+		t.Fatalf("tailBytes = %v", err)
+	}
+	if counted.n != len(full) {
+		t.Fatalf("tailBytes read %d bytes of %d, want the whole log", counted.n, len(full))
+	}
+	if !cut || string(got) != full[len(full)-keep:] {
+		t.Fatalf("tailBytes = %d bytes, cut %v; want the log's last %d bytes and the cut reported", len(got), cut, keep)
+	}
+	if cap(got) > 2*keep {
+		t.Fatalf("tailBytes' buffer grew to %d bytes reading a %d-byte log, want at most %d", cap(got), len(full), 2*keep)
+	}
+	short := "a short log\n"
+	if got, cut, err := tailBytes(strings.NewReader(short), keep); err != nil || cut || string(got) != short {
+		t.Fatalf("tailBytes of a short log = %q, cut %v, %v; want it whole and no cut", got, cut, err)
+	}
+}
+
+// countingReader counts the bytes read through it.
+type countingReader struct {
+	r io.Reader
+	n int
+}
+
+func (c *countingReader) Read(p []byte) (int, error) {
+	n, err := c.r.Read(p)
+	c.n += n
+	return n, err
 }
 
 // A probe pod's log a hundred lines of a kilobyte, the OK line last, still passes: probeLog keeps

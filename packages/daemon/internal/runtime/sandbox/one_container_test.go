@@ -353,7 +353,8 @@ func TestTheRolesContainerEndingEndsEveryRole(t *testing.T) {
 // A Gone's quote of the shared log is the role's newest lines, read through the pod's log as the
 // kubelet serves it: a log of interleaved tester, reviewer and launcher lines larger than the byte
 // bound quotes the tester's last lines, the ones nearest the container's end, and none of the
-// reviewer's or the launcher's, nor the tester's oldest.
+// reviewer's or the tester's oldest; the launcher's own unprefixed lines follow under their own
+// header, its newest, and none of the reviewer's.
 func TestARolesQuoteIsItsNewestLinesOfALogPastTheBound(t *testing.T) {
 	labels := claimLabels(claim.RoleTester)
 	name := SandboxName(workerToken)
@@ -364,7 +365,7 @@ func TestARolesQuoteIsItsNewestLinesOfALogPastTheBound(t *testing.T) {
 	padding := strings.Repeat("x", 1000)
 	var log strings.Builder
 	for i := range sharedLogLines {
-		fmt.Fprintf(&log, "tester: line %d %s\nreviewer: secret %d\nlauncher: tick %d\n", i, padding, i, i)
+		fmt.Fprintf(&log, "tester: line %d %s\nreviewer: secret %d\nlauncher tick %d\n", i, padding, i, i)
 	}
 	if log.Len() <= sharedLogBytes {
 		t.Fatalf("the log is %d bytes, not past the %d-byte bound", log.Len(), sharedLogBytes)
@@ -381,13 +382,24 @@ func TestARolesQuoteIsItsNewestLinesOfALogPastTheBound(t *testing.T) {
 	}
 	last := sharedLogLines - 1
 	quote := obs.Detail[strings.Index(obs.Detail, "last lines of tester:\n")+len("last lines of tester:\n"):]
-	lines := strings.Split(quote, "\n")
+	own, container, found := strings.Cut(quote, "\n"+containerLinesHeader+"\n")
+	if !found {
+		t.Fatalf("the quote has no section of the container's own lines: %.200q", quote)
+	}
+	lines := strings.Split(own, "\n")
 	if len(lines) != logTailLines || lines[len(lines)-1] != fmt.Sprintf("line %d %s", last, padding) ||
 		lines[0] != fmt.Sprintf("line %d %s", last-logTailLines+1, padding) {
 		t.Fatalf("the tester's quote is %d lines from %.20q to %.20q, want its last %d, line %d to line %d", len(lines), lines[0], lines[len(lines)-1], logTailLines, last-logTailLines+1, last)
 	}
-	if strings.Contains(quote, "secret") || strings.Contains(quote, "tick") {
-		t.Fatalf("the tester's quote carries a sibling's or the launcher's line: %.200q", quote)
+	if strings.Contains(own, "secret") || strings.Contains(own, "tick") {
+		t.Fatalf("the tester's quote carries a sibling's or the launcher's line: %.200q", own)
+	}
+	ticks := strings.Split(container, "\n")
+	if len(ticks) != logTailLines || ticks[0] != fmt.Sprintf("launcher tick %d", last-logTailLines+1) || ticks[len(ticks)-1] != fmt.Sprintf("launcher tick %d", last) {
+		t.Fatalf("the container's own lines are %q, want the launcher's last %d ticks", ticks, logTailLines)
+	}
+	if strings.Contains(container, "secret") || strings.Contains(container, "tester:") {
+		t.Fatalf("the container's own lines carry a role's line: %.200q", container)
 	}
 }
 
@@ -409,6 +421,49 @@ func TestARolesQuoteIsItsOwnLinesOfTheSharedLog(t *testing.T) {
 	}
 	if got := roleLines(log, claim.RoleMerger, 3); got != "" {
 		t.Errorf("roleLines of a role with no lines = %q, want none", got)
+	}
+	if got, want := containerLines(log, 3), "launcher: connected\ntesters: not mine either"; got != want {
+		t.Errorf("containerLines = %q, want %q", got, want)
+	}
+}
+
+// When the launcher, PID 1 of the one container, panics, every role of the pod ends, and the
+// cause is in its own unprefixed lines: each role's Gone quotes them after its own lines, and
+// never a sibling's. The read's first line is attributed to no one, since the kubelet's tail may
+// start it inside a line: a fragment there that reads as the tester's is not quoted as the
+// tester's.
+func TestEachRolesQuoteCarriesTheLaunchersCrash(t *testing.T) {
+	labels := claimLabels(claim.RoleTester)
+	name := SandboxName(workerToken)
+	status := corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: "roles", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 2, Reason: "Error"}},
+	}}}
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels), podObject(name, recorded, sandboxUID, labels, status)}, withoutController())
+	log := strings.Join([]string{
+		"tester: forged by a fragment",
+		"tester: running the suite",
+		"reviewer: reading the diff",
+		"panic: runtime error: index out of range [3] with length 3",
+		"",
+		"goroutine 7 [running]:",
+	}, "\n") + "\n"
+	g.kube.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		return true, &k8sruntime.Unknown{Raw: []byte(log)}, nil
+	})
+	for token, want := range map[claim.Token]string{
+		workerToken: "last lines of tester:\nrunning the suite\n" + containerLinesHeader + "\npanic: runtime error: index out of range [3] with length 3\n\ngoroutine 7 [running]:",
+		otherToken:  "last lines of reviewer:\nreading the diff\n" + containerLinesHeader + "\npanic: runtime error: index out of range [3] with length 3\n\ngoroutine 7 [running]:",
+	} {
+		obs, err := g.r.Probe(g.ctx, rolesLocator(token, recorded))
+		if err != nil {
+			t.Fatalf("Probe %s: %v", token, err)
+		}
+		if obs.Kind != runtime.Gone || !strings.HasSuffix(obs.Detail, want) {
+			t.Errorf("%s: %s %q, want Gone ending %q", token, obs.Kind, obs.Detail, want)
+		}
 	}
 }
 

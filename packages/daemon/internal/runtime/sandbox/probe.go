@@ -994,11 +994,25 @@ func (r *Runtime) probeLog(ctx context.Context, name string) (string, error) {
 	return strings.TrimSpace(text), nil
 }
 
-// lastBytes reads r to its end, keeping only the last keep bytes (one buffer of 2×keep, compacted
-// in place), and answers that tail: with a leading … line (everything up to and including the
-// first \n dropped, so what remains starts on its own line) when anything of r was cut, unchanged
-// when r was keep bytes or shorter.
+// lastBytes reads r to its end, keeping only the last keep bytes (tailBytes), and answers that
+// tail: with a leading … line (everything up to and including the first \n dropped, so what
+// remains starts on its own line) when anything of r was cut, unchanged when r was keep bytes or
+// shorter.
 func lastBytes(r io.Reader, keep int) (string, error) {
+	buf, dropped, err := tailBytes(r, keep)
+	if err != nil || !dropped {
+		return string(buf), err
+	}
+	if i := bytes.IndexByte(buf, '\n'); i >= 0 {
+		buf = buf[i+1:]
+	}
+	return "…\n" + string(buf), nil
+}
+
+// tailBytes reads r to its end and answers its last keep bytes, and whether it dropped any before
+// them. It holds one buffer of 2×keep, compacted in place, and one read chunk of keep, whatever
+// r's length: no read grows the buffer, since at most keep bytes are added to at most keep kept.
+func tailBytes(r io.Reader, keep int) ([]byte, bool, error) {
 	buf := make([]byte, 0, 2*keep)
 	chunk := make([]byte, keep)
 	dropped := false
@@ -1010,19 +1024,12 @@ func lastBytes(r io.Reader, keep int) (string, error) {
 			buf = append(buf[:0], buf[len(buf)-keep:]...)
 		}
 		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			break
+			return buf, dropped, nil
 		}
 		if err != nil {
-			return "", err
+			return nil, false, err
 		}
 	}
-	if !dropped {
-		return string(buf), nil
-	}
-	if i := bytes.IndexByte(buf, '\n'); i >= 0 {
-		buf = buf[i+1:]
-	}
-	return "…\n" + string(buf), nil
 }
 
 // undefinedFlag is Go's flag package refusing a flag the probed CLI does not define.

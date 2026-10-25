@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"io"
 	"slices"
 	"strings"
 	"time"
@@ -404,10 +403,21 @@ const (
 	sharedLogBytes = 1 << 20
 )
 
-// roleLog is role's last lines of container's log. The controller's container runs its role alone,
-// so its log is the role's whole. An issue pod's one container interleaves every role's lines, each
-// prefixed `<role>: ` by the launcher, so its quote is role's own (roleLines), never a sibling's:
-// a sibling's agent may have written anything there.
+// containerLinesHeader introduces, in a role's quote of an issue pod's one container, the lines
+// no role wrote (containerLines).
+const containerLinesHeader = "the container's own last lines, no role's:"
+
+// roleLog is role's last lines of container's log, quoted when that container has ended. The
+// controller's container runs its role alone, so its log is the role's whole. An issue pod's one
+// container interleaves every role's lines, each prefixed `<role>: ` by the launcher, so its quote
+// is role's own (roleLines), never a sibling's: a sibling's agent may have written anything there.
+// The container's own lines follow it (containerLines): what the launcher, PID 1, wrote itself
+// rather than for a role, such as a panic, is why every role of the container ended.
+//
+// The first line of the read is attributed to no one, whatever bound cut it: the kubelet's tail
+// counts a long line's partial runtime entries as lines of their own, so a read can start inside a
+// role's line, at a fragment that role's agent chose, which could read as another role's line or
+// the launcher's. Dropping it costs the read's oldest line.
 func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim.Role) string {
 	if container != runtime.IssuePodContainer {
 		return r.logTail(ctx, pod, container)
@@ -416,17 +426,23 @@ func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim
 	if err != nil {
 		return fmt.Sprintf("(the log could not be read: %v)", err)
 	}
-	if own := roleLines(text, role, logTailLines); own != "" {
-		return own
+	_, text, _ = strings.Cut(text, "\n")
+	quote := roleLines(text, role, logTailLines)
+	if quote == "" {
+		quote = fmt.Sprintf("(none of the container's last %d lines is %s's)", sharedLogLines, role)
 	}
-	return fmt.Sprintf("(none of the container's last %d lines is %s's)", sharedLogLines, role)
+	if own := containerLines(text, logTailLines); own != "" {
+		quote += "\n" + containerLinesHeader + "\n" + own
+	}
+	return quote
 }
 
 // readLog is container's last lines of log, at most limit bytes of them, read under one bound
-// (call). The bytes kept are the newest: the stream is read whole, TailLines bounding it, and only
-// its last limit bytes are kept, from the first whole line in them, so a quote never ends before
-// the lines nearest the container's end.
-func (r *Runtime) readLog(ctx context.Context, pod, container string, lines, limit int64) (string, error) {
+// (call). TailLines bounds the read to lines, and the stream is read through tailBytes, which holds
+// only its newest limit bytes, so a log's size never decides how much the daemon holds, and a
+// quote never ends before the lines nearest the container's end. When the byte bound dropped older
+// bytes, the read starts from the first whole line it kept.
+func (r *Runtime) readLog(ctx context.Context, pod, container string, lines int64, limit int) (string, error) {
 	reading, cancel := call(ctx)
 	defer cancel()
 	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(reading)
@@ -434,12 +450,11 @@ func (r *Runtime) readLog(ctx context.Context, pod, container string, lines, lim
 		return "", err
 	}
 	defer stream.Close()
-	text, err := io.ReadAll(stream)
+	text, cut, err := tailBytes(stream, limit)
 	if err != nil {
 		return "", err
 	}
-	if cut := int64(len(text)) - limit; cut > 0 {
-		text = text[cut:]
+	if cut {
 		if newline := bytes.IndexByte(text, '\n'); newline >= 0 {
 			text = text[newline+1:]
 		}
@@ -459,6 +474,24 @@ func roleLines(log string, role claim.Role, n int) string {
 		}
 	}
 	return strings.Join(own[max(0, len(own)-n):], "\n")
+}
+
+// containerLines is the last n lines of an issue pod's one container's log that no role wrote:
+// every role's output reaches the log behind its `<role>: ` prefix, so a line with none of them is
+// the launcher's own, PID 1's.
+func containerLines(log string, n int) string {
+	var own []string
+	for line := range strings.Lines(log) {
+		if line = strings.TrimRight(line, "\n"); !rolePrefixed(line) {
+			own = append(own, line)
+		}
+	}
+	return strings.Join(own[max(0, len(own)-n):], "\n")
+}
+
+// rolePrefixed is whether line begins with a workflow role's `<role>: ` prefix.
+func rolePrefixed(line string) bool {
+	return slices.ContainsFunc(claim.Roles, func(role claim.Role) bool { return strings.HasPrefix(line, string(role)+": ") })
 }
 
 // events are the pod's events, "<type> <reason>: <message>" joined by " | ", or why they could
