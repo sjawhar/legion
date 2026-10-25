@@ -8,7 +8,6 @@ package api
 import (
 	"fmt"
 	"net/http"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 )
@@ -28,15 +27,12 @@ type introspectionResponse = oauth.Introspection
 // string at random; only the broker's own failure to read its storage is a refusal, 503, since
 // answering that as "not live" would deny a sound token and hide the outage.
 //
-// It spends its source address's own bucket (DefaultIntrospectLimit) before the provider reads
-// anything, as its neighbours on the OAuth prefix spend theirs, and a refusal is 429 RATE_LIMITED
-// with Retry-After. The listed caller its own token named is not logged: reading a token back
-// acts on nobody's behalf.
+// It spends no bucket of its own: authenticate has already spent its source address's bucket
+// (DefaultAccountLimit), the one every accountAuth route shares, before the caller's token was
+// verified, so a listed caller is held to one limit across the class rather than to a second one
+// here. The listed caller its own token named is not logged: reading a token back acts on
+// nobody's behalf.
 func (s *server) introspect(w http.ResponseWriter, r *http.Request, _ string) {
-	if !s.introspectLimiter.AllowAt(clientAddress(r, s.deps.TrustedProxyHeader), time.Now()) {
-		refuseWithRetryAfter(w, s.introspectLimiter.Every(), "too many introspection requests; try again later")
-		return
-	}
 	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBytes)
 	if err := r.ParseForm(); err != nil {
 		writeError(w, http.StatusBadRequest, "INVALID_REQUEST", fmt.Sprintf("the form must parse and be at most %d bytes", maxOAuthFormBytes))

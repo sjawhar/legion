@@ -54,12 +54,27 @@ var DefaultLauncherLimits = LauncherLimits{
 // refused before the provider does any work.
 var DefaultTokenLimit = ratelimit.Limit{Every: 500 * time.Millisecond, Burst: 60}
 
-// DefaultIntrospectLimit bounds POST /v1/oauth/introspect per source address, in a bucket of its
-// own: a burst of 200 and fifty a second. The route is authenticated, so this bounds a listed
-// caller rather than a flood — a resource server asks about one token per request it serves, with
-// its own short cache in front, and fifty a second is well past what one such server asks and far
-// below what would keep the broker's storage busy.
-var DefaultIntrospectLimit = ratelimit.Limit{Every: 20 * time.Millisecond, Burst: 200}
+// DefaultAccountLimit bounds every route accountAuth authenticates per source address, in one
+// bucket the whole class shares: the nine Dispatch's server relays a person's pages and decisions
+// through, and POST /v1/oauth/introspect. It is a burst of 200 and fifty a second, per process,
+// so a fleet of N broker pods allows N times it. Each request spends it before the caller's token
+// is verified, as a token login spends its address's bucket, since a token signed under a key the
+// broker does not hold makes the verifier fetch the issuer's keys again, and the issuer and
+// audience a forged token has to name are configuration, not secrets. So a flood from one address
+// makes the broker verify, and fetch the issuer's keys for, 200 tokens at once and fifty a second
+// after that, rather than one for every request it can send; the rest are refused 429 RATE_LIMITED
+// with Retry-After, before any work.
+//
+// A listed caller spends it once a request whatever the route; introspection spends nothing more
+// inside its handler. Most of what the class carries is introspection — a resource server asks
+// about one token per request it serves, with its own short cache in front, and fifty a second is
+// well past what one such server asks and far below what would keep the broker's storage busy —
+// while Dispatch's relaying runs at the pace of the people reading its pages, a few requests for
+// each page or decision, a few a second on top at most. A caller behind an address others share
+// is held to that address's bucket: BROKER_TRUSTED_PROXY_HEADER keys it on the caller's own
+// address behind a proxy, and without it every caller the proxy forwards shares one bucket, which
+// a flood through the same proxy drains for Dispatch too.
+var DefaultAccountLimit = ratelimit.Limit{Every: 20 * time.Millisecond, Burst: 200}
 
 // DefaultRereadBurst is the depth of every per-address bucket on POST
 // /v1/secrets/{name}/reread: a person's write burst passes; a flood cannot make the broker
@@ -236,15 +251,15 @@ func newLauncherLimiter(limits LauncherLimits, trustedProxyHeader string) *launc
 	}
 }
 
-// clientAddress resolves the source address a per-address bucket keys on: the launcher limiter's
-// and the reread limiter's. With no trusted proxy header configured (the default, e.g. local/dev
-// use or a broker reached directly) it is r.RemoteAddr's host. Behind a reverse proxy or load
-// balancer (this broker's documented deployment shape: "the shared internal ALB"), r.RemoteAddr
-// as the broker sees it is the SAME address for every real caller — the proxy's — which would
-// otherwise collapse every legitimate caller into one shared bucket a single caller can exhaust.
-// Configuring the proxy's own forwarding header (e.g. X-Forwarded-For) lets this read the last
-// entry — the hop the trusted proxy itself appended — rather than an earlier, client-supplied
-// entry a caller could forge to pick its own bucket.
+// clientAddress resolves the source address every per-address bucket keys on. With no trusted
+// proxy header configured (the default, e.g. local/dev use or a broker reached directly) it is
+// r.RemoteAddr's host. Behind a reverse proxy or load balancer (this broker's documented
+// deployment shape: "the shared internal ALB"), r.RemoteAddr as the broker sees it is the SAME
+// address for every real caller — the proxy's — which would otherwise collapse every legitimate
+// caller into one shared bucket a single caller can exhaust. Configuring the proxy's own
+// forwarding header (e.g. X-Forwarded-For) lets this read the last entry — the hop the trusted
+// proxy itself appended — rather than an earlier, client-supplied entry a caller could forge to
+// pick its own bucket.
 func clientAddress(r *http.Request, trustedProxyHeader string) string {
 	if trustedProxyHeader != "" {
 		if raw := r.Header.Get(trustedProxyHeader); raw != "" {
@@ -292,6 +307,17 @@ func (l *launcherLimiter) addressAllows(r *http.Request) bool {
 // whether it had one.
 func (s *server) tokenAllows(r *http.Request) bool {
 	return s.tokenLimiter.AllowAt(clientAddress(r, s.deps.TrustedProxyHeader), time.Now())
+}
+
+// refuseAccountAddress writes 429 RATE_LIMITED and reports true when r's source address has no
+// request left in the bucket every accountAuth route shares (DefaultAccountLimit): authenticate's
+// first step for that class, spent before the caller's token is verified.
+func (s *server) refuseAccountAddress(w http.ResponseWriter, r *http.Request) bool {
+	if s.accountLimiter.AllowAt(clientAddress(r, s.deps.TrustedProxyHeader), time.Now()) {
+		return false
+	}
+	refuseWithRetryAfter(w, s.accountLimiter.Every(), "too many requests with a ServiceAccount token; try again later")
+	return true
 }
 
 // refuseReread writes 429 RATE_LIMITED and reports true when r's source address, or the broker as

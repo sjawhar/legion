@@ -78,9 +78,10 @@ type Deps struct {
 	RereadOverallLimit *ratelimit.Limit
 	// TokenLimit bounds POST /v1/oauth/token per source address; nil means DefaultTokenLimit.
 	TokenLimit *ratelimit.Limit
-	// IntrospectLimit bounds POST /v1/oauth/introspect per source address; nil means
-	// DefaultIntrospectLimit.
-	IntrospectLimit *ratelimit.Limit
+	// AccountLimit bounds every route accountAuth authenticates per source address, in one bucket
+	// the whole class shares and spent before the caller's token is verified; nil means
+	// DefaultAccountLimit.
+	AccountLimit *ratelimit.Limit
 	// TrustedProxyHeader names a request header (e.g. "X-Forwarded-For") the rate limiters'
 	// per-address buckets trust for the real client address; empty means keying on r.RemoteAddr,
 	// correct only when the broker is reached directly rather than through a reverse proxy or load
@@ -119,10 +120,10 @@ type server struct {
 	// neither.
 	rereadLimiter *ratelimit.Keyed
 	rereadOverall *ratelimit.Bucket
-	// tokenLimiter is TokenLimit applied per source address (clientAddress), and
-	// introspectLimiter IntrospectLimit, each over its own route's bucket.
-	tokenLimiter      *ratelimit.Keyed
-	introspectLimiter *ratelimit.Keyed
+	// tokenLimiter is TokenLimit applied per source address (clientAddress), over its route's own
+	// bucket, and accountLimiter AccountLimit, over the bucket every accountAuth route shares.
+	tokenLimiter   *ratelimit.Keyed
+	accountLimiter *ratelimit.Keyed
 }
 
 func Register(mux *http.ServeMux, deps Deps) {
@@ -149,17 +150,17 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.TokenLimit != nil {
 		token = *deps.TokenLimit
 	}
-	introspect := DefaultIntrospectLimit
-	if deps.IntrospectLimit != nil {
-		introspect = *deps.IntrospectLimit
+	account := DefaultAccountLimit
+	if deps.AccountLimit != nil {
+		account = *deps.AccountLimit
 	}
 	s := &server{
-		deps:              deps,
-		launcherLimiter:   newLauncherLimiter(limits, deps.TrustedProxyHeader),
-		rereadLimiter:     ratelimit.NewKeyed(reread),
-		rereadOverall:     ratelimit.NewBucket(rereadOverall),
-		tokenLimiter:      ratelimit.NewKeyed(token),
-		introspectLimiter: ratelimit.NewKeyed(introspect),
+		deps:            deps,
+		launcherLimiter: newLauncherLimiter(limits, deps.TrustedProxyHeader),
+		rereadLimiter:   ratelimit.NewKeyed(reread),
+		rereadOverall:   ratelimit.NewBucket(rereadOverall),
+		tokenLimiter:    ratelimit.NewKeyed(token),
+		accountLimiter:  ratelimit.NewKeyed(account),
 	}
 	for _, route := range routes() {
 		if deps.OAuth == nil && strings.HasPrefix(route.Pattern, oauthRoutes) {
@@ -180,12 +181,17 @@ const oauthRoutes = "/v1/oauth/"
 
 // authenticate proves who r comes from, as auth requires, or writes the refusal. A bad or missing
 // credential is a 401; a store that cannot answer is a 503 naming it, never mistaken for a bad
-// credential.
+// credential. A route a ServiceAccount token authenticates first spends its source address's
+// bucket (DefaultAccountLimit), a refusal being 429 RATE_LIMITED with Retry-After, so a flood of
+// forged tokens past that bucket costs no verification and no fetch of the issuer's keys.
 func (s *server) authenticate(w http.ResponseWriter, r *http.Request, auth routeAuth) (caller, bool) {
 	switch auth {
 	case authNone:
 		return caller{}, true
 	case authAccount:
+		if s.refuseAccountAddress(w, r) {
+			return caller{}, false
+		}
 		return s.accountCaller(w, r)
 	case authLauncher:
 		subject, err := s.proofSubject(r)
