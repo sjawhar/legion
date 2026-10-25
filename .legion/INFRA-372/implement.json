@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-372",
-  "completed": "2026-10-25T09:30:00Z",
+  "completed": "2026-10-25T09:40:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2190",
-  "headSha": "ce9ec359dbc7c865049b4787eba0f147feddeeb1",
+  "headSha": "0cc10cbf30576c8ef90ca70c22897fd0f882a2b4",
   "proof": [
     {
       "criterion": "The reason clause states what is true of the image this repository builds",
@@ -45,6 +45,14 @@
       "observed": "OK: three authorized edits (reason, gate -n, namespace clause) and the AGENTS.md row, nothing else moved, both rows point at each other (exit 0); both name checks exit 0",
       "headSha": "ce9ec359dbc7c865049b4787eba0f147feddeeb1",
       "negativeControl": "HEAD_DIR copies: round-1 page (fc8dc19f) -> FAIL head ns paragraph occurs 0 times; one command without -n -> 3 FAILs; old claim kept -> FAIL the page still says 'no command here passes'; literal workload namespace -> FAIL names this deployment's workload namespace literally; sequence ns=$(cat ...) line edited -> FAIL differs outside the three authorized regions; each exit 1"
+    },
+    {
+      "criterion": "The AGENTS.md 'Run a database' row names the gate as `kubectl -n <namespace> auth can-i create jobs`, `create services` and `get services`, and nothing else in the row changes",
+      "surface": "AGENTS.md (and docs/kubernetes.md) at the head against the merge base of main@origin and the head (158654c89e8b)",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && python3 /legion/scratch/tmp/infra372/check_clauses.py (widened to allow exactly the row's gate gaining -n <namespace>; round-2 copy kept as check_clauses_v2.py); bash .github/scripts/check-private-names.sh; bash .github/scripts/check-plugin-names.sh. The commands' behaviour is the round-2 three-way run (proof entry 4)",
+      "observed": "OK: three authorized edits (reason, gate -n, namespace clause) and the AGENTS.md row (gate -n, back pointer), nothing else moved, both rows point at each other (exit 0); both name checks exit 0",
+      "headSha": "0cc10cbf30576c8ef90ca70c22897fd0f882a2b4",
+      "negativeControl": "HEAD_DIR copies: the round-2 row without -n (ce9ec359), the row with -n plus 'the whole sequence included' -> 'the whole run included', and the row with -n legion in place of the placeholder -> each FAIL: the 'Run a database' row is not the merged row with only its gate's -n and last sentence changed, exit 1"
     }
   ],
   "filesChanged": [
@@ -60,9 +68,14 @@
     "Added a link to the page's own 'Pin by digest, never by tag' section from the new sentence, so 'pins a digest' resolves for the reader; the plan's recommended text had no link there.",
     "The paragraph's last sentence says the sequence below (which still passes no -n, per the ruling) runs in kubectl's default namespace, so the gate's answers hold for it only where that default is <namespace>; this keeps the page from contradicting itself without touching the sequence."
   ],
-  "openQuestions": [
-    "AGENTS.md:128 still names the gate as `kubectl auth can-i create jobs`, `create services` and `get services` without -n; left unchanged as a summary pointer, since the ruling added nothing else."
-  ],
-  "round": 2,
-  "reviewRequest": "Changes requested: the architect's widened item (dispatch://INFRA-372/comment/bc0d7f4a-58b4-4598-b529-9f6e1c86005b), the gate commands' namespace flag, was missing."
+  "openQuestions": [],
+  "round": 3,
+  "reviewRequest": "Round 2 changes requested: AGENTS.md:128 still named the gate without -n (thread PRRT_kwDORFy7ds6wAEbc); the architect ruled it in scope (PR comment 09:27:48Z).",
+  "threads": [
+    {
+      "id": "PRRT_kwDORFy7ds6wAEbc",
+      "reply": "Fixed in 0cc10cbf3057: the row's gate now reads `kubectl -n <namespace> auth can-i ...`; nothing else in the row changed",
+      "resolved": true
+    }
+  ]
 }
