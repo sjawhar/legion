@@ -34,30 +34,35 @@ After: nothing. The PR shows the merge. Post only when a human must act or can u
 dispatch message --issue LEGION-815 --body 'Release 1.4 is live on the devbox (dispatch://LEGION-815/artifact/release-notes). Nothing needed from you.'
 ```
 
-Before: the draft is a separate file, the spec only names it, and the ask does not link it.
+Before: the draft is a separate file, the spec only names it, and the ask does not link it. Each
+write is its own call, as AskGate reads it: two writes in one call are refused.
 
 ```bash
 dispatch artifact --issue OPS-52 --name cu-update-2026-09-15.md --content 'Hi team, ...'
-dispatch doc-edit --issue OPS-52 --artifact spec \
-  --ops-json '[{"op":"insert","after":"## Context","markdown":"## Draft (artifact cu-update-2026-09-15.md)"}]'
+```
+
+```bash
+dispatch doc-edit --issue OPS-52 --artifact spec --ops-json '[{"op":"insert","after":"## Context","markdown":"## Draft (artifact cu-update-2026-09-15.md)"}]'
 ```
 
 After: the draft is a spec section, and the ask (a human-only send) anchors there. A real file is linked by its slug from both.
 
 ```bash
-dispatch doc-edit --issue OPS-52 --artifact spec \
-  --ops-json '[{"op":"insert","after":"## Context","markdown":"## Draft\n\nHi team, ..."}]'
-dispatch ask --issue OPS-52 --anchor-json '{"artifact":"spec","quote":"Hi team,"}' \
-  --question 'Customers need an update today, and the reviewed text is ready in the spec. Sending it cannot be recalled. How should we proceed? Recommendation: send the reviewed update.' \
-  --option 'Send the reviewed update: Delivers the update today but makes its text external.' \
-  --option 'Hold the update: Avoids sending now but leaves customers without the update.'
-# or, for a real file:
-dispatch doc-edit --issue OPS-52 --artifact spec \
-  --ops-json '[{"op":"insert","after":"## Context","markdown":"## Draft\n\nThe update to send: dispatch://OPS-52/artifact/cu-update-2026-09-15-md"}]'
-dispatch ask --issue OPS-52 --ref dispatch://OPS-52/artifact/cu-update-2026-09-15-md \
-  --question 'Customers need an update today, and its reviewed text is linked from the spec. Sending it cannot be recalled. How should we proceed? Recommendation: send the reviewed update.' \
-  --option 'Send the reviewed update: Delivers the linked update today but makes its text external.' \
-  --option 'Hold the update: Avoids sending now but leaves customers without the update.'
+dispatch doc-edit --issue OPS-52 --artifact spec --ops-json '[{"op":"insert","after":"## Context","markdown":"## Draft\n\nHi team, ..."}]'
+```
+
+```bash
+dispatch ask --issue OPS-52 --anchor-json '{"artifact":"spec","quote":"Hi team,"}' --question 'Customers need an update today, and the reviewed text is ready in the spec. Sending it cannot be recalled. How should we proceed? Recommendation: send the reviewed update.' --option 'Send the reviewed update: Delivers the update today but makes its text external.' --option 'Hold the update: Avoids sending now but leaves customers without the update.'
+```
+
+Or, for a real file, again one write per call:
+
+```bash
+dispatch doc-edit --issue OPS-52 --artifact spec --ops-json '[{"op":"insert","after":"## Context","markdown":"## Draft\n\nThe update to send: dispatch://OPS-52/artifact/cu-update-2026-09-15-md"}]'
+```
+
+```bash
+dispatch ask --issue OPS-52 --ref dispatch://OPS-52/artifact/cu-update-2026-09-15-md --question 'Customers need an update today, and its reviewed text is linked from the spec. Sending it cannot be recalled. How should we proceed? Recommendation: send the reviewed update.' --option 'Send the reviewed update: Delivers the linked update today but makes its text external.' --option 'Hold the update: Avoids sending now but leaves customers without the update.'
 ```
 
 ## Naming the mechanism
