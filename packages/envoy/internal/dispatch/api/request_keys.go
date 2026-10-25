@@ -150,6 +150,14 @@ func keyedMethod(method string) bool {
 	return method == http.MethodPost || method == http.MethodPatch
 }
 
+// answerHoldsSecret is every route whose answer carries a credential, by method and pattern. A key
+// never keeps such an answer: request_keys would hold the plaintext for a day where the route's own
+// table holds only its hash. The request is released as a 5xx's is, so a write it committed answers
+// a repeat with 409 KEY_COMMITTED - made, and not shown again - and one it did not runs again.
+var answerHoldsSecret = map[string]bool{
+	http.MethodPost + " /api/v1/me/agent-tokens": true,
+}
+
 // requestKeyClaim is a keyed request's hold on its key: whose key, which key, and the attempt that
 // holds it now.
 type requestKeyClaim struct {
@@ -175,6 +183,7 @@ type resolvedCaller struct {
 // above. replay is the route's keyedReplay, nil for a route that commits no recovery point.
 func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, replay keyedReplay) http.HandlerFunc {
 	wildcards := patternWildcards(pattern)
+	keepsAnswer := !answerHoldsSecret[method+" "+pattern]
 	return func(w http.ResponseWriter, r *http.Request) {
 		key, present, err := requestKeyHeader(r)
 		if !present {
@@ -245,7 +254,7 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 		run = store.WithBeforeCommit(run, markRequestKeyCommitted(claim, &running))
 		handler(answer, r.WithContext(run))
 		running.Store(false)
-		s.settleRequestKey(r.Context(), claim, answer)
+		s.settleRequestKey(r.Context(), claim, answer, keepsAnswer)
 		settled = true
 		answer.deliver()
 	}
@@ -586,13 +595,14 @@ func storedStatus(status int) bool {
 }
 
 // settleRequestKey records what claim's handler answered: a stored status finishes the row with
-// it, and any other releases the key (releaseRequestKey). A row another attempt has taken over is
-// left as it is. A failure is logged and the caller is still answered, since the handler has run:
-// its row stays in flight, and a repeat past the lease is answered KEY_COMMITTED (or from its
-// recovery point) when the request committed a write, and runs it again when it did not.
-func (s *server) settleRequestKey(ctx context.Context, claim requestKeyClaim, answer *keyedAnswer) {
+// it, and any other - or any answer of a route that never keeps one (answerHoldsSecret) - releases
+// the key (releaseRequestKey). A row another attempt has taken over is left as it is. A failure is
+// logged and the caller is still answered, since the handler has run: its row stays in flight, and
+// a repeat past the lease is answered KEY_COMMITTED (or from its recovery point) when the request
+// committed a write, and runs it again when it did not.
+func (s *server) settleRequestKey(ctx context.Context, claim requestKeyClaim, answer *keyedAnswer, keepsAnswer bool) {
 	status := answer.finalStatus()
-	if !storedStatus(status) {
+	if !storedStatus(status) || !keepsAnswer {
 		s.releaseRequestKey(ctx, claim)
 		return
 	}
@@ -647,6 +657,10 @@ func (s *server) releaseRequestKey(ctx context.Context, claim requestKeyClaim) {
 //
 // running ends when the handler returns: a delivery the handler detached commits after its
 // answer, and is no write of the request's.
+//
+// Only a transaction the pool opens takes the step: a write a handler makes as a bare pool
+// statement commits on its own and marks nothing, so a keyed route writes inside s.begin. Every
+// POST and PATCH route does (the token mint was the one bare insert, and now begins its own).
 func markRequestKeyCommitted(claim requestKeyClaim, running *atomic.Bool) store.BeforeCommit {
 	return func(ctx context.Context, tx pgx.Tx) error {
 		if !running.Load() {
