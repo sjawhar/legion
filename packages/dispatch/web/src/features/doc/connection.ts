@@ -1,5 +1,9 @@
 import type { HocuspocusProvider } from "@hocuspocus/provider";
-import { DOCUMENT_SCHEMA_CLOSE_CODE } from "@legion/contracts";
+import {
+  DOCUMENT_BUSY_CLOSE_CODE,
+  DOCUMENT_SCHEMA_CLOSE_CODE,
+  DOCUMENT_TOO_LARGE_CLOSE_CODE,
+} from "@legion/contracts";
 import type { Awareness } from "y-protocols/awareness";
 import type { Doc } from "yjs";
 
@@ -70,6 +74,20 @@ export interface ConnectionCallbacks {
    * schema. The connection has stopped reconnecting; a fresh read decides what comes next.
    */
   onOutsideSchema(): void;
+  /**
+   * Fires when the server refused this browser's edit because it would take the document past its
+   * size bound (`DOCUMENT_TOO_LARGE_CLOSE_CODE`). The connection has stopped reconnecting and the
+   * refused edit's saved row is gone; the refused text is still in this connection's document, so
+   * the host rebuilds it from a fresh read rather than let a reconnect send it again.
+   */
+  onTooLarge(): void;
+  /**
+   * Fires `true` when the server closed the socket because the memory it keeps for open documents
+   * is full (`DOCUMENT_BUSY_CLOSE_CODE`), and `false` once it applies a frame from this browser
+   * again. The provider keeps reconnecting by itself, and the edits it could not send stay in this
+   * document and in the browser's saved rows until a socket takes them.
+   */
+  onBusy(waiting: boolean): void;
   onStatus(state: ConnectionState): void;
   /** Reports browser-held edits as IndexedDB changes or this admission's restore completes. */
   onPending(state: PendingState): void;
@@ -107,7 +125,7 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     { HocuspocusProvider, HocuspocusProviderWebsocket },
     { Doc },
     { openPendingEdits },
-    { startPendingSync },
+    { readSyncStatus, startPendingSync },
   ] = await importWhenOnline(() =>
     Promise.all([
       import("@hocuspocus/provider"),
@@ -122,6 +140,11 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     let synced = false;
     let authenticated = false;
     let announced = false;
+    // This admission's restore of the browser's saved rows; a refused edit is dropped after it.
+    let restored: Promise<void> = Promise.resolve();
+    // The server last closed a socket for want of room, and has applied nothing from this browser
+    // since.
+    let busy = false;
     let provider: HocuspocusProvider;
     // `connect: false` below means this class cannot instantiate a socket until `sync` is assigned
     // after the provider exists; the explicit `websocket.connect()` is deliberately last.
@@ -148,16 +171,16 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
     const notifySynced = () => {
       if (synced && authenticated && !announced) {
         announced = true;
-        void sync
-          ?.firstSync(isSchemaReadOnly(provider.authorizedScope))
-          .catch((error: unknown) => {
-            console.error("Could not restore this document's pending browser edits", error);
-          })
-          .then(() => {
-            if (!destroyed) {
-              callbacks.onSynced();
-            }
-          });
+        restored = Promise.resolve(
+          sync?.firstSync(isSchemaReadOnly(provider.authorizedScope))
+        ).catch((error: unknown) => {
+          console.error("Could not restore this document's pending browser edits", error);
+        });
+        void restored.then(() => {
+          if (!destroyed) {
+            callbacks.onSynced();
+          }
+        });
       }
     };
     provider = new HocuspocusProvider({
@@ -169,18 +192,53 @@ export async function loadDocumentTransport(): Promise<ConnectDocument> {
         notifySynced();
       },
       onClose: ({ event }) => {
-        // Hocuspocus answers every other close by reconnecting. This one is the server's decision
-        // about the stored document (`DOCUMENT_SCHEMA_CLOSE_CODE`), so the provider stops here and
-        // the host reads it again.
-        if (event.code === DOCUMENT_SCHEMA_CLOSE_CODE) {
-          provider.disconnect();
-          callbacks.onOutsideSchema();
+        // Hocuspocus answers every other close by reconnecting, which is what the transient
+        // `DOCUMENT_BUSY_CLOSE_CODE` wants: the server is out of room for open documents, and a
+        // later attempt finds what it has freed, so the edits it refused wait to go with it. The
+        // other two are the server's decision about the document itself, so the provider stops:
+        // a document outside the Proof schema the host reads again, and an edit past the
+        // document's size bound is dropped before the host rebuilds the document without it.
+        switch (event.code) {
+          case DOCUMENT_SCHEMA_CLOSE_CODE:
+            provider.disconnect();
+            callbacks.onOutsideSchema();
+            break;
+          case DOCUMENT_TOO_LARGE_CLOSE_CODE:
+            // The refused frame is taken now: the provider's own close handler, which runs first,
+            // has already started a reconnect that this disconnect ends.
+            void Promise.resolve(sync?.dropRefused(restored)).then(() => {
+              if (!destroyed) {
+                callbacks.onTooLarge();
+              }
+            });
+            provider.disconnect();
+            break;
+          case DOCUMENT_BUSY_CLOSE_CODE:
+            if (!busy) {
+              busy = true;
+              callbacks.onBusy(true);
+            }
+            break;
         }
       },
       onMessage: ({ event }) => {
-        if (event.data instanceof ArrayBuffer) {
-          void sync?.frameReceived(new Uint8Array(event.data));
+        if (!(event.data instanceof ArrayBuffer)) {
+          return;
         }
+        const frame = new Uint8Array(event.data);
+        if (busy) {
+          let applied = false;
+          try {
+            applied = readSyncStatus(frame) === true;
+          } catch {
+            // frameReceived reports a frame that does not parse.
+          }
+          if (applied) {
+            busy = false;
+            callbacks.onBusy(false);
+          }
+        }
+        void sync?.frameReceived(frame);
       },
       onStatus: ({ status }) => callbacks.onStatus(status === "disconnected" ? "offline" : status),
       onSynced: ({ state }) => {

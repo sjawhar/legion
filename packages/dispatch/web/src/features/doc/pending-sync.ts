@@ -24,6 +24,16 @@ export interface PendingSync {
   frameWritten(frame: Uint8Array): void;
   /** Pairs an incoming SyncStatus frame with the next counted sent frame. */
   frameReceived(frame: Uint8Array): Promise<void>;
+  /**
+   * Deletes the saved row of the Update frame this socket's server last answered as not applied,
+   * once `restored` - this admission's `firstSync` - has settled, so the rows that restore replaced
+   * are gone before the document is rebuilt. The frame is taken when this is called, from the
+   * socket the server has just closed with `DOCUMENT_TOO_LARGE_CLOSE_CODE` after that answer: the
+   * edit would take the document past its size bound, so resending it can only earn the same
+   * refusal. A plain not-applied answer drops nothing, which is what keeps a read-only admission's
+   * rows.
+   */
+  dropRefused(restored: Promise<void>): Promise<void>;
   /** Restores prior-page rows after this admission's initial sync. */
   firstSync(readOnly: boolean): Promise<void>;
   destroy(): void;
@@ -49,6 +59,20 @@ export interface PendingSyncOptions {
 
 function equals(left: Uint8Array, right: Uint8Array): boolean {
   return left.length === right.length && left.every((byte, index) => byte === right[index]);
+}
+
+/**
+ * The flag of a SyncStatus frame: true when the server applied the frame it answers, false when it
+ * did not, and undefined for any other frame. Throws for a frame that does not parse.
+ */
+export function readSyncStatus(frame: Uint8Array): boolean | undefined {
+  const decoder = createDecoder(frame);
+  readField(decoder); // the document name
+  if (readVarUint(decoder) !== MessageType.SyncStatus) {
+    return undefined;
+  }
+  // The server writes the flag as a VarUint: 1 applied, 0 not applied.
+  return readVarUint(decoder) === 1;
 }
 
 function covers(
@@ -135,6 +159,8 @@ export function startPendingSync({
   const persistedSeqByOrdinal = new Map<number, number>();
   let recorded: RecordedUpdate[] = [];
   let sent: SentFrame[] = [];
+  // The frame this socket's server last answered as not applied.
+  let refused: SentFrame | undefined;
 
   const ready = store
     .catch((error: unknown) => {
@@ -283,6 +309,7 @@ export function startPendingSync({
     socketOpened() {
       if (!destroyed) {
         sent = [];
+        refused = undefined;
       }
     },
     frameWritten(frame) {
@@ -314,17 +341,14 @@ export function startPendingSync({
       if (destroyed) {
         return;
       }
-      let applied: boolean;
+      let applied: boolean | undefined;
       try {
-        const decoder = createDecoder(frame);
-        readField(decoder); // the document name
-        if (readVarUint(decoder) !== MessageType.SyncStatus) {
-          return;
-        }
-        // The server writes the flag as a VarUint: 1 applied, 0 not applied.
-        applied = readVarUint(decoder) === 1;
+        applied = readSyncStatus(frame);
       } catch (error) {
         console.error("Could not parse a document SyncStatus frame", error);
+        return;
+      }
+      if (applied === undefined) {
         return;
       }
       const entry = sent.shift();
@@ -333,6 +357,7 @@ export function startPendingSync({
         return;
       }
       if (!applied) {
+        refused = entry;
         await Promise.all(recorded.map((record) => record.written));
         return;
       }
@@ -344,6 +369,22 @@ export function startPendingSync({
         }
       } catch (error) {
         console.error("Could not clear an acknowledged pending document edit", error);
+      }
+    },
+    async dropRefused(restored) {
+      const entry = refused;
+      refused = undefined;
+      await restored;
+      // A refused SyncStep2 carries every row at once and names none of them, so its rows stay:
+      // the rebuilt document replays each restored row as an Update of its own, and the one the
+      // server refuses then is the one dropped.
+      if (destroyed || entry?.kind !== "update") {
+        return;
+      }
+      try {
+        await clearUpdate(entry);
+      } catch (error) {
+        console.error("Could not drop a refused pending document edit", error);
       }
     },
     async firstSync(nextReadOnly) {

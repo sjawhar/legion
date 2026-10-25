@@ -188,6 +188,12 @@ export function ProofDocument({
   const [connection, setConnection] = useState<ConnectionState>("connecting");
   const [pending, setPending] = useState<PendingState | undefined>(undefined);
   const [loadError, setLoadError] = useState<string | undefined>(undefined);
+  // The server refused this browser's last edit as one that would take the document past its size
+  // bound; the edit is gone and the notice stays until the person dismisses it.
+  const [tooLarge, setTooLarge] = useState(false);
+  // The server is out of room for open documents: the connection keeps trying, and the edits it
+  // could not send wait in this browser.
+  const [busy, setBusy] = useState(false);
   const [schemaReadOnly, setSchemaReadOnly] = useState(false);
   const [openDecisionIndex, setOpenDecisionIndex] = useState(0);
   const {
@@ -385,6 +391,8 @@ export function ProofDocument({
     setConnection("connecting");
     setPending(undefined);
     setLoadError(undefined);
+    setTooLarge(false);
+    setBusy(false);
     setAdmission(undefined);
     schemaReadOnlyRef.current = false;
     setSchemaReadOnly(false);
@@ -474,12 +482,13 @@ export function ProofDocument({
         marginRef.current.registerDocument(undefined);
       };
     };
-    // Each admission - this mount, a socket the server refused as outside the Proof schema, and a
-    // blocked admission's re-admission - opens a connection only once its own fresh `/text` read
-    // succeeds, and that read alone decides: a browser editor normalizes a tree it cannot
-    // represent and writes the result back. A read that fails closes nothing already open, since
-    // only an admission opens anything, so a later refetch that fails - an outage during an
-    // artifact event's invalidation, say - leaves a connected editor and its unsent edits alone.
+    // Each admission - this mount, a socket the server refused as outside the Proof schema, an
+    // edit it refused as too large for the document, and a blocked admission's re-admission -
+    // opens a connection only once its own fresh `/text` read succeeds, and that read alone
+    // decides: a browser editor normalizes a tree it cannot represent and writes the result back.
+    // A read that fails closes nothing already open, since only an admission opens anything, so a
+    // later refetch that fails - an outage during an artifact event's invalidation, say - leaves a
+    // connected editor and its unsent edits alone.
     // A blocked admission waits for the next successful read of the text, which a repair upload
     // or a rebuild brings about, and is admitted again (`readmitRef`).
     const admit = () => {
@@ -545,6 +554,24 @@ export function ProofDocument({
               }
               setConnection("connecting");
               refusalTimer = window.setTimeout(admit, delay);
+            },
+            onTooLarge: () => {
+              if (!mounted) {
+                return;
+              }
+              // The refused edit's saved row is gone, but its text is still in this connection's
+              // document, which would send it again on any reconnect: the next admission builds
+              // the document afresh from the server, then replays the rows that are left.
+              teardown();
+              setBusy(false);
+              setTooLarge(true);
+              setConnection("connecting");
+              admit();
+            },
+            onBusy: (waiting) => {
+              if (mounted) {
+                setBusy(waiting);
+              }
             },
             onStatus: (status) => {
               if (!failed) {
@@ -660,6 +687,27 @@ export function ProofDocument({
         saving={nameVersion.isPending}
       />
       {isClosed ? <p>This issue is closed. Its document is read-only.</p> : null}
+      {tooLarge ? (
+        <div className="flex flex-wrap items-center gap-3" role="alert">
+          <p className={dangerText}>
+            Your last edit was not saved: it would make this document larger than a Dispatch
+            document may be. Your other edits are kept.
+          </p>
+          <button
+            className={`min-h-11 rounded-lg border px-3 py-2 text-sm font-medium ${secondaryButtonBorder} ${secondaryButtonText} ${secondaryButtonHoverBorder}`}
+            onClick={() => setTooLarge(false)}
+            type="button"
+          >
+            Dismiss
+          </button>
+        </div>
+      ) : null}
+      {busy ? (
+        <p role="status">
+          Dispatch is out of room for open documents right now. It keeps trying, and your edits wait
+          in this browser until they save.
+        </p>
+      ) : null}
       {repairError === undefined ? null : (
         <div className="space-y-3" role="alert">
           <p className={dangerText}>{repairError.message}</p>

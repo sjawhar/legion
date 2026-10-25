@@ -1,8 +1,13 @@
 import { afterEach, expect, spyOn, test } from "bun:test";
+import { DOCUMENT_BUSY_CLOSE_CODE, DOCUMENT_TOO_LARGE_CLOSE_CODE } from "@legion/contracts";
 import { waitFor } from "@testing-library/react";
 import * as Y from "yjs";
 
-import { type DocumentConnection, loadDocumentTransport } from "./connection";
+import {
+  type ConnectionCallbacks,
+  type DocumentConnection,
+  loadDocumentTransport,
+} from "./connection";
 import { openPendingEdits, type PendingEdits, type PendingKey } from "./pending-edits";
 import { type PendingState, type PendingSync, startPendingSync } from "./pending-sync";
 
@@ -191,6 +196,46 @@ test("an acknowledgement of 0 clears nothing", async () => {
   await sync.frameReceived(syncStatusFrame(false));
 
   expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
+});
+
+test("a too-large refusal drops the refused update's row alone, after a not-applied answer kept it", async () => {
+  const { artifact, doc, sync, type } = await scripted();
+  sync.socketOpened();
+  const first = type("first");
+  const refused = type(" too large");
+  const after = type(" after");
+  sync.frameWritten(updateFrame(first));
+  sync.frameWritten(updateFrame(refused));
+  sync.frameWritten(updateFrame(after));
+
+  await sync.frameReceived(syncStatusFrame(true));
+  await sync.frameReceived(syncStatusFrame(false));
+  expect(await rowsOf(artifact)).toEqual([
+    [artifact, doc.clientID, 2],
+    [artifact, doc.clientID, 3],
+  ]);
+
+  await sync.dropRefused(Promise.resolve());
+  expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 3]]);
+});
+
+test("a too-large refusal of a SyncStep2 drops no row, and a new socket forgets the refusal", async () => {
+  const { artifact, doc, sync, type } = await scripted();
+  sync.socketOpened();
+  type("first");
+  sync.frameWritten(syncStep2Frame(Y.encodeStateAsUpdate(doc)));
+  await sync.frameReceived(syncStatusFrame(false));
+  await sync.dropRefused(Promise.resolve());
+  expect(await rowsOf(artifact)).toEqual([[artifact, doc.clientID, 1]]);
+
+  sync.frameWritten(updateFrame(type(" second")));
+  await sync.frameReceived(syncStatusFrame(false));
+  sync.socketOpened();
+  await sync.dropRefused(Promise.resolve());
+  expect(await rowsOf(artifact)).toEqual([
+    [artifact, doc.clientID, 1],
+    [artifact, doc.clientID, 2],
+  ]);
 });
 
 test("a SyncStatus frame that ends before its flag consumes no sent frame", async () => {
@@ -484,7 +529,12 @@ class OpenSocket extends EventTarget {
     queueMicrotask(() => this.dispatchEvent(new Event("open")));
   }
 
-  close(): void {}
+  /** Whether the client closed this socket. */
+  closed = false;
+
+  close(): void {
+    this.closed = true;
+  }
 
   send(data: Uint8Array): void {
     this.sent.push(new Uint8Array(data));
@@ -506,12 +556,14 @@ test("a real provider's edit typed on an open socket is cleared by its own ackno
     const connect = await loadDocumentTransport();
     connection = connect(artifact, {
       onAdmission() {},
+      onBusy() {},
       onOutsideSchema() {},
       onPending() {},
       onStatus() {},
       onSynced: () => {
         synced = true;
       },
+      onTooLarge() {},
       schemaVersion: 1,
     });
     await waitFor(() => expect(OpenSocket.opened[0]?.sent.length).toBeGreaterThan(0));
@@ -539,6 +591,122 @@ test("a real provider's edit typed on an open socket is cleared by its own ackno
   }
 });
 
+/** Connects a real provider to an `OpenSocket` the test plays the server on, through its first
+ * sync, with `callbacks` beside the ones every such test leaves empty. */
+async function syncedProvider(
+  artifact: string,
+  callbacks: Partial<ConnectionCallbacks>
+): Promise<{ connection: DocumentConnection; socket: OpenSocket }> {
+  let synced = false;
+  const connect = await loadDocumentTransport();
+  const connection = connect(artifact, {
+    onAdmission() {},
+    onBusy() {},
+    onOutsideSchema() {},
+    onPending() {},
+    onStatus() {},
+    onSynced: () => {
+      synced = true;
+    },
+    onTooLarge() {},
+    schemaVersion: 1,
+    ...callbacks,
+  });
+  await waitFor(() => expect(OpenSocket.opened.at(-1)?.sent.length).toBeGreaterThan(0));
+  const socket = OpenSocket.opened.at(-1) as OpenSocket;
+  socket.receive(authenticatedFrame("read-write", artifact));
+  socket.receive(syncStep1Frame(Uint8Array.of(0), artifact));
+  socket.receive(syncStep2Frame(Y.encodeStateAsUpdate(new Y.Doc()), artifact));
+  await waitFor(() => expect(synced).toBe(true));
+  socket.receive(syncStatusFrame(true, artifact));
+  return { connection, socket };
+}
+
+test("a real provider closed as too large drops the refused edit's row and stops for the host", async () => {
+  const artifact = artifactId();
+  const realSocket = globalThis.WebSocket;
+  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
+  OpenSocket.opened = [];
+  let connection: DocumentConnection | undefined;
+  let tooLarge = 0;
+  try {
+    const provider = await syncedProvider(artifact, {
+      onTooLarge: () => {
+        tooLarge += 1;
+      },
+    });
+    connection = provider.connection;
+    const text = connection.doc.getText("t");
+    text.insert(0, "kept");
+    text.insert(text.length, " too large");
+    const clientId = connection.doc.clientID;
+    await waitFor(async () =>
+      expect(await rowsOf(artifact)).toEqual([
+        [artifact, clientId, 1],
+        [artifact, clientId, 2],
+      ])
+    );
+    provider.socket.receive(syncStatusFrame(true, artifact));
+    provider.socket.receive(syncStatusFrame(false, artifact));
+    provider.socket.dispatchEvent(
+      new CloseEvent("close", { code: DOCUMENT_TOO_LARGE_CLOSE_CODE, reason: "DOC_TOO_LARGE" })
+    );
+
+    await waitFor(() => expect(tooLarge).toBe(1));
+    expect(await rowsOf(artifact)).toEqual([]);
+    // The provider's own close handler starts a reconnect before the connection's runs; the
+    // connection's disconnect closes it, so no socket is left for the provider to sync on.
+    expect(OpenSocket.opened.every((socket) => socket.closed)).toBe(true);
+  } finally {
+    connection?.destroy();
+    globalThis.WebSocket = realSocket;
+  }
+});
+
+test("a real provider closed as busy reconnects, keeps the edit, and says when it is taken", async () => {
+  const artifact = artifactId();
+  const realSocket = globalThis.WebSocket;
+  globalThis.WebSocket = OpenSocket as unknown as typeof WebSocket;
+  OpenSocket.opened = [];
+  let connection: DocumentConnection | undefined;
+  const busy: boolean[] = [];
+  let tooLarge = 0;
+  try {
+    const provider = await syncedProvider(artifact, {
+      onBusy: (waiting) => busy.push(waiting),
+      onTooLarge: () => {
+        tooLarge += 1;
+      },
+    });
+    connection = provider.connection;
+    connection.doc.getText("t").insert(0, "waits for room");
+    const clientId = connection.doc.clientID;
+    await waitFor(async () => expect(await rowsOf(artifact)).toEqual([[artifact, clientId, 1]]));
+    provider.socket.receive(syncStatusFrame(false, artifact));
+    provider.socket.dispatchEvent(
+      new CloseEvent("close", { code: DOCUMENT_BUSY_CLOSE_CODE, reason: "DOC_BUSY" })
+    );
+
+    expect(busy).toEqual([true]);
+    await waitFor(() => expect(OpenSocket.opened).toHaveLength(2));
+    expect(await rowsOf(artifact)).toEqual([[artifact, clientId, 1]]);
+    const reconnected = OpenSocket.opened[1] as OpenSocket;
+    await waitFor(() => expect(reconnected.sent.length).toBeGreaterThan(0));
+    reconnected.receive(authenticatedFrame("read-write", artifact));
+    reconnected.receive(syncStep1Frame(Uint8Array.of(0), artifact));
+    reconnected.receive(syncStep2Frame(Y.encodeStateAsUpdate(new Y.Doc()), artifact));
+    // The reconnected provider's SyncStep2 carries the edit, and the server applies it.
+    reconnected.receive(syncStatusFrame(true, artifact));
+
+    await waitFor(() => expect(busy).toEqual([true, false]));
+    await waitFor(async () => expect(await rowsOf(artifact)).toEqual([]));
+    expect(tooLarge).toBe(0);
+  } finally {
+    connection?.destroy();
+    globalThis.WebSocket = realSocket;
+  }
+});
+
 test("a document whose browser keeps no edits says so, and still connects", async () => {
   const realStorage = globalThis.indexedDB;
   const realSocket = globalThis.WebSocket;
@@ -552,10 +720,12 @@ test("a document whose browser keeps no edits says so, and still connects", asyn
     const connect = await loadDocumentTransport();
     connection = connect(artifactId(), {
       onAdmission() {},
+      onBusy() {},
       onOutsideSchema() {},
       onPending: (state) => pending.push(state),
       onStatus() {},
       onSynced() {},
+      onTooLarge() {},
       schemaVersion: 1,
     });
     await waitFor(() => expect(OpenSocket.opened).toHaveLength(1));
