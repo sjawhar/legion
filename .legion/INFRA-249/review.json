@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-249",
+  "completed": "2026-10-25T10:01:03Z",
+  "decision": "changes_requested",
+  "reviewedCodeHead": "bc14427bac5c35d471c8ddc7f26ff8a65657dde7",
+  "critical": 0,
+  "important": 1,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/broadcasts.go:380-401",
+      "description": "resolveBroadcastSessions breaks its launch loop on groupCtx.Err() without recording an error. When the five-second budget ends between two launches and every launched read succeeded, group.Wait returns nil (errgroup returns only worker errors), so the unlaunched ids are missing from `live` and resolveBroadcastTargets excludes them as `no live session`. createBroadcast then commits the partial send under its idempotency key, and a retry is told `excluded by the original send`. This is the stored exclusion D7 forbids. Fix: after Wait, return ctx.Err() (the budget ctx, not groupCtx) wrapped as dispatchenvoy.ErrUnavailable, or track that every id was launched; add a test that drives the expiry between launches and asserts 503, no broadcast row, and a free key."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/comment_delivery.go:53-55",
+      "description": "New comment says a listener that could not answer 'keeps the pin'. It does not: resolveDeliveryTarget returns sessionID \"\" on every non-ErrNotFound error (envoy_resolve.go:110-111), so item.SessionID stays nil. The comment asserts behaviour the code does not have, on a line whose behaviour depends on a string prefix."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/AGENTS.md:1173-1174",
+      "description": "Says a per-session read that did not answer 'refuses the request 503' for all three decisions. True for a broadcast and a claim; a mention's comment is still created 201 with a failed delivery carrying `envoy listener: ...` (comment_create.go, dispatch_resolution_test.go asserts exactly that)."
+    }
+  ],
+  "ci": "Required set (rulesets: lint, typecheck, test, pr-title; no branch protection) all completed success at CI head bc14427bac5c; compare bc14427bac5c...6b7f15739ed0 touches only .legion/. Non-required `Legion Envoy and Contracts` run 40180040158 still running (envoy-go, envoy-go-race, envoy-smoke, dispatch-multiprocess in progress; dispatch, envoy-infra-go, dispatch-memory queued).",
+  "notes": [
+    "GitHub reports the pull request CONFLICTING with main. Files changed on both sides since merge base 531ba202f6d2: packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md, packages/envoy/internal/dispatch/api/issue_claim.go, packages/envoy/internal/dispatch/api/issue_claim_test.go. A forward merge is required; while conflicting, no pull_request workflow runs.",
+    "Thermonuclear pair at 6b7f15739ed0 (code bc14427bac5c): deep review CHANGES (the broadcast finding); code quality CHANGES (same finding, the two wrong descriptions, and the issue_claim_test.go growth past 1,000 lines as cleanup)."
+  ]
+}
