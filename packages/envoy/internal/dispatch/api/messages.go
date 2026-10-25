@@ -60,7 +60,7 @@ func (s *server) createMessage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	issueKey := r.PathValue("key")
-	message, advice, err := s.createStoredMessage(r.Context(), &issueKey, input, delivery, actor, false)
+	message, advice, err := s.createStoredMessage(r.Context(), &issueKey, input, delivery, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -94,7 +94,7 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 		s.writeHandlerError(w, err)
 		return
 	}
-	message, _, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor, true)
+	message, _, err := s.createStoredMessage(r.Context(), nil, messageInput, delivery, actor)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -102,40 +102,61 @@ func (s *server) createAgentMessage(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusCreated, message)
 }
 
-// agentMessageRecovery is the recovery point a keyed single-session send commits with its message
-// (bindRequestKeyRecovery): the message, and the mode it was sent in.
-type agentMessageRecovery struct {
+// messageRecovery is the recovery point a keyed message write commits with its message
+// (bindRequestKeyRecovery): the message, and the mode it was sent in, empty for a message that
+// targets nobody.
+type messageRecovery struct {
 	MessageID string `json:"message_id"`
 	Delivery  string `json:"delivery"`
 }
 
-// replayAgentMessage answers a repeat of a keyed single-session send whose message committed: the
-// message as GET /api/v1/agents/{session_id}/messages reads it, with its deliveries as they stand,
-// once sendHeldMessageOn has put it on its way, under the send's own 201. It is answered from the
-// database before the listener is read, so a repeat never fails because the listener is down.
-func (s *server) replayAgentMessage(w http.ResponseWriter, r *http.Request, recovery json.RawMessage) {
-	ctx := r.Context()
-	var point agentMessageRecovery
+// recoveredMessage is the message a keyed write committed, read once sendHeldMessageOn has put a
+// targeted one on its way, with its deliveries as they stand. It is read from the database before
+// the listener is, so a repeat never fails because the listener is down.
+func (s *server) recoveredMessage(ctx context.Context, recovery json.RawMessage) (model.Message, error) {
+	var point messageRecovery
 	if err := json.Unmarshal(recovery, &point); err != nil {
-		s.writeHandlerError(w, fmt.Errorf("read a send's recovery point: %w", err))
-		return
+		return model.Message{}, fmt.Errorf("read a message's recovery point: %w", err)
 	}
 	message, err := s.loadMessage(ctx, s.deps.Store.Pool, "", point.MessageID)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+		return model.Message{}, err
 	}
-	if err := s.sendHeldMessageOn(ctx, message, point.Delivery); err != nil {
-		s.writeHandlerError(w, err)
-		return
+	if message.Target != nil {
+		if err := s.sendHeldMessageOn(ctx, message, point.Delivery); err != nil {
+			return model.Message{}, err
+		}
 	}
 	deliveries, err := s.loadMessageDeliveries(ctx, s.deps.Store.Pool, []string{message.ID})
+	if err != nil {
+		return model.Message{}, err
+	}
+	message.Deliveries = deliveries[message.ID]
+	return message, nil
+}
+
+// replayAgentMessage answers a repeat of a keyed single-session send whose message committed: the
+// message as GET /api/v1/agents/{session_id}/messages reads it (recoveredMessage), under the send's
+// own 201.
+func (s *server) replayAgentMessage(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, _ []byte) {
+	message, err := s.recoveredMessage(r.Context(), recovery)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	message.Deliveries = deliveries[message.ID]
 	WriteJSON(w, http.StatusCreated, message)
+}
+
+// replayIssueMessage answers a repeat of a keyed issue message whose message committed: the
+// message as it stands (recoveredMessage), a targeted one's owed delivery made first, in the first
+// answer's shape - its advice kept - under the post's own 201.
+func (s *server) replayIssueMessage(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, stored []byte) {
+	message, err := s.recoveredMessage(r.Context(), recovery)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.writeRefreshed(w, stored, message)
 }
 
 // sendHeldMessageOn makes sure a keyed send's message is on its way before its repeat is answered,
@@ -191,17 +212,15 @@ func (s *server) attemptOwed(ctx context.Context, messageID string) (int, error)
 	}
 }
 
-// createStoredMessage writes one message in a single transaction, then sends a targeted message's
-// first attempt. recoverable commits the message as its keyed request's recovery point in that
-// transaction (bindRequestKeyRecovery), so a repeat under the key is answered with this message
-// however this request ends.
+// createStoredMessage writes one message in a single transaction, with it the keyed request's
+// recovery point (bindRequestKeyRecovery), so a repeat under the key is answered with this message
+// however this request ends, then sends a targeted message's first attempt.
 func (s *server) createStoredMessage(
 	ctx context.Context,
 	issueKey *string,
 	input createMessageInput,
 	delivery string,
 	actor model.Actor,
-	recoverable bool,
 ) (model.Message, *writeAdvice, error) {
 	tx, err := s.begin(ctx)
 	if err != nil {
@@ -260,10 +279,8 @@ func (s *server) createStoredMessage(
 	// The recovery point right after its message and before the event append: a repeat that took
 	// the key over meanwhile refuses it here, and this transaction rolls back before it takes the
 	// events' global lock.
-	if recoverable {
-		if err := bindRequestKeyRecovery(ctx, tx, agentMessageRecovery{MessageID: message.ID, Delivery: delivery}); err != nil {
-			return model.Message{}, nil, err
-		}
+	if err := bindRequestKeyRecovery(ctx, tx, messageRecovery{MessageID: message.ID, Delivery: delivery}); err != nil {
+		return model.Message{}, nil, err
 	}
 	var referenceChanges model.ReferenceChanges
 	if message.IssueKey != nil {

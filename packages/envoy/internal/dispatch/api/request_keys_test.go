@@ -17,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/jackc/pgx/v5"
+
 	"github.com/sjawhar/envoy/internal/contracts"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
@@ -516,6 +518,297 @@ func TestALapsedHolderIsTakenOver(t *testing.T) {
 	}
 	if again := rig.send(t, "a", nil, "alice", "stalled"); !replayed(again) || again.Body.String() != takeover.Body.String() {
 		t.Fatalf("a later repeat: replayed=%v body=%s, want the takeover's answer %s", replayed(again), again.Body.String(), takeover.Body.String())
+	}
+}
+
+// rigWrite writes one row of keyed_rig_writes for run in a transaction of its own, under ctx - the
+// request's, so the layer's commit step runs in it - calling held, when set, between the insert and
+// the commit.
+type rigWrite func(ctx context.Context, held func()) error
+
+// newWritingRig is a keyedRig whose handler can write to the database as a route does: write is
+// one insert and commit, under the context the handler is given.
+func newWritingRig(t *testing.T, answer func(run int32, w http.ResponseWriter, r *http.Request, write rigWrite)) *keyedRig {
+	t.Helper()
+	var database *store.Store
+	rig := newKeyedRig(t, func(run int32, w http.ResponseWriter, r *http.Request) {
+		answer(run, w, r, func(ctx context.Context, held func()) error {
+			tx, err := database.Pool.Begin(ctx)
+			if err != nil {
+				return err
+			}
+			defer tx.Rollback(ctx)
+			if _, err := tx.Exec(ctx, `insert into keyed_rig_writes (run) values ($1)`, run); err != nil {
+				return err
+			}
+			if held != nil {
+				held()
+			}
+			return tx.Commit(ctx)
+		})
+	})
+	database = rig.database
+	if _, err := database.Pool.Exec(context.Background(), `create table keyed_rig_writes (run integer not null)`); err != nil {
+		t.Fatalf("create the rig's table: %v", err)
+	}
+	return rig
+}
+
+// writes is every run keyed_rig_writes holds a row of, in order.
+func (rig *keyedRig) writes(t *testing.T) []int32 {
+	t.Helper()
+	rows, err := rig.database.Pool.Query(context.Background(), `select run from keyed_rig_writes order by run`)
+	if err != nil {
+		t.Fatalf("read the rig's writes: %v", err)
+	}
+	runs, err := pgx.CollectRows(rows, pgx.RowTo[int32])
+	if err != nil {
+		t.Fatalf("read the rig's writes: %v", err)
+	}
+	return runs
+}
+
+// loseAnswer leaves key's row as a process that died after its request committed, and before the
+// request's answer was kept, leaves it: in flight, its lease long lapsed.
+func loseAnswer(t *testing.T, database *store.Store, key string) {
+	t.Helper()
+	tag, err := database.Pool.Exec(context.Background(), `
+		update request_keys set status = null, content_type = null, response = null,
+		       leased_at = now() - interval '2 minutes'
+		where idempotency_key = $1
+	`, key)
+	if err != nil || tag.RowsAffected() != 1 {
+		t.Fatalf("lose %s's answer: %v (%d rows)", key, err, tag.RowsAffected())
+	}
+}
+
+// committedAt says whether key's row is marked committed.
+func committedAt(t *testing.T, database *store.Store, key string) bool {
+	t.Helper()
+	var committed bool
+	if err := database.Pool.QueryRow(context.Background(),
+		`select committed_at is not null from request_keys where idempotency_key = $1`, key,
+	).Scan(&committed); err != nil {
+		t.Fatalf("read %s's mark: %v", key, err)
+	}
+	return committed
+}
+
+// INFRA-258. A request committed its write, and its process died before the answer was kept. A
+// repeat past the lease must not run the write again: the key was marked committed in the write's
+// own transaction, and the repeat is answered 409 KEY_COMMITTED, naming the key, with no
+// Retry-After, since asking again changes nothing.
+func TestACommittedWriteWhoseAnswerWasLostIsNeverRunAgain(t *testing.T) {
+	rig := newWritingRig(t, func(run int32, w http.ResponseWriter, r *http.Request, write rigWrite) {
+		if err := write(r.Context(), nil); err != nil {
+			t.Errorf("write: %v", err)
+		}
+		answerRun(run, w, r)
+	})
+	if first := rig.send(t, "a", nil, "alice", "landed"); first.Code != http.StatusCreated {
+		t.Fatalf("first: status=%d body=%s", first.Code, first.Body.String())
+	}
+	if !committedAt(t, rig.database, "landed") {
+		t.Fatal("the write committed, and its key is not marked committed")
+	}
+	loseAnswer(t, rig.database, "landed")
+
+	repeat := rig.send(t, "a", nil, "alice", "landed")
+	code, text := refusalOf(t, repeat)
+	if repeat.Code != http.StatusConflict || code != contracts.IdempotencyKeyCommitted ||
+		repeat.Header().Get(contracts.IdempotencyKeyHeader) != "landed" || repeat.Header().Get("Retry-After") != "" ||
+		!strings.Contains(text, "landed") || !strings.Contains(text, "POST /test/a/writes") {
+		t.Fatalf("a repeat after the lost answer: status=%d code=%s error=%q retry-after=%q, want 409 %s naming the key and the request",
+			repeat.Code, code, text, repeat.Header().Get("Retry-After"), contracts.IdempotencyKeyCommitted)
+	}
+	if runs, writes := rig.runs.Load(), rig.writes(t); runs != 1 || len(writes) != 1 {
+		t.Fatalf("the handler ran %d times and wrote %v, want once and one row", runs, writes)
+	}
+}
+
+// A transaction that only read wrote nothing, so it marks nothing: a request whose process died
+// after it is run again by the repeat past the lease.
+func TestAReadOnlyTransactionMarksNothing(t *testing.T) {
+	var database *store.Store
+	rig := newKeyedRig(t, func(run int32, w http.ResponseWriter, r *http.Request) {
+		tx, err := database.Pool.Begin(r.Context())
+		if err != nil {
+			t.Errorf("begin: %v", err)
+			return
+		}
+		defer tx.Rollback(r.Context())
+		if err := tx.QueryRow(r.Context(), `select count(*) from request_keys`).Scan(new(int)); err != nil {
+			t.Errorf("read: %v", err)
+		}
+		if err := tx.Commit(r.Context()); err != nil {
+			t.Errorf("commit a read: %v", err)
+		}
+		answerRun(run, w, r)
+	})
+	database = rig.database
+	rig.send(t, "a", nil, "alice", "read")
+	if committedAt(t, database, "read") {
+		t.Fatal("a transaction that only read marked its key committed")
+	}
+	loseAnswer(t, database, "read")
+	if again := rig.send(t, "a", nil, "alice", "read"); again.Code != http.StatusCreated || replayed(again) || rig.runs.Load() != 2 {
+		t.Fatalf("a repeat after a read-only request's lost answer: status=%d runs=%d, want the request run again", again.Code, rig.runs.Load())
+	}
+}
+
+// A handler that committed its write and then failed - a 5xx - releases its key with the mark kept,
+// so the next attempt is answered KEY_COMMITTED at once rather than making the write twice.
+func TestAFailureAfterACommittedWriteIsAnsweredCommitted(t *testing.T) {
+	rig := newWritingRig(t, func(_ int32, w http.ResponseWriter, r *http.Request, write rigWrite) {
+		if err := write(r.Context(), nil); err != nil {
+			t.Errorf("write: %v", err)
+		}
+		writeError(w, "AFTER_THE_WRITE", http.StatusInternalServerError, "failed after the write")
+	})
+	if first := rig.send(t, "a", nil, "alice", "half"); first.Code != http.StatusInternalServerError {
+		t.Fatalf("first: status=%d, want 500", first.Code)
+	}
+	again := rig.send(t, "a", nil, "alice", "half")
+	if code, _ := refusalOf(t, again); again.Code != http.StatusConflict || code != contracts.IdempotencyKeyCommitted {
+		t.Fatalf("the next attempt: status=%d body=%s, want 409 %s at once", again.Code, again.Body.String(), contracts.IdempotencyKeyCommitted)
+	}
+	if runs, writes := rig.runs.Load(), rig.writes(t); runs != 1 || len(writes) != 1 {
+		t.Fatalf("the handler ran %d times and wrote %v, want once and one row", runs, writes)
+	}
+}
+
+// A holder that was only slow - its lease lapsed while it held its write open - loses its key to
+// the repeat past the lease, which runs the request and commits its write. The slow holder's commit
+// is then refused and its write rolls back, so the request is written once.
+func TestAHolderThatLostItsKeyCommitsNoWrite(t *testing.T) {
+	holding := make(chan struct{})
+	release, releaseOnce := heldUntilReleased(t)
+	slow := make(chan error, 1)
+	rig := newWritingRig(t, func(run int32, w http.ResponseWriter, r *http.Request, write rigWrite) {
+		var held func()
+		if run == 1 {
+			held = func() {
+				close(holding)
+				<-release
+			}
+		}
+		err := write(r.Context(), held)
+		if run == 1 {
+			slow <- err
+		}
+		if err != nil {
+			s := &server{}
+			s.writeHandlerError(w, err)
+			return
+		}
+		answerRun(run, w, r)
+	})
+	answered := make(chan *httptest.ResponseRecorder, 1)
+	go func() { answered <- rig.send(t, "a", nil, "alice", "slow-write") }()
+	<-holding
+	if _, err := rig.database.Pool.Exec(context.Background(),
+		`update request_keys set leased_at = now() - interval '2 minutes'`); err != nil {
+		t.Fatalf("lapse the lease: %v", err)
+	}
+	if takeover := rig.send(t, "a", nil, "alice", "slow-write"); takeover.Code != http.StatusCreated || !strings.Contains(takeover.Body.String(), `"run":2`) {
+		t.Fatalf("the repeat past the lease: status=%d body=%s, want run 2", takeover.Code, takeover.Body.String())
+	}
+	releaseOnce()
+	if err := <-slow; err != errRequestKeyTakenOver {
+		t.Fatalf("the slow holder's commit = %v, want %v", err, errRequestKeyTakenOver)
+	}
+	if first := awaitResponse(t, answered); first.Code != http.StatusConflict {
+		t.Fatalf("the slow holder's answer: status=%d body=%s, want 409", first.Code, first.Body.String())
+	}
+	if writes := rig.writes(t); len(writes) != 1 || writes[0] != 2 {
+		t.Fatalf("the rig's writes = %v, want the takeover's alone", writes)
+	}
+}
+
+// The commit step belongs to the handler: a write the handler detached - a broadcast's
+// recipients' deliveries - that commits after the answer is not the request's, and commits as it
+// would with no key.
+func TestAWriteDetachedPastTheAnswerCommits(t *testing.T) {
+	answeredSignal := make(chan struct{})
+	detached := make(chan error, 1)
+	rig := newWritingRig(t, func(run int32, w http.ResponseWriter, r *http.Request, write rigWrite) {
+		ctx := context.WithoutCancel(r.Context())
+		go func() {
+			<-answeredSignal
+			detached <- write(ctx, nil)
+		}()
+		answerRun(run, w, r)
+	})
+	if first := rig.send(t, "a", nil, "alice", "detached"); first.Code != http.StatusCreated {
+		t.Fatalf("first: status=%d", first.Code)
+	}
+	close(answeredSignal)
+	select {
+	case err := <-detached:
+		if err != nil {
+			t.Fatalf("the detached write after the answer = %v, want it committed", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("the detached write never finished")
+	}
+	if writes := rig.writes(t); len(writes) != 1 {
+		t.Fatalf("the rig's writes = %v, want the detached one", writes)
+	}
+}
+
+// The generic case on real routes: an ask and an issue are made once even when the answer is lost
+// after their write committed - the repeat is KEY_COMMITTED - and a document edit, whose write goes
+// through the document service, is marked committed in its own transaction the same way.
+func TestRealWritesAreMarkedCommittedAndNeverRunTwice(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createTestIssue(t, handler, "KEYS", "Keyed writes")
+	count := func(query string, args ...any) int {
+		t.Helper()
+		var n int
+		if err := database.Pool.QueryRow(context.Background(), query, args...).Scan(&n); err != nil {
+			t.Fatalf("count: %v", err)
+		}
+		return n
+	}
+	for name, write := range map[string]struct {
+		target string
+		body   any
+		rows   string
+	}{
+		"an ask":   {"/api/v1/issues/" + issue + "/asks", map[string]any{"question": "Which region?"}, `select count(*) from asks where question = 'Which region?'`},
+		"an issue": {"/api/v1/issues", map[string]any{"project": "KEYS", "title": "Made once"}, `select count(*) from issues where title = 'Made once'`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			key := "lost-" + strings.ReplaceAll(name, " ", "-")
+			if first := keyedRequest(t, handler, http.MethodPost, write.target, write.body, "alice", key); first.Code != http.StatusCreated {
+				t.Fatalf("first: status=%d body=%s", first.Code, first.Body.String())
+			}
+			if !committedAt(t, database, key) {
+				t.Fatal("the write committed, and its key is not marked committed")
+			}
+			loseAnswer(t, database, key)
+			again := keyedRequest(t, handler, http.MethodPost, write.target, write.body, "alice", key)
+			if code, _ := refusalOf(t, again); again.Code != http.StatusConflict || code != contracts.IdempotencyKeyCommitted {
+				t.Fatalf("a repeat after the lost answer: status=%d body=%s, want 409 %s", again.Code, again.Body.String(), contracts.IdempotencyKeyCommitted)
+			}
+			if rows := count(write.rows); rows != 1 {
+				t.Fatalf("the write was made %d times, want once", rows)
+			}
+		})
+	}
+	specced := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]any{
+		"project": "KEYS", "title": "Specced", "spec": "before\n",
+	}, "alice")
+	artifactID := decodeBody[struct {
+		PrimaryArtifactID string `json:"primary_artifact_id"`
+	}](t, specced).PrimaryArtifactID
+	edit := keyedRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+artifactID+"/edits",
+		map[string]any{"ops": []map[string]any{{"op": "replace", "find": "before", "with": "after"}}}, "alice", "edit-1")
+	if edit.Code != http.StatusOK {
+		t.Fatalf("edit: status=%d body=%s", edit.Code, edit.Body.String())
+	}
+	if !committedAt(t, database, "edit-1") {
+		t.Fatal("the document edit committed, and its key is not marked committed")
 	}
 }
 

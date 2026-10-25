@@ -18,19 +18,23 @@
 --
 -- A row is in flight while status is null. attempt and leased_at are its lease: the attempt that
 -- holds the key, and when it took it. A repeat past the lease (IdempotencyLease, a minute) presumes
--- the holder's process died and takes the key over, attempt + 1; every write the holder makes to
--- this row afterwards is scoped to its own attempt, so the one it no longer holds changes nothing.
--- A null leased_at is a lease released at once (a 5xx after the request committed its recovery
--- point). status, content_type and response are the stored answer: response null with a status
--- set is an answer larger than Dispatch keeps (1 MiB), replayed as ANSWER_NOT_KEPT. A 5xx, 401,
--- 408 and 429 are never stored.
+-- the holder's process died. committed_at says whether the holder had committed a write: every
+-- transaction the request commits that wrote anything sets it in that same transaction, so it is
+-- set exactly when the write is. A lapsed row without it is taken over, attempt + 1, and the
+-- request runs again; one with it is answered 409 KEY_COMMITTED, since the write landed and its
+-- answer was lost. Every write the holder makes to this row is scoped to its own attempt, so the
+-- one it no longer holds changes nothing, and a write it would commit after losing the key is
+-- refused. A null leased_at is a lease released at once (a 5xx after the request committed). status,
+-- content_type and response are the stored answer: response null with a status set is an answer
+-- larger than Dispatch keeps (1 MiB), replayed as ANSWER_NOT_KEPT. A 5xx, 401, 408 and 429 are never
+-- stored.
 --
--- recovery is the recovery point a write that also mutates foreign state commits with its own rows,
+-- recovery is the recovery point a write that also delivers to sessions commits with its own rows,
 -- in the same transaction (Brandur Leach's "Implementing Stripe-like Idempotency Keys in
--- Postgres"): the single-session send's message and the broadcast it made. A row that holds one
--- is answered from it - the delivery still owed resumed, then what it made read again - however
--- its first request ended, so a send is never made twice even when the process died between its
--- commit and this row's answer.
+-- Postgres"): the message a single-session send or an issue message made, the broadcast, the
+-- comment whose mentions deliver it. A row that holds one is answered from it - the delivery still
+-- owed resumed, then what it made read again - however its first request ended, so a send is never
+-- made twice and never left unmade when the process died between its commit and this row's answer.
 --
 -- created_at bounds a key's life: the suggestion-outcome sweep's pass deletes every row older than
 -- IdempotencyKeyTTL (24 hours), on the created_at index, and a repeat that finds an older row not
@@ -51,6 +55,7 @@ create table request_keys (
   content_type text,
   response bytea,
   recovery jsonb,
+  committed_at timestamptz,
   created_at timestamptz not null default now(),
   primary key (login, idempotency_key)
 );

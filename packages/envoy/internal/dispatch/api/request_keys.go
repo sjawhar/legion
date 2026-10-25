@@ -12,11 +12,13 @@ import (
 	"hash"
 	"io"
 	"log/slog"
+	"maps"
 	"mime"
 	"net/http"
 	"os"
 	"regexp"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -40,18 +42,23 @@ import (
 //     with Idempotency-Replayed: ?1, and the handler does not run again.
 //   - The handler runs on a writer that keeps its answer (keyedAnswer). A 2xx or a 4xx is stored and
 //     the row finished in one statement; a 5xx, a 401 (a session that lapsed mid-write), a 408, a 429
-//     and a panic delete the row, so the next attempt runs the handler again.
-//   - A row whose holder never finished - its process died - is taken over by the first repeat past
-//     the lease. Every write the holder makes to the row is scoped to its own attempt number, so a
-//     holder that was only slow changes nothing once it has lost the key.
-//   - A write that also mutates foreign state keeps its own recovery point (Brandur Leach,
+//     and a panic release the key, so the next attempt runs the handler again - unless the request
+//     committed a write (below).
+//   - Every transaction the handler commits marks the key committed in that same transaction, when
+//     it wrote anything (markRequestKeyCommitted, through the pool's store.WithBeforeCommit). A row
+//     whose holder never answered - its process died - is taken over by the first repeat past the
+//     lease only when it holds no such mark; one that does is answered 409 KEY_COMMITTED, since the
+//     write landed and its answer was lost, and the handler never runs twice. Every write the holder
+//     makes to the row is scoped to its own attempt number, so a holder that was only slow and lost
+//     its key commits nothing more: its next commit is refused.
+//   - A write that also delivers to sessions keeps its own recovery point (Brandur Leach,
 //     "Implementing Stripe-like Idempotency Keys in Postgres"): it commits what it made into the
 //     row in its own transaction (bindRequestKeyRecovery), and a repeat that finds that point is
 //     answered by its route's keyedReplay - whatever delivery is still owed resumed first, then what
-//     it made read again - rather than from the stored bytes, however its first request ended. The
-//     single-session send and the broadcast are the two: their first answer shows deliveries the
-//     repeat must report as they stand now, and a send must never be made twice, even across a
-//     crash between its commit and its stored answer.
+//     it made read again - rather than from the stored bytes or KEY_COMMITTED, however its first
+//     request ended: the single-session send, the broadcast, an issue message and a comment, whose
+//     mentions deliver it. Their first answer shows deliveries the repeat must report as they stand
+//     now, and a delivery a dead process owed must still be made, once.
 //   - Every answer to a keyed request the layer judged carries the key back in the Idempotency-Key
 //     response header, a 5xx included: an earlier Dispatch ignores the header and answers without
 //     it, so a client retries a 5xx under its key only where the echo says the key was judged.
@@ -97,15 +104,44 @@ var errRequestKeyTakenOver = errorf(http.StatusConflict, contracts.IdempotencyKe
 
 // keyedReplay answers a repeat of a keyed write whose first run committed recovery
 // (bindRequestKeyRecovery): it puts on its way whatever the write still owes, then answers what the
-// write made as it stands now, with the status the route's write answers.
-type keyedReplay func(w http.ResponseWriter, r *http.Request, recovery json.RawMessage)
+// write made as it stands now, with the status the route's write answers - a stale success, in
+// Google AIP-155's words, never a second write. stored is the first answer's body when the key kept
+// one, and nil when the first request never answered.
+type keyedReplay func(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, stored []byte)
 
-// keyedReplays is every route whose write commits a recovery point, by method and pattern.
+// keyedReplays is every route whose write commits a recovery point, by method and pattern: the
+// writes that also deliver to sessions, whose deliveries a repeat finishes.
 func (s *server) keyedReplays() map[string]keyedReplay {
 	return map[string]keyedReplay{
 		http.MethodPost + " /api/v1/agents/{session_id}/messages": s.replayAgentMessage,
 		http.MethodPost + " /api/v1/broadcasts":                   s.replayBroadcast,
+		http.MethodPost + " /api/v1/issues/{key}/messages":        s.replayIssueMessage,
+		http.MethodPost + " /api/v1/issues/{key}/comments":        s.replayComment,
+		http.MethodPost + " /api/v1/artifacts/{id}/comments":      s.replayComment,
 	}
+}
+
+// writeRefreshed answers a keyed replay with fresh, the resource as it stands now, in the first
+// answer's shape: the members stored holds that fresh does not (a write's advice, a reply's
+// ask_waiting_on) kept, and every member fresh carries written over them. With no stored answer it
+// answers fresh alone. Its status is the write's own 201.
+func (s *server) writeRefreshed(w http.ResponseWriter, stored []byte, fresh any) {
+	encoded, err := json.Marshal(fresh)
+	if err != nil {
+		s.writeHandlerError(w, fmt.Errorf("encode a replayed resource: %w", err))
+		return
+	}
+	var current map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &current); err != nil {
+		s.writeHandlerError(w, fmt.Errorf("read a replayed resource: %w", err))
+		return
+	}
+	var answer map[string]json.RawMessage
+	if len(stored) > 0 && json.Unmarshal(stored, &answer) == nil && answer != nil {
+		maps.Copy(answer, current)
+		current = answer
+	}
+	WriteJSON(w, http.StatusCreated, current)
 }
 
 // keyedMethod reports whether register keys a route of this method: a POST or a PATCH. A PUT and a
@@ -191,15 +227,24 @@ func (s *server) keyedWrites(method, pattern string, handler http.HandlerFunc, r
 			return
 		}
 		answer := &keyedAnswer{w: w}
+		// running bounds the commit step to the handler: a delivery the handler detached (a
+		// broadcast's recipients) commits after the answer, and is not the request's write.
+		var running atomic.Bool
+		running.Store(true)
 		settled := false
 		defer func() {
-			// A handler that panicked answered nothing worth keeping: the next attempt runs again.
-			// The panic itself carries on to net/http with its own stack.
+			running.Store(false)
+			// A handler that panicked answered nothing worth keeping: the key is released, so the
+			// next attempt runs again unless the request had committed a write. The panic itself
+			// carries on to net/http with its own stack.
 			if !settled {
 				s.releaseRequestKey(r.Context(), claim)
 			}
 		}()
-		handler(answer, r.WithContext(context.WithValue(r.Context(), requestKeyClaimKey{}, claim)))
+		run := context.WithValue(r.Context(), requestKeyClaimKey{}, claim)
+		run = store.WithBeforeCommit(run, markRequestKeyCommitted(claim, &running))
+		handler(answer, r.WithContext(run))
+		running.Store(false)
 		s.settleRequestKey(r.Context(), claim, answer)
 		settled = true
 		answer.deliver()
@@ -392,8 +437,17 @@ type heldRequestKey struct {
 	response    []byte
 	kept        bool
 	recovery    json.RawMessage
+	committed   bool
 	lapsed      bool
 	expired     bool
+}
+
+// storedAnswer is the first request's body as the key kept it, or nil when it holds none.
+func (held heldRequestKey) storedAnswer() []byte {
+	if held.status == nil || !held.kept {
+		return nil
+	}
+	return held.response
 }
 
 // claimRequestKey takes login's key for r, whose digest is digest, and answers whatever the key
@@ -423,13 +477,13 @@ func (s *server) claimRequestKey(
 		var held heldRequestKey
 		err = pool.QueryRow(ctx, `
 			select request_digest, method, path, attempt, status, content_type, response,
-			       response is not null, recovery,
+			       response is not null, recovery, committed_at is not null,
 			       leased_at is null or leased_at < now() - make_interval(secs => $3),
 			       created_at < now() - make_interval(secs => $4)
 			from request_keys where login = $1 and idempotency_key = $2
 		`, login, key, lease, ttl).Scan(
 			&held.digest, &held.method, &held.path, &held.attempt, &held.status, &held.contentType,
-			&held.response, &held.kept, &held.recovery, &held.lapsed, &held.expired,
+			&held.response, &held.kept, &held.recovery, &held.committed, &held.lapsed, &held.expired,
 		)
 		if errors.Is(err, pgx.ErrNoRows) {
 			continue
@@ -456,7 +510,7 @@ func (s *server) claimRequestKey(
 			return claim, true
 		case held.recovery != nil && replay != nil && (held.status != nil || held.lapsed):
 			w.Header().Set(contracts.IdempotencyReplayedHeader, "?1")
-			replay(w, r, held.recovery)
+			replay(w, r, held.recovery, held.storedAnswer())
 			return claim, true
 		case held.status != nil:
 			replayStoredAnswer(w, held)
@@ -464,12 +518,18 @@ func (s *server) claimRequestKey(
 		case !held.lapsed:
 			writeKeyInFlight(w, key)
 			return claim, true
+		case held.committed || held.recovery != nil:
+			// The holder committed its write and its process died, or it failed, before its answer
+			// was kept: running the request again would make the write twice.
+			writeKeyCommitted(w, key, held)
+			return claim, true
 		}
 		// The holder's lease lapsed with nothing committed: its process died before its write did,
 		// so this attempt takes the key over and runs the request.
 		tag, err := pool.Exec(ctx, `
 			update request_keys set attempt = attempt + 1, leased_at = now()
-			where login = $1 and idempotency_key = $2 and attempt = $3 and status is null and recovery is null
+			where login = $1 and idempotency_key = $2 and attempt = $3
+			  and status is null and recovery is null and committed_at is null
 		`, login, key, held.attempt)
 		if err != nil {
 			s.writeHandlerError(w, fmt.Errorf("take over an idempotency key: %w", err))
@@ -490,6 +550,15 @@ func writeKeyInFlight(w http.ResponseWriter, key string) {
 	writeError(w, contracts.IdempotencyKeyInFlight, http.StatusConflict, fmt.Sprintf(
 		"the first request under %s %q is still running; this one was not run: ask again under the same key",
 		contracts.IdempotencyKeyHeader, key))
+}
+
+// writeKeyCommitted answers a repeat whose first request committed its write and lost its answer:
+// Dispatch does not run the request again, and has nothing to replay (Google AIP-155's lost
+// answer; a route that commits a recovery point answers the resource instead).
+func writeKeyCommitted(w http.ResponseWriter, key string, held heldRequestKey) {
+	writeError(w, contracts.IdempotencyKeyCommitted, http.StatusConflict, fmt.Sprintf(
+		"the write under %s %q (%s %s) landed, but Dispatch lost its answer, so it is not run again and has no answer to replay: read what it wrote",
+		contracts.IdempotencyKeyHeader, key, held.method, held.path))
 }
 
 // replayStoredAnswer answers a repeat with the first request's stored answer.
@@ -519,7 +588,8 @@ func storedStatus(status int) bool {
 // settleRequestKey records what claim's handler answered: a stored status finishes the row with
 // it, and any other releases the key (releaseRequestKey). A row another attempt has taken over is
 // left as it is. A failure is logged and the caller is still answered, since the handler has run:
-// its row stays in flight until a repeat past the lease takes it over.
+// its row stays in flight, and a repeat past the lease is answered KEY_COMMITTED (or from its
+// recovery point) when the request committed a write, and runs it again when it did not.
 func (s *server) settleRequestKey(ctx context.Context, claim requestKeyClaim, answer *keyedAnswer) {
 	status := answer.finalStatus()
 	if !storedStatus(status) {
@@ -546,21 +616,61 @@ func (s *server) settleRequestKey(ctx context.Context, claim requestKeyClaim, an
 }
 
 // releaseRequestKey gives up claim's key when its handler answered nothing worth keeping. A row
-// with no recovery point is deleted, so the next attempt runs the request again; one whose request
-// committed its recovery point keeps it, and is released at once, so the next attempt is answered
-// from that point rather than making the write a second time.
+// whose request committed nothing is deleted, so the next attempt runs the request again. One
+// whose request committed a write - its recovery point, or any write markRequestKeyCommitted
+// marked - keeps it, and is released at once, so the next attempt is answered from that point, or
+// KEY_COMMITTED, rather than making the write a second time.
 func (s *server) releaseRequestKey(ctx context.Context, claim requestKeyClaim) {
 	bookkeeping, cancel := context.WithTimeout(context.WithoutCancel(ctx), keyedBookkeeping)
 	defer cancel()
 	if _, err := s.deps.Store.Pool.Exec(bookkeeping, `
 		with released as (
 			update request_keys set leased_at = null
-			where login = $1 and idempotency_key = $2 and attempt = $3 and status is null and recovery is not null
+			where login = $1 and idempotency_key = $2 and attempt = $3 and status is null
+			  and (recovery is not null or committed_at is not null)
 		)
 		delete from request_keys
-		where login = $1 and idempotency_key = $2 and attempt = $3 and status is null and recovery is null
+		where login = $1 and idempotency_key = $2 and attempt = $3 and status is null
+		  and recovery is null and committed_at is null
 	`, claim.login, claim.key, claim.attempt); err != nil {
 		slog.Error("dispatch: release a keyed request's key", "error", err)
+	}
+}
+
+// markRequestKeyCommitted is the step every transaction of claim's handler takes before its COMMIT
+// (store.WithBeforeCommit), while running holds: a transaction that wrote anything - Postgres
+// assigned it a transaction id - marks the key committed in that same transaction, so the mark
+// commits with the request's write or not at all, and a repeat that finds the key in flight and
+// its holder gone is answered KEY_COMMITTED instead of running the write again. A transaction that
+// only read marks nothing. A holder whose key a repeat has taken over is refused
+// (errRequestKeyTakenOver) and its write rolls back, so the request's write is made once.
+//
+// running ends when the handler returns: a delivery the handler detached commits after its
+// answer, and is no write of the request's.
+func markRequestKeyCommitted(claim requestKeyClaim, running *atomic.Bool) store.BeforeCommit {
+	return func(ctx context.Context, tx pgx.Tx) error {
+		if !running.Load() {
+			return nil
+		}
+		// One statement: an update whose condition holds only for a transaction that wrote, and
+		// the same question asked beside it, so a read-only transaction writes and asks nothing
+		// more, and a written one learns whether its key is still its own.
+		var wrote, marked bool
+		if err := tx.QueryRow(ctx, `
+			with marked as (
+				update request_keys set committed_at = coalesce(committed_at, now())
+				where login = $1 and idempotency_key = $2 and attempt = $3
+				  and txid_current_if_assigned() is not null
+				returning 1
+			)
+			select txid_current_if_assigned() is not null, exists (select 1 from marked)
+		`, claim.login, claim.key, claim.attempt).Scan(&wrote, &marked); err != nil {
+			return fmt.Errorf("mark an idempotency key committed: %w", err)
+		}
+		if wrote && !marked {
+			return errRequestKeyTakenOver
+		}
+		return nil
 	}
 }
 

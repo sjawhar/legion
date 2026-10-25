@@ -248,7 +248,7 @@ type broadcastRecovery struct {
 // replayBroadcast answers a repeat of a keyed broadcast whose broadcast committed: the broadcast as
 // GET /api/v1/broadcasts/{id} reads it, once sendOwedBroadcastRecipients has put every recipient it
 // still owes on its way, with the send's own exclusions, under the send's own 201.
-func (s *server) replayBroadcast(w http.ResponseWriter, r *http.Request, recovery json.RawMessage) {
+func (s *server) replayBroadcast(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, _ []byte) {
 	ctx := r.Context()
 	var point broadcastRecovery
 	if err := json.Unmarshal(recovery, &point); err != nil {

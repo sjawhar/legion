@@ -89,7 +89,7 @@ func commitKeyedMessage(t *testing.T, database *store.Store, key, body, delivery
 		request: jsonRequest(t, http.MethodPost, "/api/v1/agents/s1/messages",
 			map[string]any{"body": body, "delivery": delivery}, map[string]string{"session_id": "s1"}),
 		leasedAgo: leasedAgo, status: status,
-		recovery: agentMessageRecovery{MessageID: id, Delivery: delivery},
+		recovery: messageRecovery{MessageID: id, Delivery: delivery},
 	})
 	return id
 }
@@ -652,7 +652,7 @@ func TestASendThatLostItsKeyCommitsNothing(t *testing.T) {
 	delivery := "btw"
 	_, _, err := directServer(deps).createStoredMessage(slow, nil,
 		createMessageInput{Body: "Status?", Target: &target, Delivery: &delivery}, "btw",
-		model.Actor{Kind: "user", ID: "alice"}, true)
+		model.Actor{Kind: "user", ID: "alice"})
 	if err != errRequestKeyTakenOver {
 		t.Fatalf("the slow holder's write = %v, want %v", err, errRequestKeyTakenOver)
 	}

@@ -2,7 +2,9 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
+	"fmt"
 	"maps"
 	"net/http"
 	"slices"
@@ -139,6 +141,90 @@ func (t commentThreadTarget) eventThread(waitingOn string) commentEventThread {
 
 func (s *server) createComment(w http.ResponseWriter, r *http.Request) {
 	s.createCommentFor(w, r, issueOwner(r.PathValue("key")))
+}
+
+// commentRecovery is the recovery point a keyed comment commits with itself
+// (bindRequestKeyRecovery): the comment, whose mentions deliver it.
+type commentRecovery struct {
+	CommentID string `json:"comment_id"`
+}
+
+// replayComment answers a repeat of a keyed comment that committed: the comment with its mentions
+// and deliveries as they stand, once every mention it still owes has been delivered, in the first
+// answer's shape - its advice and ask_waiting_on kept - under the comment's own 201. A mention owes
+// its delivery when its process died after the comment committed and before the mention's one
+// attempt was sent: that attempt is still pending, and its claim, if any, has lapsed. It is resumed
+// under its own number, so the listener drops a frame that did land, and as the comment's own
+// first delivery (deliverResolvedCommentMention, initial), so an attempt a live sender holds is
+// left to it and no second attempt is opened. A mention someone retried from its card has more
+// than one attempt, and owes nothing here.
+func (s *server) replayComment(w http.ResponseWriter, r *http.Request, recovery json.RawMessage, stored []byte) {
+	ctx, pool := r.Context(), s.deps.Store.Pool
+	var point commentRecovery
+	if err := json.Unmarshal(recovery, &point); err != nil {
+		s.writeHandlerError(w, fmt.Errorf("read a comment's recovery point: %w", err))
+		return
+	}
+	comment, err := s.loadComment(ctx, pool, point.CommentID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	owed, err := s.owedCommentMentions(ctx, comment.ID)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	if len(owed) > 0 {
+		created, err := s.loadCommentCreatedEvent(ctx, pool, comment.ID)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
+		// Detached from the request, as the comment's own deliveries are: a client that gives up
+		// on the repeat must not strand the mention it started.
+		sending := context.WithoutCancel(ctx)
+		for _, mention := range owed {
+			if _, err := s.deliverResolvedCommentMention(sending, comment, created, mention, comment.Author, true); err != nil {
+				s.writeHandlerError(w, err)
+				return
+			}
+		}
+	}
+	hydrated, err := s.hydrateCommentSideTables(ctx, pool, []model.Comment{comment})
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	s.writeRefreshed(w, stored, hydrated[0])
+}
+
+// owedCommentMentions is each mention of the comment whose one attempt is pending with no live
+// claim (claimLapsed), in the mode it was opened with.
+func (s *server) owedCommentMentions(ctx context.Context, commentID string) ([]ResolvedMention, error) {
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select target, min(delivery), count(*), coalesce(bool_and(state = 'pending' and `+claimLapsed+`), false)
+		from comment_deliveries where comment_id = $1
+		group by target
+		order by target
+	`, commentID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var owed []ResolvedMention
+	for rows.Next() {
+		var target, delivery string
+		var attempts int
+		var stranded bool
+		if err := rows.Scan(&target, &delivery, &attempts, &stranded); err != nil {
+			return nil, err
+		}
+		if attempts == 1 && stranded {
+			owed = append(owed, ResolvedMention{Target: target, Delivery: delivery})
+		}
+	}
+	return owed, rows.Err()
 }
 
 func (s *server) normalizeCommentThreadTarget(
@@ -494,6 +580,13 @@ func (s *server) createCommentFor(w http.ResponseWriter, r *http.Request, owner 
 		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
 		returning created_at
 	`, rowID, owner.IssueKey, owner.ArtifactID, author, input.Body, anchorJSON, input.ReplyTo, input.AskID, turn, suggestionJSON).Scan(&comment.CreatedAt); err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// The recovery point in the comment's own transaction: a repeat under the key is answered with
+	// this comment, its owed mentions delivered (replayComment), however this request ends; a repeat
+	// that took the key over meanwhile refuses it here, and the comment rolls back.
+	if err := bindRequestKeyRecovery(r.Context(), tx, commentRecovery{CommentID: rowID}); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
