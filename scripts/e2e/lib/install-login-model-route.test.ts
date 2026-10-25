@@ -84,7 +84,7 @@ function writeFakes(bin: string, fake: Fake) {
   writeFileSync(join(bin, "omp"), fakeOmp, { mode: 0o755 });
   writeFileSync(join(bin, "mise"), fakeMise, { mode: 0o755 });
   writeFileSync(join(bin, "operator-version"), fake.operatorVersion ?? "18.12.2");
-  writeFileSync(join(bin, "pin-version"), fake.pinVersion ?? "18.8.9");
+  writeFileSync(join(bin, "pin-version"), fake.pinVersion ?? "18.12.2");
   const session = fake.session ?? [answer("anthropic", "claude-opus-4-8")];
   writeFileSync(join(bin, "session.jsonl"), `${session.join("\n")}\n`);
   if (fake.sidecar) writeFileSync(join(bin, "sidecar.jsonl"), `${fake.sidecar.join("\n")}\n`);
@@ -344,11 +344,13 @@ describe("the login model route installer", () => {
   );
 
   test(
-    "fails, installing nothing, when --omp is newer than the operator's own omp",
+    "fails, installing nothing, when --omp differs from the operator's own omp",
     () => {
-      const r = install({ fake: { pinVersion: "18.13.0", operatorVersion: "18.12.2" } });
+      const r = install({
+        fake: { pinVersion: "18.13.0", operatorVersion: "18.12.2" },
+      });
       expect(r.result.exitCode).toBe(1);
-      expect(r.stderr).toContain("newer than the operator's own 18.12.2");
+      expect(r.stderr).toContain("not the operator's own 18.12.2");
       expectNothingInstalled(r);
     },
     slow

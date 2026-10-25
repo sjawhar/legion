@@ -4,14 +4,7 @@
 # key file, for a devbox whose Oh My Pi is signed in to Anthropic and that has neither a gateway nor
 # a key to hand the run.
 #
-#   scripts/e2e/lib/install-login-model-route.sh --profile <name> --home <dir> --dest <dir> --omp <mise tool spec> --run-minutes <n>
-#
-# --home is the HOME Oh My Pi runs under for the profile, made by make_omp_home (lib/omp-home.sh):
-# the profile's files go under <home>/.omp/profiles/<name>, and the caller's own HOME is refused.
-# --omp is the Oh My Pi the run's panes run (`mise x <spec> -- omp`, the daemon's omp_invocation);
-# the preflight below runs it. --dest gets the preflight's output (<dest>/omp-preflight.log), which
-# holds the model's answer and Oh My Pi's warnings, never a credential. --run-minutes is the longest
-# the caller's run lasts.
+#   scripts/e2e/lib/install-login-model-route.sh --profile <name> --home <dir> --dest <dir> --omp <absolute executable> --run-minutes <n>
 #
 # Oh My Pi keeps its logins in its agent.db, beside its settings and caches, and a login's refresh
 # token rotates when one process refreshes it. A copy of the login in a second database would
@@ -143,18 +136,19 @@ else
 fi
 [ -f "$login_db" ] || fail "the operator's Oh My Pi has no agent.db at $login_db, so it holds no login: sign in with omp's /login, or use another model route"
 
-# Two Oh My Pi versions now write one database. A newer one migrates its schema forward under the
-# operator's own sessions, so --omp may not be newer than the operator's own omp (the first on PATH).
-# Each is compared by its release, the leading major.minor.patch of what `omp --version` prints.
+# The route shares the operator's database. --omp must therefore be the same release as the
+# operator's own omp (the first on PATH).
+# Sharing the database is safe only when --omp and the operator's own omp (the first on PATH) report
+# the same release, the leading major.minor.patch of `omp --version`: an older client can lose a
+# rotated refresh token when a run stops it mid-exchange (a 401 can force an exchange at any expiry),
+# and a newer one can migrate the database under the operator's sessions.
 version_of() { "$@" --version 2>/dev/null | sed -n 's|^omp/\([0-9][0-9.]*\).*|\1|p' | sed -n 1p; }
 operator_version=$(version_of omp) || operator_version=
 pin_version=$(version_of mise x "$omp" -- omp) || pin_version=
 [ -n "$operator_version" ] || fail "\`omp --version\` printed no version: the operator's own Oh My Pi, which --omp is compared with, must be first on PATH"
 [ -n "$pin_version" ] || fail "\`mise x $omp -- omp --version\` printed no version"
-if [ "$pin_version" != "$operator_version" ] &&
-  [ "$(printf '%s\n%s\n' "$pin_version" "$operator_version" | sort -V | tail -n 1)" = "$pin_version" ]; then
-  fail "--omp runs Oh My Pi $pin_version, newer than the operator's own $operator_version, and would migrate the shared database under the operator's sessions: upgrade the operator's omp first, or use another model route"
-fi
+[ "$pin_version" = "$operator_version" ] ||
+  fail "--omp runs Oh My Pi $pin_version, not the operator's own $operator_version: the login route shares the operator's database, so every process must run the same release; make omp_invocation the operator's executable, or use another model route"
 
 # Every provider the operator's database holds a live login for, and the minutes left on each live
 # anthropic OAuth login. Each provider but anthropic is disabled in the profile, since a subagent or
