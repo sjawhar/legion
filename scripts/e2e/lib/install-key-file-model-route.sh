@@ -206,7 +206,8 @@ if key=$(<"$key_file"); then
 else
   detail="could not read"
 fi
-# The key alone: whitespace around it (a CRLF line end, a trailing space) is no part of any key.
+# The key alone: every whitespace character (a CRLF line end, a trailing space) is dropped, since
+# no Anthropic key holds one.
 key=${key-}
 key=${key//[[:space:]]/}
 if [ -z "${key:-}" ]; then

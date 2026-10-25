@@ -153,7 +153,7 @@ cmd_profile() {
   if ! commit=$(jj -R "$co" log -r @ --no-graph -T 'commit_id ++ " parents=" ++ parents.map(|c| c.commit_id()).join(",")' 2>/dev/null); then
     # A git checkout: its HEAD, and `dirty` when the working tree differs from it.
     head=$(git -C "$co" rev-parse HEAD 2>/dev/null) || fail "$co is neither a jj nor a git checkout, so the label cannot name its commit"
-    commit="$head parents=$(git -C "$co" rev-parse HEAD^ 2>/dev/null)"
+    commit="$head parents=$(git -C "$co" rev-parse HEAD^ 2>/dev/null || true)"
     [ -z "$(git -C "$co" status --porcelain)" ] || commit+=" dirty"
   fi
   {

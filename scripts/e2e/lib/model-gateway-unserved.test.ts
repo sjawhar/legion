@@ -180,7 +180,7 @@ describe("the model route's call record", () => {
     expect(unserved("--notes", dest, since, "merge").code).toBe(1);
   });
 
-  test("serves the key alone, without the whitespace around it, and records a key file gone or blank as failed", async () => {
+  test("serves the key with every whitespace character dropped, and records a key file gone or blank as failed", async () => {
     const { run, dest, keyFile, keyCommand } = install();
     writeFileSync(keyFile, " sk-ant-x \r\n");
     const raw = Bun.spawnSync(["/bin/sh", "-c", `exec ${keyCommand}`], {
