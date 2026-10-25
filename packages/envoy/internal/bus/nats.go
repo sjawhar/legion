@@ -412,12 +412,24 @@ func (c *Client) endBind(subscription *recoverableSubscription, sub *nats.Subscr
 
 // SubOK reports whether the durable listener subscription is active on a live connection.
 func (c *Client) SubOK() bool {
+	return c.subscriptionOK(jetStreamSubscription)
+}
+
+// CoreSubOK reports whether the client's core subscription is active on a live connection. It reads
+// the subscription the client holds now, not the handle SubscribeCore returned: a recovery onto a
+// connection dialed to replace a closed one binds a replacement, and the returned handle stays
+// invalid for good.
+func (c *Client) CoreSubOK() bool {
+	return c.subscriptionOK(coreSubscription)
+}
+
+func (c *Client) subscriptionOK(transport subscriptionTransport) bool {
 	c.mu.Lock()
 	connOK := c.Conn != nil && c.Conn.Status() != nats.CLOSED
 	c.mu.Unlock()
 	c.subscriptionsMu.Lock()
-	subscription := c.subscriptions[jetStreamSubscription]
-	subOK := subscription.active != nil && subscription.active.IsValid()
+	active := c.subscriptions[transport].active
+	subOK := active != nil && active.IsValid()
 	c.subscriptionsMu.Unlock()
 	return connOK && subOK
 }
@@ -702,7 +714,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 // from an older one, so the stream still stores it but without a MsgId, and the older listener's
 // durable never fans it out.
 func usesCoreTransport(topic string) bool {
-	return strings.HasPrefix(topic, NotificationTopicPrefix) && !streamCaptures(topic)
+	return strings.HasPrefix(topic, NotificationTopicPrefix) && !StreamCaptures(topic)
 }
 
 // ErrRefused is returned for an envelope that is refused the same way however often it is
