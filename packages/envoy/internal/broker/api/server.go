@@ -39,6 +39,16 @@ type Deps struct {
 	// Policy is the live agent-secret policy, which POST /v1/secrets/{name}/reread rereads one
 	// name of (policy.Current.RefreshOne).
 	Policy *policy.Current
+	// NotifyReread tells every other pod serving this database to reread name, the fan-out
+	// internal/broker/reread's Notifier sends over Postgres LISTEN/NOTIFY; nil means no fan-out,
+	// which is a single-pod broker and every test that wires none. POST
+	// /v1/secrets/{name}/reread is its one call site (rereadSecret), which explains there both
+	// when it is called and why it is called from the route rather than from RefreshOne.
+	//
+	// It reports nothing, because the handler has nothing to do with a failure: the local reread
+	// has already succeeded and its answer stands, so whether a failed fan-out is logged, and at
+	// what level, belongs to the function cmd/broker supplies.
+	NotifyReread func(ctx context.Context, name string)
 	// SecretsPrefix is BROKER_SECRETS_PREFIX, the namespace GET /v1/settings answers.
 	SecretsPrefix string
 	// SecretsStore is BROKER_SECRETS_STORE, the store GET /v1/settings names: secrets.StoreAWS or
@@ -48,10 +58,14 @@ type Deps struct {
 	// (BROKER_SECRETS_KMS_KEY_ARN), with its region and account, or the GCP store's Cloud KMS key
 	// name (BROKER_SECRETS_KMS_KEY_NAME).
 	SecretsKMSKey string
-	// LauncherLimits bounds POST /v1/launcher-credentials; nil means DefaultLauncherLimits.
+	// LauncherLimits bounds POST /v1/oauth/device_authorization and POST
+	// /v1/launcher-credentials/token; nil means DefaultLauncherLimits.
 	LauncherLimits *LauncherLimits
 	// RereadLimit bounds POST /v1/secrets/{name}/reread per source address; nil means
-	// DefaultRereadLimit.
+	// RereadLimitFor of the shared bucket this process mounted - RereadOverallLimit, or
+	// DefaultRereadOverallLimit when that is nil too - so that an address's own rate is ordered
+	// against the bucket this process actually has rather than against a constant derived from a
+	// bucket it may never mount.
 	RereadLimit *ratelimit.Limit
 	// RereadOverallLimit bounds that route across every caller at once; nil means
 	// DefaultRereadOverallLimit.
@@ -73,6 +87,18 @@ type Deps struct {
 	DeviceLogin func(ctx context.Context, form url.Values, userCode string) error
 	// TokenHooks are the broker's steps around each token the provider issues.
 	TokenHooks oauth.TokenHooks
+	// Draining reports whether this process has begun stopping, which GET /healthz answers 503
+	// SHUTTING_DOWN for while every other route goes on being served; nil means it never does.
+	//
+	// This is how a pod stops being sent traffic before it stops accepting it. Kubernetes removes
+	// a terminating pod from its Service's EndpointSlice concurrently with the kubelet beginning
+	// termination, not before it, so a pod that simply closed its listener at SIGTERM would be
+	// refusing connections that were still being routed to it. Failing the health check is what
+	// makes a readiness probe, and anything else reading readiness, stop choosing this pod, which
+	// is why the drain has to show up here rather than in the listener. nil is every caller that
+	// never stops in the first place - brokertest and the in-process rigs - for which the broker
+	// is never draining.
+	Draining func() bool
 }
 
 type server struct {
@@ -95,13 +121,17 @@ func Register(mux *http.ServeMux, deps Deps) {
 	if deps.LauncherLimits != nil {
 		limits = *deps.LauncherLimits
 	}
-	reread := DefaultRereadLimit
-	if deps.RereadLimit != nil {
-		reread = *deps.RereadLimit
-	}
 	rereadOverall := DefaultRereadOverallLimit
 	if deps.RereadOverallLimit != nil {
 		rereadOverall = *deps.RereadOverallLimit
+	}
+	// Derived from the shared bucket resolved just above, and only when the caller named no
+	// bucket of its own: a caller that passes one - the rows that drive the per-address bucket
+	// on its own - keeps what it passed, exactly as every other optional dep here is defaulted
+	// rather than overridden.
+	reread := RereadLimitFor(rereadOverall)
+	if deps.RereadLimit != nil {
+		reread = *deps.RereadLimit
 	}
 	token := DefaultTokenLimit
 	if deps.TokenLimit != nil {
@@ -309,13 +339,25 @@ type stateResponse struct {
 	State string `json:"state"`
 }
 
-// healthResponse is GET /healthz's answer while the broker can reach Postgres.
+// healthResponse is GET /healthz's answer while the broker is not draining and can reach
+// Postgres. Neither refusal has a type of its own: both are the ordinary broker error object
+// writeError writes, so this stays the route's one named response type.
 type healthResponse struct {
 	// "ok".
 	Status string `json:"status"`
 }
 
 func (s *server) healthz(w http.ResponseWriter, r *http.Request) {
+	// A draining pod fails its health check before anything else, the Postgres ping included: the
+	// answer has to flip the moment the process begins stopping, whatever the database is doing,
+	// because this is what takes the pod out of its Service's endpoints while it goes on serving
+	// the requests already routed to it. The refusal is an ordinary broker error object rather
+	// than a healthResponse with some other status, so a caller reads the same {code, error}
+	// shape every other refusal has.
+	if s.deps.Draining != nil && s.deps.Draining() {
+		writeError(w, http.StatusServiceUnavailable, "SHUTTING_DOWN", "the broker is shutting down and is no longer taking new traffic")
+		return
+	}
 	if err := s.deps.Enroll.Store.Pool.Ping(r.Context()); err != nil {
 		writeUnavailable(w, "DATABASE_UNAVAILABLE", "ping Postgres", err)
 		return

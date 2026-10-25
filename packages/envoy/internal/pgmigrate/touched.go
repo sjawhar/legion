@@ -14,7 +14,8 @@ import (
 
 // rowWrite is what a statement does to the rows of the table it names, which decides the tables
 // a foreign key reaches from it (CensusTables). A statement that writes no row (DDL, lock table, a
-// foreign key's references) is 0.
+// foreign key's references) is 0, but for drop table (dropsTable), which removes the table's own
+// foreign keys and so locks each table they reference.
 type rowWrite int
 
 const (
@@ -22,6 +23,7 @@ const (
 	updatesRows
 	deletesRows
 	truncatesRows
+	dropsTable
 )
 
 // touchedTablePatterns are the statement forms the repository's migrations lock a table above
@@ -32,7 +34,7 @@ var touchedTablePatterns = []struct {
 }{
 	{regexp.MustCompile(`(?is)\balter\s+table\s+(?:if\s+exists\s+)?(?:only\s+)?([\w."]+)`), 0},
 	{regexp.MustCompile(`(?is)\bcreate\s+(?:unique\s+)?index\s+(?:concurrently\s+)?(?:if\s+not\s+exists\s+)?[\w."]+\s+on\s+(?:only\s+)?([\w."]+)`), 0},
-	{regexp.MustCompile(`(?is)\bdrop\s+table\s+(?:if\s+exists\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`), 0},
+	{regexp.MustCompile(`(?is)\bdrop\s+table\s+(?:if\s+exists\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`), dropsTable},
 	{regexp.MustCompile(`(?is)\btruncate\s+(?:table\s+)?(?:only\s+)?([\w."]+(?:\s*,\s*[\w."]+)*)`), truncatesRows},
 	{regexp.MustCompile(`(?is)\bcreate\s+(?:or\s+replace\s+)?(?:constraint\s+)?trigger\s+[\w."]+.*?\bon\s+([\w."]+)`), 0},
 	// The table may carry an alias (update comments c set …), as 0043 and 0044 write it.
@@ -174,12 +176,14 @@ type TouchedTable struct {
 //   - the table of each index the migration drops or alters (an index the database does not have
 //     yet is skipped: the pending migration that creates it names its table);
 //   - every table a foreign key reaches from rows the migration writes, which a statement locks
-//     only when it writes a row. A row inserted or updated is checked against the table its foreign
-//     key references (ROW SHARE). A row deleted, or one whose key an update changes, is checked
-//     against every table that references it (ROW SHARE) or acted on there by the key's on delete
-//     or on update (ROW EXCLUSIVE); a cascaded delete goes on from that table, as truncate …
-//     cascade goes on from every table it reaches, while a set null or a cascaded update stops at
-//     the table it writes. An insert's on conflict do update is read as an update too.
+//     only when it writes a row, or from a table it drops, whose own foreign keys go with it and
+//     lock the table each references (ACCESS EXCLUSIVE). A row inserted or updated is checked
+//     against the table its foreign key references (ROW SHARE). A row deleted, or one whose key an
+//     update changes, is checked against every table that references it (ROW SHARE) or acted on
+//     there by the key's on delete or on update (ROW EXCLUSIVE); a cascaded delete goes on from
+//     that table, as truncate … cascade goes on from every table it reaches, while a set null or a
+//     cascaded update stops at the table it writes. An insert's on conflict do update is read as an
+//     update too.
 //
 // The foreign keys followed are the ones the catalog holds, read when the census is taken; Census
 // adds the ones earlier pending migrations add (addedForeignKeys), which the lock audit, applying
@@ -325,7 +329,7 @@ func reachedByForeignKeys(writes map[string]rowWrite, keys []foreignKey) map[str
 	for _, table := range slices.Sorted(maps.Keys(writes)) {
 		w := writes[table]
 		for _, key := range keys {
-			if w&(insertsRows|updatesRows) != 0 && key.from == table {
+			if w&(insertsRows|updatesRows|dropsTable) != 0 && key.from == table {
 				reach(key.to, table)
 			}
 			if w&updatesRows != 0 && key.to == table {

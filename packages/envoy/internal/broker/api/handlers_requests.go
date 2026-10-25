@@ -71,10 +71,9 @@ func (s *server) createRequest(w http.ResponseWriter, r *http.Request, enrollmen
 	case errors.Is(err, requests.ErrMixedApprovers):
 		writeError(w, http.StatusBadRequest, "MIXED_APPROVERS", err.Error())
 		return
-	case errors.Is(err, requests.ErrMintRequiresLifetime):
-		// A minted secret's grant must sign lifetime_seconds of at most an hour, the life of the
-		// token it releases.
-		writeError(w, http.StatusBadRequest, "MINT_REQUIRES_LIFETIME", err.Error())
+	case errors.Is(err, requests.ErrGrantRequiresLifetime):
+		// A secret's max-grant tag bounds the lifetime its request may sign.
+		writeError(w, http.StatusBadRequest, "GRANT_REQUIRES_LIFETIME", err.Error())
 		return
 	case errors.Is(err, requests.ErrRequestPending):
 		writeError(w, http.StatusConflict, "REQUEST_PENDING", err.Error())
@@ -224,6 +223,11 @@ func (s *server) grantValues(w http.ResponseWriter, r *http.Request, enrollmentI
 		return
 	case errors.Is(err, requests.ErrSecretNotInStore):
 		writeError(w, http.StatusNotFound, "SECRET_NOT_IN_STORE", err.Error())
+		return
+	case errors.Is(err, requests.ErrMintFailed):
+		// The kind's upstream (GitHub or Google) refused or failed the mint; its message says why,
+		// such as a Google login that needs a new sign-in, and never holds the stored value.
+		writeError(w, http.StatusBadGateway, "MINT_FAILED", err.Error())
 		return
 	case err != nil:
 		writeInternal(w, "read grant values", err)

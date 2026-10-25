@@ -80,6 +80,19 @@ func resolveThenLock[R, T any](
 // resolveDeliveryTarget is the listener read behind every delivery: which live session a route
 // names right now, what the listener calls it, and why it cannot receive this mode. It is the
 // resolve half above, so it runs with nothing held.
+//
+// Both kinds of route resolve by asking the listener about the one thing the route names - the
+// holder of a role, or a session id - and neither reads the whole live-session list. That list
+// is answered out of the listener's in-memory session cache alone, so a session missing from it
+// is either ended or merely not refilled into that cache yet, and an absent row cannot tell the
+// two apart: while the cache refills, a working session reads as gone and a person's mention of
+// it is refused "no live session". The per-session read goes through to the session store, so it
+// answers that question, and a read the message bus did not answer arrives here as an error
+// instead of as an absence.
+//
+// Only ErrNotFound - no record under that id - is "no live session <id>", the text
+// comment_delivery.go tests the prefix of and the dashboard prints verbatim. Every other failure
+// takes the error path, so an unreachable listener never reads as an ended session.
 func (s *server) resolveDeliveryTarget(ctx context.Context, route model.Route, delivery string) (string, string, string) {
 	if s.deps.Envoy == nil {
 		return "", "", "envoy listener: ENVOY_URL is not configured"
@@ -89,18 +102,9 @@ func (s *server) resolveDeliveryTarget(ctx context.Context, route model.Route, d
 	if route.Kind == "role" {
 		target, err = s.deps.Envoy.Role(ctx, route.ID)
 	} else {
-		var sessions []dispatchenvoy.Session
-		sessions, err = s.deps.Envoy.Sessions(ctx)
-		if err == nil {
-			for _, candidate := range sessions {
-				if candidate.SessionID == route.ID {
-					target = candidate
-					break
-				}
-			}
-			if target.SessionID == "" {
-				return route.ID, "", "no live session " + route.ID
-			}
+		target, err = s.deps.Envoy.Session(ctx, route.ID)
+		if errors.Is(err, dispatchenvoy.ErrNotFound) {
+			return route.ID, "", "no live session " + route.ID
 		}
 	}
 	if err != nil {
