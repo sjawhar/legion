@@ -110,16 +110,6 @@ export interface Options {
   readonly coverage?: { readonly expectModel: string; readonly waitSeconds: number };
 }
 
-/** The flags as `parseArgs` reads them, before their rules are checked. */
-interface Flags {
-  readonly "a1-query"?: string;
-  readonly pair?: string[];
-  readonly "lexeme-database"?: string;
-  readonly coverage?: boolean;
-  readonly "expect-model"?: string;
-  readonly "coverage-wait"?: string;
-}
-
 /** A command line the script refuses. Its message is fixed text that never repeats an argument. */
 export class UsageError extends Error {
   override readonly name = "UsageError";
@@ -178,13 +168,24 @@ export interface A1Judgement {
   readonly verdict: "pass" | "fail";
 }
 
-export interface PairResult {
-  readonly key: string;
-  readonly verdict: Verdict;
-  /** What the pair's search found, or null when the search itself was unavailable. */
-  readonly found: { readonly shared: number | null; readonly position: number | null } | null;
-  readonly category: Category | null;
+interface PairFound {
+  readonly shared: number | null;
+  readonly position: number | null;
 }
+
+export type PairResult =
+  | {
+      readonly key: string;
+      readonly verdict: "unavailable";
+      readonly category: Category;
+      /** What the pair's search found, or null when the search itself was unavailable. */
+      readonly found: PairFound | null;
+    }
+  | {
+      readonly key: string;
+      readonly verdict: "pass" | "fail";
+      readonly found: PairFound & { readonly shared: number };
+    };
 
 export interface CoverageJudgement {
   readonly verdict: "pass" | "fail";
@@ -213,10 +214,10 @@ function parsePair(value: string): Pair {
   return { key, query };
 }
 
-export function parseArguments(argv: readonly string[]): Options {
-  let flags: Flags;
+/** The flags as `parseArgs` reads them, before their rules are checked. */
+function readFlags(argv: readonly string[]) {
   try {
-    flags = parseArgs({
+    return parseArgs({
       args: [...argv],
       options: {
         "a1-query": { type: "string" },
@@ -232,6 +233,10 @@ export function parseArguments(argv: readonly string[]): Options {
     // parseArgs names what it refused, so its message is never repeated.
     throw new UsageError(USAGE.arguments);
   }
+}
+
+export function parseArguments(argv: readonly string[]): Options {
+  const flags = readFlags(argv);
   const a1Query = flags["a1-query"];
   const lexemeDatabase = flags["lexeme-database"];
   const expectModel = flags["expect-model"];
@@ -266,11 +271,21 @@ export function errorCategory(error: unknown): Category {
   return "transport";
 }
 
+/** Any unavailable check makes the run unavailable; else any failed check fails it. */
+function overallVerdict(verdicts: readonly Verdict[]): Verdict {
+  if (verdicts.includes("unavailable")) return "unavailable";
+  if (verdicts.includes("fail")) return "fail";
+  return "pass";
+}
+
+const EXIT_CODE = { pass: 0, fail: 1, unavailable: 2 } as const satisfies Record<
+  Verdict,
+  0 | 1 | 2
+>;
+
 /** Any unavailable check → 2; else any failed check → 1; else 0. */
 export function exitCode(verdicts: readonly Verdict[]): 0 | 1 | 2 {
-  if (verdicts.includes("unavailable")) return 2;
-  if (verdicts.includes("fail")) return 1;
-  return 0;
+  return EXIT_CODE[overallVerdict(verdicts)];
 }
 
 /**
@@ -357,7 +372,7 @@ export async function checkPair(
   if (shared === null) {
     return { key: pair.key, verdict: "unavailable", found, category: "lexeme-database" };
   }
-  return { key: pair.key, verdict: judgeA2Pair(shared, position), found, category: null };
+  return { key: pair.key, verdict: judgeA2Pair(shared, position), found: { shared, position } };
 }
 
 /** A2 passes when any pair passes; else it is unavailable when any pair is; else it fails. */
@@ -365,11 +380,6 @@ export function judgeA2(pairs: readonly Pick<PairResult, "verdict">[]): Verdict 
   if (pairs.some((pair) => pair.verdict === "pass")) return "pass";
   if (pairs.some((pair) => pair.verdict === "unavailable")) return "unavailable";
   return "fail";
-}
-
-/** The coverage report, checked field by field; any departure from its shape is malformed. */
-export function parseCoverage(body: unknown): CoverageReport {
-  return CoverageReport.parse(body);
 }
 
 /** A snapshot passes when its identity is the expected model and every item is current. */
@@ -402,7 +412,7 @@ export async function checkCoverage(
     reads += 1;
     let report: CoverageReport;
     try {
-      report = parseCoverage(await readCoverage());
+      report = CoverageReport.parse(await readCoverage());
     } catch (error) {
       return { verdict: "unavailable", category: errorCategory(error), reads };
     }
@@ -425,11 +435,14 @@ function countsLine(counts: CoverageCounts): string {
 }
 
 function formatPair(pair: PairResult): string {
+  if (pair.verdict !== "unavailable") {
+    const { shared, position } = pair.found;
+    return `A2 ${pair.key} shared=${shared} position=${position ?? "none"} ${pair.verdict}`;
+  }
   if (pair.found === null) return `A2 ${pair.key} unavailable: ${pair.category}`;
   const shared = pair.found.shared ?? "unchecked";
   const position = pair.found.position ?? "none";
-  const verdict = pair.verdict === "unavailable" ? `unavailable: ${pair.category}` : pair.verdict;
-  return `A2 ${pair.key} shared=${shared} position=${position} ${verdict}`;
+  return `A2 ${pair.key} shared=${shared} position=${position} unavailable: ${pair.category}`;
 }
 
 function formatCoverage(result: CoverageResult): string[] {
@@ -507,8 +520,8 @@ export async function runChecks(options: Options, deps: CheckDependencies): Prom
       for (const line of formatCoverage(result)) out(line);
       verdicts.push(result.verdict);
     }
-    const code = exitCode(verdicts);
-    const result = code === 2 ? "unavailable" : code === 1 ? "fail" : "pass";
+    const result = overallVerdict(verdicts);
+    const code = EXIT_CODE[result];
     out(`result ${result} exit=${code}`);
     return code;
   } catch (error) {
@@ -537,17 +550,18 @@ async function readJson(
 }
 
 function liveDispatch(config: DispatchConfig): DispatchReads {
-  const base = config.url.replace(/\/+$/, "");
+  // `dispatchSettings` already trimmed the URL's trailing slashes.
   // A client's deadline runs from its construction, so each read gets a client of its own.
   const client = () => new DispatchClient(config.url, config.token);
   return {
     // Public: it is sent no token.
-    healthz: () => readJson(`${base}/healthz`, {}, (status) => status === 200 || status === 503),
+    healthz: () =>
+      readJson(`${config.url}/healthz`, {}, (status) => status === 200 || status === 503),
     search: (query, options) => client().search(query, options),
     issue: (key) => client().getIssue(key),
     coverage: () =>
       readJson(
-        `${base}/api/v1/search/coverage`,
+        `${config.url}/api/v1/search/coverage`,
         { Authorization: `Bearer ${config.token}` },
         (status) => status >= 200 && status < 300
       ),
