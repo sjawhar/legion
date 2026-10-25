@@ -455,6 +455,36 @@ approve() { dispatch_human POST "artifacts/$1/reviews" '{"state":"approved"}' >/
 # file_quiet FILE SECONDS: FILE has not grown for SECONDS.
 file_quiet() { (($(date +%s) - $(stat -c %Y "$1") >= $2)); }
 since() { printf '%ss' "$((SECONDS - $1))"; }
+# wait_for_run_processes [DEADLINE_SECONDS] [MIN_POLLS] waits for every process of the run to end,
+# polling run_processes every half second, and fails naming the pids that still run. It gives up
+# only once both bounds are spent: DEADLINE_SECONDS of wall time (default 600) have passed and
+# MIN_POLLS polls (default 10) have been made. The poll floor exists because one poll's cost belongs
+# to the machine, not to the run: run_processes walks /proc with a readlink, and often a grep, per
+# process. On a devbox at load ≈370 with ≈4,300 processes one walk took about 9 s, so the first walk
+# outran the old 30 s budget, until_true made one attempt and failed the run, and the processes
+# ended four minutes later. A wait that can make a single attempt is not a wait, and a longer
+# deadline alone would only be a new wager on the machine.
+wait_for_run_processes() {
+  local limit=${1:-600} floor=${2:-10} polls=0 started=$SECONDS beat=$SECONDS left
+  note "waiting up to ${limit}s and at least $floor polls for every process of the run to end"
+  while :; do
+    polls=$((polls + 1))
+    # run_processes's status is that of the last thing its loop ran and means nothing.
+    left=$(run_processes || true)
+    if [ -z "$left" ]; then
+      note "every process of the run ended: poll $polls, $(since "$started")"
+      return 0
+    fi
+    if ((SECONDS - started >= limit && polls >= floor)); then
+      fail "timed out after $(since "$started") ($polls polls) waiting for every process of the run to end; still running: ${left//$'\n'/ }"
+    fi
+    if ((SECONDS - beat >= 60)); then
+      beat=$SECONDS
+      note "still waiting for every process of the run to end: poll $polls, $((SECONDS - started))s of ${limit}s"
+    fi
+    sleep 0.5
+  done
+}
 
 # ---- checkpoints --------------------------------------------------------------------------------------
 begin prerequisites
@@ -837,8 +867,7 @@ docker rm -f "$pg_container" "$nats_container" >/dev/null
 for container in "$pg_container" "$nats_container"; do
   ! docker inspect "$container" >/dev/null 2>&1 || fail "the container $container remains"
 done
-no_run_processes() { [ -z "$(run_processes)" ]; }
-until_true 30 "every process of the run to end" no_run_processes
+wait_for_run_processes
 remove_run_branches
 for issue in $tree1 $tree2 $tree3 $tree4 $tree5; do
   if out=$(timeout 60 gh api "repos/$repo/branches/legion/$issue" 2>&1); then
