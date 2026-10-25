@@ -819,8 +819,9 @@ jobs:
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
-      # Every image the tests here start: testnats.Image, testnats.HubImage (which testnats's own
-      # tests start) and tests3.Image, pulled first for the reason the action gives.
+      # Every image the tests here start: testnats.Image and testnats.HubImage, which the
+      # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
+      # reason the action gives.
       - name: Pull test container images
         uses: ./.github/actions/pull-test-images
         with:
@@ -830,6 +831,13 @@ jobs:
             packages/envoy/internal/tests3/seaweedfs.go Image
       - name: Unit test envoy Go package
         run: go list ./... | grep -v /integration | xargs go test
+        working-directory: packages/envoy
+      # internal/testnats runs its server in the test process, so the untagged step above starts
+      # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
+      # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
+      # behind the natslive tag, and this step is where it runs (INFRA-250).
+      - name: Test the container-backed NATS matrix (natslive)
+        run: go test -tags natslive ./internal/testnats/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
@@ -847,7 +855,7 @@ jobs:
           sudo locale-gen en_US.UTF-8
           bash deploy/scripts/autodeploy_test.sh
         working-directory: packages/envoy
-      - name: Integration test envoy (testcontainers + NATS)
+      - name: Integration test envoy (a real NATS server, in the test process)
         run: go test ./internal/integration/ -timeout 300s -count=1
         working-directory: packages/envoy
       - name: Build envoy services
@@ -934,8 +942,8 @@ jobs:
   # fixtures under internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to
   # date" step), so this job needs Bun installed and its workspace linked the same way, though not
   # that freshness check itself - a stale fixture is envoy-go's failure to catch, not a race.
-  # delivery's and the bus's tests start NATS containers, so the job takes envoy-go's Ryuk setting
-  # and pulls that image first, for the reason .github/actions/pull-test-images gives.
+  # delivery's and the bus's NATS runs in the test process (internal/testnats), so the job needs
+  # no container runtime of its own.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -954,7 +962,6 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -964,10 +971,6 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
-      - name: Pull the NATS test container image
-        uses: ./.github/actions/pull-test-images
-        with:
-          consts: packages/envoy/internal/testnats/nats.go Image
       - name: Race-test the document service, its API, pmdoc, delivery, the store, and the bus
         run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/
         working-directory: packages/envoy
@@ -1013,9 +1016,8 @@ jobs:
   # them out, and they are a job of their own for the reason dispatch-memory is: envoy-go's unit
   # step runs under go test's default ten-minute package deadline, which the memory tests
   # already took red at 600 s (run 37116639565), and one row here waits out a durable hand-over
-  # or a maintenance loop's tick, tens of seconds each. The job takes envoy-go's Ryuk setting and
-  # pre-pulls testnats.Image, for the reason .github/actions/pull-test-images gives: with no
-  # DISPATCH_TEST_NATS_URL set, each run starts its NATS in a container of its own.
+  # or a maintenance loop's tick, tens of seconds each. Each row's NATS runs in its own test
+  # process (internal/testnats), so the job needs no container runtime of its own.
   dispatch-multiprocess:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -1034,7 +1036,6 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1042,10 +1043,6 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
-      - name: Pull the NATS test container image
-        uses: ./.github/actions/pull-test-images
-        with:
-          consts: packages/envoy/internal/testnats/nats.go Image
       - name: Two-process tests of the Dispatch server
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
         working-directory: packages/envoy
@@ -1222,8 +1219,6 @@ jobs:
     if: needs.changes.outputs.envoy_e2e_local == 'true'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
-    env:
-      E2E_NATS_CONTAINER: envoy-e2e-nats-${{ github.run_id }}-${{ github.run_attempt }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1234,18 +1229,13 @@ jobs:
         with:
           go-version-file: packages/envoy/go.mod
           cache-dependency-path: packages/envoy/go.sum
-      # The same bounded retry .github/actions/pull-test-images gives test images: a registry
-      # connection reset during the script's own implicit pull would fail the run for a reason
-      # outside it.
-      - name: Pull the NATS image the script starts
-        run: |
-          nats_image=$(sed -n 's/^docker run .* \([^ ]*nats:[^ ]*\) -js .*$/\1/p' scripts/e2e-local.sh)
-          [ -n "$nats_image" ] || { echo "::error::no nats image on the docker run line of scripts/e2e-local.sh"; exit 1; }
-          for attempt in 1 2 3; do
-            docker pull "$nats_image" && break
-            [ "$attempt" -lt 3 ] || exit 1
-            sleep 10
-          done
+      # scripts/e2e-local.test.sh drives the driver's refusals, which the acceptance run below
+      # never reaches: an unknown option, --help, and a NATS already holding the port, where the
+      # driver must refuse rather than run the acceptance against a server it did not start. It
+      # needs the bun and go this job already has, and it runs first because it is seconds
+      # (INFRA-250).
+      - name: Refusal test for e2e-local.sh
+        run: bash scripts/e2e-local.test.sh
         working-directory: packages/envoy
       - name: Local end-to-end acceptance
         run: bash scripts/e2e-local.sh

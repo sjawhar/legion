@@ -1,7 +1,6 @@
 package bus_test
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -45,8 +44,8 @@ func (c *reconnectErrClock) Advance(d time.Duration) {
 func TestAFailedReconnectAttemptLogsOneWarnAMinute(t *testing.T) {
 	unsetNkeyEnvironment(t)
 	seed, public := testnats.User(t)
-	ctr, _ := testnats.StartNkeyAuthorizedContainer(t, public)
-	gate := testnats.StartGate(t, ctr)
+	srv, _ := testnats.StartNkeyAuthorizedServer(t, public)
+	gate := testnats.StartGate(t, srv)
 	uri := gate.URL()
 	t.Setenv("NATS_NKEY_SEED", seed)
 
@@ -80,7 +79,7 @@ func TestAFailedReconnectAttemptLogsOneWarnAMinute(t *testing.T) {
 	}
 
 	gate.Close()
-	testnats.Stop(t, ctr)
+	srv.Stop(t)
 	awaitWarnings(1)
 
 	for i := range 10 {
@@ -136,9 +135,7 @@ func TestAFailedReconnectAttemptLogsOneWarnAMinute(t *testing.T) {
 		t.Error("a captured log line holds an nkey seed")
 	}
 
-	if err := ctr.Start(context.Background()); err != nil {
-		t.Fatalf("start the server again: %v", err)
-	}
+	srv.Start(t)
 	gate.Open()
 	waitFor(t, 60*time.Second, "the client to reconnect", func() bool { return client.Conn.IsConnected() })
 	if got := logs.count(name, reconnectFailed); got != 11 {
@@ -151,6 +148,6 @@ func TestAFailedReconnectAttemptLogsOneWarnAMinute(t *testing.T) {
 	// socket, and stopping the server then drops the live connection the gate's own close would
 	// have left joined, so the client's next dial is refused rather than accepted.
 	gate.Close()
-	testnats.Stop(t, ctr)
+	srv.Stop(t)
 	awaitWarnings(12)
 }
