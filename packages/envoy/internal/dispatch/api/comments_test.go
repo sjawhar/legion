@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
@@ -549,4 +550,33 @@ func TestResolveRecordsWhoAndWhen(t *testing.T) {
 		t.Fatalf("reject suggestion: status=%d body=%s", rejected.Code, rejected.Body.String())
 	}
 	assertResolution("reject", decodeBody[model.Comment](t, rejected), model.Actor{Kind: "user", ID: "bob"})
+}
+
+// What the API writes for a stored instant is the same text whatever zone the host runs in. The
+// dashboard and the browser tests compare these as strings - two replies written in one second
+// are ordered by their text, and opening an agent row marks read through a reply's own
+// created_at - so a host in another zone answering "2026-10-01T17:00:01.12-07:00" where this one
+// answers "2026-10-02T00:00:01.12Z" is a different server to every one of those readers.
+func TestAPIWritesStoredTimestampsInUTC(t *testing.T) {
+	handler, database := newTestHandlerWithStore(t)
+	issue := createInteractionIssue(t, handler, "TEST", "Timestamps", "The quick brown fox")
+	comment := createThreadComment(t, handler, issue.Key, map[string]any{"body": "written first"}, "alice")
+	const written = "2026-10-02T00:00:01.12Z"
+	if _, err := database.Pool.Exec(context.Background(),
+		`update comments set created_at = $2::timestamptz where id = $1`, comment.ID, written,
+	); err != nil {
+		t.Fatalf("stamp the comment: %v", err)
+	}
+
+	read := dispatchRequest(t, handler, http.MethodGet, "/api/v1/comments/"+comment.ID, nil, "alice")
+	if read.Code != http.StatusOK {
+		t.Fatalf("read the comment: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if !strings.Contains(read.Body.String(), `"created_at":"`+written+`"`) {
+		t.Fatalf("the comment reads back as %s, want created_at %q", read.Body.String(), written)
+	}
+	// The zone the value carries, which is what decides the text above on a host in any zone.
+	if got := decodeBody[model.Comment](t, read).CreatedAt.Location(); got != time.UTC {
+		t.Fatalf("created_at carries %s, want %s", got, time.UTC)
+	}
 }
