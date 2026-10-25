@@ -2,65 +2,94 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T17:24:30Z",
+  "completed": "2026-10-25T18:24:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "round": 6,
-  "testedHead": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
-  "roundReason": "Review at 241f4e1a requested changes: any stop that reaches the trap, not only a second one, can cut it short (closing comment, stop paragraph, recovery list); the bullet's placement caveat split between the two runs that found a Job and the rest.",
+  "round": 7,
+  "testedHead": "90eca150f88936e46d1f354cbad83cba5f9e5236",
+  "roundReason": "Architect's standing ruling (PR comments 6400492408, 6400601649, 6400670216, 6400709005): cleanup() ignores further INT/TERM/HUP; the hazard sentences come out. The implementer added 'trap '' INT TERM HUP; set -m' (set -m because kubectl does not keep an ignored SIGTERM).",
   "implementerProof": {
-    "verdict": "verified",
-    "how": "Re-ran its round-6 page checks on my own copy fetched at b773e110 (8d46e846 serves the same bytes) and reproduced its failing-work stub (no stop: 'cleanup: delete done', 'sequence: exit 1'; one stop in the trap: 'cleanup: start' and nothing after). I also drove one stop into a failed run's trap on the real filled block, which it did not, and re-ran P1."
+    "verdict": "rejected",
+    "how": "Its TERM cases reproduce: two TERMs 0.5 s apart (infra-386-postgres-gspgq) and one TERM into a failed run's trap (b84xv) each finished and printed sequence: exit; the ignore without set -m printed 'cleanup: the Job's delete failed' and left the Job, Service and pod (sdwjw); SIGKILL left them (zlgnj) and the recovery lines removed them in 5.8 s; a plain run ended exit 0 with nothing left. But it drove only SIGTERM as the stop, and the page's claim covers SIGINT and SIGHUP too. SIGINT reaching the trap still kills it (failure below), so the proof does not establish the claim it is cited for."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "Round 6: any stop reaching the trap is named as able to cut it short, the advice is one stop only while the work runs, and the bullet's caveat is split; A1-A3, A7, A8 hold",
-      "surface": "docs/kubernetes.md fetched with gh api at the head from this issue's role container",
-      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=b773e1100696e877c3b10d0b44a6c31ab89bec93\" -H \"Accept: application/vnd.github.raw\" > k-h6.md; plan section 4 checks; grep -c 'a second stop that'; '6 s to 31 s' and '60 s' read against 3152 and 3037",
-      "observed": "A1 0; A2 1 for all seven patterns; A3 date 4 and both timing pairs; A7 0; A8 0; 'a second stop that' 0; '6 s to 31 s' matches '6 s for a running postgres:16, 31 s for one still initialising' (3152) and '60 s' the Service wait's --timeout=60s (3037); the bullet's split holds: a create is answered only once stored, and no Job of the 24 that found nothing was left; main moved to 0aa3aa04, touching no file of this change",
-      "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
-      "negativeControl": "at 241f4e1a: 'a second stop that' 1 and 'Send one stop and let the trap finish'"
-    },
-    {
-      "criterion": "A4-A6, A5 at round 5's ranges",
-      "surface": "the page at the head and the branch diff against 371d6c87",
-      "command": "bash code.sh k-h6.md | sha256sum; diff -U0 k-base.md k-h6.md | awk -f hunks5.awk; bash a6.sh k-base.md k-h6.md",
-      "observed": "A4 abe1b4cf... (base); seven hunks all ok, exit 0; A6 no NONCOMMENT, old-closing 0, old-listing 1",
-      "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
-      "negativeControl": "hunks3.awk (round 4's ranges) exits 1 on the deliberate-stop hunk (round 5 run, same hunk)"
-    },
-    {
-      "criterion": "The new claim: a single stop that reaches a trap started by a failed step ends it part-way, with no 'sequence: exit' line, and can leave the workload; the page's recovery lines then remove it",
-      "surface": "the real filled block at the head, with 'false' added as the work (the line the closing comment says the work goes on), run from this issue's role container against the applied cluster",
-      "command": "bash stoptrap.sh t6-fail.sh t6-fail-stop.raw stop (one kill -TERM -- -<process> as soon as the sequence's own log shows the trap's readings header); 5 s after the end kubectl get job,service <name> and pods -l job-name=<name>; then kubectl delete job <name> --cascade=foreground; kubectl wait --for=delete service/<name> --timeout=60s",
-      "observed": "workload: infra-386-postgres-hv2lf; answered; the readings' header line, then nothing: no delete line, no 'sequence: exit' line; 5 s later job, service and pod all present; the recovery lines removed them in about 1 s; 0 left",
-      "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
-      "negativeControl": "the same failing-work block with no stop (infra-386-postgres-r64bf): readings, 'job.batch ... deleted', 'No resources found', 'sequence: exit 1', 0 left"
-    },
-    {
-      "criterion": "A10: the edited block still runs end to end",
-      "surface": "this issue's role container, against the applied cluster",
-      "command": "bash fill.sh k-h6.md t6-p1.sh; bash t6-p1.sh from 2026-10-25T17:21:07Z",
-      "observed": "run: sequence-run=6fa1c020; workload: infra-386-postgres-4sg56; service created; answered; job deleted; No resources found; sequence: exit 0; 0 left; re-list by label No resources found",
-      "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
-      "negativeControl": "cpu \"1\" copy: refused by admission (policy, binding and rule text elided), 'cleanup: no Job name was read; deleting by label sequence-run=38cc7f16', No resources found, sequence: exit 1; 0 left"
-    },
-    {
-      "criterion": "A9: no private name enters the change",
-      "surface": "repository at the head, added lines, commit messages, live PR title and body, both handoffs",
-      "command": "bash .github/scripts/check-private-names.sh; sweep.sh over each",
-      "observed": "exit 0 (5005 files); 0 literal, 0 whole-word for every file",
-      "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
-      "negativeControl": "the raw double-stop output of round 5, which prints the pod's labels: literal 1, whole-word 1"
+      "criterion": "The page's claim at docs/kubernetes.md:3211-3216 of 90eca150: 'Once the trap runs, it ignores further SIGINT, SIGTERM and SIGHUP ... a stop sent to the sequence's group while the trap runs — a second stop, or one sent after a failed step or the work's end started the trap — reaches neither the trap nor its commands, and the clean-up runs to its end', and the closing comment that now lists only SIGKILL/pod loss, a failed clean-up step and the late-stored create as ways to leave the workload (the architect's ruling: 'no stop of any kind, from any start, cuts a clean-up short')",
+      "evidence": "A SIGINT that reaches the sequence while its trap runs still ends the trap part-way, with no 'sequence: exit' line, and leaves the Job, its Service and its pod. Reproduced on the real block at the head, filled in, from this issue's role container against the applied cluster, with drive.sh SCRIPT OUT WAITFOR SIG@delay...: starts the filled block (the page's own flock ... setsid -f lines), waits until the sequence's own log matches WAITFOR, then sends each signal to the sequence's process group (kill -SIG -- -<process>) or, as bash:SIG, to its bash alone; run with TMPDIR set to a private directory: (1) work fixture 'sleep 120', kill -TERM -- -<process> once it answered, kill -INT -- -<process> 0.3 s later: 5 of 5 runs (infra-386-postgres-jgczj, mtfmz, tt9kt, qt7df, and the storm run rzxxw) printed 'Terminated' and the first readings, then nothing; Job, Service and pod still there 3 s after the sequence ended. (2) A single stop: work fixture 'false', one kill -INT -- -<process> as the trap's readings began (db4zr): nothing after the readings' first line, Job, Service and pod left. (3) SIGINT to the bash alone: TERM to the group then INT to the bash 0.3 s later (4zc4h) left all three; at 1.2 s (g9bjx) no 'sequence: exit' line (the delete had been sent, so nothing was left). Controls at the same head: TERM then TERM (c8cdf), TERM then HUP (8mhz2) and the TERM-only cases above each printed 'sequence: exit 143' or 'sequence: exit 1' and left nothing; and the same block without 'set -m' (t7-sleep-nom.sh) ignored a SIGINT to its bash and printed 'sequence: exit 143' (d6m5n). So 'set -m' is what makes SIGINT kill the trap's bash; putting 'set -m' before the 'trap '' …' (t7-sleep-swap.sh) did not help (2 of 2 runs, 2rqqc and 47fr8, left all three). Every leftover was removed with the page's two name-based recovery lines. No red test: the block lives in prose, no suite runs it, and the deployment instructions bar tests that assert a file's contents; the drive.sh commands above are the reproduction."
     }
   ],
-  "ci": "At b773e110: Tests 40215685620 in progress (typecheck success; lint and test in progress); Legion Envoy and Contracts 40215685640 queued; PR Title 40215748348 queued (earlier runs queued or cancelled by body edits). GitHub's mergeable was still being computed (unknown); main's new commits touch no file of this change. Cited, not waited for.",
-  "regressionTests": "Docs-only change: no suite reads this prose and the deployment instructions bar content-asserting tests; nothing for a red test to pin.",
-  "notesForReviewer": [
-    "docs/kubernetes.md:3022's code line remains 108 characters (judged not a defect in review)."
+  "failed": 1,
+  "otherObservations": [
+    {
+      "what": "Page checks at 90eca150 (d33598f1 serves the same bytes)",
+      "observed": "A1 0; A2 1 for all seven patterns; A3 date 4 and both timing pairs; A7 0; A8 0; comment-stripped block differs from base by exactly one line, 'trap '' INT TERM HUP; set -m' (code hash base abe1b4cf..., head 798bb54b...); every other hunk inside round 5's ranges"
+    },
+    {
+      "what": "Plain run of the filled block",
+      "observed": "infra-386-postgres-ts5sm: answered, job deleted, No resources found, sequence: exit 0, nothing of it left"
+    },
+    {
+      "what": "Minor, for the fix: between the trap's 'trap - EXIT INT TERM HUP' and the new ignore line, the signals are at their defaults for a moment; 'trap - EXIT; trap '' INT TERM HUP' closes that window. Not measured."
+    },
+    {
+      "what": "Interference to know about: a concurrent role's clean-up removed /legion/scratch/tmp/sequence.* files during one of my runs (its sequence log vanished mid-run), so every later run here used a private TMPDIR"
+    }
   ],
+  "ci": "At 90eca150: Tests 40218671474 success (lint, typecheck, test, pi-legion), Legion Envoy and Contracts 40218671476 success, PR Title 40218737554 success.",
   "previousRounds": [
+    {
+      "round": 6,
+      "testedHead": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+      "roundReason": "Review at 241f4e1a requested changes: any stop that reaches the trap, not only a second one, can cut it short (closing comment, stop paragraph, recovery list); the bullet's placement caveat split between the two runs that found a Job and the rest.",
+      "implementerProof": {
+        "verdict": "verified",
+        "how": "Re-ran its round-6 page checks on my own copy fetched at b773e110 (8d46e846 serves the same bytes) and reproduced its failing-work stub (no stop: 'cleanup: delete done', 'sequence: exit 1'; one stop in the trap: 'cleanup: start' and nothing after). I also drove one stop into a failed run's trap on the real filled block, which it did not, and re-ran P1."
+      },
+      "failures": [],
+      "failed": 0,
+      "proof": [
+        {
+          "criterion": "Round 6: any stop reaching the trap is named as able to cut it short, the advice is one stop only while the work runs, and the bullet's caveat is split; A1-A3, A7, A8 hold",
+          "surface": "docs/kubernetes.md fetched with gh api at the head from this issue's role container",
+          "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=b773e1100696e877c3b10d0b44a6c31ab89bec93\" -H \"Accept: application/vnd.github.raw\" > k-h6.md; plan section 4 checks; grep -c 'a second stop that'; '6 s to 31 s' and '60 s' read against 3152 and 3037",
+          "observed": "A1 0; A2 1 for all seven patterns; A3 date 4 and both timing pairs; A7 0; A8 0; 'a second stop that' 0; '6 s to 31 s' matches '6 s for a running postgres:16, 31 s for one still initialising' (3152) and '60 s' the Service wait's --timeout=60s (3037); the bullet's split holds: a create is answered only once stored, and no Job of the 24 that found nothing was left; main moved to 0aa3aa04, touching no file of this change",
+          "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+          "negativeControl": "at 241f4e1a: 'a second stop that' 1 and 'Send one stop and let the trap finish'"
+        },
+        {
+          "criterion": "A4-A6, A5 at round 5's ranges",
+          "surface": "the page at the head and the branch diff against 371d6c87",
+          "command": "bash code.sh k-h6.md | sha256sum; diff -U0 k-base.md k-h6.md | awk -f hunks5.awk; bash a6.sh k-base.md k-h6.md",
+          "observed": "A4 abe1b4cf... (base); seven hunks all ok, exit 0; A6 no NONCOMMENT, old-closing 0, old-listing 1",
+          "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+          "negativeControl": "hunks3.awk (round 4's ranges) exits 1 on the deliberate-stop hunk (round 5 run, same hunk)"
+        },
+        {
+          "criterion": "The new claim: a single stop that reaches a trap started by a failed step ends it part-way, with no 'sequence: exit' line, and can leave the workload; the page's recovery lines then remove it",
+          "surface": "the real filled block at the head, with 'false' added as the work (the line the closing comment says the work goes on), run from this issue's role container against the applied cluster",
+          "command": "bash stoptrap.sh t6-fail.sh t6-fail-stop.raw stop (one kill -TERM -- -<process> as soon as the sequence's own log shows the trap's readings header); 5 s after the end kubectl get job,service <name> and pods -l job-name=<name>; then kubectl delete job <name> --cascade=foreground; kubectl wait --for=delete service/<name> --timeout=60s",
+          "observed": "workload: infra-386-postgres-hv2lf; answered; the readings' header line, then nothing: no delete line, no 'sequence: exit' line; 5 s later job, service and pod all present; the recovery lines removed them in about 1 s; 0 left",
+          "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+          "negativeControl": "the same failing-work block with no stop (infra-386-postgres-r64bf): readings, 'job.batch ... deleted', 'No resources found', 'sequence: exit 1', 0 left"
+        },
+        {
+          "criterion": "A10: the edited block still runs end to end",
+          "surface": "this issue's role container, against the applied cluster",
+          "command": "bash fill.sh k-h6.md t6-p1.sh; bash t6-p1.sh from 2026-10-25T17:21:07Z",
+          "observed": "run: sequence-run=6fa1c020; workload: infra-386-postgres-4sg56; service created; answered; job deleted; No resources found; sequence: exit 0; 0 left; re-list by label No resources found",
+          "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+          "negativeControl": "cpu \"1\" copy: refused by admission (policy, binding and rule text elided), 'cleanup: no Job name was read; deleting by label sequence-run=38cc7f16', No resources found, sequence: exit 1; 0 left"
+        },
+        {
+          "criterion": "A9: no private name enters the change",
+          "surface": "repository at the head, added lines, commit messages, live PR title and body, both handoffs",
+          "command": "bash .github/scripts/check-private-names.sh; sweep.sh over each",
+          "observed": "exit 0 (5005 files); 0 literal, 0 whole-word for every file",
+          "headSha": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+          "negativeControl": "the raw double-stop output of round 5, which prints the pod's labels: literal 1, whole-word 1"
+        }
+      ],
+      "ci": "At b773e110: Tests 40215685620 in progress (typecheck success; lint and test in progress); Legion Envoy and Contracts 40215685640 queued; PR Title 40215748348 queued (earlier runs queued or cancelled by body edits). GitHub's mergeable was still being computed (unknown); main's new commits touch no file of this change. Cited, not waited for."
+    },
     {
       "round": 5,
       "testedHead": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
