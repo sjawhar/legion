@@ -2,61 +2,24 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-122",
-  "completed": "2026-10-25T17:56:00Z",
-  "headSha": "5bdf16079401da78cf036f243905bad95b356356",
+  "completed": "2026-10-25T19:08:00Z",
+  "round": 2,
+  "headSha": "d73383ee860fca625b2499da5fd3f632f671f382",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's $TMPDIR/smoke/run.sh with a listener the tester built from 5bdf1607 (ENVOY_SUBSCRIBE_ALL_TOPICS=1): /healthz live_topics=subscribed, host evil.example:80/x refused 400 expected [host], one POST /session/smoke-s/prompt_async carrying Topic notifications.team.smoke-1792950350 at 10.1.10.198:18080 in the publish's second. Read CI before-run job 121220517750 (run 40210282599 at d6cf8f38): exactly TestAServingPortReceivesATopicTheStreamDoesNotStore and TestAListenerReachesASessionAtTheHostItRecorded fail."
+    "how": "Re-ran the implementer's $TMPDIR/smoke/run.sh and refusal.sh with a listener the tester built from d73383ee: one prompt carrying Topic notifications.team.smoke-1792954749 at 10.1.10.198:18080 in the publish's second, the malformed host 400; under refusal.sh /healthz 200 subscribed with the grant, then 503 live subscription inactive on the first poll after NATS restarted without notifications.>, with the Permissions Violation logged."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "1. A serving-port session receives a topic the stream does not store within 2 s; fails before, passes after",
-      "surface": "listener built by the tester from 5bdf1607 against a real nats-server v2.10.29 -js and python fake serving ports (rig under $TMPDIR/tester)",
-      "command": "start nats-server; listener ENVOY_MACHINE_ID=m1 ENVOY_SUBSCRIBE_ALL_TOPICS=1; POST /v1/interests/subscribe {session_id, topics:[notifications.team.t1, notifications.team.>, ...], port, host:127.0.0.1}; POST /v1/messages/publish and raw core NATS publishes (natscli pub) on team topics",
-      "observed": "each team publish reached the subscribed serving port once within the second; a session subscribed to both notifications.team.t1 and notifications.team.> got a t1 publish once; a session subscribed only to t2 got only t2; echo from the session itself skipped (listener skip echo)",
-      "headSha": "5bdf16079401da78cf036f243905bad95b356356",
-      "negativeControl": "ENVOY_SUBSCRIBE_ALL_TOPICS unset, empty or 0 -> live_topics not_applicable; true, ' 1', '1 ', yes -> startup refused, exit 1, 'invalid ENVOY_SUBSCRIBE_ALL_TOPICS'"
-    },
-    {
-      "criterion": "2. Nothing else changes and nothing arrives twice",
-      "surface": "same rig; two listeners of machine m1 (rolling deploy) and one of m2, all with the opt-in; the base binary d6cf8f38 for comparison",
-      "command": "5 raw publishes on notifications.team.dup with a session per machine; raw publishes on notifications.github.acme.repo.pr.1.comment, notifications.dispatch.ACME.issue.updated, notifications.agent.A; POST /v1/roles/set then a role publish (head and base); kill and restart nats-server then 3 more publishes; SIGTERM with a live delivery blocked on a 120 s port",
-      "observed": "5 prompts per session, split 3/2 across the two m1 listeners; each stored topic reached the serving port exactly once; role publish identical to base (serving-port holder gets no prompt, receipt_timeout); during outage /healthz 503 nats unavailable, after restart healthy live_topics subscribed and 3/3 delivered to both sessions; SIGTERM -> shutdown complete, exit 1 in 2.1 s",
-      "headSha": "5bdf16079401da78cf036f243905bad95b356356",
-      "negativeControl": "raw envelope on notifications.team.zzz naming topic notifications.team.t2, notifications.agent.C or notifications.role.someone -> no prompt, WARN 'listener live envelope names a topic other than its subject'; invalid JSON -> 'listener decode failed', no prompt"
-    },
-    {
-      "criterion": "3. The bus permits what each listener does",
-      "surface": "listener under a real nats-server with an authorization config per grant",
-      "command": "user lis: publish >, subscribe [_INBOX.>, 'notifications.role.> envoy-listener-smoke'] (the listener grant's subscribe side) with and without ENVOY_SUBSCRIBE_ALL_TOPICS=1; the same plus notifications.> (the host grant's) with it. CI: envoy-infra-go job (natslive step) success in run 40217683605",
-      "observed": "listener grant without the opt-in -> healthy; host grant with it -> healthy, 'live topics subscribed subject=notifications.> queue=envoy-listener-live-smoke'",
-      "headSha": "5bdf16079401da78cf036f243905bad95b356356",
-      "negativeControl": "listener grant with the opt-in -> exit 1, ERROR 'live topics subscription failed: ENVOY_SUBSCRIBE_ALL_TOPICS=1 needs a NATS user that may subscribe to every notification topic ... nats: permissions violation'"
-    },
-    {
-      "criterion": "4. Text corrected",
-      "surface": "the files the plan names",
-      "command": "grep -rnE 'receives nothing on such a topic|receives no team topic|never the routing key' docs/site/src/content/docs/dispatch/envoy.md packages/envoy-client/src/tool-contract.ts packages/claude-envoy/dist skills/envoy/SKILL.md packages/envoy/AGENTS.md packages/envoy/CHANGELOG.md packages/envoy/internal/session/registry.go packages/envoy/cmd/listener/claim_wiring.go; read the diff of envoy.md, tool-contract.ts and skills/envoy/SKILL.md",
-      "observed": "grep exit 1, nothing printed; the new text says a serve-port session receives a team topic through a listener with ENVOY_SUBSCRIBE_ALL_TOPICS=1, which matches what the rig showed; claude-envoy CI job success",
-      "headSha": "5bdf16079401da78cf036f243905bad95b356356",
-      "negativeControl": "the implementer's grep at base 064cc728 matched envoy.md, claude-envoy dist, tool-contract.ts, registry.go and skills/envoy/SKILL.md"
-    },
-    {
-      "criterion": "5. A session is reached at its recorded host",
-      "surface": "same rig; listener with and without ENVOY_HOST_BRIDGE; envoy-infra CLI built from 5bdf1607 and from base 064cc728",
-      "command": "register with host = pod IP 10.1.10.198, ::1, nonexistent.invalid; listener with ENVOY_HOST_BRIDGE=127.0.0.1 and host nonexistent.invalid; envoy-infra render webhook-listener-env --machine-id hub --nats-url nats://127.0.0.1:4222 --listen-host 0.0.0.0 --host-bridge 127.0.0.1 --nats-replicas 1 [--subscribe-all-topics]",
-      "observed": "prompt at 10.1.10.198:18080; ::1 dialled as http://[::1]:<port>; bridge beats the recorded host (prompt delivered); nonexistent.invalid without a bridge -> 'listener delivery failed', listener stays healthy; render without the flag byte-identical (cmp) to base, with it adds only ENVOY_SUBSCRIBE_ALL_TOPICS=1. Production record is post-merge.",
-      "headSha": "5bdf16079401da78cf036f243905bad95b356356",
-      "negativeControl": "hosts [::1], evil:80, a/b, a@b, 'a b', -x, x-, host.example., a?b, a#b, %41, fe80::1%eth0, a non-ASCII name, 254 characters, 'host\\n' -> 400 expected [host]; empty or absent host and a port-0 registration -> 200; render --subscribe-all-topics=maybe -> exit 2"
+      "criterion": "2. Nothing else the listener delivers changes, and nothing arrives twice: the eight stored subjects, an agent's own inbox among them",
+      "evidence": "An inbox message to a serving-port session arrives twice when a second machine's listener shares the bus and can reach the session's recorded host. Every machine's listener has its own durable and so takes every notifications.agent.* message; the listener that does not own the session goes down session.HandleAgentMessage's registry path, and hostFor now gives it entry.Host for another machine's session (internal/session/session.go:199), where before it dialled the owning listener's machine id, which is no address of a session whose host differs from it. Real surface: listeners m1 (ENVOY_HOST_BRIDGE=127.0.0.1) and m2 on one nats-server; the session registered through m1 by envoy-client's own subscribe (host = kernel hostname, port 18901); POST /v1/messages/send to it -> base binary d6cf8f38: 1 prompt (m2 logs 'listener agent session not found anywhere'); head d73383ee: 2 prompts, both m1 and m2 log 'listener agent delivered' for event 808695a415ecf041de2072fdaf50cc5e. This is the deployment's shape: the cluster the production record uses runs two listeners of different machine ids on one bus (the in-cluster listener and the one beside Dispatch), and agent pods there are reached at their pod address. Red test (own commit 44bace59): TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBus in packages/envoy/cmd/listener/live_topics_test.go; `cd packages/envoy && go test ./cmd/listener/ -run TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBus -count=1` fails at the head: 'received another prompt within 3s, want none'. Counter-check in a scratch copy only: with hostFor using entry.Host for the listener's own machine alone, this test, TestAServingPortReceivesATopicTheStreamDoesNotStore and TestAListenerReachesASessionAtTheHostItRecorded all pass. Which fix is right is the architect's call: the approved spec's address rule names the recorded host for another machine's session too, while its criterion 2 forbids the second arrival."
     }
   ],
-  "ciAtTest": "Run 40217683605 (Legion Envoy and Contracts) in progress at 17:55Z: envoy-infra-go (natslive), claude-envoy, envoy-e2e-local, envoy-client, pi-envoy, typecheck and others success; envoy-go (criterion 1's after-run), envoy-go-race, envoy-smoke, dispatch, dispatch-memory, lint, test in progress. Tests 40217683619 and Worker Image 40217683609 in progress; Docs 40217683593 and PR Title success. Cited as running, not waited on.",
-  "testsJudged": "The new tests cover every way the tester tried to break it: stored topic and role message once with the lane on (TestAStoredTopicStillReachesAServingPortOnce), the rolling deploy (TestTwoListenersOnOneMachineDeliverALiveTopicOnce), the exception read-back, a mismatched or invalid envelope (TestALiveLaneDropsAnInvalidEnvelope), the refusing grant (TestAListenerWhoseGrantRefusesEveryTopicEndsItsStart and the natslive subtest), recovery (TestCoreSubOKReportsTheReplacementAfterTheClientReplacesAClosedConnection), healthz, SIGTERM, config parsing, the address rule and ValidHost. No red test was needed.",
-  "observations": [
-    "Host check refuses a trailing-dot FQDN (host.example.) and any machine id with a space; envoy-client sends ENVOY_MACHINE_ID || os.hostname(), and the deploy convention sets ENVOY_MACHINE_ID to the hostname, so no realistic registration is refused (the implementer's open question).",
-    "The host check runs only on write: an entry an older listener wrote with an unchecked host is read as-is by a new listener of the same machine id during a rolling deploy until it ages out (5 min session TTL). A malformed host then fails its delivery or is caught by url parsing; not a failure of any criterion.",
-    "Building envoy-infra's CLI rewrites packages/envoy/infra/go.work.sum at base 064cc728 as at the head; pre-existing, not this PR's; the tester restored the file."
-  ]
+  "failed": 1,
+  "checkedWithoutFailure": [
+    "Review finding 1: grant revoked by a NATS restart -> /healthz 503 live subscription inactive within 0.2 s, team topic not delivered, stored inbox still delivered; grant restored by restart -> 200 subscribed and team delivery resumes. Grant revoked by a config reload (SIGHUP) -> 503 within 0.3 s; restored by reload -> stays 503 and no team delivery until a reconnect or restart, since the server removed the subscription and nothing sends it again (truthful health; same pattern as the other 503 states, whose remedy is a restart).",
+    "Census, driven through envoy-client's own subscribe (createEnvoyClient().subscribe): ENVOY_MACHINE_ID unset (host = kernel hostname) with a port -> 200 and the team publish delivered at that host; ENVOY_MACHINE_ID='my box' with a port -> EnvoyApiError 'host is not a host name or address (expected: host)', also through a listener with ENVOY_HOST_BRIDGE; 'my box' with port 0 and selfSubscribed -> 200; a dotted id example-host-box.local with a port through a bridged listener -> 200 and delivered; the e2e scripts' payload (port, no host) -> 200, falling back to host.docker.internal as before. ENVOY_SUBSCRIBE_ALL_TOPICS '1' accepted; render --subscribe-all-topics writes exactly ENVOY_SUBSCRIBE_ALL_TOPICS=1 (round 1, byte-identical without it).",
+    "Round-1 regressions at d73383ee: two m1 listeners plus one m2 with the opt-in -> each of 5 team publishes reached each machine's session exactly once; stored GitHub topic once; mismatched envelope dropped with WARN; listener grant with the opt-in -> exit 1 naming the variable; host grant -> live topics subscribed."
+  ],
+  "ciAtTest": "At d73383ee (19:07Z): Docs and PR Title success; Legion Envoy and Contracts 40223528605 queued; Tests 40223528588 and Worker Image 40223528606 in progress. Cited as running, not waited on."
 }
