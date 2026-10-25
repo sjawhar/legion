@@ -7,18 +7,23 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log/slog"
+	"maps"
+	"math"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/KimMachineGun/automemlimit/memlimit"
 	"github.com/jackc/pgx/v5/pgconn"
 
 	"github.com/sjawhar/envoy/internal/bus"
@@ -824,6 +829,67 @@ func TestMain(m *testing.M) {
 		os.Exit(0)
 	}
 	os.Exit(storetest.Main(m))
+}
+
+// The boot path sets the runtime's memory limit to 90% of what its provider reads: a container
+// limited to 4 GiB, as the GKE pod is (infra/gcp/dispatch_kube.go:459), gives 3.6 GiB, and the boot
+// line names both. A provider that reports no limit, or finds no control group to read, leaves the
+// runtime with none, and the boot line says so.
+func TestTheGoMemoryLimitIsNinetyPercentOfTheContainers(t *testing.T) {
+	// Either variable in the runner's environment would skip the provider (setGoMemoryLimit).
+	for _, variable := range []string{"GOMEMLIMIT", "AUTOMEMLIMIT"} {
+		t.Setenv(variable, "")
+		if err := os.Unsetenv(variable); err != nil {
+			t.Fatal(err)
+		}
+	}
+	previous := debug.SetMemoryLimit(-1)
+	t.Cleanup(func() { debug.SetMemoryLimit(previous) })
+	const noLimitLine = "dispatch: no go memory limit set: no container memory limit readable"
+	for _, row := range []struct {
+		name     string
+		provider memlimit.Provider
+		limit    int64
+		line     map[string]any
+	}{
+		{"a container limited to 4 GiB", memlimit.Limit(4 << 30), 3865470566, map[string]any{
+			"level": "INFO", "msg": "dispatch: go memory limit set from the container's",
+			"container_limit_bytes": float64(4294967296), "go_memory_limit_bytes": float64(3865470566),
+		}},
+		{"a container whose memory is not limited", func() (uint64, error) { return 0, memlimit.ErrNoLimit }, math.MaxInt64, map[string]any{
+			"level": "INFO", "msg": noLimitLine, "reason": memlimit.ErrNoLimit.Error(),
+		}},
+		{"a process in no control group", func() (uint64, error) { return 0, memlimit.ErrNoCgroup }, math.MaxInt64, map[string]any{
+			"level": "INFO", "msg": noLimitLine, "reason": memlimit.ErrNoCgroup.Error(),
+		}},
+	} {
+		t.Run(row.name, func(t *testing.T) {
+			// The runtime's own default, no limit, as a process boots with.
+			debug.SetMemoryLimit(math.MaxInt64)
+			var logged bytes.Buffer
+			previousLogger := slog.Default()
+			slog.SetDefault(slog.New(slog.NewJSONHandler(&logged, nil)))
+			t.Cleanup(func() { slog.SetDefault(previousLogger) })
+
+			setGoMemoryLimit(row.provider)
+
+			if got := debug.SetMemoryLimit(-1); got != row.limit {
+				t.Errorf("memory limit %d, want %d", got, row.limit)
+			}
+			lines := strings.Split(strings.TrimSpace(logged.String()), "\n")
+			if len(lines) != 1 {
+				t.Fatalf("logged %q, want one line", logged.String())
+			}
+			var line map[string]any
+			if err := json.Unmarshal([]byte(lines[0]), &line); err != nil {
+				t.Fatalf("decode %q: %v", lines[0], err)
+			}
+			delete(line, "time")
+			if !maps.Equal(line, row.line) {
+				t.Errorf("logged %v, want %v", line, row.line)
+			}
+		})
+	}
 }
 
 func TestWriteBlockIDBackfillReportLabelsSkippedDocuments(t *testing.T) {

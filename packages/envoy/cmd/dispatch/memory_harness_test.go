@@ -45,7 +45,8 @@ type memoryHarness struct {
 	t        *testing.T
 	database *store.Store
 	issue    string
-	// env is added to every server's environment.
+	// env is added to every server's environment, after the harness's own: a variable it repeats
+	// wins, since exec.Cmd keeps the last value of each.
 	env []string
 }
 
@@ -137,6 +138,12 @@ func (h *memoryHarness) start(t *testing.T) *memoryServer {
 		"DISPATCH_PORT=" + port,
 		"DISPATCH_WEB_DIST=" + t.TempDir(),
 		"DISPATCH_SERVER_URL=http://127.0.0.1:" + port,
+		// main sets the runtime's memory limit from the control group it runs in
+		// (setGoMemoryLimit), which here is the runner's, so the bounds above idle the memory
+		// tests hold (memory_test.go) would be weighed under whatever limit the runner happens to
+		// expose. Every server runs with none unless its test sets GOMEMLIMIT or AUTOMEMLIMIT in
+		// env.
+		"AUTOMEMLIMIT=off",
 	}
 	command.Env = append(command.Env, h.env...)
 	server := &memoryServer{command: command, base: "http://127.0.0.1:" + port, output: &lockedBuffer{}, exited: make(chan struct{})}
@@ -184,6 +191,25 @@ func (p *memoryServer) stop(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		_ = p.command.Process.Kill()
 		<-p.exited
+	}
+}
+
+// With AUTOMEMLIMIT=off a real server sets no memory limit, whatever control group the runner puts
+// it in, and its boot line says so. The test pins the variable itself rather than trusting the
+// harness's pin or the runner's control group. A container with no readable limit is the provider
+// row of TestTheGoMemoryLimitIsNinetyPercentOfTheContainers (main_test.go).
+func TestTheGoMemoryLimitIsNotSetWithAutomemlimitOff(t *testing.T) {
+	harness := newMemoryHarness(t)
+	harness.env = append(harness.env, "AUTOMEMLIMIT=off")
+	server := harness.start(t)
+	server.stop(t)
+	output := server.output.String()
+	const line = "dispatch: no go memory limit set: GOMEMLIMIT or AUTOMEMLIMIT=off in the environment, so the container's was not read"
+	if count := strings.Count(output, line); count != 1 {
+		t.Fatalf("the server logged %q %d times, want once:\n%s", line, count, output)
+	}
+	if strings.Contains(output, "dispatch: go memory limit") {
+		t.Fatalf("the server set a memory limit with AUTOMEMLIMIT=off:\n%s", output)
 	}
 }
 
@@ -386,7 +412,7 @@ func (p *memoryServer) loadOverWebsocket(t *testing.T, artifactID string) {
 }
 
 // lockedBuffer is the server's output, written by the process's copying goroutine and read by the
-// test when it fails.
+// test when it fails, or whole by a test that asserts what the server logged.
 type lockedBuffer struct {
 	mu     sync.Mutex
 	buffer bytes.Buffer
@@ -396,6 +422,12 @@ func (b *lockedBuffer) Write(data []byte) (int, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.buffer.Write(data)
+}
+
+func (b *lockedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buffer.String()
 }
 
 func (b *lockedBuffer) tail() string {

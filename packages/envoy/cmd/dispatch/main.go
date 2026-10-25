@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"net"
 	"net/http"
 	"net/url"
@@ -18,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/KimMachineGun/automemlimit/memlimit"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 
@@ -111,8 +113,47 @@ type bootConfig struct {
 	EnvoyToken string
 }
 
+// setGoMemoryLimit gives the Go runtime a soft memory limit of 90% of the container's, so the
+// collector works harder as the heap nears it rather than letting garbage pile up until the
+// container is killed at its limit (4 GiB in the GKE deployment, infra/gcp/dispatch_kube.go:459,
+// which resources() at :103-106 sets as a limit); nothing else tells the runtime that limit
+// exists. The ratio is automemlimit's default, 0.9: 3.6 GiB of 4 GiB. provider reads the
+// container's limit: main passes memlimit.FromCgroup, which reads memory.max under control group
+// v2 and memory.limit_in_bytes under v1, takes the smallest in the hierarchy and reports `max` as
+// no limit; a test passes its own rather than depending on the runner's control group. Where no
+// limit is readable the runtime keeps having none. GOMEMLIMIT and AUTOMEMLIMIT stay automemlimit's
+// own variables, read inside memlimit.Set and not settings rows (settings.go:11-22): a GOMEMLIMIT,
+// or AUTOMEMLIMIT=off, skips the provider, and any other AUTOMEMLIMIT replaces the ratio. It logs
+// one line naming the limit it read and the limit it set.
+func setGoMemoryLimit(provider memlimit.Provider) {
+	read, readErr, called := uint64(0), error(nil), false
+	limit, err := memlimit.Set(memlimit.WithProvider(func() (uint64, error) {
+		called = true
+		read, readErr = provider()
+		return read, readErr
+	}))
+	switch {
+	case called && readErr != nil:
+		// memlimit.ErrNoLimit, or no control group to read (a laptop, a host outside a
+		// container): either way the limit stays unset.
+		slog.Info("dispatch: no go memory limit set: no container memory limit readable", "reason", readErr.Error())
+	case err != nil:
+		// An AUTOMEMLIMIT that is neither `off` nor a ratio in (0, 1]: the library refuses it
+		// before reading anything and leaves the limit as it was.
+		slog.Warn("dispatch: no go memory limit set", "error", err)
+	case called:
+		slog.Info("dispatch: go memory limit set from the container's", "container_limit_bytes", read, "go_memory_limit_bytes", limit)
+	case limit == math.MaxInt64:
+		slog.Info("dispatch: no go memory limit set: GOMEMLIMIT or AUTOMEMLIMIT=off in the environment, so the container's was not read")
+	default:
+		slog.Info("dispatch: go memory limit taken from GOMEMLIMIT; the container's was not read", "go_memory_limit_bytes", limit)
+	}
+}
+
 func main() {
 	slog.SetDefault(slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	// First, before the server allocates anything the collector would have to catch up on.
+	setGoMemoryLimit(memlimit.FromCgroup)
 	env := processSettings()
 	if len(os.Args) > 1 {
 		os.Exit(runSubcommand(context.Background(), os.Args[1:], env, os.Stdout, os.Stderr))

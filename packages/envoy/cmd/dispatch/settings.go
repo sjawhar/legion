@@ -15,10 +15,11 @@ import (
 // list. The libraries Dispatch links read a few variables for themselves, outside the table:
 // `HOME` (os.UserHomeDir), libpq's `PG*` (pgx), `HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY`
 // (net/http), `SSL_CERT_FILE` and `SSL_CERT_DIR` (crypto/x509), the AWS SDK's `AWS_*` and its
-// shared config files (the file store's region and credentials), and the Go runtime's `GO*` and
-// `TZ`. `envoy-dispatch settings` prints the table, and the docs site's configuration reference is
-// generated from that output. A new setting is a new row here, never an os.Getenv;
-// TestNoReaderBypassesTheSettingsTable holds cmd/dispatch and internal/dispatch to that.
+// shared config files (the file store's region and credentials), automemlimit's `AUTOMEMLIMIT` and
+// `GOMEMLIMIT` (setGoMemoryLimit), and the Go runtime's `GO*` and `TZ`. `envoy-dispatch settings`
+// prints the table, and the docs site's configuration reference is generated from that output. A
+// new setting is a new row here, never an os.Getenv; TestNoReaderBypassesTheSettingsTable holds
+// cmd/dispatch and internal/dispatch to that.
 type setting struct {
 	// Name is the environment variable.
 	Name string

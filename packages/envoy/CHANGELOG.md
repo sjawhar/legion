@@ -1028,6 +1028,17 @@
 
 ### Fixed
 
+- `envoy-dispatch` sets the Go runtime's soft memory limit to 90% of its container's when it
+  starts, 3.6 GiB of the GKE pod's 4 GiB, so the collector works harder as the heap nears the limit
+  instead of letting garbage pile up until the container is killed (INFRA-179). The limit is read
+  by `github.com/KimMachineGun/automemlimit` from the control group (`memory.max` under version
+  two, `memory.limit_in_bytes` under version one, the smallest in the hierarchy), and the server
+  logs one line naming the limit it read and the limit it set. Where no limit is readable (`max`,
+  or no control group) it sets none and the line says so. `GOMEMLIMIT` in the environment is used
+  as it is and the container's limit is not read; `AUTOMEMLIMIT=off` turns the limit off, and any
+  other `AUTOMEMLIMIT` is the ratio, in (0, 1]. Both are the library's variables, not rows of the
+  settings table.
+
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
   but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
   which replaces a machine's own credentials for every program that uses them. A write under
