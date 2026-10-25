@@ -2,35 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-184",
-  "completed": "2026-10-25T08:05:00Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T08:50:00Z",
+  "decision": "approved",
   "critical": 0,
   "important": 0,
-  "minor": 2,
-  "round": 3,
-  "roundTwoClosed": [
-    "packages/envoy/internal/dispatch/api/issue_claim.go — the claim walk now runs on context.WithoutCancel inside a savepoint bounded at 500 ms, reset before release, and the call moved to before writeIssueClaim, so nothing sits between appendEvent and tx.Commit. TestClaimSurvivesAHangingLegionLabelWalk passes at this head logging 'claim legion_managed_status omitted … SQLSTATE 57014', with the claim intact on the response and on the re-read and the field absent; TestClaimSurvivesAFailingLegionLabelWalk still passes on SQLSTATE 42P01.",
-    "The deterministic cancellation test I required was not written, and I accepted the argument after reading it against the package: with the walk before the write, a cancellation inside it means writeIssueClaim never runs, so the assertion would be about a claim that was never written. The hazard is removed rather than made testable. That half of the fix is proven by inspection, and the reason is recorded.",
-    "packages/envoy/internal/dispatch/api/write_advice.go — legionManagedStatusAdvice takes a savepoint of its own inside the advice savepoint and logs rather than returning an adviceQueryError. TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails, armed on legion_managed_status, passes with issue_status, session_writes_since_human = 2 and the one open ask present and the field absent.",
-    "packages/envoy/AGENTS.md:414-415 now cites internal/dispatch/api/issue_parent.go and names claimLegionManagedStatus as the claim-side wrapper; :1835 now says both routes answer claimAnswer.",
-    "packages/envoy/internal/dispatch/api/issue_claim_test.go:491-496 records the no-t.Parallel constraint the swap depends on and why server.adviceQueryHook is not used instead."
+  "minor": 0,
+  "round": 4,
+  "approvedHead": "the head this round's handoff push makes, named by SHA in the review submission",
+  "roundThreeClosed": [
+    "packages/envoy/AGENTS.md:407-416, packages/envoy/internal/dispatch/api/write_advice.go:131-139 and write_advice_test.go:576-581 now state the mechanism the code implements: issue_create.go computes and persists LEGION-550's suggestions only once the advice survives, after it, so a fatal advice failure costs a creation the whole offer rather than a stored copy. The AGENTS.md paragraph adds the contrast that makes it true — asks.go computes its suggestions independently and falls back to a suggestions-only answer.",
+    "packages/envoy/internal/dispatch/api/issue_claim_test.go:510 calls rawClaimFields instead of inlining the decode; json stays imported and used by the helper."
   ],
-  "keyFindings": [
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/write_advice.go:135, packages/envoy/internal/dispatch/api/write_advice_test.go:578-580, packages/envoy/AGENTS.md:410-411",
-      "description": "Three comments this round added state the mechanism backwards. Each says a fatal advice failure would drop the suggestions an issue creation 'already computed and persisted'. issue_create.go:384-386 calls writeAdvice first and :404-407 calls computeAndPersistSuggestions only inside `if advice != nil`, so on a fatal advice failure nothing had been computed and no suggestion row had been written: the fix makes suggestions get computed where they were previously skipped, rather than preventing persisted rows from being dropped. The effect is real and the tester measured it; the stated reason is not. AGENTS.md:410-411 in particular would tell a reader that suggestion rows survive a fatal advice failure too, which contradicts issue_create.go:399-403."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/issue_claim_test.go:510-517",
-      "description": "TestClaimSurvivesAFailingLegionLabelWalk inlines `var body map[string]json.RawMessage`, json.Unmarshal and a decode t.Fatalf — byte for byte what rawClaimFields does, which this same round added at :582-589 of the same file and which the sibling test uses at :559. Replace the inline block with rawClaimFields(t, claimed)."
-    }
+  "verifiedAtThisHead": [
+    "go vet ./internal/dispatch/api/ clean.",
+    "TestClaimSurvivesAFailingLegionLabelWalk passes, logging 'claim legion_managed_status omitted … SQLSTATE 42P01', claim intact.",
+    "TestClaimSurvivesAHangingLegionLabelWalk passes, logging 'claim legion_managed_status omitted … SQLSTATE 57014', claim intact on the response and on the re-read, field absent.",
+    "TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails passes with issue_status, session_writes_since_human and your_open_asks present and legion_managed_status absent."
   ],
-  "recordedNotRequested": [
-    "thermonuclear-code-quality asked for the claim-side walk to move out of the claim's transaction onto the pool (deleting claimLegionManagedStatus, the context.WithoutCancel reasoning, both statement_timeout statements and the claimApplied field) and for the two savepoint wrappers to collapse into one with a deferred rollback. Both are maintainability proposals against code that is correct and now covered by two tests, not defects, and the architect scoped this round to the acceptance lines and the correctness and contracts of what the change touches. Recorded for him to route, not requested here.",
-    "The no-t.Parallel constraint both package-level legionManagedStatusSQL swaps depend on is recorded in a comment and enforced by nothing.",
-    "context.WithoutCancel keeps a disconnected client's claim transaction holding its pool connection and the issue's row lock for up to the 500 ms bound past the hang-up, where a cancellation used to end it at once. Bounded and self-limiting."
-  ],
-  "ciAtHead": "The code head is ab8f1ee2004d (7fb29bd85bda and 9bb00ac9db1a above it change only .legion/). main requires lint, typecheck, test and pr-title; at the time of writing typecheck and pr-title are success and lint and test are in_progress, so this round's decision rests on the findings and not on CI, as a request for changes does."
+  "ciAtHead": "The code head is 284f41267c3a and the push that started the runs is 5b1049d8a40c. main requires lint, typecheck, test and pr-title; all four are completed and success there (pr-title's earlier cancelled run was superseded by 40175889022). The compare 5b1049d8a40c...eaa386dffc14 lists only .legion/INFRA-184/test.json, so the code the approval covers is the code CI ran.",
+  "inspectionNotRun": "The cancellation half of the claim-walk fix is proven by inspection, not by a run. The walk moved to issue_claim.go:425, before writeIssueClaim, so a cancellation inside it means no claim was ever written and 'cancel in the walk, assert the claim committed' would assert about a claim that cannot exist. A deterministic test was required in round 2 and accepted as not constructible in round 3 on that ground alone, after the argument was read against the package.",
+  "keyFindings": [],
+  "decidedNotDeferred": [
+    "thermonuclear-code-quality asked to move the claim-side walk out of the claim's transaction onto the pool: refused on its merits. The claim and the answer it returns come from one lock and one snapshot, it would spend a second pool connection on every claim, and the deletions it offers exist because the walk shares the claim's transaction.",
+    "It asked to collapse the two savepoint wrappers into one deferred-rollback helper: declined for this pull request, a maintainability preference over correct code carrying two tests in the function whose correctness took three rounds to settle.",
+    "It asked to move the status-ownership tests and labelledIssueKey out of issue_claim_test.go, now 1,135 lines, before it passes 1,000: declined on the same ground, and the trigger is named — the next change that touches that file carries the move with its own tests.",
+    "It asked to collapse the suggestion-scheduling explanation now standing in three places: declined. The repetition is the direct consequence of the round-3 correction, two places are the code the behaviour lives in and the third is the package map an agent reads first.",
+    "No issue is filed for any of the four.",
+    "thermonuclear-deep-review returned APPROVE at this head, its first on this pull request."
+  ]
 }
