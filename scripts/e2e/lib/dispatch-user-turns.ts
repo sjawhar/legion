@@ -387,7 +387,9 @@ async function taggedUserTurns(
       if (settled) return;
       settled = true;
       clearTimeout(timeout);
-      result.reject(new Error(`the live socket closed before its replay (${event.code} ${event.reason})`));
+      result.reject(
+        new Error(`the live socket closed before its replay (${event.code} ${event.reason})`)
+      );
     });
     return result.promise;
   }, session);

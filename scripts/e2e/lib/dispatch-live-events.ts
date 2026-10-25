@@ -37,6 +37,18 @@ interface EventFrame {
   readonly type: "event";
 }
 
+interface Ended {
+  readonly reason: string;
+  readonly sub: string;
+  readonly type: "ended";
+}
+
+interface Refusal {
+  readonly code: string;
+  readonly message: string;
+  readonly type: "error";
+}
+
 class UsageError extends Error {}
 
 const BunWebSocket = WebSocket as unknown as new (
@@ -157,6 +169,40 @@ function asEventFrame(value: unknown): EventFrame | undefined {
   return value as EventFrame;
 }
 
+function asEnded(value: unknown): Ended | undefined {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("type" in value) ||
+    value.type !== "ended" ||
+    !("sub" in value) ||
+    value.sub !== "events" ||
+    !("reason" in value) ||
+    typeof value.reason !== "string"
+  ) {
+    return undefined;
+  }
+  return value as Ended;
+}
+
+/** An `error` frame refusing the feed, or, without `sub`, a frame this script sent. */
+function asRefusal(value: unknown): Refusal | undefined {
+  if (
+    typeof value !== "object" ||
+    value === null ||
+    !("type" in value) ||
+    value.type !== "error" ||
+    ("sub" in value && value.sub !== "events") ||
+    !("code" in value) ||
+    typeof value.code !== "string" ||
+    !("message" in value) ||
+    typeof value.message !== "string"
+  ) {
+    return undefined;
+  }
+  return value as Refusal;
+}
+
 function reconnectDelay(attempt: number): number {
   return Math.min(BASE_RECONNECT_DELAY_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
 }
@@ -175,7 +221,8 @@ async function watch(options: Options): Promise<boolean> {
   let socket: WebSocket | null = null;
   let stopped = false;
 
-  const stop = (matched: boolean) => {
+  /** Ends the watch: true once an event matched, false at the timeout, or Dispatch's refusal. */
+  const stop = (outcome: boolean | Error) => {
     if (stopped) return;
     stopped = true;
     clearTimeout(timeout);
@@ -183,7 +230,22 @@ async function watch(options: Options): Promise<boolean> {
     const closing = socket;
     socket = null;
     closing?.close(1000);
-    done.resolve(matched);
+    if (outcome instanceof Error) done.reject(outcome);
+    else done.resolve(outcome);
+  };
+
+  /** Subscribes the feed on `target`, resuming after the cursor once there is one. */
+  const subscribe = (target: WebSocket) => {
+    const frame =
+      cursor === null
+        ? { sub: "events", type: "subscribe", view: { kind: "events" } }
+        : {
+            resume: { since: cursor },
+            sub: "events",
+            type: "subscribe",
+            view: { kind: "events" },
+          };
+    target.send(JSON.stringify(frame));
   };
 
   const open = (resubscribing: boolean) => {
@@ -193,16 +255,7 @@ async function watch(options: Options): Promise<boolean> {
     socket = next;
     next.addEventListener("open", () => {
       if (socket !== next || stopped) return;
-      const frame =
-        cursor === null
-          ? { sub: "events", type: "subscribe", view: { kind: "events" } }
-          : {
-              resume: { since: cursor },
-              sub: "events",
-              type: "subscribe",
-              view: { kind: "events" },
-            };
-      next.send(JSON.stringify(frame));
+      subscribe(next);
     });
     next.addEventListener("message", (message) => {
       if (socket !== next || stopped || typeof message.data !== "string") return;
@@ -214,7 +267,24 @@ async function watch(options: Options): Promise<boolean> {
       }
       const start = asEventsStart(frame);
       if (start !== undefined) {
+        // The feed is carried again: the next loss backs off from the first delay.
+        attempt = 0;
         if (cursor === null) cursor = eventID(start.since, "events_start.since");
+        return;
+      }
+      const ended = asEnded(frame);
+      if (ended !== undefined) {
+        // Dispatch dropped the feed and left the socket open, where it would stay silent: subscribe
+        // again from the cursor.
+        write({ ended: ended.reason, resubscribed: cursor });
+        subscribe(next);
+        return;
+      }
+      const refusal = asRefusal(frame);
+      if (refusal !== undefined) {
+        stop(
+          new Error(`Dispatch refused the events subscription: ${refusal.code}: ${refusal.message}`)
+        );
         return;
       }
       const event = asEventFrame(frame);
@@ -229,9 +299,7 @@ async function watch(options: Options): Promise<boolean> {
       socket = null;
       write({ close: event.code, reason: event.reason });
       const immediate = event.code === SERVICE_RESTART || event.code === SOCKET_ROTATED;
-      const delay = immediate
-        ? 0
-        : reconnectDelay(attempt++) * (0.75 + Math.random() * 0.5);
+      const delay = immediate ? 0 : reconnectDelay(attempt++) * (0.75 + Math.random() * 0.5);
       reconnect = setTimeout(() => {
         reconnect = undefined;
         open(true);
@@ -253,7 +321,9 @@ async function main(argv: readonly string[]): Promise<number> {
       process.stderr.write(`dispatch-live-events: ${error.message}\n${USAGE}\n`);
       return 2;
     }
-    process.stderr.write(`dispatch-live-events: ${error instanceof Error ? error.message : String(error)}\n`);
+    process.stderr.write(
+      `dispatch-live-events: ${error instanceof Error ? error.message : String(error)}\n`
+    );
     return 1;
   }
 }

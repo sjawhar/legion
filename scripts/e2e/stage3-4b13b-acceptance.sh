@@ -395,12 +395,14 @@ production_audit() {
   if [ "$prod_baseline" = none ]; then printf 'no user-level Dispatch configuration\n'; return "$found"; fi
   bearer=$work/production-dispatch-bearer
   (umask 077 && printf '%s\n' "$prod_token" >"$bearer")
+  # A refusal of the feed is printed on stderr; the replay's close and resubscribe lines carry no
+  # event and are not counted.
   bun "$root/scripts/e2e/lib/dispatch-live-events.ts" \
     --url "$prod_dispatch_url" --bearer-file "$bearer" --since "$((prod_baseline - 1))" --timeout 25 \
-    >"$work/production-events.jsonl" 2>/dev/null || true
+    >"$work/production-events.jsonl" || true
   rm -f "$bearer"
   events=$(jq -s -c --argjson ids "$sessions" --arg project "$project" --argjson baseline "$prod_baseline" '
-    [.[] | .event] |
+    [.[] | .event | select(. != null)] |
     {control: any(.[]; .id == $baseline), count: length,
      rig: [.[] | select((.actor.id as $a | $ids | index($a)) or (tostring | contains($project))) | {id, issue_key, type, actor: .actor.id, created_at}]}' "$work/production-events.jsonl")
   printf '%s\n' "$events" >"$evidence/production-dispatch-audit.json"

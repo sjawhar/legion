@@ -9,7 +9,8 @@ const scratchDirectories: string[] = [];
 
 afterEach(() => {
   for (const server of servers.splice(0)) server.stop(true);
-  for (const directory of scratchDirectories.splice(0)) rmSync(directory, { force: true, recursive: true });
+  for (const directory of scratchDirectories.splice(0))
+    rmSync(directory, { force: true, recursive: true });
 });
 
 function scratch(): string {
@@ -18,7 +19,9 @@ function scratch(): string {
   return directory;
 }
 
-async function run(...args: string[]): Promise<{ code: number; stderr: string; stdout: unknown[] }> {
+async function run(
+  ...args: string[]
+): Promise<{ code: number; stderr: string; stdout: unknown[] }> {
   const child = Bun.spawn([process.execPath, probe, ...args], {
     stderr: "pipe",
     stdout: "pipe",
@@ -44,7 +47,8 @@ test("the live event probe resumes after rotation and stops once an event matche
   let connections = 0;
   const server = Bun.serve({
     fetch(request, srv) {
-      if (new URL(request.url).pathname !== "/ws/live") return new Response("not found", { status: 404 });
+      if (new URL(request.url).pathname !== "/ws/live")
+        return new Response("not found", { status: 404 });
       upgrades.push(request.headers.get("x-dispatch-user") ?? "");
       return srv.upgrade(request) ? undefined : new Response("upgrade failed", { status: 400 });
     },
@@ -108,13 +112,122 @@ test("the live event probe resumes after rotation and stops once an event matche
   ]);
 });
 
+test("the live event probe subscribes again from its cursor when Dispatch ends the feed", async () => {
+  const subscriptions: unknown[] = [];
+  let upgrades = 0;
+  const server = Bun.serve({
+    fetch(request, srv) {
+      if (new URL(request.url).pathname !== "/ws/live")
+        return new Response("not found", { status: 404 });
+      upgrades += 1;
+      return srv.upgrade(request) ? undefined : new Response("upgrade failed", { status: 400 });
+    },
+    hostname: "127.0.0.1",
+    port: 0,
+    websocket: {
+      message(socket, raw) {
+        subscriptions.push(JSON.parse(String(raw)));
+        if (subscriptions.length === 1) {
+          socket.send(JSON.stringify({ since: "5", sub: "events", type: "events_start" }));
+          socket.send(
+            JSON.stringify({
+              event: { id: 6, type: "issue.updated" },
+              id: "6",
+              sub: "events",
+              type: "event",
+            })
+          );
+          // The relay dropped the subscription: the socket stays open, silent for this feed.
+          socket.send(JSON.stringify({ reason: "behind", sub: "events", type: "ended" }));
+          return;
+        }
+        socket.send(JSON.stringify({ since: "6", sub: "events", type: "events_start" }));
+        socket.send(
+          JSON.stringify({
+            event: { id: 7, note: "needle", type: "issue.updated" },
+            id: "7",
+            sub: "events",
+            type: "event",
+          })
+        );
+      },
+    },
+  });
+  servers.push(server);
+
+  const result = await run(
+    "--url",
+    `http://127.0.0.1:${server.port}`,
+    "--user",
+    "alice@example.com",
+    "--until",
+    "needle",
+    "--timeout",
+    "2"
+  );
+
+  expect(result.code).toBe(0);
+  expect(result.stderr).toBe("");
+  expect(upgrades).toBe(1);
+  expect(subscriptions).toEqual([
+    { sub: "events", type: "subscribe", view: { kind: "events" } },
+    { resume: { since: "6" }, sub: "events", type: "subscribe", view: { kind: "events" } },
+  ]);
+  expect(result.stdout).toEqual([
+    { event: { id: 6, type: "issue.updated" } },
+    { ended: "behind", resubscribed: "6" },
+    { event: { id: 7, note: "needle", type: "issue.updated" } },
+  ]);
+});
+
+test("the live event probe prints Dispatch's refusal of the feed and exits 1", async () => {
+  const server = Bun.serve({
+    fetch(request, srv) {
+      if (new URL(request.url).pathname !== "/ws/live")
+        return new Response("not found", { status: 404 });
+      return srv.upgrade(request) ? undefined : new Response("upgrade failed", { status: 400 });
+    },
+    hostname: "127.0.0.1",
+    port: 0,
+    websocket: {
+      message(socket) {
+        socket.send(
+          JSON.stringify({
+            code: "STREAM_UNAVAILABLE",
+            message: "no feed",
+            sub: "events",
+            type: "error",
+          })
+        );
+      },
+    },
+  });
+  servers.push(server);
+
+  const result = await run(
+    "--url",
+    `http://127.0.0.1:${server.port}`,
+    "--user",
+    "alice@example.com",
+    "--timeout",
+    "2"
+  );
+
+  expect(result.code).toBe(1);
+  expect(result.stderr).toBe(
+    "dispatch-live-events: Dispatch refused the events subscription: STREAM_UNAVAILABLE: no feed\n"
+  );
+  expect(result.stdout).toEqual([]);
+});
+
 test("the live event probe authenticates with a bearer file and exits at its timeout", async () => {
   const directory = scratch();
   const bearerFile = join(directory, "bearer");
   writeFileSync(bearerFile, "test-bearer\n", { mode: 0o600 });
   const server = Bun.serve({
     fetch(request, srv) {
-      if (new URL(request.url).pathname !== "/ws/live") return new Response("not found", { status: 404 });
+      if (new URL(request.url).pathname !== "/ws/live")
+        return new Response("not found", { status: 404 });
       if (request.headers.get("authorization") !== "Bearer test-bearer") {
         return new Response("forbidden", { status: 403 });
       }
