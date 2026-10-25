@@ -266,8 +266,13 @@ function renderAdvice(
     );
   }
 
+  // The advice is dropped, not reworded, on a Legion-managed issue: the Legion daemon moves such
+  // an issue out of triage itself when it releases it, so asking the session to move the status
+  // asks it to do the one thing the daemon undoes. The memo is marked inside the block, so a key
+  // whose line was never printed can still be told later if it leaves Legion's hands.
   if (
     advice.issue_status === "triage" &&
+    advice.legion_managed_status !== true &&
     tool !== "dispatch_issue" &&
     !(tool === "dispatch_issue_update" && opts.setsStatus === true) &&
     !triageAdviceShown.has(key)

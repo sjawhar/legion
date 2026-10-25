@@ -215,6 +215,15 @@ export interface WriteAdvice {
    * `suggestions.missing` explains why search did not answer in time instead.
    */
   readonly suggestions?: Suggestions;
+  /**
+   * True when the issue carries the `legion` label in any case, or sits under an issue that
+   * does, so only the Legion daemon writes its status and a status anyone else sets is undone.
+   * Resolved only where a line depends on it: a session's write on an issue whose status is
+   * `triage`, where it decides whether the "still in triage" advice is printed. Absent
+   * everywhere else — on a write to an issue past triage, and on a write whose actor is not a
+   * session, which is answered without running any advice query.
+   */
+  readonly legion_managed_status?: boolean;
 }
 /** Response-only; never on an event payload. */
 export type Advised<T> = T & { readonly advice?: WriteAdvice };

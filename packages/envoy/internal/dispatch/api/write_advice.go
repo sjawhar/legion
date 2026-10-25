@@ -25,6 +25,14 @@ type writeAdvice struct {
 	IssueStatus             string      `json:"issue_status"`
 	SessionWritesSinceHuman int         `json:"session_writes_since_human"`
 	YourOpenAsks            []adviceAsk `json:"your_open_asks"`
+	// LegionManagedStatus is whether the Legion daemon owns the issue's status (the issue, or
+	// an issue above it, carries the legion label). A pointer, omitted when nil, because it is
+	// resolved only where a line depends on it - a session's write on an issue in triage, the
+	// one case where the client has advice to drop - and a plain bool would serialise false
+	// everywhere else and state, wrongly, that Legion does not own the status. Absent means
+	// "not asked", which is what @legion/contracts' optional WriteAdvice.legion_managed_status
+	// already expresses.
+	LegionManagedStatus *bool `json:"legion_managed_status,omitempty"`
 	// documentBlocks is set by a document write whose document reads; nil omits its fields.
 	*documentBlocks
 	// editBlocks is set by a document edit; nil omits its field.
@@ -54,15 +62,19 @@ func (e *adviceQueryError) Unwrap() error {
 	return e.err
 }
 
-// computeWriteAdvice runs the issue-scoped advice queries for a session's write. Both of them
-// are about the calling session itself - its own writes since the last human event, its own
-// open asks - so writeAdvice calls this only for a session actor.
+// computeWriteAdvice runs the issue-scoped advice queries for a session's write. Two of them are
+// about the calling session itself - its own writes since the last human event, its own open
+// asks - so writeAdvice calls this only for a session actor. The third, whether Legion owns the
+// issue's status, runs only on an issue whose status is triage: that is the only line the answer
+// decides, so an ordinary write on an ordinary issue gains no query at all. status is the
+// issue's status as the write committed it, the same value writeAdvice reports.
 func (s *server) computeWriteAdvice(
 	ctx context.Context,
 	tx pgx.Tx,
 	issueKey string,
 	actor model.Actor,
 	excludeAskID string,
+	status string,
 ) (*writeAdvice, error) {
 	advice := &writeAdvice{YourOpenAsks: []adviceAsk{}}
 	if err := s.runAdviceQueryHook(ctx, tx, "session_writes_since_human"); err != nil {
@@ -105,6 +117,19 @@ func (s *server) computeWriteAdvice(
 	if err := rows.Err(); err != nil {
 		return nil, &adviceQueryError{query: "your_open_asks", err: err}
 	}
+	if status != model.IssueStatusTriage {
+		return advice, nil
+	}
+	if err := s.runAdviceQueryHook(ctx, tx, "legion_managed_status"); err != nil {
+		return nil, &adviceQueryError{query: "legion_managed_status", err: err}
+	}
+	// The same helper the claim routes use (issue_claim.go), so the write advice and the claim
+	// result never disagree about who owns the status.
+	managed, err := legionManagedStatus(ctx, tx, issueKey)
+	if err != nil {
+		return nil, &adviceQueryError{query: "legion_managed_status", err: err}
+	}
+	advice.LegionManagedStatus = &managed
 	return advice, nil
 }
 
@@ -124,9 +149,11 @@ func (s *server) writeAdvice(
 	excludeAskID string,
 	status string,
 ) *writeAdvice {
-	// A human or service write has no advice query to run - both are about the calling session
-	// - so it is answered here, outside the savepoint and the two statement_timeout statements
-	// that would otherwise run inside the write's own transaction while it holds the issue row.
+	// A human or service write has no advice query to run - every one of them is about the
+	// calling session, and the triage line this answers is about what a session is told - so it
+	// is answered here, outside the savepoint and the two statement_timeout statements that
+	// would otherwise run inside the write's own transaction while it holds the issue row. Such
+	// a write still gets the triage advice, which is true for a reader who may move the status.
 	if actor.Kind != "session" {
 		return &writeAdvice{YourOpenAsks: []adviceAsk{}, IssueStatus: status}
 	}
@@ -142,7 +169,7 @@ func (s *server) writeAdvice(
 		s.logAdviceError(route, issueKey, "statement_timeout", err)
 		return nil
 	}
-	advice, err := s.computeWriteAdvice(ctx, adviceTx, issueKey, actor, excludeAskID)
+	advice, err := s.computeWriteAdvice(ctx, adviceTx, issueKey, actor, excludeAskID, status)
 	if err != nil {
 		_ = adviceTx.Rollback(ctx)
 		query := "unknown"

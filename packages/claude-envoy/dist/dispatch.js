@@ -16351,7 +16351,7 @@ function renderAdvice(tool, key, advice, opts) {
   if (advice.decision_blocks === 0 && opts.isPrimarySpec === true && (tool === "dispatch_issue" || tool === "dispatch_artifact")) {
     lines.push('This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".');
   }
-  if (advice.issue_status === "triage" && tool !== "dispatch_issue" && !(tool === "dispatch_issue_update" && opts.setsStatus === true) && !triageAdviceShown.has(key)) {
+  if (advice.issue_status === "triage" && advice.legion_managed_status !== true && tool !== "dispatch_issue" && !(tool === "dispatch_issue_update" && opts.setsStatus === true) && !triageAdviceShown.has(key)) {
     triageAdviceShown.add(key);
     lines.push(`${key} is still in triage \u2014 nobody can see its development status. See the \`dispatch\` skill, "Issue status is yours to move".`);
   }

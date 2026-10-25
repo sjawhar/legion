@@ -29,6 +29,7 @@ type testWriteAdvice struct {
 	YourOpenAsks            []testAdviceAsk `json:"your_open_asks"`
 	DecisionBlocks          *int            `json:"decision_blocks"`
 	DecisionBlocksAdded     *int            `json:"decision_blocks_added"`
+	LegionManagedStatus     *bool           `json:"legion_managed_status"`
 	UnparsedOpeners         *struct {
 		Count    int      `json:"count"`
 		Examples []string `json:"examples"`
@@ -482,6 +483,111 @@ func TestWriteAdviceReportsIssueStatusAtWriteTime(t *testing.T) {
 	inProgress := sessionRequest(t, handler, http.MethodPost, path, map[string]any{"body": "in-progress write", "actor": actor})
 	if advice := adviceFromResponse(t, inProgress.Code, inProgress.Body.String()); advice.IssueStatus != "in_progress" {
 		t.Fatalf("post-patch message status = %q", advice.IssueStatus)
+	}
+}
+
+// adviceLabelledIssueKey seeds one issue with the given labels under the given parent (empty for
+// none), for the advice over who owns an issue's status.
+func adviceLabelledIssueKey(t *testing.T, handler http.Handler, project, title string, labels []string, parent string) string {
+	t.Helper()
+	body := map[string]any{"project": project, "title": title, "force": true}
+	if labels != nil {
+		body["labels"] = labels
+	}
+	if parent != "" {
+		body["parent"] = parent
+	}
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+	if created.Code != http.StatusCreated {
+		t.Fatalf("create issue %s: status=%d body=%s", title, created.Code, created.Body.String())
+	}
+	return decodeBody[struct {
+		Key string `json:"key"`
+	}](t, created).Key
+}
+
+// A Legion child issue sits in triage until its daemon releases it, so a write there has to say
+// who owns the status: the client prints no triage line on such an issue rather than telling the
+// session to do the one thing the daemon undoes. The answer is the claim routes' own helper, so
+// it reads the label in whatever case it was typed and the issue's parents' labels too, and it is
+// resolved only where it decides that line - a session's write on an issue still in triage.
+func TestWriteAdviceAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
+	handler := newTestHandler(t)
+	createAdviceProject(t, handler, "OWNED")
+	actor := adviceSessionActor("session-owner")
+
+	parent := adviceLabelledIssueKey(t, handler, "OWNED", "Split the billing worker", []string{"legion"}, "")
+	for _, want := range []struct {
+		name    string
+		key     string
+		managed bool
+	}{
+		{"the legion label", adviceLabelledIssueKey(t, handler, "OWNED", "Rotate the certificates", []string{"legion"}, ""), true},
+		{"the label as Legion", adviceLabelledIssueKey(t, handler, "OWNED", "Back up the volume", []string{"Legion"}, ""), true},
+		{"a child under a labelled parent", adviceLabelledIssueKey(t, handler, "OWNED", "Draft an invoice renderer", nil, parent), true},
+		{"no such label on it or above it", adviceLabelledIssueKey(t, handler, "OWNED", "Tidy the checklist", []string{"infra"}, ""), false},
+	} {
+		t.Run(want.name, func(t *testing.T) {
+			written := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+want.key+"/messages", map[string]any{
+				"body": "session write", "actor": actor,
+			})
+			advice := adviceFromResponse(t, written.Code, written.Body.String())
+			if advice.LegionManagedStatus == nil || *advice.LegionManagedStatus != want.managed {
+				t.Fatalf("advice legion_managed_status = %#v, want %v", advice.LegionManagedStatus, want.managed)
+			}
+		})
+	}
+
+	// A human's write is answered before the savepoint and runs no advice query, so it must omit
+	// the field rather than claim Legion does not own the status.
+	human := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+parent+"/messages", map[string]any{
+		"body": "human write",
+	}, "alice")
+	if human.Code != http.StatusCreated {
+		t.Fatalf("human message: status=%d body=%s", human.Code, human.Body.String())
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(human.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode human write: %v", err)
+	}
+	var rawAdvice map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["advice"], &rawAdvice); err != nil {
+		t.Fatalf("decode human advice: %v body=%s", err, human.Body.String())
+	}
+	if _, exists := rawAdvice["legion_managed_status"]; exists {
+		t.Fatalf("human write advice carried legion_managed_status: %s", human.Body.String())
+	}
+}
+
+// The walk runs where its answer is used and nowhere else: an issue past triage prints no triage
+// line whatever the answer would be, so an ordinary write on an ordinary issue gains no query.
+func TestWriteAdviceLeavesWhoOwnsTheStatusUnaskedPastTriage(t *testing.T) {
+	handler := newTestHandler(t)
+	createAdviceProject(t, handler, "PAST")
+	key := adviceLabelledIssueKey(t, handler, "PAST", "Already under way", []string{"legion"}, "")
+	moved := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]string{
+		"status": "in_progress",
+	}, "alice")
+	if moved.Code != http.StatusOK {
+		t.Fatalf("move the issue out of triage: status=%d body=%s", moved.Code, moved.Body.String())
+	}
+
+	written := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/messages", map[string]any{
+		"body": "session write", "actor": adviceSessionActor("session-past-triage"),
+	})
+	if advice := adviceFromResponse(t, written.Code, written.Body.String()); advice.IssueStatus != "in_progress" {
+		t.Fatalf("advice issue_status = %q, want in_progress", advice.IssueStatus)
+	}
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal(written.Body.Bytes(), &envelope); err != nil {
+		t.Fatalf("decode write past triage: %v", err)
+	}
+	var rawAdvice map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["advice"], &rawAdvice); err != nil {
+		t.Fatalf("decode advice past triage: %v body=%s", err, written.Body.String())
+	}
+	if _, exists := rawAdvice["legion_managed_status"]; exists {
+		t.Fatalf("a write past triage asked who owns the status: %s", written.Body.String())
 	}
 }
 

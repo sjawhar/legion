@@ -382,8 +382,15 @@ replacement room's load then runs the settlement the failure dropped, which the 
 `doc_settlements_pending` row still names.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
-count of the calling session's own messages/comments/asks since the last human event, and the calling
-session's two oldest open asks; issue creation and Markdown artifact uploads also report the
+count of the calling session's own messages/comments/asks since the last human event, the calling
+session's two oldest open asks, and `legion_managed_status`: whether the Legion daemon owns the
+issue's status, because the issue carries the `legion` label in any case or sits under one that
+does. The client prints no "still in triage" advice on such an issue, because Legion moves it out
+of triage itself and a status a session writes there is undone. That field is resolved only where
+it decides a line - a session's write on an issue whose status is `triage` - and is absent on a
+write past triage and on one whose actor is not a session, which runs no advice query at all and
+still gets the triage advice, true for a reader who may move the status.
+Issue creation and Markdown artifact uploads also report the
 document's `decision_blocks` count and, when it holds any, its `unparsed_openers`
 (`{count, examples}`): typed block openings (`:::name{`) in its text outside code, written inside a
 line or escaped, each example quoting the opening with a little of the text before it. A writer who
@@ -402,7 +409,13 @@ timeout that is restored before the savepoint is released: one failure is logged
 calling actor's own events (it runs for a session caller alone; any other actor reports zero with no
 query) and materializes the last-human fence so its `max(id)` runs once, and relies on the
 `events (issue_key, seq)` unique index's issue prefix and commit-ordered event ids; the open-ask
-query relies on the `asks_open (issue_key) where state = 'open'` partial index.
+query relies on the `asks_open (issue_key) where state = 'open'` partial index; the
+`legion_managed_status` query is the claim routes' own `legionManagedStatus`
+(`internal/dispatch/api/issue_claim.go`), one recursive walk up the issue's parent chain bounded
+by `parentDepthCap`, each step a primary-key lookup on `issues (key)` (the `issues_parent_key`
+index serves the opposite direction and this walk never reads it), and it runs on a triage issue
+alone, so an ordinary write on an ordinary issue gains no query. A chain deeper than the cap
+answers "not managed" there and the line prints.
 
 Quote-anchored asks and comments retain their inline mark and quote cache, plus the stable `block_id`
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays

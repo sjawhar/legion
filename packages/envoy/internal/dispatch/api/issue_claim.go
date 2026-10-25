@@ -311,9 +311,11 @@ const legionLabel = "legion"
 // the case they were typed in and are only de-duplicated case-insensitively, so `Legion` is a real
 // stored value and the match is on lower(label). The walk starts at the issue itself, so one query
 // answers both its own labels and its ancestors', and is bounded by parentDepthCap like every
-// other issue walk, so it terminates even if a raced reparent ever commits a cycle; a chain deeper
-// than the cap answers false, which no caller ever sees because loadIssue refuses such a chain
-// before this runs.
+// other issue walk, so it terminates even if a raced reparent ever commits a cycle. A chain deeper
+// than the cap answers false. A claim never reaches that case - loadIssue refuses such a chain
+// before this runs - but a write's advice does (computeWriteAdvice, write_advice.go), and there it
+// means the issue is treated as one Legion does not run: the "still in triage" line prints.
+// A chain that deep needs a reparent that refuseParentTooDeep would have refused.
 var legionManagedStatusSQL = `
 	with recursive chain as (
 		select i.parent_key, i.labels, 0 as depth
