@@ -1446,13 +1446,13 @@ func TestAgentSecretsBlockRefusals(t *testing.T) {
 	}
 }
 
-// The plain-http exemption covers what a Go resolver answers from its own rule: a loopback address
-// literal, zoned or IPv4-mapped, and `localhost` with any trailing dots. Every other name a
-// refusal check calls loopback is asked of DNS by a CGO_ENABLED=0 binary, so the token the request
-// carries would go to whatever answers, and plain http is refused for it.
+// The plain-http exemption covers what Go's pure resolver answers from the hosts file: a loopback
+// address literal, zoned or IPv4-mapped, and `localhost` written exactly so. Every other spelling a
+// refusal check calls loopback, a trailing dot included, is asked of DNS by a CGO_ENABLED=0 binary,
+// so the token the request carries would go to whatever answers, and plain http is refused for it.
 func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
 	for _, url := range []string{
-		"http://127.0.0.1:13380", "http://LOCALHOST:13380", "http://localhost..:13380",
+		"http://127.0.0.1:13380", "http://LOCALHOST:13380",
 		"http://[::1%25lo]:13380", "http://[::ffff:127.0.0.1]:13380",
 	} {
 		t.Run(url, func(t *testing.T) {
@@ -1462,7 +1462,10 @@ func TestLoopbackBrokerMayBePlainHTTP(t *testing.T) {
 			}
 		})
 	}
-	for _, url := range []string{"http://secrets.localhost:13380", "http://localhost.localdomain:13380", "http://ip6-localhost:13380"} {
+	for _, url := range []string{
+		"http://localhost.:13380", "http://localhost..:13380", "http://secrets.localhost:13380",
+		"http://localhost.localdomain:13380", "http://ip6-localhost:13380",
+	} {
 		t.Run("refused "+url, func(t *testing.T) {
 			_, err := LoadForValidation(writeConfigFile(t, kubernetesFile+"    agent_secrets:\n      url: "+url+"\n"+agentSecretsTokenFile), noEnv)
 			want := "runtime.kubernetes.agent_secrets.url must use https unless the host is a loopback address"

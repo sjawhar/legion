@@ -1104,6 +1104,12 @@
   deployment. A deployed binding shows no diff: once the Role exists, the name is its own. The
   component's README also lists the broker token's second holder, the secrets broker, which must
   restart with the app after a rotation, and says the tailnet auth key needs no restart.
+- `bus.LocalNATSURL`, which decides whether a NATS URL needs `ENVOY_ALLOW_REMOTE_NATS=1`, reads
+  every spelling of loopback: it drops any number of trailing dots, where it dropped one, and reads
+  a zoned (`[::1%25lo]`) or IPv4-mapped (`[::ffff:127.0.0.1]`) address, which `net.ParseIP` refused
+  as no address at all. Such a URL needed the opt-in to connect, and the listener's rendered
+  `ENVOY_ALLOW_REMOTE_NATS` (`infra/core/listener_env.go`) was set for it; now neither is. A
+  numeric name such as `127.1` is still no address and still counts as another machine's.
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
   but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
   which replaces a machine's own credentials for every program that uses them. A write under

@@ -413,12 +413,14 @@ func isLoopbackHost(host string) bool {
 }
 
 // plainHTTPHost is a host a URL may carry credentials to over plain http: a loopback address
-// literal, zoned or IPv4-mapped, or `localhost` with any trailing dots, which a Go resolver answers
-// from its own rule rather than from DNS. Every other name, `secrets.localhost` and
-// `localhost.localdomain` among them, is asked of DNS by a CGO_ENABLED=0 binary, so whatever answers
-// would receive the token the request carries.
+// literal, zoned or IPv4-mapped, or `localhost` written exactly so, which Go's pure resolver
+// answers from the hosts file. Every other spelling leaves the machine: a trailing dot
+// (`localhost.`) misses that entry, which is stored without one (`$GOROOT/src/net/dnsclient.go`,
+// absDomainName adds no dot to a name with no inner dot), and goes to DNS, as a name such as
+// `secrets.localhost` or `localhost.localdomain` does in a CGO_ENABLED=0 binary. Whatever answers
+// would receive the token the request carries, so plain http is refused for all of them.
 func plainHTTPHost(host string) bool {
-	if strings.EqualFold(strings.TrimRight(host, "."), "localhost") {
+	if strings.EqualFold(host, "localhost") {
 		return true
 	}
 	addr, ok := hostAddr(host)
