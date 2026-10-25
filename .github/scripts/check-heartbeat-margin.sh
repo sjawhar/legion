@@ -17,8 +17,10 @@
 #      before a live pane is dropped - but the third must *complete* before the record expires,
 #      not merely be attempted. The record expires that long after the listener accepted a write,
 #      while the third refresh is only posted three intervals after that acceptance and still owes
-#      its round trip, and `setInterval` only ever fires late; at equality the third refresh is due
-#      at the very instant the record expires, with no time left to complete. The call budget is
+#      its round trip, and `setInterval` only ever fires late; at equality the third refresh's
+#      budgeted completion reaches the instant the record expires, leaving no scheduling margin.
+#      With a 40 000 ms interval, a 60 000 ms call budget and a 180 000 ms lifetime, the third
+#      refresh is dispatched at 120 000 ms and its budget runs out at 180 000 ms. The call budget is
 #      that round trip: every attempt's timeout plus the retry delays between them
 #      (packages/envoy-client/src/transport.ts).
 #
