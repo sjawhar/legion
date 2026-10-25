@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-180",
+  "completed": "2026-10-25T15:40:00Z",
+  "round": 9,
+  "kind": "re-check after a CI re-run; no product line moved",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2166",
+  "headSha": "621ea16a91dd4476e88ee6f61b3424ed0418835a",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Round 9 changed no product line: the whole diff from the head I last verified, the merge head ce39bc6b7f9c, to the pull request's head a84899d3fb22 is `.legion/INFRA-180/implement.json | 43 +`. The unchanged-diff fingerprint is 89c45be1c41e0714fafc282853c0a06d01d3ec4eb35c1e5d90734756d8aee6b8 at the merge head, at the code head this round names (621ea16a91dd, retro's commit) and at the pull request's head, computed here with the reference's own command and equal to the figure I computed last round. The round's one claim is that the red was not this change and cleared on its single allowed re-run, and I checked both halves against GitHub and the tree rather than from the handoff."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The CI red this round answers is not this change's, and the re-run that cleared it changed nothing: the branch is green at the head that will merge, with the product evidence of earlier rounds still standing.",
+      "surface": "GitHub's own run and attempt records for the pull request's code head, read with gh; the branch's file list against its base, read with jj; and the Go daemon's test file in this workspace.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && gh run view 40205954052 --repo sjawhar/legion --json headSha,status,conclusion,attempt && gh api repos/sjawhar/legion/actions/runs/40205954052/attempts/1 --jq '{conclusion, head_sha}' && gh api repos/sjawhar/legion/actions/runs/40205954052/attempts/1/jobs --jq '.jobs[] | \"\\(.name) \\(.conclusion)\"' && gh run list --commit 621ea16a91dd4476e88ee6f61b3424ed0418835a --repo sjawhar/legion --json databaseId,name,status,conclusion && jj diff --from \"fork_point(\\\"main\\\"@origin | a84899d3fb22ca2f074169cd00908423957109d2)\" --to a84899d3fb22ca2f074169cd00908423957109d2 --name-only | grep -c packages/daemon",
+      "observed": "Attempt 1 of run 40205954052 at head 621ea16a91dd is `failure`, with `test` failed and `lint` and `typecheck` succeeded; attempt 2 of the same run, on the same head, is `success` with all three jobs success. The branch changes 8 files against its base — the Envoy Slack normalizer, its two test files, two copies of the controller reference, the changelog, the solutions note and the generated bundle copy — and `grep -c packages/daemon` over that list returns 0, so the failing package is one this pull request does not touch. The assertion the handoff names is in this workspace at packages/daemon/internal/daemon/outbox_lanes_test.go:511, `if hours != 1 || sweeps != 1 { t.Fatalf(\"hour timers armed = %d and sweep timers armed = %d, want one each and neither fired\", hours, sweeps) }` — a count of how many timers the lane ever armed, which is load-dependent, not a wrong delivery. At the code head every run is now completed success: `Tests` 40205954052, `Legion Envoy and Contracts` 40205954172 (its `envoy-go` and `envoy-go-race` jobs both completed success, so acceptance 2's lane is green on the code that merges), `Worker Image` 40205954081, `Docs` 40205954040 and three `PR Title` runs. The pull request's head a84899d3fb22 is the handoff push and carries the `skip-checks: true` trailer, so GitHub started no run for it, which is right.",
+      "headSha": "621ea16a91dd4476e88ee6f61b3424ed0418835a",
+      "negativeControl": "The re-run is its own control: it ran the failed job alone, on the same head and the same bytes, with nothing changed to make it pass, so a reproducible failure would have failed again — and it did not. I did not take the quoted failure text as read: attempt 1's log is no longer retrievable through `gh run view --log-failed`, so what I can attest is the attempt record (failure, `test` alone), the assertion's text and shape in the tree, and that the branch touches no `packages/daemon` path. I state that limit rather than repeat the implementer's quotation as my own observation."
+    },
+    {
+      "criterion": "The symptom the issue names is still cured at the head that will merge, and the branch's approved diff is untouched by this round.",
+      "surface": "A real nats-server v2.11.4, a real envoy-listener I built from this workspace at this head, and a fake agent session subscribed to notifications.slack.> over prompt_async, posted to over /webhook/slack; plus the jj unchanged-diff fingerprint at three heads.",
+      "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && go build -o out/bin/envoy-listener-r9 ./cmd/listener && cd -- \"$LEGION_WORKSPACE\" && LISTENER=$PWD/packages/envoy/out/bin/envoy-listener-r9 NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server bash packages/envoy/out/e2e/infra180-slack-wake-rig.sh   # and the fingerprint command of skill://legion-worker/references/conflicts-and-rewrites.md at ce39bc6b7f9c, 621ea16a91dd and a84899d3fb22",
+      "observed": "The rig delivered `Summary: slack bot message in C_RIG from datadog: [Triggered] CPU load high` with the payload `\"text\":\"[Triggered] CPU load high\\nhost web-1 is at 97% for 10 minutes\"` on topic `notifications.slack.T_RIG.C_RIG.message` — a signed Slack message whose words sit only in an attachment waking an agent with those words, from the code that merges. The fingerprint is 89c45be1c41e0714fafc282853c0a06d01d3ec4eb35c1e5d90734756d8aee6b8 at all three heads, so nothing of the approved diff moved this round and the shapes of rounds 1 to 7 needed no re-driving.",
+      "headSha": "621ea16a91dd4476e88ee6f61b3424ed0418835a",
+      "negativeControl": "In the same rig run the same body posted with the signature `v0=deadbeef` was refused HTTP 401 and woke nobody: `unsigned post status (want 401) : 401` and `wakes delivered: 1`, the one wake being the signed post's."
+    }
+  ],
+  "acceptance": {
+    "one": "Verified at round 7 and untouched since, which the fingerprint shows: 39 TestSlackDeliveredText cases green at the code head, 32 of them failing against the branch base.",
+    "two": "Proven twice on the production code that merges: run 40176669854 at f3c3d411a87c, `envoy-go` completed success, and now run 40205954172 at the code head 621ea16a91dd, `envoy-go` and `envoy-go-race` both completed success.",
+    "three": "packages/envoy/CHANGELOG.md carries the entry; it survived the forward merge's conflict with the branch's own addition unchanged, which the fingerprint shows."
+  },
+  "risksForTheArchitect": [
+    "R1 — nothing new. The design gate is open (`currentVersion 16, approvedVersion 16`), CI is green at the code head, and from my side nothing stands between this branch and the merge gate.",
+    "R2 — one thing worth leaving on the record for a repository that is not this issue's: the red was `TestAReleasedNoticeRunsOnItsLaneWhenTheReleaseCommits` in packages/daemon/internal/daemon/outbox_lanes_test.go, whose assertion counts how many hour timers the lane ever armed rather than how many are live, so it can fail under load without any delivery being wrong. It cost this tree one phase round. It is outside this issue, so it is not mine to file; `skill://legion-worker/references/findings.md` makes it a `dispatch ask` if you want it raised, and I have not opened one.",
+    "R3 — carried, unchanged, none re-driven because no product line moved: the two Security[prompt] paths recorded with the human; the round 6 fallback-wrapper cost (1.4373 s for a 9,900-level chain in a 373 KB body against 0.0892 s on round 5's listener, on a shape Slack's own schema does not produce); a single-line own text whose rich_text copy Slack split at a style boundary delivering the words twice in fragments; two objects saying the same thing both delivering; a rich_text whose every leaf sits inside the own text skipped whole; a section's `accessory` preceding its `fields`; and a context element carrying only a link's `url` delivering nothing."
+  ],
+  "ciRead": "At the code head 621ea16a91dd4476e88ee6f61b3424ed0418835a, read 2026-10-25T15:35Z: `Tests` run 40205954052 completed success on its second attempt, `Legion Envoy and Contracts` run 40205954172 completed success, `Worker Image` run 40205954081 completed success, `Docs` run 40205954040 completed success, and `PR Title` runs 40205954062, 40206042156 and 40209974527 completed success. The pull request's head a84899d3fb22 carries the handoff-only trailer and started no run. Lint, types and the unit and integration suites are CI's and were not re-run here.",
+  "rounds": [
+    { "round": 1, "headSha": "4ea17e805b03ee9e2fd34e1360b39ce113d9a165", "failed": 0, "summary": "Passed with three risks recorded, all three of which review round 1 then drove as findings." },
+    { "round": 2, "headSha": "ba073fa8485e72128fded3b0c9ece780d7b508e9", "failed": 1, "summary": "Failed: the rich_text exception dropped an app's own rich text. Pinned by the red test at 0a049686c832, unmodified since and still green." },
+    { "round": 3, "headSha": "3f13dcc25f794e041aeaaeb9ca187b1ce566ef80", "failed": 0, "summary": "Passed; the narrowing's per-level re-measure recorded as a measured risk, which review round 2 bounded and the architect required fixed." },
+    { "round": 4, "headSha": "709538bf7d44fd76dbcc2e0a116fbd099e4a4d6f", "failed": 0, "summary": "Passed: the cost became linear, the duplicate content went, blocks moved before attachments, a field arrived as one line, two display names landed." },
+    { "round": 5, "headSha": "50f2638ba9413593f1e5cdcdf937860388d81109", "failed": 0, "summary": "Passed: the repeat rule was scoped to the object and the field pairing deleted with it." },
+    { "round": 6, "headSha": "77f73e55e29b0cf14b077991ae17c804220c773b", "failed": 0, "summary": "Passed: the fallback moved last and is suppressed by its own attachment's subtree. One new measured risk recorded." },
+    { "round": 7, "headSha": "f3c3d411a87c84cd65f127c1ef5958ad68844d1c", "failed": 0, "summary": "Passed: one test-fixture line, proven to pin the per-object rule by the mutation that leaves round 6's table green and fails exactly that case here." },
+    { "round": 8, "headSha": "ce39bc6b7f9c3458de6f299102a17faab6709a52", "failed": 0, "summary": "Rebase re-check of the forward merge of main: fingerprint unchanged at three heads, bare gates only." }
+  ]
+}
