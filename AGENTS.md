@@ -266,14 +266,20 @@ implement App's own disarm sent before READY that GitHub applied late (auto-merg
 `manually_disabled`, or a `manual` dequeue, by that App), and auto-merge a close turned off
 (`closed`), which the reopen at READY's head undid. The repository's required reviews and checks
 decide when it merges; Legion bypasses
-none, and a review only a person can give is waited for. READY accepts a head whose required checks
-are still running, and refuses one whose required check failed or never reported. The row reads
+none, and a review only a person can give is waited for. READY reads no check of the head at all:
+whether the merge happens is GitHub's to decide, under the base branch's own rules. The row reads
 GitHub, then the record, and submits nothing once the record shows the issue has left that READY or
 applied a close; while the record still awaits it, a pull request GitHub shows closed or at another
-head waits for the two to agree. The bound is GitHub's own clock: once GitHub's last change to the
-pull request (its `updatedAt`) is more than 10 minutes old, a webhook never arrived, so the row ends
-and tells the architect once (`merge-stalled`); routine waits and rate-limit deferrals never count
-toward it. A reopen at READY's head reuses that row, starts it over as though nothing had been armed,
+head waits for the two to agree. Two bounds hold the wait. The first is GitHub's own clock: once
+GitHub's last change to the pull request (its `updatedAt`) is more than 10 minutes old, a webhook
+never arrived, so the row ends and tells the architect once (`merge-stalled`); routine waits and
+rate-limit deferrals never count toward it. The second ends nothing: a merge the daemon submitted
+that GitHub has not completed within an hour of the workflow queueing the row at READY's acceptance
+tells the issue's architect once (`merge-waiting`) and goes on waiting - nothing is withdrawn, the
+issue stays in `awaiting_merge`, and the row keeps submitting - so what is left to find is on
+GitHub: a required check that never ran or failed, a review only a person can give, a merge queue
+that has not landed it.
+A reopen at READY's head reuses that row, starts it over as though nothing had been armed,
 and takes it from any worker still holding it, so the merge is never lost. A refusal GitHub would
 repeat on a retry ends the row and is told to the architect once (`merge-refused`).
 GitHub checks the expected head only when auto-merge is enabled, and arming is right only for an

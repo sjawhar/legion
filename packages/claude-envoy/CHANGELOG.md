@@ -113,6 +113,17 @@
 
 ### Added
 
+- A Claude Code session registers under the name a person gave it (`claude -n`, `--name`,
+  `/rename`), alone, so Dispatch's Agents page shows that name where it showed
+  `<tmux pane or folder> <short id>`; `ENVOY_SESSION_TITLE` still wins, and a session nobody named
+  keeps that `<tmux pane or folder> <short id>` title. Claude Code hands the chosen name to a hook
+  alone, as `session_title`, so a new `UserPromptSubmit` hook, and the `SessionStart` one, records
+  it under `${CLAUDE_PLUGIN_DATA}/titles/` and the channel server reads it on every registration:
+  a rename shows after the session's next prompt and the heartbeat that follows, and taking the
+  name away brings the fallback title back. That hook is a bundle of its own, since Claude Code
+  holds the prompt until it returns: it costs about what starting `bun` at all costs. Title files
+  are pruned at thirty days, and so are the role files beside them, which a session that held its
+  role to the end used to leave behind for ever.
 - The Legion phase reminder runs on Claude Code (INFRA-220). A phase worker in a Legion pane whose
   turn ends with its phase still open — no successful `handoff_complete` since its assignment — is
   reminded at the end of every turn, for as long as that phase stays open, as an Oh My Pi worker

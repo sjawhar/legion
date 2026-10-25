@@ -298,8 +298,9 @@ func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMes
 // and reporting ok=false when there is nobody to deliver to. Delivery
 // distrusts a claim whose holder has not heartbeated within
 // session.ClaimStaleAfter even when its registry cache entry has not yet
-// expired (the plugin heartbeats every two minutes, so two missed
-// heartbeats means the claiming process is very likely gone) — stricter
+// expired (the plugin heartbeats every 90 seconds — DEFAULT_HEARTBEAT_MS,
+// packages/envoy-client/src/envoy-settings.ts — so three missed heartbeats
+// means the claiming process is very likely gone) — stricter
 // than resolveLiveRoleHolder's plain ErrKeyNotFound check, since a dropped
 // delivery is costlier here than an HTTP 404. Both that stricter check and
 // resolveLiveRoleHolder release an expired claim through the shared

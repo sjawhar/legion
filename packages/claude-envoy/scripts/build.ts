@@ -24,10 +24,14 @@ const repoRoot = resolve(packageRoot, "..", "..")
 const pinnedBunVersion = (await readFile(join(repoRoot, ".bun-version"), "utf8")).trim()
 
 /** Output name -> source entrypoint, relative to the package root. `dispatch` is the `dispatch`
- *  CLI that `bin/dispatch` runs, built from the shared library's entry. */
+ *  CLI that `bin/dispatch` runs, built from the shared library's entry. `session-title-hook` is a
+ *  bundle of its own rather than a mode of `session-hook`, because Claude Code blocks the user's
+ *  prompt on it: an ESM entrypoint evaluates its whole module graph before it reads `argv`, so
+ *  sharing one would make every prompt pay for zod and the Dispatch client. */
 export const BUNDLE_ENTRYPOINTS = {
   "envoy-channel": "bin/envoy-channel.ts",
   "session-hook": "hooks/session-hook.ts",
+  "session-title-hook": "hooks/session-title-hook.ts",
   dispatch: "../envoy-client/bin/dispatch.ts",
 } as const
 
