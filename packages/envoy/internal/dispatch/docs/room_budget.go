@@ -22,24 +22,26 @@ import (
 // (cmd/dispatch/main.go:119-128). Open documents are the largest thing the pod holds; the rest is
 // the request path's, the cold reads' cache's (documentReadBudget, 256 MiB, which this does not
 // count) and the slack that limit leaves the collector. At the measured cost of a room
-// (bytesOfHeapAnElement) it holds thirty-nine edited documents of a mebibyte of prose (57,600
-// elements, 54 MB each), and since an admission reserves its stored version's count at that same
-// price (storedRoomReservation), an empty budget admits thirty-nine of them and refuses the
-// fortieth. No room has a ceiling: a mebibyte of the densest markdown measured, which goldmark
-// stops counting, is priced at more than the whole budget (bytesOfHeapAByteAtTheDensest), and
-// what answers a room that heavy is the hook's refusal of every insert while nothing can be closed
-// (peer_update.go:44-58), not a cap on its charge (TestTheRoomBudgetsArithmetic).
+// (bytesOfHeapAnElement) it holds thirty-nine documents of a mebibyte of prose (57,600 elements,
+// 54 MB each at both copies, roomCopies), read or edited alike, and since an admission reserves its
+// stored version's count at that same price (storedRoomReservation), an empty budget admits
+// thirty-nine of them and refuses the fortieth. No room has a ceiling: a mebibyte of the densest
+// markdown measured, which goldmark stops counting, is priced at more than the whole budget
+// (bytesOfHeapAByteAtTheDensest), and what answers a room that heavy is the hook's refusal of
+// every insert while nothing can be closed (peer_update.go:44-58), not a cap on its charge
+// (TestTheRoomBudgetsArithmetic).
 const roomBudgetBytes = 2 << 30
 
 // bytesOfHeapAnElement is the heap one copy of a document holds for each element its rendering
 // makes (pmdoc.MeasureDocument): about 470 bytes at 524 KiB and at 1 MiB, 578 at 51 KiB, where
 // what every document holds whatever its size is a larger share. A room that is only read holds
 // one copy, its live document; a room that has taken an update holds two, the live document and
-// the rendered replica its update observer keeps (renderedReplica). The heap follows the elements
-// and not the markdown's bytes, which misprice a dense document by several times: the figure
-// before this one, 120 bytes of heap a byte of markdown, was measured on a shape no room can hold
-// (room_heap_test.go). TestAResidentRoomsHeapPerByteOfItsMarkdown measures rooms of each size,
-// read and edited, and fails once a copy's heap an element leaves 0.85x to 1.3x of this.
+// the rendered replica its update observer keeps (renderedReplica); the budget charges every room
+// at both from its admission on (roomCopies). The heap follows the elements and not the markdown's
+// bytes, which misprice a dense document by several times: the figure before this one, 120 bytes
+// of heap a byte of markdown, was measured on a shape no room can hold (room_heap_test.go).
+// TestAResidentRoomsHeapPerByteOfItsMarkdown measures rooms of each size, read and edited, and
+// fails once a copy's heap an element leaves 0.85x to 1.3x of this.
 const bytesOfHeapAnElement = 470
 
 // bytesOfHeapAByteAtTheDensest is the densest price: the heap one copy of a document is charged
@@ -74,7 +76,7 @@ const bytesOfHeapAByteAtTheDensest = 1_058
 
 // errRoomBudgetFull is the refusal of a browser the open rooms leave no room for (reserveRoom). It
 // is answered with DocumentBusyCloseCode, the transient close: the next attempt finds the bytes
-// the sweep it started has freed, or the rooms open retiring by themselves.
+// the sweep it started has freed for it (wanted), or the rooms open retiring by themselves.
 var errRoomBudgetFull = errors.New("the open documents fill their memory budget")
 
 // roomBudget charges every open room the heap it holds, and refuses a browser one more room past
@@ -86,8 +88,9 @@ var errRoomBudgetFull = errors.New("the open documents fill their memory budget"
 // unrecorded-mark sweep, settlement's repair - opens its room over the budget, and the room is
 // charged and closed once nothing holds it (sweepRooms).
 //
-// Over the budget, the rooms that hold nothing outlasting them are closed (sweepRooms), and when
-// none is left to close, full is raised: the one signal the peer update hook reads (Service.
+// Over the budget, or short of what an admission it refused needs (wanted), the rooms that hold
+// nothing outlasting them are closed (sweepRooms). When the budget is still over its limit with
+// none left to close, full is raised: the one signal the peer update hook reads (Service.
 // weighPeerUpdate), with one atomic load, since the hook runs on the peer's read loop and takes
 // neither this mutex nor a room's state lock. It is lowered once the rooms' charges are back
 // within the budget, and a sweep started once a room may have become closable lowers it too.
@@ -104,7 +107,15 @@ type roomBudget struct {
 	// sweep closes the rooms nothing holds until the budget is met (Service.sweepRooms), started
 	// on a goroutine of its own. Nil in a budget no service built, which never sweeps.
 	sweep func()
-	// full is raised by a sweep that leaves the budget over, having closed every room it could.
+	// wanted is the most an admission the budget refused needed since the last sweep ended
+	// (reserve), which the next sweep closes rooms to make room for beside the limit itself
+	// (short). Without it a sweep would stop as soon as the budget is back within its limit, and
+	// a reservation never takes it past: the sweep a refused admission starts would close nothing,
+	// and the next attempt would be refused while unused rooms stayed charged until each retired
+	// on its own a minute later.
+	wanted int64
+	// full is raised by a sweep that leaves the budget over its limit, having closed every room it
+	// could; never by one that leaves it within its limit but short of wanted (swept).
 	full atomic.Bool
 	// stored holds the counts admissions made of the stored versions (storedRoomReservation).
 	stored storedCounts
@@ -119,7 +130,7 @@ type budgetedRoom struct {
 	reservations []*roomReservation
 }
 
-// roomCharge is one loaded room's charge: its latest measured document at its copies, plus the
+// roomCharge is one loaded room's charge: its latest measured document at both copies, plus the
 // bytes of the updates it has taken since that measurement (weight). Each measurement replaces the
 // last rather than adding to it, and the update bytes beside it start again from that measurement:
 // a charge that only rose would never fall while browsers stayed, since a Yjs delete tombstones
@@ -136,9 +147,8 @@ type budgetedRoom struct {
 type roomCharge struct {
 	budget *roomBudget
 	room   string
-	// heap is what one copy of the room's latest measured document is priced at (copyHeap), and
-	// copies 1 until the room takes its first update and 2 from then on.
-	heap, copies int64
+	// heap is what one copy of the room's latest measured document is priced at (copyHeap).
+	heap int64
 	// updates is the bytes of every update the room has taken since it loaded, and measuredAt what
 	// it was at the rendering heap prices.
 	updates, measuredAt int64
@@ -156,10 +166,23 @@ type roomReservation struct {
 	settled bool
 }
 
-// roomWeight is what a room is charged whose one copy holds heap (copyHeap), at copies copies,
-// and which has taken updates bytes of updates since heap was measured.
-func roomWeight(heap, copies, updates int64) int64 {
-	return heap*copies + updates
+// roomCopies is the copies of its document a room is charged at, from the reservation its
+// admission makes (storedRoomReservation) through its load (load) to its retirement (retire): its
+// live document and the rendered replica its update observer keeps (renderedReplica). A room only
+// read holds the first alone, and both are charged before the second exists, because the replica
+// is taken by the room's own update observer the first time anyone types (renderedReplica.catchUp),
+// inside ygo's apply of an update the peer hook has already admitted, and nothing at that point can
+// refuse it. Charged one copy until then, rooms only read would be admitted at half their price:
+// an admission of a mebibyte of prose reserves 54,144,000 bytes, its room would then be charged
+// 27,072,000, and an empty budget would admit seventy-eight of them rather than thirty-nine; once
+// they were typed into, each would take its replica with nothing able to refuse it, and the open
+// rooms would come to about twice the 2 GiB budget in a 4 GiB pod.
+const roomCopies = 2
+
+// roomWeight is what a room is charged whose one copy holds heap (copyHeap), at roomCopies, and
+// which has taken updates bytes of updates since heap was measured.
+func roomWeight(heap, updates int64) int64 {
+	return heap*roomCopies + updates
 }
 
 // copyHeap is the heap one copy of a document is priced at whose rendering is bytes long and makes
@@ -207,7 +230,12 @@ func (b *roomBudget) refusal() error {
 }
 
 // reserve holds weight for a socket admitted to room, or reserves nothing for a room already
-// charged, which the socket joins. Past the limit it reserves nothing, starts a sweep, and refuses.
+// charged, which the socket joins. Where weight would take the budget past its limit it reserves
+// nothing, records weight as what the sweep it starts is to make room for (wanted), and refuses:
+// the admission that found the budget full is refused at once, and the sweep frees the bytes for
+// its next attempt, which the editor's backoff on DocumentBusyCloseCode retries into. A weight past
+// the limit itself is not recorded, since no sweep can make room for it, and closing every unused
+// room to try would only cost their next readers a load.
 func (b *roomBudget) reserve(room string, weight int64) (*roomReservation, error) {
 	b.mu.Lock()
 	defer b.unlock()
@@ -218,6 +246,9 @@ func (b *roomBudget) reserve(room string, weight int64) (*roomReservation, error
 	}
 	if b.used+weight > b.limit {
 		b.dropIfEmptyLocked(room, entry)
+		if weight <= b.limit {
+			b.wanted = max(b.wanted, weight)
+		}
 		b.startSweepLocked()
 		return nil, fmt.Errorf("%w: %d of %d bytes are charged, and this document needs %d", errRoomBudgetFull, b.used, b.limit, weight)
 	}
@@ -244,9 +275,9 @@ func (b *roomBudget) release(reservation *roomReservation) {
 }
 
 // load charges room's newly loaded instance, whose one copy is priced at heap (copyHeap) from the
-// count of the rendering it loaded with, in place of every reservation its admissions hold: the
-// room's own document at one copy replaces its stored version at two, and the two documents differ
-// only by the updates stored since that version was cut.
+// count of the rendering it loaded with, at roomCopies, in place of every reservation its
+// admissions hold: the room's own document replaces its stored version at the same two copies, and
+// the two documents differ only by the updates stored since that version was cut.
 func (b *roomBudget) load(room string, heap int64) *roomCharge {
 	b.mu.Lock()
 	defer b.unlock()
@@ -255,21 +286,18 @@ func (b *roomBudget) load(room string, heap int64) *roomCharge {
 		b.settleLocked(reservation)
 	}
 	entry.reservations = nil
-	charge := &roomCharge{budget: b, room: room, heap: heap, copies: 1}
+	charge := &roomCharge{budget: b, room: room, heap: heap}
 	entry.charges = append(entry.charges, charge)
 	b.reweighLocked(charge)
 	return charge
 }
 
-// took charges the room update bytes more, at two copies once copied: the update observer takes the
-// replica, the room's second copy, on the room's first update (renderedReplica.catchUp).
-func (c *roomCharge) took(update int, copied bool) {
+// took charges the room update bytes more. Its second copy is charged from its load on
+// (roomCopies), so the update that makes the replica adds only its own bytes.
+func (c *roomCharge) took(update int) {
 	c.budget.mu.Lock()
 	defer c.budget.unlock()
 	c.updates += int64(update)
-	if copied {
-		c.copies = 2
-	}
 	c.budget.reweighLocked(c)
 }
 
@@ -319,11 +347,21 @@ func (b *roomBudget) retire(room string) {
 	b.dropIfEmptyLocked(room, entry)
 }
 
-// over is whether the charges and reservations pass the limit.
-func (b *roomBudget) over() bool {
+// short is whether the charges and reservations leave no room for wanted, the most an admission
+// the budget refused needed since the last sweep ended: past the limit, or within it but without
+// room for that admission. A sweep closes rooms while it holds.
+func (b *roomBudget) short() bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	return b.used > b.limit
+	return b.used+b.wanted > b.limit
+}
+
+// figures is what the rooms' charges and the reservations come to, the limit, and wanted, for a
+// sweep to log what each room it closes left.
+func (b *roomBudget) figures() (used, limit, wanted int64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.used, b.limit, b.wanted
 }
 
 // heaviest lists the charged rooms, the heaviest first, for a sweep to close in that order.
@@ -387,11 +425,22 @@ func (b *roomBudget) startSweepLocked() {
 	go b.sweep()
 }
 
-// swept ends a sweep, raising full when it left the budget over: it closed every room it could.
+// swept ends a sweep, raising full when it left the budget over its limit: it closed every room
+// it could. A sweep that leaves the budget within its limit but short of wanted lowers full
+// rather than raising it. Full refuses every insert in every room (Service.weighPeerUpdate), and
+// a single oversized document refused on an almost empty pod must not freeze every room's growth;
+// a refused admission is answered by its own refusal, and by whatever room the sweep could make
+// for it.
+//
+// wanted starts again from nothing: the admissions refused since this sweep started have had what
+// room it could make for the most any of them needed, and one refused after its last look at the
+// budget, where nothing else has freed room by its next attempt, is refused again then, which
+// records its weight once more and starts a sweep of its own.
 func (b *roomBudget) swept() {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	b.sweeping = false
+	b.wanted = 0
 	b.full.Store(b.used > b.limit)
 }
 
@@ -423,7 +472,7 @@ func (b *roomBudget) reweighLocked(charge *roomCharge) {
 	if charge.retired {
 		return
 	}
-	weight := roomWeight(charge.heap, charge.copies, charge.updates-charge.measuredAt)
+	weight := roomWeight(charge.heap, charge.updates-charge.measuredAt)
 	b.used += weight - charge.weight
 	charge.weight = weight
 }
@@ -431,16 +480,17 @@ func (b *roomBudget) reweighLocked(charge *roomCharge) {
 // reserveRoom admits a browser's socket to room's document against the room budget, before anything
 // loads the document (ServeHTTP). A room already charged admits it with nothing reserved: the
 // browser joins a room whose heap is counted. Otherwise it reserves what the stored document will
-// cost at both copies (storedRoomReservation), since a browser's first keystroke takes the room's
-// second copy in its update observer, where nothing can refuse it. The reservation is made before
-// the load, not when the room has loaded: fifty browsers could otherwise pass an unreserved check
-// and each build a whole cold copy before any of their rooms exists.
+// cost at both copies (storedRoomReservation, roomCopies), since a browser's first keystroke takes
+// the room's second copy in its update observer, where nothing can refuse it. The reservation is
+// made before the load, not when the room has loaded: fifty browsers could otherwise pass an
+// unreserved check and each build a whole cold copy before any of their rooms exists.
 //
 // A budget already past its limit refuses at once, without reading the document, and so does one
 // this document's reservation would pass; either starts a sweep on a goroutine of its own
 // (sweepRooms), never on this one, an HTTP handler whose load already has a documented wedge
 // against a writer holding a pooled connection (onLoadDocument), and the next attempt finds what
-// the sweep freed. The caller releases the reservation on every way out of its handler.
+// the sweep freed: room for this document's reservation where unused rooms can make it (reserve).
+// The caller releases the reservation on every way out of its handler.
 func (s *Service) reserveRoom(ctx context.Context, room string) (*roomReservation, error) {
 	if s.budget.join(room) {
 		return nil, nil
@@ -486,7 +536,7 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 		return 0, fmt.Errorf("read the number of the document's latest version: %w", err)
 	}
 	if heap, ok := s.budget.stored.get(room, number); ok {
-		return roomWeight(heap, 2, 0), nil
+		return roomWeight(heap, 0), nil
 	}
 	flight := s.budget.stored.flights.DoChan(room+"@"+strconv.FormatInt(number, 10), func() (any, error) {
 		return s.countStoredVersion(ctx, room, number)
@@ -498,7 +548,7 @@ func (s *Service) storedRoomReservation(ctx context.Context, room string) (int64
 		if result.Err != nil {
 			return 0, result.Err
 		}
-		return roomWeight(result.Val.(int64), 2, 0), nil
+		return roomWeight(result.Val.(int64), 0), nil
 	}
 }
 
@@ -630,13 +680,20 @@ func (s *Service) chargeLoadedRoom(room string, replica *renderedReplica) *roomC
 	return charge
 }
 
-// sweepRooms is the budget's sweep (roomBudget.sweep): while the budget is over, it closes the
-// charged rooms that hold nothing outlasting them, the heaviest first, through the eviction a
-// failed room takes (evictRoom), whose close flushes the room before it goes. Unused is the
-// service's own test (unusedLocked), not the weaker "no browser connected": a room with no browser
-// can still hold an open writer, an armed settlement or an update its persistence has not
-// appended. The close's unload returns the room's charge (releaseUnloadedRoom). Once nothing more
-// can be closed it raises full if the budget is still over (roomBudget.swept).
+// sweepRooms is the budget's sweep (roomBudget.sweep): while the budget is short (roomBudget.short)
+// - over its limit, or without room for the most an admission it refused needed since the last
+// sweep (wanted) - it closes the charged rooms that hold nothing outlasting them, the heaviest
+// first, so as few as it can, through the eviction a failed room takes (evictRoom), whose close
+// flushes the room before it goes. Unused is the service's own test (unusedLocked), not the weaker
+// "no browser connected": a room with no browser can still hold an open writer, an armed
+// settlement or an update its persistence has not appended. The close's unload returns the room's
+// charge (releaseUnloadedRoom), and ygo's CloseRoom fires that unload before it returns wherever
+// it is the one that removed the room (sjawhar/ygo v1.51.3-sami.2,
+// provider/websocket/inject.go:604-634), so the next look at the budget sees the charge gone. Each
+// close is logged with the budget's own figures before and after it, which is how an operator, or
+// a test of the real process, tells a room the budget closed from one that retired on its own.
+// Once nothing more can be closed it raises full if the budget is still over its limit
+// (roomBudget.swept).
 //
 // It runs on a goroutine of its own, as failRoomLocked's eviction does, which Shutdown joins
 // (evictWG); a service stopping sweeps nothing, since its Shutdown closes every room itself.
@@ -647,7 +704,7 @@ func (s *Service) sweepRooms() {
 	}
 	defer s.evictWG.Done()
 	for _, room := range s.budget.heaviest() {
-		if !s.budget.over() {
+		if !s.budget.short() {
 			return
 		}
 		state := s.lockExistingState(room)
@@ -662,6 +719,10 @@ func (s *Service) sweepRooms() {
 		// has invalidated.
 		state.roomGeneration++
 		s.unlockState(room, state)
+		before, _, _ := s.budget.figures()
 		_ = s.evictRoom(room, state)
+		after, limit, wanted := s.budget.figures()
+		slog.Info("dispatch: the room budget closed an unused document",
+			"room", room, "charged_before", before, "charged", after, "limit", limit, "making_room_for", wanted)
 	}
 }

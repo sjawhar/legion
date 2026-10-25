@@ -418,13 +418,20 @@ func (r *renderedReplica) publishLoadedSize(markdown *string) {
 // a whole goldmark parse, 89 ms of one processor at a mebibyte of the shape a room holds and 58 ms
 // at 524 KiB of the keystroke benchmark's document (BenchmarkElementCountAgainstRender), and a
 // count of each changed rendering took the keystroke benchmark's p50 up by 29 to 36 per cent on
-// this pod's two processors (BenchmarkKeystrokeBesideReads). Five seconds keeps a room typed into
-// at the bound to under 2 per cent of one processor, while the bytes a room takes in five seconds
-// of typing, which its charge counts beside its last count, are a few kilobytes against the tens
-// of megabytes the count prices. So a room's charge is at most this interval and one count stale;
-// it is memory accounting, which refuses nothing in the room itself, and the update bytes charged
-// beside the count (roomCharge) are what cover the gap.
-const roomCountInterval = 5 * time.Second
+// this pod's two processors (BenchmarkKeystrokeBesideReads).
+//
+// This interval is the knob that moves what the count costs a keystroke: what the benchmark sees is
+// how many keystrokes a count falls across. At five seconds a 58 ms count fell across about one
+// keystroke in twelve on the 524 KiB document, which took one row of BenchmarkKeystrokeBesideReads
+// to 10.89 per cent against its gate of ten. Fifteen seconds puts it at about one keystroke in
+// thirty-five, and a room typed into at the bound at under 1 per cent of one processor.
+//
+// What it costs is how old a room's charge can be: up to this interval and one count, fifteen
+// seconds rather than five. The bytes of every update the room takes in between are charged beside
+// its last count either way (roomCharge) - a few kilobytes of typing in fifteen seconds against
+// the tens of megabytes the count prices - and the rooms the charge is weighed against retire a
+// minute after their last use. It is memory accounting, which refuses nothing in the room itself.
+const roomCountInterval = 15 * time.Second
 
 // publishCounted publishes markdown's size with elements, its count, already known, and withdraws
 // any rendering the room had waiting for the measurer: this one is newer, and a count of the older

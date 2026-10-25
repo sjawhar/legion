@@ -487,9 +487,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 	s.unlockState(room, state)
 	replica := s.keepReplica(doc, contentMarkdown)
 	// The room's charge in the room budget replaces the reservations of the sockets admitted to it
-	// (reserveRoom), which counted the stored version at two copies, with the count its load just
-	// made of the room's own document at one (keepReplica). From here every update the room takes is
-	// charged until a later count of its rendering re-bases the charge (roomCharge).
+	// (reserveRoom), which counted the stored version at both copies, with the count its load just
+	// made of the room's own document, at both copies too (roomCopies). From here every update the
+	// room takes is charged until a later count of its rendering re-bases the charge (roomCharge).
 	charge := s.chargeLoadedRoom(room, replica)
 	instance := s.keepInstance(room, doc)
 	hold := &instance.hold
@@ -502,7 +502,7 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 			s.finishSuppressedPersistence(published.slot, update)
 		}
 		if repair, identityRepair := origin.(*identityClosureOrigin); identityRepair {
-			charge.took(len(update), false)
+			charge.took(len(update))
 			s.recordSuppressedCommit(repair.slot, update)
 			// A repair's update is not classified or credited - its writer appends it in its own
 			// transaction - but it names this instance all the same: one that reaches the room's
@@ -518,8 +518,9 @@ func (s *Service) onLoadDocument(ctx context.Context, room string, doc *crdt.Doc
 		}
 		// Charged before the observer renders it, so the rendering it publishes holds this update
 		// and the count of that rendering re-bases the charge past it (renderedReplica.publishSize).
-		// The observer's first update copies the room into its replica, the room's second copy.
-		charge.took(len(update), true)
+		// The observer's first update copies the room into its replica, the room's second copy,
+		// which the charge has held since the room loaded (roomCopies).
+		charge.took(len(update))
 		contentChanged := replica.observe(room, doc, func(tree *pmdoc.Node) {
 			s.observeAskBlocksForUpdate(room, tree)
 		})

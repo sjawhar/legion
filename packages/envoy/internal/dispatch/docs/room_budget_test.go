@@ -26,20 +26,20 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/store/storetest"
 )
 
-// A room is charged its latest count at its copies, plus the bytes of the updates it has taken
-// since that count: one copy until its first update and two from then on, and each count replaces
-// the last rather than adding to it, so the charge falls when the document does. A rendering
-// goldmark could not finish counting is priced from its bytes at the densest price, past the
-// element bound and never at nothing. A socket's reservation is replaced by its room's charge when
-// the room loads, and the charge goes when ygo retires the room.
+// A room is charged its latest count at both copies, plus the bytes of the updates it has taken
+// since that count: both copies from its load, before its first update makes the second
+// (roomCopies), and each count replaces the last rather than adding to it, so the charge falls when
+// the document does. A rendering goldmark could not finish counting is priced from its bytes at the
+// densest price, past the element bound and never at nothing. A socket's reservation is replaced by
+// its room's charge when the room loads, and the charge goes when ygo retires the room.
 func TestARoomsChargeIsItsLatestCountAtItsCopiesPlusTheUpdatesSince(t *testing.T) {
 	budget := &roomBudget{limit: roomBudgetBytes}
 	charge := budget.load("room", copyHeap(10_000, 1_000))
-	requireCharged(t, budget, charge, 1_000*bytesOfHeapAnElement, "a room that has taken no update holds one copy")
+	requireCharged(t, budget, charge, 2*1_000*bytesOfHeapAnElement, "a room that has taken no update is charged both copies")
 
-	charge.took(100, true)
-	requireCharged(t, budget, charge, 2*1_000*bytesOfHeapAnElement+100, "the first update makes the second copy and adds its bytes")
-	charge.took(50, true)
+	charge.took(100)
+	requireCharged(t, budget, charge, 2*1_000*bytesOfHeapAnElement+100, "the first update, which makes the second copy, adds its bytes alone")
+	charge.took(50)
 	requireCharged(t, budget, charge, 2*1_000*bytesOfHeapAnElement+150, "a later update adds its bytes")
 
 	// The count of the rendering published once the room had taken 100 bytes re-bases the charge
@@ -55,30 +55,30 @@ func TestARoomsChargeIsItsLatestCountAtItsCopiesPlusTheUpdatesSince(t *testing.T
 	const uncounted = 64 << 10
 	charge.measured(copyHeap(uncounted, elementsPastCounting), 150)
 	requireCharged(t, budget, charge, 2*uncounted*bytesOfHeapAByteAtTheDensest, "a rendering goldmark stopped counting is priced from its bytes at the densest price")
-	if atTheBound := roomWeight(copyHeap(pmdoc.MaxDocumentBytes, pmdoc.MaxDocumentElements), 2, 0); charge.weight <= atTheBound {
+	if atTheBound := roomWeight(copyHeap(pmdoc.MaxDocumentBytes, pmdoc.MaxDocumentElements), 0); charge.weight <= atTheBound {
 		t.Fatalf("an uncounted 64 KiB rendering is charged %d bytes, want more than the %d of a document at the element bound", charge.weight, atTheBound)
 	}
 	charge.measured(copyHeap(sizeUnmeasured, sizeUnmeasured), 150)
 	requireCharged(t, budget, charge, 0, "a room that renders no markdown is charged its update bytes alone")
 
 	budget.retire("room")
-	charge.took(1_000, true)
+	charge.took(1_000)
 	if budget.used != 0 || len(budget.rooms) != 0 {
 		t.Fatalf("the budget holds %d bytes over %d rooms once the room retired, want nothing", budget.used, len(budget.rooms))
 	}
 
 	// The reservation an admission makes, its stored version's count at both copies, is replaced
-	// at the room's load by the charge of the room's own document at one copy, here one an update
-	// stored since that version has made smaller.
-	reserved := roomWeight(copyHeap(3_000, 30), 2, 0)
+	// at the room's load by the charge of the room's own document at both copies, here one an
+	// update stored since that version has made smaller.
+	reserved := roomWeight(copyHeap(3_000, 30), 0)
 	reservation, err := budget.reserve("other", reserved)
 	if err != nil || reservation == nil || budget.used != reserved {
 		t.Fatalf("a reservation held %d bytes (%v), want %d", budget.used, err, reserved)
 	}
 	other := budget.load("other", copyHeap(3_000, 10))
-	if budget.used != 10*bytesOfHeapAnElement || len(budget.rooms["other"].reservations) != 0 {
+	if budget.used != 2*10*bytesOfHeapAnElement || len(budget.rooms["other"].reservations) != 0 {
 		t.Fatalf("the loaded room is charged %d bytes beside %d reservations, want its own %d alone",
-			budget.used, len(budget.rooms["other"].reservations), 10*bytesOfHeapAnElement)
+			budget.used, len(budget.rooms["other"].reservations), 2*10*bytesOfHeapAnElement)
 	}
 	budget.release(reservation)
 	if joined, err := budget.reserve("other", reserved); joined != nil || err != nil || budget.used != other.weight {
@@ -89,7 +89,16 @@ func TestARoomsChargeIsItsLatestCountAtItsCopiesPlusTheUpdatesSince(t *testing.T
 	if refused, err := budget.reserve("third", 101); refused != nil || !errors.Is(err, errRoomBudgetFull) || budget.used != other.weight {
 		t.Fatalf("a reservation past the limit was %v (%v), and the budget holds %d bytes, want a refusal holding nothing", refused, err, budget.used)
 	}
-	other.took(1_000, true)
+	if budget.wanted != 101 {
+		t.Fatalf("the refusal left %d bytes for the next sweep to make room for, want the 101 it refused", budget.wanted)
+	}
+	// A sweep that leaves the budget within its limit raises nothing, however short it left the
+	// budget of what it was to make room for: full refuses growth in every room.
+	budget.swept()
+	if budget.full.Load() || budget.wanted != 0 {
+		t.Fatalf("a sweep that left the budget within its limit raised full (%t) and left %d bytes wanted, want neither", budget.full.Load(), budget.wanted)
+	}
+	other.took(1_000)
 	budget.swept()
 	if !budget.full.Load() {
 		t.Fatal("a sweep that left the budget over did not raise full")
@@ -131,10 +140,10 @@ func TestARoomsUpdateBytesAreClearedOnlyUpToTheRenderingACountMeasured(t *testin
 
 	replica := service.keepReplica(newDocumentCopy(), &loaded)
 	charge := service.chargeLoadedRoom("room", replica)
-	requireCharged(t, &service.budget, charge, int64(len(loaded))*bytesOfHeapAByteAtTheDensest,
+	requireCharged(t, &service.budget, charge, 2*int64(len(loaded))*bytesOfHeapAByteAtTheDensest,
 		"a room loaded with a rendering the counter cannot finish is priced from its bytes at the densest price")
 
-	charge.took(100, true)
+	charge.took(100)
 	replica.publishSize(&counted)
 	if markdown := <-counting; markdown != counted {
 		t.Fatal("the measurer started on a rendering the room did not publish")
@@ -142,7 +151,7 @@ func TestARoomsUpdateBytesAreClearedOnlyUpToTheRenderingACountMeasured(t *testin
 	// The count of counted is in flight. What the room takes now, and a rendering published while
 	// that count runs, which publishes its bytes at once and waits for a count of its own, leave
 	// the charge as it was: the bytes alone clear nothing.
-	charge.took(50, true)
+	charge.took(50)
 	replica.publishSize(&later)
 	if bytes, _, _ := replica.size(); bytes != int64(len(later)) {
 		t.Fatalf("the room published %d bytes, want the later rendering's %d at once", bytes, len(later))
@@ -168,13 +177,15 @@ func TestARoomsUpdateBytesAreClearedOnlyUpToTheRenderingACountMeasured(t *testin
 }
 
 // The budget's arithmetic at the shapes its design is stated in. A room of a mebibyte of prose
-// (57,600 elements, TestAResidentRoomsHeapPerByteOfItsMarkdown's shape), edited, is charged 54 MB
-// once counted, and since an admission reserves the same count at the same two copies
-// (storedRoomReservation), the budget admits thirty-nine such documents and refuses the fortieth.
-// There is no ceiling on one room: a mebibyte of the densest rendering, which goldmark stops
-// counting and which is priced from its bytes (bytesOfHeapAByteAtTheDensest), is more than the
-// whole budget at both copies, so the budget admits none, and the pressure rule is what answers a
-// room grown that heavy (peer_update.go:44-58).
+// (57,600 elements, TestAResidentRoomsHeapPerByteOfItsMarkdown's shape) is charged 54 MB once
+// counted, at both copies whether it is read or edited (roomCopies), and since an admission
+// reserves the same count at the same two copies (storedRoomReservation), the budget admits
+// thirty-nine such documents and refuses the fortieth, each admitted room loaded before the next
+// arrives: a load charged at one copy would admit seventy-eight, whose replicas their first
+// keystrokes would then take with nothing able to refuse them. There is no ceiling on one room: a
+// mebibyte of the densest rendering, which goldmark stops counting and which is priced from its
+// bytes (bytesOfHeapAByteAtTheDensest), is more than the whole budget at both copies, so the budget
+// admits none, and the pressure rule is what answers a room grown that heavy (peer_update.go:44-58).
 func TestTheRoomBudgetsArithmetic(t *testing.T) {
 	for _, shape := range []struct {
 		name           string
@@ -185,19 +196,21 @@ func TestTheRoomBudgetsArithmetic(t *testing.T) {
 		{"a mebibyte of the densest rendering", copyHeap(pmdoc.MaxDocumentBytes, elementsPastCounting), 2_218_786_816, 0},
 	} {
 		t.Run(shape.name, func(t *testing.T) {
-			if weight := roomWeight(shape.heap, 2, 0); weight != shape.weight {
-				t.Fatalf("an edited room of %d bytes of heap a copy is charged %d bytes, want %d", shape.heap, weight, shape.weight)
+			if weight := roomWeight(shape.heap, 0); weight != shape.weight {
+				t.Fatalf("a room of %d bytes of heap a copy is charged %d bytes, want %d", shape.heap, weight, shape.weight)
 			}
 			budget := &roomBudget{limit: roomBudgetBytes}
 			admitted := int64(0)
 			for {
-				reservation, err := budget.reserve(fmt.Sprintf("room-%d", admitted), shape.weight)
+				room := fmt.Sprintf("room-%d", admitted)
+				reservation, err := budget.reserve(room, shape.weight)
 				if errors.Is(err, errRoomBudgetFull) {
 					break
 				}
 				if err != nil || reservation == nil {
 					t.Fatalf("reserve room %d: %v", admitted+1, err)
 				}
+				budget.load(room, shape.heap)
 				admitted++
 			}
 			if admitted != shape.admits {
@@ -450,7 +463,7 @@ func requireCharged(t *testing.T, budget *roomBudget, charge *roomCharge, want i
 // refused outside the schema, one whose admission load fails, one the budget refuses, and one that
 // joins its room. The reservation is the stored version's count at both copies, held while the
 // handler loads the document, and the room's load replaces it with the count of the rendering it
-// loaded with, at one copy: the same document here, so half the reservation.
+// loaded with, at both copies too (roomCopies): the same document here, so the reservation itself.
 func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 	database := storetest.Open(t)
 	watch := &admissionWatchStore{VersionedStore: NewPgVersioned(database), held: make(map[string][]int64)}
@@ -461,7 +474,7 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 	ids := createDocuments(t, database, 4)
 	outside, failing, refused, joined := ids[0], ids[1], ids[2], ids[3]
 	stored := latestVersionMarkdown(t, database, joined)
-	reserved := roomWeight(copyHeap(int64(len(stored)), countElements(stored)), 2, 0)
+	reserved := roomWeight(copyHeap(int64(len(stored)), countElements(stored)), 0)
 	if reserved <= 0 {
 		t.Fatalf("the stored document reserves %d bytes, want some", reserved)
 	}
@@ -502,13 +515,13 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 		waitFor(t, 10*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(joined) != nil })
 		watch.requireHeldAtLoad(t, joined, reserved)
 		rendering := renderedLive(t, service, joined)
-		loaded := roomWeight(copyHeap(int64(len(rendering)), countElements(rendering)), 1, 0)
+		loaded := roomWeight(copyHeap(int64(len(rendering)), countElements(rendering)), 0)
 		requireNothingReserved(t, service)
 		if used := budgetUsed(service); used != loaded {
-			t.Fatalf("the budget holds %d bytes for the open room, want its own charge at one copy, %d", used, loaded)
+			t.Fatalf("the budget holds %d bytes for the open room, want its own charge at both copies, %d", used, loaded)
 		}
-		if roomWeight(loaded, 2, 0) != reserved {
-			t.Fatalf("the room's count charges %d bytes at one copy, want half the %d its admission reserved from the same document at two", loaded, reserved)
+		if loaded != reserved {
+			t.Fatalf("the room's count charges %d bytes at both copies, want the %d its admission reserved from the same document at both", loaded, reserved)
 		}
 		leaveDocument(connection)
 		if err := service.Evict(context.Background(), joined); err != nil {
@@ -523,7 +536,7 @@ func TestTheDocumentSocketReturnsItsReservationOnEveryWayOut(t *testing.T) {
 // An admission reserves its stored version counted, at both copies, as the room it opens is priced
 // once loaded (storedRoomReservation). A mebibyte of prose, the shape
 // TestAResidentRoomsHeapPerByteOfItsMarkdown weighs, is admitted to an empty budget, and what it
-// reserves is within 1.05x of what its room is charged once loaded and edited, at two copies. The
+// reserves is within 1.05x of what its room is charged once loaded, at both copies. The
 // two are not one figure by construction: the admission counts the markdown the version stored,
 // and the room counts the rendering of the document it decoded from the stored updates, so they
 // agree only as far as that rendering spells the document as the stored one does - here, with no
@@ -554,8 +567,8 @@ func TestAnAdmissionReservesTheCountOfItsStoredVersion(t *testing.T) {
 	if err != nil || reservation == nil {
 		t.Fatalf("a mebibyte of prose was refused at admission to an empty budget: %v", err)
 	}
-	if want := roomWeight(copyHeap(int64(len(stored)), elements), 2, 0); reservation.weight != want || parses.Load() != 1 {
-		t.Fatalf("the admission reserved %d bytes after %d parses, want its count at two copies, %d, after one", reservation.weight, parses.Load(), want)
+	if want := roomWeight(copyHeap(int64(len(stored)), elements), 0); reservation.weight != want || parses.Load() != 1 {
+		t.Fatalf("the admission reserved %d bytes after %d parses, want its count at both copies, %d, after one", reservation.weight, parses.Load(), want)
 	}
 	service.budget.release(reservation)
 	again, err := service.reserveRoom(ctx, room)
@@ -571,12 +584,11 @@ func TestAnAdmissionReservesTheCountOfItsStoredVersion(t *testing.T) {
 	waitFor(t, 30*time.Second, "the room to go live", func() bool { return service.srv.GetDoc(room) != nil })
 	requireNothingReserved(t, service)
 	loaded := budgetUsed(service)
-	edited := roomWeight(loaded, 2, 0)
-	ratio := float64(reservation.weight) / float64(edited)
-	t.Logf("a mebibyte of prose reserves %d bytes at admission; its room is charged %d bytes loaded, at one copy, and %d edited, at two (%.4fx); its bytes at the densest price would reserve %d",
-		reservation.weight, loaded, edited, ratio, roomWeight(int64(len(stored))*bytesOfHeapAByteAtTheDensest, 2, 0))
+	ratio := float64(reservation.weight) / float64(loaded)
+	t.Logf("a mebibyte of prose reserves %d bytes at admission; its room is charged %d bytes loaded, at both copies (%.4fx); its bytes at the densest price would reserve %d",
+		reservation.weight, loaded, ratio, roomWeight(int64(len(stored))*bytesOfHeapAByteAtTheDensest, 0))
 	if ratio < 1/factor || ratio > factor {
-		t.Fatalf("the admission reserved %d bytes, %.4fx the %d its room costs once counted, want within %.2fx", reservation.weight, ratio, edited, factor)
+		t.Fatalf("the admission reserved %d bytes, %.4fx the %d its room costs once counted, want within %.2fx", reservation.weight, ratio, loaded, factor)
 	}
 	if parses.Load() != 1 {
 		t.Fatalf("the socket's admission parsed the stored version again (%d parses), want the kept count", parses.Load())
@@ -598,7 +610,7 @@ func TestAnAdmissionReservesTheCountOfItsStoredVersion(t *testing.T) {
 	const second = "A second version.\n"
 	appendVersion(second)
 	next, err := service.reserveRoom(ctx, room)
-	if want := roomWeight(copyHeap(int64(len(second)), countElements(second)), 2, 0); err != nil || next == nil || next.weight != want || parses.Load() != 2 {
+	if want := roomWeight(copyHeap(int64(len(second)), countElements(second)), 0); err != nil || next == nil || next.weight != want || parses.Load() != 2 {
 		t.Fatalf("an admission to a new version reserved %v (%v) after %d parses, want its own count, %d, after a second parse", next, err, parses.Load(), want)
 	}
 	service.budget.release(next)
@@ -611,9 +623,9 @@ func TestAnAdmissionReservesTheCountOfItsStoredVersion(t *testing.T) {
 		t.Fatal("a mebibyte of the densest rendering was counted, want it past counting")
 	}
 	appendVersion(uncountable)
-	densest := roomWeight(int64(len(uncountable))*bytesOfHeapAByteAtTheDensest, 2, 0)
+	densest := roomWeight(int64(len(uncountable))*bytesOfHeapAByteAtTheDensest, 0)
 	if weight, err := service.storedRoomReservation(ctx, room); err != nil || weight != densest || parses.Load() != 3 {
-		t.Fatalf("a version past counting reserves %d bytes (%v) after %d parses, want its bytes at the densest price at two copies, %d, after a third", weight, err, parses.Load(), densest)
+		t.Fatalf("a version past counting reserves %d bytes (%v) after %d parses, want its bytes at the densest price at both copies, %d, after a third", weight, err, parses.Load(), densest)
 	}
 	if refused, err := service.reserveRoom(ctx, room); refused != nil || !errors.Is(err, errRoomBudgetFull) || parses.Load() != 3 {
 		t.Fatalf("an admission to a mebibyte past counting reserved %v (%v) after %d parses, want a refusal from the kept count", refused, err, parses.Load())
@@ -662,12 +674,12 @@ func TestTwoAdmissionsAtOnceCountTheStoredVersionOnce(t *testing.T) {
 	default:
 	}
 	close(release)
-	want := roomWeight(copyHeap(int64(len(stored)), countElements(stored)), 2, 0)
+	want := roomWeight(copyHeap(int64(len(stored)), countElements(stored)), 0)
 	for range 2 {
 		select {
 		case got := <-admissions:
 			if got.err != nil || got.reservation == nil || got.reservation.weight != want {
-				t.Fatalf("an admission reserved %v (%v), want the stored version's count at two copies, %d", got.reservation, got.err, want)
+				t.Fatalf("an admission reserved %v (%v), want the stored version's count at both copies, %d", got.reservation, got.err, want)
 			}
 			defer service.budget.release(got.reservation)
 		case <-time.After(10 * time.Second):
@@ -733,6 +745,76 @@ func TestTheRoomBudgetClosesUnusedRoomsAndRefusesWhenNoneIsLeft(t *testing.T) {
 	if used := budgetUsed(service); used != 0 {
 		t.Fatalf("the budget holds %d bytes with no room open, want none", used)
 	}
+}
+
+// An admission the budget refuses while it is within its limit starts a sweep that makes room for
+// that admission: a reservation never takes the budget past its limit, so a sweep that stopped once
+// the budget was within it would close nothing, and the next attempt would be refused while
+// unused rooms stayed charged. The sweep closes unused rooms, the heaviest first, until the
+// refused weight fits and no further, the refused admission itself stays refused, and its next
+// attempt is admitted. Nothing in this raises full, which refuses growth in every room.
+func TestARefusedAdmissionsSweepMakesRoomForIt(t *testing.T) {
+	ctx := context.Background()
+	database := storetest.Open(t)
+	service := newRoomBudgetService(t, database, NewPgVersioned(database))
+	// Each write's rendering is counted as it is published, so the rooms' charges are settled
+	// before the limit is set against them.
+	service.measurer.interval = noInterval
+	ids := createDocuments(t, database, 4)
+	unused, refused := ids[:3], ids[3]
+	for _, room := range unused {
+		appendThroughAPI(t, service, room)
+		waitFor(t, 10*time.Second, "the written room to settle and hold nothing", func() bool { return roomUnused(service, room) })
+	}
+	service.measurer.waitIdle()
+	needs, err := service.storedRoomReservation(ctx, refused)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service.budget.mu.Lock()
+	charged, lightest := service.budget.used, int64(0)
+	for _, room := range unused {
+		weight := service.budget.rooms[room].charges[0].weight
+		if lightest == 0 || weight < lightest {
+			lightest = weight
+		}
+	}
+	service.budget.mu.Unlock()
+	if needs <= 0 || needs > lightest {
+		t.Fatalf("the refused document reserves %d bytes and the lightest unused room is charged %d, want a reservation one room's close makes room for", needs, lightest)
+	}
+
+	service.SetRoomBudgetForTest(charged)
+	t.Cleanup(func() { service.SetRoomBudgetForTest(0) })
+	if reservation, err := service.reserveRoom(ctx, refused); reservation != nil || !errors.Is(err, errRoomBudgetFull) {
+		t.Fatalf("an admission to a budget its open rooms fill exactly reserved %v (%v), want it refused", reservation, err)
+	}
+	closed := func() int {
+		count := 0
+		for _, room := range unused {
+			if service.srv.GetDoc(room) == nil {
+				count++
+			}
+		}
+		return count
+	}
+	waitFor(t, 10*time.Second, "the sweep the refusal started to close an unused room", func() bool { return closed() > 0 })
+	waitFor(t, 10*time.Second, "the sweep to end", func() bool {
+		service.budget.mu.Lock()
+		defer service.budget.mu.Unlock()
+		return !service.budget.sweeping
+	})
+	if count := closed(); count != 1 {
+		t.Fatalf("the sweep closed %d of the %d unused rooms, want the one that makes room for the refused admission", count, len(unused))
+	}
+	if used := budgetUsed(service); used+needs > charged || service.budget.full.Load() {
+		t.Fatalf("after the sweep the budget holds %d of %d bytes with full %t, want room for the %d refused and full down", used, charged, service.budget.full.Load(), needs)
+	}
+	reservation, err := service.reserveRoom(ctx, refused)
+	if err != nil || reservation == nil {
+		t.Fatalf("the refused admission's next attempt reserved %v (%v), want it admitted into the room the sweep made", reservation, err)
+	}
+	service.budget.release(reservation)
 }
 
 // newRoomBudgetService is a document service over persist whose rooms stay resident a minute after
