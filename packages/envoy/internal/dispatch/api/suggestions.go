@@ -24,10 +24,7 @@ const writeSuggestionTimeout = 300 * time.Millisecond
 // every server the deployment builds, since register builds &server{deps: deps} and sets no
 // suggestionTimeout, and whatever a test set otherwise.
 func (s *server) suggestionAllowance() time.Duration {
-	if s.suggestionTimeout > 0 {
-		return s.suggestionTimeout
-	}
-	return writeSuggestionTimeout
+	return cmp.Or(s.suggestionTimeout, writeSuggestionTimeout)
 }
 
 // suggestionRelatedCount is "the three items most like what was just filed" (LEGION-550's spec).
