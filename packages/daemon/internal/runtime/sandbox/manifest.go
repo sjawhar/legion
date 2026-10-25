@@ -118,7 +118,7 @@ var sessionStoreVariables = []string{ompsessions.StorageVariable, ompsessions.DS
 // whatever the Secret's key is called.
 const providersDSNFile = ProvidersDir + "/" + ompsessions.DSNFileName
 
-// sessionProxyFlagNames are the flags a role container's `legion launcher` is told the Cloud SQL
+// sessionProxyFlagNames are the flags a pod's `legion launcher` is told the Cloud SQL
 // session database by, in the order sessionProxyFlags writes them: the instance's connection name,
 // the database in it, and the IAM login the pod signs in as.
 var sessionProxyFlagNames = [3]string{"--session-instance", "--session-database", "--session-user"}
@@ -653,10 +653,11 @@ func (r *Runtime) sessionDSNFile(generation uint64) string {
 	return providersDSNFile
 }
 
-// sessionProxyFlags are what each role container's `legion launcher` is told of the Cloud SQL
-// session database it proxies its generations' sessions to, none under any other store. There is
-// no address among them: the launcher binds the socket in the generation's own private directory,
-// which it already knows from --private-dir.
+// sessionProxyFlags are what a pod's `legion launcher` is told of the Cloud SQL session database
+// it proxies its generations' sessions to, none under any other store. There is no address among
+// them: the launcher binds the socket in the generation's own private directory, which it knows
+// from --roles-dir and the role in an issue pod's one container, and from --private-dir in the
+// controller's.
 func (r *Runtime) sessionProxyFlags() []string {
 	if r.sessionStore.Kind != ompsessions.StoreCloudSQLIAM {
 		return nil

@@ -107,6 +107,23 @@ func newRig(t *testing.T) *rig {
 	return newSessionRig(t, Config{})
 }
 
+// shortTempDir is a temporary directory of its own for a test that binds a unix socket under it:
+// such a path has barely a hundred bytes, where t.TempDir()'s carries the whole of the test's name
+// (docs/testing.md). It is made under /tmp rather than under TMPDIR, which os.MkdirTemp("") would
+// read and which is itself long on a dev box whose temporary directory is on a data disk; a system
+// with no writable /tmp falls back to TMPDIR, where only the longest of these paths would not fit.
+func shortTempDir(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("/tmp", "lch")
+	if err != nil {
+		if dir, err = os.MkdirTemp("", "lch"); err != nil {
+			t.Fatal(err)
+		}
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(dir) })
+	return dir
+}
+
 // newSessionRig runs a launcher that carries cfg's session database and dialer, the fake standing
 // in for the Cloud SQL connector, besides the fields every rig's launcher is given.
 func newSessionRig(t *testing.T, cfg Config) *rig {
@@ -116,14 +133,7 @@ func newSessionRig(t *testing.T, cfg Config) *rig {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
-	// The private directory's path is kept short deliberately: a generation's session socket is
-	// bound under it, and a unix socket's path has barely a hundred bytes, where t.TempDir()'s
-	// carries the whole of the test's name.
-	private, err := os.MkdirTemp("", "lch")
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { _ = os.RemoveAll(private) })
+	private := shortTempDir(t)
 	ctx, cancel := context.WithCancel(context.Background())
 	g := &rig{t: t, listener: listener, private: private, cancel: cancel, result: make(chan error, 1), stderr: &lockedBuffer{}}
 	cfg.Connect, cfg.Token, cfg.Sandbox = "tcp://"+listener.Addr().String(), "launcher-token", "legion-legion-legion-208"

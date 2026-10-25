@@ -853,7 +853,7 @@ Postgres protocol at all: it accepts a connection, dials the instance over its p
 copies bytes both ways — which is what Google's own `cloud-sql-proxy` does over the same
 connector. Google runs that connector as a container beside the application; a Legion pod admits
 no further container, since `runtime.kubernetes.pod` takes only env, volumes, mounts and a service
-account, so the same library runs inside the first process of the role's container, the launcher
+account, so the same library runs inside the pod's own first process, the launcher
 itself.
 
 The two readers of that socket spell it differently, so `ompsessions.Endpoint` composes both

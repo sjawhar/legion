@@ -333,8 +333,8 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 // movedSessionStore compares the whole session store pod carries with the one a pod created now
 // would carry, so no pod outlives a change of store; ok is whether they differ. A generation
 // started under a database store names a URL file no pod created under another store has: the
-// providers volume's projection of the Secret key under postgres, the proxy a role container's
-// launcher serves under cloudsql-iam. Each side is named from what a pod spec holds, the kubelet
+// providers volume's projection of the Secret key under postgres, the proxy the pod's launcher
+// serves under cloudsql-iam. Each side is named from what a pod spec holds, the kubelet
 // escaping included (kubeletLiteral), as movedStream names the stream.
 func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 	proxy := r.sessionProxyFlags()
