@@ -422,6 +422,15 @@ func TestGateRoundTripsTheChangesRequestItRecords(t *testing.T) {
 		if gotIssue == nil || gotIssue.Awaiting != nil || gotIssue.WaitFenceSeq != since.Seq {
 			t.Fatalf("resumed root = %#v, want no wait and wait fence %d", gotIssue, since.Seq)
 		}
+		// An older reconstruction cannot move the durable, monotone fence backward.
+		stale := *gotIssue
+		stale.WaitFenceSeq = 0
+		must(t, records.PutIssue(ctx, tx, stale))
+		gotIssue, err = records.Issue(ctx, tx, issue.Key)
+		must(t, err)
+		if gotIssue == nil || gotIssue.WaitFenceSeq != since.Seq {
+			t.Fatalf("root after a stale fence write = %#v, want wait fence %d kept", gotIssue, since.Seq)
+		}
 		must(t, records.PutGate(ctx, tx, closed))
 		got, err := records.Gate(ctx, tx, issue.Key)
 		must(t, err)
