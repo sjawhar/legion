@@ -1818,7 +1818,11 @@ console.log(JSON.stringify(args, null, 2));
     ]);
     expect(g.calls[0].user).toContain('"body": "The run finished."');
     // A literal path in a call AskGate cannot read gets the plain resend reason: the path is not why.
-    const joined = await g.bash("joined", `cd $X && ${bin}/dispatch comment --issue X-1 --body hi`);
+    const blocking = bind({ env: { PATH: "/usr/bin:/bin", OMP_ASKGATE: "block" }, cwd: work });
+    const joined = await blocking.bash(
+      "joined",
+      `cd $X && ${bin}/dispatch comment --issue X-1 --body hi`
+    );
     expect(joined?.block).toBe(true);
     expect(joined?.reason).toContain("send that `dispatch comment` again on its own.");
     expect(joined?.reason).not.toContain("Here ");
@@ -1826,12 +1830,14 @@ console.log(JSON.stringify(args, null, 2));
     expect(joined?.reason).toContain("cannot know the text it would send");
     expect(joined?.reason).toContain("AskGate reads one form only");
     expect(joined?.reason).toContain("no second command, no pipe");
+    expect(blocking.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual([
+      ["dispatch_comment", "unreadable", "revise"],
+    ]);
     expect(g.entries.map((e) => [e.toolCallId, e.tool, e.outcome, e.decision])).toEqual([
       ["abs", "dispatch_message", "verdict", "allow"],
       ["rel", "dispatch_comment", "verdict", "allow"],
       ["quoted", "dispatch_comment", "verdict", "allow"],
       ["cd", "dispatch_ask", "verdict", "allow"],
-      ["joined", "dispatch_comment", "unreadable", "revise"],
     ]);
   }, 30_000);
   test("a dispatch write called by a path the shell expands is unreadable in every mode, its reason naming what AskGate cannot read", async () => {
@@ -1956,8 +1962,8 @@ console.log(JSON.stringify(args, null, 2));
     );
     expect(g.calls[4].user).toContain('"summary": "A live sync replaces the nightly export."');
   }, 30_000);
-  test("a request-approval joined to another command is refused like any other scoped write", async () => {
-    const g = bind({ env: STUB, cwd: work });
+  test("a request-approval joined to another command is unreadable like any other scoped write", async () => {
+    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
     const result = await g.bash(
       "r",
       "make && dispatch request-approval --issue X-1 --summary-file s.md"
@@ -2704,7 +2710,9 @@ describe("data routing", () => {
         throw new Error("the context must not be read");
       },
     });
-    expect(await g.device("t1", "dispatch_comment", COMMENT)).toBeUndefined();
+    const result = await g.device("t1", "dispatch_comment", COMMENT);
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain("on another provider than the gate's");
     expect(g.calls).toHaveLength(0);
     expect(g.entries).toMatchObject([
       { decision: "allow", outcome: "skipped", reason: "primary on openai-codex" },
@@ -3194,7 +3202,8 @@ describe("askgate.ts, the entry", () => {
     attempts = [answer("partial", 40_000, 100, 0.41)];
     throwAfterAttempts = true;
     const { result, entries } = await gateOnce();
-    expect(result).toBeUndefined();
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain("provider went away");
     expect(entries).toMatchObject([
       {
         outcome: "error",
@@ -3262,7 +3271,7 @@ describe("askgate.ts, the entry", () => {
     const dump = path.join(dir, "dump.txt");
     fs.symlinkSync(target, dump);
     const { result, entries } = await gateOnce({ OMP_ASKGATE_DUMP: dump });
-    expect(result).toBeUndefined();
+    expect(result?.block).toBeUndefined();
     expect(fs.readFileSync(target, "utf8")).toBe("untouched\n");
     expect(entries).toMatchObject([{ decision: "allow", outcome: "error" }]);
     expect(entries[0].reason).toContain("ELOOP");

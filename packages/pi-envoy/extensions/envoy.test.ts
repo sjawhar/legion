@@ -3793,6 +3793,7 @@ describe("envoy OMP extension", () => {
       expect(fixture.renderers.has("envoy-message")).toBe(true);
       expect(notifications).toEqual([
         "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
+        "envoy: AskGate refuses each Dispatch write it would review: this session's envoy.json location could not be worked out, so its switch cannot be read.",
       ]);
       expect(natsState.connectedNames).toEqual([]);
     });
@@ -3885,7 +3886,8 @@ console.log(JSON.stringify(args));
         },
         ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
       }) as SessionContext;
-    const ASK = "dispatch ask --issue DSP-1 --question Ready?";
+    // Quoted: an unquoted `?` is a glob, which the gate does not take as a literal word.
+    const ASK = "dispatch ask --issue DSP-1 --question 'Ready?'";
 
     test("(a) with Dispatch on and no askgate section, a dispatch ask reaches the gate's model and a revise blocks it", async () => {
       writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
