@@ -2,46 +2,41 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-246",
-  "completed": "2026-10-25T10:35:00Z",
+  "completed": "2026-10-25T11:40:00Z",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 1,
+  "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/pi-envoy/extensions/envoy.ts:2304",
-      "description": "The new skip in settleEndedHolds' failed-restore loop tests the topic alone - `if (topic === claimedRoleTopic) continue;` - while its comment claims the matching topic means 'a newer move's claim, which dropped every hand-back of it left pending'. That is not guaranteed: claimedRoleTopic is also set, a few lines above in this same loop, by the unconfirmed adoption at :2281-2285, which writes claimedRoleTopic = hold.topic, claimedRoleSessionID = hold.id and holdUnconfirmed = true without the listener having confirmed anything. So when pendingHandBacks carries two entries of one topic under different sessions - reachable because setEnvoyRole's abandoned branch adds `<topic>@<id>` at :1929 without the dedupe delete that only a live, claimed branch performs at :1938-1941 - the loop adopts the wanted one and then drops the other instead of recording abandonedHolds[topic] = {the other session}. The lost record is exactly what observeAbandonedHold reads (:1864-1865) to tell this process's own stale holder, which the listener will reap, from a genuine competitor: without it the next refusal records refusedRoles[id] = role (:1978), desiredRole then answers undefined for that session (:2036-2039), and the pane stops trying for the role until a session event or an explicit claim clears it - a live pane that should have reclaimed the role once the stale hold expired does not. Round 4's behaviour here was to restore always, whose worst case I audited as a redundant soft claim of a role the session already holds; this round traded that harmless redundancy for a sticky refusal in the harm class. Fix: discriminate on confirmation, not on the topic - `if (topic === claimedRoleTopic && !holdUnconfirmed) continue;`. Not the session id: a confirmed claim legitimately carries a different claimedRoleSessionID from the failed hold's, so `id === claimedRoleSessionID` would restore exactly the case the skip exists for. Reverting the line to round 4's unconditional restore is also acceptable, since that behaviour is audited and bounded."
-    },
-    {
-      "severity": "minor",
-      "file": ".github/scripts/check-heartbeat-margin.sh:19-21",
-      "description": "The header says that at equality 'the third refresh is due at the very instant the record expires', which conflates dispatch with completion. With the suite's own tie fixture (heartbeat 40000, call budget 60000, lifetime 180000) the third refresh is due at 120000 ms and its budgeted completion reaches 180000. The rule is right and the fixtures are right; the sentence explaining them is not, and it is the sentence a future timing change starts from. Say that the third refresh's budgeted completion reaches expiry, leaving no scheduling margin."
+      "file": "packages/pi-envoy/extensions/envoy.ts:2299-2301",
+      "description": "The failed-hand-back restore loop, returned to its unconditional form this round, is not bounded to a redundant soft claim. That bound is the reviewer's own round-4 audit and it was wrong; this finding corrects it. Path A, the one that takes a role: a loop under host A removes `X@A`, its unsubscribe fails so the entry lives only in the local `failed` array, and the task is abandoned at its deadline. The process moves to B, which claims X successfully - that claim clears pendingHandBacks and abandonedHolds of X (:1938-1941) but cannot reach the old loop's local array. Another process resumes A and claims X, so A is the newer live holder. The old loop then finishes and restores `X@A` into pendingHandBacks, because its captured `host` is still A. B's next pass wants X, adopts that entry over its own confirmed state (:2281-2285, setting claimedRoleSessionID = A and holdUnconfirmed = true), computes supersedes = A (:2366) and sends the soft claim with previousSessionID = A (:2384). The listener supersedes a holder that matches previous_session_id even when that holder is live - packages/envoy/cmd/listener/api.go:822-825, 'so may the claimant's own predecessor, live or not', applied at packages/envoy/internal/store/kv.go:612-615 - so B takes X from the process now running A, and that role's traffic follows B. Without the resurrected entry B's pass would have soft-claimed with no predecessor, taken the 409 and relinquished (:1658-1693). Path B, underneath it: the loop classifies with the captured `host`, so a hold under a session the process has left since is filed as pending rather than abandoned. That is exactly the case settleEndedHolds' own comment says must go to abandonedHolds, 'since nothing heartbeats that session any more and a later try could take a hold another process made under that id' - the hazard Path A realises, named in the function and defeated by the stale capture. Round 5's topic-only skip blocked Path A while breaking the unconfirmed-adoption case; the revert restores Path A. Two conditions, wrong in opposite directions. `topic === claimedRoleTopic && !holdUnconfirmed` closes Path A and keeps round 5's case fixed, and classifying against the live host rather than the captured one closes Path B - but the reviewer does not assert that pair is sufficient, having now been wrong about this loop once, and the choice between a third targeted condition and a scoped redesign is the architect's."
     }
   ],
-  "roundFourFindingsVerified": [
-    "check-heartbeat-margin.sh:261 is `renewal_window >= lifetime.value`, with the message naming 'equal to' or 'past' and stating that the tie is refused as surely as what is past it.",
-    "The remedy arithmetic moved with the comparison and went further: max_heartbeat = (lifetime - call_budget - 1) // RENEWALS // SECOND * SECOND and min_lifetime = (renewal_window // SECOND + 1) * SECOND, rounded to whole seconds because the Go sites a maintainer edits are parsed as whole seconds or minutes. The suite proves both by applying each prescribed remedy to a complete fixture (exit 0 at 177000 against 180000, and at 180000 against 181000), and refuses the tie itself at exactly 180000.",
-    "The subsumed two-interval rule and its worst_case term are gone from the check, its suite and the smoke; the header reads four rules and keeps the backstop paragraph in full under rule 1."
+  "roundFiveFindingsVerified": [
+    "The revert is exact, computed here: packages/pi-envoy/extensions/envoy.ts hashes to 6dacb75f44afd8732db16ccd229ee1fd4de3ba6b7d5da7d03cb0d2041120247e at both d6884d57 and this head, and jj diff over that path between them is 0 files changed.",
+    "The replacement test case is round 2's and not the skip's: one session, no second pendingHandBacks entry of a topic, no newer claim of the role it hands back, and its assertions are at the fixture listener's surface (handedBack gaining legion-controller@ses_rf_ab then reviewer@ses_rf_ab, reviewer left unheld).",
+    "The check's header now separates dispatch from budgeted completion and shows its work with the tie fixture's own numbers (40000 ms interval, 60000 ms budget, 180000 ms lifetime, dispatch at 120000), so the paragraph and the case that proves it move together."
   ],
   "ciRead": {
-    "codeHead": "0a3dc8ad4937dc332d17f03158dc12c367149dc3",
+    "codeHead": "fabca81c255be2d6cd75335f98a8b0848326c987",
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "verdict": "all four completed success at the code head. One pr-title check-run is `cancelled` (run 15374, 09:38Z), superseded by run 15389 at 09:51Z which is success - the workflow's concurrency group cancels the earlier run when a body edit starts a new one, and the newest run for the required context is green. compare 0a3dc8ad...f1c34692 is ahead with only .legion/INFRA-246/implement.json and test.json above it. Several non-required lanes (envoy-go, envoy-client, pi-envoy, pi-shared, pi-legion, envoy-e2e-local, envoy-go-race, envoy-infra-go, dispatch-memory) were queued or running; none was waited for.",
+    "verdict": "all four completed success at the code head; compare fabca81c...e8e18568 is ahead with only .legion/INFRA-246/implement.json and test.json above it. The pi-legion check-run is `failure` there and is NOT in the required set: the reviewer verified the inheritance rather than accepting it, finding the owning workflow `Legion Envoy and Contracts` also failing on main (run at 3ff60972), so it is main's red and not this head's, tracked on dispatch://INFRA-376. One pr-title run is cancelled and superseded by five successes from the workflow's concurrency group. envoy-go, envoy-go-race, envoy-smoke and dispatch-memory were still running; none is required.",
     "reviewedHead": "the head this round's handoff push makes"
   },
   "threads": {
-    "openedByReviewer": 15,
-    "answeredByImplementer": 15,
-    "reviewerRepliesPosted": 15,
-    "botThreadsAccepted": [],
-    "note": "Rounds 1, 3 and 4; each fix verified in the code before the reviewer's reply."
+    "openedByReviewer": 17,
+    "reviewerRepliesPosted": 17,
+    "unresolvedByReviewer": ["PRRT_kwDORFy7ds6wAaPJ - the revert thread, unresolved because the behaviour it restored carries this round's finding"],
+    "botThreadsAccepted": []
   },
   "thermonuclear": {
-    "head": "f1c34692",
-    "scope": "the whole pull request, weighted to the round-5 delta d6884d57..f1c34692, since rounds 1-4 audited the rest",
-    "deepReview": "CHANGES - 1 medium, the hold-restore skip",
-    "codeQuality": "APPROVE - 1 P3, the header's dispatch-versus-completion wording",
-    "adjudication": "Both carried; they are the two findings in this handoff. The medium was verified in the code by the reviewer, including the shorter route to it (two same-topic pending hand-backs in one loop) rather than only the pair's six-step sequence. Nothing declined this round."
-  }
+    "head": "e8e18568",
+    "scope": "the whole pull request, weighted to the round-6 delta 4320e947..e8e18568",
+    "deepReview": "CHANGES - 1 medium, the restored unconditional restore taking a role from a newer live holder",
+    "codeQuality": "APPROVE - no findings",
+    "adjudication": "The medium was carried after the reviewer verified its load-bearing external fact, the listener's supersede-a-live-predecessor rule, in packages/envoy/cmd/listener/api.go and packages/envoy/internal/store/kv.go. The reviewer added Path B, the stale captured host, which the pair did not name. Nothing declined."
+  },
+  "reviewerCorrection": "Round 4's handoff recorded this loop's worst case as 'a redundant soft claim of a role the session already holds', and round 5's review offered reverting as equally acceptable on that basis. Both rest on the same mistake: the audit stopped at the restore and never followed the restored entry into the adoption that turns it into a previousSessionID the listener honours against a live holder. The architect chose the revert partly on that assurance."
 }
