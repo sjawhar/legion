@@ -2,34 +2,33 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T17:12:45Z",
-  "round": 4,
-  "decision": "changes_requested",
+  "completed": "2026-10-25T17:40:36Z",
+  "round": 5,
+  "decision": "approved",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "reviewedCodeHead": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
-  "roundReason": "Implementing round 5 answered the four findings of the review at 355ffe8e. All four fixes hold. An adversarial sentence sweep by a reviewer subagent, checked against the code and by a stub run, found that my round-3 finding (1b) was too narrow, plus one further minor wording error.",
+  "reviewedCodeHead": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+  "roundReason": "Implementing round 6 answered the review at 241f4e1a: any stop that reaches the trap, not only a second one, can cut it short (closing comment, stop paragraph, recovery list), and the bullet's placement caveat now separates the two runs that found a Job from the rest.",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:3133-3134, 3210-3212, 3228-3229",
-      "description": "The page says only a *second* stop can cut the trap short. cleanup() is the EXIT trap and restores every signal's default as it starts (3016), whatever started it. So a single stop that reaches the sequence while a trap started by a failed step or the work's end is running also ends it part-way. The trap can run for a long time: the diagnostic reads, a 6-31 s foreground delete, and a Service wait of up to 60 s. 'Send one stop and let the trap finish' then implies that one stop is always safe. Measured 2026-10-25 with the same stub, its work ending in `false`: one `kill -TERM -- -<pid>` during the trap printed `cleanup: start` and nothing after; the no-stop control printed `cleanup: delete done` and `sequence: exit 1`. My round-3 finding asked only for the second stop, which was too narrow."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:3314-3315",
-      "description": "'For the runs that took the label path, nothing they printed shows when the stop landed relative to the create's request and answer' is too broad for the label-path runs that found nothing. The server answers a create only after storing it, and no Job of theirs was left, so their empty label delete shows the stop landed before the create's answer. What stays unknown for them is before the request left versus in flight; for the two that found a Job, in flight versus after the answer (as 3171-3172 already says). This wording was my own round-3 suggestion."
-    }
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "fixesVerified": [
-    "3131-3135 closing comment: no-trap exits and the cut-short trap named, both with no `sequence: exit` line; failed step printed; late-stored create",
-    "3166-3172 trap paragraph: scoped to runs whose label delete found a Job; none of the twenty-six left a Job; the placement caveat limited to the 0.33 s and 0.35 s runs",
-    "3227-3231 recovery list: failed label delete and cut-short label-path trap added; each printed its label first (the label prints at 3010, before the create)",
-    "3210-3215 stop paragraph: the stub measurement quoted matches the reviewer's run"
+    "3133-3136 closing comment: any stop while the trap runs (a second one, or one after a failed step or the work's end started the trap)",
+    "3211-3222 stop paragraph: the reason holds (`trap -` at 3016 runs whatever started the trap); the stub runs are quoted as the reviewer ran them; 6-31 s delete (3147-3150) and the 60 s Service wait (3037)",
+    "3235-3236 recovery list: 'a stop that cut short a trap on its label path'",
+    "3321-3323 bullet: the two runs that found a Job versus the rest, consistent with 3171-3173"
   ],
-  "ci": "Code head 241f4e1a: Tests 40214431002 queued, PR Title pending, Legion Envoy and Contracts success when read. Not waited for: a request for changes stands whatever CI says. main moved to 4792c8fa (#2183, no docs/kubernetes.md change); GitHub reports the PR MERGEABLE.",
-  "threads": "Four threads from the round-3 review; see the PR's thread replies.",
-  "thermo": "Not run: docs-only diff."
+  "judgedNotDefects": [
+    "'Send a stop only while the work runs' (3211) is stricter than its reason needs, since the page measured stops during the Ready wait and the check as safe. It leaves no workload: a hanging step still times out and runs the trap. It came from the reviewer's own suggestion. Raised by the adversarial sweep at P3 and judged not a defect.",
+    "docs/kubernetes.md:3022's code line is 108 characters; the block already holds lines over 100 at base."
+  ],
+  "sweep": "A reviewer subagent attacked this round's changed sentences against bash semantics, kubectl, the page's measurements and every other sentence on the page: 'overall_correctness: correct', with the one P3 above.",
+  "ci": "Required set (ruleset): lint, typecheck, test, pr-title. CI head b773e110 (newest pull_request run): Tests 40215685620 success (lint, typecheck, test); pr-title success (PR Title 40215748348); compare b773e110...0a08ceee touches only .legion/. main is 0aa3aa04, with no docs/kubernetes.md change since base; GitHub reports MERGEABLE.",
+  "threads": "8 review threads, all mine: each answered by the implementer's fix and my reply confirming it at b773e110 or 241f4e1a; all resolved by the implementer.",
+  "thermo": "Not run: docs-only diff.",
+  "notProvenOrRisk": [
+    "A create the API server stores only after the trap's label delete has listed the Jobs is not measured; the page names it as unmeasured and gives the re-list and label delete as the recovery.",
+    "No wait was measured: how long after a stop the API server can still store a create whose client is gone is not known, so no re-list, however late, is proven to rule such a Job out. The page says so.",
+    "The stop paragraph's trap-cutting evidence is a stub of the trap's structure, not the real block against the cluster."
+  ]
 }
