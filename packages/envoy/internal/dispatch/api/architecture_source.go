@@ -1,8 +1,8 @@
 package api
 
 import (
+	"context"
 	"errors"
-	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
@@ -14,77 +14,70 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
+// A project imports its component model from any number of sources, one per repository, and a
+// source is addressed by its project and repository, as a repository mapping is. Every route here
+// is authAny: agents save, remove and refresh sources as people do, and a bearer save or removal
+// names its session in actor.
+
+// listArchitectureSources answers every source of every project, by project and then in the
+// order each project's sources were added.
 func (s *server) listArchitectureSources(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	rows, err := s.deps.Store.Pool.Query(r.Context(), `
-		select `+architecture.SourceColumns+`
-		from architecture_sources
-		order by project_key, id
-	`)
+	sources, err := querySources(r.Context(), s.deps.Store.Pool, `order by project_key, id`)
 	if err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	defer rows.Close()
-
-	sources := []model.ArchitectureSource{}
-	for rows.Next() {
-		source, err := architecture.ScanSource(rows)
-		if err != nil {
-			s.writeHandlerError(w, err)
-			return
-		}
-		sources = append(sources, source)
-	}
-	if err := rows.Err(); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	WriteJSON(w, http.StatusOK, sources)
 }
 
-func (s *server) getArchitectureSource(w http.ResponseWriter, r *http.Request) {
+// listProjectArchitectureSources answers the project's sources in the order they were added. A
+// project with none answers [], since whether a project has a model is a question with an
+// ordinary negative answer; a project that does not exist is still a 404, so a mistyped key is
+// reported rather than read as "no model".
+func (s *server) listProjectArchitectureSources(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	source, err := architecture.ScanSource(s.deps.Store.Pool.QueryRow(r.Context(), `
-		select `+architecture.SourceColumns+`
-		from architecture_sources
-		where project_key = $1
-		order by id
-		limit 1
-	`, r.PathValue("key")))
-	if err != nil {
-		if errors.Is(err, pgx.ErrNoRows) {
-			// Whether a project has a source is a property of the project, and most projects do
-			// not have one. Answering that question with a 404 made the expected answer an
-			// error: every issue and project page logged a failed request for a read that
-			// worked, and every caller had to tell that 404 apart from a real one.
-			//
-			// No row means two things, though, and only one of them is that answer. A project
-			// that does not exist is still a 404 - the same check `putArchitectureSource` makes
-			// before it writes - so a mistyped key is reported rather than read as "no model".
-			if err := s.deps.Store.Pool.QueryRow(r.Context(),
-				"select key from projects where key = $1", r.PathValue("key"),
-			).Scan(new(string)); err != nil {
-				s.writeHandlerError(w, err)
-				return
-			}
-			WriteJSON(w, http.StatusOK, nil)
-			return
-		}
+	key := r.PathValue("key")
+	if err := s.deps.Store.Pool.QueryRow(r.Context(), "select key from projects where key = $1", key).Scan(new(string)); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	WriteJSON(w, http.StatusOK, source)
+	sources, err := querySources(r.Context(), s.deps.Store.Pool, `where project_key = $1 order by id`, key)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	WriteJSON(w, http.StatusOK, sources)
 }
 
+// querySources reads the source rows the tail (a where and order by clause) selects.
+func querySources(ctx context.Context, q queryer, tail string, args ...any) ([]model.ArchitectureSource, error) {
+	rows, err := q.Query(ctx, `select `+architecture.SourceColumns+` from architecture_sources `+tail, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	sources := []model.ArchitectureSource{}
+	for rows.Next() {
+		source, err := architecture.ScanSource(rows)
+		if err != nil {
+			return nil, err
+		}
+		sources = append(sources, source)
+	}
+	return sources, rows.Err()
+}
+
+// putArchitectureSource adds the repository in the path as a source of the project, or changes
+// the branch of the source it already is. A re-save keeps the source's id and its components and
+// resets its sync bookkeeping, so the next sync re-imports from the new branch.
 func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	key := r.PathValue("key")
 	var input struct {
-		Repo   string       `json:"repo"`
 		Branch string       `json:"branch"`
 		Actor  *model.Actor `json:"actor"`
 	}
@@ -96,7 +89,7 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
-	owner, name, err := parseSourceRepo(input.Repo)
+	owner, name, err := sourcePathRepo(r)
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -134,40 +127,20 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tx.Rollback(r.Context())
-	// This route keeps one source per project: a save replaces the project's source in place,
-	// under the project row's lock so two first saves cannot both add one.
-	if err := tx.QueryRow(r.Context(), "select key from projects where key = $1 for no key update", key).Scan(new(string)); err != nil {
-		s.writeHandlerError(w, err)
-		return
-	}
-	var existing int64
-	query := `
+	source, err := architecture.ScanSource(tx.QueryRow(r.Context(), `
 		insert into architecture_sources (project_key, repo, branch, enabled, installation_id, created_by)
 		values ($1, $2, $3, true, $4, $5)
-		returning ` + architecture.SourceColumns
-	args := []any{key, owner + "/" + name, branch, check.InstallationID, actorJSON}
-	switch err := tx.QueryRow(r.Context(),
-		"select id from architecture_sources where project_key = $1 order by id limit 1", key).Scan(&existing); {
-	case err == nil:
-		query = `
-			update architecture_sources set
-				repo = $2,
-				branch = $3,
-				enabled = true,
-				installation_id = $4,
-				created_by = $5,
-				last_sync_at = null,
-				last_commit = null,
-				last_tree_sha = null,
-				last_error = null
-			where project_key = $1 and id = $6
-			returning ` + architecture.SourceColumns
-		args = append(args, existing)
-	case !errors.Is(err, pgx.ErrNoRows):
-		s.writeHandlerError(w, err)
-		return
-	}
-	source, err := architecture.ScanSource(tx.QueryRow(r.Context(), query, args...))
+		on conflict (project_key, repo) do update set
+			branch = excluded.branch,
+			enabled = true,
+			installation_id = excluded.installation_id,
+			created_by = excluded.created_by,
+			last_sync_at = null,
+			last_commit = null,
+			last_tree_sha = null,
+			last_error = null
+		returning `+architecture.SourceColumns,
+		key, owner+"/"+name, branch, check.InstallationID, actorJSON))
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
@@ -187,10 +160,10 @@ func (s *server) putArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	WriteJSON(w, http.StatusOK, source)
 }
 
-// deleteArchitectureSource removes the source and, in the same transaction,
-// the model it projected: the project's components and their dependency
-// edges (graph_edges loses its component arms with them). Snapshots stay as
-// history.
+// deleteArchitectureSource removes the source and, in the same transaction, the model it
+// projected: its components (by the components foreign key's cascade) and their dependency
+// edges (graph_edges loses their component arms with them). Every other source's components stay,
+// and snapshots stay as history.
 func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Actor *model.Actor `json:"actor"`
@@ -203,6 +176,12 @@ func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request
 		return
 	}
 	key := r.PathValue("key")
+	owner, name, err := sourcePathRepo(r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	repo := owner + "/" + name
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
@@ -210,20 +189,15 @@ func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request
 	}
 	defer tx.Rollback(r.Context())
 	source, err := architecture.ScanSource(tx.QueryRow(r.Context(), `
-		delete from architecture_sources where project_key = $1
+		delete from architecture_sources where project_key = $1 and repo = $2
 		returning `+architecture.SourceColumns,
-		key))
+		key, repo))
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source configured for "+key)
+			writeSourceNotFound(w, key, repo)
 			return
 		}
 		s.writeHandlerError(w, err)
-		return
-	}
-	// component_depends cascades from components.
-	if _, err := tx.Exec(r.Context(), `delete from components where project_key = $1`, key); err != nil {
-		s.writeHandlerError(w, fmt.Errorf("retire architecture components: %w", err))
 		return
 	}
 	event, err := s.appendEvent(r.Context(), tx, projectOwner(key).event(
@@ -241,41 +215,76 @@ func (s *server) deleteArchitectureSource(w http.ResponseWriter, r *http.Request
 	w.WriteHeader(http.StatusNoContent)
 }
 
-// syncArchitectureSource imports the project's architecture model now, inline,
-// and answers the updated source row. A model or upstream failure is a 200
-// whose row carries last_error: the HTTP call itself succeeded and the
-// previous projection is still up. Only a credential- or configuration-shaped
-// failure — no App key, no installation, no Contents: read, no such branch —
-// is a 409 the caller must act on.
+// syncArchitectureSource imports one source's model now, inline, and answers its updated row. A
+// model or upstream failure is a 200 whose row carries last_error: the HTTP call itself succeeded
+// and the source's previous projection is still up. Only a credential- or configuration-shaped
+// failure — no App key, no installation, no Contents: read, no such branch — is a 409 the caller
+// must act on.
 func (s *server) syncArchitectureSource(w http.ResponseWriter, r *http.Request) {
 	if !s.requireAuthenticated(w, r) {
 		return
 	}
-	results, err := s.deps.Architecture.SyncProject(r.Context(), r.PathValue("key"))
-	if err == nil && len(results) == 0 {
-		err = architecture.ErrNoSource
+	key := r.PathValue("key")
+	owner, name, err := sourcePathRepo(r)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
 	}
-	if errors.Is(err, architecture.ErrNoSource) {
-		writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source configured for "+r.PathValue("key"))
+	repo := owner + "/" + name
+	source, err := s.deps.Architecture.Sync(r.Context(), key, repo)
+	switch {
+	case err == nil:
+		WriteJSON(w, http.StatusOK, source)
+	case errors.Is(err, architecture.ErrNoSource):
+		writeSourceNotFound(w, key, repo)
+	case source.Project == "":
+		// Sync could not even record the failure on the row: the database, not
+		// the model or GitHub, is what broke.
+		s.writeHandlerError(w, err)
+	case architecture.IsAccessFailure(err):
+		writeError(w, "SOURCE_ACCESS", http.StatusConflict, err.Error())
+	default:
+		WriteJSON(w, http.StatusOK, source)
+	}
+}
+
+// syncArchitectureSources imports every source of the project now, inline, each attempted
+// whatever an earlier one did, and answers every row in the order the sources were added. Each
+// failure, an access failure included, is on its own row's last_error; the call answers 200
+// because the import was attempted and recorded. Only a failure that could not be recorded on its
+// row is a 500.
+func (s *server) syncArchitectureSources(w http.ResponseWriter, r *http.Request) {
+	if !s.requireAuthenticated(w, r) {
+		return
+	}
+	key := r.PathValue("key")
+	results, err := s.deps.Architecture.SyncProject(r.Context(), key)
+	if errors.Is(err, architecture.ErrNoSource) || (err == nil && len(results) == 0) {
+		writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source configured for "+key)
 		return
 	}
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
-	source, err := results[0].Source, results[0].Err
-	if err == nil {
-		WriteJSON(w, http.StatusOK, source)
-		return
+	sources := make([]model.ArchitectureSource, 0, len(results))
+	for _, result := range results {
+		if result.Err != nil && result.Source.Project == "" {
+			s.writeHandlerError(w, result.Err)
+			return
+		}
+		sources = append(sources, result.Source)
 	}
-	if source.Project == "" {
-		return
-	}
-	if architecture.IsAccessFailure(err) {
-		writeError(w, "SOURCE_ACCESS", http.StatusConflict, err.Error())
-		return
-	}
-	WriteJSON(w, http.StatusOK, source)
+	WriteJSON(w, http.StatusOK, sources)
+}
+
+func writeSourceNotFound(w http.ResponseWriter, key, repo string) {
+	writeError(w, "SOURCE_NOT_FOUND", http.StatusNotFound, "no architecture source from "+repo+" configured for "+key)
+}
+
+// sourcePathRepo reads the {owner}/{repo} path segments as parseSourceRepo reads a repository.
+func sourcePathRepo(r *http.Request) (owner, name string, err error) {
+	return parseSourceRepo(r.PathValue("owner") + "/" + r.PathValue("repo"))
 }
 
 // parseSourceRepo validates and canonicalizes an owner/name repository input

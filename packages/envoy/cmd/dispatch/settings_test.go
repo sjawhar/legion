@@ -988,7 +988,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 					w.WriteHeader(http.StatusNotFound)
 				}))
 				defer github.Close()
-				request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/ARCH/architecture-source/sync", nil)
+				request := httptest.NewRequest(http.MethodPost, "/api/v1/projects/ARCH/architecture-sources/acme/arch/sync", nil)
 				request.Header.Set("Authorization", "Bearer agent-token")
 				response := httptest.NewRecorder()
 				routerFor(t, resolveWith(t, map[string]string{"DISPATCH_GITHUB_API_BASE": github.URL}), routes.AppContextOptions{App: app, Store: database}).ServeHTTP(response, request)

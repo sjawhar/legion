@@ -380,7 +380,8 @@ type IssueChild struct {
 }
 
 // ArchitectureTree is GET /api/v1/projects/{key}/architecture: the project's
-// component model with the work attached to it. Counting rule: a component
+// component model — every source's components together — with the work
+// attached to it. Counting rule: a component
 // counts every distinct issue whose effective set names it or any component it
 // contains (transitively over parent), parents and icebox included, each once;
 // Own* restricts that to issues whose effective set names this component
@@ -388,7 +389,7 @@ type IssueChild struct {
 // those resolving to a `none` row; RetiredLinks those whose effective set names
 // a component a re-import retired.
 type ArchitectureTree struct {
-	Source           ArchitectureTreeSource      `json:"source"`
+	Sources          []ArchitectureTreeSource    `json:"sources"`
 	Totals           ArchitectureTreeTotals      `json:"totals"`
 	Components       []ArchitectureTreeComponent `json:"components"`
 	Unassigned       []ArchitectureTreeIssueRef  `json:"unassigned"`
@@ -396,7 +397,8 @@ type ArchitectureTree struct {
 	RetiredLinks     []ArchitectureTreeRetired   `json:"retired_links"`
 }
 
-// ArchitectureTreeSource is the source row's sync bookkeeping.
+// ArchitectureTreeSource is one source row's sync bookkeeping; the tree lists
+// them in the order the project added its sources.
 type ArchitectureTreeSource struct {
 	Repo       string     `json:"repo"`
 	Branch     string     `json:"branch"`
@@ -418,9 +420,11 @@ type ArchitectureTreeTotals struct {
 }
 
 // ArchitectureTreeComponent is one component with its counts and the issues
-// counted, each saying how it qualified.
+// counted, each saying how it qualified. Source is the repository of the
+// source whose files define it.
 type ArchitectureTreeComponent struct {
 	ID        string                  `json:"id"`
+	Source    string                  `json:"source"`
 	Title     string                  `json:"title"`
 	Parent    *string                 `json:"parent"`
 	DependsOn []string                `json:"depends_on"`

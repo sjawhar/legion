@@ -25,33 +25,25 @@ func componentTreeFiles() map[string]string {
 	}
 }
 
-// newComponentTreeServer imports the fixture model into project CORE and returns the handler.
+// newComponentTreeServer imports the fixture model into project CORE from its one source,
+// legion/arch, and returns the handler.
 func newComponentTreeServer(t *testing.T) (http.Handler, *fakeGitHubApp) {
 	t.Helper()
 	fake := &fakeGitHubApp{
 		installations: map[string]string{"legion/arch": "read"},
-		commit:        "sha-one",
-		files:         componentTreeFiles(),
+		repos:         map[string]*fakeArchitectureRepo{"legion/arch": {commit: "sha-one", files: componentTreeFiles()}},
 	}
 	handler, _ := newArchitectureSourceServer(t, fake)
 	createTestProject(t, handler, "CORE")
-	if saved := dispatchRequest(t, handler, http.MethodPut, "/api/v1/projects/CORE/architecture-source", map[string]string{
-		"repo": "legion/arch", "branch": "main",
-	}, "alice"); saved.Code != http.StatusOK {
-		t.Fatalf("put source: status=%d body=%s", saved.Code, saved.Body.String())
-	}
-	syncComponentTree(t, handler)
+	putSource(t, handler, "CORE", "legion/arch", "main")
+	syncComponentTree(t, handler, "legion/arch")
 	return handler, fake
 }
 
-func syncComponentTree(t *testing.T, handler http.Handler) {
+func syncComponentTree(t *testing.T, handler http.Handler, repo string) {
 	t.Helper()
-	synced := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects/CORE/architecture-source/sync", nil, "alice")
-	if synced.Code != http.StatusOK {
-		t.Fatalf("sync: status=%d body=%s", synced.Code, synced.Body.String())
-	}
-	if body := decodeBody[map[string]any](t, synced); body["last_error"] != nil {
-		t.Fatalf("sync rejected the model: %v", body["last_error"])
+	if synced := syncSource(t, handler, "CORE", repo); synced.LastError != nil {
+		t.Fatalf("sync rejected the model: %s", *synced.LastError)
 	}
 }
 
@@ -162,8 +154,13 @@ func TestArchitectureTreeCountsAttachedWork(t *testing.T) {
 	}
 
 	tree := readTree(t, handler)
-	if tree.Source.Repo != "legion/arch" || tree.Source.LastCommit == nil || *tree.Source.LastCommit != "sha-one" {
-		t.Fatalf("tree source = %+v", tree.Source)
+	if len(tree.Sources) != 1 || tree.Sources[0].Repo != "legion/arch" || tree.Sources[0].LastCommit == nil || *tree.Sources[0].LastCommit != "sha-one" {
+		t.Fatalf("tree sources = %+v", tree.Sources)
+	}
+	for _, component := range tree.Components {
+		if component.Source != "legion/arch" {
+			t.Fatalf("component %s names source %q, want legion/arch", component.ID, component.Source)
+		}
 	}
 	wantCounts := map[string][4]int{
 		"legion":    {1, 4, 0, 2}, // root direct, child inherited, grandchild + done contained
@@ -235,9 +232,9 @@ func TestArchitectureTreeCountsAttachedWork(t *testing.T) {
 
 	// Retire workspace by re-import: the closed issue keeps the link as unknown, appears in
 	// retired_links, and its live component still counts it.
-	fake.commit = "sha-two"
-	delete(fake.files, "workspace.md")
-	syncComponentTree(t, handler)
+	fake.repos["legion/arch"].commit = "sha-two"
+	delete(fake.repos["legion/arch"].files, "workspace.md")
+	syncComponentTree(t, handler, "legion/arch")
 	retired := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+done.Key, nil, "alice"))
 	if !reflect.DeepEqual(retired.Components.IDs, []string{"daemon"}) || !reflect.DeepEqual(retired.Components.Unknown, []string{"workspace"}) {
 		t.Fatalf("components after retiring workspace = %+v", retired.Components)
@@ -265,6 +262,97 @@ func TestArchitectureTreeCountsAttachedWork(t *testing.T) {
 		t.Fatalf("reset components: status=%d body=%s", reset.Code, reset.Body.String())
 	} else if got := decodeBody[model.Issue](t, reset).Components; got.Mode != "explicit" || !reflect.DeepEqual(got.IDs, []string{"legion"}) || got.InheritedFrom == nil || *got.InheritedFrom != root.Key {
 		t.Fatalf("components after reset = %+v, want legion inherited from %s", got, root.Key)
+	}
+}
+
+// A project's component model is every source's components together: an issue names ids from
+// two sources in one write, its children inherit both, the tree says which source defines each
+// component, and the reference graph resolves a component of either source. An external
+// component is still refused, whichever source defines it.
+func TestIssueComponentsFromEverySource(t *testing.T) {
+	handler, fake := newComponentTreeServer(t)
+	fake.installations["acme/infra"] = "read"
+	fake.repos["acme/infra"] = &fakeArchitectureRepo{commit: "sha-infra", files: map[string]string{
+		"deploy.md": "---\ntitle: Deploy\n---\nShipping.\n",
+		"cloud.md":  "---\ntitle: Cloud\nexternal: true\n---\nThe cloud.\n",
+	}}
+	putSource(t, handler, "CORE", "acme/infra", "main")
+	syncComponentTree(t, handler, "acme/infra")
+
+	parent := createComponentIssue(t, handler, "Both sources", nil, nil)
+	attached := patchComponents(t, handler, parent.Key, map[string]any{"mode": "explicit", "ids": []string{"deploy", "daemon"}})
+	if attached.Code != http.StatusOK {
+		t.Fatalf("attach a component of each source: status=%d body=%s", attached.Code, attached.Body.String())
+	}
+	if got := decodeBody[model.Issue](t, attached).Components; !reflect.DeepEqual(got.IDs, []string{"daemon", "deploy"}) || len(got.Unknown) != 0 {
+		t.Fatalf("attached components = %+v, want daemon and deploy", got)
+	}
+	read := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+parent.Key, nil, "alice"))
+	if got := read.Components; got.Mode != "explicit" || !reflect.DeepEqual(got.IDs, []string{"daemon", "deploy"}) || len(got.Unknown) != 0 || got.InheritedFrom != nil {
+		t.Fatalf("read back components = %+v, want daemon and deploy", got)
+	}
+	child := createComponentIssue(t, handler, "Inherits both", &parent.Key, nil)
+	inherited := decodeBody[model.Issue](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues/"+child.Key, nil, "alice"))
+	if got := inherited.Components; got.Mode != "explicit" || !reflect.DeepEqual(got.IDs, []string{"daemon", "deploy"}) || got.InheritedFrom == nil || *got.InheritedFrom != parent.Key {
+		t.Fatalf("child components = %+v, want daemon and deploy inherited from %s", got, parent.Key)
+	}
+
+	for name, tc := range map[string]struct {
+		ids     []string
+		message string
+	}{
+		"external in the second source": {[]string{"daemon", "cloud"}, "external components cannot be attached: cloud"},
+		"external in the first source":  {[]string{"deploy", "github"}, "external components cannot be attached: github"},
+		"in neither source":             {[]string{"deploy", "web"}, "CORE has no component web"},
+	} {
+		refused := patchComponents(t, handler, parent.Key, map[string]any{"mode": "explicit", "ids": tc.ids})
+		if body := refused.Body.String(); refused.Code != http.StatusBadRequest || !strings.Contains(body, `"code":"COMPONENTS_INPUT"`) || !strings.Contains(body, tc.message) {
+			t.Fatalf("%s: status=%d body=%s, want COMPONENTS_INPUT naming %q", name, refused.Code, body, tc.message)
+		}
+	}
+
+	tree := readTree(t, handler)
+	sources := []string{}
+	for _, source := range tree.Sources {
+		sources = append(sources, source.Repo+"@"+source.Branch+" "+deref(source.LastCommit))
+	}
+	if want := []string{"legion/arch@main sha-one", "acme/infra@main sha-infra"}; !reflect.DeepEqual(sources, want) {
+		t.Fatalf("tree sources = %q, want %q", sources, want)
+	}
+	for id, source := range map[string]string{"legion": "legion/arch", "daemon": "legion/arch", "github": "legion/arch", "deploy": "acme/infra", "cloud": "acme/infra"} {
+		if got := treeComponent(t, tree, id).Source; got != source {
+			t.Errorf("component %s names source %q, want %q", id, got, source)
+		}
+	}
+	if len(tree.Components) != 9 {
+		t.Fatalf("tree lists %d components, want both sources' 9", len(tree.Components))
+	}
+	for _, id := range []string{"daemon", "deploy"} {
+		component := treeComponent(t, tree, id)
+		if got := componentCounts(component); got != [4]int{0, 2, 0, 2} {
+			t.Errorf("%s counts = %v, want the parent and its child", id, got)
+		}
+		if got := issueAttachments(component); !reflect.DeepEqual(got, map[string]string{parent.Key: "direct", child.Key: "inherited"}) {
+			t.Errorf("%s attachments = %v", id, got)
+		}
+	}
+
+	edges := graphEdges(t, handler, url.Values{"from": {"dispatch://" + parent.Key}, "kind": {"affects"}})
+	excerpts := map[string]string{}
+	for _, edge := range edges.Edges {
+		if edge.Node.Kind != "component" || edge.Excerpt == nil {
+			t.Fatalf("affects edge = %+v, want a component with its title", edge)
+		}
+		excerpts[edge.Node.Ref] = edge.Excerpt.Text
+	}
+	if want := map[string]string{"dispatch://CORE/component/daemon": "Daemon", "dispatch://CORE/component/deploy": "Deploy"}; !reflect.DeepEqual(excerpts, want) {
+		t.Fatalf("affects edges = %v, want %v", excerpts, want)
+	}
+	for _, id := range []string{"daemon", "deploy"} {
+		backlinks := graphEdges(t, handler, url.Values{"to": {"dispatch://CORE/component/" + id}, "kind": {"affects"}})
+		if backlinks.Node.Kind != "component" || backlinks.Node.ID != "CORE/"+id || len(backlinks.Edges) != 1 || backlinks.Edges[0].Node.ID != parent.Key {
+			t.Fatalf("%s backlinks = %+v, want the component with %s's edge", id, backlinks, parent.Key)
+		}
 	}
 }
 
