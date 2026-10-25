@@ -125,6 +125,37 @@ func TestParseKeepsALinkedImagesLink(t *testing.T) {
 	}
 }
 
+// A linked image's link is its destination as CommonMark reads it, character references and
+// backslash escapes decoded, as the browser editor stores it and as the image's own src is read:
+// a link written through the documents API must open the address the live editor's view, a past
+// version and a comment all draw for the same markdown, and must read back so (INFRA-190).
+func TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt(t *testing.T) {
+	for _, test := range []struct{ markdown, link string }{
+		{"[![x](i.png)](https://u.com/?a=1&amp;b=2)\n", "https://u.com/?a=1&b=2"},
+		{"[![x](i.png)](https://u.com/a\\*b)\n", "https://u.com/a*b"},
+		{"[![x](i.png)](https://u.com/\\)x)\n", "https://u.com/)x"},
+	} {
+		got, err := ParseForWrite(test.markdown, nil)
+		if err != nil {
+			t.Errorf("ParseForWrite(%q) = %v, want the write taken", test.markdown, err)
+			continue
+		}
+		image := got.Children[0].Children[0]
+		if link, _ := image.Attrs["link"].(string); image.Type != "image" || link != test.link {
+			t.Errorf("ParseForWrite(%q) image link = %q, want %q", test.markdown, link, test.link)
+			continue
+		}
+		markdown, err := Render(got)
+		if err != nil {
+			t.Fatalf("Render(ParseForWrite(%q)): %v", test.markdown, err)
+		}
+		again, err := Parse(markdown)
+		if err != nil || !again.Equal(got) {
+			t.Errorf("Render wrote %q, which does not read back as the stored tree (err %v)", markdown, err)
+		}
+	}
+}
+
 // The browser editor's parser matches a reference to its definition by the labels as written,
 // before their character references are decoded, and a label is stored and written decoded, so a
 // reference whose label matches its definition's only as written would lose it: `[^&AUML;]` finds
