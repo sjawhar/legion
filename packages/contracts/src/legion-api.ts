@@ -154,8 +154,8 @@ const legionPullRequestView = z.strictObject({
   repo: nonEmptyString,
   number: z.number().int().positive(),
   head: nonEmptyString,
-  /** `open`, `merged` or `closed` (contract 36). */
-  state: nonEmptyString,
+  /** `open`, `merged` or `closed` (contract 36), `record.PullRequestState`'s values. */
+  state: z.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
   fixAttempts: z.number().int().nonnegative(),

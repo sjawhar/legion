@@ -44192,7 +44192,7 @@ var legionPullRequestView = exports_external.strictObject({
   repo: nonEmptyString,
   number: exports_external.number().int().positive(),
   head: nonEmptyString,
-  state: nonEmptyString,
+  state: exports_external.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
   fixAttempts: exports_external.number().int().nonnegative()
