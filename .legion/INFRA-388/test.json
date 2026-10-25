@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-388",
+  "completed": "2026-10-25T18:17:30Z",
+  "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's throwaway driver ($TMPDIR/liveproof_deploy_test.go), copied into a scratch copy of the tree at 19e78ffe, against my own Postgres 16 (port 55433) and NATS 2.10 JetStream (port 14223): `go test -tags liveproof ./internal/daemon -run 'TestLiveDeployRunWake$|TestLiveDeployRunReRunWake$' -count=1 -v`. Both PASS (64.5 s, 18.2 s), with the same looks and refusals as the proof comment: 1->2 (run 40184206819), 3 (run 40186577548 kept), 4 (older run 40177490116), and no look for attempt 2 of run 39304834688 (kept job)."
+  },
+  "failures": [],
+  "failed": 0,
+  "ci": "Read at 19e78ffe on 2026-10-25: Tests 40219336654 in progress (changes and typecheck success); Legion Envoy and Contracts 40219336917 queued; Docs 40219336630 success; Worker Image 40219336639 in progress; PR Title 40219396449 success. None of these lanes was re-run by the tester.",
+  "proof": [
+    {
+      "criterion": "An open check gets a new look at each successful Apply after its merge, and the log names the run",
+      "surface": "the daemon (check-wake rig `run`) over real Postgres 16 and NATS JetStream with its durable GitHub intake and outbox; GitHub answered by api.github.com through a gh api proxy; envelopes built by Envoy's own contracts.GithubEnvelopes from real sjawhar/legion runs",
+      "command": "go test -tags liveproof ./internal/daemon -run 'TestTesterBreakA$' -count=1 -v (throwaway; https://github.com/sjawhar/legion/pull/2203#issuecomment-6401341415)",
+      "observed": "The Envoy-normalized envelope of run 40184206819 opened look 2 with detail 'sjawhar/legion .github/workflows/release.yaml run 40184206819 attempt 1, job legion_build: Smoke test succeeded at 2026-10-25T11:14:23Z'. The implementer's task was 'Look 2, woken by the deploy workflow's run: ...'. GET /legion/v1/state showed both configured deploys.",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "A forged release.yaml envelope that named pr-and-main.yaml run 40205628520 was refused with 'the run is of workflow \".github/workflows/pr-and-main.yaml\"'. One that named legion-smoke run 40205339374 got 404 'GitHub does not know the deploy run'. One that claimed main for the pull_request run 40218586433 was refused with 'the run is on branch \"legion/INFRA-225\"'. None of them opened a look."
+    },
+    {
+      "criterion": "Two applies give two looks; an apply while a look is open is kept for the next look",
+      "surface": "same as above",
+      "command": "go test -tags liveproof ./internal/daemon -run 'TestTesterBreakB$' -count=1 -v",
+      "observed": "One real run (40184206819) had 'Publish to npm' succeed in three jobs. envoy_plugin_publish opened look 2, pi_envoy_publish was kept, and pi_legion_publish was ignored (one cause slot). At look 2's pending report, look 3 started at once from pi_envoy_publish. The deploy was configured as SJAWHAR/Legion, and the repository still matched without case.",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "Look 3 was ended pending and the same run was delivered again. No look 4 opened, because every job's wake event was already recorded."
+    },
+    {
+      "criterion": "The same run seen twice gives one",
+      "surface": "same as above",
+      "command": "TestTesterBreakA case A6",
+      "observed": "Two envelope ids for run 40184206819 were published concurrently. Both were compared ('checks':1 twice), and there was exactly one 'production check woken' and look 2, with nothing kept.",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "The legion-smoke check that was open in the same store stayed at look 1, because a run of sjawhar/legion queues no compare for another repository."
+    },
+    {
+      "criterion": "A preview-only run, an apply that finished before the merge, and a run of another workflow give none",
+      "surface": "same as above",
+      "command": "TestTesterBreakA cases A1, A2, A5; the implementer's TestLiveDeployRunWake case (3) re-run",
+      "observed": "Real run 40186577548, whose legion_build job ran with its 'Smoke test' step skipped, opened no look ('step \"Smoke test\" succeeded in no job of the attempt'). This is the preview-only shape, proven live. Run 40173636181, whose step finished before merged_at, opened no look. A real run on another branch made no row and no GitHub read.",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "Run 40184206819 has the same configured step, and it succeeded after the merge, so it woke look 2. The refusal is the skipped step, not a read failure."
+    },
+    {
+      "criterion": "Configuration refuses a malformed deploy",
+      "surface": "the branch's legion binary (go build ./cmd/legion at 19e78ffe)",
+      "command": "legion start --config <file> --check-config",
+      "observed": "These files gave exit 0: 'deploys: []', null 'deploys:', two workflows of one repository, and the same deploy in two projects. These gave exit 1, each naming the field: a mapping ('must be an array'), an extra key ('unknown key projects.ACME.deploys[0].branch'), '.github/workflows/.yaml', 'envoy.YAML', '.github/workflows/../envoy.yaml', step \"\" ('must not be empty'), and repo 'acme/infra/x'.",
+      "headSha": "19e78ffefc1c6063a3c2fc75c889897a4d9208eb",
+      "negativeControl": "Each refused file is the valid file with one change."
+    }
+  ],
+  "testAdequacy": "Every break attempt above has a regression lock in the implementer's tests: outbox_check_test.go cases for another workflow, another branch, another head repository, pull_request and pull_request_target, 404, a skipped (preview-only) step, an apply at or before the merge, two applying jobs, kept and re-run jobs, and two pages of jobs; check_wake_test.go rig cases through the durable GitHub intake; workflow/check_test.go for branch, last-look, closed checks and the kept cause; config_test.go for the config refusals. I found no break that these tests would miss, so I wrote no red test.",
+  "observations": [
+    "Wording only (Fast-follow class): the outbox logs 'outbox check compare found a deploy after the merge; the check is woken' for every job that applied. It also logs this when the workflow then keeps or ignores the wake, or takes it as a duplicate. The build compare path already does the same. The workflow's own woken/kept/ignored line records the decision.",
+    "Envoy's normalizer drops a workflow_run whose pull_requests is not empty (seen live on pull_request run 40218586433), so a deploy only wakes a check through a run with no pull request attached. A push run on main after a squash merge has none (all real release.yaml runs I used)."
+  ],
+  "notProven": [
+    "A real agent-infra envoy.yaml Apply waking a check in the INFRA deployment needs the deployment's legion.yaml value, Envoy delivering workflow_run for agent-infra, and the implement App's Actions read there. That is the root's live proof (plan.json forRoot.liveA4), not reachable from this tree."
+  ]
+}
