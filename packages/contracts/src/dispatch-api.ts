@@ -1151,12 +1151,15 @@ export const MAX_BROADCAST_RECIPIENTS = 100;
  * `IDEMPOTENCY_LEASE_MS`) is `409 IDEMPOTENCY_KEY_IN_FLIGHT` with `Retry-After: 1`, which a client
  * asks again after. A 5xx, 401, 408 or 429 is not stored, so the next attempt runs the request
  * again. Keys belong to the signed-in login that sent them and are kept `IDEMPOTENCY_KEY_TTL_MS`.
- * Two routes answer a repeat from the delivery they record rather than the stored body:
- * `POST /api/v1/agents/{session_id}/messages` and `POST /api/v1/broadcasts` resume any delivery
- * still owed and answer the message or broadcast read afresh (`201`, a broadcast with the first
- * answer's `excluded`), so a recipient whose attempt a live sender holds can still read
- * `pending`. A write without the header is run as it always was, with no replay (the IETF
- * `Idempotency-Key` draft; Google AIP-155).
+ * Five routes answer a repeat from the record they made rather than the stored body: `POST
+ * /api/v1/agents/{session_id}/messages`, `POST /api/v1/broadcasts`, `POST
+ * /api/v1/issues/{key}/messages`, `POST /api/v1/issues/{key}/comments` and `POST
+ * /api/v1/artifacts/{id}/comments` resume any delivery still owed and answer `201` with
+ * `IDEMPOTENCY_REPLAYED_HEADER` and the resource read afresh in the first answer's shape (a
+ * broadcast with the first answer's `excluded`), so a recipient whose attempt a live sender holds
+ * can still read `pending`, and a repeat after a lost answer is that replay, never
+ * `409 IDEMPOTENCY_KEY_COMMITTED`. A write without the header is run as it always was, with no
+ * replay (the IETF `Idempotency-Key` draft; Google AIP-155).
  */
 export const IDEMPOTENCY_KEY_HEADER = "Idempotency-Key";
 
@@ -1197,10 +1200,10 @@ export const IDEMPOTENCY_ANSWER_NOT_KEPT = "ANSWER_NOT_KEPT";
 export const IDEMPOTENCY_KEY_TTL_MS = 24 * 60 * 60 * 1000;
 
 /** How long a key's first request holds the key: a repeat within this is
- *  `409 IDEMPOTENCY_KEY_IN_FLIGHT`, and one after it takes the key over and runs the request
- *  again, the first one's process presumed dead - except on the two routes that record their
- *  delivery (`IDEMPOTENCY_KEY_HEADER`), which answer from what that first run recorded. 60
- *  seconds. */
+ *  `409 IDEMPOTENCY_KEY_IN_FLIGHT`. One after it, the first one's process presumed dead, is
+ *  answered `409 IDEMPOTENCY_KEY_COMMITTED` when that first run's write committed, is answered
+ *  from the record on the five routes that keep one (`IDEMPOTENCY_KEY_HEADER`), and otherwise
+ *  takes the key over and runs the request again. 60 seconds. */
 export const IDEMPOTENCY_LEASE_MS = 60 * 1000;
 
 export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
