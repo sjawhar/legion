@@ -1,0 +1,30 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-190",
+  "completed": "2026-10-25T19:46:30Z",
+  "round": 1,
+  "headSha": "6a206afc8f7a06b773823a0d40709777d673acde",
+  "codeHeadSha": "073cd8515c22a654fa1fb974cf9023f6a6788b3c",
+  "ci": "At 073cd8515c22 (read 2026-10-25T19:46Z with gh run list --commit): PR Title 40226068172 success, Docs 40226068167 success, Worker Image 40226068174 success, Tests 40226068165 in progress, Legion Envoy and Contracts 40226068175 queued. Not waited on; no lane rerun here.",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran each proof at head 6a206afc against a fresh git archive of that head (/legion/scratch/tmp/infra190/tester/head, prepared with the harness's prepare-tree.sh), on the tester lane (Postgres 127.0.0.1:5434, server 28777). A1: the spec's reproduction in pmdoc/gen prints [![x](i.png)](https://u.com) on both lines. A2: POST /api/v1/issues/LIVE-1/artifacts then GET /text returns [![x](i.png)](https://u.com \"t\") byte for byte; [a ![x](i.png) b](https://u.com) reads back [a ](https://u.com)![x](i.png)[ b](https://u.com), as at base. Round 2: wow\\![a](u) reads back unchanged (live/api.log). A3: linked-images.e2e.ts chromium + iphone, 16 passed (tester/e2e-head.log). A4: differential.sh --base 7af60a22b33f (main, the head's fork point) --head 6a206afc --corpus theorem.jsonl: 2243 documents, every GATE 0, linked image kept 2/2, exit 0 (tester/diff-a4.log). A5: the implementer's websocket script pointed at the tester server: token 2 and token 3 readonly, the stale peer's link-stripping update answered SyncStatus applied=0 and /text unchanged; token 3:1 read-write and its same update applied (tester/live/a5.log)."
+  },
+  "failures": [
+    {
+      "criterion": "R1 / A4: a linked image keeps its link through the API and pmdoc, read back with its link as the engine reads it (the differential's own gate, 'head loses a whole-image link')",
+      "evidence": "A linked image whose link carries a character reference or a backslash escape is stored with its link as written, not as CommonMark and the browser editor read it. (1) differential.sh --base 7af60a22b33f --head 6a206afc --corpus tester/corpus/adversarial.jsonl (48 adversarial shapes) exits 1 with 'GATE head loses a whole-image link ... 1' (adversarial:dest-escaped, [![x](i.png)](https://u.com/\\)x)); with tester/corpus/control.jsonl it is 2 (linked-dest-amp [![x](i.png)](https://u.com/?a=1&amp;b=2), linked-dest-backslash-star [![x](i.png)](https://u.com/\\*x)): head's tree holds link 'https://u.com/?a=1&amp;b=2' where the engine reads 'https://u.com/?a=1&b=2'. (2) In the real browser (throwaway spec zz-tester-linked.e2e.ts T1, chromium, against the head server), the same document written by an agent draws the live editor's anchor as href=\"https://ci.example/q?a=1&amp;b=2\" and href=\"https://ci.example/a\\*b\", while the past-version view and the comment draw https://ci.example/q?a=1&b=2 and https://ci.example/a*b: one document, two different links. Cause: parse.go:950 takes href = current.Destination raw for a link, while parseImage decodes src with unescapeMarkdownText (parse.go:836); the linked-image branch (parse.go:959-967) stores that raw href as the image's link. Red test: TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt in packages/envoy/internal/dispatch/pmdoc/parse_test.go (commit 80ac2d84fc67); 'cd packages/envoy && go test ./internal/dispatch/pmdoc/ -run TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt' fails with image link = \"https://u.com/?a=1&amp;b=2\", want \"https://u.com/?a=1&b=2\" (and the two escape cases). Text links carry the same raw href at base and head (live editor draws href=\"...&amp;b=2\" for [text-amp](https://ci.example/q?a=1&amp;b=2) too); whether the fix also decodes a text link's href is a scope decision sent to the architect."
+    }
+  ],
+  "failed": 1,
+  "checked": [
+    "Unsafe addresses (live editor, past version, comment, chromium): JAVASCRIPT:, <javascript:...>, data:text/html, vbscript: draw no anchor in any view and window.__pwned stays unset; javascript&#58;... draws no anchor in the version view and comment, and in the live editor an anchor with the raw relative href 'javascript&#58;window.__pwned=5' (inert; a decode fix must keep the view's scheme check after decoding). mailto:, /issues/CORE-1 and #heading draw as written.",
+    "Containers through the API: a linked image in a heading, a list item, a quote and a table cell (link 't\\|u' with title) is stored byte for byte and the live editor draws each inside its anchor (table link https://ci.example/t|u).",
+    "Agent and browser edits around a pasted badge (T3): an agent insert elsewhere and an agent replace in the badge's own paragraph keep [![b](...)](https://ci.example/build \"Build\"); text typed right after the picture is not linked (...\"Build\")XY); copying the paragraph through the editor's copy handler and pasting it stores a second identical linked badge; after reload both pictures sit in their anchors.",
+    "A GitHub-rendered HTML badge paste (<a href><img alt></a>) is stored as a linked image; the img alt becomes its title, as the implementer's recorded deviation says.",
+    "Websocket admission variants (tester/live/a5-variants.log): token 3:1 read-write; 3, 2, 3:1:x, 3:01, 3:2, :1, 2:1 readonly; query {3,1} with token 3 readonly (the token overrides); empty token never authenticates.",
+    "Editor store: 48 adversarial shapes parsed by the headless engine, copied into a Y.Doc and read back serialize identically except the documented stay-as-today shapes (text and image in one link, a marked image) and a mark on a linked image (non-goal) (tester/yrt.log).",
+    "Stay-as-today shapes through the API: empty destination stored as ![x](i.png) (as base), reference-style refused INVALID_MARKDOWN (as base), a linked image inside another image's alt stored as base stores it."
+  ]
+}
