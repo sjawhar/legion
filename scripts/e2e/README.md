@@ -653,7 +653,9 @@ pane. The checks:
 - `claude-implementer-registers`: the implementer's claim registers its Claude Code transcript,
   `<state>/claude/<claim token>/projects/<cwd>/<session id>.jsonl`, as its session file and the
   session id as its session; its `claude` runs as a child of `legion claude-bridge`, started with
-  `--session-id <that id>`.
+  `--session-id <that id>`. The parent's command line, which holds the pane's whole system prompt
+  (past 64 KB, with newlines), is matched in the shell rather than piped to `grep -q`, whose early
+  exit would end the writer with SIGPIPE under `pipefail`; a failure prints the claude's ancestry.
 - `claude-implementer-handoff`: told through Dispatch to make the spec's one-file change, write
   and push its handoff, and call the `legion` tool's `handoff_complete`, it does: the daemon records
   the completion's commit, which the implement App authored and committed, which is on
@@ -674,20 +676,25 @@ the variable, before anything else, and refuses a key Anthropic's `GET /v1/model
 directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
 the daemon creates only when missing) before the claim exists: a `settings.json` whose
 `apiKeyHelper` is a command that prints that copy, and whose `model` is `claude-sonnet-5`. So no
-pane's environment carries `ANTHROPIC_API_KEY`, which the watcher checks for every agent process,
-and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is the Oh My
-Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
+pane's environment carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`,
+`ANTHROPIC_FOUNDRY_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, which the watcher checks for every agent
+process, and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is
+the Oh My Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
 ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)). `CLAUDE_E2E_EVIDENCE_DIR` names
 the evidence directory; by default it is a fresh one under `/tmp`.
 
 The rig is Stage 3's without the GitHub ingress bridge: scratch Postgres, NATS, Envoy listener and
 native Dispatch from [`lib/rig.sh`](#librigsh), the workflow's vocabulary from
 [`lib/workflow.sh`](#libworkflowsh), `admission_cap: 1`, and the design gate off, so the
-architect's gate registration starts planning with no approval. The daemon is started with
-`LEGION_CLAUDE_PATH` and `LEGION_BUN_PATH` set to the `claude` and `bun` on the operator's `PATH`,
-and `LEGION_CLAUDE_PLUGIN_DIR` set to this checkout's `packages/claude-envoy`, whose
-`dist/envoy-channel.js` and generated `legion/` must be built. Legion's role Apps resolve as Stage
-3's do: the daemon runs `secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- …` and `secrets
+architect's gate registration starts planning with no approval. The daemon is started with the
+real `gh`, `jj`, `tmux` and `bun` that `mise which` names first on its `PATH`, which every pane
+inherits ([`real_bin_path`](#librigsh): the run's own `HOME` hides mise's global config from the
+box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), so all four must be
+pinned in mise. `LEGION_CLAUDE_PATH` is set to the `claude` on the operator's `PATH`,
+`LEGION_BUN_PATH` to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's
+`packages/claude-envoy`, whose `dist/envoy-channel.js` and generated `legion/` must be built.
+Legion's role Apps resolve as Stage 3's do: the daemon runs
+`secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- …` and `secrets
 GH_REVIEW_APP_PRIVATE_KEY_B64 -- …` as each App's `private_key_command`, and `prerequisites`
 checks each with `secrets get <KEY> --no-request`, which prints only the key and its tier, and
 refuses one that does not resolve to the agent tier. The proof human is the devbox's ordinary
