@@ -163,9 +163,9 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   a hover to ask with; below `md`, where a phone has no hover and the directory already sits on a
   line of its own under the name (`order-last basis-full`), it shows the whole path and wraps it
   instead of truncating. Which side of that line the page is on is answered once for the list
-  (`PHONE_VIEWPORT_QUERY` through `useMediaQuery` in `AgentsPage`, handed to each row as
-  `phoneViewport`), so a list of two hundred rows holds one media-query listener rather than two
-  hundred.
+  (`MD_VIEWPORT_QUERY`, Tailwind's `md` itself so it answers exactly when the row's own `md:`
+  classes apply, through `useMediaQuery` in `AgentsPage`, handed to each row as `mdViewport`), so
+  a list of two hundred rows holds one media-query listener rather than two hundred.
 - A person's direct Send or Aside reaches an Oh My Pi session as that person's own user turn once
   the session has accepted the attempt with Dispatch, so the live view shows it from the stream,
   where the session took it. When the stream tags it with its Dispatch id (`dispatchTurns` in

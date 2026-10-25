@@ -7,6 +7,11 @@ import { DIALOG_SCOPE, useKeymap, useKeymapScope } from "./keymap";
 export const COMPACT_VIEWPORT_QUERY = "(max-width: 1279px)";
 /** Below Tailwind's `md`: a phone, where a margin thread opens full-screen. */
 export const PHONE_VIEWPORT_QUERY = "(max-width: 767px)";
+/** Tailwind's `md` itself: true exactly when the `md:` classes apply. A caller that pairs this
+ *  query with `md:` classes on the same element must keep the two in step, since a predicate a
+ *  pixel out leaves a fractional viewport width - zoom, a fractional device-pixel ratio - with
+ *  one answer from the query and the other from the classes. */
+export const MD_VIEWPORT_QUERY = "(min-width: 768px)";
 
 const focusableSelector = [
   "a[href]",

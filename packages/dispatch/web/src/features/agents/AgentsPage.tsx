@@ -77,7 +77,7 @@ import { MarkdownBody } from "../refs/MarkdownBody";
 import { buildInboxPath, buildIssuePath } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
 import { closestMatching, focusOnDocument } from "../shell/roving";
-import { PHONE_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
+import { MD_VIEWPORT_QUERY, useMediaQuery } from "../shell/useDialog";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
 import { useUserPreference } from "../shell/userPreference";
 import { AgentMessageComposer, type AgentReply, agentSendKey } from "./AgentMessageComposer";
@@ -604,10 +604,10 @@ function AgentRow({
   agent,
   hidden,
   liveAgents,
+  mdViewport,
   needsYou,
   onPin,
   onSelect,
-  phoneViewport,
   pinned,
   section,
   selected,
@@ -618,16 +618,18 @@ function AgentRow({
    *  or a filter loses nothing it holds. */
   hidden: boolean;
   liveAgents: readonly Agent[];
+  /** Whether the page is at Tailwind's `md` or wider - the width the row's own `md:` classes
+   *  switch at - answered once for the whole list rather than once per row: a list of two
+   *  hundred rows must not hold two hundred media-query listeners. Below it, on a phone, there
+   *  is no hover and the directory has a line of its own under the name, so it shows the whole
+   *  path; at `md` and wider the directory keeps its last segment and the path is a hover
+   *  away. */
+  mdViewport: boolean;
   /** This session's open questions that wait on the reader themselves: whose next move is a
    *  person's, on an issue assigned to them, and not snoozed. */
   needsYou: number;
   onPin: () => void;
   onSelect: (selected: boolean) => void;
-  /** Whether the page is on a phone, answered once for the whole list rather than once per row:
-   *  a list of two hundred rows must not hold two hundred media-query listeners. A phone has no
-   *  hover and gives the directory a line of its own under the name, so it shows the whole path;
-   *  wider, the directory keeps its last segment and the path is a hover away. */
-  phoneViewport: boolean;
   pinned: boolean;
   section: AgentSection;
   selected: boolean;
@@ -637,9 +639,10 @@ function AgentRow({
 }): ReactNode {
   const label = sessionLabel(agent.session_id, agent.title);
   const machineAndDir = `${agent.host} · ${agent.dir}`;
-  // The name takes the row's width, so above a phone the directory gives its own up and keeps
-  // the segment that names the session's work, with the whole path on the hover its `title` is.
-  const shownDir = `${agent.host} · ${phoneViewport ? agent.dir : lastPathSegment(agent.dir)}`;
+  // The name takes the row's width, so from `md` - where the span's own `md:` classes truncate
+  // it - the directory gives its own up and keeps the segment that names the session's work,
+  // with the whole path on the hover its `title` is.
+  const shownDir = `${agent.host} · ${mdViewport ? lastPathSegment(agent.dir) : agent.dir}`;
   const unreadReplies =
     useQuery(userAgentStateQuery()).data?.[agent.session_id]?.unread_replies ?? 0;
   const [expanded, setExpanded] = useState(false);
@@ -1168,7 +1171,7 @@ export function AgentsPage(): ReactNode {
   useDocumentTitle("Agents · Dispatch");
   const { agents, error, isError, isPending } = useAgents(true, true);
   // One listener for the list, not one per row: every row's directory reads the same answer.
-  const phoneViewport = useMediaQuery(PHONE_VIEWPORT_QUERY);
+  const mdViewport = useMediaQuery(MD_VIEWPORT_QUERY);
   const inbox = useQuery(inboxQuery());
   // Until `/auth/whoami` answers, no question is counted as the reader's.
   const viewer = useQuery(whoAmIQuery()).data?.login;
@@ -1335,10 +1338,10 @@ export function AgentsPage(): ReactNode {
       hidden={!foldOpen || !matches(agent)}
       key={agent.session_id}
       liveAgents={agents}
+      mdViewport={mdViewport}
       needsYou={needsYouBySession.get(agent.session_id) ?? 0}
       onPin={() => togglePin(agent.session_id)}
       onSelect={(next) => select(agent.session_id, next)}
-      phoneViewport={phoneViewport}
       pinned={pinned.includes(agent.session_id)}
       section={section}
       selected={selected.has(agent.session_id)}
