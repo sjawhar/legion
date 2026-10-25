@@ -33,6 +33,14 @@ const Image = "mirror.gcr.io/library/nats:2.10"
 // start is not bounded by it: how long Docker takes to create a container is the daemon's load.
 const readinessTimeout = 30 * time.Second
 
+// namedNATSEnv names a NATS server already running beside the tests, which URL then uses in place
+// of the package's container. namedNATSMonitorEnv is the base URL of that same server's
+// monitoring endpoint (http://host:port), which each test's drain reads. See sharedServer.
+const (
+	namedNATSEnv        = "LEGION_TEST_NATS_URL"
+	namedNATSMonitorEnv = "LEGION_TEST_NATS_MONITOR_URL"
+)
+
 var (
 	// held is locked by the test using the server, from URL until the test's cleanups have run, so
 	// no two tests share its state. holder names that test, so that a second take by it or by one
@@ -61,8 +69,9 @@ func init() {
 }
 
 // Main runs the package's tests, then removes the NATS container if a test started one, and
-// returns the exit code. A package whose tests use URL or JetStream calls it from TestMain:
-// os.Exit(testnats.Main(m)).
+// returns the exit code. A server namedNATSEnv named is left running: shared is nil unless this
+// binary started a container of its own, and Main removes nothing else. A package whose tests use
+// URL or JetStream calls it from TestMain: os.Exit(testnats.Main(m)).
 func Main(m *testing.M) int {
 	mainRuns = true
 	code := m.Run()
@@ -82,6 +91,11 @@ func Main(m *testing.M) int {
 // to report no client connection first: a previous test that published without waiting for acks
 // leaves messages the server still routes after the test ends, into a stream this test recreates.
 // The reset deletes every stream, so a test creates its own there with CreateStream.
+//
+// The server is a container of the package's own, or the one namedNATSEnv names (sharedServer).
+// The reset empties a named server exactly as it empties a container, deleting every stream on
+// it, and the hold serialises the tests over it, so LEGION_TEST_NATS_URL must name a server of
+// the test run's own: never one shared with anything else, and never a production one.
 func URL(t testing.TB) string {
 	t.Helper()
 	if !mainRuns {
@@ -89,19 +103,10 @@ func URL(t testing.TB) string {
 	}
 	take(t)
 	startOnce.Do(func() {
-		started, err := start(Image)
-		if err != nil {
-			startErr = err
-			return
-		}
-		shared = started
-		serverURL, startErr = started.ConnectionString(context.Background())
-		if startErr == nil {
-			monitorURL, startErr = monitor(started)
-		}
+		serverURL, monitorURL, startErr = sharedServer()
 	})
 	if startErr != nil {
-		t.Fatalf("start NATS JetStream: %v", startErr)
+		t.Fatal(startErr)
 	}
 	drained(t)
 	conn, js := connect(t)
@@ -127,6 +132,44 @@ func URL(t testing.TB) string {
 		t.Fatalf("the NATS server still holds %d streams after emptying it", info.Streams)
 	}
 	return serverURL
+}
+
+// sharedServer resolves, once per test binary, the NATS server its tests share: the one
+// namedNATSEnv names when it is set, and otherwise a container of the package's own. It returns
+// that server's client URL and the base URL of its monitoring endpoint.
+//
+// Both paths exist because the two places these tests run differ. CI has Docker, so a container
+// gives each run a server nothing else has touched. A development pod has no Docker at all, so no
+// container can start there; one nats-server runs beside the tests instead and is named in the
+// environment, and then no container is started for the life of the test binary.
+//
+// A named server is only usable together with its monitoring endpoint: URL drains the server
+// before it resets it, over <monitor>/connz, and only a container can be asked for its own mapped
+// monitoring port. A name without one is refused here, rather than left to a drain that waits out
+// readinessTimeout in every test or a reset that silently runs over a server still being written
+// to.
+func sharedServer() (string, string, error) {
+	if named := strings.TrimSpace(os.Getenv(namedNATSEnv)); named != "" {
+		monitoring := strings.TrimSpace(os.Getenv(namedNATSMonitorEnv))
+		if monitoring == "" {
+			return "", "", fmt.Errorf("testnats: %s names %s but %s is unset or empty: a NATS server named in the environment must be started with -m <port> and both variables set (%s=http://host:<port>), since every test drains that server over its monitoring endpoint before emptying it", namedNATSEnv, named, namedNATSMonitorEnv, namedNATSMonitorEnv)
+		}
+		return named, monitoring, nil
+	}
+	started, err := start(Image)
+	if err != nil {
+		return "", "", fmt.Errorf("start NATS JetStream: %w", err)
+	}
+	shared = started
+	client, err := started.ConnectionString(context.Background())
+	if err != nil {
+		return "", "", fmt.Errorf("start NATS JetStream: %w", err)
+	}
+	monitoring, err := monitor(started)
+	if err != nil {
+		return "", "", fmt.Errorf("start NATS JetStream: %w", err)
+	}
+	return client, monitoring, nil
 }
 
 // take holds the shared server for t until t ends, refusing a take by the test already holding it
