@@ -42,10 +42,12 @@ type pod struct {
 
 // requestReply is the broker's answer to POST /v1/requests.
 type requestReply struct {
-	State    string          `json:"state"`
-	GrantID  *string         `json:"grant_id"`
-	RecordID *string         `json:"record_id"`
-	Approver json.RawMessage `json:"approver"`
+	RequestID  string          `json:"request_id"`
+	State      string          `json:"state"`
+	GrantID    *string         `json:"grant_id"`
+	RecordID   *string         `json:"record_id"`
+	Approver   json.RawMessage `json:"approver"`
+	ApproveURL string          `json:"approve_url"`
 }
 
 // logIn logs service in with a token for account and returns its launcher credential.
