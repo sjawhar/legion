@@ -1,0 +1,92 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-215",
+  "completed": "2026-10-25T11:00:36Z",
+  "plan": "dispatch://INFRA-215/artifact/plan-md",
+  "summary": "Documentation change to docs/kubernetes.md's section 'Running a workload in the cluster from a role' (title unchanged), four corrections in docs/kubernetes.md and skills/legion-worker/references/tools.md (regenerate packages/claude-envoy/legion with bun run build), and one sentence of the LEGION-578 solutions note. Every banked finding was checked against main 3ff60972 and the applied cluster in planning: F1, F2, F4-F7, F9, F10, F12-F18 stand and are fixed (F12 by keeping python3, departure D1); F3 and F11 are overtaken; F8 is resolved by a foreground delete plus an explicit Service wait; F19 is recorded as latent, not fixed, as the release note directs.",
+  "planningMeasurements": [
+    "2026-10-25 10:38Z planner role container: POD_NAMESPACE unset; command -v psql redis-cli sqlite3 nc dig -> none; python3 present; packages/daemon sets POD_NAMESPACE nowhere.",
+    "2026-10-25 10:38Z published reachability block against a never-created Service name: 60 s, 'never answered: gaierror: [Errno -2] Name or service not known', exit 1.",
+    "2026-10-25 10:40-10:45Z labelled busybox Job + admitted Service, nothing listening on 5432, check with one print per attempt: pod Ready -> every attempt ConnectionRefusedError for 60.7 s; pod exited (Failed) -> every attempt ConnectionRefusedError for 60.7 s. The cluster refuses both when nothing listens and when the Service has no running pod.",
+    "The bash tool is not a bash process ($$ is omp): a trap typed into it never fires at the sequence's end; a bare EXIT trap did not run on SIGTERM/SIGHUP in a quick probe. The sequence must run as its own bash, and its traps are measured in T0.",
+    "Service ownerReference must carry blockOwnerDeletion absent or false (deployment admission), so a foreground Job delete does not wait for the Service.",
+    "jj snapshot.max-new-file-size = 1MiB; role container has go, flock, openssl, no docker, no psql; nine volume variables set."
+  ],
+  "tasks": [
+    "T0 measure first: trap form under set -euo pipefail and INT/TERM/HUP in a bash started from the bash tool, during kubectl wait and the check; Ready-wait behaviour for a server that exits on its own configuration; foreground delete duration and Service wait.",
+    "T1 F18 line 2648-2650: a role's pod holds a server only as a test harness's rootless install at its fixed reservation.",
+    "T2 F6/F5 lines 2676-2697: rewrite the apply/create permission explanation whole; replace 'declarations not applied yet' and 'nobody removes' with what the trap and recovery line do.",
+    "T3 F19 lines 2699-2709: record the latent namespace gap with scoped evidence; no -n added.",
+    "T4 F1 label bullet 2735-2738: timeout vs refusal (starting, or nothing listening at the deadline).",
+    "T5 F7/F4/F5/F8/F1/F2 lines 2769-2858: one block run as its own bash; set -euo pipefail; prints the workload name; manifests in heredocs under mktemp -d; generated password; trap prints pod line, log tail and port->targetPort on failure, then delete --cascade=foreground and kubectl wait --for=delete service, preserving status; check prints its reading; by-name listing with --ignore-not-found; recovery line after the block; honest SIGKILL bound.",
+    "T6 F12/F16 lines 2860-2869, 2881-2883: keep python3, scope the client claim; image clients or a library on the issue's disk, never a binary a role installs.",
+    "T7 F1/F2 reading paragraph 2871-2879: four readings as next checks; final line reports the last attempt only; where a server stopping before Ready shows.",
+    "T8 F17 lines 2932-2934: image's clients or its package runners.",
+    "T9 F10: scope the LEGION-578 note's line 21 to the namespace Legion's pods run in.",
+    "T10 F9 lines 2941-2946: every pod in that namespace reaches a labelled workload; quota rise and return measured.",
+    "T11 F13 kubernetes.md:109-112 and tools.md:14-17: full local-stack prerequisite list; psql was the one the image lacked.",
+    "T12 F14 tools.md:90-91: snapshot size limit, measured in a scratch jj repo under TMPDIR.",
+    "T13 F15 kubernetes.md:199: all nine volume variables.",
+    "T14 regenerate packages/claude-envoy/legion (bun run build) and bun run check-dist.",
+    "T15 evidence passage 2890-2927 written last from V1-V8 captures at the final block; old bullets 'as published then'; 'not run again since' rechecked entry by entry."
+  ],
+  "verification": [
+    "V1 published block extracted from the doc at head, placeholders substituted from a private file under TMPDIR: answered, exit 0, pod gone at delete return, Service wait 0, by-name listing empty.",
+    "V2 targetPort changed: ConnectionRefusedError reading at 60 s with pod line, log tail and port->targetPort printed before cleanup; exit nonzero; cleaned.",
+    "V3 server exits on its own configuration: the step T0(b) found reports it with its reading; cleaned.",
+    "V4 reachability label line removed: TimeoutError reading; cleaned.",
+    "V5 Service step skipped or address renamed: gaierror reading; cleaned.",
+    "V6 SIGTERM/SIGHUP/SIGINT to the block's bash during the Ready wait and the check, and a failing step: trap runs, Job absent by name.",
+    "V7 SIGKILL: Job remains; recovery line with the printed name removes it.",
+    "V8 quota read during V1 and after: Jobs' quota up by the request, then back.",
+    "V9 POD_NAMESPACE unset; grep packages/daemon no match.",
+    "V10 command -v of the five clients and of go psql flock openssl docker.",
+    "V11 2 MiB file in a scratch jj repo under TMPDIR.",
+    "V12 nine volume variables in env.",
+    "V13 bun run check-dist in packages/claude-envoy; .github/scripts/check-private-names.sh.",
+    "V14 private-name sweep: list built at run time from the deployment declaration into TMPDIR, grep -c -F -f over the diff, generated copy, PR title/body and commit messages, counts only; quoted command output scrubbed."
+  ],
+  "dispositions": {
+    "F3": "closed by INFRA-71's per-run name, docs/kubernetes.md:2747-2767",
+    "F8": "comment already exact since INFRA-234; trap uses --cascade=foreground plus an explicit Service deletion wait",
+    "F11": "overtaken: dispatch://INFRA-71/artifact/plan-md v10 carries no naming-rule citation",
+    "F12": "python3 kept: role container has none of the five clients (departure D1)",
+    "F19": "recorded as latent, not fixed, per the architect's release note"
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: push, PR body template, E2E line and proof array (references/pr-body.md), and references/tools.md is a file this change edits",
+      "dispatch: recording the dispositions on the issue if a comment is needed, and reading the plan document"
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md for what the tester re-runs (V1, V2, V4-V7 from its own role container) and how it records its proof"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the review round, and references/pr-body.md to check each dated evidence claim against a capture"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "G1 fail-fast cleanup deletes the objects before the log and targetPort can be read; a server dying before Ready exits at the Ready wait", "answer": "T5 trap prints the pod line, log tail and Service port->targetPort before deleting, preserving the status; T0(b) measures where a pre-Ready failure shows and T7 says so; V2/V3 check it."},
+      {"finding": "G2 the namespace fix overrides the release note's 'record as latent'", "answer": "Plan records F19 (T3) and adds no -n; recovery and diagnostic commands use the same default namespace as the sequence."},
+      {"finding": "G3 readings stated as exclusive diagnoses; final line is the last attempt only", "answer": "T7 states each reading as the next thing to check and says the final line reports only the last attempt."},
+      {"finding": "G4 'deleted on any stop short of SIGKILL' is stronger than the traps establish; shell unspecified", "answer": "T0(a) measures the trap form in a bash the block starts (the bash tool is not a bash process); T5 bounds the promise to the measured cases; V6/V7 check handled and unhandled stops; recovery line for the rest."},
+      {"finding": "G5 private values in heredocs and quoted output", "answer": "Placeholders stay exactly the issue key, the label line and the compute-class line; the driver substitutes them from a private file under TMPDIR; V14 sweep with counts only; quoted output scrubbed."},
+      {"finding": "G6 evidence passage must separate old runs, new published-block runs, instrumented and fixture runs", "answer": "T15 written last from V1-V8 captures; old bullets 'as published then'; each 'not run again since' entry rechecked."},
+      {"finding": "G7 F8 not fully overtaken; listing point and Service timing", "answer": "Foreground delete plus kubectl wait --for=delete service; listing by name with --ignore-not-found after the waits; quota read V8."},
+      {"finding": "G8 F6 correction must cover the whole permission explanation including 'kubectl create … refused on the create'", "answer": "T2 rewrites 2676-2691 whole; no measured claim for the create-yes/get-no combination."},
+      {"finding": "G9 per-finding closure checks missing", "answer": "Dispositions table maps each finding to a task and each task to V1-V14."},
+      {"finding": "G10 live-state claims broader than measured (all five clients, fleet POD_NAMESPACE)", "answer": "All five clients now checked; T3/T6 scope claims to the measured containers and to packages/daemon's source, not the fleet or the digest."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "The section's one worked example, a twenty-line inline python3 loop, can be the thing a reader would actually type once the worker image carries psql.",
+      "plan": "Keep the python3 reachability check and add no psql example; the check prints a reading per failure class.",
+      "evidence": "2026-10-25 10:38Z, a role container of this deployment: command -v psql redis-cli sqlite3 nc dig found none, so a psql example could not be driven from a role container, which the spec's second acceptance bullet and the release note require; python3 runs on every digest and names the failure class the readings key on.",
+      "outcome": {"kind": "unchanged"}
+    }
+  ]
+}
