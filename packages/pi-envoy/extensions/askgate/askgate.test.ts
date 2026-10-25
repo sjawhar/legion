@@ -1189,7 +1189,21 @@ console.log(JSON.stringify(args, null, 2));
     expect(g.calls).toHaveLength(0);
     expect(g.entries).toHaveLength(0);
   });
-  test("a scoped dispatch write the gate cannot read is refused before it runs, in every mode, with the resend reason", async () => {
+  /**
+   * What a call the gate cannot read gives back, by mode: block refuses it before anything runs,
+   * warn runs it and hands the same explanation back as context. The text the test then checks.
+   */
+  const unreadableText = (result: Result, mode: string): string => {
+    if (mode === "block") {
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("Nothing in the call ran");
+      return result?.reason ?? "";
+    }
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain("The call ran unreviewed");
+    return result?.additionalContext ?? "";
+  };
+  test("a scoped dispatch write the gate cannot read is refused in block mode and warned about in warn mode", async () => {
     const compound = [
       "cd $X && dispatch ask --issue X-1 --question q",
       "cd ~/x && dispatch ask --issue X-1 --question q",
@@ -1207,25 +1221,55 @@ console.log(JSON.stringify(args, null, 2));
     for (const mode of ["warn", "block"]) {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
       for (const [index, command] of compound.entries()) {
-        const result = await g.bash(`b${index}`, command);
-        expect(result?.block).toBe(true);
-        expect(result?.reason).toMatch(
-          /send that `dispatch (ask|comment|issue|doc-edit)` again on its own/
-        );
-        expect(result?.reason).toContain("Nothing in the call ran");
+        const text = unreadableText(await g.bash(`b${index}`, command), mode);
+        expect(text).toContain("AskGate reads one form only");
+        expect(text).toMatch(/`dispatch (ask|comment|issue|doc-edit)`/);
       }
       expect(g.dryRuns).toHaveLength(0);
       expect(g.calls).toHaveLength(0);
-      expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual([
-        ...Array(9).fill(["dispatch_ask", "unreadable", "revise"]),
-        ["dispatch_comment", "unreadable", "revise"],
-        ["dispatch_issue", "unreadable", "revise"],
-        ["dispatch_doc_edit", "unreadable", "revise"],
+      const decision = mode === "block" ? "revise" : "allow";
+      expect(g.entries.map((e) => [e.tool, e.outcome, e.decision, e.verdictMode])).toEqual([
+        ...Array(9).fill(["dispatch_ask", "unreadable", decision, mode]),
+        ["dispatch_comment", "unreadable", decision, mode],
+        ["dispatch_issue", "unreadable", decision, mode],
+        ["dispatch_doc_edit", "unreadable", decision, mode],
       ]);
       expect(g.notices).toHaveLength(0);
     }
   });
-  test("a scoped write after a prefix's options or its -- terminator is refused, in every mode", async () => {
+  test("in warn mode an unreadable call runs and its file refusal comes back as context", async () => {
+    const g = bind({ env: { ...STUB, OMP_ASKGATE: "warn" }, cwd: work });
+    const text = unreadableText(
+      await g.bash("w-file", "dispatch ask --issue X-1 --question-file /dev/stdin"),
+      "warn"
+    );
+    expect(text).toContain("file descriptor of the process that opens it");
+    expect(g.entries).toMatchObject([
+      { tool: "dispatch_ask", outcome: "unreadable", decision: "allow", verdictMode: "warn" },
+    ]);
+  });
+  test("warn mode is no off switch for a gate that cannot review at all: no model role and a load failure still refuse", async () => {
+    const noRole = bind({ env: { ...STUB, OMP_ASKGATE: "warn" }, cwd: work, roles: {} });
+    const refusedByRole = await noRole.bash("role", "dispatch comment --issue X-1 --body hi | cat");
+    expect(refusedByRole?.block).toBe(true);
+    expect(refusedByRole?.reason).toContain("modelRoles.askgate");
+    expect(noRole.entries).toMatchObject([
+      { outcome: "no-model-role", decision: "revise", verdictMode: "warn" },
+    ]);
+    const entries: Array<Record<string, unknown>> = [];
+    const refuse = core.loadFailureGate(
+      new Error("a host module did not load"),
+      { env: { OMP_ASKGATE: "warn" }, configFile: CONFIG_FILE },
+      { appendEntry: (_type, data) => entries.push(data as Record<string, unknown>) }
+    );
+    const refusedByLoad = refuse(
+      { toolName: "bash", toolCallId: "load", input: { command: "dispatch comment --issue X-1 --body hi" } },
+      { agent: { kind: "main" }, sessionManager: { getEntries: () => [] } } as never
+    );
+    expect(refusedByLoad?.block).toBe(true);
+    expect(entries).toMatchObject([{ outcome: "load-failed", verdictMode: "warn" }]);
+  });
+  test("a scoped write after a prefix's options or its -- terminator is unreadable in every mode", async () => {
     const prefixed = [
       "command -- dispatch ask --issue X-1 --question q",
       "command -p -- dispatch ask --issue X-1 --question q",
@@ -1248,14 +1292,17 @@ console.log(JSON.stringify(args, null, 2));
         tool: "dispatch_ask",
         label: "dispatch ask",
       });
-    // `command -v` prints where a program is and runs nothing.
-    expect(unreadableDispatchWrite("command -v dispatch ask --issue X-1")).toBeUndefined();
+    // `command -v` prints where a program is and runs nothing, but the text still names a write:
+    // when in doubt, the call is unreadable.
+    expect(unreadableDispatchWrite("command -v dispatch ask --issue X-1")).toEqual({
+      tool: "dispatch_ask",
+      label: "dispatch ask",
+      wrapped: true,
+    });
     for (const mode of ["warn", "block"]) {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
       for (const [index, command] of prefixed.entries()) {
-        const result = await g.bash(`p${index}`, command);
-        expect(result?.block).toBe(true);
-        expect(result?.reason).toContain("Nothing in the call ran");
+        unreadableText(await g.bash(`p${index}`, command), mode);
       }
       expect(g.dryRuns).toHaveLength(0);
       expect(g.calls).toHaveLength(0);
@@ -1413,12 +1460,10 @@ console.log(JSON.stringify(args, null, 2));
     ],
   ];
   for (const [form, command, tool] of STILL_REFUSED)
-    test(`still refused before anything runs, in every mode: ${form}`, async () => {
+    test(`still unreadable in every mode: ${form}`, async () => {
       for (const mode of ["warn", "block"]) {
         const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
-        const result = await g.bash("r", command);
-        expect(result?.block).toBe(true);
-        expect(result?.reason).toContain("Nothing in the call ran");
+        unreadableText(await g.bash("r", command), mode);
         expect(g.dryRuns).toHaveLength(0);
         expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
       }
@@ -1670,7 +1715,7 @@ console.log(JSON.stringify(args, null, 2));
       ["joined", "dispatch_comment", "unreadable", "revise"],
     ]);
   }, 30_000);
-  test("a dispatch write called by a path the shell expands is refused, in every mode, its reason naming what AskGate cannot read", async () => {
+  test("a dispatch write called by a path the shell expands is unreadable in every mode, its reason naming what AskGate cannot read", async () => {
     // A `~/` path and a backslash-quoted `\dispatch` are read (the variable test above); these are not.
     const expanded: Array<[string, string]> = [
       ["$HOME/bin/dispatch comment --issue X-1 --body hi", "`$`"],
@@ -1680,26 +1725,25 @@ console.log(JSON.stringify(args, null, 2));
     for (const mode of ["warn", "block"]) {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
       for (const [command, holds] of expanded) {
-        const result = await g.bash("b", command);
-        expect(result?.block).toBe(true);
-        expect(result?.reason).toContain(
+        const text = unreadableText(await g.bash("b", command), mode);
+        expect(text).toContain(
           `Here the word that calls \`dispatch\` holds ${holds}, which AskGate does not take as literal.`
         );
-        expect(result?.reason).toContain("again on its own, calling `dispatch` by name:");
-        expect(result?.reason).toContain("Nothing in the call ran");
+        expect(text).toContain("calling `dispatch` by name");
       }
       expect(g.dryRuns).toHaveLength(0);
       expect(g.calls).toHaveLength(0);
+      const decision = mode === "block" ? "revise" : "allow";
       expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual(
         ["dispatch_comment", "dispatch_comment", "dispatch_ask"].map((tool) => [
           tool,
           "unreadable",
-          "revise",
+          decision,
         ])
       );
     }
   });
-  test("a scoped subcommand run by a program an expansion names is refused, in every mode, telling the agent to call dispatch by name", async () => {
+  test("a scoped subcommand run by a program an expansion names is unreadable in every mode, telling the agent to call dispatch by name", async () => {
     /** The shell's braced expansion of D, `${D}`, written without a JavaScript template's look. */
     const bracedD = `$${"{"}D}`;
     const viaExpansion: Array<[string, string, string]> = [
@@ -1719,18 +1763,17 @@ console.log(JSON.stringify(args, null, 2));
     for (const mode of ["warn", "block"]) {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
       for (const [index, [command, , holds]] of viaExpansion.entries()) {
-        const result = await g.bash(`v${index}`, command);
-        expect(result?.block).toBe(true);
-        expect(result?.reason).toContain(
+        const text = unreadableText(await g.bash(`v${index}`, command), mode);
+        expect(text).toContain(
           `Here its program's name holds ${holds}, so AskGate cannot tell which program would run.`
         );
-        expect(result?.reason).toContain("again on its own, calling `dispatch` by name:");
-        expect(result?.reason).toContain("Nothing in the call ran");
+        expect(text).toContain("calling `dispatch` by name");
       }
       expect(g.dryRuns).toHaveLength(0);
       expect(g.calls).toHaveLength(0);
+      const decision = mode === "block" ? "revise" : "allow";
       expect(g.entries.map((e) => [e.tool, e.outcome, e.decision])).toEqual(
-        viaExpansion.map(([, tool]) => [tool, "unreadable", "revise"])
+        viaExpansion.map(([, tool]) => [tool, "unreadable", decision])
       );
     }
   });
@@ -2468,7 +2511,7 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.calls).toHaveLength(0);
       expect(g.entries).toHaveLength(0);
     });
-    test("(k) an expansion in --name or --path is refused as unreadable, in every mode", async () => {
+    test("(k) an expansion in --name or --path is unreadable, in every mode", async () => {
       const expanded = [
         'dispatch artifact --issue DSP-1 --name "$NAME" --path shot.png',
         "dispatch artifact --issue DSP-1 --name $NAME --path shot.png",
@@ -2477,9 +2520,7 @@ console.log(JSON.stringify(args, null, 2));
       for (const mode of ["warn", "block"]) {
         const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
         for (const [index, command] of expanded.entries()) {
-          const result = await g.bash(`x${index}`, command);
-          expect(result?.block).toBe(true);
-          expect(result?.reason).toContain("Nothing in the call ran");
+          unreadableText(await g.bash(`x${index}`, command), mode);
         }
         expect(g.dryRuns).toHaveLength(0);
         expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual(

@@ -149,17 +149,27 @@ export function isReview(record: GateRecord): boolean {
   return record.outcome === "verdict";
 }
 
-/** The gate did not pass the write as sent: a revise, a refusal, or a gate that did not load. */
+/**
+ * The gate did not pass the write as sent: a revise, a call the gate could not read (which in warn
+ * mode runs with the reason returned, so its decision is `allow`), or a gate that did not load.
+ */
 export function isSentBack(record: GateRecord): boolean {
-  return record.decision === "revise" || record.outcome === "load-failed";
+  return (
+    record.decision === "revise" ||
+    record.outcome === "unreadable" ||
+    record.outcome === "load-failed"
+  );
 }
 
-/** A write that did not post: refused in block mode, or refused in every mode. */
+/**
+ * A write that did not post: sent back in block mode, or refused in every mode. `no-model-role`
+ * and `load-failed` mean the gate can review nothing, so each refuses in warn mode too; an
+ * `unreadable` call is one call's form, which warn mode lets through.
+ */
 export function isRefusal(record: GateRecord): boolean {
   return (
     isSentBack(record) &&
     (record.verdictMode === "block" ||
-      record.outcome === "unreadable" ||
       record.outcome === "no-model-role" ||
       record.outcome === "load-failed")
   );

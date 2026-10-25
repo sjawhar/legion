@@ -83,7 +83,9 @@ const sessionA = [
   gate({ id: "a4", decision: "allow", latency: 400, cost: null }),
   gate({ id: "a5", decision: "allow", latency: 500 }),
   gate({ id: "old", decision: "revise", latency: 9999, ts: "2026-10-01T00:00:00.000Z" }),
-  gate({ id: "a6", outcome: "unreadable", decision: "revise", latency: 5 }),
+  // An unreadable call in each mode: warn ran it and returned the reason, block refused it.
+  gate({ id: "a6", outcome: "unreadable", decision: "allow", mode: "warn", latency: 5 }),
+  gate({ id: "a8", outcome: "unreadable", decision: "revise", mode: "block", latency: 6 }),
   gate({ id: "a7", outcome: "timeout", decision: "allow", latency: 7 }),
 ].join("\n");
 
@@ -116,7 +118,7 @@ afterAll(async () => {
 describe("parseSessionText", () => {
   test("skips bad lines, keeps gate entries and joins the call text", () => {
     const parsed = parseSessionText(sessionA, "s");
-    expect(parsed).toHaveLength(8);
+    expect(parsed).toHaveLength(9);
     const a1 = parsed.find((r) => r.toolCallId === "a1");
     expect(a1?.text).toBe("dispatch ask --issue ACME-1 --question 'Ship it?'");
     expect(parsed.find((r) => r.toolCallId === "a3")?.text).toBeNull();
@@ -148,7 +150,7 @@ describe("parseSessionText", () => {
 
 describe("readSessions and computeStats", () => {
   test("walks subdirectories, reads only .jsonl and applies --since", () => {
-    expect(records).toHaveLength(10);
+    expect(records).toHaveLength(11);
     expect(records.some((r) => r.toolCallId === "old")).toBe(false);
     expect(records.some((r) => r.toolCallId === "x")).toBe(false);
     expect(new Set(records.map((r) => r.session)).size).toBe(2);
@@ -156,7 +158,7 @@ describe("readSessions and computeStats", () => {
 
   test("counts, latency, cost, refusals and per-tool shares", () => {
     const s = computeStats(records);
-    expect(s.gatedCalls).toBe(10);
+    expect(s.gatedCalls).toBe(11);
     expect(s.reviews).toBe(8);
     expect(s.sentBack).toBe(4);
     // Review latencies 100..800: nearest-rank median is the 4th, p90 the 8th.
@@ -164,7 +166,7 @@ describe("readSessions and computeStats", () => {
     expect(s.latencyP90).toBe(800);
     // Costs 0.01, 0.02, 0.03, 0.04: nearest-rank median is the 2nd.
     expect(s.costMedian).toBe(0.02);
-    // a1 (block) and a6 (unreadable).
+    // a1 (a revise in block mode) and a8 (unreadable in block mode); a6, unreadable in warn, ran.
     expect(s.refusals).toBe(2);
     expect(s.perTool).toEqual([
       { tool: "dispatch_ask", reviews: 5, sentBack: 2 },
@@ -234,6 +236,20 @@ describe("isSentBack and isRefusal", () => {
     expect(record && isSentBack(record)).toBe(true);
     expect(record && isRefusal(record)).toBe(true);
   });
+
+  test("a warn-mode unreadable call was sent back and not refused; a block-mode one was refused", () => {
+    const [warned] = parseSessionText(
+      gate({ id: "uw", outcome: "unreadable", decision: "allow", mode: "warn" }),
+      "s"
+    );
+    expect(warned && isSentBack(warned)).toBe(true);
+    expect(warned && isRefusal(warned)).toBe(false);
+    const [blocked] = parseSessionText(
+      gate({ id: "ub", outcome: "unreadable", decision: "revise", mode: "block" }),
+      "s"
+    );
+    expect(blocked && isRefusal(blocked)).toBe(true);
+  });
 });
 
 describe("CLI", () => {
@@ -259,7 +275,7 @@ describe("CLI", () => {
     const first = run();
     expect(first.exitCode).toBe(0);
     const stdout = first.stdout.toString();
-    expect(stdout).toContain("gated calls: 10");
+    expect(stdout).toContain("gated calls: 11");
     expect(stdout).toContain("reviews: 8");
     expect(stdout).toContain("refusals: 2");
     expect(stdout).toContain("seed: 11");

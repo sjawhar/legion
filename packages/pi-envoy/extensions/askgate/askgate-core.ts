@@ -42,14 +42,17 @@
 //     reviewed write, or calling `dispatch` by a path the shell expands (`$HOME/…/dispatch`) — or
 //     a scoped subcommand run by a program an expansion names (`$D comment …`, `"${D}" ask …`,
 //     `$(command -v dispatch) …`), or a `dispatch` whose subcommand an expansion names (`dispatch
-//     $SUB …`), is refused before anything in it runs, whatever the mode, with a reason that
-//     states the literal grammar and tells the agent to send that `dispatch` command again on its
-//     own; when the word that runs it or names its subcommand is what AskGate cannot read, the
-//     reason names the characters in it (`unreadableDispatchWrite`, a scan aware of quotes,
-//     here-documents and command substitutions, for a scoped write at a command position). The
+//     $SUB …`), is `unreadable`. In `block` mode the call is refused before anything in it runs;
+//     in `warn` mode it runs and the same explanation comes back as additional context, with the
+//     entry's decision `allow`. The explanation states the literal grammar and tells the agent to
+//     send that `dispatch` command on its own; when the word that runs it or names its subcommand
+//     is what AskGate cannot read, it names the characters in it (`unreadableDispatchWrite`, a
+//     scan aware of quotes, here-documents and command substitutions, for a scoped write at a
+//     command position, and of the call's own text for a write another command would run). The
 //     entry reads `unreadable`; it never counts toward the halt. A halt, or a session the gate
 //     would skip (a primary on another provider), lets it run; a session with no model role
-//     refuses it.
+//     refuses it in both modes, as a gate that did not load does: neither can review anything,
+//     and a gate that cannot review is no off switch.
 //   - `write xd://<device>` calls, seen on the nested `tool_call` event the device wrapper emits
 //     with `toolName = <device>` and the validated arguments, for dispatch_ask, dispatch_message,
 //     dispatch_edit_ask, dispatch_comment, dispatch_doc_edit, and dispatch_issue when its
@@ -1672,22 +1675,30 @@ function resendFlags(flag: string): { stdin: string; regular: string } {
 /** The one form AskGate reads, as the refusal states it to the agent. */
 const LITERAL_GRAMMAR =
   "AskGate reads one form only: one `dispatch` call alone, with at most one `cd <path> &&` before it, one `2>&1` after it, and one here-document opened with a quoted delimiter (`<<'EOF'`). Every word is literal: no `$`, backtick, `~`, `*`, `?`, `[`, `{`, `}` or backslash. Nothing else is in the call: no second command, no pipe, no `;`, `&&`, `||` or `&`, no assignment and no other redirect.";
-/** The refusal for a scoped `dispatch` write inside a command the gate cannot read; nothing in the call ran. */
-function renderUnreadable({
-  label,
-  program,
-  subcommand,
-  wrapped,
-  file,
-}: UnreadableCommand): string {
+/**
+ * What a scoped `dispatch` write inside a command the gate cannot read tells the agent. In `block`
+ * mode nothing in the call ran, and this is the call's refusal. In `warn` mode the call ran with
+ * no review, and this is its note: the same explanation of why AskGate could not read it and of
+ * the form it reads, so the next write goes in that form.
+ */
+function renderUnreadable(
+  { label, program, subcommand, wrapped, file }: UnreadableCommand,
+  mode: Mode
+): string {
+  const ran = mode === "warn";
+  const note = (body: string) =>
+    ran ? `<advisor-gate advisor="AskGate" outcome="unreadable">\n${body}\n</advisor-gate>` : body;
+  const ending = ran ? "The call ran unreviewed." : "Nothing in the call ran.";
   if (file !== undefined) {
     const { stdin, regular } = resendFlags(file.flag);
-    return `AskGate did not run this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. Nothing in the call ran.`;
+    return note(
+      `AskGate ${ran ? "did not review" : "did not run"} this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${stdin} -\` and a quoted here-document (\`<<'EOF'\`), or name a regular file with ${regular}. ${ending}`
+    );
   }
   const opening =
     subcommand === undefined
-      ? `AskGate did not run this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and in this call AskGate cannot know the text it would send.`
-      : `AskGate did not run this call: the word after \`dispatch\` holds ${characters(subcommand.unread)}, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`;
+      ? `AskGate ${ran ? "did not review" : "did not run"} this call: it holds a \`${label}\`, which AskGate reviews before it is sent, and in this call AskGate cannot know the text it would send.`
+      : `AskGate ${ran ? "did not review" : "did not run"} this call: the word after \`dispatch\` holds ${characters(subcommand.unread)}, so AskGate cannot tell which subcommand would run, and AskGate reviews each Dispatch write before it is sent.`;
   const why =
     program !== undefined
       ? program.namesDispatch
@@ -1698,9 +1709,11 @@ function renderUnreadable({
         : "";
   const resend =
     subcommand === undefined
-      ? ` Run any other commands it held in a call of their own first, then send that \`${label}\` again on its own${program === undefined ? "" : ", calling \`dispatch\` by name"}.`
+      ? ` ${ran ? "Send the next one" : `Run any other commands it held in a call of their own first, then send that \`${label}\` again`} on its own${program === undefined ? "" : ", calling \`dispatch\` by name"}.`
       : " Send the `dispatch` command again with its subcommand written out.";
-  return `${opening} ${LITERAL_GRAMMAR}${why} Nothing in the call ran.${resend} Text it posts from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.${wrapped === true ? ` If \`${label}\` here is text and no Dispatch write (a search pattern, a message, a file's content), keep it out of the command line: put that text in a file and name the file.` : ""}`;
+  return note(
+    `${opening} ${LITERAL_GRAMMAR}${why} ${ending}${resend} Text it posts from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.${wrapped === true ? ` If \`${label}\` here is text and no Dispatch write (a search pattern, a message, a file's content), keep it out of the command line: put that text in a file and name the file.` : ""}`
+  );
 }
 
 /**
@@ -1942,6 +1955,24 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       result: { block: true, reason: NO_MODEL_ROLE_REFUSAL },
       effect: "none",
     };
+    /**
+     * A call the gate cannot read: a judgment on one call's form, not a gate that failed. `block`
+     * mode refuses it before anything in it runs, so the agent sends the write in a form AskGate
+     * reads; `warn` mode runs it and hands the same explanation back as context, with the entry
+     * recording `unreadable` and `allow`. Neither counts toward the halt.
+     */
+    const unreadableCall = (found: UnreadableCommand, mode: Mode): Decision =>
+      mode === "block"
+        ? {
+            fields: { decision: "revise", outcome: "unreadable" },
+            result: { block: true, reason: renderUnreadable(found, mode) },
+            effect: "none",
+          }
+        : {
+            fields: { decision: "allow", outcome: "unreadable" },
+            result: { additionalContext: renderUnreadable(found, mode) },
+            effect: "none",
+          };
     /** The first of the gate's roles that resolves to a model in this session, with that model. */
     const resolveRole = (ctx: GateCtx): { role: GateRole; model: GateModel } | undefined => {
       for (const role of GATE_ROLES) {
@@ -2446,9 +2477,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           if (scoped === undefined) {
             const unreadable = unreadableDispatchWrite(event.input.command);
             if (unreadable === undefined) return undefined;
-            // Refused before anything in the call runs, in every mode, when its resend would be reviewed;
-            // a halt, or a session whose primary is off the gate's provider, lets it run as the resend
-            // would, and a session with no model role refuses it as it would refuse the resend.
+            // A judgment on one call's form: block mode refuses it before anything in it runs, and
+            // warn mode runs it and hands the reason back (`unreadableCall`). A halt, or a session
+            // whose primary is off the gate's provider, lets it run as the resend would, and a
+            // session with no model role refuses it as it would refuse the resend.
             base = { ...identity(event, mode), tool: unreadable.tool, path: unreadable.label };
             const resolved = halted ? undefined : resolveRole(ctx);
             if (halted) decision = pass("halted");
@@ -2457,12 +2489,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               decision = pass("skipped", {
                 reason: `primary on ${ctx.model?.provider ?? "no model"}`,
               });
-            else
-              decision = {
-                fields: { decision: "revise", outcome: "unreadable" },
-                result: { block: true, reason: renderUnreadable(unreadable) },
-                effect: "none",
-              };
+            else decision = unreadableCall(unreadable, mode);
           } else {
             if (scoped.rebuttal !== undefined) {
               withoutRebuttal = { ...event.input, command: scoped.command };
@@ -2484,12 +2511,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 decision = pass("skipped", {
                   reason: `primary on ${ctx.model?.provider ?? "no model"}`,
                 });
-              else
-                decision = {
-                  fields: { decision: "revise", outcome: "unreadable" },
-                  result: { block: true, reason: renderUnreadable(run.unreadable) },
-                  effect: "none",
-                };
+              else decision = unreadableCall(run.unreadable, mode);
             }
             // The CLI refuses arguments it cannot parse before it sends anything, so the command runs.
             else if ("failure" in run) decision = pass("error", { reason: run.failure });
