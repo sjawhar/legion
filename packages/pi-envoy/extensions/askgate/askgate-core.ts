@@ -21,25 +21,35 @@
 //     JSON it prints. A dry-run that fails, times out or prints no JSON object is recorded as
 //     `error` and the call runs (the CLI refuses arguments it cannot parse, before it sends
 //     anything). A `dispatch` command with `--dry-run` or `--help` sends nothing and is not
-//     reviewed. An upload given with `--path` prints the path, not the text: the gate reads that
-//     file (`readFile`) and adds its text as `content`, so both forms reach the model alike. The
-//     arguments are cut at 64 KiB as one JSON block, so the document gets less than 64 KiB of it.
-//     A relative path resolves where the CLI resolves it, against its
+//     reviewed. An upload given with `--path` prints the path, not the text. Every file the
+//     write posts, that path and each `--<field>-file` and the write's literal stdin, is copied
+//     into a private snapshot the gate owns before the model is asked. The gate reviews the
+//     snapshot's bytes as `content` and rewrites the call to post the snapshot, so the bytes that
+//     post are the bytes reviewed. It reads a regular file alone: a missing file, a directory, a
+//     device, a FIFO and `/dev/stdin` are refused as `unreadable` before any read.
+//     The arguments are cut at 64 KiB as one JSON block, so the document gets less than 64 KiB of
+//     it. A relative path resolves where the CLI resolves it, against its
 //     `process.cwd()`, the physical directory the command runs in after its own `cd`: bash names
-//     it (the `cd`, then `pwd -P`, run as the dry run runs). A file the
-//     gate cannot read is `error`, and the call runs. An upload is judged against failure 10 alone
-//     (askgate-upload.md), since a plan or a report is long by nature.
+//     it (the `cd`, then `pwd -P`, run as the dry run runs). A directory lookup that fails is
+//     `unreadable`, since a failed lookup is no proof that the write would fail. An upload is
+//     judged against failure 10 alone (askgate-upload.md), since a plan or a report is long by
+//     nature.
 //   - A `bash` call those head rules do not take but whose one scoped write the composite reader
-//     reads (`compositeScoped`): around the write only `\`-newline continuations, the write's own
-//     output redirects (`2>&1`, `>`/`2>` to a literal path) and later pipeline stages that hold no
-//     `dispatch` word (`| head -3`), literal `NAME=value` prefixes and one `timeout <duration>`,
-//     a literal file as its stdin (`< q.md`), and before it, joined by `&&`, `;` or a newline,
-//     `cd <literal path>`, literal assignments (`export A=B`), read-only commands (`wc`, `cat`,
-//     `ls`, `grep`, `head`, `[` …) and `dispatch` calls that are no reviewed write (`claim`,
-//     `read` …); after it, anything that holds no reviewed write. `$NAME` in the write counts
-//     when an earlier statement sets NAME to a literal, and a `~/` program path is read too. The
-//     dry run keeps the `cd` and assignment statements, the prefixes and the stdin, and drops
-//     the rest. The call itself runs as written.
+//     reads (`compositeScoped`). The reader takes a form only when it can prove that the posted
+//     bytes do not depend on anything the model did not review. Around the write: `\`-newline
+//     continuations, the write's own output redirects (`2>&1`, `>`/`2>` to a literal path), later
+//     pipeline stages that only read the write's output (`| head -3`), literal `NAME=value`
+//     prefixes and one `timeout <duration>`, and a literal file as its stdin (`< q.md`). Before
+//     it, joined by `&&`, `;` or a newline: `cd <literal path>`, literal assignments
+//     (`export A=B`), read-only commands (`wc`, `cat`, `ls`, `grep`, `head`, `[` …) and `dispatch`
+//     calls that are no reviewed write (`claim`, `read` …). After it, anything that holds no
+//     reviewed write. `$NAME` in the write counts when an earlier kept statement sets NAME to a
+//     literal. The dry run keeps the `cd` and assignment statements, the prefixes and the stdin,
+//     and drops the rest, so a dropped statement may not decide whether a kept one runs: one
+//     joined by `&&` to its neighbour, a conditional `cd`, `printf -v`, `read`, `eval`, `source`,
+//     `set`, `cd -` and the rest of the state-changing words are refused. So is a later stage that
+//     can write a file (`| cp …`, `| sed -i …`, `| tee f`), a second write, and a program or
+//     subcommand an expansion names. The call itself runs as written, but for the file snapshots.
 //   - A `bash` call that holds a scoped `dispatch` write neither reader takes — after a command
 //     that may change a file or the text (`python3 - <<'EOF' …`, `sed -i … f`, `cat > f <<EOF`,
 //     `make`), with a command or process substitution (`"$(cat note.md)"`, `< <(awk …)`), sent to
@@ -119,6 +129,8 @@
 // lets it go, and neither counts toward the halt. OMP_ASKGATE_DUMP names a file each gate's system
 // and user prompts are appended to, owner-only and never through a symlink.
 import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import * as os from "node:os";
 import * as path from "node:path";
 import requestTemplate from "./askgate-request.md" with { type: "text" };
 import systemTemplate from "./askgate-system.md" with { type: "text" };
@@ -295,8 +307,6 @@ interface Deps {
   configFile: string;
   /** Appends to a file; serves OMP_ASKGATE_DUMP. */
   appendFile: (p: string, text: string) => void;
-  /** File text, or undefined when no file is there; reads the document an upload's `--path` names. */
-  readFile: (p: string) => string | undefined;
   complete: (req: CompleteRequest) => Promise<Completion>;
   /**
    * The models after `primary` in `role`'s retry.fallbackChains chain, in the order omp walks it,
@@ -409,7 +419,7 @@ const REFUSED_DOUBLE_QUOTED = "$`\\";
  * opener starts and ends in the command. */
 function headLine(
   command: string
-): { text: string; at: number; stderr?: [number, number] } | undefined {
+): { text: string; at: number; heredoc?: true; stderr?: [number, number] } | undefined {
   if (hasControlCharacter(command)) return undefined;
   // Blank lines before the head and after the command's last line run as no command, so they are
   // dropped whole. No other line is trimmed: bash ends a here-document only at a line that is
@@ -423,7 +433,9 @@ function headLine(
   const lineAt = all.slice(0, first).reduce((sum, line) => sum + line.length + 1, 0);
   let head = lines[0] ?? "";
   let stderr: [number, number] | undefined;
+  let heredoc = false;
   if (lines.length > 1) {
+    heredoc = true;
     const opening = HEREDOC_OPENING.exec(head);
     if (opening === null) return undefined;
     const stripTabs = opening[2] === "-";
@@ -442,6 +454,7 @@ function headLine(
   return {
     text: head.replace(/^[ \t]+|[ \t]+$/g, ""),
     at: lineAt + leading,
+    ...(heredoc ? { heredoc: true as const } : {}),
     ...(stderr ? { stderr } : {}),
   };
 }
@@ -515,6 +528,7 @@ interface DispatchHead {
   cdEnd?: number;
   end: number;
   stderr?: [number, number];
+  heredoc?: true;
 }
 
 function dispatchCommandHead(command: string): DispatchHead | undefined {
@@ -550,6 +564,7 @@ function dispatchCommandHead(command: string): DispatchHead | undefined {
     at,
     ...(cdEnd === undefined ? {} : { cdEnd }),
     end: at + text.length,
+    ...(line.heredoc ? { heredoc: true as const } : {}),
     ...(line.stderr ? { stderr: line.stderr } : {}),
   };
 }
@@ -584,7 +599,7 @@ function headScan(head: string): boolean {
   return quote === undefined;
 }
 
-type Word = { raw: string; value: string };
+type Word = { raw: string; value: string; start?: number; end?: number };
 
 /**
  * Whether `name` with `flags` is a write the gate reviews: a scoped command, with no flag under
@@ -648,26 +663,45 @@ function headWords(head: string): Word[] {
   const words: Word[] = [];
   let word: Word | undefined;
   let quote: string | undefined;
-  for (const char of head) {
+  for (let index = 0; index < head.length; index++) {
+    const char = head[index];
     if (quote === undefined && (char === " " || char === "\t")) {
-      if (word) words.push(word);
+      if (word) {
+        word.end = index;
+        words.push(word);
+      }
       word = undefined;
       continue;
     }
-    word ??= { raw: "", value: "" };
+    word ??= { raw: "", value: "", start: index };
     word.raw += char;
     if (quote === undefined && (char === "'" || char === '"')) quote = char;
     else if (char === quote) quote = undefined;
     else word.value += char;
   }
-  if (word) words.push(word);
+  if (word) {
+    word.end = head.length;
+    words.push(word);
+  }
   return words;
 }
 
-/** A scoped `dispatch` command: the tool it calls, the text to run (an override flag removed),
- * the same text with `--dry-run` after the command name, the override's line, and whether a flag
- * names a file the gate reads (a `--<field>-file` other than `-`, the here-document, or an
- * upload's `--path`). */
+/**
+ * One file the command asks Dispatch to read. `span` names the complete shell word whose source
+ * becomes the owned snapshot: the value word for `--field-file path`, or the whole flag for
+ * `--field-file=path`.
+ */
+interface FileInput {
+  flag: string;
+  source: string;
+  span: [number, number];
+  equals: boolean;
+  /** Bash expands an unquoted leading home marker before it opens the source. */
+  expandsHome: boolean;
+}
+type UnsafeFile = { flag: string; path: string; reason: string };
+
+/** A scoped `dispatch` command and every file whose bytes it would make Dispatch read. */
 export interface ScopedCommand {
   tool: string;
   label: string;
@@ -675,8 +709,15 @@ export interface ScopedCommand {
   dryRunScript: string;
   rebuttal?: string;
   readsFile: boolean;
+  fileInputs: readonly FileInput[];
+  /** A `--field-file -` needs a quoted here-document or one literal input redirect. */
+  stdinFileFlag?: string;
+  /** `--path-file` chooses another path after the gate has no way to bind it. */
+  unsafeFile?: UnsafeFile;
   /** A `dispatch artifact` upload of a markdown document, reviewed against failure 10 alone. */
   upload?: true;
+  /** A leading or retained setup `cd` changes where relative file operands resolve. */
+  changesDirectory?: true;
   /**
    * The command's own leading `cd`, if any, then `pwd -P`: run where the dry run runs, it prints
    * the physical directory the command reaches, the CLI's `process.cwd()`, against which an
@@ -710,16 +751,69 @@ function splitRebuttal(flags: readonly Word[]): { rebuttal?: string; removed: Se
   return { ...(rebuttal === undefined ? {} : { rebuttal }), removed };
 }
 
-/** Whether a flag names a file the gate reads: a `--<field>-file` but `-`, or an upload's `--path`. */
-function namesFile(flags: readonly Word[], upload: boolean): boolean {
-  return flags.some(({ value }, index) => {
-    const eq = value.indexOf("=");
-    const flag = eq === -1 ? value : value.slice(0, eq);
-    const file = eq === -1 ? flags[index + 1]?.value : value.slice(eq + 1);
-    const named =
-      (flag.startsWith("--") && flag.endsWith("-file")) || (upload && flag === "--path");
-    return named && file !== undefined && file !== "-";
-  });
+/**
+ * Every file operand the CLI will open after the gate returns. `--path-file` is different: its
+ * contents choose another path, which would be a new open outside this proof and is refused.
+ */
+function fileInputs(
+  flags: readonly Word[],
+  upload: boolean
+): { inputs: FileInput[]; stdinFileFlag?: string; unsafeFile?: UnsafeFile } {
+  const inputs: FileInput[] = [];
+  let stdinFileFlag: string | undefined;
+  for (let index = 0; index < flags.length; index++) {
+    const word = flags[index];
+    const eq = word.value.indexOf("=");
+    const flag = eq === -1 ? word.value : word.value.slice(0, eq);
+    if (upload && flag === "--path-file") {
+      const source = eq === -1 ? flags[index + 1]?.value : word.value.slice(eq + 1);
+      return {
+        inputs,
+        ...(stdinFileFlag === undefined ? {} : { stdinFileFlag }),
+        unsafeFile: {
+          flag,
+          path: source ?? "",
+          reason: "is an indirect path that AskGate cannot capture before Dispatch opens it",
+        },
+      };
+    }
+    const named = flag.startsWith("--") && flag.endsWith("-file");
+    const artifactPath = upload && flag === "--path";
+    if (!named && !artifactPath) continue;
+    const sourceWord =
+      eq === -1
+        ? flags[index + 1]
+        : {
+            raw: word.raw.slice(word.raw.indexOf("=") + 1),
+            value: word.value.slice(eq + 1),
+            start: word.start === undefined ? undefined : word.start,
+            end: word.end,
+          };
+    if (sourceWord === undefined) continue;
+    const source = sourceWord.value;
+    if (source === "-") {
+      stdinFileFlag ??= flag;
+      continue;
+    }
+    const span =
+      eq === -1
+        ? sourceWord.start === undefined || sourceWord.end === undefined
+          ? undefined
+          : ([sourceWord.start, sourceWord.end] as [number, number])
+        : word.start === undefined || word.end === undefined
+          ? undefined
+          : ([word.start, word.end] as [number, number]);
+    if (span === undefined) continue;
+    inputs.push({
+      flag,
+      source,
+      span,
+      equals: eq !== -1,
+      // Bash expands a leading `~/` in a word of its own, and not after `--flag=`.
+      expandsHome: eq === -1 && sourceWord.raw.startsWith("~"),
+    });
+  }
+  return { inputs, ...(stdinFileFlag === undefined ? {} : { stdinFileFlag }) };
 }
 
 /**
@@ -736,11 +830,31 @@ export function scopedCommand(command: unknown): ScopedCommand | undefined {
 function strictScoped(command: string): ScopedCommand | undefined {
   const found = dispatchCommandHead(command);
   if (found === undefined) return undefined;
-  const { head, at, cdEnd, end, stderr } = found;
+  const { head, at, cdEnd, end, heredoc, stderr } = found;
   const [program, name, ...flags] = headWords(head);
   if (name === undefined || !reviewedWrite(name.value, flags)) return undefined;
   const { rebuttal, removed } = splitRebuttal(flags);
   const kept = flags.filter((_, index) => !removed.has(index));
+  const words = [program, name, ...kept];
+  const positioned: Word[] = [];
+  let cursor = at;
+  for (const word of words) {
+    positioned.push({ ...word, start: cursor, end: cursor + word.raw.length });
+    cursor += word.raw.length + 1;
+  }
+  const commandHead = words.map((word) => word.raw).join(" ");
+  const upload = name.value === UPLOAD_COMMAND;
+  const files = fileInputs(positioned.slice(2), upload);
+  const unsafeFile =
+    files.unsafeFile ??
+    (files.stdinFileFlag !== undefined && !heredoc
+      ? {
+          flag: files.stdinFileFlag,
+          path: "-",
+          reason:
+            "reads standard input that is not a quoted here-document or a literal file redirect",
+        }
+      : undefined);
   // The command runs as written, its wrappers included. The dry-run keeps the `cd`, with its output
   // silenced (bash prints the directory when CDPATH found it), so it runs where the command will;
   // it drops the `2>&1`, before or after a here-document opener, so the CLI's JSON is all its
@@ -753,16 +867,18 @@ function strictScoped(command: string): ScopedCommand | undefined {
     stderr === undefined
       ? command.slice(end)
       : `${command.slice(end, stderr[0])}${command.slice(stderr[1])}`;
-  const rest = kept.map((word) => word.raw);
-  const upload = name.value === UPLOAD_COMMAND;
   return {
     tool: `dispatch_${name.value.replaceAll("-", "_")}`,
     label: `dispatch ${name.value}`,
-    command: `${command.slice(0, at)}${[program.raw, name.raw, ...rest].join(" ")}${command.slice(at + head.length)}`,
-    dryRunScript: `${before}${[program.raw, name.raw, "--dry-run", ...rest].join(" ")}${after}`,
+    command: `${command.slice(0, at)}${commandHead}${command.slice(at + head.length)}`,
+    dryRunScript: `${before}${[program.raw, name.raw, "--dry-run", ...kept.map((word) => word.raw)].join(" ")}${after}`,
     ...(rebuttal === undefined ? {} : { rebuttal }),
-    readsFile: namesFile(kept, upload),
+    readsFile: files.inputs.length > 0,
+    fileInputs: files.inputs,
+    ...(files.stdinFileFlag === undefined ? {} : { stdinFileFlag: files.stdinFileFlag }),
+    ...(unsafeFile === undefined ? {} : { unsafeFile }),
     ...(upload ? { upload: true as const } : {}),
+    ...(cdEnd === undefined ? {} : { changesDirectory: true as const }),
     dirScript: cdEnd === undefined ? "pwd -P" : `${command.slice(0, cdEnd)} >/dev/null && pwd -P`,
   };
 }
@@ -1003,7 +1119,7 @@ function readCall(command: string): CallStatement[] | undefined {
         const line = command.slice(at, lineEnd);
         if ((stripTabs ? line.replace(/^\t+/, "") : line) === delimiter) {
           opened.heredoc = {
-            quoted: /['"\\]/.test(opened.target?.raw ?? ""),
+            quoted: /['"]|\\(?!\n)/.test(opened.target?.raw ?? ""),
             body: [begin, lineEnd],
           };
           at = lineEnd + 1;
@@ -1114,6 +1230,7 @@ const READ_ONLY: Record<string, true> = {
   grep: true,
   head: true,
   tail: true,
+  cut: true,
   sleep: true,
   date: true,
   echo: true,
@@ -1128,17 +1245,20 @@ const DURATION = /^\d+(\.\d+)?[smhd]?$/;
  *   - `\`-newline continuations, quotes, comments and quoted here-documents;
  *   - on the write: `2>&1`, `>`/`>>`/`2>` to a literal path (`/dev/null` too), `< <literal path>`,
  *     one quoted here-document, literal `NAME=value` prefixes and one `timeout <duration>`;
- *   - later stages of the write's pipeline that hold no `dispatch` word, no here-document and no
- *     substitution: they only read the write's output;
+ *   - later stages of the write's pipeline that pass the same read-only rule (`READ_ONLY`), so
+ *     they only read the write's output and write no file;
  *   - before it, joined by `&&`, `;` or a newline: `cd <literal path>`, `export NAME=literal …`
- *     or `NAME=literal …` (a value may start with `~/`), a pipeline of read-only programs
- *     (`READ_ONLY`) with no redirect but to /dev/null, `2>&1` or from a literal path, and a
- *     `dispatch` call that is no reviewed write, with no redirect to a file;
+ *     or `NAME=literal …` (a value may start with `~/`), which the dry run keeps; and, joined by
+ *     `;` or a newline alone, a pipeline of read-only programs (`READ_ONLY`) with no redirect but
+ *     to /dev/null, `2>&1` or from a literal path, and a `dispatch` call that is no reviewed
+ *     write, with no redirect to a file, which it drops;
  *   - after it, any statement that holds no reviewed write;
- *   - `$NAME` or `${NAME}` in the write's words when an earlier statement assigns NAME a literal.
- *     A prefix assignment does not count: bash expands the words before it applies.
+ *   - `$NAME` or `${NAME}` in the write's words when an earlier kept statement assigns NAME a
+ *     literal. A prefix assignment does not count: bash expands the words before it applies.
  * The dry run keeps the `cd`, `export` and assignment statements and the write's prefixes and
- * stdin, and drops the rest. Anything else is no read, and the gate refuses the call as unreadable.
+ * stdin, and drops the rest. A dropped statement may not decide what runs, so it is joined to its
+ * neighbours by `;` or a newline alone, never `&&` or `||`. Anything else is no read, and the gate
+ * refuses the call as unreadable.
  */
 function compositeScoped(command: string): ScopedCommand | undefined {
   const statements = readCall(command);
@@ -1148,7 +1268,9 @@ function compositeScoped(command: string): ScopedCommand | undefined {
     for (const stage of statement.stages)
       if (stage.redirects.some((r) => r.heredoc !== undefined && !r.heredoc.quoted))
         return undefined;
-  const vars = new Map<string, string>();
+  // Variables the call sets to a literal before the write. Once the write is found, a later
+  // statement may set any variable (`read`, `N=$(…)`, `eval`), so the reader knows none there.
+  let vars = new Map<string, string>();
   const wordValue = (word: CallWord | undefined): string | undefined => {
     if (word === undefined || word.unknown) return undefined;
     let out = "";
@@ -1169,7 +1291,7 @@ function compositeScoped(command: string): ScopedCommand | undefined {
     for (const word of list) {
       const value = wordValue(word);
       if (value === undefined) return undefined;
-      out.push({ raw: word.raw, value });
+      out.push({ raw: word.raw, value, start: word.start, end: word.end });
     }
     return out;
   };
@@ -1199,46 +1321,78 @@ function compositeScoped(command: string): ScopedCommand | undefined {
     return at;
   };
   /** A stage's part in the call: the write, a `dispatch` call that sends nothing reviewed, another
-   * program, or `unread` when it may be a write this reader cannot tell. */
+   * program, or `unread` when it may be a write this reader cannot tell: a program, or an
+   * assignment before it, that is an expansion no earlier literal assignment proves. */
   const classify = (stage: CallStage): "write" | "dispatch" | "other" | "unread" => {
-    const text = command.slice(stage.start, stage.end);
     const at = commandAt(stage);
-    if (at === undefined) return text.includes("dispatch") ? "unread" : "other";
+    if (at === undefined) return "unread";
     const [program, name, ...flags] = stage.words.slice(at);
     if (program === undefined) return "other";
     const programValue = wordValue(program);
-    const nameValue = wordValue(name);
-    const scoped = (SCOPED_COMMANDS as readonly string[]).includes(nameValue ?? "");
-    if (programValue === undefined) return scoped || nameValue === undefined ? "unread" : "other";
+    if (programValue === undefined) return "unread";
     if (programValue.split("/").at(-1) !== "dispatch") return "other";
     if (name === undefined) return "dispatch";
+    const nameValue = wordValue(name);
+    const scoped = (SCOPED_COMMANDS as readonly string[]).includes(nameValue ?? "");
     const words = asWords(flags);
     if (nameValue === undefined || (scoped && (words === undefined || stage.substitution)))
       return "unread";
     return words !== undefined && reviewedWrite(nameValue, words) ? "write" : "dispatch";
   };
+
+  /** `printf -vNAME` is a variable assignment, including the attached form bash accepts. */
+  const printfWrites = (words: readonly Word[]) => {
+    let options = true;
+    for (const word of words.slice(1)) {
+      if (options && word.value === "--") {
+        options = false;
+        continue;
+      }
+      if (options && /^-[^-]*v/.test(word.value)) return true;
+    }
+    return false;
+  };
+  /** A later pipeline stage or dropped statement that can only read its inputs and print. */
+  const readOnlyStage = (stage: CallStage): boolean => {
+    const words = asWords(stage.words);
+    const at = commandAt(stage);
+    const program = at === undefined ? undefined : words?.[at]?.value;
+    return (
+      words !== undefined &&
+      program !== undefined &&
+      !stage.substitution &&
+      Object.hasOwn(READ_ONLY, program) &&
+      !(program === "printf" && printfWrites(words.slice(at))) &&
+      stage.redirects.every((redirect) => quiet(redirect) || input(redirect))
+    );
+  };
   const setup: CallStatement[] = [];
   const cds = new Set<CallStatement>();
   let write: CallStatement | undefined;
-  for (const statement of statements) {
+  let writeVars = vars;
+  for (const [index, statement] of statements.entries()) {
+    const kinds = statement.stages.map(classify);
+    if (kinds.includes("unread")) return undefined;
     if (write !== undefined) {
-      // After the write: it has already posted, so only another reviewed write in it matters.
-      if (unreadableDispatchWrite(command.slice(statement.start, statement.end)) !== undefined)
+      // A second write is still a second post, even though it runs after the first one, and so is
+      // one behind a prefix (`env dispatch comment …`), which only the command scan finds.
+      if (
+        kinds.includes("write") ||
+        unreadableDispatchWrite(command.slice(statement.start, statement.end)) !== undefined
+      )
         return undefined;
       continue;
     }
-    const kinds = statement.stages.map(classify);
-    if (kinds.includes("unread")) return undefined;
     if (kinds[0] === "write") {
-      // Later stages of the write's pipeline only read its output.
-      for (const later of statement.stages.slice(1))
-        if (
-          later.substitution ||
-          later.redirects.some((r) => r.heredoc !== undefined) ||
-          later.words.some((w) => w.raw.includes("dispatch"))
-        )
-          return undefined;
+      // Every pipeline stage shares the state that classified the write and must be read-only.
+      if (
+        kinds.slice(1).some((kind) => kind !== "other") ||
+        statement.stages.slice(1).some((later) => !readOnlyStage(later))
+      )
+        return undefined;
       write = statement;
+      writeVars = vars;
+      vars = new Map();
       continue;
     }
     if (kinds.includes("write") || statement.sep === "||") return undefined;
@@ -1267,21 +1421,17 @@ function compositeScoped(command: string): ScopedCommand | undefined {
         continue;
       }
     }
-    // A statement the dry run drops: it reads and prints, and changes no file the write reads.
-    for (const [index, stage] of statement.stages.entries()) {
-      const words = asWords(stage.words);
-      const program = words?.[0]?.value;
-      if (words === undefined || program === undefined || stage.substitution) return undefined;
-      if (kinds[index] === "dispatch" && stage.redirects.every(quiet)) continue;
-      if (
-        !Object.hasOwn(READ_ONLY, program) ||
-        (program === "printf" && words.some((w) => w.value === "-v")) ||
-        !stage.redirects.every((r) => quiet(r) || input(r))
-      )
-        return undefined;
+    // The dry run drops this statement, so it may not decide whether a kept statement or the write
+    // runs: it is joined to neither the statement before it nor the one after it by `&&`.
+    if (statement.sep === "&&" || statements[index - 1]?.sep === "&&") return undefined;
+    // A statement the dry run drops may only read its inputs and print.
+    for (const [at, stage] of statement.stages.entries()) {
+      if (kinds[at] === "dispatch" && stage.redirects.every(quiet)) continue;
+      if (!readOnlyStage(stage)) return undefined;
     }
   }
   if (write === undefined) return undefined;
+  vars = writeVars;
   const stage = write.stages[0];
   const at = commandAt(stage) ?? 0;
   const name = stage.words[at + 1];
@@ -1345,6 +1495,46 @@ function compositeScoped(command: string): ScopedCommand | undefined {
   const heredoc = stage.redirects.find((r) => r.heredoc !== undefined)?.heredoc;
   const upload = nameValue === UPLOAD_COMMAND;
   const keptFlags = flags.filter((_, index) => !removed.has(index));
+  const files = fileInputs(keptFlags, upload);
+  const stdinRedirect = stage.redirects.find((redirect) => input(redirect));
+  let unsafeFile = files.unsafeFile;
+  const inputs = [...files.inputs];
+  if (files.stdinFileFlag !== undefined && unsafeFile === undefined) {
+    const source = stdinRedirect === undefined ? undefined : targetOf(stdinRedirect);
+    if (
+      stdinRedirect?.target === undefined ||
+      !isLiteral(stdinRedirect.target) ||
+      source === undefined ||
+      source === "-"
+    ) {
+      const quotedHereDocument = stage.redirects.some(
+        (redirect) => redirect.heredoc?.quoted === true
+      );
+      if (!quotedHereDocument)
+        unsafeFile = {
+          flag: files.stdinFileFlag,
+          path: "-",
+          reason:
+            "reads standard input that is not a quoted here-document or a literal file redirect",
+        };
+    } else {
+      inputs.push({
+        flag: files.stdinFileFlag,
+        source,
+        span: [stdinRedirect.target.start, stdinRedirect.target.end],
+        equals: false,
+        expandsHome: stdinRedirect.target.raw.startsWith("~"),
+      });
+    }
+  }
+  const snapshotInputs = inputs.map((file) => {
+    let removedBytes = 0;
+    for (const [from, to] of rebuttalCuts) if (to <= file.span[0]) removedBytes += to - from;
+    return {
+      ...file,
+      span: [file.span[0] - removedBytes, file.span[1] - removedBytes] as [number, number],
+    };
+  });
   return {
     tool: `dispatch_${nameValue.replaceAll("-", "_")}`,
     label: `dispatch ${nameValue}`,
@@ -1356,12 +1546,12 @@ function compositeScoped(command: string): ScopedCommand | undefined {
       { at: name.end, text: " --dry-run" }
     )}${heredoc === undefined ? "" : command.slice(heredoc.body[0], heredoc.body[1])}`,
     ...(rebuttal === undefined ? {} : { rebuttal }),
-    readsFile: namesFile(keptFlags, upload),
+    readsFile: snapshotInputs.length > 0,
+    fileInputs: snapshotInputs,
+    ...(unsafeFile === undefined ? {} : { unsafeFile }),
     ...(upload ? { upload: true as const } : {}),
-    dirScript: `${setup
-      .filter((statement) => cds.has(statement))
-      .map(kept)
-      .join("")}pwd -P`,
+    ...(cds.size === 0 ? {} : { changesDirectory: true as const }),
+    dirScript: `${setup.map(kept).join("")}pwd -P`,
   };
 }
 
@@ -1634,6 +1824,8 @@ export interface UnreadableCommand {
   tool: string;
   label: string;
   program?: { namesDispatch: boolean; unread: string[] };
+  /** A file the call would make Dispatch read cannot be captured safely. */
+  file?: { flag: string; path: string; reason: string };
 }
 
 /**
@@ -1707,6 +1899,77 @@ export async function spawnDryRun(
   }
 }
 
+interface CapturedFile {
+  input: FileInput;
+  path: string;
+}
+interface SnapshotSet {
+  directory: string;
+  files: CapturedFile[];
+}
+
+/** The one shell quoting transform for absolute snapshot paths inserted into a command. */
+function quoteSnapshotPath(value: string): string {
+  const escaped = value.replaceAll("'", "'\\''");
+  return `'${escaped}'`;
+}
+
+/** Rewrites only the operands Dispatch opens, leaving every other command word byte-for-byte intact. */
+function commandWithSnapshots(command: string, files: readonly CapturedFile[]): string {
+  let cursor = 0;
+  let out = "";
+  for (const captured of [...files].sort(
+    (left, right) => left.input.span[0] - right.input.span[0]
+  )) {
+    const [from, to] = captured.input.span;
+    if (from < cursor) throw new Error("AskGate found overlapping file operands");
+    out += command.slice(cursor, from);
+    const snapshot = quoteSnapshotPath(captured.path);
+    out += captured.input.equals ? `${captured.input.flag}=${snapshot}` : snapshot;
+    cursor = to;
+  }
+  return out + command.slice(cursor);
+}
+
+/**
+ * Copies one source into an exclusive owner-only snapshot, reading only a regular file. `stat`
+ * refuses a FIFO, a device, a directory or a link to one before the open, and `O_NONBLOCK` with a
+ * second `fstat` on the open descriptor refuses one swapped in between, before the first read.
+ */
+function captureSnapshot(source: string, directory: string, index: number): string {
+  if (!fs.statSync(source).isFile()) throw new Error("is not a regular file AskGate can read");
+  const target = path.join(directory, `${index}${path.extname(source)}`);
+  const input = fs.openSync(source, fs.constants.O_RDONLY | fs.constants.O_NONBLOCK);
+  let output: number | undefined;
+  let complete = false;
+  try {
+    if (!fs.fstatSync(input).isFile()) throw new Error("is not a regular file AskGate can read");
+    output = fs.openSync(
+      target,
+      fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL | fs.constants.O_NOFOLLOW,
+      0o600
+    );
+    fs.fchmodSync(output, 0o600);
+    const buffer = Buffer.allocUnsafe(64 * 1024);
+    for (;;) {
+      const read = fs.readSync(input, buffer);
+      if (read === 0) break;
+      for (let written = 0; written < read; )
+        written += fs.writeSync(output, buffer, written, read - written);
+    }
+    complete = true;
+    return target;
+  } finally {
+    if (output !== undefined) fs.closeSync(output);
+    fs.closeSync(input);
+    if (!complete) fs.rmSync(target, { force: true });
+  }
+}
+
+function removeSnapshots(snapshot: SnapshotSet): void {
+  for (const captured of snapshot.files) fs.rmSync(captured.path, { force: true });
+  fs.rmSync(snapshot.directory, { recursive: true, force: true });
+}
 function breakerKey(toolName: string, input: Input): string {
   let key = toolName;
   for (const k of BREAKER_KEYS) if (input[k] !== undefined) key += `\u0000${k}=${String(input[k])}`;
@@ -1988,7 +2251,9 @@ function characters(chars: readonly string[]): string {
     : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
 }
 /** The refusal for a scoped `dispatch` write inside a command the gate cannot read; nothing in the call ran. */
-function renderUnreadable({ label, program }: UnreadableCommand): string {
+function renderUnreadable({ label, program, file }: UnreadableCommand): string {
+  if (file !== undefined)
+    return `AskGate did not run this call: \`${file.flag}\` names ${JSON.stringify(file.path)}, which ${file.reason}. AskGate reads and posts only a regular file it captured before review. Send the text with \`${file.flag} -\` and a quoted here-document (\`<<'EOF'\`), or use \`--content-file\` with a regular file. Nothing in the call ran.`;
   const why =
     program === undefined
       ? ""
@@ -2097,9 +2362,18 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     /** Why a waiting gate was given up: the user or the runner ended its call or run, or the session shut down. */
     type Abandon = (cause: "abandoned" | "shutdown", graceMs?: number) => void;
     const inflight = new Map<string, Abandon>();
+    const snapshots = new Map<string, SnapshotSet>();
+    const releaseSnapshots = (toolCallId: string) => {
+      const snapshot = snapshots.get(toolCallId);
+      if (snapshot === undefined) return;
+      snapshots.delete(toolCallId);
+      removeSnapshots(snapshot);
+    };
     pi.on("tool_execution_end", (event: { toolCallId: string }) => {
       inflight.get(event.toolCallId)?.("abandoned");
+      releaseSnapshots(event.toolCallId);
     });
+    pi.on("tool_result", (event: { toolCallId: string }) => releaseSnapshots(event.toolCallId));
     pi.on("agent_end", (event: { messages?: readonly Message[]; willContinue?: boolean }) => {
       if (event.willContinue) return;
       if (event.messages?.findLast((m) => m.role === "assistant")?.stopReason !== "aborted") return;
@@ -2113,6 +2387,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
     pi.on("session_shutdown", async () => {
       closing = true;
       for (const abandon of inflight.values()) abandon("shutdown", SHUTDOWN_GRACE_MS);
+      for (const toolCallId of snapshots.keys()) releaseSnapshots(toolCallId);
       const { promise: waited, resolve: stopWaiting } = Promise.withResolvers<void>();
       const timer = setTimeout(stopWaiting, SHUTDOWN_WAIT_MS);
       await Promise.race([Promise.allSettled([...handling]), waited]);
@@ -2411,10 +2686,11 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
      * or `unscoped`: an upload whose resolved name and path make no markdown document.
      */
     type DryRun =
-      | { args: Input }
-      | { failure: string }
-      | { cause: "abandoned" | "shutdown" }
-      | { unscoped: true };
+      | { args: Input; command?: string }
+      | { failure: string; command?: string }
+      | { unreadable: UnreadableCommand }
+      | { cause: "abandoned" | "shutdown"; command?: string }
+      | { unscoped: true; command?: string };
     const readArgs = async (
       scoped: ScopedCommand,
       input: Input,
@@ -2471,8 +2747,128 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         }
         return { stdout: run.stdout, stderr: run.stderr };
       };
-      const dry = await stdoutOf(scoped.dryRunScript, `${scoped.label} --dry-run`);
-      if (!("stdout" in dry)) return dry;
+      if (scoped.unsafeFile !== undefined)
+        return {
+          unreadable: {
+            tool: scoped.tool,
+            label: scoped.label,
+            file: scoped.unsafeFile,
+          },
+        };
+
+      let executionCommand = scoped.command;
+      if (scoped.fileInputs.length > 0) {
+        const relativeFile = scoped.fileInputs.find((file) => {
+          if (file.expandsHome) return false;
+          return !path.isAbsolute(file.source);
+        });
+        let base = cwd;
+        if (relativeFile !== undefined) {
+          try {
+            // A child shell's process.cwd() is physical even when the tool's cwd used a symlink.
+            base = fs.realpathSync(cwd);
+          } catch (error) {
+            return {
+              unreadable: {
+                tool: scoped.tool,
+                label: scoped.label,
+                file: {
+                  flag: relativeFile.flag,
+                  path: relativeFile.source,
+                  reason: `could not resolve the tool directory: ${messageOf(error)}`,
+                },
+              },
+            };
+          }
+        }
+        const firstRelative = scoped.changesDirectory === true ? relativeFile : undefined;
+        if (firstRelative !== undefined) {
+          const reached = await stdoutOf(scoped.dirScript, `${scoped.label}'s directory`);
+          if ("cause" in reached) return reached;
+          if (!("stdout" in reached))
+            return {
+              unreadable: {
+                tool: scoped.tool,
+                label: scoped.label,
+                file: {
+                  flag: firstRelative.flag,
+                  path: firstRelative.source,
+                  reason: `could not determine the command directory: ${reached.failure}`,
+                },
+              },
+            };
+          base = reached.stdout.endsWith("\n") ? reached.stdout.slice(0, -1) : reached.stdout;
+          if (!path.isAbsolute(base))
+            return {
+              unreadable: {
+                tool: scoped.tool,
+                label: scoped.label,
+                file: {
+                  flag: firstRelative.flag,
+                  path: firstRelative.source,
+                  reason: "could not determine an absolute command directory",
+                },
+              },
+            };
+        }
+
+        const directory = fs.mkdtempSync(path.join(path.resolve(os.tmpdir()), "askgate-"));
+        fs.chmodSync(directory, 0o700);
+        const snapshot: SnapshotSet = { directory, files: [] };
+        let current = scoped.fileInputs[0];
+        let source = current.source;
+        try {
+          for (const inputFile of scoped.fileInputs) {
+            current = inputFile;
+            source = inputFile.source;
+            if (inputFile.expandsHome) {
+              if (!/^~(?:\/|$)/.test(source))
+                throw new Error("uses a home directory AskGate cannot resolve");
+              source = source.replace(/^~/, deps.home);
+            }
+            const resolved = path.isAbsolute(source) ? source : path.resolve(base, source);
+            snapshot.files.push({
+              input: inputFile,
+              path: captureSnapshot(resolved, directory, snapshot.files.length),
+            });
+          }
+          snapshots.set(toolCallId, snapshot);
+          executionCommand = commandWithSnapshots(scoped.command, snapshot.files);
+        } catch (error) {
+          removeSnapshots(snapshot);
+          return {
+            unreadable: {
+              tool: scoped.tool,
+              label: scoped.label,
+              file: {
+                flag: current.flag,
+                path: source,
+                reason:
+                  (error as NodeJS.ErrnoException).code === "ENOENT"
+                    ? "does not exist"
+                    : `could not be captured: ${messageOf(error)}`,
+              },
+            },
+          };
+        }
+      }
+
+      const execution = executionCommand === scoped.command ? {} : { command: executionCommand };
+      const reviewed = execution.command === undefined ? scoped : scopedCommand(execution.command);
+      if (reviewed === undefined)
+        return {
+          unreadable: {
+            tool: scoped.tool,
+            label: scoped.label,
+            file: {
+              flag: scoped.fileInputs[0]?.flag ?? "--file",
+              path: "",
+              reason: "could not rewrite to the snapshot AskGate captured",
+            },
+          },
+        };
+      const dry = await stdoutOf(reviewed.dryRunScript, `${scoped.label} --dry-run`);
+      if (!("stdout" in dry)) return { ...dry, ...execution };
       let args: Input | undefined;
       try {
         const parsed: unknown = JSON.parse(dry.stdout);
@@ -2482,7 +2878,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       }
       if (args === undefined) {
         const printed = clipBytes((dry.stdout || dry.stderr).trim(), GATE_REASON_MAX_BYTES);
-        return { failure: `${scoped.label} --dry-run printed no JSON object: ${printed}` };
+        return {
+          failure: `${scoped.label} --dry-run printed no JSON object: ${printed}`,
+          ...execution,
+        };
       }
       if (scoped.upload) {
         // The name and the path as the CLI sends them: Dispatch trims the name it stores.
@@ -2490,32 +2889,42 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           ...args,
           ...(typeof args.name === "string" ? { name: args.name.trim() } : {}),
         };
-        if (!uploadIsDocument(resolved)) return { unscoped: true };
+        if (!uploadIsDocument(resolved)) return { unscoped: true, ...execution };
       }
-      // An upload given with `--path` prints the path, not the text: the gate reads the file and adds
-      // its text as `content`, so the model sees one shape for both forms of the upload.
+      // The artifact dry run prints its snapshot path rather than its body. Read only the owned
+      // snapshot here, so the model sees the exact bytes the rewritten command will post.
       if (!scoped.upload || typeof args.path !== "string" || args.content !== undefined)
-        return { args };
-      // A relative path resolves where the CLI runs, against its process.cwd(): the physical
-      // directory after the command's own `cd`, which bash resolves (CDPATH and symlinks included),
-      // so the gate asks bash for that directory rather than guessing it. Only the newline `pwd`
-      // ends its line with is removed: a directory's name may end in a blank.
-      let base = cwd;
-      if (!path.isAbsolute(args.path)) {
-        const reached = await stdoutOf(scoped.dirScript, `${scoped.label}'s directory`);
-        if (!("stdout" in reached)) return reached;
-        base = reached.stdout.endsWith("\n") ? reached.stdout.slice(0, -1) : reached.stdout;
-      }
-      const file = path.resolve(base, args.path);
-      let content: string | undefined;
+        return { args, ...execution };
+      const snapshot = snapshots
+        .get(toolCallId)
+        ?.files.find((file) => file.input.flag === "--path");
+      if (snapshot === undefined)
+        return {
+          unreadable: {
+            tool: scoped.tool,
+            label: scoped.label,
+            file: {
+              flag: "--path",
+              path: args.path,
+              reason: "was not captured before review",
+            },
+          },
+        };
       try {
-        content = deps.readFile(file);
+        return { args: { ...args, content: fs.readFileSync(snapshot.path, "utf8") }, ...execution };
       } catch (error) {
-        return { failure: `${scoped.label}: ${file} could not be read: ${messageOf(error)}` };
+        return {
+          unreadable: {
+            tool: scoped.tool,
+            label: scoped.label,
+            file: {
+              flag: "--path",
+              path: snapshot.path,
+              reason: `could not read its captured snapshot: ${messageOf(error)}`,
+            },
+          },
+        };
       }
-      if (content === undefined)
-        return { failure: `${scoped.label}: ${file}, which --path names, does not exist` };
-      return { args: { ...args, content } };
     };
 
     /** The fields every entry of a call carries; a gated call fills in its target's revise count and the digest. */
@@ -2569,10 +2978,27 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               revised = { ...event.input, command: scoped.command };
             base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
             const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
+            if ("command" in run && run.command !== undefined)
+              revised = { ...event.input, command: run.command };
             // An upload its dry run shows is no markdown document passes as an unscoped call does,
             // with no entry; an override flag on it is still removed, since the CLI would refuse it.
             if ("unscoped" in run) return revised === undefined ? undefined : { input: revised };
             if ("cause" in run) decision = givenUp(mode, run.cause);
+            else if ("unreadable" in run) {
+              const resolved = halted ? undefined : resolveRole(ctx);
+              if (halted) decision = pass("halted");
+              else if (resolved === undefined) decision = noModelRole;
+              else if (ctx.model?.provider !== resolved.model.provider)
+                decision = pass("skipped", {
+                  reason: `primary on ${ctx.model?.provider ?? "no model"}`,
+                });
+              else
+                decision = {
+                  fields: { decision: "revise", outcome: "unreadable" },
+                  result: { block: true, reason: renderUnreadable(run.unreadable) },
+                  effect: "none",
+                };
+            }
             // The CLI refuses arguments it cannot parse before it sends anything, so the command runs.
             else if ("failure" in run) decision = pass("error", { reason: run.failure });
             else {
@@ -2612,12 +3038,17 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         // gate's own (the dump, the render, the dry-run's spawn), not a missing
         // verdict, so it does not count toward the halt.
         decision = pass("error", { reason: messageOf(error) });
+        releaseSnapshots(event.toolCallId);
       }
       // Settled once and recorded once, each on its own, so neither failing can repeat the other.
       try {
         settle(decision.effect, ctx);
       } catch {
         // The halt notice is best effort.
+      }
+      if (decision.result?.block) {
+        releaseSnapshots(event.toolCallId);
+        revised = undefined;
       }
       // The first gated call says once that the OMP_ASKGATE it ignored is not the switch.
       if (ignoredModeNotice !== undefined) {

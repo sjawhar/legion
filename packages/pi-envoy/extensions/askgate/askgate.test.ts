@@ -120,7 +120,6 @@ function bind(
     now: Date.now,
     logger: { warn: (message: string) => warnings.push(message) },
     appendFile: (p, text) => dumps.push([p, text]),
-    readFile: (p) => (fs.existsSync(p) ? fs.readFileSync(p, "utf8") : undefined),
     complete: (req) => {
       calls.push(req);
       return complete(req);
@@ -1060,7 +1059,8 @@ describe("population (test 11)", () => {
 
 describe("dispatch CLI calls", () => {
   // A stand-in for the plugin's `dispatch`: under --dry-run it prints the arguments its flags name as
-  // JSON (a `-file` flag reads its path, `-` reads stdin), and without it exits 3 as if it had sent.
+  // JSON (a `-file` flag reads its path, `-` reads stdin). A real call can record the arguments it
+  // would post under ASKGATE_POSTED, so the gate tests compare reviewed content with sent content.
   const work = fs.mkdtempSync(path.join(tmpdir(), "askgate-cli-"));
   const bin = path.join(work, "bin");
   fs.mkdirSync(bin);
@@ -1068,7 +1068,7 @@ describe("dispatch CLI calls", () => {
     path.join(bin, "dispatch"),
     `#!${process.execPath}
 const [command, ...rest] = process.argv.slice(2);
-if (!rest.includes("--dry-run")) { console.log("stub dispatch " + command + " would send"); process.exit(3); }
+const dryRun = rest.includes("--dry-run");
 const args = {};
 for (let i = 0; i < rest.length; i++) {
 	const token = rest[i];
@@ -1079,6 +1079,12 @@ for (let i = 0; i < rest.length; i++) {
 	const value = eq === -1 ? rest[++i] : token.slice(eq + 1);
 	if (name.endsWith("-file")) args[name.slice(0, -5).replaceAll("-", "_")] = value === "-" ? await Bun.stdin.text() : await Bun.file(value).text();
 	else args[name.replaceAll("-", "_")] = value;
+}
+if (!dryRun) {
+	if (command === "artifact" && typeof args.path === "string") args.content = await Bun.file(args.path).text();
+	if (process.env.ASKGATE_POSTED) await Bun.write(process.env.ASKGATE_POSTED, JSON.stringify(args));
+	console.log("stub dispatch " + command + " would send");
+	process.exit(0);
 }
 console.log(JSON.stringify(args, null, 2));
 `,
@@ -1253,7 +1259,7 @@ console.log(JSON.stringify(args, null, 2));
     const plain = "dispatch comment --dry-run --issue X-1 --body hi";
     const cases: Array<[string, string]> = [
       [
-        "cd pre && wc -c note.txt && dispatch message --issue X-1 --body-file note.txt",
+        "wc -c pre/note.txt; cd pre && dispatch message --issue X-1 --body-file note.txt",
         "cd pre >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt",
       ],
       [
@@ -1261,7 +1267,7 @@ console.log(JSON.stringify(args, null, 2));
         "export A=1 B=~/two && C=3\ndispatch comment --dry-run --issue X-1 --body hi",
       ],
       [
-        "cat pre/note.txt | grep -c Body >/dev/null; ls pre 2>&1 | head -1; [ -s pre/note.txt ] && dispatch comment --issue X-1 --body hi",
+        "cat pre/note.txt | grep -c Body >/dev/null; ls pre 2>&1 | head -1; [ -s pre/note.txt ]; dispatch comment --issue X-1 --body hi",
         plain,
       ],
       [
@@ -1269,9 +1275,19 @@ console.log(JSON.stringify(args, null, 2));
         plain,
       ],
     ];
+    const results = [];
     for (const [index, [command]] of cases.entries())
-      expect(await g.bash(`s${index}`, command)).toBeUndefined();
-    expect(g.dryRuns.map((r) => r.script)).toEqual(cases.map(([, script]) => script));
+      results.push(await g.bash(`s${index}`, command));
+    expect(results[0]?.input?.command).toContain("/askgate-");
+    expect(results.slice(1)).toEqual([undefined, undefined, undefined]);
+    expect(g.dryRuns).toHaveLength(5);
+    expect(g.dryRuns[0].script).toBe("cd pre >/dev/null && pwd -P");
+    expect(g.dryRuns[1].script).toContain(
+      "cd pre >/dev/null && dispatch message --dry-run --issue X-1 --body-file '"
+    );
+    expect(g.dryRuns.slice(2).map((run) => run.script)).toEqual(
+      cases.slice(1).map(([, script]) => script)
+    );
     expect(g.calls[0].user).toContain('"body": "Body from pre."');
     expect(g.entries.map((e) => e.outcome)).toEqual(Array(cases.length).fill("verdict"));
   }, 30_000);
@@ -1316,15 +1332,15 @@ console.log(JSON.stringify(args, null, 2));
     expect(g.calls[1].user).toContain('"issue": "X-1"');
     expect(g.entries.map((e) => e.outcome)).toEqual(Array(cases.length).fill("verdict"));
   }, 30_000);
-  test("a literal file as the write's stdin is read and kept in its dry run", async () => {
+  test("a literal file as the write's stdin is snapshotted before the dry run", async () => {
     fs.writeFileSync(path.join(work, "q.md"), QUESTION);
     const g = bind({ env: STUB, cwd: work });
-    expect(
-      await g.bash("i1", "dispatch ask --issue X-1 --question-file - < q.md 2>&1")
-    ).toBeUndefined();
-    expect(g.dryRuns.map((r) => r.script)).toEqual([
-      "dispatch ask --dry-run --issue X-1 --question-file - < q.md",
-    ]);
+    const result = await g.bash("i1", "dispatch ask --issue X-1 --question-file - < q.md 2>&1");
+    expect(result?.input?.command).toContain("/askgate-");
+    expect(g.dryRuns).toHaveLength(1);
+    expect(g.dryRuns[0].script).toContain(
+      "dispatch ask --dry-run --issue X-1 --question-file - < '"
+    );
     expect(g.calls[0].user).toContain(
       JSON.stringify({ issue: "X-1", question: QUESTION }, null, 2)
     );
@@ -1403,6 +1419,103 @@ console.log(JSON.stringify(args, null, 2));
         expect(g.dryRuns).toHaveLength(0);
         expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
       }
+    });
+  test("astra 1: a backslash-continued here-document delimiter is refused before bash runs", async () => {
+    const marker = path.join(work, "heredoc-marker");
+    fs.rmSync(marker, { force: true });
+    const command = `dispatch ask --issue X-1 --question-file - <<E\\\nOF\n$(printf marker > ${marker}; printf reviewed)\nEOF`;
+    const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+
+    const result = await g.bash("continued-heredoc", command);
+
+    expect(result?.block).toBe(true);
+    expect(fs.existsSync(marker)).toBe(false);
+    expect(g.dryRuns).toHaveLength(0);
+    expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "unreadable" }]);
+  });
+  const UNPROVED: Array<[string, string, string, boolean?]> = [
+    [
+      "astra 2: a write named by a variable after a reviewed write",
+      'N=comment; dispatch comment --issue X-1 --body one; dispatch "$N" --issue X-1 --body two',
+      "dispatch_comment",
+    ],
+    [
+      "astra 2: a write run by a variable program in a later pipeline stage",
+      "D=dispatch; dispatch comment --issue X-1 --body one | $D comment --issue X-1 --body two",
+      "dispatch_comment",
+    ],
+    [
+      "B2: a later pipeline stage copies over the question file",
+      "dispatch ask --issue X-1 --question-file q.md | cp other.md q.md",
+      "dispatch_ask",
+    ],
+    [
+      "B2: a later pipeline stage edits the upload file",
+      "dispatch artifact --issue X-1 --name b.md --path b.md | sed -i 's/a/b/' b.md",
+      "dispatch_artifact",
+    ],
+    [
+      "B2: a later pipeline stage tees to a path",
+      "dispatch ask --issue X-1 --question q | tee answer.txt",
+      "dispatch_ask",
+    ],
+    [
+      "astra 3: a dropped conditional cd",
+      "test -e missing && cd alt; dispatch comment --issue X-1 --body-file note.md",
+      "dispatch_comment",
+    ],
+    [
+      "B3: a dropped bracket test before a conditional cd",
+      "[ -d docs ] && cd docs; dispatch ask --issue X-1 --question-file q.md",
+      "dispatch_ask",
+    ],
+    [
+      "astra 3: printf -vNAME changes the reviewed variable",
+      'TEXT=REVIEWED; printf -vTEXT %s UNREVIEWED; dispatch comment --issue X-1 --body "$TEXT"',
+      "dispatch_comment",
+    ],
+    [
+      "astra 4: CDPATH changes the upload directory",
+      "export CDPATH=/other; cd alt; dispatch artifact --issue X-1 --name note.md --path note.md",
+      "dispatch_artifact",
+      true,
+    ],
+    [
+      "B3: an exported CDPATH joined by && changes the upload directory",
+      "export CDPATH=/x && cd docs && dispatch artifact --issue X-1 --name b.md --path b.md",
+      "dispatch_artifact",
+      true,
+    ],
+    [
+      "astra 2: a write named by a variable reassigned after the reviewed write",
+      'N=read; dispatch comment --issue X-1 --body one; N=ask; dispatch "$N" --issue X-1 --question two',
+      "dispatch_comment",
+    ],
+    [
+      "astra 2: a second write behind a prefix after the reviewed write",
+      "dispatch comment --issue X-1 --body one; env dispatch comment --issue X-1 --body two",
+      "dispatch_comment",
+    ],
+    [
+      "astra 3: a dropped command after a kept cd joined by &&",
+      "cd pre && wc -c note.txt; dispatch comment --issue X-1 --body hi",
+      "dispatch_comment",
+    ],
+    [
+      "astra 2: a program named by a variable whose words hold the subcommand",
+      'CMD="dispatch comment"; dispatch comment --issue X-1 --body one; $CMD --issue X-1 --body two',
+      "dispatch_comment",
+    ],
+  ];
+  for (const [form, command, tool, directoryLookup] of UNPROVED)
+    test(`${form} is refused before it sends`, async () => {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      const result = await g.bash("unproved", command);
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("Nothing in the call ran");
+      expect(g.dryRuns).toHaveLength(directoryLookup ? 1 : 0);
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries.map((e) => [e.tool, e.outcome])).toEqual([[tool, "unreadable"]]);
     });
   test("a compound command whose dispatch sends nothing, or names dispatch only as text, is not refused", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
@@ -1502,7 +1615,7 @@ console.log(JSON.stringify(args, null, 2));
       ["cd", "dispatch_ask", "verdict", "allow"],
       ["joined", "dispatch_comment", "unreadable", "revise"],
     ]);
-  });
+  }, 30_000);
   test("a dispatch write called by a path the shell expands is refused, in every mode, its reason naming what AskGate cannot read", async () => {
     // A `~/` path and a backslash-quoted `\dispatch` are read (the variable test above); these are not.
     const expanded: Array<[string, string]> = [
@@ -1626,7 +1739,7 @@ console.log(JSON.stringify(args, null, 2));
       "The agent is about to run `dispatch request-approval` with these arguments:"
     );
     expect(g.calls[4].user).toContain('"summary": "A live sync replaces the nightly export."');
-  });
+  }, 30_000);
   test("a request-approval joined to another command is refused like any other scoped write", async () => {
     const g = bind({ env: STUB, cwd: work });
     const result = await g.bash(
@@ -1718,14 +1831,17 @@ console.log(JSON.stringify(args, null, 2));
     fs.writeFileSync(path.join(work, "sub", "inner", "note.txt"), "Body from the inner directory.");
     for (const mode of ["warn", "block"]) {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: mode }, cwd: work });
-      expect(
-        await g.bash("cd", "cd sub && dispatch message --issue X-1 --body-file note.txt")
-      ).toBeUndefined();
-      expect(
-        await g.bash("rel", "cd inner && dispatch message --issue X-1 --body-file note.txt", {
-          cwd: "sub",
-        })
-      ).toBeUndefined();
+      const first = await g.bash(
+        "cd",
+        "cd sub && dispatch message --issue X-1 --body-file note.txt"
+      );
+      const second = await g.bash(
+        "rel",
+        "cd inner && dispatch message --issue X-1 --body-file note.txt",
+        { cwd: "sub" }
+      );
+      expect(first?.input?.command).toContain("/askgate-");
+      expect(second?.input?.command).toContain("/askgate-");
       expect(
         await g.bash("err", "dispatch comment --issue X-1 --body 'Looks right.' 2>&1")
       ).toBeUndefined();
@@ -1741,35 +1857,23 @@ console.log(JSON.stringify(args, null, 2));
           `dispatch ask --issue X-1 --question-file - <<'EOF' 2>&1\n${QUESTION}EOF`
         )
       ).toBeUndefined();
-      expect(g.dryRuns).toEqual([
-        {
-          script:
-            "cd sub >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt",
-          cwd: work,
-          timeoutMs: 10_000,
-        },
-        {
-          script:
-            "cd inner >/dev/null && dispatch message --dry-run --issue X-1 --body-file note.txt",
-          cwd: path.join(work, "sub"),
-          timeoutMs: 10_000,
-        },
-        {
-          script: "dispatch comment --dry-run --issue X-1 --body 'Looks right.'",
-          cwd: work,
-          timeoutMs: 10_000,
-        },
-        {
-          script: `cd sub >/dev/null && dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`,
-          cwd: work,
-          timeoutMs: 10_000,
-        },
-        {
-          script: `dispatch ask --dry-run --issue X-1 --question-file - <<'EOF'\n${QUESTION}EOF`,
-          cwd: work,
-          timeoutMs: 10_000,
-        },
-      ]);
+      expect(g.dryRuns).toHaveLength(7);
+      expect(g.dryRuns[0]).toMatchObject({
+        script: "cd sub >/dev/null && pwd -P",
+        cwd: work,
+        timeoutMs: 10_000,
+      });
+      expect(g.dryRuns[1]?.script).toContain(
+        "cd sub >/dev/null && dispatch message --dry-run --issue X-1 --body-file '"
+      );
+      expect(g.dryRuns[2]).toMatchObject({
+        script: "cd inner >/dev/null && pwd -P",
+        cwd: path.join(work, "sub"),
+        timeoutMs: 10_000,
+      });
+      expect(g.dryRuns[3]?.script).toContain(
+        "cd inner >/dev/null && dispatch message --dry-run --issue X-1 --body-file '"
+      );
       expect(g.calls).toHaveLength(5);
       expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
       expect(g.calls[1].user).toContain('"body": "Body from the inner directory."');
@@ -1822,12 +1926,16 @@ console.log(JSON.stringify(args, null, 2));
     ]) {
       expect((await g.bash(command, command))?.reason).not.toContain(NOTE);
     }
-  });
+  }, 30_000);
   test("a cd that CDPATH resolves prints nothing into the dry-run's JSON", async () => {
+    fs.mkdirSync(path.join(work, "sub"), { recursive: true });
+    fs.writeFileSync(path.join(work, "sub", "note.txt"), "Body from the working directory.");
     const g = bind({ env: { ...STUB, CDPATH: work }, cwd: bin });
-    expect(
-      await g.bash("b1", "cd sub && dispatch message --issue X-1 --body-file note.txt")
-    ).toBeUndefined();
+    const result = await g.bash(
+      "b1",
+      "cd sub && dispatch message --issue X-1 --body-file note.txt"
+    );
+    expect(result).toMatchObject({ input: { command: expect.stringContaining("/askgate-") } });
     expect(g.entries).toMatchObject([{ tool: "dispatch_message", outcome: "verdict" }]);
     expect(g.calls[0].user).toContain('"body": "Body from the working directory."');
   });
@@ -1914,18 +2022,22 @@ console.log(JSON.stringify(args, null, 2));
         "u1",
         "dispatch artifact --issue DSP-1 --name brief.md --content-file brief.md"
       );
-      expect(result).toBeUndefined();
+      expect(result?.input?.command).toContain("/askgate-");
       expect(g.calls).toHaveLength(1);
       expect(g.calls[0].user).toContain(JSON.stringify(BRIEF));
       expect(g.calls[0].user).toContain(uploadRule);
       expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "verdict" }]);
     });
-    test("(b) --path, whose dry run prints {issue, name, path}, reaches the model with the same text", async () => {
+    test("(b) --path reaches the model with the snapshot path and the source text", async () => {
       const g = bind({ env: STUB, cwd: work });
-      await g.bash("u2", "dispatch artifact --issue DSP-1 --name brief.md --path brief.md");
+      const result = await g.bash(
+        "u2",
+        "dispatch artifact --issue DSP-1 --name brief.md --path brief.md"
+      );
+      expect(result?.input?.command).toContain("/askgate-");
       expect(g.calls).toHaveLength(1);
       expect(g.calls[0].user).toContain(`"content": ${JSON.stringify(BRIEF)}`);
-      expect(g.calls[0].user).toContain('"path": "brief.md"');
+      expect(g.calls[0].user).toContain('"path": "/mnt/nvme/sami/tmp/askgate-');
       expect(g.calls[0].user).toContain(uploadRule);
     });
     test("(c) after a leading cd, a relative --path is read from the directory the cd reached, which bash names", async () => {
@@ -1980,16 +2092,101 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.calls).toHaveLength(1);
       expect(g.calls[0].user).toContain(JSON.stringify(`${BRIEF}(the spaced copy)\n`));
     });
-    test("(d) a --path the gate cannot read records error and the call runs", async () => {
+    test("(d) a missing --path is refused before AskGate reads it", async () => {
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
       const result = await g.bash(
         "u4",
         "dispatch artifact --issue DSP-1 --name brief.md --path missing.md"
       );
-      expect(result).toBeUndefined();
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("does not exist");
       expect(g.calls).toHaveLength(0);
-      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "error" }]);
-      expect(g.entries[0].reason).toContain(path.join(work, "missing.md"));
+      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "unreadable" }]);
+    });
+    test("B4: a non-regular --path is refused before AskGate reads it", async () => {
+      const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
+      const result = await g.bash(
+        "u4-device",
+        "dispatch artifact --issue DSP-1 --name brief.md --path /dev/null"
+      );
+
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("--content-file");
+      expect(g.calls).toHaveLength(0);
+      expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "unreadable" }]);
+    });
+    test("astra 5: an artifact posts the file snapshot reviewed before the model answers", async () => {
+      const source = path.join(work, "snapshot.md");
+      const posted = path.join(work, "snapshot-posted.json");
+      const reviewed = "# reviewed upload\n";
+      fs.writeFileSync(source, reviewed);
+      const command = "dispatch artifact --issue DSP-1 --name snapshot.md --path snapshot.md";
+      const g = bind({
+        env: STUB,
+        cwd: work,
+        complete: async () => {
+          fs.writeFileSync(source, "# changed after review\n");
+          return { text: ALLOW };
+        },
+      });
+
+      const result = await g.bash("snapshot", command);
+      const postedCommand = (result?.input?.command as string | undefined) ?? command;
+      const child = Bun.spawn(["bash", "-c", postedCommand], {
+        cwd: work,
+        env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(await child.exited).toBe(0);
+      expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ content: reviewed });
+      expect(g.calls[0]?.user).toContain(JSON.stringify(reviewed));
+    });
+    test("a --question-file posts the snapshot that AskGate reviewed", async () => {
+      const source = path.join(work, "snapshot-question.md");
+      const posted = path.join(work, "snapshot-question-posted.json");
+      const reviewed = "Should the deployment wait for approval?\n";
+      fs.writeFileSync(source, reviewed);
+      const command = "dispatch ask --issue DSP-1 --question-file snapshot-question.md";
+      const g = bind({
+        env: STUB,
+        cwd: work,
+        complete: async () => {
+          fs.writeFileSync(source, "Changed after AskGate reviewed it.\n");
+          return { text: ALLOW };
+        },
+      });
+
+      const result = await g.bash("snapshot-question", command);
+      const postedCommand = result?.input?.command as string | undefined;
+      expect(postedCommand).toBeString();
+      const child = Bun.spawn(["bash", "-c", postedCommand ?? command], {
+        cwd: work,
+        env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      expect(await child.exited).toBe(0);
+      expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ question: reviewed });
+      expect(g.calls[0]?.user).toContain(JSON.stringify(reviewed));
+    });
+    test("a snapshot is released when the tool reports its result", async () => {
+      const source = path.join(work, "release-snapshot.md");
+      fs.writeFileSync(source, "Release this snapshot after posting.\n");
+      const g = bind({ env: STUB, cwd: work });
+
+      const result = await g.bash(
+        "release-snapshot",
+        "dispatch ask --issue DSP-1 --question-file release-snapshot.md"
+      );
+      const command = result?.input?.command as string;
+      const snapshot = /'([^']*\/askgate-[^']*\/0[^']*)'/.exec(command)?.[1];
+      expect(snapshot).toBeString();
+      expect(fs.existsSync(snapshot ?? "")).toBe(true);
+
+      await g.event("tool_result", { toolCallId: "release-snapshot" });
+
+      expect(fs.existsSync(snapshot ?? "")).toBe(false);
     });
     test("(e) an upload of shot.png never reaches the model", async () => {
       const g = bind({ env: STUB, cwd: work });
@@ -2007,13 +2204,15 @@ console.log(JSON.stringify(args, null, 2));
       ).toBeUndefined();
       expect(g.entries).toHaveLength(0);
     });
-    test("a markdown upload piped into a reader is reviewed, the pipe left out of its dry run", async () => {
+    test("a markdown upload piped into a reader posts its snapshot and leaves the pipe out of its dry run", async () => {
       const g = bind({ env: STUB, cwd: work });
-      expect(
-        await g.bash("u7", "dispatch artifact --issue DSP-1 --name brief.md --path brief.md | cat")
-      ).toBeUndefined();
-      expect(g.dryRuns[0].script).toBe(
-        "dispatch artifact --dry-run --issue DSP-1 --name brief.md --path brief.md"
+      const result = await g.bash(
+        "u7",
+        "dispatch artifact --issue DSP-1 --name brief.md --path brief.md | cat"
+      );
+      expect(result?.input?.command).toContain("/askgate-");
+      expect(g.dryRuns[0].script).toContain(
+        "dispatch artifact --dry-run --issue DSP-1 --name brief.md --path '"
       );
       expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "verdict" }]);
     });
@@ -2034,14 +2233,14 @@ console.log(JSON.stringify(args, null, 2));
       expect(g.calls[0].user).toContain(JSON.stringify("The person said: ship it on Friday.\n"));
       expect(g.entries).toMatchObject([{ tool: "dispatch_artifact", outcome: "verdict" }]);
     });
-    test("(j) a --name-file whose name is shot.png, uploading shot.png, stays unreviewed and unrecorded", async () => {
+    test("(j) a --name-file whose name is shot.png stays unreviewed and unrecorded", async () => {
+      fs.writeFileSync(path.join(work, "shot.png"), "image bytes");
       const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-      expect(
-        await g.bash(
-          "u13",
-          "dispatch artifact --issue DSP-1 --name-file name-png.txt --path shot.png"
-        )
-      ).toBeUndefined();
+      const result = await g.bash(
+        "u13",
+        "dispatch artifact --issue DSP-1 --name-file name-png.txt --path shot.png"
+      );
+      expect(result?.input?.command).toContain("/askgate-");
       expect(g.dryRuns).toHaveLength(1);
       expect(g.calls).toHaveLength(0);
       expect(g.entries).toHaveLength(0);

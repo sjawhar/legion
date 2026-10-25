@@ -59,16 +59,6 @@ type Ctx = {
   sessionManager: { getEntries(): readonly SessionEntry[]; getLeafId(): string | null };
 };
 
-/** File text, or undefined when no file is there; any other failure (EACCES, EISDIR) throws. */
-function readFile(p: string): string | undefined {
-  try {
-    return fs.readFileSync(p, "utf8");
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-}
-
 /** Appends to the dump, owner-only on every open (not only on creation), and never through a symlink. */
 function appendDump(p: string, text: string): void {
   const fd = fs.openSync(
@@ -262,7 +252,6 @@ async function loadAskGate(pi: PiApi, host: AskGateHost): Promise<ToolCallHandle
     configFile: host.configFile,
     // The dump holds the primary system prompt and transcript: owner-only, like the session files.
     appendFile: appendDump,
-    readFile,
     complete,
     fallbackModels,
     // The runner's tool_call handler ceiling, normalised as the runner does (runner.ts normalizeHandlerTimeout).
