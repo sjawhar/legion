@@ -1088,7 +1088,8 @@ type LedgerLine = z.infer<typeof LedgerLine>;
  * CLI makes before the call reaches Dispatch is logged too whenever the call knows its session: a
  * refusal of a command's own arguments (`dispatch <command> was not called`, exit 1) under its
  * tool, and a usage refusal (`dispatch: …`, exit 2) under its tool, or under `dispatch` when the
- * CLI could not name the command. It logs no `--help` call and no dry run that passed. A run with
+ * CLI could not name the command. It logs no `--help` call that printed help and no dry run that
+ * passed; a `--help` of an unknown command is a usage refusal and is logged. A run with
  * no ledger is the rig's fault: its CLI kept no record where the rig reads it. */
 function ledgerOf(runDir: string, session: string): LedgerLine[] {
   const state = { XDG_STATE_HOME: path.join(runDir, "home", ".local", "state") };
@@ -1865,7 +1866,8 @@ const indented = (text: string, depth = 6) =>
  *     report came after the write before it and before this write, in transcript order
  *     (checkOutcome). Each check that counts for no write is printed with why.
  *   - refusals: every refused `dispatch` call (refusalBlocks: an `error` line of the CLI's ledger,
- *     or a usage refusal a call's output shows, which the CLI does not log) is followed by a call
+ *     or a refusal a call's output shows that the ledger holds no line of: an `eval` cell's, whose
+ *     kernel knows no session, or one the CLI made with no session) is followed by a call
  *     the ledger logs as a success, in a later tool call, with no skill file read between them. A
  *     call the agent made before the refusal came back is no fix: it cannot show that the agent
  *     fixed the call from the refusal alone. Each failing refusal is printed with its text.

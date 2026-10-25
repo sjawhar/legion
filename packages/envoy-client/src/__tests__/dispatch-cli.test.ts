@@ -1504,6 +1504,16 @@ describe("cliRefusals", () => {
     const cases: [string, readonly string[], Record<string, string | undefined>, string][] = [
       ["an unknown flag", ["message", "--issue", "X", "--isue", "Y"], omp, "dispatch_message"],
       ["an unknown command", ["frobnicate"], omp, "dispatch"],
+      // The CLI checks the command's name before its flags, so a help call of an unknown command
+      // is refused, and a dry run with a bad argument is refused before it is a dry run. The
+      // skill-scenario scorer matches each ledger line to its command on this.
+      ["an unknown command's help", ["frobnicate", "--help"], omp, "dispatch"],
+      [
+        "a dry run's bad argument",
+        ["message", "--issue", "X", "--isue", "Y", "--dry-run"],
+        omp,
+        "dispatch_message",
+      ],
       ["no host", ["projects"], { DISPATCH_SESSION_ID: "ses-1" }, "dispatch_projects"],
       [
         "another host",

@@ -43,7 +43,9 @@
   flag or command, a missing or unknown host, a session it cannot name a directory for, a file
   that turns Dispatch off) to the session's ledger, whenever the call knows its session. A reader
   of the ledger now sees a call whose output a pipe, `$(…)` or another program swallowed. A call
-  with no session id logs nothing, as before, and `--help` and `--dry-run` log nothing.
+  with no session id logs nothing, as before. A `--help` that prints help and a `--dry-run` that
+  passes its checks log nothing; a `--help` of an unknown command and a `--dry-run` with a bad
+  argument are refused, and logged like any other refusal.
 
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then
   aborts the lookup and returns the origin without `tmux` and `pane`. An aborted `defaultExec` call
