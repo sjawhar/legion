@@ -2,9 +2,16 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-249",
-  "completed": "2026-10-25T12:05:00Z",
-  "round": 2,
-  "codeHead": "65dc638db04f422dccebfa5ce921affe47b94a49",
+  "completed": "2026-10-25T12:55:00Z",
+  "round": 3,
+  "codeHead": "b9dfd74177f40233b27e6137634d35f059e4e5c5",
+  "rebaseRecheck": {
+    "line": "rebase re-check 65dc638db04f422dccebfa5ce921affe47b94a49 → b9dfd74177f40233b27e6137634d35f059e4e5c5: fingerprint unchanged, bare gates only",
+    "fingerprint": "Computed here with the unchanged-diff command (fork_point(\"main\"@origin | <head>), --context 0, '~(.legion | docs/solutions)'). Both 65dc638db04f and b9dfd74177f4 give 279c310464b117401605b2d736f0fd2235f5f706e261736a1bb1377135fe7ab8. b9dfd74177f4 is the forward merge of 09ebf6dacf97 with main 3ca092a69891 (#2162).",
+    "mergeRead": "The architect asked that the merged files be read and not trusted. Against main 3ca092a69891, server_test.go differs only by this branch's writeSessionRecord helper, so main's side is kept whole. No file has conflict markers: packages/envoy/AGENTS.md, CHANGELOG.md and server_test.go each give 0. In AGENTS.md, main's assignee bullet and this branch's fetchHolderLiveness text both stand whole.",
+    "smoke": "At b9dfd74177f4, with the local nats-server harness applied by `git apply` and then reverted: `bash scripts/e2e-local.sh` with the docker stand-in gave PASS, and the registry route answered `{\"error\":\"no live session ses_e2e_local_never_registered\"}` and the registered session's row. `go test ./cmd/listener -run 'TestDispatch|TestSessionEntryRoute|TestV1RoutesAnswerAKeyNATSWouldRefuseWith4xx' -count=1` gave ok 15.6 s, with all 12 tests passing, including the four cross-service tests on real NATS and Postgres. No test that starts its own container was run, so no skip list was needed.",
+    "ci": "At b9dfd74177f4, read and not waited for: PR Title 40194238671 and 40194100697 success, Docs 40194100691 success; Tests 40194100775 and Worker Image 40194100689 in progress; Legion Envoy and Contracts 40194100836 queued. GitHub reports the pull request MERGEABLE (mergeStateStatus BLOCKED, waiting on checks and review). The architect reports envoy-go red from main's cmd/broker vet break (dispatch://INFRA-379). It is outside the required set, and I did not re-check it here."
+  },
   "fingerprint": "279c310464b117401605b2d736f0fd2235f5f706e261736a1bb1377135fe7ab8 at 65dc638db04f, computed here with the unchanged-diff command and equal to the implementer's posted value. The fingerprint is different from round one's head bc14427bac5c (this round changed broadcasts.go, comment_delivery.go and AGENTS.md, and merged main twice), so this was a full test round.",
   "implementerProof": {
     "verdict": "verified",
@@ -62,7 +69,7 @@
   ],
   "ci": "At 65dc638db04f: Tests 40189659348 success (lint, typecheck, test); PR Title success; Docs 40189659308 success; Worker Image 40189659304 success. Legion Envoy and Contracts 40189659278 is running: changes and envoy-infra-go success; envoy-go, envoy-smoke, dispatch and dispatch-memory in progress; envoy-e2e-local, envoy-go-race and dispatch-multiprocess queued. pi-legion is skipped at this head, not red. None of these was re-run here, and the tester did not wait for any of them.",
   "notes": [
-    "GitHub reports the pull request CONFLICTING (mergeStateStatus DIRTY) as of this round's end. main moved to 3ca092a69891 (#2162, the broker run on more than one pod) after the branch's second merge. Files changed on both sides since c09a5f866aaa: packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md and packages/envoy/internal/dispatch/api/server_test.go. The implementer must merge forward again. The fingerprint after that merge decides whether the next test round is the bare gates only.",
+    "Round two ended with the pull request CONFLICTING against main 3ca092a69891 (#2162), in packages/envoy/AGENTS.md, CHANGELOG.md and internal/dispatch/api/server_test.go. The third forward merge, b9dfd74177f4, resolved it. The fingerprint is unchanged (see rebaseRecheck), and GitHub reports MERGEABLE.",
     "The cmd/listener skip list was not needed this round. I ran only the named cross-service, route and pin tests, and none of them starts a container of its own."
   ],
   "previousRound": {
