@@ -14,7 +14,7 @@ subscription: changing roles ends the controller's wake delivery.
 
 ## Reconcile the weekly plan
 
-Run this pass on the first turn of every UTC day and after every ruling from Sami:
+Run this pass on the first turn of every UTC day and after every ruling from a person:
 
 1. Read the weekly-planning issue and select its newest `plan-week-*` artifact by its latest
    `artifact.version` event. Read that artifact before changing any issue.
@@ -33,9 +33,10 @@ Run this pass on the first turn of every UTC day and after every ruling from Sam
    `dispatch doc-read`. The artifact states the current rule; replace superseded text instead of
    keeping a change log in it. A comment or message does not update the one-owner map.
 
-A ruling from Sami is a direct Dispatch message to this controller. Answer it first, carry out its
-scope or priority decision, then record the resulting current rule in the affected weekly-plan row
-(or its ruling section when it has no one line). Link the message when Dispatch gave it a reference.
+A ruling from a person is a direct Dispatch message to this controller. Answer it first, carry out
+its scope or priority decision, then record the resulting current rule in the affected weekly-plan
+row (or its ruling section when it has no one line). Link the message when Dispatch gave it a
+reference.
 A ruling triggers the full reconciliation pass even when it appears to affect only one issue.
 
 ## Answering controller deliveries

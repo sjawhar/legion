@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
 	"os/exec"
@@ -455,9 +456,8 @@ func (b *gcpBackend) viewOf(ctx context.Context, secret *secretmanagerpb.Secret)
 	}
 	view := secretView{
 		Name: b.displayName(secret.GetName()), SecretName: secret.GetName(),
-		Owner: secret.GetAnnotations()[policy.TagOwner], Tier: secret.GetAnnotations()[policy.TagTier],
 		HasValue: hasValue,
-	}
+	}.withTags(secret.GetAnnotations())
 	if t := secret.GetCreateTime(); t != nil {
 		created := t.AsTime()
 		view.Created = &created
@@ -529,7 +529,7 @@ func (b *gcpBackend) show(ctx context.Context, slug string) (secretView, error) 
 	return view, nil
 }
 
-func (b *gcpBackend) create(ctx context.Context, slug, owner, tier, value string) error {
+func (b *gcpBackend) create(ctx context.Context, slug string, tags map[string]string, value string) error {
 	secret, err := b.client.CreateSecret(ctx, &secretmanagerpb.CreateSecretRequest{
 		Parent:   b.parent(),
 		SecretId: b.secretID(slug),
@@ -543,7 +543,7 @@ func (b *gcpBackend) create(ctx context.Context, slug, owner, tier, value string
 					},
 				},
 			},
-			Annotations: map[string]string{policy.TagOwner: owner, policy.TagTier: tier},
+			Annotations: tags,
 		},
 	})
 	if err != nil {
@@ -564,41 +564,50 @@ func (b *gcpBackend) set(ctx context.Context, slug, value string) error {
 	return err
 }
 
-func (b *gcpBackend) currentTags(ctx context.Context, slug string) (owner, tier string, err error) {
+func (b *gcpBackend) currentTags(ctx context.Context, slug string) (heldTags, error) {
 	secret, err := b.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: b.id(slug)})
 	if err != nil {
-		return "", "", err
+		return heldTags{}, err
 	}
-	return secret.GetAnnotations()[policy.TagOwner], secret.GetAnnotations()[policy.TagTier], nil
+	return heldTags{tags: secret.GetAnnotations(), etag: secret.GetEtag()}, nil
 }
 
-// retag changes only the owner and tier annotations, preserving any other annotation the secret
-// holds: an UpdateSecret whose mask names "annotations" replaces the whole map, unlike AWS's
-// TagResource, which touches only the tags it names, so this reads the secret's current
-// annotations first and sends the merged map rather than one holding only owner and tier. It
-// sends the read's Etag, so a concurrent change to the secret between the read and this write
-// (another annotation, say) fails the update with FAILED_PRECONDITION instead of being silently
-// overwritten by this request's stale map.
-func (b *gcpBackend) retag(ctx context.Context, slug, owner, tier string) error {
-	secret, err := b.client.GetSecret(ctx, &secretmanagerpb.GetSecretRequest{Name: b.id(slug)})
-	if err != nil {
-		return err
+// setTags writes tags into the annotations held holds, and removeTags deletes keys from them, each
+// in one UpdateSecret that keeps every annotation it does not name. An UpdateSecret whose mask names
+// "annotations" replaces the whole map, so each sends held's annotations, changed, with held's
+// etag: the write lands only on the annotations the retag checked, and a write another writer made
+// since held was read refuses it with FAILED_PRECONDITION (errTagsChanged), naming the change,
+// rather than being merged into annotations no one checked.
+func (b *gcpBackend) setTags(ctx context.Context, slug string, held heldTags, tags map[string]string) error {
+	return b.updateAnnotations(ctx, slug, held, func(annotations map[string]string) { maps.Copy(annotations, tags) })
+}
+
+func (b *gcpBackend) removeTags(ctx context.Context, slug string, held heldTags, keys []string) error {
+	return b.updateAnnotations(ctx, slug, held, func(annotations map[string]string) {
+		for _, key := range keys {
+			delete(annotations, key)
+		}
+	})
+}
+
+// updateAnnotations sends held's annotations, as change leaves a copy of them, with held's etag.
+func (b *gcpBackend) updateAnnotations(ctx context.Context, slug string, held heldTags, change func(map[string]string)) error {
+	annotations := maps.Clone(held.tags)
+	if annotations == nil {
+		annotations = map[string]string{}
 	}
-	annotations := secret.GetAnnotations()
-	merged := make(map[string]string, len(annotations)+2)
-	for k, v := range annotations {
-		merged[k] = v
-	}
-	merged[policy.TagOwner] = owner
-	merged[policy.TagTier] = tier
-	_, err = b.client.UpdateSecret(ctx, &secretmanagerpb.UpdateSecretRequest{
+	change(annotations)
+	_, err := b.client.UpdateSecret(ctx, &secretmanagerpb.UpdateSecretRequest{
 		Secret: &secretmanagerpb.Secret{
 			Name:        b.id(slug),
-			Annotations: merged,
-			Etag:        secret.GetEtag(),
+			Annotations: annotations,
+			Etag:        held.etag,
 		},
 		UpdateMask: &fieldmaskpb.FieldMask{Paths: []string{"annotations"}},
 	})
+	if status.Code(err) == codes.FailedPrecondition {
+		return fmt.Errorf("%w, so the store refused this write: %w", errTagsChanged, err)
+	}
 	return err
 }
 
