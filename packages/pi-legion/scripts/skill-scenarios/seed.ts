@@ -1,10 +1,10 @@
-// Seeds rig.sh's scratch Dispatch through its API, and reads back what a run left there.
-// DISPATCH_E2E_PORT names the server, which e2e/api.ts addresses. e2e/api.ts addresses
+// Seeds a skill-scenario run's own scratch Dispatch through its API, and reads back what the run
+// left there. DISPATCH_E2E_PORT names the server, which e2e/api.ts addresses. e2e/api.ts addresses
 // PLAYWRIGHT_BASE_URL instead, with E2E_AGENT_TOKEN as its bearer, whenever it is set, so seed.ts
 // refuses to run while either is set.
 //
 //   seed.ts project                        project LWEVAL and LWEVAL-1, the issue the tester's world
-//                                          implements
+//                                          implements; the world of every scenario but brainstorm
 //   seed.ts ask-on-message <file>          one run's own issue and the owner's message posting its
 //                                          plan; writes {issue, message} to <file>
 //   seed.ts measure-before-ask <file>      one run's own issue and the owner's message naming three
@@ -15,7 +15,8 @@
 //                                          them (message.json, asks.json, events.json in <run dir>)
 //   seed.ts brainstorm                     project TODO, the to-do CLI rig.sh's run_brainstorm
 //                                          writes into each agent's working directory, with two
-//                                          unrelated issues; once per batch, as `project` is
+//                                          unrelated issues; brainstorm's world, in place of
+//                                          `project`
 //   seed.ts capture-brainstorm <file> <run dir>
 //                                          the issue <run dir>'s own transcript created (Dispatch's
 //                                          `Created <KEY>:` answer in a tool result; null when it
@@ -256,8 +257,8 @@ if (command === "project") {
     `captured ${issue}: ${records.asks.length} asks, ${records.artifacts.length} documents`
   );
 } else if (command === "capture-brainstorm" && runDir !== undefined) {
-  // The run's own issue, from its own transcript, never from the project: a batch's runs share the
-  // one project. Dispatch answers `Created <KEY>:` only when it creates the issue, whatever
+  // The run's own issue, from its own transcript, never from the project, which holds the two
+  // seeded issues too. Dispatch answers `Created <KEY>:` only when it creates the issue, whatever
   // reached it (score.ts's CREATED); a refused duplicate reads `Not created:`.
   let issue: string | null = null;
   for (const text of toolResults(session(runDir))) {

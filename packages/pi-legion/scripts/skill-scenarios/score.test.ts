@@ -30,10 +30,19 @@ const turn = [
 ];
 const noKey = "error: No API key found for anthropic.\nexit=1\n";
 
-function run(name: string, files: Record<string, string>, transcript: object[]) {
+/** A run's own Dispatch as rig.sh's own_dispatch records it in dispatch.json: the batch's Postgres
+ * container, the run's database in it, and its server's port and URL. */
+const dispatchRecord = (database: string, postgres = "pg-1") =>
+  JSON.stringify({ postgres, database, port: 20000, url: "http://127.0.0.1:20000" });
+
+/** A run directory holding `files` (by default a dispatch.json naming the run's own database, or
+ * none when `files` gives it null) and `transcript`. */
+function run(name: string, files: Record<string, string | null>, transcript: object[]) {
   const dir = path.join(runs, name);
   mkdirSync(path.join(dir, "sessions"), { recursive: true });
-  for (const [file, text] of Object.entries(files)) writeFileSync(path.join(dir, file), text);
+  const own = dispatchRecord(`run_${name.replaceAll("-", "_")}`);
+  for (const [file, text] of Object.entries({ "dispatch.json": own, ...files }))
+    if (text !== null) writeFileSync(path.join(dir, file), text);
   writeFileSync(
     path.join(dir, "sessions", "2026-09-30T14-51-17-651Z_01a0f2cc.jsonl"),
     transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
@@ -435,6 +444,31 @@ run("askgate-on-1", askgate("facts"), [...header, ...turn]);
 // A directory whose case is not the one its case.txt records.
 run("askgate-upload-on-4", askgate("facts"), [...header, ...turn]);
 
+// Each run's own Dispatch, as dispatch.json records it. Two runs of one batch that name one
+// database in the batch's Postgres shared a Dispatch, so each could read the other's issue and
+// asks: neither is scored. The same name in two batches is two databases, one in each batch's
+// Postgres container.
+const didNothing = [...header, ...turn];
+for (const [name, database, postgres] of [
+  ["ask-on-message-shared-1", "run_shared", "pg-7"],
+  ["ask-on-message-shared-2", "run_shared", "pg-7"],
+  ["ask-on-message-apart-1", "run_apart_1", "pg-7"],
+  ["ask-on-message-apart-2", "run_apart_2", "pg-7"],
+  ["ask-on-message-batches-1", "run_batches", "pg-7"],
+  ["ask-on-message-batches-2", "run_batches", "pg-8"],
+] as const)
+  run(
+    name,
+    { ...capture, "out.txt": "exit=0\n", "dispatch.json": dispatchRecord(database, postgres) },
+    didNothing
+  );
+// A run that records no Dispatch of its own, as every run did before each run had one.
+run(
+  "ask-on-message-unrecorded-1",
+  { ...capture, "out.txt": "exit=0\n", "dispatch.json": null },
+  didNothing
+);
+
 const scored = Bun.spawnSync(["bun", path.join(import.meta.dir, "score.ts"), "runs", runs]);
 const out = scored.stdout.toString();
 
@@ -462,6 +496,32 @@ test("the tester ran the CLI when the bun stand-in recorded a run of greet.ts, n
 
 test("a tool call naming the other label's checkout is a rig error wherever the name falls in it", () => {
   expect(out).toContain("tester-proof-cross-1\trig error: a bash call names base's checkout");
+});
+
+test("two runs of one batch that name one Dispatch database are rig errors, saying so", () => {
+  expect(out).toContain(
+    "ask-on-message-shared-1\trig error: it shares Dispatch database run_shared of Postgres pg-7 with ask-on-message-shared-2, so each could read the other's issue and asks"
+  );
+  expect(out).toContain(
+    "ask-on-message-shared-2\trig error: it shares Dispatch database run_shared of Postgres pg-7 with ask-on-message-shared-1, so each could read the other's issue and asks"
+  );
+  expect(out).toContain("ask-on-message\tshared\t0/0\t0/0\t2\n");
+});
+
+test("runs on databases of their own are scored, and one name in two batches is two databases", () => {
+  for (const name of [
+    "ask-on-message-apart-1",
+    "ask-on-message-apart-2",
+    "ask-on-message-batches-1",
+    "ask-on-message-batches-2",
+  ])
+    expect(out).toContain(`${name}\tpass=false\t`);
+});
+
+test("a run that records no Dispatch of its own is a rig error", () => {
+  expect(out).toContain(
+    "ask-on-message-unrecorded-1\trig error: it records no Dispatch of its own (no dispatch.json)"
+  );
 });
 
 test("a measure-before-ask ask passes when it carries the population and the measurement and drops the option they rule out", () => {

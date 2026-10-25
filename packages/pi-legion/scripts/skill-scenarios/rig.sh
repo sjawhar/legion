@@ -32,11 +32,11 @@
 #                   (run_measure_before_ask). Scored by measureBeforeAsk.
 #   brainstorm      A plain session (no Legion role) gets a bare `/brainstorming` prompt on a
 #                   scratch to-do CLI, with no word of Dispatch in the prompt and no Dispatch
-#                   configuration anywhere in its environment; the batch seeds project TODO once,
-#                   with two unrelated issues (seed.ts brainstorm), so the agent must find it by
-#                   search, never its own environment or the Dispatch HTTP API. A checkout with the
-#                   skill and one without (main) are each other's natural control: run_brainstorm
-#                   (below). Scored by brainstormSurface.
+#                   configuration anywhere in its environment; the run's own Dispatch holds one
+#                   project, TODO, with two unrelated issues (seed.ts brainstorm), so the agent must
+#                   find it by search, never its own environment or the Dispatch HTTP API. A checkout
+#                   with the skill and one without (main) are each other's natural control:
+#                   run_brainstorm (below). Scored by brainstormSurface.
 #   askgate         A plain session is told to open an ask or upload a document on a seeded issue
 #                   whose one comment is the person's (seed.ts askgate), with AskGate, the Envoy
 #                   plugin's review of each Dispatch write, on (any label) or off (the label `off`,
@@ -58,11 +58,16 @@
 # and they cannot detect a lost skill rule. A new scenario is an instrument only once an ablate
 # arm has scored lower on it.
 #
-# A batch's services are the e2e harness's real Go Dispatch server
-# (packages/dispatch/e2e/run-server.sh) on a Postgres container of its own, seeded and read back
-# through its API (seed.ts), a NATS container, and the Envoy listener built from this checkout.
-# Docker assigns the containers' host ports, the listener and Dispatch bind ports
-# scripts/e2e/lib/rig.sh picks, and the kernel assigns each run's daemon stand-in its port.
+# A batch's services are a Postgres container, a NATS container, and the Envoy listener built from
+# this checkout. Each run gets a Dispatch of its own (own_dispatch): a database named after the run
+# in the batch's Postgres, and the e2e harness's real Go Dispatch server
+# (packages/dispatch/e2e/run-server.sh) on that database, seeded and read back through its API
+# (seed.ts) and stopped when the run ends. A `dispatch search` searches every project of its
+# server, and a Dispatch bearer cannot be limited to one project, so a shared server would show
+# each run the other runs' issues and asks. Each run records its Dispatch in <run>/dispatch.json,
+# and score.ts does not score two runs that name one database. Docker assigns the containers' host
+# ports, the listener and each Dispatch bind ports scripts/e2e/lib/rig.sh picks, and the kernel
+# assigns each run's daemon stand-in its port.
 #
 # Operator input (no default in this repository):
 #   LEGION_E2E_MODEL_GATEWAY_URL  profile: the model gateway (scripts/e2e/lib/install-model-gateway.sh)
@@ -130,7 +135,8 @@ tmux_socket=$work/tmux.sock
 tmux() { command tmux -S "$tmux_socket" "$@"; }
 
 # What a command started, for its exit trap: the run directory and its agent's tmux session, the
-# pids lib/rig.sh's start_process sets, and the services' ports and directory.
+# pids lib/rig.sh's start_process sets (a run's own Dispatch server among them), and the services'
+# ports and directory.
 R='' session='' daemon_pid='' listener_pid='' dispatch_pid='' runs_pid='' batch_scenario=''
 S='' envoy_port='' dispatch_port='' pg_port='' nats_port=''
 
@@ -310,11 +316,16 @@ stop_panes() {
   for pid in $(tmux list-panes -s -t "=$1" -F '#{pane_pid}' 2>/dev/null || true); do stop_tree "$pid" "$server"; done
 }
 
-# A run's or a live read's exit: its daemon stand-in, its agent's session, and every process that
-# carries its SKILL_SCENARIO_RUN.
+# A run's or a live read's exit: its daemon stand-in, its own Dispatch server, its agent's session,
+# and every process that carries its SKILL_SCENARIO_RUN. The run's database stays in the batch's
+# Postgres container, which services_down removes. The two services are this shell's own jobs, so
+# each is waited for once it is killed: bash otherwise prints a `Killed` notice for it on stderr.
 # shellcheck disable=SC2329 # on_exit's trap runs it
 stop_run() {
-  stop_tree "$daemon_pid"
+  local pid
+  for pid in "$daemon_pid" "$dispatch_pid"; do
+    [ -z "$pid" ] || { stop_tree "$pid" && wait "$pid" 2>/dev/null || true; }
+  done
   [ -z "$session" ] || stop_panes "$session"
   [ -z "$R" ] || stop_env_processes "$R"
   [ -z "$session" ] || tmux kill-session -t "=$session" 2>/dev/null || true
@@ -374,18 +385,30 @@ start_listener() {
   fail "the Envoy listener lost its picked port five times"
 }
 
-# The harness's fake Envoy and GitHub, which run-server.sh names and this rig does not run, are
-# port 1, where nothing listens; its broker switch is empty, so the server has no secrets broker.
+# dispatch_answers is whether the server this run started answers on dispatch_port. The runs of a
+# batch pick their ports at once, each in a shell of its own, so two can pick one port. The second
+# server to bind it exits, but until it does, another run's server answers there, on that run's
+# database. So the server must answer, and the process that listens on the port must be the one
+# this run started: run-server.sh execs the server, so its pid is dispatch_pid.
+# shellcheck disable=SC2329 # start_dispatch's await_start runs it
+dispatch_answers() {
+  local listening
+  curl -fsS -o /dev/null -H 'Authorization: Bearer e2e-token' "http://127.0.0.1:$dispatch_port/api/v1/whoami" &&
+    listening=$(ss -ltnpH "sport = :$dispatch_port") && [[ $listening == *"pid=$dispatch_pid,"* ]]
+}
+
+# start_dispatch DATABASE_URL starts the e2e harness's Dispatch server on that database. The
+# harness's fake Envoy and GitHub, which run-server.sh names and this rig does not run, are port 1,
+# where nothing listens; its broker switch is empty, so the server has no secrets broker.
 start_dispatch() {
-  local attempt offset result
+  local url=$1 attempt offset result
   for attempt in 1 2 3 4 5; do
     pick_port dispatch_port
     offset=$(log_size dispatch)
-    DATABASE_URL="postgres://postgres:ci@127.0.0.1:$pg_port/postgres?sslmode=disable" DISPATCH_E2E_PORT=$dispatch_port \
-      FAKE_ENVOY_PORT=1 FAKE_GITHUB_PORT=1 DISPATCH_E2E_AGENT_SECRETS_URL= start_process dispatch bash "$root/packages/dispatch/e2e/run-server.sh"
+    DATABASE_URL=$url DISPATCH_E2E_PORT=$dispatch_port FAKE_ENVOY_PORT=1 FAKE_GITHUB_PORT=1 DISPATCH_E2E_AGENT_SECRETS_URL='' \
+      start_process dispatch bash "$root/packages/dispatch/e2e/run-server.sh"
     result=0
-    await_start dispatch "$dispatch_pid" "$offset" 300 "Dispatch to answer /api/v1/whoami" \
-      curl -fsS -o /dev/null -H 'Authorization: Bearer e2e-token' "http://127.0.0.1:$dispatch_port/api/v1/whoami" || result=$?
+    await_start dispatch "$dispatch_pid" "$offset" 300 "Dispatch to answer /api/v1/whoami" dispatch_answers || result=$?
     [ "$result" != 0 ] || return 0
     note "Dispatch lost port $dispatch_port to another process (attempt $attempt); picking another"
   done
@@ -401,10 +424,15 @@ lock_services() {
     fail "a batch already holds $S/up; a batch killed outright leaves it, its $tag-* containers and its processes behind"
 }
 
+# Each run's Dispatch server opens at most 30 connections to the batch's Postgres: its shared pool
+# (16), loop leases (8), document rooms (4), health probe (1) and listener (1), the sizes in
+# packages/envoy/internal/dispatch/store/pool.go. Postgres admits 100 by default, too few for 5
+# servers at once, so max_connections is 30 for each concurrent run and 20 more for psql.
 services_up() {
   evidence=$S
   docker run -d --name "$tag-pg" --mount type=tmpfs,destination=/var/lib/postgresql/data \
-    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a >/dev/null
+    -e POSTGRES_PASSWORD=ci -p 127.0.0.1::5432 pgvector/pgvector@sha256:7b822b0aac60967beb1ea5e576b8602c94c300a157d187f385ae3e0da199b90a \
+    -c max_connections=$((30 * ${SKILL_SCENARIOS_PARALLEL:-5} + 20)) >/dev/null
   pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
   [ -n "$pg_port" ] || fail "docker assigned Postgres no host port"
   docker run -d --name "$tag-nats" -p 127.0.0.1::4222 nats:2.10 -js >/dev/null
@@ -415,58 +443,71 @@ services_up() {
   (cd "$root/packages/envoy" && go build -o "$S/envoy-listener" ./cmd/listener)
   (umask 077 && openssl rand -hex 24 >"$S/envoy-token" && printf 'e2e-token\n' >"$S/dispatch-token")
   start_listener
-  start_dispatch
-  # The batch's world, seeded once: brainstorm's to-do CLI project, or the project every other
-  # scenario's runs seed their own issue into. A batch holds only its own, so a brainstorm run's
-  # search finds one project to file in.
-  local seed=project
-  [ "$batch_scenario" != brainstorm ] || seed=brainstorm
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$seed") >>"$S/logs/seed.log" 2>&1 ||
-    fail "seed.ts $seed failed; see $S/logs/seed.log"
-  printf '%s\n' "$dispatch_port" >"$S/dispatch-port"
   {
     echo "ENVOY_URL=http://127.0.0.1:$envoy_port"
     echo "ENVOY_NATS_URL=nats://127.0.0.1:$nats_port"
     echo "ENVOY_TOKEN_FILE=$S/envoy-token"
-    echo "DISPATCH_URL=http://127.0.0.1:$dispatch_port"
-    echo "DISPATCH_TOKEN_FILE=$S/dispatch-token"
   } >"$services_env"
-  note "services up: listener :$envoy_port, NATS :$nats_port, Dispatch :$dispatch_port, Postgres :$pg_port"
+  note "services up: listener :$envoy_port, NATS :$nats_port, Postgres :$pg_port"
 }
 
 # shellcheck disable=SC2329 # stop_batch, an exit trap, runs it
 services_down() {
   stop_tree "${listener_pid:-}"
-  stop_tree "${dispatch_pid:-}"
   docker rm -fv "$tag-nats" "$tag-pg" >/dev/null 2>&1 || true
   rm -f "$services_env" "$S/up"
+}
+
+# own_dispatch SEED gives the run a Dispatch of its own and seeds it with `seed.ts SEED`, the world
+# the scenario needs (project, or brainstorm): a database named after the run in the batch's
+# Postgres, and a Dispatch server on it, which stop_run stops. It records the container, the
+# database and the server in $R/dispatch.json, which score.ts reads, and sets dispatch_port.
+own_dispatch() {
+  local seed=$1 database=run_${R##*/} pg_port postgres
+  database=${database//-/_}
+  # Postgres cuts a longer name to 63 bytes, and two runs whose names agree that far would share it.
+  [ "${#database}" -le 63 ] || fail "the run's database name $database is longer than Postgres's 63 bytes"
+  pg_port=$(docker port "$tag-pg" 5432/tcp | sed -n '1s/.*://p')
+  postgres=$(docker inspect -f '{{.Id}}' "$tag-pg")
+  [ -n "$pg_port" ] && [ -n "$postgres" ] || fail "no Postgres container $tag-pg for the run's Dispatch"
+  docker exec "$tag-pg" psql -U postgres -v ON_ERROR_STOP=1 -qc "CREATE DATABASE $database" >>"$R/fixture.log" 2>&1 ||
+    fail "CREATE DATABASE $database failed; see $R/fixture.log"
+  start_dispatch "postgres://postgres:ci@127.0.0.1:$pg_port/$database?sslmode=disable"
+  jq -n --arg postgres "$postgres" --arg database "$database" --argjson port "$dispatch_port" \
+    '{postgres:$postgres, database:$database, port:$port, url:("http://127.0.0.1:" + ($port|tostring))}' >"$R/dispatch.json"
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$seed") >>"$R/fixture.log" 2>&1 ||
+    fail "seed.ts $seed failed; see $R/fixture.log"
 }
 
 # seed_dispatch SCENARIO seeds the run's own issue, and the owner's message when the scenario has
 # one, with `seed.ts SCENARIO`, and sets the caller's issue and message (empty when the fixture
 # names none), which its prompt names.
 seed_dispatch() {
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" "$1" "$R/fixture.json") \
-    >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "$1" "$R/fixture.json") \
+    >>"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
   issue=$(jq -r .issue "$R/fixture.json")
   message=$(jq -r '.message // empty' "$R/fixture.json")
 }
 
-# dispatch_session NAME [CAPTURE] runs $R/prompt.txt as a plain session outside Legion, with
-# Dispatch as its own and no Envoy (an address nothing listens on) or NATS, then reads back what it
+# dispatch_session NAME [CAPTURE] runs $R/prompt.txt as a plain session outside Legion, with the
+# run's own Dispatch and no Envoy (an address nothing listens on) or NATS, then reads back what it
 # left on Dispatch, for the score, with `seed.ts CAPTURE` (default `capture`).
 dispatch_session() {
   base_env
   standins
-  grep '^DISPATCH_' "$services_env" >>"$R/pane.env"
-  echo "ENVOY_URL=http://127.0.0.1:1" >>"$R/pane.env"
+  {
+    echo "DISPATCH_URL=http://127.0.0.1:$dispatch_port"
+    echo "DISPATCH_TOKEN_FILE=$work/services/dispatch-token"
+    echo "ENVOY_URL=http://127.0.0.1:1"
+  } >>"$R/pane.env"
   launch "$1"
-  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$(<"$work/services/dispatch-port") bun "$here/seed.ts" "${2:-capture}" "$R/fixture.json" "$R") \
+  (cd "$root/packages/dispatch" && DISPATCH_E2E_PORT=$dispatch_port bun "$here/seed.ts" "${2:-capture}" "$R/fixture.json" "$R") \
     >>"$R/fixture.log" 2>&1 || fail "the capture failed; see $R/fixture.log"
 }
 
 run_ask_on_message() {
   local name=$1 issue message
+  own_dispatch project
   seed_dispatch ask-on-message
   printf 'On Dispatch issue %s, the Dispatch owner session posted its plan for the rest of the work in this message: dispatch://%s/message/%s. Open an ask on %s asking Sami whether to go ahead with that plan. Do nothing else.\n' \
     "$issue" "$issue" "$message" "$issue" >"$R/prompt.txt"
@@ -478,6 +519,7 @@ run_ask_on_message() {
 # agent a second reason to drop A; measureBeforeAsk says how the first runs split on it.
 run_measure_before_ask() {
   local name=$1 issue message
+  own_dispatch project
   seed_dispatch measure-before-ask
   awk 'BEGIN { print "key,title,component,owner"
     for (n = 1; n <= 430; n++) printf "ISS-%d,Stranded issue %d,billing-api,%s\n", 1000 + n, n, (n % 23 == 0 ? "owner" n "@example.invalid" : "") }' \
@@ -496,6 +538,7 @@ run_measure_before_ask() {
 run_askgate() {
   local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} issue message ref
   printf '%s\n' "$askCase" >"$R/case.txt"
+  own_dispatch project
   seed_dispatch askgate
   ref=$(jq -r .comment_ref "$R/fixture.json")
   case $askCase in
@@ -508,12 +551,13 @@ run_askgate() {
 }
 
 # A tiny to-do CLI in a scratch git repository with no Dispatch configuration and no word of due
-# dates. The batch seeded its one Dispatch project (seed.ts brainstorm: TODO, with two unrelated
+# dates. The run's own Dispatch holds one project (seed.ts brainstorm: TODO, with two unrelated
 # issues whose titles name the "todo CLI", so a search for it finds the project), and
 # `seed.ts capture-brainstorm` reads back the issue this run's own transcript created, for
 # brainstormSurface.
 run_brainstorm() {
   local name=$1
+  own_dispatch brainstorm
   cat >"$R/cwd/todo.py" <<'PYEOF'
 """A tiny command-line to-do list that keeps its tasks in tasks.json next to this file."""
 
@@ -576,6 +620,7 @@ MDEOF
   git -C "$R/cwd" add -A
   git -C "$R/cwd" -c user.name=rig -c user.email=rig@example.invalid -c commit.gpgsign=false \
     commit -qm "A tiny to-do CLI"
+  # shellcheck disable=SC2016 # the backticks are the prompt's own, a command name for the agent
   printf '/brainstorming a small feature: let a task in this to-do CLI carry an optional due date, and have `list` show overdue tasks first.\n' \
     >"$R/prompt.txt"
   dispatch_session "$name" capture-brainstorm
@@ -711,6 +756,8 @@ Negative control: \`bun greet.ts\` (no name) → exit 2, \`usage: greet.ts <name
 run_tester_proof() {
   local name=$1 n=$2 index=$3 start=$4 state project port
   worker_fixture "$index" "$start" >"$R/fixture.log" 2>&1 || fail "the fixture failed; see $R/fixture.log"
+  # The issue the tester's world implements, LWEVAL-1, on the run's own Dispatch.
+  own_dispatch project
   state=$R/state
   # Each run its own Legion project, so concurrent runs claim distinct role tokens on one listener.
   # A project token is lower-case letters and digits only (isLegionProjectToken), so the label's
@@ -733,6 +780,8 @@ run_tester_proof() {
   bun "$here/worker-pane.ts" "$R" "$R/pane.env" "$port" "$profile" "$project" "$worker_key" tester "$co"
   {
     cat "$R/worker.env" "$services_env"
+    echo "DISPATCH_URL=http://127.0.0.1:$dispatch_port"
+    echo "DISPATCH_TOKEN_FILE=$work/services/dispatch-token"
     echo "GIT_CONFIG_COUNT=0"
     echo "JJ_USER=Rig Worker"
     echo "JJ_EMAIL=rig@example.invalid"
@@ -801,11 +850,6 @@ cmd_batch() {
   esac
   [[ $runs =~ ^[0-9]+$ ]] || fail "run count '$runs' is not a number"
   shift 2
-  # A batch's runs share one Dispatch, and every brainstorm run files the same feature: a second run
-  # finds the first one's issue and extends it, or Dispatch refuses its own as a duplicate, so its
-  # score measures its sibling's timing. Compare labels across batches of one run each.
-  [ "$batch_scenario" != brainstorm ] || [ $((runs * $#)) = 1 ] ||
-    fail "a brainstorm batch takes one run of one label (got $runs of $#); run each label as its own batch"
   for label in "$@"; do load_label "$label"; done
   lock_services
   on_exit stop_batch

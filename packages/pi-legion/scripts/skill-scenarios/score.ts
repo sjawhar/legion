@@ -601,7 +601,28 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
   return { run, scenario: "tester-proof", label, pass, ref, notes: notes.join(" ") };
 }
 
+/** rig.sh's own_dispatch record, <run>/dispatch.json: the run's own Dispatch, a database in the
+ * batch's Postgres container (its id) and the server on it. */
+const RunDispatch = z.object({
+  postgres: z.string().min(1),
+  database: z.string().min(1),
+  port: z.number(),
+  url: z.string(),
+});
+/** The run's own Dispatch as `postgres` and `database`, one tab between them; throws when the run
+ * records none. */
+function dispatchOf(runDir: string): string {
+  const file = path.join(runDir, "dispatch.json");
+  if (!existsSync(file)) throw new Error("it records no Dispatch of its own (no dispatch.json)");
+  const { postgres, database } = json(file, RunDispatch);
+  return `${postgres}\t${database}`;
+}
+
 /** Why the rig cannot score a run, or undefined when it can:
+ *   - it did not have a Dispatch of its own: it records none (no dispatch.json), or another run
+ *     names the same database in the same Postgres container (`sharing`, each Dispatch's runs).
+ *     A `dispatch search` searches every project of its server, so runs that share one can read
+ *     each other's issue and asks, and one run's answer can be another's;
  *   - it never finished: out.txt has no `exit=` line;
  *   - its agent got no model turn: it left no transcript, or one with no assistant message, as when
  *     the profile's gateway key command ran past its budget. The key command's own record of each
@@ -614,7 +635,18 @@ function testerProof(runDir: string, run: string, label: string, heads: string[]
  *     An agent reads the whole filesystem, and `legion` on its PATH resolves into the checkout
  *     rig.sh runs from.
  * A record missing or malformed is a rig error too, thrown by the scenario's function. */
-function unscored(runDir: string, label: string, labels: Map<string, string>): string | undefined {
+function unscored(
+  runDir: string,
+  label: string,
+  labels: Map<string, string>,
+  sharing: Map<string, string[]>
+): string | undefined {
+  const dispatch = dispatchOf(runDir);
+  const others = (sharing.get(dispatch) ?? []).filter((run) => run !== path.basename(runDir));
+  if (others.length > 0) {
+    const [postgres, database] = dispatch.split("\t");
+    return `it shares Dispatch database ${database} of Postgres ${postgres} with ${others.join(", ")}, so each could read the other's issue and asks`;
+  }
   if (!lines(path.join(runDir, "out.txt")).at(-1)?.startsWith("exit="))
     return "out.txt has no exit= line: the run never finished";
   const entries = session(runDir);
@@ -654,6 +686,18 @@ function scoreRuns(runsDir: string, only: string | undefined) {
       return [];
     }
   });
+  // Every run's own Dispatch, keyed by its Postgres container and database, with the runs that
+  // name it. A dispatch.json that is missing or does not parse is its own run's rig error, below.
+  const sharing = new Map<string, string[]>();
+  for (const run of existsSync(runsDir) ? readdirSync(runsDir) : []) {
+    let dispatch: string;
+    try {
+      dispatch = dispatchOf(path.join(runsDir, run));
+    } catch {
+      continue;
+    }
+    sharing.set(dispatch, [...(sharing.get(dispatch) ?? []), run]);
+  }
   // Each scenario's scorer, keyed by the name its runs' directories start with. An askgate run's
   // case comes from its directory (ASKGATE_RUN).
   const scorers: Record<string, (dir: string, run: string, label: string, askCase: string) => Row> =
@@ -682,7 +726,7 @@ function scoreRuns(runsDir: string, only: string | undefined) {
         throw new Error(
           "the directory names no case: an askgate run's directory is askgate-<case>-<label>-<n>"
         );
-      reason = unscored(dir, label, labels);
+      reason = unscored(dir, label, labels, sharing);
       if (reason === undefined) rows.push(score(dir, run, label, askCase));
     } catch (error) {
       reason = error instanceof Error ? error.message : String(error);
