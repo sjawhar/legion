@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-266",
+  "completed": "2026-10-25T09:05:00Z",
+  "round": 1,
+  "reviewedHead": "87ae4f4864d2eaf4823e3eb14266e4989561e0e7",
+  "codeHead": "98ac7624699e4d7221e9fc7a54aca39418613553",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/settings/ProjectsSection.tsx:58",
+      "description": "One shared, unguarded mutation for every row: after a pick the controlled select snaps back to the stored value while the PUT is pending and stays enabled, so a second pick sends a second PUT concurrently (reviewer's probe: value 'alice@example.com', disabled=false after picking bob; PUT calls [bob, carol] both in flight). The server applies whichever commits last, so the project's default can end as the choice the person replaced, and that default decides who later unowned issues go to. Fix as useIssueFieldWrite.ts does (per-project ordered write, newest choice wins, pending choice shown) or disable that row's control and show the pending choice until the write settles; the unit test should assert the displayed value, not only the PUT arguments and a refetch count."
+    },
+    {
+      "severity": "important",
+      "file": "packages/dispatch/web/src/features/settings/ProjectsSection.tsx:64",
+      "description": "While the defaults read is pending or has failed, `defaults.data ?? []` renders every project as Unassigned with the control enabled (reviewer's probe with a rejected read: value '', disabled=false, beside the load error). An unknown is shown as a known 'no default'. Render no value and keep the control disabled until defaults.isSuccess; the e2e row's `ops` toHaveValue('') then only proves something once the read has answered."
+    },
+    {
+      "severity": "minor",
+      "file": "skills/dispatch/references/asks.md:7",
+      "description": "'an issue is unassigned only when its project names no default assignee either' is false: an explicit null create, a reassign to nobody, and every issue created before the default was set are unassigned with a default configured. Agent-facing guidance; same overstatement in the Settings sentence at ProjectsSection.tsx:141-143 ('reaches that person for every one of its issues': a person's own create, an owned token's or an assigned parent's still win). Reword both to the default being the last fallback for a new issue created with nobody named."
+    }
+  ],
+  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title. CI head 98ac7624699e (only .legion/ changed since, compare true): typecheck success, pr-title success, lint in_progress, test queued at the read. Not approved, so not waited on.",
+  "thermonuclear": "Pair run once at 87ae4f48: deep review CHANGES (the mutation-ordering finding, the asks.md overstatement; no security finding); code quality CHANGES (the same ordering finding, the unknown-as-Unassigned rendering, a unit test that pins wiring). Both UI findings confirmed by a throwaway probe test run in packages/dispatch, then deleted.",
+  "contractCensus": "Not required: additive only (two new routes, a new DispatchEvent arm, a nullable column); no existing field removed, renamed or made required, and no existing route gains a refusal."
+}
