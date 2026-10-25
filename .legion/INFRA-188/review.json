@@ -61,7 +61,7 @@
     "codeQuality": "Verdict: APPROVE at b0796342, none blocking. Ranked: the stale body lines (reviewer's, rewritten), the test name carried above as this round's finding, the printed-move derivation (declined above), and a weighing of the replaced example that requested no change."
   },
   "verifiedOnTheForge": {
-    "threads": "0 review threads on sjawhar/legion#2174 (gh api graphql reviewThreads); round 1's review carried its three findings in its body and opened none that persists, so there is none to answer or accept.",
+    "threads": "Four review threads on sjawhar/legion#2174, none resolved (gh api graphql reviewThreads). Three are round 1's inline findings, all mine, all answered on the thread at this round with b079634292d9 named as the commit that fixed each, and all three accepted for the implementer to resolve as the pull request's author: PRRT_kwDORFy7ds6v-1K8 (skills/dispatch/references/issues.md), PRRT_kwDORFy7ds6v-1K- (packages/contracts/src/dispatch-tools.ts), PRRT_kwDORFy7ds6v-1K_ (packages/envoy-client/src/__tests__/dispatch-execute.test.ts). The fourth, PRRT_kwDORFy7ds6v-8JH, is this round's finding and stays open until the rename lands. No bot opened a thread here. The review was submitted with a thread count read before its own inline comments existed; the submitted body was corrected in place to this.",
     "e2eLines": "Both present in the pull request body at this head: E2E (implementer) and E2E (tester), the tester's naming its round-2 run at b079634292d9.",
     "compare": "gh api repos/sjawhar/legion/compare/b079634292d9...a14f3fdf1c41 prints true: every path above the code head is under .legion/."
   }
