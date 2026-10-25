@@ -303,16 +303,24 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
   });
 
   try {
-    const streamResponse = page.waitForEvent(
-      "websocket",
-      (socket) => new URL(socket.url()).pathname === "/ws/live"
-    );
+    // Every event frame for the hidden issue the reloaded page's live socket carries.
+    let hiddenFrames = 0;
+    page.on("websocket", (socket) => {
+      if (new URL(socket.url()).pathname !== "/ws/live") return;
+      socket.on("framereceived", ({ payload }) => {
+        const frame = JSON.parse(String(payload)) as {
+          readonly type?: string;
+          readonly event?: { readonly issue_key?: string };
+        };
+        if (frame.type === "event" && frame.event?.issue_key === hiddenIssue.key) hiddenFrames += 1;
+      });
+    });
     const reloaded = page.reload();
-    // A reload is a cold client: the server starts its stream at the current head and replays
-    // nothing. Posting the hidden reply before that stream is open means the frame never
-    // reaches the page, no pending marker is ever set, and everything below passes without
-    // testing anything. Wait for the stream as the sibling above does.
-    await Promise.all([listRequested.promise, streamResponse]);
+    // A reload's first subscription resumes from its sign-in check's `event_head`, and the page
+    // reads the Inbox only once that check has answered, so the hidden reply, posted once the
+    // held Inbox read is out, is replayed to the page whenever its live socket opens: no wait for
+    // the socket.
+    await listRequested.promise;
     await createComment(
       hiddenIssue.key,
       { ask_id: hiddenAsk.id, body: "Fresh hidden reply." },
@@ -330,6 +338,9 @@ test("a later Inbox response clears a hidden ask's pending refresh", async ({ br
     await expect(
       page.getByTestId(`ask-${visibleAsk.id}`).getByText("Ordering marker.")
     ).toBeVisible();
+    // So the hidden reply reached the page before the held response lands: what follows tests its
+    // pending refresh rather than passing without one.
+    expect(hiddenFrames).toBeGreaterThan(0);
     releaseList.resolve();
     await reloaded;
 
