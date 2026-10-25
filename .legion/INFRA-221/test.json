@@ -2,23 +2,28 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-221",
-  "completed": "2026-10-25T07:22:41Z",
-  "round": 12,
+  "completed": "2026-10-25T07:28:28Z",
+  "round": 13,
   "implementerProof": {
     "verdict": "verified",
-    "how": "At 417d96141003ba5bad7dc6fd5f45aa983975c61f: `printf` of the nine variables in this container resolves each under /legion (scratch, go, uv), none to /legion/harness; `df -h /legion $HOME /tmp` puts /legion on the 49G volume and $HOME and /tmp on the container's `/`; the old phrase 'through one of the variables the runtime actually sets' is gone from tools.md; `diff -r skills/legion-worker packages/claude-envoy/legion/skills/legion-worker` is empty. The implementer's claim — the reworded condition admits the worked case at /legion/harness — holds. The failure below is what else the rewording admits."
+    "how": "At 3061dbb55729ab84c4add0c9ff983a7c12864e7e: the first condition (tools.md:84-95) now reads 'on the issue's own volume, under /legion ... but outside the issue's workspace ($LEGION_WORKSPACE, under /legion/workspaces) and the runtime's own directories (/legion/repos, /legion/feed, /legion/sessions)', keeping the repository's own dependency install into ignored directories as the one sanctioned write into the workspace (:117-119 is that case). `ls -d /legion/*` here gives feed, go, lost+found, repos, scratch, sessions, workspaces: the three excluded runtime directories are the ones the list names, and go and scratch (and /legion/uv, which UV_CACHE_DIR and UV_PYTHON_INSTALL_DIR name) are where the listed variables point, so /legion/harness is admitted and the workspace is not. The INFRA-43 note says 'outside the workspace' and restores the operative 'not into the shell you go on working in'. `diff -r skills/legion-worker packages/claude-envoy/legion/skills/legion-worker` is empty."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "The test's first condition admits the page's worked case without sanctioning a placement the page's own cited learning forbids (review round 9's finding, fixed without opening a new hole).",
-      "evidence": "skills/legion-worker/references/tools.md:84-88 now reads: lands on the issue's own volume, under `/legion` ... 'or under a path on that volume your harness names itself'. `$LEGION_WORKSPACE` is such a path — /legion/workspaces/sjawhar/legion/infra-221, on the same 49G volume (`ls /legion`: feed go repos scratch sessions workspaces) — and the INFRA-43 learning the worked case cites says 'Put nothing under `$LEGION_WORKSPACE`: six roles share that jj workspace'. Driven in this role container: `mkdir -p .harness-probe/usr/bin`, a 2-line `pg_ctl` and an `env.sh` written under the workspace, then `jj status` -> `A .harness-probe/env.sh`, `A .harness-probe/usr/bin/pg_ctl` in the shared working-copy commit (`snapshot.auto-track` is `all()`; `snapshot.max-new-file-size` is 1MiB, so every small file of an extraction root is snapshotted); removed, `jj status` clean and @ empty again. So a role that follows the condition as written can put its harness root where jj tracks it into every role's working copy, and the condition calls that sanctioned; at b4ebc2dd the nine-variable wording excluded it, since none of the nine is under /legion/workspaces. The same widening admits /legion/sessions (Oh My Pi's session store) and /legion/repos. Fix (one clause in the one statement): 'on the issue's volume, outside `$LEGION_WORKSPACE` — whose untracked files jj snapshots into every role's working copy — and outside the runtime's own directories', keeping the repository's own dependency set (`uv sync`/`bun install` into its ignored directories) as the page already sanctions it. No red test: a test asserting a skill's wording is a source-text test, which this repository's rules forbid."
+      "criterion": "The test's first condition admits the worked case at /legion/harness and refuses a harness root in the shared jj workspace and in the runtime's own /legion directories (review round 9 and tester round 12).",
+      "surface": "This tester's role container: the tree at 3061dbb55729ab84c4add0c9ff983a7c12864e7e, the /legion volume as mounted, and the issue's jj workspace itself.",
+      "command": "ls -d /legion/*; echo $UV_CACHE_DIR $UV_PYTHON_INSTALL_DIR; sed -n 84,99p skills/legion-worker/references/tools.md; in $LEGION_WORKSPACE: mkdir -p .probe13/lib; printf 'x\\n' > .probe13/env.sh; head -c 2097152 /dev/zero > .probe13/lib/libbig.so; jj status; rm -rf .probe13; jj status; diff -r skills/legion-worker packages/claude-envoy/legion/skills/legion-worker",
+      "observed": "The condition names the workspace and /legion/repos, /legion/feed, /legion/sessions as excluded, which with the variables' /legion/go, /legion/scratch and /legion/uv covers every entry `ls -d /legion/*` shows but lost+found. The reason it gives is real: `jj status` showed `A .probe13/env.sh` in the shared working-copy commit; removed, the working copy is clean and @ empty. The bundle is byte-identical. Nothing outside skills/, its bundle copy, one docs/solutions note and .legion/ changed since round 12.",
+      "headSha": "3061dbb55729ab84c4add0c9ff983a7c12864e7e",
+      "negativeControl": "At 417d96141003 the condition read 'under a path on that volume your harness names itself' with no exclusion, which admitted the same .probe13 placement that jj tracks above (tester round 12's failure)."
     }
   ],
-  "failed": 1,
-  "ciRead": "At code head 417d96141003ba5bad7dc6fd5f45aa983975c61f (skills/ text, the bundle copy and one docs/solutions note), `gh api repos/sjawhar/legion/commits/417d9614…/check-runs`: build pending and queued; changes, lint, test, typecheck and three pr-title queued; one pr-title cancelled. Cited as running; not waited on and not re-run. The last code head with settled CI, 21c0047b30ea, had lint, typecheck, test and pr-title all success; no Go file or Dockerfile has changed since.",
+  "ciRead": "At code head 3061dbb55729ab84c4add0c9ff983a7c12864e7e, `gh api repos/sjawhar/legion/commits/3061dbb5…/check-runs`: build pending and queued; changes, lint, test, typecheck and pr-title queued; one pr-title cancelled. Cited as running; not waited on and not re-run. The last code head with settled CI, 21c0047b30ea, had lint, typecheck, test and pr-title all success; no Go file or Dockerfile has changed since.",
   "observations": [
-    "The INFRA-43 note dropped round 11's operative sentence ('source it in the same invocation as the harness command ... not into the shell you go on working in') for 'That is a statement of scope, not a change to the recipe above'. Not a finding: 'a role reaches it only by sourcing the env file for the harness's own commands' still carries the second condition. But the replacement sentence means little to a reader who did not follow the rounds, and the instruction it replaced was the one a role acts on.",
-    "Image half not re-driven: no Go file or Dockerfile changed; skills/ text ships in the image but its content is the bundle, which is byte-identical to skills/."
+    "Wording, not a finding: 'its jj working copy tracks every new file' (tools.md:90-91) overstates the mechanism — the same probe's 2 MiB file was refused ('Refused to snapshot some files: ... the maximum size allowed is 1.0MiB', `snapshot.max-new-file-size`) and left untracked while the 2-byte env.sh was added. The conclusion — a root written there is added to the change every role shares — holds for every file of a root under 1 MiB, so no role acts differently; 'tracks every new file under 1 MiB' would be exact.",
+    "Image half not re-driven: no Go file or Dockerfile changed; the skill text the image ships is the bundle, identical to skills/."
   ],
   "previousRounds": [
     {
@@ -97,6 +102,13 @@
       "verdict": "pass",
       "handoffCommit": "fcefe699af71",
       "summary": "All five INFRA-221 notes name the heading and a condition once; INFRA-44's dates and runtime claims match GitHub and the container; INFRA-43's subshell form driven."
+    },
+    {
+      "round": 12,
+      "head": "417d96141003ba5bad7dc6fd5f45aa983975c61f",
+      "verdict": "fail",
+      "handoffCommit": "552c5cf87c60",
+      "summary": "The widened first condition admitted $LEGION_WORKSPACE, where jj snapshots a harness root into the shared working copy."
     }
   ]
 }
