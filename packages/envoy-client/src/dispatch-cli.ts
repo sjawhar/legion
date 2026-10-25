@@ -3,6 +3,7 @@ import type { ActiveDispatchConfig } from "./dispatch-config";
 import type { DispatchHost } from "./dispatch-cwd";
 import { checkDispatchCall, dispatchServerUrls, executeDispatchTool } from "./dispatch-execute";
 import {
+  appendResult,
   loadSessionMemory,
   pruneSessions,
   type ResultInput,
@@ -174,52 +175,73 @@ export async function runDispatchCli(
   for (const [name, value] of Object.entries(rawEnv)) {
     if (value !== undefined && value !== "") env[name] = value;
   }
+  // A refusal before the call reaches Dispatch goes to the session's ledger too, whenever this
+  // call knows its session, so a reader of the ledger (pi-envoy's run-end check, the
+  // skill-scenario rig) sees a call whose output a pipe, `$(…)` or another program swallowed.
+  // The host need not be known for the session to be: a Python `subprocess.run(["dispatch", …])`
+  // inherits the session id without `DISPATCH_HOST`. A ledger that cannot be written changes
+  // nothing here: the refusal is already printed, and the caller is exiting.
+  const refuse = (text: string, code: number, tool?: string): number => {
+    print(text);
+    const sessionId = env.CLAUDE_CODE_SESSION_ID ?? env.DISPATCH_SESSION_ID;
+    if (sessionId !== undefined) {
+      try {
+        appendResult(sessionDirectory(env, sessionId), {
+          tool: tool ?? "dispatch",
+          error: text.trimEnd(),
+        });
+      } catch {
+        // The session's directory is unusable; the printed refusal stands on its own.
+      }
+    }
+    return code;
+  };
 
   let parsed: ParsedCommand;
   try {
     parsed = parseCommand(argv, io);
   } catch (error) {
-    print(`dispatch: ${messageFor(error)}`);
-    return USAGE;
+    return refuse(`dispatch: ${messageFor(error)}`, USAGE);
   }
   if (parsed.kind === "help") {
     print(parsed.tool === undefined ? commandsHelp() : commandHelp(parsed.tool));
     return OK;
   }
   if (parsed.kind === "refused") {
-    if (parsed.tool === undefined) {
-      print([`dispatch: ${parsed.problems.join("\n")}`, "Run dispatch --help."].join("\n"));
-      return USAGE;
-    }
-    print(new ToolInputError(parsed.tool, parsed.problems).message);
-    return REFUSED;
+    return parsed.tool === undefined
+      ? refuse(
+          [`dispatch: ${parsed.problems.join("\n")}`, "Run dispatch --help."].join("\n"),
+          USAGE
+        )
+      : refuse(new ToolInputError(parsed.tool, parsed.problems).message, REFUSED, parsed.tool);
   }
 
   const hostName =
     env.DISPATCH_HOST ?? (env.CLAUDE_CODE_CHILD_SESSION === "1" ? "claude" : undefined);
   const host = HOSTS.find((name) => name === hostName);
   if (host === undefined) {
-    print(
+    return refuse(
       hostName === undefined
         ? "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself."
-        : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`
+        : `dispatch: DISPATCH_HOST is ${JSON.stringify(hostName)}, not omp, claude or opencode.`,
+      USAGE,
+      parsed.tool
     );
-    return USAGE;
   }
   const sessionVariable = host === "claude" ? "CLAUDE_CODE_SESSION_ID" : "DISPATCH_SESSION_ID";
   const sessionId = env[sessionVariable];
   if (sessionId === undefined) {
-    print(
-      `dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`
+    return refuse(
+      `dispatch: ${sessionVariable} is not set, so this call has no session to act as. The host plugin sets it in an agent's shell.`,
+      USAGE,
+      parsed.tool
     );
-    return USAGE;
   }
   let dir: string;
   try {
     dir = sessionDirectory(env, sessionId);
   } catch (error) {
-    print(messageFor(error));
-    return USAGE;
+    return refuse(messageFor(error), USAGE, parsed.tool);
   }
 
   // The file the session's plugin handed its shell (each plugin sets DISPATCH_HOST and
@@ -242,26 +264,25 @@ export async function runDispatchCli(
       serverUrls: settings?.enabled === true ? dispatchServerUrls(settings) : [],
     });
     if (problems.length > 0) {
-      print(new ToolInputError(parsed.tool, problems).message);
-      return REFUSED;
+      return refuse(new ToolInputError(parsed.tool, problems).message, REFUSED, parsed.tool);
     }
     print(JSON.stringify(parsed.args, null, 2));
     return OK;
   }
   if (file.path === null) {
-    print(`dispatch: ${file.error}`);
-    return USAGE;
+    return refuse(`dispatch: ${file.error}`, USAGE, parsed.tool);
   }
   const { dispatch: resolution, warnings } = sessionDispatchSettings(file, env, { cwd: io.cwd });
   // A checkout's OpenCode-era file, which is not read, is said on every call while it is there.
   for (const warning of warnings) print(`dispatch: ${warning}`);
   if (!resolution.enabled) {
-    print(
+    return refuse(
       resolution.error === null
         ? `dispatch: ${resolution.notice}`
-        : `dispatch: dispatch config: ${resolution.error}`
+        : `dispatch: dispatch config: ${resolution.error}`,
+      USAGE,
+      parsed.tool
     );
-    return USAGE;
   }
   const config: ActiveDispatchConfig = resolution;
 
@@ -297,8 +318,7 @@ export async function runDispatchCli(
     pruneSessions(sessionStateRoot(env), Date.now());
     follows = loadSessionMemory(dir, sessionId);
   } catch (error) {
-    print(`dispatch: ${messageFor(error)}`);
-    return USAGE;
+    return refuse(`dispatch: ${messageFor(error)}`, USAGE, parsed.tool);
   }
   const { tool, args } = parsed;
   let text: string;

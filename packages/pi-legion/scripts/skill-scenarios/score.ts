@@ -1200,6 +1200,22 @@ function refusalBlocks(
       const call = callOf(op.step);
       return [{ where: op.call.text, text: op.refusal, call, op: place, at: call?.start ?? 0 }];
     }),
+    // An `eval` cell runs `dispatch` through its own language, which no shell parse reads, and Oh
+    // My Pi gives its kernel an environment of allowlisted names alone, with no session id in it,
+    // so the CLI knows no session and logs nothing. Such a cell's refusals are in its output
+    // alone, and each counts once, for the cell.
+    ...calls.flatMap((call) => {
+      if (call.step.tool !== "eval") return [];
+      if (lines.some((entry) => entry.call === call)) return [];
+      if (ops.some((op) => op.kind === "dispatch" && op.step.id === call.step.id)) return [];
+      return cliRefusals(results.get(call.step.id)?.text ?? "").map((found) => ({
+        where: `eval cell ${call.step.id}, which the CLI logged no call of`,
+        text: found.line,
+        call: call as Call | undefined,
+        op: undefined as number | undefined,
+        at: call.start,
+      }));
+    }),
   ].sort((a, b) => a.at - b.at || (a.op ?? 0) - (b.op ?? 0));
 
   const blocks: string[] = [];

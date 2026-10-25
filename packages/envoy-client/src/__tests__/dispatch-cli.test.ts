@@ -1268,6 +1268,57 @@ describe("cliRefusals", () => {
     expect(cliRefusals(moved.stdout)).toEqual([]);
   });
 
+  // A refusal the CLI prints before it reaches Dispatch is logged too, whenever the call knows its
+  // session: a reader of the ledger (pi-envoy's run-end check, the skill-scenario rig) sees a call
+  // whose output a pipe, `$(…)` or another program swallowed. The host and the command need not be
+  // known for the session to be: a Python `subprocess.run(["dispatch", …])` inherits the session id
+  // without `DISPATCH_HOST`.
+  test("an early refusal is logged when the call knows its session, with no request", async () => {
+    const cases: [string, readonly string[], Record<string, string | undefined>, string][] = [
+      ["an unknown flag", ["message", "--issue", "X", "--isue", "Y"], omp, "dispatch_message"],
+      ["an unknown command", ["frobnicate"], omp, "dispatch"],
+      ["no host", ["projects"], { DISPATCH_SESSION_ID: "ses-1" }, "dispatch_projects"],
+      [
+        "another host",
+        ["projects"],
+        { DISPATCH_HOST: "vim", DISPATCH_SESSION_ID: "ses-1" },
+        "dispatch_projects",
+      ],
+      [
+        "Dispatch turned off",
+        ["projects"],
+        { ...omp, DISPATCH_URL: undefined, DISPATCH_TOKEN: undefined },
+        "dispatch_projects",
+      ],
+    ];
+    for (const [name, argv, env, tool] of cases) {
+      stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+      const { code, stdout } = await run(argv, env);
+      expect(code, name).toBeGreaterThan(0);
+      const logged = ledger("ses-1");
+      expect(
+        logged.map((line) => line.tool),
+        name
+      ).toEqual([tool]);
+      expect(logged[0]?.error, name).toBe(stdout.trimEnd());
+      expect(cliRefusals(`${logged[0]?.error}\n`), name).toHaveLength(1);
+    }
+    expect(requests).toEqual([]);
+  });
+
+  // Catches: a crash, or an empty ledger file, when no session id is set at all, and a help or dry
+  // run logged as a refusal.
+  test("a call with no session logs nothing, and help and a dry run log no refusal", async () => {
+    const { code } = await run(["projects"], { DISPATCH_HOST: "omp" });
+    expect(code).toBe(2);
+    expect(existsSync(join(stateDir, "sessions"))).toBe(false);
+
+    stateDir = mkdtempSync(join(tmpdir(), "dispatch-cli-"));
+    await run(["doc-edit", "--help"], omp);
+    await run(["message", "--issue", "DSP-1", "--body", "hi", "--dry-run"], omp);
+    expect(existsSync(join(stateDir, "sessions", "ses-1", "results.jsonl"))).toBe(false);
+  });
+
   test("help, a dry run's arguments, and a refusal quoted inside a line refuse nothing", async () => {
     const help = await run(["doc-edit", "--help"], omp);
     const dry = await run(["message", "--issue", "DSP-1", "--body", "hi", "--dry-run"], omp);

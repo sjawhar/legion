@@ -344,6 +344,23 @@ const sh = (
     },
   },
 ];
+/** An `eval` cell and its result. Its code runs `dispatch` through its own language, which no
+ * shell parse reads, and Oh My Pi's kernel is given no session, so the CLI logs nothing for it
+ * (`logged` is empty unless a fixture says otherwise). */
+const evalCell = (id: string, code: string, text: string, logged: Logged[] = []) => [
+  toolCall(id, "eval", { code, language: "python" }),
+  {
+    type: "message",
+    logged,
+    message: {
+      role: "toolResult",
+      toolName: "eval",
+      toolCallId: id,
+      isError: false,
+      content: [{ type: "text", text }],
+    },
+  },
+];
 const readOf = (id: string, target: string) => [
   toolCall(id, "read", { path: target }),
   result(id, "text"),
@@ -1027,6 +1044,39 @@ specRun("spec-writing-head-43", {
     )
   ),
 });
+// An `eval` cell whose Python ran `dispatch` and was refused before the call reached Dispatch.
+// Oh My Pi gives its kernel no session (its environment is an allowlist that holds no
+// DISPATCH_SESSION_ID), so the CLI logs nothing, and the cell's code is no shell text: the
+// refusal is in the cell's output alone.
+const noHost =
+  "dispatch: DISPATCH_HOST is not set. The host plugin sets it in an agent's shell; to run dispatch by hand, set DISPATCH_HOST and DISPATCH_SESSION_ID yourself.\n";
+const pythonCall =
+  "import subprocess\nr = subprocess.run(['dispatch', 'doc-edit', '--issue', 'LWEVAL-7', '--artifact', 'spec', '--ops-json-file', 'ops.json'], capture_output=True, text=True)\nprint(r.stdout)";
+specRun("spec-writing-head-57", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish,
+    evalCell("x14", pythonCall, noHost)
+  ),
+});
+// The same refusal, fixed by a later `dispatch` call with no skill read between.
+specRun("spec-writing-head-58", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    evalCell("x14", pythonCall, noHost),
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
 // A refusal fixed by a later call that reads a skill file after its dispatch command: that read
 // comes after the fix.
 const laterSkill = path.join(
@@ -1633,6 +1683,15 @@ test("refusals: the CLI's ledger holds each refusal, the ones a call's output hi
     "refused call: dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json 2> (dispatch_doc_edit, logged at "
   );
   expect(rowOf("spec-writing-head-46")).toContain("no later dispatch call succeeded");
+});
+
+test("refusals: a refusal in an eval cell's output counts when the CLI logged nothing for it", () => {
+  expect(scoresOf("spec-writing-head-57")).toEqual({ ...allPass, refusals: "false" });
+  const row = rowOf("spec-writing-head-57");
+  expect(row).toContain("refused call: eval cell x14, which the CLI logged no call of");
+  expect(row).toContain(`    ${noHost.trim()}`);
+  expect(row).toContain("no later dispatch call succeeded");
+  expect(scoresOf("spec-writing-head-58")).toEqual(allPass);
 });
 
 test("refusals: a run whose CLI ledger is missing is a rig error naming the file", () => {

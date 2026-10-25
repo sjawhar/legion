@@ -335,7 +335,8 @@ ledger, the memory) could not be written, the result still prints, with one line
 `<XDG_STATE_HOME or ~/.local/state>/dispatch/sessions/<id>`): `state.json` carries what a
 long-lived host remembered across calls (the triage lines and pictures already shown, the asks
 whose follow notice was printed), and `results.jsonl` gets one line per call with the tool's
-`details` or its refusal, which pi-envoy's run-end check reads; a line that is not JSON is named
+`details` or its refusal, a refusal the CLI made before the call reached Dispatch included, which
+pi-envoy's run-end check reads; a line that is not JSON is named
 (file and line number) and skipped. Directories idle for 14 days are removed, at most once a day.
 
 `bun bin/stand-in-gateway.ts --status 502 --body html` serves one non-Dispatch answer (`html`,

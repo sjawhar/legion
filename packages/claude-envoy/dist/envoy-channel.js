@@ -42620,6 +42620,10 @@ function writeMemory(dir, sessionId, follows) {
   writeAtomically(join(dir, "state.json"), `${JSON.stringify(state)}
 `);
 }
+function appendResult(dir, entry) {
+  ensureDirectory(dir);
+  writeResult(dir, entry);
+}
 function writeResult(dir, entry) {
   const line = { at: new Date().toISOString(), ...entry };
   appendFileSync(join(dir, "results.jsonl"), `${JSON.stringify(line)}
