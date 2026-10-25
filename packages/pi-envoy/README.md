@@ -277,7 +277,10 @@ call knows two rules (`extensions/askgate/rule-check.md`) and judges only the ne
 
 A new ask is a `dispatch ask`, an ask block that a `dispatch doc-edit` inserts, a block that it
 retypes into an ask, an ask block in a `dispatch issue` spec, or an ask block in a markdown
-upload whose `#id` the document does not already hold.
+upload whose `#id` the document does not already hold. When that document cannot be read, an
+upload's ask blocks that carry an `#id` are left out — a stored version may hold any of them —
+and only the blocks with no id are judged, so a re-upload of an unchanged document is never
+refused for an ask block it already held.
 
 A match refuses the call in `warn` mode and in `block` mode, so no part of the call posts. The
 refusal names the matching asks, each with its rule and the words that match. It says what to do
@@ -327,11 +330,14 @@ such target. A call that opens a new ask adds the fields of the rules check:
   the charter check's own time on the same clock; the two calls run side by side, so each says
   what it cost of the entry's whole `latencyMs`.
 - `ruleTextMissing`: `true` when the gate could not read the text of an ask and judged the ask
-  without it.
+  without it. A failed read of an upload's stored version never sets it: no ask of an upload
+  loses its own text.
 - `ruleError`: the error text for `error` (the provider's, or the check's own when it fails before
   a model answers), `timeout` for a timeout, and `no-verdict` for an answer that does not parse.
 - `ruleAsksCut`: how many asks the request left out or cut. The gate caps the list of asks at
   32 KiB, and each ask at 8 KiB.
+- `ruleAsksPartial`: `true` when the call was judged on part of its asks: the gate could not read
+  the document an upload replaces, so the ask blocks carrying an `#id` were left out of the check.
 
 `decision` is `revise` on a rules refusal in `warn` mode too. The gate refused a call exactly when
 `decision` is `revise` and one of these is true: `verdictMode` is `block`, `outcome` is
@@ -350,9 +356,9 @@ document of the session's own, `askgate-decisions-<session id>.md`.
 
 - **What it carries.** The time, the session, `source` (`pod` for a Legion role's session, which
   `LEGION_ISSUE` names, and `machine` for every other), the project, `tool`, `target`, `rule`,
-  `ruleOutcome`, `ruleError`, `ruleTextMissing`, `ruleAsksCut`, `decision`, `outcome`,
-  `verdictMode`, `ruleLatencyMs`, `charterLatencyMs` and the plugin's version. **No ask text and
-  no quote leaves the session**, so nothing a person wrote travels with the counts.
+  `ruleOutcome`, `ruleError`, `ruleTextMissing`, `ruleAsksCut`, `ruleAsksPartial`, `decision`,
+  `outcome`, `verdictMode`, `ruleLatencyMs`, `charterLatencyMs` and the plugin's version. **No ask
+  text and no quote leaves the session**, so nothing a person wrote travels with the counts.
 - **Which project.** `OMP_ASKGATE_RECORD_PROJECT`, else `LEGION_PROJECT` (a Legion pod has no
   envoy.json, so its environment is the only setting it can carry), else no record at all and no
   Dispatch call.
@@ -365,6 +371,7 @@ document of the session's own, `askgate-decisions-<session id>.md`.
   rather than silently.
 
 `scripts/askgate-report.ts --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those
-documents and prints the day's refusals by rule, the refusals the agent overrode, and the
-rules-call error rate, each split by `source`, with the documents and lines it could not read
-counted beside them. The same script's `--sessions <dir>` mode still reports the entries on disk.
+documents and prints the day's refusals by rule, the refusals the agent overrode, the calls
+judged on part of their asks, and the rules-call error rate, each split by `source`, with the
+documents and lines it could not read counted beside them. The same script's `--sessions <dir>`
+mode still reports the entries on disk.

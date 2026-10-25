@@ -36,9 +36,12 @@
   target sends the call anyway. The breaker counts only the calls the gate refused, so a charter
   revise in `warn` mode, which sends the call, never moves it, and its free pass covers only the
   thing that was refused: a target whose refusals named no ask, or a call opening one of the asks
-  a rules refusal named there. Another ask on that target is reviewed like any other call. The
+  a rules refusal named there. An upload's ask block is new only while the version it replaces
+  does not already hold it, and when that version cannot be read the blocks carrying an `#id` are
+  left out of the check (`ruleAsksPartial`), so a re-upload of an unchanged document is never
+  refused for an ask block it already held. The
   `advisor-gate` entry gains `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleModel`,
-  `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut` and
+  `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut`, `ruleAsksPartial` and
   `target`, and `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors
   and the refusals the agent overrode.
 - AskGate publishes each rule decision, and each refused call the agent sent again with a rebuttal

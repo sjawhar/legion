@@ -147,6 +147,7 @@ const RECORD_KEYS = [
   "ruleError",
   "ruleTextMissing",
   "ruleAsksCut",
+  "ruleAsksPartial",
   "decision",
   "outcome",
   "verdictMode",
@@ -216,6 +217,7 @@ describe("the AskGate decision record", () => {
       ruleError: null,
       ruleTextMissing: false,
       ruleAsksCut: 0,
+      ruleAsksPartial: false,
       decision: "revise",
       outcome: "verdict",
       verdictMode: "block",
@@ -251,6 +253,25 @@ describe("the AskGate decision record", () => {
       decision: "allow",
       ruleLatencyMs: null,
       charterLatencyMs: 5200,
+    });
+  });
+
+  test("an upload judged on part of its asks records that, and no missing text", async () => {
+    const dispatch = fakeDispatch();
+    await harness({ client: dispatch.client }).write({
+      ...REFUSAL,
+      tool: "dispatch_artifact",
+      target: "dispatch_artifact issue=X-1",
+      decision: "allow",
+      rule: undefined,
+      ruleOutcome: "none",
+      ruleAsksPartial: true,
+    });
+    expect(recordsIn(dispatch.uploads[0]?.content ?? "")[0]).toMatchObject({
+      tool: "dispatch_artifact",
+      ruleOutcome: "none",
+      ruleAsksPartial: true,
+      ruleTextMissing: false,
     });
   });
 

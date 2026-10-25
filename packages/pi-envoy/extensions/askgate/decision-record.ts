@@ -80,6 +80,7 @@ export interface RecordedDecision {
   ruleError?: string;
   ruleTextMissing?: true;
   ruleAsksCut?: number;
+  ruleAsksPartial?: true;
   ruleLatencyMs?: number;
   charterLatencyMs?: number;
 }
@@ -99,6 +100,8 @@ export interface DecisionRecord {
   ruleError: string | null;
   ruleTextMissing: boolean;
   ruleAsksCut: number;
+  /** The call was judged on part of its asks: an upload whose stored version could not be read. */
+  ruleAsksPartial: boolean;
   decision: string;
   outcome: string;
   verdictMode: string;
@@ -166,6 +169,7 @@ export function createDecisionRecorder(deps: RecordDeps): DecisionRecorder {
       ruleError: entry.ruleError ?? null,
       ruleTextMissing: entry.ruleTextMissing === true,
       ruleAsksCut: entry.ruleAsksCut ?? 0,
+      ruleAsksPartial: entry.ruleAsksPartial === true,
       decision: entry.decision,
       outcome: entry.outcome,
       verdictMode: entry.verdictMode,

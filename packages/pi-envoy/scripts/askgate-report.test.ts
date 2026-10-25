@@ -598,6 +598,8 @@ function decision(e: {
   ruleError?: string;
   /** How many of the call's new asks the rules request did not carry whole. */
   ruleAsksCut?: number;
+  /** The call was judged on part of its asks: its upload's stored version could not be read. */
+  ruleAsksPartial?: boolean;
 }): string {
   return JSON.stringify({
     time: e.time,
@@ -612,6 +614,7 @@ function decision(e: {
     ruleError: e.ruleError ?? null,
     ruleTextMissing: false,
     ruleAsksCut: e.ruleAsksCut ?? 0,
+    ruleAsksPartial: e.ruleAsksPartial ?? false,
     decision: e.rule === undefined ? "allow" : "revise",
     outcome: e.outcome ?? "verdict",
     verdictMode: "block",
@@ -731,6 +734,7 @@ const DAY_REPORT: DispatchReport = {
     overrides: 1,
     errors: 2,
     cut: 2,
+    partial: 0,
   },
   pod: {
     calls: 3,
@@ -739,6 +743,7 @@ const DAY_REPORT: DispatchReport = {
     overrides: 1,
     errors: 1,
     cut: 1,
+    partial: 0,
   },
   machine: {
     calls: 3,
@@ -747,6 +752,7 @@ const DAY_REPORT: DispatchReport = {
     overrides: 0,
     errors: 1,
     cut: 1,
+    partial: 0,
   },
 };
 
@@ -792,6 +798,7 @@ describe("the Dispatch reader", () => {
       overrides: 0,
       errors: 0,
       cut: 0,
+      partial: 0,
     });
   });
 
@@ -861,6 +868,7 @@ describe("the Dispatch reader", () => {
       overrides: 0,
       errors: 0,
       cut: 0,
+      partial: 0,
     });
   });
 
@@ -883,6 +891,7 @@ describe("the Dispatch reader", () => {
     expect(text).toContain("overrides: 1 (pod 1, machine 0)");
     expect(text).toContain("rules errors: 2 (pod 1, machine 1)");
     expect(text).toContain("rules calls with asks cut: 2 (pod 1, machine 1)");
+    expect(text).toContain("rules calls judged on part of their asks: 0 (pod 0, machine 0)");
     expect(text).toContain("rules error rate: 33.3% (pod 33.3%, machine 33.3%)");
   });
 
@@ -928,6 +937,46 @@ describe("the Dispatch reader", () => {
     expect([json.total.cut, json.pod.cut, json.machine.cut]).toEqual([2, 2, 0]);
   });
 
+  test("the calls judged on part of their asks are counted from the records, by source", async () => {
+    // One pod call and one machine call whose upload's stored version the gate could not read, so
+    // each judged only the asks no stored version can hold; the pod's other call judged them all.
+    const documents: ProjectDocument[] = [
+      {
+        name: `askgate-decisions-${POD_SESSION}.md`,
+        markdown: decisionDocument(POD_SESSION, [
+          decision({
+            time: at(1),
+            session: POD_SESSION,
+            source: "pod",
+            target: SPEC,
+            ruleAsksPartial: true,
+          }),
+          decision({ time: at(2), session: POD_SESSION, source: "pod", target: ASK_1 }),
+        ]),
+      },
+      {
+        name: `askgate-decisions-${MACHINE_SESSION}.md`,
+        markdown: decisionDocument(MACHINE_SESSION, [
+          decision({
+            time: at(1),
+            session: MACHINE_SESSION,
+            source: "machine",
+            target: SPEC,
+            ruleAsksPartial: true,
+          }),
+        ]),
+      },
+    ];
+    const { read, report } = await reportOf(documents, SINCE);
+    expect(read.records.map((record) => record.ruleAsksPartial)).toEqual([true, false, true]);
+    expect([report.total.partial, report.pod.partial, report.machine.partial]).toEqual([2, 1, 1]);
+    expect(dispatchReportLines(report, false)).toContain(
+      "rules calls judged on part of their asks: 2 (pod 1, machine 1)"
+    );
+    const json = JSON.parse(dispatchReportLines(report, true)[0] as string) as DispatchReport;
+    expect([json.total.partial, json.pod.partial, json.machine.partial]).toEqual([2, 1, 1]);
+  });
+
   test("an override counts on the refusal it overrode and in none of the rules call counts", async () => {
     const markdown = decisionDocument(POD_SESSION, [
       decision({
@@ -970,6 +1019,7 @@ describe("the Dispatch reader", () => {
       overrides: 1,
       errors: 1,
       cut: 0,
+      partial: 0,
     });
     const text = dispatchReportLines(report, false);
     expect(text).toContain("rules calls: 2 (pod 2, machine 0)");

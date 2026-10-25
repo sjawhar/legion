@@ -30,6 +30,7 @@ import {
   parseRuleVerdict,
   type RuleMatch,
   type RulesCheckCall,
+  type RulesCheckDeps,
   runRulesCheck,
 } from "./rules-check";
 import { renderTemplate } from "./text";
@@ -3549,7 +3550,10 @@ describe("rules check", () => {
   /** The document Dispatch holds for the upload below, under the name it trimmed on the way in. */
   const BRIEF = ":::ask{#window}\nWhich deployment window?\n:::\n";
   /** One rules check on its own, driven with the walk and the Dispatch the core lends it. */
-  const checkRules = (call: Pick<RulesCheckCall, "toolName" | "tool" | "input">) =>
+  const checkRules = (
+    call: Pick<RulesCheckCall, "toolName" | "tool" | "input">,
+    deps: Partial<RulesCheckDeps> = {}
+  ) =>
     runRulesCheck(
       {
         now: () => 0,
@@ -3558,6 +3562,7 @@ describe("rules check", () => {
           { id: "doc-brief", name: "brief.md", slug: "brief", markdown: BRIEF },
         ]).session,
         walk: async () => ({ answer: { kind: "answer" as const, text: RULES_NONE }, called: {} }),
+        ...deps,
       },
       {
         directory: async () => "/work",
@@ -3590,6 +3595,65 @@ describe("rules check", () => {
       },
     });
     expect(check?.names).toEqual(["The ask block #window that starts 'Which deployment window?'"]);
+  });
+  /** A session whose Dispatch does not resolve: the de-duplication read fails on every call. */
+  const noDispatch: Partial<RulesCheckDeps> = { dispatchClient: () => undefined };
+  test("an upload whose de-duplication read fails judges the openers with no id and leaves the id-carrying ones alone", async () => {
+    // Without the read nothing says which asks the stored version already holds, and an opener
+    // carrying an id may be one of them.
+    const check = await checkRules(
+      {
+        toolName: "dispatch_artifact",
+        tool: "dispatch artifact",
+        input: {
+          issue: "X-1",
+          name: "brief.md",
+          content: `${BRIEF}\n:::ask{}\nWhich region?\n:::\n`,
+        },
+      },
+      noDispatch
+    );
+    expect(check?.names).toEqual(["The ask block that starts 'Which region?'"]);
+    expect(check?.asksPartial).toBe(true);
+    // No ask was judged without its own text: the upload carries the text of every ask it holds.
+    expect(check?.textMissing).toBe(false);
+  });
+  test("an unchanged document re-uploaded when the de-duplication read fails is not refused", async () => {
+    const check = await checkRules(
+      {
+        toolName: "dispatch_artifact",
+        tool: "dispatch artifact",
+        input: { issue: "X-1", name: "brief.md", content: BRIEF },
+      },
+      {
+        ...noDispatch,
+        // The rule the stored ask block would match, were it judged as an ask this upload adds.
+        walk: async () => ({
+          answer: {
+            kind: "answer" as const,
+            text: rulesAnswer([{ ask: 1, rule: "no_change", quote: "Which deployment window?" }]),
+          },
+          called: {},
+        }),
+      }
+    );
+    expect(check).toBeUndefined();
+  });
+  test("a doc-edit whose document read fails still judges every ask it inserts", async () => {
+    const check = await checkRules(
+      {
+        toolName: "dispatch_doc_edit",
+        tool: "dispatch doc-edit",
+        input: {
+          issue: "X-1",
+          artifact: "brief",
+          ops: [{ op: "insert", after: "end", markdown: BRIEF }],
+        },
+      },
+      noDispatch
+    );
+    expect(check?.names).toEqual(["The ask block #window that starts 'Which deployment window?'"]);
+    expect(check?.asksPartial).toBe(false);
   });
 });
 
@@ -3742,5 +3806,37 @@ describe("the Dispatch decision record (A5)", () => {
     expect(dispatch.uploads).toEqual([]);
     expect(g.entries).toMatchObject([{ rule: "no_change", ruleOutcome: "match" }]);
     expect(g.entries[0]?.recordError).toBeUndefined();
+  });
+
+  test("an upload whose de-duplication read fails carries ruleAsksPartial, and no missing text, into the entry and the record", async () => {
+    // The upload adds one ask block of its own and carries one the stored version may already
+    // hold; this Dispatch answers the record's two calls alone, so the gate's read of that
+    // stored version fails and only the block with no id is judged.
+    const content =
+      ":::ask{}\nShould I change the cache path? Recommendation: keep it as it is.\n:::\n\n:::ask{#window}\nWhich deployment window?\n:::\n";
+    const dispatch = recordingDispatch();
+    const g = bind({
+      complete: bySystem(ALLOW, MATCHED),
+      env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+      dispatch: dispatch.session,
+      dryRun: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({ issue: "X-1", name: "brief.md", content }),
+        stderr: "",
+        timedOut: false,
+      }),
+    });
+    const result = await g.bash(
+      "t1",
+      "dispatch artifact --issue X-1 --name brief.md --content-file brief.md"
+    );
+    expect(result?.block).toBe(true);
+    expect(g.entries).toMatchObject([
+      { tool: "dispatch_artifact", rule: "no_change", ruleOutcome: "match", ruleAsksPartial: true },
+    ]);
+    expect(g.entries[0]?.ruleTextMissing).toBeUndefined();
+    expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
+      { tool: "dispatch_artifact", ruleAsksPartial: true, ruleTextMissing: false },
+    ]);
   });
 });

@@ -123,8 +123,11 @@
 //     insert, a `dispatch issue` spec or a markdown `dispatch artifact` upload writes, and each
 //     block a doc-edit retypes into an ask. For a retype the gate reads the block's own text from
 //     Dispatch, and for an upload the ids the version it replaces already holds, so a re-upload
-//     judges only the asks it adds; a read that fails sets `ruleTextMissing` and the ask is judged
-//     without it. The system prompt is rule-check-system.md and rule-check.md, and the request
+//     judges only the asks it adds. A retype whose read fails sets `ruleTextMissing` and is judged
+//     without its text; an upload whose read fails judges only the openers that carry no id, which
+//     no stored version can hold, and sets `ruleAsksPartial` for the openers it left out, so a
+//     re-upload of an unchanged document is never refused for an ask block it already held.
+//     The system prompt is rule-check-system.md and rule-check.md, and the request
 //     (rule-check-request.md) carries the same escaped system prompt and transcript, then each ask
 //     in an `<ask>` tag of its own, the list bounded at 32 KiB and each ask at 8 KiB
 //     (`ruleAsksCut`). When the answer names an ask that matches `no_change` or `untried_access`,
@@ -134,9 +137,9 @@
 //     there is a UI. A rules verdict, a session_switch or a session_branch resets that count. The
 //     rules reason never feeds the charter request, and only the charter call moves the halt
 //     count. The entry adds `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleError`,
-//     `ruleModel`, `ruleLatencyMs`, `ruleTextMissing` and `ruleAsksCut`, and its `usage` and
-//     `promptBytes` sum both calls. The two calls run side by side, so `charterLatencyMs` and
-//     `ruleLatencyMs` say what each of them cost of the gate's whole `latencyMs`.
+//     `ruleModel`, `ruleLatencyMs`, `ruleTextMissing`, `ruleAsksCut` and `ruleAsksPartial`, and
+//     its `usage` and `promptBytes` sum both calls. The two calls run side by side, so
+//     `charterLatencyMs` and `ruleLatencyMs` say what each cost of the gate's whole `latencyMs`.
 // Every outcome other than an unscoped or subagent call appends one `advisor-gate` entry
 // (pi.appendEntry, never sent to the model) with the deadline it raced and every attempt's
 // usage, the aborted one included. Every path fails open but
@@ -356,6 +359,11 @@ export interface GateEntry {
   ruleTextMissing?: true;
   /** New asks the rules request left out or cut to its bounds. */
   ruleAsksCut?: number;
+  /**
+   * An upload whose stored version the gate could not read: the rules call judged only the
+   * openers that carry no id, the ones no stored version can already hold.
+   */
+  ruleAsksPartial?: true;
   /** Why this decision reached no Dispatch decision record (`decision-record.ts`); the call itself was unaffected. */
   recordError?: string;
 }
@@ -2556,6 +2564,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
               ...(ruled.error === undefined ? {} : { ruleError: ruled.error }),
               ...(ruled.textMissing ? { ruleTextMissing: true as const } : {}),
               ...(ruled.asksCut > 0 ? { ruleAsksCut: ruled.asksCut } : {}),
+              ...(ruled.asksPartial ? { ruleAsksPartial: true as const } : {}),
             }),
       };
       const { answer } = charter;

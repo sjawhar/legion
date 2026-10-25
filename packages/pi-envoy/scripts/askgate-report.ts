@@ -509,6 +509,7 @@ export type ReportRecord = Pick<
   | "ruleOutcome"
   | "ruleError"
   | "ruleAsksCut"
+  | "ruleAsksPartial"
   | "outcome"
 >;
 
@@ -559,6 +560,9 @@ export function parseRecordLine(line: string): ReportRecord | null {
     ruleError: strOrNull(value.ruleError),
     // A record written before the gate counted the asks holds none, which is no ask cut.
     ruleAsksCut: num(value.ruleAsksCut) ?? 0,
+    // A record written before the gate told the two apart holds nothing here, which is a call
+    // judged on all of its asks.
+    ruleAsksPartial: value.ruleAsksPartial === true,
     outcome: str(value.outcome),
   };
 }
@@ -668,6 +672,11 @@ export interface DecisionCounts {
    * clipped text, so what it did not read could match no rule.
    */
   cut: number;
+  /**
+   * Rules calls judged on part of their asks (`ruleAsksPartial`): an upload whose stored version
+   * the gate could not read, so the asks that version may already hold went unjudged.
+   */
+  partial: number;
 }
 
 /** One day's decisions over one Dispatch project, as both output modes print them. */
@@ -706,6 +715,7 @@ function countDecisions(
       (record) => record.ruleError !== null || ERROR_OUTCOMES.includes(record.ruleOutcome as string)
     ).length,
     cut: calls.filter((record) => record.ruleAsksCut > 0).length,
+    partial: calls.filter((record) => record.ruleAsksPartial).length,
   };
 }
 
@@ -745,6 +755,7 @@ export function formatDispatchReport(report: DispatchReport): string[] {
     "A rules refusal is a rules call with a rule. It was overridden when the next record on its target, in its session, is a rebuttal or a breaker.",
     "A document that could not be read, and a line that is not a record, are counted below: the decisions they held are missing from every other count.",
     "A rules call with asks cut is one whose request did not carry every new ask of the call whole: the check judged clipped text.",
+    "A rules call judged on part of its asks is an upload whose stored version the gate could not read: it judged the asks no stored version can hold and left the rest alone.",
     `project: ${report.project}`,
     `since: ${report.since}`,
     `documents: ${report.documents}`,
@@ -761,6 +772,7 @@ export function formatDispatchReport(report: DispatchReport): string[] {
     `overrides: ${bySource(report, (c) => c.overrides)}`,
     `rules errors: ${bySource(report, (c) => c.errors)}`,
     `rules calls with asks cut: ${bySource(report, (c) => c.cut)}`,
+    `rules calls judged on part of their asks: ${bySource(report, (c) => c.partial)}`,
     `rules error rate: ${share(report.total.errors, report.total.calls)} (pod ` +
       `${share(report.pod.errors, report.pod.calls)}, machine ` +
       `${share(report.machine.errors, report.machine.calls)})`,

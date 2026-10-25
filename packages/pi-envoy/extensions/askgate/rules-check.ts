@@ -134,6 +134,11 @@ export interface RulesCheck {
   textMissing: boolean;
   /** Asks whose text the request does not carry whole: each clipped ask, counted once. */
   asksCut: number;
+  /**
+   * An upload whose stored version could not be read: the call was judged on part of its asks,
+   * the openers no stored version could already hold.
+   */
+  asksPartial: boolean;
   usage?: RuleUsage;
 }
 
@@ -299,15 +304,22 @@ async function readAsks(
   deps: RulesCheckDeps,
   call: RulesCheckCall,
   first: NewAsk[]
-): Promise<{ asks: NewAsk[]; textMissing: boolean }> {
+): Promise<{ asks: NewAsk[]; textMissing: boolean; asksPartial: boolean }> {
   const upload = call.toolName === "dispatch_artifact";
   const retypes = first.filter((ask) => ask.kind === "retype");
-  if (!upload && retypes.length === 0) return { asks: first, textMissing: false };
+  if (!upload && retypes.length === 0)
+    return { asks: first, textMissing: false, asksPartial: false };
   const read = await readDocument(deps, call);
   if (read === "failed") {
-    // Every opener is judged, and a retype is judged without its text.
+    // A retype is judged without its text, which only the document holds. For an upload the read
+    // is the one thing telling the asks this upload adds from those the version it replaces
+    // already holds, so an opener carrying an id may be one the stored version holds: judging it
+    // would refuse a re-upload of an unchanged document for its own ask block. Only the openers
+    // with no id, which no stored version can hold, are judged, as a read that found the rest
+    // would leave them out.
     for (const ask of retypes) ask.textMissing = true;
-    return { asks: first, textMissing: true };
+    const asks = upload ? first.filter((ask) => ask.id === undefined) : first;
+    return { asks, textMissing: retypes.length > 0, asksPartial: asks.length < first.length };
   }
   if (!upload) {
     const blocks = read === "not-found" ? [] : read.blocks;
@@ -323,7 +335,7 @@ async function readAsks(
       ask.text = block.text.trim();
       ask.opening = openingOf(ask.text);
     }
-    return { asks: first, textMissing };
+    return { asks: first, textMissing, asksPartial: false };
   }
   // An upload replaces the document of its name, as the server matches one; the asks that version
   // already holds are not new. Any other document the reference found says nothing about this
@@ -336,6 +348,7 @@ async function readAsks(
   return {
     asks: first.filter((ask) => ask.id === undefined || currentIds?.has(ask.id) !== true),
     textMissing: false,
+    asksPartial: false,
   };
 }
 
@@ -391,12 +404,13 @@ export async function runRulesCheck(
     latencyMs: deps.now() - began,
     textMissing: false,
     asksCut: 0,
+    asksPartial: false,
     ...rest,
   });
   const first = newAsks(call.toolName, call.input);
   if (first.length === 0) return undefined;
   try {
-    const { asks, textMissing } = await readAsks(deps, call, first);
+    const { asks, textMissing, asksPartial } = await readAsks(deps, call, first);
     if (asks.length === 0) return undefined;
     const described = describeAsks(asks);
     const user = () => {
@@ -433,6 +447,7 @@ export async function runRulesCheck(
       promptBytes: called.promptBytes ?? 0,
       textMissing,
       asksCut: described.asksCut,
+      asksPartial,
       ...(called.usage === undefined ? {} : { usage: called.usage }),
     });
   } catch (error) {
