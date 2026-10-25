@@ -251,9 +251,11 @@ reviewing until you finish.
     topic, and file no issue. It names this issue, the pull request, the merge commit, what you
     drove and what failed. Name the ask (`dispatch://<REPORT KEY>/ask/<id>`) in the `Production:`
     line and in the summary.
-- **Nothing waits in the session for a deploy.** A `pending` ends the look: the daemon suspends
-  your claim with its session kept, the pod goes and the issue's disk with it, and the daemon wakes
-  the check (a new pod comes back on a fresh disk and your session resumes with a new check task) on Dispatch's
+- **Nothing waits in the session for a deploy.** A `pending` ends the look. Where no wake is
+  queued yet, the daemon suspends your claim with its session kept, and the pod goes and the
+  issue's disk with it; where a wake arrived while the look was open, the next look starts at once
+  on the same pod. Either way the daemon wakes
+  the check (after a suspension a new pod comes back on a fresh disk, and your session resumes with a new check task) on Dispatch's
   `issue.deployed` event for the pull request, or, for `sjawhar/legion`, on a Legion daemon's boot
   on a build containing the merge, on Dispatch's `server.started` naming such a build, or on the
   build the daemon read from Dispatch at its boot. The woken look's task names the event

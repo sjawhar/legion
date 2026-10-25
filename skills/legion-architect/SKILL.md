@@ -417,9 +417,10 @@ notice names what it waits for and none follows as they depart, so read the pull
 GitHub. A child's close reaches you as `child-closed`: the daemon retires five of its six claims
 and leaves the implementer running, since it still owes the production check handed to it at the
 merge. Its pod stays for that first look, and the issue's Sandbox goes with the pod whenever the
-check pauses between looks or closes — a look that ends with `pending` and no wake already queued,
-a look that ends with no report at all, and a `pass` or `fail` that closes the check all take it;
-only a `pending` whose next wake is already waiting starts another look on the same pod
+check pauses with nothing waiting to wake it, or closes: a `pass` or `fail` closes it and takes
+the pod, and so does a look that ends with no wake queued, whether the implementer reported
+`pending` or the look ended with no report at all. A wake already queued starts the next look on
+the same pod instead, again whichever way the look ended
 (`skill://legion-worker/references/merge-gate.md`, *The production check
 after the close*). A root's close writes `done`, frees the tree's admission slot and lingers the
 tree for `linger_hours` with every member suspended; a child still in the workflow at the linger's

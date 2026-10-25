@@ -15,10 +15,10 @@ var _ runtime.IssueSuspender = (*Runtime)(nil)
 // SuspendIssue is the durable close effect, not a per-role stop. Its pod's launch turn (lockPod, by
 // the issue's Sandbox name) orders authorize (the store's check of the close against the issue's
 // starts, stops and stored roles) and the mode change with physical starts: a later re-admission
-// starts only after this patch and resumes the Sandbox. No database transaction spans a Kubernetes
-// call. Once the pod is gone the Sandbox is deleted (deleteStoredSandbox), with the six role
-// Secrets it owns — each holding a launcher token and a rendered `gh` credential bundle — so a
-// close leaves the issue nothing: its disk was the pod's own and went with it, and the issue's
+// starts only after this patch, and makes a Sandbox of its own rather than resuming this one. No
+// database transaction spans a Kubernetes call. Once the pod is gone the Sandbox is deleted
+// (deleteStoredSandbox), with the six role Secrets it owns — each holding a launcher token and a
+// rendered `gh` credential bundle — so a close leaves the issue nothing: its disk was the pod's own and went with it, and the issue's
 // next launch, if a person sets it todo again, makes the Sandbox afresh (ensureSandbox). The
 // parent's Sandbox is another issue's and is never touched.
 func (r *Runtime) SuspendIssue(ctx context.Context, issue, tree string, authorize func(context.Context) (bool, error)) error {
