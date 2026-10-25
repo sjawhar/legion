@@ -70,7 +70,8 @@ type checkWakeGitHub struct {
 }
 
 // checkWakeRun is attempt 1 of a push run of a sjawhar/legion workflow on main, as GitHub answers
-// it: the workflow file it ran, the commit it ran on, and the attempt's jobs (checkWakeJob).
+// it: the workflow file it ran, the commit it ran on, and the attempt's jobs (checkWakeJob). The
+// attempt started an hour before the merge, before every step the tests list.
 type checkWakeRun struct {
 	workflow string
 	headSHA  string
@@ -123,7 +124,7 @@ func newCheckWakeGitHub(t *testing.T) *checkWakeGitHub {
 				_ = json.NewEncoder(w).Encode(map[string]any{
 					"id": id, "run_attempt": 1, "name": run.name(), "path": run.workflow, "head_branch": "main", "head_sha": run.headSHA, "event": "push",
 					"status": "completed", "conclusion": "success", "html_url": fmt.Sprintf("https://github.com/sjawhar/legion/actions/runs/%d/attempts/1", id),
-					"head_repository": map[string]any{"full_name": "sjawhar/legion"},
+					"run_started_at": checkWakeMergedAt.Add(-time.Hour).Format(time.RFC3339), "head_repository": map[string]any{"full_name": "sjawhar/legion"},
 				})
 			case len(parts) == 4 && parts[3] == "jobs":
 				_, _ = fmt.Fprintf(w, `{"total_count":%d,"jobs":[%s]}`, len(run.jobs), strings.Join(run.jobs, ","))

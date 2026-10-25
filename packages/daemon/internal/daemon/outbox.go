@@ -1391,16 +1391,17 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 }
 
 // deployJob is one job of a deploy run attempt as GitHub lists it (GET
-// /actions/runs/{run}/attempts/{attempt}/jobs): the attempt it ran in, its name, and its steps,
-// each with its conclusion and when it finished, GitHub's own clock.
+// /actions/runs/{run}/attempts/{attempt}/jobs): its id, its name, and its steps, each with its
+// conclusion and when it started and finished, GitHub's own clock. A step that never ran names no
+// start.
 type deployJob struct {
-	ID         int64  `json:"id"`
-	Name       string `json:"name"`
-	RunAttempt int    `json:"run_attempt"`
-	Steps      []struct {
-		Name        string    `json:"name"`
-		Conclusion  string    `json:"conclusion"`
-		CompletedAt time.Time `json:"completed_at"`
+	ID    int64  `json:"id"`
+	Name  string `json:"name"`
+	Steps []struct {
+		Name        string     `json:"name"`
+		Conclusion  string     `json:"conclusion"`
+		StartedAt   *time.Time `json:"started_at"`
+		CompletedAt time.Time  `json:"completed_at"`
 	} `json:"steps"`
 }
 
@@ -1411,14 +1412,19 @@ type deployJob struct {
 // envelope the row was queued from, which anyone holding an Envoy bearer can publish: a run of
 // another workflow file, branch or head repository, or one a pull request triggered (whose head is
 // the pull request's, never production's), wakes nothing, and neither does a run GitHub does not
-// know (404); each is logged. The attempt's jobs are read across every page. A job of this attempt
-// whose step named by the deploy concluded `success` strictly after merged_at is a deploy after
-// the merge — both times are GitHub's, read in this row, so no daemon clock is compared. Each such
-// job, in order of its step's completion, applies intake.CheckWake under an event of the check,
-// the run, the attempt and the job: the same run read again (a second delivery, a second row) is a
-// duplicate, and two applying jobs are two wakes, the second kept for the next look by the
-// workflow's wake rule. A run with no such job wakes nothing, logged with why. Any other failure
-// retries on the row's backoff, a rate limit as every GitHub row's.
+// know (404); each is logged. The attempt's jobs are read across every page. GitHub lists an
+// attempt's jobs with those it kept from an earlier attempt ("re-run failed jobs"), each under a
+// new job id and this attempt's run_attempt but with the earlier attempt's step times, so a step
+// counts only when it ran in this attempt: it started (or, naming no start, finished) no earlier
+// than the attempt's run_started_at. A kept step deployed in its own attempt, whose row woke the
+// check for it. A job's step named by the deploy that ran in this attempt and concluded `success`
+// strictly after merged_at is a deploy after the merge — every time compared is GitHub's, read in
+// this row, so no daemon clock is compared. Each such job, in order of its step's completion,
+// applies intake.CheckWake under an event of the check, the run, the attempt and the job: the same
+// run read again (a second delivery, a second row) is a duplicate, and two applying jobs are two
+// wakes, the second kept for the next look by the workflow's wake rule. A run with no such job
+// wakes nothing, logged with why. An attempt GitHub names no start time for, and any other
+// failure, retries on the row's backoff, a rate limit as every GitHub row's.
 func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, payload record.CheckCompare, check *record.ProductionCheck, github githubrest.Client) error {
 	deploy := *payload.Deploy
 	var pull struct {
@@ -1447,10 +1453,11 @@ func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, paylo
 	merged := *pull.MergedAt
 	attempt := fmt.Sprintf("/actions/runs/%d/attempts/%d", deploy.Run, deploy.Attempt)
 	var run struct {
-		Path           string `json:"path"`
-		HeadBranch     string `json:"head_branch"`
-		Event          string `json:"event"`
-		HTMLURL        string `json:"html_url"`
+		Path           string     `json:"path"`
+		HeadBranch     string     `json:"head_branch"`
+		Event          string     `json:"event"`
+		HTMLURL        string     `json:"html_url"`
+		RunStartedAt   *time.Time `json:"run_started_at"`
 		HeadRepository struct {
 			FullName string `json:"full_name"`
 		} `json:"head_repository"`
@@ -1481,6 +1488,12 @@ func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, paylo
 			"run", deploy.Run, "attempt", deploy.Attempt, "url", run.HTMLURL, "why", why)
 		return nil
 	}
+	// Without the attempt's start no job can be told this attempt's from a kept one, so the answer
+	// is one to read again later rather than one to act on.
+	if run.RunStartedAt == nil {
+		return fmt.Errorf("attempt %d of deploy run %d names no start time for %s's production check", deploy.Attempt, deploy.Run, row.Issue)
+	}
+	started := *run.RunStartedAt
 	jobs, err := githubrest.GetListPages[deployJob](ctx, github, attempt+"/jobs", "jobs")
 	if err != nil {
 		return fmt.Errorf("read the jobs of attempt %d of deploy run %d for %s's production check: %w", deploy.Attempt, deploy.Run, row.Issue, err)
@@ -1490,19 +1503,24 @@ func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, paylo
 		at  time.Time
 	}
 	var deployed []applied
-	var stepSeen, succeeded bool
+	var stepSeen, succeeded, keptSucceeded bool
 	for _, job := range jobs {
-		// GitHub lists an attempt's jobs with those an earlier attempt ran and this one kept; they
-		// deployed in that attempt, whose own row woke the check for them.
-		if job.RunAttempt != deploy.Attempt {
-			continue
-		}
 		for _, step := range job.Steps {
 			if step.Name != deploy.Step {
 				continue
 			}
 			stepSeen = true
 			if step.Conclusion != "success" {
+				continue
+			}
+			// A job this attempt kept from an earlier one is listed with that attempt's step times,
+			// all before this attempt started.
+			ran := step.CompletedAt
+			if step.StartedAt != nil {
+				ran = *step.StartedAt
+			}
+			if ran.Before(started) {
+				keptSucceeded = true
 				continue
 			}
 			succeeded = true
@@ -1516,13 +1534,15 @@ func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, paylo
 		switch {
 		case !stepSeen:
 			why = fmt.Sprintf("no job of the attempt has a step named %q", deploy.Step)
+		case !succeeded && keptSucceeded:
+			why = fmt.Sprintf("step %q succeeded only in jobs this attempt kept from an earlier one", deploy.Step)
 		case !succeeded:
 			why = fmt.Sprintf("step %q succeeded in no job of the attempt", deploy.Step)
 		default:
 			why = fmt.Sprintf("step %q succeeded only at or before the merge", deploy.Step)
 		}
 		r.log.Info("outbox check compare finished without acting: the run did not deploy after the merge", "row", row.ID, "issue", row.Issue,
-			"run", deploy.Run, "attempt", deploy.Attempt, "url", run.HTMLURL, "mergedAt", merged, "jobs", len(jobs), "why", why)
+			"run", deploy.Run, "attempt", deploy.Attempt, "url", run.HTMLURL, "mergedAt", merged, "runStartedAt", started, "jobs", len(jobs), "why", why)
 		return nil
 	}
 	slices.SortStableFunc(deployed, func(a, b applied) int { return a.at.Compare(b.at) })
