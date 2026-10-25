@@ -348,41 +348,102 @@ test("live: a forced server disconnect resumes from the last event id", async ({
 
   const alice = await asUser(browser, "alice");
   const page = await alice.newPage();
-  const eventSubscriptions: unknown[] = [];
+  // Each live socket the page opens, in order: the id of every event frame it received and the
+  // resume of every event feed subscribe it sent.
+  const sockets: { readonly events: string[]; readonly resumes: (string | undefined)[] }[] = [];
   page.on("websocket", (socket) => {
     if (new URL(socket.url()).pathname !== "/ws/live") return;
-    socket.on("framesent", (event) => {
-      try {
-        const frame = JSON.parse(
-          typeof event.payload === "string" ? event.payload : event.payload.toString()
-        ) as { readonly type?: string; readonly view?: { readonly kind?: string } };
-        if (frame.type === "subscribe" && frame.view?.kind === "events") {
-          eventSubscriptions.push(frame);
-        }
-      } catch {
-        // The assertion below filters only the event feed's valid subscribe frame.
+    const seen = { events: [] as string[], resumes: [] as (string | undefined)[] };
+    sockets.push(seen);
+    socket.on("framereceived", ({ payload }) => {
+      const frame = JSON.parse(String(payload)) as { readonly type?: string; readonly id?: string };
+      if (frame.type === "event" && frame.id !== undefined) seen.events.push(frame.id);
+    });
+    socket.on("framesent", ({ payload }) => {
+      const frame = JSON.parse(String(payload)) as {
+        readonly type?: string;
+        readonly view?: { readonly kind?: string };
+        readonly resume?: { readonly since?: string };
+      };
+      if (frame.type === "subscribe" && frame.view?.kind === "events") {
+        seen.resumes.push(frame.resume?.since);
       }
     });
   });
+  const whoami = page.waitForResponse(
+    (response) => new URL(response.url()).pathname === "/auth/whoami" && response.ok()
+  );
 
   await page.goto(`/issues/${issue.key}/conversation`);
+  const head: string = (await (await whoami).json()).event_head;
   await expect(page.getByText("Before disconnect")).toBeVisible();
+  // The first subscription resumes from the sign-in check's head.
+  await expect.poll(() => sockets[0]?.resumes).toEqual([head]);
   await createMessage(issue.key, { body: "Seen live before disconnect" }, bob);
   await expect(page.getByText("Seen live before disconnect")).toBeVisible();
-  await expect.poll(() => eventSubscriptions.length).toBeGreaterThanOrEqual(1);
+  const first = sockets[0];
+  if (first === undefined) throw new Error("the page opened no live socket");
+  expect(first.events.length).toBeGreaterThan(0);
 
-  // A 1012 restart opens the socket at once and marks the event subscription as a gap.
+  // A 1012 restart opens the socket at once and resumes the event feed after the last event the
+  // closed socket carried.
   await disconnectLiveSockets();
+  await expect.poll(() => sockets[1]?.resumes.length ?? 0).toBe(1);
+  expect(sockets).toHaveLength(2);
+  const last = first.events.at(-1);
+  expect(sockets[1]?.resumes).toEqual([last]);
+  expect(BigInt(last ?? "0")).toBeGreaterThan(BigInt(head));
 
   await createMessage(issue.key, { body: "Missed during disconnect" }, bob);
   await expect(page.getByText("Missed during disconnect")).toBeVisible();
-  await expect.poll(() => eventSubscriptions.length).toBeGreaterThanOrEqual(2);
-
-  const reconnect = eventSubscriptions.at(-1) as { readonly resume?: { readonly since?: string } };
-  expect(reconnect.resume?.since).not.toBe("0");
-  expect(Number(reconnect.resume?.since)).toBeGreaterThan(0);
 
   await alice.close();
+});
+
+// The page's first live socket fails its opening handshake. A change committed before the next one
+// opens still reaches the page, with no reload: the page tries again, and its event feed resumes
+// from the sign-in check's head.
+test("live: a change committed while the first live socket fails to open is shown without a reload", async ({
+  browser,
+}) => {
+  await createProject({ key: "CORE", name: "Core" });
+  const issue = await createIssue({ project: "CORE", title: "Before the failed handshake" });
+
+  const alice = await asUser(browser, "alice");
+  try {
+    const page = await alice.newPage();
+    let loads = 0;
+    page.on("load", () => {
+      loads += 1;
+    });
+    let opens = 0;
+    const refused = Promise.withResolvers<void>();
+    const committed = Promise.withResolvers<void>();
+    await page.routeWebSocket(/\/ws\/live$/u, async (route) => {
+      opens += 1;
+      if (opens === 1) {
+        await route.close({ code: 1006, reason: "the opening handshake failed" });
+        refused.resolve();
+        return;
+      }
+      await committed.promise;
+      route.connectToServer();
+    });
+
+    await page.goto(`/issues/${issue.key}/conversation`);
+    await expect(page.getByText("Before the failed handshake", { exact: true })).toBeVisible();
+    await refused.promise;
+    await patchIssue(issue.key, { title: "Committed while the socket was down" }, bob);
+    committed.resolve();
+
+    await expect(
+      page.getByText("Committed while the socket was down", { exact: true })
+    ).toBeVisible();
+    expect(opens).toBe(2);
+    expect(loads).toBe(1);
+  } finally {
+    await alice.close();
+  }
 });
 
 test("live: a fresh page load opens the socket and stays within a bounded request budget", async ({
