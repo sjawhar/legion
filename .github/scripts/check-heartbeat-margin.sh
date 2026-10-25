@@ -9,32 +9,35 @@
 # record expire, and every other agent asking the listener for it is told there is no live session:
 # messages to it are refused, its role lookups answer gone, and nothing logs an error.
 #
-# Five things must hold, and this check fails unless all five do:
+# Four things must hold, and this check fails unless all four do:
 #
-#   1. Three refresh intervals, plus one listener call's budget, fit inside the record lifetime. A
-#      record that expires unless refreshed is renewed at a third of its lifetime, so two whole
-#      refreshes may fail before a live pane is dropped - but the third must *complete* inside the
-#      lifetime, not merely be attempted. The record expires that long after the listener accepted
-#      a write, while the third refresh is only posted three intervals after that acceptance and
-#      still owes its round trip, and `setInterval` only ever fires late. The call budget is that
-#      round trip: every attempt's timeout plus the retry delays between them
+#   1. Three refresh intervals, plus one listener call's budget, fit strictly inside the record
+#      lifetime: a sum equal to the lifetime fails as surely as one past it. A record that expires
+#      unless refreshed is renewed at a third of its lifetime, so two whole refreshes may fail
+#      before a live pane is dropped - but the third must *complete* before the record expires,
+#      not merely be attempted. The record expires that long after the listener accepted a write,
+#      while the third refresh is only posted three intervals after that acceptance and still owes
+#      its round trip, and `setInterval` only ever fires late; at equality the third refresh is due
+#      at the very instant the record expires, with no time left to complete. The call budget is
+#      that round trip: every attempt's timeout plus the retry delays between them
 #      (packages/envoy-client/src/transport.ts).
-#   2. Two refresh intervals plus that same call budget fit inside it too. That is the real worst
-#      case between two accepted registrations: the heartbeat's own backstop posts the refresh at
-#      the first tick where a pass is still running and the last accepted registration is a whole
-#      interval old (`ensureHeartbeat`, packages/pi-envoy/extensions/envoy.ts), so a pass that
-#      stalls costs at most one extra interval and then one listener call. The pass deadline is
-#      not read here at all, and is not forgotten: that backstop fires whatever the deadline is,
-#      so the deadline does not bound this gap - `MIN_PASS_DEADLINE_MS` only floors how long one
-#      pass may run, and raising it must not be refused by this check.
-#   3. The Legion daemon's own copy of the interval (`Heartbeat`,
+#
+#      The pass deadline is not in that sum, and is not forgotten. A pass that stalls does not hold
+#      the refresh back until its deadline: the heartbeat's own backstop posts the refresh at the
+#      first tick where a pass is still running and the last accepted registration is a whole
+#      interval old (`ensureHeartbeat`, packages/pi-envoy/extensions/envoy.ts), whatever the
+#      deadline is. So the gap a stalled pass can open between two accepted registrations is at
+#      most two intervals and one listener call, which the sum above already covers.
+#      `MIN_PASS_DEADLINE_MS` only floors how long one pass may run, and raising it must not be
+#      refused by this check.
+#   2. The Legion daemon's own copy of the interval (`Heartbeat`,
 #      packages/daemon/internal/controller/liveness.go) equals the TypeScript one, and its
 #      staleness window is at least the record lifetime. The window is
 #      `max(bootTimeout, N*Heartbeat)`; `N` is read out of `liveness.go` rather than assumed, and
 #      only the heartbeat arm is checked, because `bootTimeout` is deployment configuration this
 #      check cannot see. A daemon window narrower than the record lifetime reports a live
 #      controller gone.
-#   4. The daemon's other copy of the interval (`pluginHeartbeat`,
+#   3. The daemon's other copy of the interval (`pluginHeartbeat`,
 #      packages/daemon/internal/daemon/notice_exceptions.go) equals the TypeScript one as well.
 #      That file is read because the constant is a real delay and not a comment: it is
 #      `noticeReholdDelays[1]`, so the second re-hold of a notice the listener could not forward
@@ -42,7 +45,7 @@
 #      from those delays moves with it. A copy that drifts re-sends that notice at the wrong
 #      distance - too soon, before a relaunched pane has registered, or too late, holding the
 #      architect's notice past the window it could have been caught in.
-#   5. The daemon's hand-copies of the listener's two liveness windows (`listenerSessionTTL` and
+#   4. The daemon's hand-copies of the listener's two liveness windows (`listenerSessionTTL` and
 #      `listenerClaimStale`, packages/daemon/internal/daemon/notice_exceptions.go) equal the
 #      windows themselves - `OpenSessionRegistry`'s default `ttl`
 #      (packages/envoy/internal/session/registry.go) and `ClaimStaleAfter`
@@ -246,47 +249,37 @@ claim_stale = duration(CLAIM_FILE, claim_lines, "ClaimStaleAfter", CLAIM_STALE_A
 # One listener call: every attempt's timeout, plus one retry delay between each pair of them.
 call_budget = attempts.value * timeout.value + max(attempts.value - 1, 0) * retry_delay.value
 renewal_window = RENEWALS * heartbeat.value + call_budget
-worst_case = 2 * heartbeat.value + call_budget
 daemon_window = window_factor.value * daemon_heartbeat.value
+# The remedies are whole seconds, because the numbers they move are Go durations this check reads
+# only as whole seconds or minutes: the daemon's two copies of the interval, and the registry's
+# ttl. The interval is the longest whole second whose renewal window still falls short of the
+# lifetime; the lifetime is the shortest whole second past the renewal window.
+SECOND = MILLIS["Second"]
+max_heartbeat = (lifetime.value - call_budget - 1) // RENEWALS // SECOND * SECOND
+min_lifetime = (renewal_window // SECOND + 1) * SECOND
 
-if renewal_window > lifetime.value:
+if renewal_window >= lifetime.value:
+    relation = "equal to" if renewal_window == lifetime.value else "past"
     problem(
         SETTINGS_FILE,
         heartbeat.line,
         f"{RENEWALS} refresh intervals of {heartbeat.value} ms ({heartbeat.site}) plus one "
         f"listener call's {call_budget} ms ({attempts.value} attempts of {timeout.value} ms, "
         f"{timeout.site}, with {retry_delay.value} ms between them, {retry_delay.site}; the "
-        f"attempt count is at {attempts.site}) are {renewal_window} ms, past the session record "
-        f"lifetime of {lifetime.value} ms ({lifetime.site}): the third refresh does not complete "
-        f"inside the lifetime. The record expires that long after the listener accepted a write, "
-        f"while the third refresh is only posted {RENEWALS} intervals later and still owes its "
-        f"round trip - and `setInterval` fires late - so a pane whose process is still running "
-        f"has its record expire after two failed refreshes, and from then on every other agent "
-        f"asking the listener for that pane is told there is no live session for it - messages to "
-        f"it are refused and its role lookups answer gone, with nothing logged. Lower "
-        f"{HEARTBEAT_CONST} to at most {(lifetime.value - call_budget) // RENEWALS} ms, or raise "
-        f"the registry's default ttl to at least {renewal_window} ms (and the daemon's window "
-        f"with it)",
-    )
-
-if worst_case > lifetime.value:
-    problem(
-        SETTINGS_FILE,
-        heartbeat.line,
-        f"the worst case between two accepted registrations is {worst_case} ms - two refresh "
-        f"intervals of {heartbeat.value} ms ({heartbeat.site}), plus one listener call's "
-        f"{call_budget} ms ({attempts.value} attempts of {timeout.value} ms, {timeout.site}, with "
-        f"{retry_delay.value} ms between them, {retry_delay.site}; the attempt count is at "
-        f"{attempts.site}) - past the session record lifetime of {lifetime.value} ms "
-        f"({lifetime.site}). Two intervals, not one interval and the pass deadline: a stalled "
-        f"pass delays the refresh only until the heartbeat's backstop posts it, at the first tick "
-        f"where a pass is still running and the last accepted registration is a whole interval "
-        f"old (`ensureHeartbeat`, packages/pi-envoy/extensions/envoy.ts), whatever the pass "
-        f"deadline is. Past that sum one stalled pass is enough for a live pane's record to "
-        f"expire, and every other agent asking the listener for that pane is then told there is "
-        f"no live session for it, with nothing logged. Lower {HEARTBEAT_CONST} or the call budget "
-        f"until their sum is at most {lifetime.value} ms, or raise the registry's default ttl to "
-        f"at least {worst_case} ms (and the daemon's window with it)",
+        f"attempt count is at {attempts.site}) are {renewal_window} ms, {relation} the session "
+        f"record lifetime of {lifetime.value} ms ({lifetime.site}), and the sum must fall strictly "
+        f"short of it: equal is refused as surely as past, because either way the third refresh "
+        f"does not complete before the record expires. The record expires that long after the "
+        f"listener accepted a write, while the third refresh is only posted {RENEWALS} intervals "
+        f"later and still owes its round trip - and `setInterval` fires late - so even at equality "
+        f"it lands no earlier than the instant of expiry. A pane whose process is still running "
+        f"then has its record expire after two failed refreshes, and from then on every other "
+        f"agent asking the listener for that pane is told there is no live session for it - "
+        f"messages to it are refused and its role lookups answer gone, with nothing logged. Lower "
+        f"{HEARTBEAT_CONST} to at most {max_heartbeat} ms, the longest whole second that leaves "
+        f"the sum short of the lifetime (and the daemon's Heartbeat and pluginHeartbeat with it), "
+        f"or raise the registry's default ttl to at least {min_lifetime} ms, the shortest whole "
+        f"second past the sum (and the daemon's window and its listenerSessionTTL with it)",
     )
 
 if daemon_heartbeat.value != heartbeat.value:
@@ -376,9 +369,7 @@ print(
     f"{RENEWALS} refresh intervals of {heartbeat.value} ms ({heartbeat.site}) plus one listener "
     f"call {call_budget} ms ({attempts.value} attempts of {timeout.value} ms, {timeout.site}, "
     f"{retry_delay.value} ms apart, {retry_delay.site}; attempts at {attempts.site}) are "
-    f"{renewal_window} ms, and the worst case between registrations - two intervals and one such "
-    f"call, the pass deadline bounding neither - is {worst_case} ms; both inside the session "
-    f"record lifetime {lifetime.value} ms "
+    f"{renewal_window} ms, strictly inside the session record lifetime {lifetime.value} ms "
     f"({lifetime.site}); the daemon's Heartbeat {daemon_heartbeat.value} ms "
     f"({daemon_heartbeat.site}) matches and its window {window_factor.value} x Heartbeat = "
     f"{daemon_window} ms ({window_factor.site}) covers that lifetime; its pluginHeartbeat "

@@ -6,8 +6,9 @@
 # any tree it cannot read unambiguously. The failure it stops is a silent one — a live pane's
 # record expires and every other agent is told there is no live session for it — so the suite pins
 # the exit status and the wording the author of a drift has to act on, including that the third
-# refresh must complete inside the lifetime rather than merely be attempted, and that a
-# pass-deadline floor far above the heartbeat is no longer refused.
+# refresh must complete strictly inside the lifetime rather than merely be attempted - a renewal
+# window equal to the lifetime is refused like one past it, and the remedies the refusal names
+# pass when applied - and that a pass-deadline floor far above the heartbeat is not refused.
 #
 # Each case builds a miniature repository under a temporary directory and symlinks the real script
 # into it, so the script under test is the file CI runs. The fixtures' numbers are invented and are
@@ -30,12 +31,12 @@ source "$script_dir/test-lib.sh"
 # fixture <name> [heartbeat-ms] [pass-deadline-floor-ms] [timeout-ms] [retry-delay-ms] [attempts]
 #         [record-lifetime] [daemon-heartbeat] [window-heartbeats] [plugin-heartbeat]
 #         [listener-session-ttl] [claim-stale-after] [listener-claim-stale]: a tree that
-# passes — three refresh intervals plus one listener call, and the worst case between
-# registrations, both inside the record lifetime, both of the daemon's copies of the interval
-# equal to the TypeScript one, its window covering that lifetime, and its two copies of the
-# listener's liveness windows equal to the windows themselves. The pass-deadline floor is
-# written because the real file declares one; the check must not read it, and the assertion that
-# it is quoted nowhere is only a test of that while this line keeps being written.
+# passes — three refresh intervals plus one listener call strictly inside the record lifetime,
+# both of the daemon's copies of the interval equal to the TypeScript one, its window covering
+# that lifetime, and its two copies of the listener's liveness windows equal to the windows
+# themselves. The pass-deadline floor is written because the real file declares one; the check
+# must not read it, and the assertion that it is quoted nowhere is only a test of that while this
+# line keeps being written.
 # Echoes its root.
 fixture() {
   local root="$work/$1" heartbeat=${2:-40_000} deadline=${3:-12_000} timeout=${4:-2_000}
@@ -127,10 +128,8 @@ run_check "$root"
 check "exits 0" "$(is "$status" 0)"
 check "names the interval, the call budget and their sites" \
   "$(contains "$out" '^3 refresh intervals of 40000 ms (packages/envoy-client/src/envoy-settings.ts:4) plus one listener call 4400 ms (2 attempts of 2000 ms, packages/envoy-client/src/transport.ts:1, 400 ms apart, packages/envoy-client/src/transport.ts:2; attempts at packages/envoy-client/src/transport.ts:6) are 124400 ms')"
-check "names the worst case as two intervals and one call, with the deadline bounding neither" \
-  "$(contains "$out" 'the worst case between registrations - two intervals and one such call, the pass deadline bounding neither - is 84400 ms')"
 check "names the record lifetime and its site" \
-  "$(contains "$out" 'both inside the session record lifetime 180000 ms (packages/envoy/internal/session/registry.go:4)')"
+  "$(contains "$out" 'are 124400 ms, strictly inside the session record lifetime 180000 ms (packages/envoy/internal/session/registry.go:4)')"
 check "names the daemon's heartbeat, window and second copy with their sites" \
   "$(contains "$out" "daemon's Heartbeat 40000 ms (packages/daemon/internal/controller/liveness.go:5) matches and its window 5 x Heartbeat = 200000 ms (packages/daemon/internal/controller/liveness.go:8) covers that lifetime; its pluginHeartbeat 40000 ms (packages/daemon/internal/daemon/notice_exceptions.go:7) matches too")"
 check "names the daemon's copies of the listener's two liveness windows with their sites" \
@@ -140,21 +139,55 @@ check "names the daemon's copies of the listener's two liveness windows with the
 check "the pass-deadline floor is not quoted anywhere" \
   "$(is "$(contains "$out" 'PASS_DEADLINE')" false)"
 
-echo "case: three intervals exactly equal to the record lifetime"
-# The case the old rule passed: the third refresh is attempted at the instant the record expires
-# and has not completed, so it no longer renews anything.
+echo "case: three intervals alone equal to the record lifetime"
+# Three intervals with nothing else would land the third refresh at the instant the record
+# expires; the call budget is what puts the sum past the lifetime, so this case proves the budget
+# is counted. It is not the boundary itself - the next case is.
 root=$(fixture equal 40_000 12_000 2_000 400 2 '2 * time.Minute' '40 * time.Second' 3)
 run_check "$root"
 check "exits 1" "$(is "$status" 1)"
 check "names the sum, the lifetime and both sites" \
   "$(contains "$out" '3 refresh intervals of 40000 ms (packages/envoy-client/src/envoy-settings.ts:4) plus one listener call.s 4400 ms (2 attempts of 2000 ms, packages/envoy-client/src/transport.ts:1, with 400 ms between them, packages/envoy-client/src/transport.ts:2; the attempt count is at packages/envoy-client/src/transport.ts:6) are 124400 ms, past the session record lifetime of 120000 ms (packages/envoy/internal/session/registry.go:4)')"
-check "says the third refresh does not complete inside the lifetime" \
-  "$(contains "$out" 'the third refresh does not complete inside the lifetime')"
+check "says the third refresh does not complete before the record expires" \
+  "$(contains "$out" 'the third refresh does not complete before the record expires')"
 check "says the record expires from the listener's acceptance, not the attempt" \
   "$(contains "$out" 'still owes its round trip')"
-check "names the remedy on either side, with the call budget taken off the interval" \
-  "$(contains "$out" 'Lower DEFAULT_HEARTBEAT_MS to at most 38533 ms, or raise the registry.s default ttl to at least 124400 ms')"
+check "names the remedy on either side in whole seconds, with the call budget taken off the interval" \
+  "$(contains "$out" 'Lower DEFAULT_HEARTBEAT_MS to at most 38000 ms, the longest whole second that leaves the sum short of the lifetime (and the daemon.s Heartbeat and pluginHeartbeat with it), or raise the registry.s default ttl to at least 125000 ms, the shortest whole second past the sum')"
 check "counts the problem" "$(contains "$out" '::error::1 problem(s)')"
+
+echo "case: three intervals plus the call budget exactly equal to the record lifetime"
+# The boundary itself, reached by moving the call budget and not the heartbeat: a timeout of
+# 29 800 ms makes the budget 2 x 29 800 + 400 = 60 000 ms, and three intervals of 40 000 ms plus it
+# are the lifetime of 180 000 ms to the millisecond. Every other rule passes on this tree, so the
+# renewal rule alone must refuse it.
+root=$(fixture tie 40_000 12_000 29_800)
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the sum as equal to the lifetime, not past it, with every site" \
+  "$(contains "$out" '3 refresh intervals of 40000 ms (packages/envoy-client/src/envoy-settings.ts:4) plus one listener call.s 60000 ms (2 attempts of 29800 ms, packages/envoy-client/src/transport.ts:1, with 400 ms between them, packages/envoy-client/src/transport.ts:2; the attempt count is at packages/envoy-client/src/transport.ts:6) are 180000 ms, equal to the session record lifetime of 180000 ms (packages/envoy/internal/session/registry.go:4)')"
+check "says it rejects the tie, not only what is past it" \
+  "$(contains "$out" 'the sum must fall strictly short of it: equal is refused as surely as past, because either way the third refresh does not complete before the record expires')"
+check "says why equality is not enough" \
+  "$(contains "$out" 'so even at equality it lands no earlier than the instant of expiry')"
+check "names remedies that leave the sum short of the lifetime" \
+  "$(contains "$out" 'Lower DEFAULT_HEARTBEAT_MS to at most 39000 ms, .* or raise the registry.s default ttl to at least 181000 ms')"
+check "and nothing else fails with it" "$(contains "$out" '::error::1 problem(s)')"
+
+echo "case: the tie with its suggested maximum heartbeat applied"
+root=$(fixture tie-heartbeat-remedy 39_000 12_000 29_800 400 2 '3 * time.Minute' \
+  '39 * time.Second' 5 '39 * time.Second')
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "the sum falls short of the lifetime" \
+  "$(contains "$out" 'are 177000 ms, strictly inside the session record lifetime 180000 ms')"
+
+echo "case: the tie with its suggested minimum lifetime applied"
+root=$(fixture tie-ttl-remedy 40_000 12_000 29_800 400 2 '181 * time.Second')
+run_check "$root"
+check "exits 0" "$(is "$status" 0)"
+check "the sum falls short of the lifetime" \
+  "$(contains "$out" 'are 180000 ms, strictly inside the session record lifetime 181000 ms')"
 
 echo "case: three intervals past the record lifetime"
 root=$(fixture renewals 50_000 12_000 2_000 400 2 '2 * time.Minute' '50 * time.Second' 3 '50 * time.Second')
@@ -166,33 +199,15 @@ check "says what breaks in production" \
   "$(contains "$out" 'every other agent asking the listener for that pane is told there is no live session for it')"
 check "counts the problem" "$(contains "$out" '::error::1 problem(s)')"
 
-echo "case: the worst case between registrations past the record lifetime"
-root=$(fixture worst-case 40_000 12_000 90_000)
-run_check "$root"
-check "exits 1" "$(is "$status" 1)"
-check "names the sum as two intervals and one call, with every site" \
-  "$(contains "$out" 'the worst case between two accepted registrations is 260400 ms - two refresh intervals of 40000 ms (packages/envoy-client/src/envoy-settings.ts:4), plus one listener call.s 180400 ms (2 attempts of 90000 ms, packages/envoy-client/src/transport.ts:1, with 400 ms between them, packages/envoy-client/src/transport.ts:2; the attempt count is at packages/envoy-client/src/transport.ts:6)')"
-check "names the lifetime and its site" \
-  "$(contains "$out" 'past the session record lifetime of 180000 ms (packages/envoy/internal/session/registry.go:4)')"
-check "says why two intervals and not the pass deadline" \
-  "$(contains "$out" 'Two intervals, not one interval and the pass deadline: a stalled pass delays the refresh only until the heartbeat.s backstop posts it')"
-check "names the backstop that bounds the gap" \
-  "$(contains "$out" 'ensureHeartbeat., packages/pi-envoy/extensions/envoy.ts), whatever the pass deadline is')"
-check "says what breaks in production" \
-  "$(contains "$out" 'one stalled pass is enough for a live pane.s record to expire')"
-check "names the remedy" \
-  "$(contains "$out" 'raise the registry.s default ttl to at least 260400 ms')"
-check "and the renewal rule, which this call budget also breaks, is reported beside it" \
-  "$(contains "$out" '::error::2 problem(s)')"
-
 echo "case: a pass-deadline floor far above the heartbeat"
-# The false refusal this change removes: the floor bounds how long one pass may run, not the gap
-# between two accepted registrations, so a tree that raises it still passes.
+# The false refusal this check must not make: the floor bounds how long one pass may run, not the
+# gap between two accepted registrations, so a tree that raises it still passes with the same
+# renewal window.
 root=$(fixture deadline-floor 40_000 200_000)
 run_check "$root"
 check "exits 0" "$(is "$status" 0)"
-check "the worst case is still two intervals and one call" \
-  "$(contains "$out" 'the worst case between registrations - two intervals and one such call, the pass deadline bounding neither - is 84400 ms')"
+check "the renewal window is still three intervals and one call" \
+  "$(contains "$out" 'are 124400 ms, strictly inside the session record lifetime 180000 ms')"
 
 echo "case: the daemon's copy of the interval drifted from the TypeScript one"
 root=$(fixture daemon-copy 40_000 12_000 2_000 400 2 '3 * time.Minute' '41 * time.Second')
@@ -410,7 +425,7 @@ out=$("$check_script" 2>&1)
 status=$?
 set -e
 check "exits 0" "$(is "$status" 0)"
-check "reports both margins, the daemon's agreement on both copies of the interval, and its two copies of the listener's windows" \
-  "$(contains "$out" '^3 refresh intervals of .* (packages/envoy-client/src/envoy-settings.ts:.*) plus one listener call .* are .*, and the worst case between registrations - two intervals and one such call, the pass deadline bounding neither - is .*; both inside the session record lifetime .* (packages/envoy/internal/session/registry.go:.*) covers that lifetime; its pluginHeartbeat .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches too; its listenerSessionTTL .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches that lifetime and its listenerClaimStale .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches ClaimStaleAfter .* (packages/envoy/internal/session/claim.go:.*)$')"
+check "reports the margin, the daemon's agreement on both copies of the interval, and its two copies of the listener's windows" \
+  "$(contains "$out" '^3 refresh intervals of .* (packages/envoy-client/src/envoy-settings.ts:.*) plus one listener call .* are .*, strictly inside the session record lifetime .* (packages/envoy/internal/session/registry.go:.*) covers that lifetime; its pluginHeartbeat .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches too; its listenerSessionTTL .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches that lifetime and its listenerClaimStale .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches ClaimStaleAfter .* (packages/envoy/internal/session/claim.go:.*)$')"
 
 summary "check-heartbeat-margin.sh"
