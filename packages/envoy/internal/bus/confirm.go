@@ -20,25 +20,43 @@ var errPublishUnconfirmed = errors.New("publish not known to have been accepted"
 
 // publishConfirmed publishes msg on conn with publish, flushes within deadline, and confirms the
 // server accepted it (confirmPublished). A nil error means the server accepted the publish;
-// otherwise the error is nats.go's refusal before sending (refused), a flush that failed or ran out
-// of the window, ErrPublishDenied, or one wrapping errPublishUnconfirmed. publish is conn.PublishMsg,
-// bound to the same conn: both callers read their connection once and pass it and its PublishMsg, so
-// publish publishes on the connection observe and confirmPublished judge. It is a parameter so a
-// test can make the server's answer arrive before publish returns, which is the case the state read
-// before it exists for.
+// otherwise the error is a window already spent (errWindowElapsed), nats.go's refusal before
+// sending (refused), a flush that failed or ran out of the window, ErrPublishDenied, or one
+// wrapping errPublishUnconfirmed. publish is conn.PublishMsg, bound to the same conn: both callers
+// read their connection once and pass it and its PublishMsg, so publish publishes on the
+// connection observe and confirmPublished judge. It is a parameter so a test can make the server's
+// answer arrive before publish returns, which is the case the state read before it exists for.
+//
+// A deadline already spent is refused before publish is called, never after: a core publish is
+// on its way to the subject the moment publish returns, so answering failure behind it tells the
+// caller a message failed that its subscribers receive - and a core subject has no duplicate
+// window, so the caller's retry delivers it twice. The check after publish stays for a window that
+// runs out during publish itself; that publish is not known to have left this process, the same
+// ambiguity a flush that runs out of the window has, and is answered the same way.
 func (c *Client) publishConfirmed(conn *nats.Conn, msg *nats.Msg, deadline time.Time, publish func(*nats.Msg) error) error {
+	if time.Until(deadline) <= 0 {
+		return errWindowElapsed(msg.Subject)
+	}
 	before := observe(conn)
 	if err := publish(msg); err != nil {
 		return c.refused(err, len(msg.Data))
 	}
 	remaining := time.Until(deadline)
 	if remaining <= 0 {
-		return fmt.Errorf("bus: window elapsed before the publish to %q was flushed", msg.Subject)
+		return errWindowElapsed(msg.Subject)
 	}
 	if err := conn.FlushTimeout(remaining); err != nil {
 		return fmt.Errorf("bus: flush publish to %q: %w", msg.Subject, err)
 	}
 	return confirmPublished(conn, msg.Subject, before)
+}
+
+// errWindowElapsed is the error of a core publish to subject whose window ran out before it could
+// be flushed. Its text is the one this error had before the spent-window check moved ahead of the
+// publish, so anything that matches it - a deployed log filter, an operator's search - still does,
+// and every site that reports a spent window returns it.
+func errWindowElapsed(subject string) error {
+	return fmt.Errorf("bus: window elapsed before the publish to %q was flushed", subject)
 }
 
 // connState is what confirmPublished compares across a core publish and its flush.

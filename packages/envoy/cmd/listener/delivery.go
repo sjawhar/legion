@@ -269,18 +269,19 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 // publishNoHolderExceptionOrNak publishes a "no_holder" delivery exception
 // for control topics and, if publishing itself fails, escalates to an
 // immediate NAK by finalizing message and reporting false — a message whose
-// failure notice never went out must not be silently ACKed. Shared by the
-// direct-agent path (no live session for the target) and the fanout path (no
-// matching interests at all). sessionID is "" when this outcome has no
-// attempt-cache entry to roll back (the fanout no-interests case).
-func publishNoHolderExceptionOrNak(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope, sessionID string) bool {
+// failure notice never went out must not be silently ACKed. Its one caller is
+// the fanout path with no matching interests at all, which has no attempt-cache
+// entry to roll back; listenerDeliveryHandler routes every role and agent topic
+// elsewhere, so a fanout topic is never a control topic and the guard below
+// returns true for it before anything is published. The direct-agent give-up
+// does not use it: that give-up is terminal whether or not its notice goes out
+// (agentSubjectDelivery), since a NAK there would redeliver a message whose push
+// allowance is spent.
+func publishNoHolderExceptionOrNak(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) bool {
 	if !isControlTopic(item.Topic) || isExceptionsTopic(item.Topic) {
 		return true
 	}
-	if err := publishDeliveryException(cfg.client, item, "no_holder", sessionID, false); err != nil {
-		if sessionID != "" {
-			cfg.attemptCache.Clear(item.DedupeKey, sessionID)
-		}
+	if err := publishDeliveryException(cfg.client, item, "no_holder", "", false); err != nil {
 		cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
 		cfg.messagesNAKed.Inc()
 		message.finalize(true)
@@ -607,10 +608,10 @@ const pushFailedDeferrals = 1
 // keyed on each message's stream sequence (nats.MsgMetadata.Sequence.Stream), and the budget
 // unplaceableDeferralCap bounds. It is keyed rather than counted so that only a slot this
 // listener took ever comes back: a redelivery is no evidence that this listener deferred the
-// message - the interest path's ShouldNAK, publishNoHolderExceptionOrNak's NAK and an expired
-// AckWait all redeliver too, and they come in step with deferrals (a local session whose server
-// is down produces interest-path NAKs and direct-path deferrals at once) - so a count released on
-// every redelivery could read zero while the cap's worth of messages were still held.
+// message - the interest path's ShouldNAK and an expired AckWait redeliver too, and they come in
+// step with deferrals (a local session whose server is down produces interest-path NAKs and
+// direct-path deferrals at once) - so a count released on every redelivery could read zero while
+// the cap's worth of messages were still held.
 //
 // What the set guarantees: it never holds more than unplaceableDeferralCap entries, an entry is
 // added only by a deferral this listener made and removed only by that same message's next
@@ -865,18 +866,38 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		}
 		// Given up: the deferrals this cause is allowed are spent, the delivery count is reached,
 		// this listener is already holding unplaceableDeferralCap messages, the metadata could
-		// not be read, or this is a core delivery nothing would redeliver. The no_holder
-		// exception goes out here, once per message rather than once per attempt.
-		if !publishNoHolderExceptionOrNak(cfg, message, item, sessionID) {
-			return
-		}
+		// not be read, or this is a core delivery nothing would redeliver. The give-up is
+		// terminal whatever becomes of its no_holder notice: once the push allowance is spent,
+		// nothing here may restore the state that permits another push, and the record of the
+		// give-up must not depend on the bus that just failed to place the message.
+		//
+		// So applyDeliveryOutcome writes the counter and the give-up line first, then publishes
+		// the notice, once per message rather than once per attempt. A notice that does not go
+		// out is logged exceptionPublishFailedLine and nothing else: it neither NAKs the message
+		// nor clears its attempt-cache entry. The entry is kept rather than cleared because it is
+		// what stops a further delivery of this message pushing again - the redelivery an ACK
+		// lost on the wire brings (finalize's ACK is fire-and-forget), which arrives after the
+		// durable's AckWait and well inside attemptCacheTTL - and the message is ACKed below.
+		//
+		// What this gives up is the notice itself, when it cannot be published. That is cheaper
+		// than the retry it replaces. For an agent subject nothing in this deployment reads the
+		// no_holder exception: the Legion daemon's NATS grant subscribes only to the role lanes'
+		// exception subjects (infra/core, DaemonPermissions), while the give-up line, its counter
+		// and exceptionPublishFailedLine are what an operator does read. The retry NAKed the
+		// message and cleared its attempt entry, so every redelivery ran the whole handler again
+		// and pushed a message whose push allowance was already spent; and the failure it retried
+		// is correlated with the fault (the bus that will not take the notice is the one whose
+		// trouble made the message unplaceable) and can be permanent - the notice embeds the
+		// original payload, so an envelope near the server's max payload yields a notice refused
+		// bus.ErrTooLarge on every attempt - which ran the message to the durable's MaxDeliver
+		// with no give-up record at all.
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
 			sessionID:    sessionID,
 			metricStatus: giveUpStatus,
 			log: func(logger *logging.Logger) {
 				logger.DeliveryLog(slog.LevelWarn, "listener agent delivery given up", sessionID, item.Topic, item.EventID, giveUpStatus, slog.String("reason", reason))
 			},
-			clearAttempt: true,
+			exceptionReason: "no_holder",
 		})
 	}
 	if result.ShouldNAK {
@@ -893,7 +914,7 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	items := cfg.registry.Match(cfg.machineID, item.Topic)
 	if len(items) == 0 {
-		if !publishNoHolderExceptionOrNak(cfg, message, item, "") {
+		if !publishNoHolderExceptionOrNak(cfg, message, item) {
 			return
 		}
 		cfg.logger.Info("listener no matching interests", slog.String("topic", item.Topic))

@@ -812,6 +812,18 @@ func (c *Client) PublishReportingDuplicateWithin(ctx context.Context, item contr
 // keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
 // that passed none. The acknowledgement wait is still taken from publishAcknowledgementClock, the
 // seam a test uses to expire that bound without spending it.
+//
+// A ctx that has already ended never puts the message on the wire here, and that protection is
+// the dependency's rather than this repository's: js.Publish under nats.Context is a request, and
+// nats.go's requestWithContext returns ctx.Err() before it sends anything (nats.go v1.50.0,
+// context.go), on the first attempt, on each of its no-responders retries and on the reconnect
+// retry below alike. So the core path's own check (publishConfirmed) has no counterpart here, and
+// it is not redundant with this one: a change that stopped passing nats.Context(ctx), or a nats.go
+// that stopped checking first, would reopen the case on this path silently.
+// TestAPublishWithAnEndedContextSendsNothing pins it, so either change fails that test instead of
+// reaching the wire. What a context that ends during the acknowledgement wait leaves is a message
+// the stream may hold while the caller is answered failure; that is the acknowledgement's own
+// ambiguity, which the MsgId's duplicate window absorbs for an envelope that earns one.
 func (c *Client) publishJetStream(ctx context.Context, item contracts.Envelope) (bool, error) {
 	if err := checkSubject(item.Topic); err != nil {
 		return false, err
@@ -867,6 +879,16 @@ func (c *Client) PublishCoreTo(subject string, item contracts.Envelope) error {
 // The bound taken below is the earlier of ctx's own deadline and publishBound, since WithTimeout
 // keeps the parent's deadline when that is the earlier one; publishBound is what bounds a caller
 // that passed none.
+//
+// A ctx that has ended puts nothing on the wire, and it takes two checks rather than one because
+// they see different things. publishConfirmed refuses a deadline already spent, immediately
+// before it publishes, and that is where the class is closed for every caller of it at once:
+// ensureConnWithContext returns on a healthy connection without consulting ctx, so no earlier
+// step can be trusted to have caught it. But publishConfirmed is given a deadline and not a
+// context, so a ctx cancelled while its deadline is still in the future is invisible there; only
+// a holder of the context can see that, which is this function. What makes a spent deadline
+// reachable at all is publishHandler (cmd/listener/api.go), whose holder lookup does not take the
+// route's own context and can spend it on a slow bus before the publish begins.
 func (c *Client) publishCoreTo(ctx context.Context, subject string, item contracts.Envelope) error {
 	if err := checkSubject(subject); err != nil {
 		return err
@@ -877,6 +899,9 @@ func (c *Client) publishCoreTo(ctx context.Context, subject string, item contrac
 	}
 	ctx, cancel := context.WithTimeout(ctx, publishBound)
 	defer cancel()
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("%w: %w", errWindowElapsed(subject), err)
+	}
 	if err := c.ensureConnWithContext(ctx); err != nil {
 		return err
 	}

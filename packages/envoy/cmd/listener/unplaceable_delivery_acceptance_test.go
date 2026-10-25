@@ -43,6 +43,8 @@ type deliveryRecord struct {
 	// line carries in place of the stream age it named before: the window is counted in
 	// deliveries from the first one, so the age bounds nothing.
 	WindowDeferrals uint64 `json:"window_deferrals"`
+	// Error is the error a failure line carries, exceptionPublishFailedLine's among them.
+	Error string `json:"error"`
 }
 
 // deliveryRecords decodes every line the harness logged whose msg is message. Counting them is how
@@ -176,6 +178,8 @@ type unplaceableDeliveryRun struct {
 	item    contracts.Envelope
 	// exceptions reads the delivery exceptions published for the envelope's own topic.
 	exceptions *natsgo.Subscription
+	// consumer names the run's durable, for a test that reads back what the stream still holds.
+	consumer string
 }
 
 // oneDeferralWindow is a retry window that buys exactly one deferral: the handler spends a window
@@ -226,8 +230,14 @@ func startUnplaceableDelivery(t *testing.T, harness listenerDeliveryHarness, cfg
 // for a run that must put something in front of the listener's own handler.
 func startDeliveryThrough(t *testing.T, harness listenerDeliveryHarness, handler natsgo.MsgHandler, target string, soak time.Duration) unplaceableDeliveryRun {
 	t.Helper()
-	subject := contracts.AgentSubject(target)
-	item := listenerTestEnvelope(subject, "unplaceable-"+target)
+	return startEnvelopeDeliveryThrough(t, harness, handler, target, listenerTestEnvelope(contracts.AgentSubject(target), "unplaceable-"+target), soak)
+}
+
+// startEnvelopeDeliveryThrough is startDeliveryThrough with the envelope given whole, for a run
+// whose envelope must carry something the default one does not; item.Topic is target's subject.
+func startEnvelopeDeliveryThrough(t *testing.T, harness listenerDeliveryHarness, handler natsgo.MsgHandler, target string, item contracts.Envelope, soak time.Duration) unplaceableDeliveryRun {
+	t.Helper()
+	subject := item.Topic
 	exceptions, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + subject)
 	if err != nil {
 		t.Fatalf("subscribe the exception probe for %s: %v", subject, err)
@@ -264,7 +274,7 @@ func startDeliveryThrough(t *testing.T, harness listenerDeliveryHarness, handler
 		t.Fatalf("create the durable %s over %s: %v", consumer, subject, err)
 	}
 	t.Cleanup(func() { _ = harness.client.JS().DeleteConsumer(bus.Stream, consumer) })
-	return unplaceableDeliveryRun{harness: harness, item: item, exceptions: exceptions}
+	return unplaceableDeliveryRun{harness: harness, item: item, exceptions: exceptions, consumer: consumer}
 }
 
 // A message for a session this listener cannot place is kept in the stream and redelivered for the
@@ -693,12 +703,11 @@ func TestARedeliveryGivesItsDeferralSlotBack(t *testing.T) {
 
 // A redelivery this listener never deferred gives no slot back. Only a message this listener
 // deferred holds a slot, so only that message's next delivery may return one: a redelivery that
-// another branch's NAK produced - the interest path's ShouldNAK, publishNoHolderExceptionOrNak's
-// NAK - or an expired AckWait is no sign a slot was ever taken for it. Those redeliveries come in
-// step with deferrals, too: a local session whose server is down produces interest-path NAKs and
-// direct-path deferrals at once. A release on every redelivery gives back slots it never took,
-// until the budget reads empty while the listener is holding its whole cap, and the cap bounds
-// nothing.
+// another branch's NAK produced - the interest path's ShouldNAK - or an expired AckWait is no
+// sign a slot was ever taken for it. Those redeliveries come in step with deferrals, too: a local
+// session whose server is down produces interest-path NAKs and direct-path deferrals at once. A
+// release on every redelivery gives back slots it never took, until the budget reads empty while
+// the listener is holding its whole cap, and the cap bounds nothing.
 //
 // The NAK here is the run's own, put in front of the listener's handler in place of those
 // branches: it takes the message's first delivery and asks for it again at once, so the handler's
@@ -853,5 +862,91 @@ func TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther(t *testing
 	}
 	if got := len(recordsFor(deliveryRecords(t, logs, "listener agent delivery given up"), noRecord)); got != 0 {
 		t.Fatalf("%d give-up lines for the no-record message at attempt 2, want none - the window still has deferrals for it:\n%s", got, logs)
+	}
+}
+
+// A give-up whose no_holder notice can never be published is still the message's end: the counter
+// and the give-up line are written, the failed notice is logged exceptionPublishFailedLine, the
+// message is acknowledged, and the session is pushed no more than its allowance however many
+// deliveries of it follow. Before this the give-up published the notice first and, when that
+// failed, NAKed the message and cleared its attempt entry before writing anything: no counter, no
+// give-up line, and a redelivery with neither a dedupe nor an attempt entry, which ran the whole
+// handler again and pushed again, every 30 s, to the durable's MaxDeliver.
+//
+// The notice fails here for good, not for one attempt, by the reviewer's own reachable case: the
+// notice embeds the original payload, so an envelope just under the server's max payload yields a
+// notice past it, which the bus refuses bus.ErrTooLarge every time it is published. The session
+// has a port and refuses every push, so the cause is push_failed, whose allowance is
+// pushFailedDeferrals deferrals and so pushFailedDeferrals+1 pushes.
+//
+// Two reads prove nothing more follows. The durable is read back: the message must be
+// acknowledged, nothing pending, where the NAK this replaces leaves it pending for a redelivery
+// 30 s on. And the envelope is delivered once more, as the redelivery an ACK lost on the wire
+// would bring: the give-up keeps the attempt entry, so that delivery is an attempt-dedupe skip and
+// pushes nothing, where an entry cleared at the give-up would push a third time.
+func TestAGiveUpWhoseNoticeCanNeverBePublishedIsStillTerminal(t *testing.T) {
+	const target = "ses_notice_too_large"
+	var pushes atomic.Int32
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(*http.Request) (*http.Response, error) {
+		pushes.Add(1)
+		return nil, fmt.Errorf("dial tcp: connect: connection refused")
+	}))
+	if err := harness.sessions.Put(target, session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register the unreachable session: %v", err)
+	}
+	item := listenerTestEnvelope(contracts.AgentSubject(target), "unplaceable-"+target)
+	// The payload fills the envelope to 256 bytes under the server's max payload, so the envelope
+	// itself is published and delivered, and the notice - the same payload plus the notice's own
+	// fields and a second level of JSON quoting - is past it.
+	bare := marshalListenerEnvelope(t, item)
+	item.Payload = strings.Repeat("p", int(harness.client.Conn.MaxPayload())-len(bare)-256)
+	cfg := harness.config
+	cfg.unplaceableRetryWindow = defaultUnplaceableRetryWindow
+	run := startEnvelopeDeliveryThrough(t, harness, jetStreamDeliveryHandler(cfg), target, item, 0)
+
+	waitFor(t, 20*time.Second, "the message to be given up and its notice to fail", func() bool {
+		logs := harness.logs.String()
+		return len(deliveryRecords(t, logs, "listener agent delivery given up")) > 0 &&
+			len(deliveryRecords(t, logs, exceptionPublishFailedLine)) > 0
+	})
+	waitFor(t, 10*time.Second, "the durable to hold nothing pending for the message", func() bool {
+		info, err := harness.client.JS().ConsumerInfo(bus.Stream, run.consumer)
+		return err == nil && info.NumAckPending == 0
+	})
+	info, err := harness.client.JS().ConsumerInfo(bus.Stream, run.consumer)
+	if err != nil {
+		t.Fatalf("read the durable %s back: %v", run.consumer, err)
+	}
+	if want := uint64(pushFailedDeferrals + 1); info.Delivered.Consumer != want || info.AckFloor.Consumer != want {
+		t.Fatalf("the durable delivered %d and acknowledged through %d, want both %d - the delivery that gave the message up acknowledges it, notice or none", info.Delivered.Consumer, info.AckFloor.Consumer, want)
+	}
+
+	// The further delivery: the same envelope through the same handler state, as a redelivery.
+	harness.handler(&natsgo.Msg{Data: marshalListenerEnvelope(t, item)})
+
+	logs := harness.logs.String()
+	giveUps := deliveryRecords(t, logs, "listener agent delivery given up")
+	if len(giveUps) != 1 || giveUps[0].Reason != "push_failed" || giveUps[0].DeliveryStatus != "unplaceable_push_failed" {
+		t.Fatalf("want exactly one give-up line, naming push_failed and unplaceable_push_failed:\n%s", logs)
+	}
+	failures := deliveryRecords(t, logs, exceptionPublishFailedLine)
+	if len(failures) != 1 || failures[0].Topic != item.Topic || !strings.Contains(failures[0].Error, bus.ErrTooLarge.Error()) {
+		t.Fatalf("want exactly one %q line for %s naming %q - the notice was refused, once, and said so:\n%s", exceptionPublishFailedLine, item.Topic, bus.ErrTooLarge, logs)
+	}
+	if skips := deliveryRecords(t, logs, "listener attempt-dedupe skip"); len(skips) != 1 {
+		t.Fatalf("%d attempt-dedupe skips, want the further delivery's one - the given-up message's attempt entry is what keeps it from pushing again:\n%s", len(skips), logs)
+	}
+	if got := pushes.Load(); got != pushFailedDeferrals+1 {
+		t.Fatalf("the session was pushed %d times, want %d - the allowance for a push that may have landed, however many deliveries follow:\n%s", got, pushFailedDeferrals+1, logs)
+	}
+	body := metricsBody(t, harness)
+	if got := counterValue(t, body, deliveredSeries("unplaceable_push_failed")); got != 1 {
+		t.Fatalf("%s = %d, want 1 - the give-up is counted whether or not its notice went out:\n%s", deliveredSeries("unplaceable_push_failed"), got, body)
+	}
+	if got := counterValue(t, body, nakedCounter); got != pushFailedDeferrals {
+		t.Fatalf("%s = %d, want %d - the deferral's NAK and nothing for the notice that failed:\n%s", nakedCounter, got, pushFailedDeferrals, body)
+	}
+	if message, err := run.exceptions.NextMsg(500 * time.Millisecond); err == nil {
+		t.Fatalf("a notice past the server's max payload was published after all (%d bytes): the run proves nothing about a notice that cannot go out", len(message.Data))
 	}
 }
