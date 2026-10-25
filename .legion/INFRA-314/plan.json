@@ -1,0 +1,111 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-314",
+  "completed": "2026-10-25T12:22:06Z",
+  "plan": "dispatch://INFRA-314/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase charter, references/pr-body.md for the E2E line and proof array (the live-binary test and broker-approval.e2e.ts are the proofs), references/conflicts-and-rewrites.md for the stacked base on legion/INFRA-228 and the forward merge after the retarget to main, references/default-branch-check.md before each push, references/findings.md for anything found outside this issue.",
+      "dispatch-first, then dispatch: step 1's ask for the Google OAuth Web client and any message on INFRA-314 go through them, with a search first.",
+      "ce-simplify-code: the simplify pass over the settled diff before the final proofs (step 13)."
+    ],
+    "test": [
+      "legion-worker: references/pr-body.md defines the tester's run of the application (broker-approval.e2e.ts and the live-binary test re-run, then the break attempts section 5 names) and its proof array; CI is read, not re-run, for lint, types and unit suites.",
+      "dispatch: reporting a failure or a no-surface item on INFRA-314."
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md for the review round and approval of the head by SHA, references/review-threads.md for thread dispositions, references/pr-body.md to check both E2E lines against section 5's surfaces and negative controls, and the plan's D1-D13 read beside the spec for its two recorded departures."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: The new browser authority must be deployed inside INFRA-243's protected boundary before this can be reported as closing the deploy-to-admin route. \u201cbroker/ gets \u2026 config\u201d does not establish who can change that configuration, run the broker/front door, or read the new OAuth secret and broker state. A deploy that can replace the broker page or configure a different issuer can defeat the proposed browser protections directly.",
+        "answer": "Plan section 7 and the production check separate 'merged' from 'escalation route closed in production': the Production line states whether the broker's deployment sits inside INFRA-243's protected boundary (S4) that day; until then, whoever deploys the broker can replace the page, which is INFRA-243's route to close."
+      },
+      {
+        "finding": "F2: \u201cDeploy order: broker (with sign-in) before Dispatch\u201d interrupts approvals. The new broker immediately rejects the exact agent-secret decision route the old Dispatch UI still calls. Deploying Dispatch first is not a working alternative under the proposed missing-URL behavior: old broker rows have no approve_url, so the new Inbox renders them without a link.",
+        "answer": "Section 6 fixes the order: broker (with BROKER_SIGNIN_*) first, Dispatch second. In between, the old Dispatch's Approve on a secret request receives the broker's 403 DECIDE_ON_BROKER_PAGE with the page URL in its message (relayed verbatim), so approvals continue through that link and nothing is approved on Dispatch's word; the reverse order is not used."
+      },
+      {
+        "finding": "F3: The parent plan still instructs other slices to build Dispatch-signed approver assertions. That is not merely historical acceptance text in INFRA-314: it remains active parent work and can reintroduce the rejected trust path after this slice lands.",
+        "answer": "Reported to the architect (plan section 9): INFRA-228 plan.md's Dispatch-signed approver assertion items are superseded by this issue. D8 and step 7 rewrite every route comment that promises a signed assertion, and A13's content check fails on one left behind."
+      },
+      {
+        "finding": "F4: The proof does not test the issue's central adversary: a modified Dispatch page sharing a site with the broker while the victim has a live broker session. SameSite=Lax is not the boundary between these sibling subdomains. The exact Origin check and __Host cookies are appropriate proposed protections, but a cookie-handling Go HTTP client does not establish browser SameSite, cookie-prefix, CORS, framing or DOM behavior.",
+        "answer": "A4 is explicit: a server-side origin matrix (sibling origin, null, same-site/cross-site Fetch Metadata, none) in Go tests, and a real-Chromium hostile sibling page (another 127.0.0.1 port: same site, other origin) attempting form post, credentialed fetch and iframe in Dispatch's Playwright suite. Both cookies are __Host-; SameSite is not relied on; no CORS is sent."
+      },
+      {
+        "finding": "F5: \u201cother pending \u2026 records (PendingForApprover(login))\u201d is not enough information to render an informed batch approval. That method returns summaries, not each request's reason, lifetime, enrollment identity, expiry or current state. Rendering only those summaries while \u201cApprove all N shown\u201d grants the full records would weaken the settled requirement that the granting service print what is being approved.",
+        "answer": "D5: every record offered a button is rendered in full from ReadRecord/RecordDetail (names, verified enrollment, labelled unsigned session claim, reason, lifetime with null meaning 'until the session ends', times, approver, state). D6: the batch set is the rendered snapshot, bound by the page token; A3 proves a record pending after render is not decided."
+      },
+      {
+        "finding": "F6: The design treats \u201cdefault and max 86400\u201d as if the offboarding commitment settles the broker's session policy. It establishes an upper bound, not a selected default, rolling-renewal rule, or permission to replace membership reconfirmation with an unrevocable 24-hour browser session. Online-only sign-in and a session row containing only login/expiry also leave no described way to react earlier to suspension or revoke a browser login.",
+        "answer": "D4 states the policy: absolute 24 h expiry (BROKER_SIGNIN_SESSION_SECONDS default and max 86400), no sliding renewal, no membership re-check inside a session, logout deletes the row. The trade (a suspended account keeps approval power up to 24 h) is stated and reported to the architect as the planner's choice, not attributed to INFRA-178's open ask."
+      },
+      {
+        "finding": "F7: The existing OIDC test issuer cannot prove either new PKCE enforcement or the absence of a refresh-token requirement. It currently ignores PKCE and always issues a refresh token for a code exchange, so the proposed live-binary test can pass while either change is missing.",
+        "answer": "D13 extends oidctest with PKCE verification and a no-refresh-token option; A8 requires a wrong or missing verifier to fail and a no-refresh exchange to sign in, while Dispatch's offline/consent tests stay unchanged."
+      },
+      {
+        "finding": "F8: \u201cA person who is not the record's approver \u2026 no buttons\u201d has a work-changing literal reading: no real login equals the shared-secret approver string \u201canyone\u201d, so shared approvals would have no controls. Also, the deployment history map's statement that INFRA-178 introduced an approver allowlist is not supported by the supplied code or its human answer. Carrying that assertion into the plan would add a restriction the human explicitly declined.",
+        "answer": "D5 uses record.MayDecide for who may decide (shared records decidable by any signed-in domain member); no approver allowlist is added, and section 1 records that none exists (SECRET_APPROVERS found nowhere)."
+      },
+      {
+        "finding": "F9: The new page's singular \u201crequester (session id \u2026)\u201d must not collapse the enrolled session identity and the request's self-stated session override. The override is unsigned and can name someone else's session. Showing it as the verified requester would let an agent misattribute a sensitive approval request even though the record ID is correctly bound.",
+        "answer": "D5 shows the verifying enrollment (kind, operator, runtime/host, slot) as the requester and the request's own session id separately, labelled as its unsigned claim, all from the broker's record."
+      },
+      {
+        "finding": "F10: Batch completion and the displayed outcome are underspecified. \u201ceach record decided through \u2026 ApplyDecision\u201d means separate committed transactions; a later stale, cancelled or unauthorized item cannot roll back earlier grants. Additionally, ApplyDecision can receive an approval but return state denied because the enrollment is no longer live. An unconditional \u201capproved\u201d result or aggregate success would be false.",
+        "answer": "D6: batches are independent per record, each outcome shown (granted; recorded denied because the session ended; already decided; expired; not yours); replay changes nothing. Section 5's handler test asserts exact grant counts and one terminal event per record."
+      },
+      {
+        "finding": "F11: There is no described way to change the broker account when a live session belongs to the wrong person. login_hint is used only when there is no live session. The specified wrong-approver page has no buttons, but no sign-out/account-switch route; a user can be stuck until expiry or manual cookie removal.",
+        "answer": "D1/D5 add POST /signin/logout (server-side delete) and a 'Not you? Sign in as someone else' switch on every page (prompt=select_account, back to the same record); the browser spec's case 5 proves it, and A2 proves a logged-out cookie replay writes nothing."
+      },
+      {
+        "finding": "F12: An Inbox href assertion plus an unspecified broker-only Chromium smoke does not decide the settled two-click/no-hops and batch criteria. All current Acceptance bullets are in the rejected historical section, so they cannot supply the missing active checks.",
+        "answer": "A7 and broker-approval.e2e.ts drive the real Dispatch Inbox into the real broker page (fake-broker fixture whose approve_url names a real broker record): live session with no provider request, lapsed session returning to the same record, approve-all of three; A11 covers two broker processes and a restart in the live-binary test; A2 requires the grant's value to be released."
+      },
+      {
+        "finding": "F13: The affected consumers extend beyond the deleted SPA page and the listed prose docs. The plan must retain shared machine-login client/UI pieces, migrate secret-approval fixtures, and account for the executable documentation rigs and source-derived API reference. Otherwise the new flow can be correct while the documented walkthrough, site build or machine page is broken.",
+        "answer": "D11 keeps MachineLoginPage's shared pieces (CredentialRecordFacts, CredentialDecisionButtons, approve/deny client and server routes); D9 defines approve_url presence for every answer; D12 updates the CLI's typed models; step 8 extends broker-refgen's auth labels and pages.go; step 12 updates the media rig and screenshots."
+      },
+      {
+        "finding": "F14: The deployment and test prerequisites are not yet an executable handoff. The root's current supplied harness cannot boot, its dev broker deliberately cannot approve anything, and the actual Google callback/client has not been proven. These are acknowledged root-owned edges\u2014not new INFRA-314 findings to silently absorb\u2014but the proposed proof depends on them being resolved. The new broker-only OAuth client/configuration also needs to exist before the old decision path is cut off; otherwise 'healthy broker, approvals off' is a complete approval outage.",
+        "answer": "Section 6 makes #2187's merge, its own cutover edges (run-server.sh, dev-broker.sh, media rig), the Google OAuth client (step 1 ask, opened at once) and the deploy order explicit dependencies; D10 refuses partial config and never falls back; the production check exercises the real provider redirect and a real approval."
+      },
+      {
+        "finding": "Source correction: Google was not literally chosen by the human, and the IAP API shutdown does not prove no OAuth client can be declared programmatically.",
+        "answer": "Plan section 1 says Google is the plan's choice (Dispatch's precedent), not the human's; step 1 asks a person to create the client in the console following Dispatch's precedent without claiming universal impossibility."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "The spec's Acceptance list (from its line 42) is the rejected passkey design, kept as record: passkey assertions, registered passkeys, registration routes and two registered devices.",
+      "plan": "The plan proves A1-A13 for the settled sign-in design instead: the broker's own page and sign-in on its origin, decisions bound to the session and the printed records, no service route deciding a secret request, nothing Dispatch holds sufficing, machine logins unchanged, two clicks from the Inbox, and the Google OAuth client requested at the start of implementation.",
+      "evidence": "Spec lines 1-24 and the answered ask dispatch://INFRA-314/ask/223f5cd2-8229-4f1a-b886-db56434f407b settle sign-in for approvals with at most two clicks; spec line 26 says the work below is kept as the record of a rejected way.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": [
+          "Every passkey acceptance line is replaced by plan criteria A1-A13 (dispatch://INFRA-314/artifact/plan-md, section 3)."
+        ]
+      }
+    },
+    {
+      "spec": "The settled design moves approvals to the granting service; the Inbox item becomes the link to the approval page.",
+      "plan": "Deny moves with approve: no account route decides a secret request in either direction (403 DECIDE_ON_BROKER_PAGE), Dispatch's Deny button for secret requests and its /credentials/<record> page are deleted, and the CLI's waiting line names the broker page. Machine-login decisions and revoke-by-approver stay on Dispatch.",
+      "evidence": "Approve and deny share one route and one relay (handlers_ui_records.go:174-215 and credential_requests.go:139-171 at PR #2187's head); any decision a service route can make is one a changed Dispatch can make, and the record page would have no button left.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Dispatch also loses the Deny of a secret request and its credential-record page; the broker page offers Deny."
+      }
+    }
+  ]
+}
