@@ -393,7 +393,7 @@ func initContainerStatus(pod *corev1.Pod, name string) *corev1.ContainerStatus {
 // logTail is a container's last log lines, or why they could not be read: a detail's quote never
 // changes its verdict, so the read is bounded whole (call).
 func (r *Runtime) logTail(ctx context.Context, pod, container string) string {
-	text, err := r.readLog(ctx, pod, container, logTailLines, 64<<10)
+	text, _, err := r.readLog(ctx, pod, container, logTailLines, 64<<10)
 	if err != nil {
 		return fmt.Sprintf("(the log could not be read: %v)", err)
 	}
@@ -419,19 +419,23 @@ const containerLinesHeader = "the container's own last lines, no role's:"
 // The container's own lines follow it (containerLines): what the launcher, PID 1, wrote itself
 // rather than for a role, such as a panic, is why every role of the container ended.
 //
-// The first line of the read is attributed to no one, whatever bound cut it: the kubelet's tail
-// counts a long line's partial runtime entries as lines of their own, so a read can start inside a
-// role's line, at a fragment that role's agent chose, which could read as another role's line or
-// the launcher's. Dropping it costs the read's oldest line.
+// The first line of the read is attributed to no one when the line bound alone cut it: the
+// kubelet's tail counts a long line's partial runtime entries as lines of their own, so a read can
+// start inside a role's line, at a fragment that role's agent chose, which could read as another
+// role's line or the launcher's. Dropping it costs the read's oldest line. A read the byte bound cut
+// already starts after a newline the log holds (readLog), on a whole line, so nothing more is
+// dropped from it.
 func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim.Role) string {
 	if container != runtime.IssuePodContainer {
 		return r.logTail(ctx, pod, container)
 	}
-	text, err := r.readLog(ctx, pod, container, sharedLogLines, sharedLogBytes)
+	text, whole, err := r.readLog(ctx, pod, container, sharedLogLines, sharedLogBytes)
 	if err != nil {
 		return fmt.Sprintf("(the log could not be read: %v)", err)
 	}
-	_, text, _ = strings.Cut(text, "\n")
+	if !whole {
+		_, text, _ = strings.Cut(text, "\n")
+	}
 	quote := roleLines(text, role, logTailLines)
 	if quote == "" {
 		quote = fmt.Sprintf("(none of the container's last %d lines is %s's)", sharedLogLines, role)
@@ -446,25 +450,27 @@ func (r *Runtime) roleLog(ctx context.Context, pod, container string, role claim
 // (call). TailLines bounds the read to lines, and the stream is read through tailBytes, which holds
 // only its newest limit bytes, so a log's size never decides how much the daemon holds, and a
 // quote never ends before the lines nearest the container's end. When the byte bound dropped older
-// bytes, the read starts from the first whole line it kept.
-func (r *Runtime) readLog(ctx context.Context, pod, container string, lines int64, limit int) (string, error) {
+// bytes, the read starts from the first whole line it kept, and whole says so: the text then starts
+// just after a newline of the log. Otherwise it starts where the kubelet's line count did, which
+// may be inside a line.
+func (r *Runtime) readLog(ctx context.Context, pod, container string, lines int64, limit int) (text string, whole bool, err error) {
 	reading, cancel := call(ctx)
 	defer cancel()
 	stream, err := r.kube.CoreV1().Pods(r.namespace).GetLogs(pod, &corev1.PodLogOptions{Container: container, TailLines: &lines}).Stream(reading)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	defer stream.Close()
-	text, cut, err := tailBytes(stream, limit)
+	kept, cut, err := tailBytes(stream, limit)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	if cut {
-		if newline := bytes.IndexByte(text, '\n'); newline >= 0 {
-			text = text[newline+1:]
+		if newline := bytes.IndexByte(kept, '\n'); newline >= 0 {
+			kept, whole = kept[newline+1:], true
 		}
 	}
-	return strings.TrimRight(string(text), "\n"), nil
+	return strings.TrimRight(string(kept), "\n"), whole, nil
 }
 
 // roleLines is role's last n lines of log, each with the launcher's `<role>: ` prefix dropped: the

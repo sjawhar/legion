@@ -502,6 +502,37 @@ func TestEachRolesQuoteCarriesTheLaunchersCrash(t *testing.T) {
 	}
 }
 
+// A read the byte bound cut starts on the first whole line it kept, its partial first line already
+// dropped, so that whole line is quoted: a tester whose only line is the first after the cut, in a
+// log of 33 role lines each below the launcher's 64 KiB line cap, keeps it in its quote.
+func TestARolesFirstWholeLineAfterTheByteCutIsQuoted(t *testing.T) {
+	labels := claimLabels(claim.RoleTester)
+	name := SandboxName(workerToken)
+	status := corev1.PodStatus{Phase: corev1.PodRunning, ContainerStatuses: []corev1.ContainerStatus{{
+		Name: "roles", State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}},
+	}}}
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels), podObject(name, recorded, sandboxUID, labels, status)}, withoutController())
+	reviewer := "reviewer: " + strings.Repeat("r", 33000) + "\n"
+	first := len(reviewer)
+	log := reviewer + "tester: fatal setup error\n" + strings.Repeat(reviewer, 31)
+	if over := len(log) - sharedLogBytes; over <= 0 || over >= first {
+		t.Fatalf("the log is %d bytes, %d past the bound; want the byte cut inside its first, %d-byte line", len(log), over, first)
+	}
+	g.kube.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		return true, &k8sruntime.Unknown{Raw: []byte(log)}, nil
+	})
+	obs, err := g.r.Probe(g.ctx, rolesLocator(workerToken, recorded))
+	if err != nil {
+		t.Fatalf("Probe: %v", err)
+	}
+	if obs.Kind != runtime.Gone || !strings.HasSuffix(obs.Detail, "last lines of tester:\nfatal setup error") {
+		t.Fatalf("%s %.300q, want Gone quoting the tester's only line", obs.Kind, obs.Detail)
+	}
+}
+
 // The stream an issue pod's launcher dials is read from its one container: a pod whose roles
 // container dials a stream the daemon moved from is StaleAddress for its role.
 func TestTheStreamIsReadFromTheRolesContainer(t *testing.T) {
