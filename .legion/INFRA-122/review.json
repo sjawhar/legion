@@ -1,0 +1,32 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-122",
+  "completed": "2026-10-25T18:06:30Z",
+  "reviewedHead": "aa58857897400c3bf95688c1834a87152722d9ba",
+  "codeHead": "5bdf16079401da78cf036f243905bad95b356356",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 1,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/bus/nats.go:432",
+      "description": "CoreSubOK reads only Subscription.IsValid, which nats.go v1.50.0 never clears on a server's permission refusal (processTransientError sets the unexported permissionsErr, nats.go:3806-3833; IsValid checks only conn and closed, :4928-4934). After a reconnect onto a server that refuses notifications.>, the live lane delivers nothing while /healthz answers 200 healthy, live_topics: subscribed (cmd/listener/main.go:371). Reproduced by the deep review on the built listener at 5bdf1607 ($TMPDIR/deep-review-live-*/listener.log: 'envoy nats async error name=envoy-live-topics ... Permissions Violation for Subscription to notifications.>' after reconnect, then a publish returned 200 and no prompt). The startup Flush+LastError check (main.go:551-558) runs only at start. Fix: the refusal of the current core subscription makes CoreSubOK false (or ends the listener) until a subscription the server accepts; a regression test restarts the server without the grant."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/cmd/listener/api.go:1075",
+      "description": "The PR adds a refusal at a process boundary (POST /v1/interests/subscribe answers 400 for a serving-port registration whose host is not an IP literal or plain host name; config.Load refuses any ENVOY_SUBSCRIBE_ALL_TOPICS other than unset/''/0/1) and its body carries no ## Contract change census. The census must list the search commands and every sender with a disposition, notably packages/envoy-client/src/transport.ts:320 (host: machineID() = ENVOY_MACHINE_ID || os.hostname()), which the OpenCode plugin sends with a port: an ENVOY_MACHINE_ID holding a space now gets every registration refused, including on a compose host whose ENVOY_HOST_BRIDGE would win over the host anyway; and a rollout line (warn-first, or an immediate refusal naming the vulnerability it closes)."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/site/src/content/docs/dispatch/envoy.md:123",
+      "description": "'it reaches every session subscribed to it when it is published, the publisher included' is false for a serve-port publisher: fanoutDelivery skips the source session (cmd/listener/delivery.go:670-679 'listener skip echo', which the tester also observed). The tool description and skills/envoy/SKILL.md attach 'yours included' to own-NATS sessions only; this row should say the same."
+    }
+  ],
+  "fastFollow": "Move openLiveTopics and liveDeliveryHandler out of cmd/listener/main.go (now 1058 lines) into a cmd/listener/live_topics.go, beside the durable.go split, in this pull request's next push.",
+  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title. CI head 5bdf1607 (newest pull_request runs): lint, typecheck, test, pr-title success; envoy-go, envoy-go-race and dispatch in progress in run 40217683605 at 18:05Z. Compare 5bdf1607...aa588578 touches only .legion/.",
+  "thermonuclear": "Both at aa588578 (code 5bdf1607): deep review CHANGES (finding 1); code quality CHANGES (main.go growth, finding 3)."
+}
