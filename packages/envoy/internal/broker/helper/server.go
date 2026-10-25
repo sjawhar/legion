@@ -21,16 +21,6 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/record"
 )
 
-// oldCLISessionKeyOps are the op names an agent-secrets CLI before legion-envoy 10 asks the
-// kind-free pair under, each answered exactly as the op it maps to. The callers are dotfiles'
-// agentbox (scripts/agentbox: `enroll --helper --kind box` and `unenroll --helper`), which runs
-// whatever agent-secrets the machine's PATH holds, so a CLI older than this helper reaches it
-// whenever the helper moves first: a pin rolled back while the helper keeps running this release,
-// or a second agent-secrets install on the machine. Each use logs "a client asked a legacy op";
-// the map goes once dotfiles' agent-secrets pin is at this release or later and no helper has
-// logged that line for 30 days.
-var oldCLISessionKeyOps = map[string]string{"enroll-box": "enroll-session-key", "unenroll-box": "unenroll-session-key"}
-
 // Server answers the helper socket. PeerOf is a field so tests can present a chosen pid.
 type Server struct {
 	Registry *Registry
@@ -84,10 +74,6 @@ func (s *Server) handle(ctx context.Context, conn *net.UnixConn) {
 		peer.Close()
 		s.reply(conn, Response{Code: CodeUnidentified, Error: "the peer exited before it was identified"})
 		return
-	}
-	if op, legacy := oldCLISessionKeyOps[req.Op]; legacy {
-		s.Log.Info("a client asked a legacy op; answered as "+op, "op", req.Op)
-		req.Op = op
 	}
 	var resp Response
 	switch req.Op {

@@ -10,20 +10,27 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/ratelimit"
 )
 
-// LauncherLimits bounds POST /v1/launcher-credentials and POST /v1/launcher-credentials/token, the
-// routes an unauthenticated caller can use to make the broker do work on their behalf. Every
-// source address has its own token bucket (PerAddress), and so does every person a machine login's
-// login_hint names and every account a verified token login proves (PerLogin). A token login
-// spends its address's bucket before its token is verified, since a refused token signature makes
-// the verifier fetch the issuer's keys again, and its account's only after; a machine login
-// verifies its request object locally first, to read the person its bucket is keyed on, then
-// spends both. So a flood from one address cannot keep the broker verifying tokens or writing
-// machine logins, a flood naming one operator cannot bury that operator's pending machine logins,
-// and one account cannot log in faster than its bucket allows. A daemon behind an address others
-// share is held to that address's bucket too: BROKER_TRUSTED_PROXY_HEADER keys the bucket on the
-// caller's own address behind a proxy, and the daemon renews its credential halfway through its
-// life, which carries it through brief contention for that bucket, not through a caller that keeps
-// it drained until the credential expires.
+// LauncherLimits bounds POST /v1/oauth/device_authorization and POST
+// /v1/launcher-credentials/token, the login routes an unauthenticated caller can use to make the
+// broker do work on their behalf. Every source address has its own token bucket (PerAddress), and
+// so does every person a machine login's login_hint names and every account a verified token login
+// proves (PerLogin). A token login spends its address's bucket before its token is verified, since
+// a refused token signature makes the verifier fetch the issuer's keys again, and its account's
+// only after; a device login spends its address's bucket before the provider does any work, then
+// verifies its request object locally to read the person its bucket is keyed on and spends that.
+// So a flood from one address cannot keep the broker verifying tokens or writing machine logins, a
+// flood naming one operator cannot bury that operator's pending machine logins, and one account
+// cannot log in faster than its bucket allows. A daemon behind an address others share is held to
+// that address's bucket too: BROKER_TRUSTED_PROXY_HEADER keys the bucket on the caller's own
+// address behind a proxy, and the daemon renews its credential halfway through its life, which
+// carries it through brief contention for that bucket, not through a caller that keeps it drained
+// until the credential expires.
+//
+// The per-login bucket, keyed on the request object's own claims rather than the caller's
+// address, is unaffected by trustedProxyHeader and remains a smaller, accepted risk. A person's
+// machine login spends its own person:<login> bucket, so an attacker naming a specific victim
+// operator repeatedly can lock out that operator's machine logins at a low rate. This is inherent
+// to a per-login limit on an unauthenticated route.
 type LauncherLimits struct {
 	PerAddress ratelimit.Limit
 	PerLogin   ratelimit.Limit
@@ -100,23 +107,6 @@ func clientAddress(r *http.Request, trustedProxyHeader string) string {
 		return r.RemoteAddr
 	}
 	return address
-}
-
-// refuse writes 429 RATE_LIMITED and reports true when r's source address, or the login key it
-// names (launcherLoginKey), has no request left in its bucket, with the Retry-After of the slower
-// of the two buckets.
-//
-// The per-login bucket, keyed on the request object's own claims rather than the caller's address,
-// is unaffected by trustedProxyHeader and remains a smaller, accepted risk. A person's machine
-// login spends its own person:<login> bucket, so an attacker naming a specific victim operator
-// repeatedly can lock out that operator's machine logins at a low rate. This is inherent to a
-// per-login limit on an unauthenticated route.
-func (l *launcherLimiter) refuse(w http.ResponseWriter, r *http.Request, login string) bool {
-	if !l.addressAllows(r) || !l.perLogin.AllowAt(login, time.Now()) {
-		refuseWithRetryAfter(w, max(l.perAddress.Every(), l.perLogin.Every()), "too many launcher credential requests; try again later")
-		return true
-	}
-	return false
 }
 
 // refuseAddress writes 429 RATE_LIMITED and reports true when r's source address has no request

@@ -464,7 +464,9 @@ ARG PI_CODEGRAPH_VERSION
 # pod's git speaks https with its role's App token through gh): what a pod may reach is Legion's
 # ruling, the capability table's withheld `network` row
 # (packages/daemon/internal/capabilities/capabilities.go, dispatch://LEGION-5: the pod is the
-# boundary), a declaration the report renders, not a network control this repository ships. The
+# boundary, except a workload a role starts where its deployment's cluster admits it and the
+# Service fronting it, docs/kubernetes.md "Running a workload in the cluster from a role"), a
+# declaration the report renders, not a network control this repository ships. The
 # package's two set-id files lose their bits in the RUN below: /usr/lib/openssh/ssh-keysign, setuid
 # root for host-based authentication, which nothing here uses, and /usr/bin/ssh-agent, setgid _ssh by
 # its postinst. A pod would ignore both anyway (allowPrivilegeEscalation false and every capability
