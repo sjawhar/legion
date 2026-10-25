@@ -245,6 +245,123 @@ describe("Dispatch pictures", () => {
       view.unmount();
     }
   });
+
+  test("a linked picture from elsewhere sits in its link's anchor", async () => {
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={'[![build](https://example.com/badge.svg)](https://ci.example/build "Build")'}
+        />
+      )
+    );
+
+    try {
+      const image = await within(view.container).findByRole("img", { name: "build" });
+      expect(image.getAttribute("src")).toBe("https://example.com/badge.svg");
+      const link = image.closest("a");
+      expect(link?.getAttribute("href")).toBe("https://ci.example/build");
+      expect(link?.getAttribute("title")).toBe("Build");
+      expect(link?.hasAttribute("data-dispatch-ref")).toBe(false);
+      expect(view.container.querySelectorAll("a")).toHaveLength(1);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("a linked Dispatch picture is drawn in its link's anchor, the one anchor there", async () => {
+    const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+      artifacts: [picture],
+      key: "CORE-1",
+      title: "Core one",
+    } as never);
+    const view = render(
+      withQueries(
+        <MarkdownBody markdown="[![shot.png](dispatch://CORE-1/artifact/shot-png@v1)](https://ci.example/build)" />
+      )
+    );
+
+    try {
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(shot.getAttribute("src")).toBe("/api/v1/issues/CORE-1/artifacts/shot-png/versions/1");
+      expect(shot.closest("[data-dispatch-picture]")?.tagName).toBe("SPAN");
+      expect(shot.closest("a")?.getAttribute("href")).toBe("https://ci.example/build");
+      expect(view.container.querySelectorAll("a")).toHaveLength(1);
+
+      // A version it cannot draw falls back to the reference's short form, in the same link:
+      // never a second link, nor the reference's title.
+      fireEvent.error(shot);
+      await waitFor(() => expect(within(view.container).queryByRole("img")).toBeNull());
+      const link = within(view.container).getByRole("link", { name: "CORE-1 shot-png" });
+      expect(link.getAttribute("href")).toBe("https://ci.example/build");
+      expect(view.container.querySelectorAll("a")).toHaveLength(1);
+      expect(getIssue).not.toHaveBeenCalled();
+    } finally {
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a linked Dispatch picture that pins no version reads as its short form in the link", async () => {
+    const view = render(
+      withQueries(
+        <MarkdownBody markdown="[![shot.png](dispatch://CORE-1/artifact/shot-png)](https://ci.example/build)" />
+      )
+    );
+
+    try {
+      const link = await within(view.container).findByRole("link", { name: "CORE-1 shot-png" });
+      expect(link.getAttribute("href")).toBe("https://ci.example/build");
+      expect(link.querySelector("[data-dispatch-picture]")?.tagName).toBe("SPAN");
+      expect(view.container.querySelectorAll("a")).toHaveLength(1);
+    } finally {
+      view.unmount();
+    }
+  });
+
+  test("a picture linked to a Dispatch reference keeps the picture in a link to the reference's page", async () => {
+    const getIssue = spyOn(api, "getIssue");
+    const view = render(
+      withQueries(<MarkdownBody markdown="[![x](https://example.com/a.png)](dispatch://OTHER-1)" />)
+    );
+
+    try {
+      const image = await within(view.container).findByRole("img", { name: "x" });
+      expect(image.getAttribute("src")).toBe("https://example.com/a.png");
+      const link = image.closest("a");
+      expect(link?.getAttribute("href")).toBe("/issues/OTHER-1");
+      expect(link?.getAttribute("data-dispatch-ref")).toBe("dispatch://OTHER-1");
+      expect(link?.childNodes).toHaveLength(1);
+      // No title is portalled into it, so nothing fetches one.
+      expect(getIssue).not.toHaveBeenCalled();
+    } finally {
+      getIssue.mockRestore();
+      view.unmount();
+    }
+  });
+
+  test("a picture with an unsafe link is drawn with no link", async () => {
+    const view = render(
+      withQueries(
+        <MarkdownBody
+          markdown={
+            "[![x](https://example.com/a.png)](javascript:window.__pwned=1)\n\n[![shot.png](dispatch://CORE-1/artifact/shot-png@v1)](javascript:window.__pwned=1)"
+          }
+        />
+      )
+    );
+
+    try {
+      const image = await within(view.container).findByRole("img", { name: "x" });
+      expect(image.closest("a")).toBeNull();
+      // The Dispatch picture is drawn as one with no link: in the link to its own page.
+      const shot = await within(view.container).findByRole("img", { name: "shot.png" });
+      expect(shot.closest("a")?.getAttribute("href")).toBe("/issues/CORE-1/artifacts/shot-png?v=1");
+      expect(view.container.querySelector("a[href^='javascript']")).toBeNull();
+      expect(view.container.innerHTML).not.toContain('href="javascript');
+    } finally {
+      view.unmount();
+    }
+  });
 });
 
 test("renders a typed callout body through the server schema", async () => {

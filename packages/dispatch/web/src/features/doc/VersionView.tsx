@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
@@ -9,6 +10,7 @@ import { Timestamp } from "../refs/Timestamp";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import { colorForLogin } from "./connection";
+import { followDispatchLink } from "./dispatch-link-click";
 import { createDoc, type EditorHandle } from "./editor";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
@@ -40,6 +42,7 @@ export function VersionView({
   const [highlightMissing, setHighlightMissing] = useState(false);
   const [renderError, setRenderError] = useState<string | undefined>(undefined);
   const { createEditor } = useContext(DocumentRuntime);
+  const navigate = useNavigate();
   const versionQuery = useQuery({
     queryKey: ["artifact", artifactId, "version", version],
     queryFn: () => api.getArtifactVersion(artifactId, version),
@@ -135,7 +138,12 @@ export function VersionView({
       {renderError === undefined ? null : (
         <p role="alert">This version could not be rendered: {renderError}</p>
       )}
-      <article aria-label="Document" className="dispatch-doc" data-read-only="true">
+      <article
+        aria-label="Document"
+        className="dispatch-doc"
+        data-read-only="true"
+        onClickCapture={(event) => followDispatchLink(event, navigate)}
+      >
         <div ref={root} />
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);

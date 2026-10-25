@@ -3,14 +3,23 @@ import { type ReactNode, useState } from "react";
 import { artifactVersionPath } from "../../api/client";
 import { borderDefault } from "../../theme/classes";
 import { pictureThumbnailClassName, RefLink } from "./RefLink";
-import { type DispatchReferenceRoute, parseDispatchReference, referencedArtifact } from "./routes";
+import {
+  type DispatchReferenceRoute,
+  parseDispatchReference,
+  referencedArtifact,
+  shortForm,
+} from "./routes";
 
 /** A picture's placeholder in a rendered body, holding the `DispatchPicture` a portal renders
- *  into it: the link the engine's serializer wrote, or the element a surface put in its place
- *  (`MarkdownPreview` keeps no link inside the link it sits in). */
+ *  into it: the link the engine's serializer wrote, the `<span>` it wrote inside a picture's own
+ *  link, or the element a surface put in its place (`MarkdownPreview` keeps no link inside the
+ *  link it sits in). */
 export interface PictureAnchor {
   readonly anchor: HTMLElement;
   readonly caption: string;
+  /** Whether the picture sits in its own link (`data-picture-in-link`), whose anchor is the one
+   *  link there: its fallback is then words, never a reference's title. */
+  readonly inLink: boolean;
   readonly key: string;
   readonly route: DispatchReferenceRoute;
 }
@@ -35,6 +44,7 @@ export function collectPictureAnchors(root: HTMLElement): PictureAnchor[] {
     pictures.push({
       anchor,
       caption: anchor.getAttribute("data-picture-caption") ?? "",
+      inLink: anchor.hasAttribute("data-picture-in-link"),
       key: `picture:${reference}:${index}`,
       route,
     });
@@ -49,21 +59,25 @@ export function collectPictureAnchors(root: HTMLElement): PictureAnchor[] {
  * `inline` (a one-line place: an option label, a clamped preview) shows the 40 px thumbnail beside
  * its caption. A version whose bytes are no picture the browser can draw - a document or another
  * file referenced with the picture syntax - falls back to the reference's title, as a plain
- * reference to it reads.
+ * reference to it reads; in a picture's own link (`inLink`), where the link is the image's and
+ * not the reference's, it falls back to the reference's short form, as the document editor's
+ * picture view does.
  */
 export function DispatchPicture({
   caption,
+  inLink,
   route,
   variant,
 }: {
   caption: string;
+  inLink: boolean;
   route: DispatchReferenceRoute;
   variant: "block" | "inline";
 }): ReactNode {
   const [failed, setFailed] = useState(false);
   const named = referencedArtifact(route);
   if (failed || named?.version === undefined) {
-    return <RefLink route={route} />;
+    return inLink ? shortForm(route) : <RefLink route={route} />;
   }
   const src = artifactVersionPath(named.owner, named.slug, named.version);
   return variant === "inline" ? (

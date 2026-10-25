@@ -36,18 +36,14 @@ import {
 } from "../artifacts/ArtifactUpload";
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
-import {
-  buildIssuePath,
-  buildProjectPath,
-  buildReferencePath,
-  parseDispatchReference,
-} from "../refs/routes";
+import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
+import { followDispatchLink } from "./dispatch-link-click";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
 import type { Highlight } from "./highlight";
@@ -155,16 +151,6 @@ function setSearchHighlights(root: HTMLElement, query: string): void {
     }
   }
   CSS.highlights.set("dispatch-search", new Highlight(...ranges));
-}
-
-/** A rendered link mark's `dispatch://` target, if any. `@legion/proof-editor`'s Markdown
- * serializer sanitizes a `dispatch://` href to `""` (Milkdown's link sanitizer only allows
- * http/https/mailto/tel/ftp — a document strangers can edit should never render an
- * attacker-chosen non-http scheme as a clickable href) and tags the anchor with
- * `data-dispatch-href` carrying the original target instead. */
-function dispatchHrefOf(anchor: Element): string | null {
-  const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
-  return href?.startsWith("dispatch://") ? href : null;
 }
 
 export function ProofDocument({
@@ -753,33 +739,12 @@ export function ProofDocument({
           This document could not load: {shownLoadError}
         </p>
       )}
-      {/* biome-ignore lint/a11y/useKeyWithClickEvents: dispatch:// link clicks bubble here; the
-      editor already handles keyboard activation of its own links. */}
       <article
         aria-label="Document"
         className="dispatch-doc relative"
         data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined || repairError !== undefined || rebuildError !== undefined}
-        onClick={(event) => {
-          // A modifier click (open in new tab/window) or a drag-selection that happens to end
-          // on the link should reach the browser/editor's own handling, not steal the click.
-          const modified = event.ctrlKey || event.metaKey || event.shiftKey || event.altKey;
-          if (event.button !== 0 || modified) {
-            return;
-          }
-          const selection = window.getSelection();
-          if (selection !== null && !selection.isCollapsed) {
-            return;
-          }
-          const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>("a");
-          const href = anchor === null ? null : dispatchHrefOf(anchor);
-          const route = href === null ? undefined : parseDispatchReference(href);
-          if (route === undefined) {
-            return;
-          }
-          event.preventDefault();
-          navigate(buildReferencePath(route));
-        }}
+        onClickCapture={(event) => followDispatchLink(event, navigate)}
       >
         <div ref={root} />
         {askBlockHosts.map((host) => {

@@ -118,9 +118,9 @@ export function useRenderedMarkdown(
       ...referenceAnchors.map(({ anchor, key, route }) =>
         createPortal(<RefLink route={route} />, anchor, key)
       ),
-      ...pictureAnchors.map(({ anchor, caption, key, route }) =>
+      ...pictureAnchors.map(({ anchor, caption, inLink, key, route }) =>
         createPortal(
-          <DispatchPicture caption={caption} route={route} variant={pictures} />,
+          <DispatchPicture caption={caption} inLink={inLink} route={route} variant={pictures} />,
           anchor,
           key
         )
