@@ -69,6 +69,9 @@ func commitNamedVersion(t *testing.T, service *Service, artifactID string, actor
 
 // editAsConnectedPeer makes edit as actor's browser: actor is the room's one connected peer while
 // the room applies it, so the room's update observer credits actor alone (creditContentChange).
+// It is for a document one process serves, where no room stands behind the durable head. A test
+// whose document two processes serve uses editAsBrowserPeer: there the room this edit is made in
+// can itself be behind the head, which refuses the append and fails the room.
 func editAsConnectedPeer(t *testing.T, service *Service, artifactID string, connection uint64, actor model.Actor, edit func(*pmdoc.Node) *pmdoc.Node) {
 	t.Helper()
 	if err := service.warmLiveDocument(context.Background(), artifactID); err != nil {

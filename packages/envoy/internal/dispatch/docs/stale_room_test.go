@@ -59,12 +59,17 @@ func newProcessPair(t *testing.T) processPair {
 // leaveTaskABehind loads task A's room, then has a browser on task B edit the document: task A's
 // room holds every update through the head it loaded and not that one, which is the state every
 // gate here refuses to write from.
+//
+// Task B's own room can be behind the head too, and that is what editAsBrowserPeer is for: this
+// process's settlement of the seeded document can append its repair while task B's room is
+// loading, which leaves that room one version short, so the gate refuses the browser's append and
+// fails the room. A browser's provider reconnects and resends there, and so does this.
 func (pair processPair) leaveTaskABehind(t *testing.T, connection uint64, peer model.Actor, markdown string) {
 	t.Helper()
 	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
 		t.Fatalf("load task A's room: %v", err)
 	}
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, connection, peer, appendBlocks(t, markdown))
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, connection, peer, appendBlocks(t, markdown))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	if behind := roomBehind(t, pair.taskA, pair.artifactID); !behind {
 		t.Fatal("task A's room stands at the head after task B's edit, so nothing here is tested")
@@ -867,7 +872,7 @@ func TestAnOpenAskIsNotRetractedByASettlementFromARoomBehindTheHead(t *testing.T
 	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
 		t.Fatalf("load task A's room: %v", err)
 	}
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 1, bob,
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 1, bob,
 		appendBlocks(t, ":::ask{#bob-ask urgency=\"high\" multiple=\"false\"}\nWhich transport?\n:::\n"))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	settleCurrentGeneration(t, pair.taskB, pair.artifactID)
@@ -950,7 +955,7 @@ func TestARoomLoadedAfterAnotherProcessesAppendStandsAtTheHead(t *testing.T) {
 	if err := pair.taskA.Evict(context.Background(), pair.artifactID); err != nil {
 		t.Fatalf("evict the room task A seeded: %v", err)
 	}
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 1, bob, appendBlocks(t, "Bob's paragraph.\n"))
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 1, bob, appendBlocks(t, "Bob's paragraph.\n"))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
 		t.Fatalf("load task A's room after task B's append: %v", err)

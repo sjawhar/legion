@@ -141,7 +141,7 @@ func TestAWriteOnTheOtherProcessClosesThisProcessesRoomWithinTheRoundTrip(t *tes
 	waitForPeerDocument(t, browser, storedMarkdown(t, pair.database, pair.artifactID))
 
 	started := time.Now()
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 2,
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 2,
 		model.Actor{Kind: "user", ID: "bob"}, appendBlocks(t, "Bob writes on the other process.\n"))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	stored := storedMarkdown(t, pair.database, pair.artifactID)
@@ -202,7 +202,7 @@ func TestARoomIsNotEvictedByItsOwnProcessesWrites(t *testing.T) {
 
 	// The same room, left behind by the other process, is evicted: the five decisions above were
 	// made by an evictor that does evict, on a room it was right to leave alone.
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 2,
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 2,
 		model.Actor{Kind: "user", ID: "bob"}, appendBlocks(t, "Bob writes on the other process.\n"))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	if note := waitStaleRoomNote(t, notes, pair.artifactID, "the other process's write"); !note.evicted {
@@ -331,7 +331,7 @@ func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.
 	if err := pair.taskA.warmLiveDocument(context.Background(), pair.artifactID); err != nil {
 		t.Fatalf("load task A's room: %v", err)
 	}
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 2, bob, appendBlocks(t, "Bob types once.\n"))
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 2, bob, appendBlocks(t, "Bob types once.\n"))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	if note := waitStaleRoomNote(t, notes, pair.artifactID, "the burst's first write"); !note.evicted {
 		t.Fatal("the first write on the other process evicted nothing, so the interval holds no eviction to refuse the burst's last write by")
@@ -347,7 +347,7 @@ func TestTheLastWriteOfABurstEvictsTheRoomWithoutAnotherNotification(t *testing.
 
 	// The burst's last write: inside the window, so the interval refuses it, and nothing writes
 	// this document again.
-	editAsConnectedPeer(t, pair.taskB, pair.artifactID, 3, bob, appendBlocks(t, "Bob types again.\n"))
+	editAsBrowserPeer(t, pair.taskB, pair.artifactID, 3, bob, appendBlocks(t, "Bob types again.\n"))
 	waitForLandedAppends(t, pair.taskB, pair.artifactID)
 	if note := waitStaleRoomNote(t, notes, pair.artifactID, "the burst's last write"); note.evicted {
 		t.Fatalf("the write inside the %s window evicted the room again, under readers the eviction before it had not finished re-syncing", staleRoomEvictInterval)
