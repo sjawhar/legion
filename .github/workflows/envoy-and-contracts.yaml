@@ -818,8 +818,9 @@ jobs:
       - name: Check pmdoc fixtures are up to date
         run: bun run check
         working-directory: packages/envoy/internal/dispatch/pmdoc/gen
-      # Every image the tests here start: testnats.Image, testnats.HubImage (which testnats's own
-      # tests start) and tests3.Image, pulled first for the reason the action gives.
+      # Every image the tests here start: testnats.Image and testnats.HubImage, which the
+      # natslive step below runs the two-image matrix on, and tests3.Image, pulled first for the
+      # reason the action gives.
       - name: Pull test container images
         uses: ./.github/actions/pull-test-images
         with:
@@ -829,6 +830,13 @@ jobs:
             packages/envoy/internal/tests3/seaweedfs.go Image
       - name: Unit test envoy Go package
         run: go list ./... | grep -v /integration | xargs go test
+        working-directory: packages/envoy
+      # internal/testnats runs its server in the test process, so the untagged step above starts
+      # no container. The two-image matrix, which proves a rendered authorization on nats:2.10 and
+      # on the image the hub runs, is the one thing an in-process server cannot reproduce: it sits
+      # behind the natslive tag, and this step is where it runs (INFRA-250).
+      - name: Test the container-backed NATS matrix (natslive)
+        run: go test -tags natslive ./internal/testnats/
         working-directory: packages/envoy
       - name: Isolation test for dev-broker.sh (fakes docker/go/curl; no real Postgres or network)
         run: bash scripts/dev-broker.test.sh
