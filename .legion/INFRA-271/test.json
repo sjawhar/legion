@@ -2,63 +2,57 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-271",
-  "completed": "2026-10-25T07:32:38Z",
-  "headTested": "5c6e2b342e0680619e3bf48916e786dc10997d9c",
+  "completed": "2026-10-25T07:51:46Z",
+  "round": 2,
+  "headTested": "12217616312f4c129e7da298cd006d16a5a6839f",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the implementer's database-backed launcher proofs (TestAnAgentKeepsWritingPastItsCredentialsExpiry, TestAResumeUnderASessionDatabaseIsServedThroughTheProxy, TestStartUnderSQLStorageResumesOnlyASessionTheTableHolds and the five socket/refusal cases) against a PostgreSQL 16.2 started in this pod: all PASS at 5c6e2b34. Then drove the same surface further than its harness did: the real Oh My Pi v18.8.9 started by the real launcher (Run, not sessionproxy.Start alone) as a generation's child, writing and then resuming its conversation through the generation's socket — see proof[0]."
+    "how": "Reproduced the fix's live claim on my own harness: the real launcher, running as PID 1 in a PID namespace (unshare -r), gets a real SIGTERM, and its child writes a row through the generation's socket into a real PostgreSQL 16.2 during its grace. The negative control was reproduced by restoring sessionproxy.go and launcher.go from f27918df (pre-fix) in the working copy and then putting them back: 0 rows, and both the red test and the implementer's wedged-child test fail with `no such file or directory`. With the fix: 1 row, and both pass. See proof[0]."
   },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "resolvedFromRound1": [
     {
-      "criterion": "The listener holds its credential for the generation and nothing between generations (spec acceptance 3); PR body: 'the proxy stops with the child, before the generation's directory goes'.",
-      "evidence": "On the container's own SIGTERM (the launcher's context ending: pod deletion, eviction, node drain) the proxy stops BEFORE the child. sessionproxy.Start (internal/sessionproxy/sessionproxy.go, the goroutine `case <-ctx.Done(): _ = p.Close()`) is handed the launcher's Run context by startSession (internal/launcher/launcher.go:484), so the listener closes and the socket file is unlinked the moment the context ends, while Run's stopActive is still giving the child its StopGrace. Any connection the agent opens in that grace — its last session writes once Bun's pool has idled out after 5 s — is refused; the postgres store, which dials the database directly, has no such gap. Under the daemon's LauncherStop the same work is served. Observed live: a child that on SIGTERM runs psql through its generation's socket against a real PostgreSQL got `42` under the daemon's stop and `connection to server on socket \".../g1/.s.PGSQL.5432\" failed: No such file or directory` under the container's SIGTERM. Red test, its own commit af071bc5: packages/daemon/internal/launcher/session_shutdown_test.go, TestASessionDatabaseServesItsChildThroughTheChildsShutdownGrace — `cd packages/daemon && go test -count=1 -run TestASessionDatabaseServesItsChildThroughTheChildsShutdownGrace ./internal/launcher/` fails on container_shutdown (`refused: dial unix …/g1/.s.PGSQL.5432: connect: no such file or directory`) and passes on daemon_stop, deterministically (-count=3). It goes green with startSession handing Start context.WithoutCancel(ctx), so wait() alone closes the proxy after the child exits (checked locally, then reverted); the fix is the implementer's."
+      "criterion": "The listener holds its credential for the generation (the proxy outlives the child through its stop grace on a container SIGTERM).",
+      "resolution": "18b29e17: a started proxy no longer watches the start context (sessionproxy.Start serves on context.WithoutCancel(ctx), so only Close ends it); manager.wait closes it after the child and cleanExitedGeneration. The red test af071bc5 is unmodified and passes at 12217616 (5 runs)."
     }
   ],
   "proof": [
     {
-      "criterion": "Legion sends no database password to a pod and needs none; a resume works under the same scheme.",
-      "surface": "the real launcher (internal/launcher Run, driven by the test rig's stand-in daemon over shimwire) starting the worker image's real Oh My Pi v18.8.9 (/opt/omp/bin/omp) as each generation's child, its proxy dialing a real PostgreSQL 16.2 whose pg_hba trusts only the IAM-style login and requires a password of every other user",
-      "command": "throwaway TestT271RealAgentWritesAndResumes (not committed): gen 1 `omp -p 'Reply with the single word ALPHA.' --session-dir $TMPDIR/t271/sess` with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE=<gen dir>/OMP_SESSION_SQL_DSN; gen 2 a resume of an absent session; gen 3 `omp --resume <gen 1's session> -p 'What word did you reply with before?'` with ResumeFile set",
-      "observed": "gen 1's DSN file: postgres://legion-sessions%40example-project.iam@localhost/legion_sessions?path=%2F…%2Fg1%2F.s.PGSQL.5432&sslmode=disable (login, no password); the agent answered ALPHA, exit 0, and omp_session_files gained its row; gen 1's socket was dead once its child exited. Gen 2 was refused `resume session …/absent.jsonl: the session table holds no such session` with no child run. Gen 3's launcher lookup found the row through the proxy, the resumed agent answered ALPHA (it read its own conversation back), and the row's mtime_ms moved 1792913259660 → 1792913267497; 11 upstream dials across the run, one per connection.",
-      "headSha": "5c6e2b342e0680619e3bf48916e786dc10997d9c",
-      "negativeControl": "the resume of a session the table does not hold was refused and started no child"
+      "criterion": "The listener holds its credential for the generation and nothing between generations; an agent's writes during its stop grace are served however the stop arrives.",
+      "surface": "the real launcher (internal/launcher Run) as PID 1 of a PID namespace in this pod, a stand-in daemon over shimwire, the proxy's upstream a real PostgreSQL 16.2, a real SIGTERM sent to PID 1 from outside",
+      "command": "throwaway TestT2CooperativeChildWritesDuringGrace (grace 3s: on SIGTERM the child runs psql through `host=<gen dir>` inserting a tagged row, then exits) and TestT2WedgedChildAndHeldConnection (grace 1s: the child writes its row on SIGTERM but keeps running; a setsid'd psql holds a `select pg_sleep(600)` connection through the socket), run with PATH carrying a sudo shim for unshare -r",
+      "observed": "at 12217616: cooperative, the launcher exited 60 ms after SIGTERM with 1 row written during the grace; wedged with a held connection, it exited after 1.01 s (= the grace) with 1 row. In both runs, once the launcher had exited, a dial of the socket was refused and the generation's directory was gone. A further variant whose held connection ignores SIGTERM also ended at 1.01 s with 1 row, because in PID 1 the SIGKILL at the grace goes to the whole namespace (signalGeneration targets -1). So on a container stop the proxy's lifetime is the grace; the two-grace bound applies only to a child that exits on its own and leaves processes behind.",
+      "headSha": "12217616312f4c129e7da298cd006d16a5a6839f",
+      "negativeControl": "the same two runs with sessionproxy.go and launcher.go restored from f27918df (pre-fix): 0 rows each, the child's psql answered by `No such file or directory`; TestOnTheContainersShutdownASessionDatabaseEndsOnceItsWedgedChildIsKilled and my red test TestASessionDatabaseServesItsChildThroughTheChildsShutdownGrace/container_shutdown both FAIL there (`connect: no such file or directory`); files restored afterwards"
     },
     {
-      "criterion": "The listener fails the generation loudly rather than starting an agent that would connect to something else — in a live pod with no grant.",
-      "surface": "the real `legion launcher` binary built at this head, in this live INFRA pod, with the real Cloud SQL connector and the pod's own metadata-server identity, against a stand-in daemon",
-      "command": "legion launcher --connect tcp://127.0.0.1:<port> --token-file … --sandbox … --role tester --private-dir … --session-instance example-project:us-central1:example-instance --session-database legion_sessions --session-user legion-sessions@example-project.iam, then a LauncherStart whose child would touch a marker",
-      "observed": "start answered after 1.46 s OK=false: `the session database proxy for generation 1: sessionproxy: dial example-project:us-central1:example-instance: failed to get instance: refresh error: … googleapi: Error 403: … Possibly missing permission cloudsql.instances.get …`; the child's marker never appeared; the private directory held 0 entries afterwards.",
-      "headSha": "5c6e2b342e0680619e3bf48916e786dc10997d9c",
-      "negativeControl": "this run is itself the refusal; the positive side is proof[0]"
+      "criterion": "Legion sends no database password to a pod and needs none; a resume works under the same scheme (re-run at this head).",
+      "surface": "the real launcher starting the worker image's Oh My Pi v18.8.9 as each generation's child, its proxy dialing a real PostgreSQL 16.2 that trusts only the IAM-style login",
+      "command": "throwaway TestT271RealAgentWritesAndResumes (round 1's harness, not committed)",
+      "observed": "gen 1's agent answered ALPHA with exit 0 and wrote its session row through the socket (DSN file: login, no password). A resume of an absent session was refused with `the session table holds no such session` and no child. Gen 3 resumed gen 1's session and answered ALPHA from it, and the row's mtime_ms moved 1792914653686 → 1792914660647. The round-1 container-SIGTERM probe now gets `42`, where round 1 got `No such file or directory`.",
+      "headSha": "12217616312f4c129e7da298cd006d16a5a6839f",
+      "negativeControl": "the absent-session resume was refused and started no child"
     },
     {
-      "criterion": "The configuration cannot express a password under the new store.",
-      "surface": "`legion start --check-config` of the binary built at this head, on deploy/kubernetes/daemon/legion.yaml.example with the store keys added",
-      "command": "legion start --check-config --config legion-<case>.yaml for 17 files (the example as shipped, a full cloudsql-iam mapping, 15 variants)",
-      "observed": "a full cloudsql-iam mapping: Config OK. Refused, each naming the key: session_dsn_secret under cloudsql-iam; no session_database; missing user; empty name; instance with two segments, an empty segment, four segments; an unknown member `password` (`unknown key runtime.kubernetes.session_database.password`); session_database not a mapping; session_database under postgres and under pvc; a misspelled kind.",
-      "headSha": "5c6e2b342e0680619e3bf48916e786dc10997d9c",
-      "negativeControl": "`session_database.password: hunter2` refused as an unknown key, so no password can be written into this store's configuration"
+      "criterion": "The listener fails the generation loudly in a live pod with no grant (re-run with the binary built at this head).",
+      "surface": "the real `legion launcher` binary built at 12217616, in this INFRA pod, with the real Cloud SQL connector and the pod's metadata-server identity",
+      "command": "legion launcher … --session-instance example-project:us-central1:example-instance --session-database legion_sessions --session-user legion-sessions@example-project.iam, then a LauncherStart from the stand-in daemon",
+      "observed": "OK=false after 0.66 s: `the session database proxy for generation 1: sessionproxy: dial example-project:us-central1:example-instance: failed to get instance: refresh error: … Error 403 …`; no child ran; the private directory held 0 entries afterwards",
+      "headSha": "12217616312f4c129e7da298cd006d16a5a6839f",
+      "negativeControl": "the run is the refusal itself; the positive side is proof[1]"
     },
     {
-      "criterion": "Many connections at once (the agent's pool plus the launcher's own client) are each served by the real database.",
-      "surface": "one generation's proxy under the real launcher, a real PostgreSQL 16.2",
-      "command": "throwaway TestT271ConcurrentClients: 40 pgx clients at once on the generation's socket, each `select $1::int from pg_sleep(0.2)`",
-      "observed": "40 of 40 answered their own value; 41 upstream dials (40 plus the start's proof dial)",
-      "headSha": "5c6e2b342e0680619e3bf48916e786dc10997d9c",
-      "negativeControl": "the per-dial count matching the client count shows no connection reused another's upstream"
-    },
-    {
-      "criterion": "The repaired marker helper makes the PID-namespace launcher tests assert what their names claim.",
-      "surface": "the real launcher as PID 1 in a PID namespace (unshare -r in this pod, through a sudo shim that drops the --setuid/--setgid the rig passes)",
-      "command": "PATH=$TMPDIR/t271/bin:$PATH go test -count=1 -v -run TestPIDOneLauncher ./internal/launcher/ (from packages/daemon)",
-      "observed": "all three PASS at this head; with the PID-1 cleanup and orphan reaping disabled in process.go (temporary, reverted) they FAIL with `detached process 9 survived into the next generation after stop` / `after natural exit` and `resident role left an adopted orphan: zombie`. Before the repair they failed on an empty result, which is CI run 40168372424's red; they never passed on nothing.",
-      "headSha": "5c6e2b342e0680619e3bf48916e786dc10997d9c",
-      "negativeControl": "the mutation run above"
+      "criterion": "The replaced sessionproxy test lost no coverage.",
+      "surface": "internal/sessionproxy tests, read against the change and run",
+      "command": "go test -count=3 -run 'TestCancellingTheContextLeavesAStartedProxyServingUntilClose|TestStartRefusesWhenItsContextHasEnded' -v ./internal/sessionproxy/ (from packages/daemon)",
+      "observed": "PASS ×3. The pair holds both directions. Once started, a proxy whose context is cancelled still carries bytes both ways and its dialer stays open; Close then refuses new dials and closes the dialer exactly once. A start whose context has already ended is refused naming the instance, closes the dialer and leaves the socket path free. The removed TestCancellingTheContextStopsTheProxy pinned exactly the behaviour round 1 found defective.",
+      "headSha": "12217616312f4c129e7da298cd006d16a5a6839f",
+      "negativeControl": "run, then reverted: the first test against sessionproxy.go restored from f27918df FAILS (`dial the proxy after its start context ended: … no such file or directory`); the second with the proof dial moved onto the serving context FAILS (`Start served although its context had ended`)"
     }
   ],
-  "ci": "At 5c6e2b34 when this round ended: Tests run 40172562272 (lint, typecheck, test) queued; PR Title run 40172676698 queued; Docs 40172562271, Worker Image 40172562275, Legion Envoy and Contracts 40172562273 queued. Not waited on.",
+  "ci": "At 12217616 when this round ended: Tests run 40174053921 (lint, typecheck, test) queued; PR Title run 40174076573 queued; Docs 40174053908, Legion Envoy and Contracts 40174053915 queued; Worker Image 40174053926 pending. The superseded run at 5c6e2b34, 40172562272, ended cancelled. Not waited on: a required red still sends the issue back, and the reviewer reads the head's checks before approving.",
   "notes": [
-    "A quoted session_database.instance with leading whitespace (\" example-project:us-central1:example-instance\") passes --check-config and would be refused loudly at every generation start by the connector; not recorded as a failure (it fails loud, never silent)."
+    "A quoted session_database.instance with leading whitespace passes --check-config and would be refused loudly at every generation start (round 1 note; unchanged)."
   ]
 }
