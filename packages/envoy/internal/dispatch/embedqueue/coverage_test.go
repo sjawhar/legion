@@ -2,7 +2,11 @@ package embedqueue
 
 import (
 	"context"
+	"encoding/binary"
 	"fmt"
+	"io"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +14,7 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/retry"
@@ -656,5 +661,183 @@ func TestCoverageOfAnEmptyBacklogHasNoOldestAge(t *testing.T) {
 		if counts != want {
 			t.Errorf("%s items = %d, want %d", kind, counts, want)
 		}
+	}
+}
+
+// pausingProxy forwards one Postgres connection's bytes between the client and the server, and
+// the first time the server sends a DataRow message longer than pauseOver bytes, forwards that
+// message and stops forwarding the server's messages on that connection until release is closed.
+// The client then holds an open cursor (it has its first row and waits for the rest) for as long
+// as the test wants: Postgres computes an UPDATE ... RETURNING whole before it sends any row, so
+// only the client's side of a transfer can be held open.
+type pausingProxy struct {
+	listener  net.Listener
+	server    string
+	pauseOver int
+	paused    chan struct{}
+	release   chan struct{}
+	once      sync.Once
+}
+
+func startPausingProxy(t *testing.T, server string, pauseOver int) *pausingProxy {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen for the proxy: %v", err)
+	}
+	p := &pausingProxy{listener: listener, server: server, pauseOver: pauseOver, paused: make(chan struct{}), release: make(chan struct{})}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			client, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			go p.serve(client)
+		}
+	}()
+	return p
+}
+
+func (p *pausingProxy) serve(client net.Conn) {
+	defer client.Close()
+	server, err := net.Dial("tcp", p.server)
+	if err != nil {
+		return
+	}
+	defer server.Close()
+	go func() { _, _ = io.Copy(server, client) }()
+	// Every message the server sends is a type byte and a length that counts itself.
+	header := make([]byte, 5)
+	for {
+		if _, err := io.ReadFull(server, header); err != nil {
+			return
+		}
+		length := int(binary.BigEndian.Uint32(header[1:]))
+		body := make([]byte, length-4)
+		if _, err := io.ReadFull(server, body); err != nil {
+			return
+		}
+		if _, err := client.Write(append(header, body...)); err != nil {
+			return
+		}
+		if header[0] == 'D' && length > p.pauseOver {
+			first := false
+			p.once.Do(func() { first = true })
+			if first {
+				close(p.paused)
+				<-p.release
+			}
+		}
+	}
+}
+
+// Run's coverage pass and its scan loop run side by side, so each must hold a connection of its
+// own: the pass is never refused as a second connection of one caller (store.ErrNestedAcquire)
+// because the scan loop has a cursor open at that moment, which ends the pass until the next tick,
+// 10 minutes later, and leaves content no trigger saw without a row. Here the scan loop's claim
+// has received its first row (a long title) and waits for the rest, cursor open, while the pass's
+// first statement waits on an uncommitted insert of the row it would add. The insert commits, the
+// pass's next statement starts while the claim's cursor is still open, and the pass must still
+// reach the comment no trigger saw, which the scan then embeds.
+func TestRunsCoveragePassIsNotRefusedWhileTheScanLoopHoldsACursor(t *testing.T) {
+	database := storetest.Open(t)
+	ctx := context.Background()
+	const blockedTitle = "Issue whose row an open transaction is inserting"
+	longTitle := strings.Repeat("long pending title ", 1600)
+	withTriggersOff(t, database, func(q querier) {
+		mustExec(t, q, `insert into projects (key, name) values ('SIDE', 'Test')`)
+		mustExec(t, q, `
+			insert into issues (key, project_key, number, title, created_by, rank)
+			values ('SIDE-1', 'SIDE', 1, $1, '{"kind":"user","id":"alice"}', 'A')`, blockedTitle)
+		mustExec(t, q, `insert into comments (issue_key, author, body) values ('SIDE-1', '{"kind":"user","id":"alice"}', 'Written before the triggers')`)
+	})
+	seedIssue(t, database, "SIDE", "SIDE-2", longTitle)
+
+	// Run reaches the database through the proxy, which holds the scan loop's claim open once
+	// the claim's row, the only message longer than the long title, reaches the client.
+	config := database.Pool.Config().Copy()
+	proxy := startPausingProxy(t, net.JoinHostPort(config.ConnConfig.Host, strconv.Itoa(int(config.ConnConfig.Port))), len(longTitle))
+	released := false
+	releaseProxy := func() {
+		if !released {
+			released = true
+			close(proxy.release)
+		}
+	}
+	defer releaseProxy()
+	proxyHost, proxyPort, _ := net.SplitHostPort(proxy.listener.Addr().String())
+	port, _ := strconv.Atoi(proxyPort)
+	config.ConnConfig.Host, config.ConnConfig.Port = proxyHost, uint16(port)
+	config.ConnConfig.TLSConfig, config.ConnConfig.Fallbacks = nil, nil
+	opened, err := pgxpool.NewWithConfig(ctx, config)
+	if err != nil {
+		t.Fatalf("open a pool through the proxy: %v", err)
+	}
+	proxied := &store.Store{Pool: store.NewPool(opened)}
+	defer proxied.Pool.Close()
+
+	// The pass's first statement, the issue kind's insert of missing rows, waits on this one.
+	insert, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the inserting transaction: %v", err)
+	}
+	defer func() { _ = insert.Rollback(ctx) }()
+	if _, err := insert.Exec(ctx, `
+		insert into embeddings (kind, id, text_snapshot, content_hash)
+		values ('issue', 'SIDE-1', $1::text, encode(sha256(convert_to($1::text, 'UTF8')), 'hex'))`, blockedTitle); err != nil {
+		t.Fatalf("insert SIDE-1's row uncommitted: %v", err)
+	}
+
+	runCtx, cancel := context.WithCancel(ctx)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		Run(runCtx, Deps{Store: proxied, Embedder: newPlaceEmbedder(configuredIdentity)})
+	}()
+	defer func() {
+		cancel()
+		releaseProxy()
+		<-done
+	}()
+
+	select {
+	case <-proxy.paused:
+	case <-time.After(15 * time.Second):
+		t.Fatal("the scan loop's claim of SIDE-2 never reached the client")
+	}
+	deadline := time.Now().Add(15 * time.Second)
+	for {
+		var waiting int
+		if err := database.Pool.QueryRow(ctx, `
+			select count(*) from pg_stat_activity
+			where datname = current_database() and wait_event_type = 'Lock' and wait_event = 'transactionid'`).Scan(&waiting); err != nil {
+			t.Fatalf("count lock waiters: %v", err)
+		}
+		if waiting == 1 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("%d statements wait on a transaction, want the pass's insert", waiting)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	if err := insert.Commit(ctx); err != nil {
+		t.Fatalf("commit SIDE-1's row: %v", err)
+	}
+	// The pass's next statement starts while the claim's cursor is still open.
+	time.Sleep(500 * time.Millisecond)
+	releaseProxy()
+
+	deadline = time.Now().Add(20 * time.Second)
+	for {
+		items, current, lacking, failed, _ := coverage(t, database, configuredIdentity)
+		if items == 3 && current == 3 {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("after Run: items %d current %d lacking %d failed %d, want all 3 current: the coverage pass stopped before the comment no trigger saw", items, current, lacking, failed)
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
