@@ -54,13 +54,13 @@ func setApp(a *gcp.DispatchArgs) {
 }
 
 // dispatchBrokerAndAppArgs is dispatchArgs with both optional groups set: the secrets-broker relay
-// (agentSecretsUrl with agentSecretsTokenSecret) and the GitHub App (appClientId, appId and the
+// (agentSecretsUrl with agentSecretsAudience) and the GitHub App (appClientId, appId and the
 // existing Kubernetes Secret and key that hold the private key).
 func dispatchBrokerAndAppArgs(t *testing.T) *gcp.DispatchArgs {
 	t.Helper()
 	args := dispatchArgs()
 	args.AgentSecretsUrl = "https://example-broker.internal.example"
-	args.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+	args.AgentSecretsAudience = "example-broker-audience"
 	setApp(args)
 	return args
 }
@@ -144,39 +144,42 @@ func TestDispatchResolverRefusesInvalidInputs(t *testing.T) {
 		{name: "no sign-in client secret", edit: func(a *gcp.DispatchArgs) { a.SignInClientSecret = nil }, err: []string{"signInClientSecret", "required"}},
 		{name: "an agent secrets URL with a path", edit: func(a *gcp.DispatchArgs) {
 			a.AgentSecretsUrl = "https://example-broker.internal.example/v1"
-			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+			a.AgentSecretsAudience = "example-broker-audience"
 		}, err: []string{"agentSecretsUrl", "no path"}},
 		{name: "an agent secrets URL without a scheme", edit: func(a *gcp.DispatchArgs) {
 			a.AgentSecretsUrl = "example-broker.internal.example"
-			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+			a.AgentSecretsAudience = "example-broker-audience"
 		}, err: []string{"agentSecretsUrl", "absolute http(s) URL"}},
 		{name: "an agent secrets URL with a user and password", edit: func(a *gcp.DispatchArgs) {
 			a.AgentSecretsUrl = "https://user:example-pass@example-broker.internal.example"
-			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+			a.AgentSecretsAudience = "example-broker-audience"
 		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
 		{name: "an agent secrets URL with a user alone", edit: func(a *gcp.DispatchArgs) {
 			a.AgentSecretsUrl = "https://user@example-broker.internal.example"
-			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+			a.AgentSecretsAudience = "example-broker-audience"
 		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
 		{name: "an agent secrets URL with a query", edit: func(a *gcp.DispatchArgs) {
 			a.AgentSecretsUrl = "https://example-broker.internal.example?token=example-pass"
-			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+			a.AgentSecretsAudience = "example-broker-audience"
 		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
 		{name: "an agent secrets URL with an empty query", edit: func(a *gcp.DispatchArgs) {
 			a.AgentSecretsUrl = "https://example-broker.internal.example?"
-			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+			a.AgentSecretsAudience = "example-broker-audience"
 		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
 		{name: "an agent secrets URL with a fragment", edit: func(a *gcp.DispatchArgs) {
 			a.AgentSecretsUrl = "https://example-broker.internal.example#example-pass"
-			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+			a.AgentSecretsAudience = "example-broker-audience"
 		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
 		{name: "an agent secrets URL with an empty fragment", edit: func(a *gcp.DispatchArgs) {
 			a.AgentSecretsUrl = "https://example-broker.internal.example#"
-			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
+			a.AgentSecretsAudience = "example-broker-audience"
 		}, err: []string{"agentSecretsUrl", "no user, password, query or fragment", "(not echoed)"}},
-		{name: "an agent secrets token secret without its URL", edit: func(a *gcp.DispatchArgs) {
-			a.AgentSecretsTokenSecret = pulumi.String("projects/example-project/secrets/example-agent-secrets-token")
-		}, err: []string{"agentSecretsUrl", "required when agentSecretsTokenSecret is set"}},
+		{name: "an agent secrets audience without its URL", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsAudience = "example-broker-audience"
+		}, err: []string{"agentSecretsUrl", "required when agentSecretsAudience is set"}},
+		{name: "an agent secrets URL without its audience", edit: func(a *gcp.DispatchArgs) {
+			a.AgentSecretsUrl = "https://example-broker.internal.example"
+		}, err: []string{"agentSecretsAudience", "required when agentSecretsUrl is set"}},
 		{name: "an app client ID alone", edit: func(a *gcp.DispatchArgs) { a.AppClientId = "example-app-client-id" }, err: []string{"appId, appPrivateKeySecretName, appPrivateKeySecretKey", "required when appClientId is set"}},
 		{name: "an app private key secret name alone", edit: func(a *gcp.DispatchArgs) { a.AppPrivateKeySecretName = "example-app-key" }, err: []string{"appClientId, appId, appPrivateKeySecretKey", "required when appPrivateKeySecretName is set"}},
 		{name: "an app without its ID", edit: func(a *gcp.DispatchArgs) {
@@ -255,6 +258,7 @@ func TestDispatchRefusesAnNKeySeedInAPlainInput(t *testing.T) {
 		{"a seed as the namespace", "namespace", func(a *gcp.DispatchArgs) { a.Namespace = pulumi.StringRef(lower) }},
 		{"a seed in an allowed namespace", "allowedNamespaces[1]", func(a *gcp.DispatchArgs) { a.AllowedNamespaces = []string{"envoy", lower} }},
 		{"a seed inside the agent secrets URL", "agentSecretsUrl", func(a *gcp.DispatchArgs) { a.AgentSecretsUrl = "https://" + lower + ".internal.example" }},
+		{"a seed inside the agent secrets audience", "agentSecretsAudience", func(a *gcp.DispatchArgs) { a.AgentSecretsAudience = "https://" + lower + ".internal.example" }},
 		{"a seed as the app client ID", "appClientId", func(a *gcp.DispatchArgs) { a.AppClientId = seed }},
 		{"a seed as the app ID", "appId", func(a *gcp.DispatchArgs) { a.AppId = seed }},
 		{"a seed as the app private key secret name", "appPrivateKeySecretName", func(a *gcp.DispatchArgs) { a.AppPrivateKeySecretName = lower }},
@@ -1026,9 +1030,9 @@ func TestDispatchHoldsNoBrokerTokenOrAppKeyMaterial(t *testing.T) {
 	}
 }
 
-// Unset, neither pair leaves a trace: the Secret keeps exactly its four keys, no second
-// SecretProviderClass or accessor exists, and TestDispatchPodMatchesGolden pins the pod template
-// byte-identical to before the inputs existed.
+// Unset, neither pair leaves a trace: the Secret keeps exactly its four keys, the NATS seed's is
+// the one accessor, and TestDispatchPodMatchesGolden pins the pod template byte-identical to before
+// the inputs existed.
 func TestDispatchSecretCarriesNoBrokerOrAppKeyUnset(t *testing.T) {
 	m, err := runDispatch(t, dispatchArgs(), true)
 	require.NoError(t, err)
@@ -1036,37 +1040,31 @@ func TestDispatchSecretCarriesNoBrokerOrAppKeyUnset(t *testing.T) {
 		"DATABASE_URL", "DISPATCH_AGENT_TOKEN", "DISPATCH_SIGNING_KEY", "DISPATCH_SIGNIN_CLIENT_SECRET",
 	}, secretDataKeys(dispatchSecretData(t, m)))
 	require.Len(t, registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember"), 1, "only the NATS seed's accessor exists")
-	for _, r := range m.Registrations() {
-		require.NotEqual(t, "example-dispatch-agent-secrets-token", r.Name)
-	}
 }
 
-// With agentSecretsTokenSecret set, a second per-secret accessor for the pod's principal exists,
-// on that secret alone, and the Deployment waits for it.
-func TestDispatchGrantsTheBrokerTokenAccessorOnlyWhenSet(t *testing.T) {
+// The broker relay stores no secret: Dispatch's token is projected by the kubelet, so with it set
+// the pods' principal gains no Secret Manager grant and the component no SecretProviderClass beyond
+// the NATS seed's, and the Deployment waits on no grant beyond that seed's.
+func TestDispatchStoresNoBrokerTokenWhenSet(t *testing.T) {
 	m, err := runDispatch(t, dispatchBrokerAndAppArgs(t), true)
 	require.NoError(t, err)
 	members := registrationsOf(m, "gcp:secretmanager/secretIamMember:SecretIamMember")
-	require.Len(t, members, 2)
-	var token *pulumitest.Registration
-	for i := range members {
-		if members[i].Name == "example-dispatch-agent-secrets-token-accessor" {
-			token = &members[i]
+	require.Len(t, members, 1)
+	require.Equal(t, "example-dispatch-nats-seed-accessor", members[0].Name)
+	var classes []string
+	for _, r := range m.Registrations() {
+		if r.Inputs["kind"].IsString() && r.Inputs["kind"].StringValue() == "SecretProviderClass" {
+			classes = append(classes, r.Name)
 		}
 	}
-	require.NotNil(t, token)
-	inputs := token.Inputs.Mappable()
-	require.Equal(t, "projects/example-project/secrets/example-agent-secrets-token", inputs["secretId"])
-	require.Equal(t, "roles/secretmanager.secretAccessor", inputs["role"])
-	deployment := m.Named(t, "kubernetes:apps/v1:Deployment", "example-dispatch")
-	require.Contains(t, deployment.RPC.GetDependencies(),
-		"urn:pulumi:s::p::"+dispatchType+"$gcp:secretmanager/secretIamMember:SecretIamMember::example-dispatch-agent-secrets-token-accessor")
+	require.Equal(t, []string{"example-dispatch-nats-seed"}, classes)
 }
 
 // Both pairs set, the pod template gains exactly the broker env pair (DISPATCH_AGENT_SECRETS_URL
-// and DISPATCH_AGENT_SECRETS_TOKEN_FILE), the app env triple (DISPATCH_APP_CLIENT_ID and
-// DISPATCH_APP_ID plain, DISPATCH_APP_PEM_B64 from the consumer's Secret), and the token's own
-// CSI volume mounted into envoy-dispatch alone.
+// and DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE), the app env triple (DISPATCH_APP_CLIENT_ID and
+// DISPATCH_APP_ID plain, DISPATCH_APP_PEM_B64 from the consumer's Secret), and the projected
+// ServiceAccount token's own volume, for the broker's audience and an hour's lifetime, mounted
+// into envoy-dispatch alone.
 func TestDispatchPodWithBrokerAndAppMatchesGolden(t *testing.T) {
 	m, err := runDispatch(t, dispatchBrokerAndAppArgs(t), true)
 	require.NoError(t, err)
@@ -1114,25 +1112,6 @@ func TestDispatchWithABrokerPresentsItsOwnServiceAccountToken(t *testing.T) {
 		}
 	}
 	require.True(t, projected, "%s lies on volume %s, which projects no ServiceAccount token", path, volumeName)
-}
-
-// The token's SecretProviderClass is the second of the component: provider gke, the secret's
-// path with /versions/latest, written to the file agent-secrets-token.
-func TestDispatchRegistersTheBrokerTokenSecretProviderClass(t *testing.T) {
-	m, err := runDispatch(t, dispatchBrokerAndAppArgs(t), true)
-	require.NoError(t, err)
-	var found bool
-	for _, r := range m.Registrations() {
-		if r.Name != "example-dispatch-agent-secrets-token" || r.Inputs["kind"].StringValue() != "SecretProviderClass" {
-			continue
-		}
-		found = true
-		spec := r.Inputs.Mappable()["spec"].(map[string]any)
-		require.Equal(t, "gke", spec["provider"])
-		require.Equal(t, "- resourceName: projects/example-project/secrets/example-agent-secrets-token/versions/latest\n  path: agent-secrets-token\n",
-			spec["parameters"].(map[string]any)["secrets"])
-	}
-	require.True(t, found)
 }
 
 // With both groups set, the listener's and the front door's pods are exactly as without them: the
