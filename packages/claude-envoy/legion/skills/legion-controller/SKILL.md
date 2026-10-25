@@ -426,11 +426,11 @@ themselves: an issue reaches Legion only when a person hands it over or a role r
    `Filed for` line ([Findings, and the issues you file](#findings-and-the-issues-you-file)), and its
    `actor` is this session, which `dispatch whoami` names, or an earlier one of yours. An earlier
    session is yours when its reply starts `Filed dispatch://<this KEY>`: under the ask a `Filed for
-   <person>` line names, after a newest answer of `File it for Legion`, or under the evidence comment
-   a `Filed for Legion` line names. Any other filing hands over nothing: leave the issue in `triage`
-   and ask the person on your report issue whether Legion should take it, naming the issue and who
-   labelled it, with the options `Admit it` and `Leave it`. On `Admit it`, admit it below, and either
-   way reply `Admitted dispatch://<KEY>` or `Not admitted: <reason>`, as for a finding ask.
+   <person>` line names, after a newest answer of `File it for Legion`, or under the evidence (a
+   comment or an ask) a `Filed for Legion` line names. Any other filing hands over nothing: leave
+   the issue in `triage` and ask the person on your report issue whether Legion should take it,
+   naming the issue and who labelled it, with the options `Admit it` and `Leave it`. On `Admit it`,
+   admit it below, and either way reply `Admitted dispatch://<KEY>` or `Not admitted: <reason>`.
 3. If a person handed it over, or it is a clear defect you filed for Legion, and it should run now,
    admit the root issue:
 

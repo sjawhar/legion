@@ -58,8 +58,9 @@ says which), its first line exactly `Clear defect from <your role token>`. It pr
 - the evidence comment, `dispatch://<REPORT KEY>/comment/<id>`
 
 The controller files it for Legion and replies under your evidence comment with the issue it filed.
-You file nothing, and you wait for nothing. A production check's `Production:` line then names the
-defect as sent to the controller.
+You file nothing, and you wait for nothing. When the report issue is missing or closed, put the
+evidence in the message itself. A production check's `Production:` line then names the defect as
+sent to the controller.
 
 ### When no controller takes it
 
@@ -68,21 +69,26 @@ and no controller reads it later. `envoy_publish`'s own answer tells you whether
 publish to a role answers with its live `holder`. With no live controller it fails instead, with
 `no holder for role legion-<project>-controller` or a holder that lapsed, and the listener delivers
 nothing (`packages/envoy/cmd/listener`, the test "unheld role returns 404 without publishing").
+Then make the finding an ask, as [What the ask says](#what-the-ask-says) spells it, on the first
+of these that holds, so a person sees it and the controller finds it when it returns:
 
-- **Your evidence comment is on the report issue:** do nothing more. The comment is the record,
-  and the controller files each `Clear defect from` comment nobody answered at its next start
-  (`skill://legion-controller/references/finding-asks.md`, "Catch up at every start").
-- **The evidence is in your message alone** (the report issue is missing or closed) **and the
-  publish failed:** open the finding as a `dispatch ask` on your own issue, as [What the ask
-  says](#what-the-ask-says) spells it, with `File it for Legion` first and recommended. Your issue's
-  assignee sees it, and its answer comes back to your session. Send the controller that answer
-  with the defect once a publish to it names a holder.
-- **Your own issue is closed too** (Dispatch refuses the ask `409 ISSUE_CLOSED`, as on a production
-  check): post the evidence as a comment on the pull request. Name it in the `Production:` line as
-  taken by no controller, and say so in your summary. Do not create or reopen the report issue
-  yourself: that is the controller's.
+1. **The report issue is open:** ask there, the question opening `Clear defect from <your role
+   token>` and `--ref` naming your evidence comment. Then reply `Asked dispatch://<REPORT
+   KEY>/ask/<id>` under that comment, so the controller takes the ask and not the comment. The
+   report issue's assignee sees the ask, and the controller's catch-up files it.
+2. **The report issue is missing or closed:** ask on your own issue, the evidence posted there as
+   a comment first. Then publish the ask's reference to your tree's architect (`skill://legion-worker`,
+   the escalation paragraph). An architect holds its own. The architect holds your issue's
+   acceptance until a controller has taken the ask (`skill://legion-architect`, "Acceptance and the
+   merge"), so your issue cannot close and hide it, and the controller files or moves it when it
+   returns.
+3. **Your own issue is closed too** (Dispatch refuses the ask `409 ISSUE_CLOSED`, as on a
+   production check): reopen the report issue, or create it when a search finds none, as
+   `skill://legion-controller`'s "Daily report" spells it. Then post the evidence there and ask
+   there, as [What the ask says](#what-the-ask-says) spells it. No other issue can hold an
+   answerable ask, so this is the one case a role writes the report issue.
 
-Name what you did, the ask or the comment, in your summary.
+Name the ask in your summary, and in a production check's `Production:` line.
 
 ## Where it goes
 
@@ -100,37 +106,41 @@ done`, and Dispatch refuses the ask with `409 ISSUE_CLOSED`), do not create or r
 controller topic your `Legion addressing` line names (`expects_reply: none`), holding the problem,
 the issue it came from, the evidence and the decision it needs. The controller creates or reopens
 the report issue and opens the ask. When that publish fails because no controller holds the role,
-open the ask on your own issue instead, as [When no controller takes
-it](#when-no-controller-takes-it) says for a clear defect. When your issue is closed, post it on
-the pull request. A production check's `Production:` line then names the finding as sent to the
-controller, or names the ask or comment you left.
+take step 2 or 3 of [When no controller takes it](#when-no-controller-takes-it). A production
+check's `Production:` line then names the finding as sent to the controller, or names the ask.
 
 ## What the ask says
 
 The question stands alone, since the ask view shows no comment. It holds at most 800 characters,
 the `Ref: <reference>` line `--ref` appends included (about 75 characters for a comment's
-reference). It carries:
+reference). Its first line names who asks: `Clear defect from <your role token>` for a clear
+defect no controller took, else `Finding from <your role token>`. The architect's acceptance and the
+controller's catch-up find a finding ask by that line. Then it carries:
 
 - the problem, as its reader recognises it, and the issue it came from (`dispatch://<KEY>`);
 - where the fix would belong: the repository or layer, and a plain statement that it is not
   Legion's when it is not. A problem is not Legion's because you work in Legion: name the
   component that misbehaved;
-- the decision a person must make, and your recommendation and its reason.
+- the decision a person must make, and your recommendation and its reason. For a clear defect, it
+  carries the fix, with `File it for Legion` first and recommended.
 
 The evidence (the commands, their output and its time, the file and line, the pull request) does
-not fit. Post it first as a `dispatch comment` on the report issue, which prints
-`Posted comment <id>`, and cite that comment with `--ref`, the one reference an ask takes:
+not fit. Post it first as a `dispatch comment` on the issue the ask goes on, which prints `Posted
+comment <id>`, and cite that comment with `--ref`, the one reference an ask takes. That issue,
+`<ASK KEY>` below, is the report issue, except as [When no controller takes
+it](#when-no-controller-takes-it) says:
 
 ```bash
-dispatch comment --issue <REPORT KEY> --body-file - <<'EOF'
+dispatch comment --issue <ASK KEY> --body-file - <<'EOF'
 <the evidence: commands, output with its time, file:line, links>
 EOF
 # Only when your Legion addressing line lists the repository where the fix belongs, keep the
 # `File it for Legion` option; otherwise drop that line.
-dispatch ask --issue <REPORT KEY> --ref 'dispatch://<REPORT KEY>/comment/<id>' --question-file - \
+dispatch ask --issue <ASK KEY> --ref 'dispatch://<ASK KEY>/comment/<id>' --question-file - \
   --option 'File an issue: <what it would track, and who would own it>' \
   --option 'File it for Legion: Legion works it once it is filed' \
   --option 'Do not file: <what stays as it is>' <<'EOF'
+Finding from <your role token>
 <the problem and dispatch://<KEY> it came from; where the fix belongs, and that it is not Legion's when it is not; your recommendation and why>
 EOF
 ```
@@ -144,6 +154,9 @@ open, `envoy_publish` its reference, `dispatch://<REPORT KEY>/ask/<id>` (the id 
 `Asked <id> on …` line), to the controller topic your `Legion addressing` line names, with
 `expects_reply: none`. The controller follows the ask and files what the person's answer asks for;
 you file nothing, whatever the answer says. The controller itself skips this step, since it follows
-each ask it opens.
+each ask it opens. When that publish names no holder, do nothing more for an ask on the report
+issue: the controller's catch-up follows it at its next start.
 
-The ask blocks nothing of your own issue: its work goes on.
+An ask on the report issue blocks nothing of your own issue: its work goes on. One on your own
+issue holds its acceptance, as step 2 of [When no controller takes
+it](#when-no-controller-takes-it) says.

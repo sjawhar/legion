@@ -159,15 +159,24 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   later red sends the issue back are corrected for this one head. In the round after a READY
   refusal the reviewer fixes no prose itself, since that round's approval needs the tester's `E2E`
   line to name the head with only `.legion/` changed since.
-- A clear defect sent while no controller runs is no longer lost (INFRA-140). The controller topic
-  is a live wake, and a publish to it with no live holder fails (`no holder for role …`) and
-  delivers nothing, so `envoy_publish`'s own answer tells the role. When its evidence comment is
-  on the report issue, the controller files it at its next start. When the evidence was in the
-  message alone, the role opens the finding as a `dispatch ask` on its own issue, or a comment on
-  the pull request when its issue is closed. The planner's core prompt now matches the headless
-  part composed with it: a clear defect goes to whoever coordinates the project's work, and a
-  finding that needs a decision is an ask (`roles_test.go` pins both sentences and forbids the old
-  one).
+- A finding no controller takes ends where a live reader handles it (INFRA-140). The controller
+  topic is a live wake, and a publish to it with no live holder fails (`no holder for role …`) and
+  delivers nothing, so `envoy_publish`'s own answer tells the role. The role then makes the
+  finding an ask, on the first of three places that holds: the report issue when it is open, with
+  the evidence comment as the ask's `--ref` and an `Asked dispatch://…` reply under that comment;
+  the role's own issue when the report issue is missing or closed, its reference sent to the
+  tree's architect, whose acceptance (`legion-architect`, section 6) waits until the ask is
+  resolved or answered with the controller's `Filed`/`Not filed` reply under it, so the issue
+  cannot close and hide it; and, when the role's own issue is closed too (a production check),
+  the report issue, which the role reopens or creates. Every finding ask's question opens
+  `Finding from <role>`, or `Clear defect from <role>` for a clear defect, which is how the
+  acceptance and the controller find one. At every start the controller's catch-up
+  (`legion-controller/references/finding-asks.md`) files a clear-defect ask at once, moves an
+  own-issue decision ask to the report issue, and acts on an answered finding ask of an issue in
+  `needs_review`, so its reply releases the held acceptance. The planner's core prompt now matches
+  the headless part composed with it: a clear defect goes to whoever coordinates the project's
+  work, and a finding that needs a decision is an ask (`roles_test.go` pins both sentences and
+  forbids the old one).
 - `legion-worker`: a role requests a secret from the agent-secrets broker only to use it for its
   own issue's work, never to find out whether it exists or resolves, since a request for a secret
   its role does not hold reaches a person's Inbox (INFRA-140). A planner read the rule to check

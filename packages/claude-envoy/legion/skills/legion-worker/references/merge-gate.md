@@ -125,9 +125,10 @@ reviewing until you finish.
   `legion` tool's `sign_off`, which moves the issue to retro, or sends it back to `implementing`
   or `testing` with `request_backward_move` and a reason, which reaches the started worker's task
   as its `Reason:` line and counts a review round. The architect also reads the reviewer's own
-  prose commits here, with the rest of the evidence, and that read is no new round. The acceptance
-  asks no `Production:` line of
-  anyone: that line is written after the close (*The production check after the close*, below).
+  prose commits here, with the rest of the evidence, and that read is no new round. It does not
+  accept while the issue holds a finding ask no controller has taken (`findings.md`, "When no
+  controller takes it"). The acceptance asks no `Production:` line of anyone: that line is written
+  after the close (*The production check after the close*, below).
   CI red at the head in `accepting` returns the issue to `implementing` as it does in review. A
   head the review App pushed beyond `.legion/` is the exception: the daemon marks it a planned red
   and acts on it nowhere, and GitHub holds the merge under the base branch's own rules.

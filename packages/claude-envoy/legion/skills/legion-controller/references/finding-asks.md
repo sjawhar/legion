@@ -13,7 +13,10 @@ comment on the report issue. That comment's first line is `Clear defect from <ro
 can carry the evidence itself when the report issue did not exist or was closed. Then create or
 reopen the report issue as the skill's "Daily report" says, and post that evidence with
 `dispatch comment`, first line `Clear defect from <role>`. A clear defect you find yourself gets
-the same comment, with `controller` as the role.
+the same comment, with `controller` as the role. A role that found no controller sends none: it
+asks instead, the question opening `Clear defect from <role>` (`findings.md`, "When no controller
+takes it"). Such an ask needs no answer: file it as below, the ask its evidence, then reply under
+it and resolve it (`dispatch resolve-ask --kind resolved`).
 
 1. Check that it is clear: the fix needs no choice a person must make, and it belongs in a
    repository your addressing line lists. Otherwise it is a finding that needs a decision: open an
@@ -33,10 +36,11 @@ the same comment, with `controller` as the role.
    states the defect, where the fix belongs and the fix, cites the evidence by its `dispatch://`
    reference, and ends with the line `Filed for Legion from <role> on <issue>: <evidence>`.
    `<role>` is the sending role's token, or `controller` for one you found. `<issue>` is the
-   `dispatch://<KEY>` it came from. `<evidence>` is the evidence comment's reference. The issue
-   opens in `triage` with the label, so its triage wake brings it back to you (the skill's "New
-   issue triage").
-4. Reply under the evidence comment, its first line exactly `Filed dispatch://<NEW KEY>`:
+   `dispatch://<KEY>` it came from. `<evidence>` is the evidence comment's reference, or the ask's
+   for a clear defect a role asked. The issue opens in `triage` with the label, so its triage wake
+   brings it back to you (the skill's "New issue triage").
+4. Reply under the evidence comment (or the ask: `--reply-to-ask '<ask id>'` on the ask's issue),
+   its first line exactly `Filed dispatch://<NEW KEY>`:
 
    ```text
    dispatch comment --issue <REPORT KEY> --reply-to '<comment id>' --body-file -
@@ -52,6 +56,8 @@ the controller topic. Follow it, so that its answer reaches you:
 ```text
 dispatch follow --ask 'dispatch://<KEY>/ask/<id>' --action follow
 ```
+
+When `dispatch read --ref` shows it answered already, act on its answer now.
 
 ## Act on its answer
 
@@ -72,10 +78,11 @@ the selected option when the two disagree:
 An ask that re-files an escalated child also takes the steps of the skill's "Architect escalation".
 
 Then reply under the ask with what you did, its first line exactly `Filed dispatch://<NEW KEY>` or
-`Not filed: <reason>`:
+`Not filed: <reason>`. The ask's issue is the report issue, or the role's own issue for an ask no
+controller took:
 
 ```text
-dispatch comment --issue <REPORT KEY> --reply-to-ask '<ask id>' --body-file -
+dispatch comment --issue <the ask's issue> --reply-to-ask '<ask id>' --body-file -
 ```
 
 Dispatch refuses to resolve an answered ask, so that reply is its record. An open finding ask that
@@ -87,19 +94,26 @@ turns moot (an issue now tracks the problem, or the problem is gone) you close w
 An answer that arrives while no controller runs never wakes you, a reference or clear defect
 published then reaches nobody, and a new session follows none of the asks an earlier one
 followed. So at every start, catch up on the report issue (with none yet, there is nothing to
-catch up):
+catch up), and on the finding asks roles opened on their own issues while no controller ran:
 
 1. Read it with `dispatch read`. Reopen it when its `Status:` is `done`, and assign it when its
    `Assignee:` says `unassigned` and a person is known, both as the skill's "Daily report" says.
-2. Follow each of its open asks: `dispatch open-asks --project <PROJECT>` lists every unanswered
-   ask of the project, with no cap, each line naming its issue; follow those on the report issue.
+2. Take each open ask: `dispatch open-asks --project <PROJECT>` lists every unanswered ask of the
+   project, with no cap, each line naming its issue. Follow those on the report issue, and file at
+   once each whose question opens `Clear defect from `. One on another issue whose question opens
+   `Finding from ` or `Clear defect from ` is a role's own-issue ask, which its architect holds
+   acceptance on. File a clear defect. Move a finding that needs a decision: ask it again on the
+   report issue, the same question, options and `--ref`, then reply `Moved dispatch://<REPORT
+   KEY>/ask/<new id>` under the old ask. Resolve the old ask either way.
 3. List the answered asks still waiting on you, which no `dispatch` command lists:
    `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/asks?state=answered&thread=1" | jq -c '[.[] | select(any(.options[]; .label == "Do not file" or .label == "Admit it")) | .answer.at as $t | select([.thread.replies[]? | select(.author.kind == "session" and .created_at > $t and (.body | test("^(Filed dispatch://|Admitted dispatch://|Not filed:|Not admitted:)")))] | length == 0) | {id, question, answer}]'`.
-   Act on each as above, a triage ask as the skill's "New issue triage" says.
+   Run the same for each issue `dispatch issues --project <PROJECT>` shows in `needs_review`,
+   whose architect holds its acceptance on a finding ask's answer. Act on each as above, a triage
+   ask as the skill's "New issue triage" says. Your reply under it releases that acceptance.
 4. List the clear defects nobody filed yet. Each is an evidence comment whose first line starts
-   `Clear defect from `, with no session reply under it that starts `Filed dispatch://` or `Not
-   filed:`:
-   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/comments" | jq -c '. as $all | [.[] | select(.reply_to == null and (.body | startswith("Clear defect from "))) | .id as $id | select([$all[] | select(.reply_to == $id and .author.kind == "session" and (.body | test("^(Filed dispatch://|Not filed:)")))] | length == 0) | {id, body}]'`.
+   `Clear defect from `, with no session reply under it that starts `Filed dispatch://`, `Not
+   filed:` or `Asked dispatch://` (a role that asked instead, which step 2 takes):
+   `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<REPORT KEY>/comments" | jq -c '. as $all | [.[] | select(.reply_to == null and (.body | startswith("Clear defect from "))) | .id as $id | select([$all[] | select(.reply_to == $id and .author.kind == "session" and (.body | test("^(Filed dispatch://|Not filed:|Asked dispatch://)")))] | length == 0) | {id, body}]'`.
    File each as [File a clear defect](#file-a-clear-defect) says. When one is not clear, reply
    `Not filed: <reason>` under it and open an ask for it instead.
 

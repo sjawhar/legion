@@ -342,7 +342,13 @@ spec and the plan: the tester's handoff (`.legion/<issue>/test.json` at the appr
 body's `E2E (implementer)` and `E2E (tester)` lines, the reviewer's approval of that head by SHA
 (`gh api --paginate repos/<o>/<r>/pulls/<n>/reviews`). Read the reviewer's own prose commits here
 too (`gh pr view <n> --json commits`, the ones the review App authored): its text had no reader but
-itself, and this is that reader. Reading them is no new round. Accept only when scope is fully met,
+itself, and this is that reader. Reading them is no new round. A finding ask on the issue holds the
+acceptance: one a worker sent you, or one under `dispatch read`'s `Open asks:` whose question opens
+`Finding from ` or `Clear defect from ` (`skill://legion-worker/references/findings.md`, "When no
+controller takes it"). Follow each (`dispatch follow --ask <id> --action follow`). Once it is
+answered, publish its reference to the controller topic. Accept only once each is resolved, or
+answered with the controller's reply under it (`Filed dispatch://` or `Not filed:`), since a closed
+issue hides it from the controller. Accept only when scope is fully met,
 integration evidence is current, corrective work is complete, review is clean, and no necessary
 work was silently deferred. Post the acceptance as a
 `dispatch comment` explicit about that evidence, then accept with `sign_off`, which runs only in
