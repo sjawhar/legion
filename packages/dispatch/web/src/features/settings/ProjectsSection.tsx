@@ -135,8 +135,8 @@ export function ProjectsSection(): ReactNode {
           </div>
           <p className={`mt-2 text-sm ${textSecondaryOnCanvas}`}>
             An issue created from a repository with no project mapping lands in the default project,
-            so a default assignee set on that project reaches that person for every one of its
-            issues.
+            so a default assignee set on that project also receives each such issue that is created
+            with nobody named and with no person, token owner or assigned parent to take it.
           </p>
           {defaults.isError ? (
             <div className="mt-4">

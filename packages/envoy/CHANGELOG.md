@@ -6,9 +6,10 @@
 
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
-  it, goes to the person the project names, and is unassigned only where the project names none. A
-  default that no longer names a person who has signed in is ignored rather than refused, so a
-  create never fails on a stale one. A person sets it on the Settings page through
+  it, goes to the person the project names; nothing already filed, and no create that names an
+  assignee or `null`, changes. A default that no longer names a person who has signed in is
+  ignored rather than refused, so a create never fails on a stale one. A person sets it on the
+  Settings page through
   `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee`
   `{assignee}` (an email of someone who has signed in, or `null` to clear it; otherwise
   `400 ASSIGNEE_NOT_ALLOWED`, and a body without `assignee`, or whose `assignee` is neither a
