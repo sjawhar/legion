@@ -7,14 +7,14 @@ description: "Use before your first dispatch command in a session: a message, co
 
 Dispatch holds each issue's spec, asks, comments and documents. It is a record for the people who decide, never a log of your work.
 
-- Use the `dispatch` command; the HTTP API is only for what no command does. `dispatch <command> --help` gives each command's rules, limits and an example.
+- Use the `dispatch` command; the HTTP API only for what no command does. `dispatch <command> --help` gives each command's rules and an example.
 - Put long text on stdin: `--<field>-file -` with a quoted here-document (`<<'EOF'`). Give object and list fields as JSON.
-- Exit 1 means Dispatch refused, 2 a usage error. A refusal lists each problem and what to fix: fix them all, then call once.
+- Exit 1 is a refusal, 2 a usage error. A refusal lists each problem: fix them all, then call once.
 - `DOC_SERVICE_UNAVAILABLE` means the document is reloading and nothing was written. Wait a few seconds and repeat the call.
 
 ## Asks and ask blocks
 
-- A question about a design a document records is an ask block (a decision block) at the end of the section it concerns, at each phase:
+- A question about a design a document records is an ask block (a decision block) at the end of its section, at each phase:
 
 ```md
 :::ask{urgency="med"}
@@ -27,11 +27,10 @@ The problem and why it matters. Recommendation: the option and its reason.
 
 - A to-do or permission only a person can give, or a decision with no document, is a `dispatch ask`. A Legion phase worker sends its decision to its architect.
 - In a Legion session, a finding outside your own issue is an ask as `skill://legion-worker/references/findings.md` says, never an issue you file.
-- An ask stands alone: its view does not show the issue's comments.
 - An open ask is the request. Do not raise it again in each message.
 - Change an open ask's block with `dispatch edit-ask`, or `doc-edit`'s `replace` or `move`. An answered ask is fixed: ask again in a new block.
 - Answer a person's reply to an open ask with `dispatch comment --reply-to-ask`; `--turn agent` for a note that needs nothing from them.
-- When an answer's option and its typed text disagree, the text is the answer.
+- When an answer's option and text disagree, the text is the answer.
 - An ask block has a block id, for `doc-edit`, and an ask id, for the ask commands. `dispatch read --ref dispatch://KEY/ask/<id>` takes either.
 - An ask reaches the issue's assignee. On an unassigned issue, name who must answer.
 - After `doc-edit` adds a block, read it back with `dispatch doc-read`.
@@ -39,7 +38,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 ## Choosing what to work on
 
 - When you finish an issue, take the top ready issue: status `todo`, by priority and then board rank, in each project.
-- `todo` means specced and waiting on no deploy or decision. An issue that waits goes in `backlog`, saying what it waits on.
+- `todo` means specced and waiting on nothing. An issue that waits goes in `backlog`, saying on what.
 - Hold at most three issues in flight. Past three, move unfinished work to `backlog`, saying where it is.
 - Never reorder the board. When the top looks wrong, tell the project's order keeper: `notifications.role.legion-<project>-controller`.
 

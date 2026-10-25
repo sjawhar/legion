@@ -4,6 +4,9 @@
 
 ### Fixed
 
+- `dispatch-first` now says to open a `dispatch ask` the moment a person blocks your work, and to
+  record every request you accept in Dispatch and read that record back before a turn ends (INFRA-140).
+
 - The `dispatch` command waits at most 1 s for tmux to name the session's pane, then kills the tmux
   client and sends the call without the pane. A tmux client waiting to connect to a tmux server too
   busy to accept caught the SIGTERM of the lookup's 5 s timeout and kept waiting, and the command
