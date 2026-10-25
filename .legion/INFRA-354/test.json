@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-354",
-  "completed": "2026-10-25T08:29:46Z",
-  "codeHeadTested": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
+  "completed": "2026-10-25T09:25:14Z",
+  "codeHeadTested": "9cdb4130c10a4555d0a6d9bd18cda6dd45a81d6e",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2 (review fixes at 3ec1bea3): re-ran its round command against a fresh cluster Postgres Job + ClusterIP Service: `go test ./cmd/broker -run 'TestOneServicesTwoAccountsEachGetItsSecret|TestAnAccountProvesOnlyTheServiceItIsListedFor' -v -count=1` both PASS through the shared podBroker fixture (A,B granted automatic, C denied; 6 cross-service denials, own pod granted). Re-ran its negative control independently: the any-listed-account mutant in a copy outside the checkout fails TestAnAccountProvesOnlyTheServiceItIsListedFor with three 'granted' replies. Read the diff d677494f..3ec1bea3: production change is the policy.go Requester.Service doc comment only; every State/GrantID/RecordID/Approver assertion of both tests survived the refactor; the boot-log owner-tag-malformed check is kept."
+    "how": "Round 3 (forward merge 9cdb4130): reproduced the implementer's fingerprints (2f2e9983 -> b874ad58 whole; c74431614bd5 restricted, unchanged) and its removal-only docs claim line by line; re-ran its real-binary tests at the merged head against a fresh cluster Postgres, both PASS."
   },
   "failures": [],
   "failed": 0,
@@ -19,39 +19,52 @@
   ],
   "proof": [
     {
-      "criterion": "Lines 1 and 4 at the review-round head: two accounts for one service start the broker (start-up path).",
-      "surface": "Real compiled broker built at 3ec1bea3, started by hand against a fresh cluster Postgres Job + ClusterIP Service.",
-      "command": "BROKER_SERVICES=\"example-service=<A> example-service=<B>\" with productionEnv equivalents and BROKER_FAKE_SECRETS_FILE; GET /healthz; POST /v1/secrets/SERVICE_KEY/reread.",
-      "observed": "broker listening; healthz 200; reread {\"name\":\"SERVICE_KEY\",\"served\":true}.",
-      "headSha": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
-      "negativeControl": "Same binary with A written twice: exit 1 `names the service account system:serviceaccount:example:example-worker-a twice for \"example-service\"`."
+      "criterion": "Lines 1 and 4 at the merged head: two accounts for one service start the broker.",
+      "surface": "Real compiled broker built at 9cdb4130, started by hand against a fresh cluster Postgres Job + ClusterIP Service.",
+      "command": "BROKER_SERVICES=\"example-service=<A> example-service=<B>\" and today's \"example-service=<A> other-service=<D>\", productionEnv equivalents, BROKER_FAKE_SECRETS_FILE; GET /healthz; POST /v1/secrets/SERVICE_KEY/reread.",
+      "observed": "Both: listening, healthz 200, {\"name\":\"SERVICE_KEY\",\"served\":true}.",
+      "headSha": "9cdb4130c10a4555d0a6d9bd18cda6dd45a81d6e",
+      "negativeControl": "Binary built from main@origin 158654c8 (the merged base): exit 1 before listening, `BROKER_SERVICES must give each service once, got \"example-service=system:serviceaccount:example-other:example-worker-b\"`."
     },
     {
-      "criterion": "Line 2 at the review-round head: a repeated account is refused naming it.",
-      "surface": "Real compiled broker built at 3ec1bea3, started by hand.",
-      "command": "BROKER_SERVICES=\"example-service=<A> example-service=<A>\" and \"example-service=<A> other-service=<A>\".",
-      "observed": "Both exit 1 before listening: `... twice for \"example-service\"; each account proves one service, so name it once` and `... for both \"example-service\" and \"other-service\"; ...`.",
-      "headSha": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
-      "negativeControl": "A and B distinct for the one service: starts and serves SERVICE_KEY."
+      "criterion": "Line 2 at the merged head: a repeated account is refused naming it.",
+      "surface": "Real compiled broker built at 9cdb4130, started by hand.",
+      "command": "BROKER_SERVICES \"example-service=<A> example-service=<A>\"; \"example-service=<A> other-service=<A>\"; BROKER_SERVICE_LOGINS naming the service's second pod account B.",
+      "observed": "Each exit 1 before listening: `names the service account system:serviceaccount:example:example-worker-a twice for \"example-service\"; ...`; `... for both \"example-service\" and \"other-service\"; ...`; `BROKER_SERVICE_LOGINS names system:serviceaccount:example-other:example-worker-b, the account BROKER_SERVICES binds for \"example-service\"'s pods ...`.",
+      "headSha": "9cdb4130c10a4555d0a6d9bd18cda6dd45a81d6e",
+      "negativeControl": "A and B distinct for one service: starts and serves SERVICE_KEY."
     },
     {
-      "criterion": "Line 3 at the review-round head: a pod under any of a service's accounts gets its secrets; an unlisted account, or one listed for another service, gets nothing and no approver.",
-      "surface": "Real compiled broker over HTTP via the real-process harness (local OIDC issuer, real projected pod tokens, token logins, enrollments, cluster Postgres), now through the shared podBroker fixture.",
+      "criterion": "Line 3 at the merged head: a pod under any of a service's accounts gets its secrets; unlisted or other-service accounts get nothing and no approver.",
+      "surface": "Real compiled broker over HTTP via the real-process harness (local OIDC issuer, real projected pod tokens, token logins, enrollments, cluster Postgres).",
       "command": "cd packages/envoy && go test ./cmd/broker -run 'TestOneServicesTwoAccountsEachGetItsSecret|TestAnAccountProvesOnlyTheServiceItIsListedFor' -v -count=1",
-      "observed": "Both PASS (7.49s, 8.59s). Pods A,B granted decision automatic, record/approver null, values read; pod C denied. Cross-service: other-service own pod granted OTHER_KEY; pods under other-service running as A or B, and under example-service running as D, denied SERVICE_KEY and OTHER_KEY (6 replies, grant_id/record_id/approver null).",
-      "headSha": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
-      "negativeControl": "Any-listed-account mutant of requester (outside the checkout): TestAnAccountProvesOnlyTheServiceItIsListedFor FAIL, three granted replies where denied is required."
+      "observed": "Both PASS (7.12s, 6.71s): A,B granted automatic with record/approver null, C denied; other-service own pod granted OTHER_KEY; 6 cross-service replies denied with grant_id/record_id/approver null.",
+      "headSha": "9cdb4130c10a4555d0a6d9bd18cda6dd45a81d6e",
+      "negativeControl": "Any-listed-account mutant of requester in a copy of the merged packages/envoy outside the checkout: TestAnAccountProvesOnlyTheServiceItIsListedFor FAIL with three granted replies (OTHER_KEY to A and B under other-service, SERVICE_KEY to D under example-service)."
     }
   ],
-  "environment": "Round 2: fresh Postgres Job + ClusterIP Service (controller-uid selector) per docs/kubernetes.md; gates yes/yes/yes; reachability answered; Job deleted, kubectl get jobs,pods held nothing of it, svc NotFound. Round 1 environment as before.",
-  "ci": "At 3ec1bea3: Tests 40176473240, Legion Envoy and Contracts 40176473247, Docs 40176473279, PR Title 40176482718/40176483283/40176508515 queued; Worker Image 40176473285 pending. Not waited on.",
-  "round": 2,
+  "environment": "Round 3: fresh Postgres Job + ClusterIP Service (controller-uid selector) per the merged docs/kubernetes.md; gates yes/yes/yes; reachability answered; Job deleted, kubectl get jobs,pods held nothing of it, svc NotFound.",
+  "ci": "At 9cdb4130: Tests 40180063495, Legion Envoy and Contracts 40180063437, Docs 40180063418, Worker Image 40180063454 queued; PR Title 40180122744 pending. Not waited on.",
+  "round": 3,
   "priorRounds": [
     {
       "round": 1,
       "codeHeadTested": "8b53654d4545988b8880e4f627aa11c593964572",
       "verdict": "pass",
       "testCommit": "d677494f626c8824b10a1b943b6b0896254e1af3"
+    },
+    {
+      "round": 2,
+      "codeHeadTested": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
+      "verdict": "pass"
     }
-  ]
+  ],
+  "rebaseCheck": {
+    "from": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
+    "to": "9cdb4130c10a4555d0a6d9bd18cda6dd45a81d6e",
+    "fingerprint": "2f2e99836d00b05a44700695c0db16c372b65120a9b2f4a4124706392c80ec5b -> b874ad58be0de04063e1fae70f36d8f3a1102e83a243caa1c1d248f1d7b73451: changed, so a full test round was run",
+    "restrictedFingerprint": "over '~(.legion | docs/solutions | docs/kubernetes.md)': c74431614bd5ddaa8f83144f7759f359f00da393dc26353c7fbe57056caeae66 at both heads (reproduced by the tester)",
+    "docsDelta": "docs/kubernetes.md branch delta: 87 +/- lines at 3ec1bea3, 28 at 9cdb4130; 0 lines at the merged head are absent from the round-2 delta, 59 dropped (main's #2182 carries them), none of the dropped lines mention BROKER_SERVICES or legion-daemon; the deployment-block and controller BROKER_SERVICES passages are intact in the diff against main@origin. The merged cluster-workload section still documents the controller-uid selector.",
+    "brokerSource": "No file under packages/envoy differs between 3ec1bea3 and 9cdb4130, and the base delta (fork points 3ec1bea3 vs 9cdb4130) touches no packages/envoy file or go.mod/go.work."
+  }
 }
