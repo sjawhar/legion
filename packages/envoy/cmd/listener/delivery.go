@@ -266,30 +266,6 @@ func applyDeliveryOutcome(cfg listenerDeliveryHandlerConfig, item contracts.Enve
 	return retry
 }
 
-// publishNoHolderExceptionOrNak publishes a "no_holder" delivery exception
-// for control topics and, if publishing itself fails, escalates to an
-// immediate NAK by finalizing message and reporting false — a message whose
-// failure notice never went out must not be silently ACKed. Its one caller is
-// the fanout path with no matching interests at all, which has no attempt-cache
-// entry to roll back; listenerDeliveryHandler routes every role and agent topic
-// elsewhere, so a fanout topic is never a control topic and the guard below
-// returns true for it before anything is published. The direct-agent give-up
-// does not use it: that give-up is terminal whether or not its notice goes out
-// (agentSubjectDelivery), since a NAK there would redeliver a message whose push
-// allowance is spent.
-func publishNoHolderExceptionOrNak(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) bool {
-	if !isControlTopic(item.Topic) || isExceptionsTopic(item.Topic) {
-		return true
-	}
-	if err := publishDeliveryException(cfg.client, item, "no_holder", "", false); err != nil {
-		cfg.logger.Error(exceptionPublishFailedLine, slog.String("error", err.Error()), slog.String("topic", item.Topic))
-		cfg.messagesNAKed.Inc()
-		message.finalize(true)
-		return false
-	}
-	return true
-}
-
 // listenerDeliveryHandler decodes and validates the envelope, then routes it
 // to exactly one of the three delivery paths based on its topic: a role
 // lane (arbitrated to whichever session currently holds the role), a direct
@@ -914,9 +890,9 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 func fanoutDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMessage, item contracts.Envelope) {
 	items := cfg.registry.Match(cfg.machineID, item.Topic)
 	if len(items) == 0 {
-		if !publishNoHolderExceptionOrNak(cfg, message, item) {
-			return
-		}
+		// No interests is no failure: listenerDeliveryHandler routes every role and agent topic
+		// elsewhere, so a fanout topic is never a control topic and owes no delivery exception,
+		// and the message is ACKed with nothing to retry.
 		cfg.logger.Info("listener no matching interests", slog.String("topic", item.Topic))
 		message.finalize(false)
 		return
