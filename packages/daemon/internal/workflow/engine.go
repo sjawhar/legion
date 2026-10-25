@@ -726,6 +726,13 @@ func (e *Engine) signOff(ctx context.Context, tx pgx.Tx, fact intake.SignOff) (i
 	if issue.Phase != phase.Accepting {
 		return refused("SIGNOFF_OUTSIDE_ACCEPTING", fmt.Sprintf("%s is in phase %s, not accepting; this sign-off changed nothing", issue.Key, issue.Phase)), nil
 	}
+	running, err := e.openBeneath(ctx, tx, *issue)
+	if err != nil {
+		return intake.Result{}, err
+	}
+	if len(running) > 0 {
+		return refused("SIGNOFF_CHILD_IN_WORKFLOW", fmt.Sprintf("%s still has %s beneath it in the workflow; this sign-off changed nothing. Accept %s once the last of them closes, or take one out of the workflow with park_child", issue.Key, strings.Join(running, ", "), issue.Key)), nil
+	}
 	review, err := e.phaseRow(ctx, tx, issue.Key, claim.RoleReviewer)
 	if err != nil {
 		return intake.Result{}, err
@@ -986,6 +993,49 @@ func (e *Engine) treeMembers(ctx context.Context, tx pgx.Tx, root record.Issue) 
 		}
 	}
 	return members, nil
+}
+
+// openBeneath is the sorted keys of the issues under issue — its children, their children, and so
+// on — that are still in the workflow (InWorkflow). It reads the tree's members once and walks
+// down the recorded parent column from issue, which is the right candidate set because every issue
+// of a tree keeps the root's key in its tree field and its own parent's key in parent. The walk
+// must be downward and never over the flat tree: every member names the root in its tree field, so
+// an issue held for any member of its tree would wait for the root, which is waiting for it. Its
+// three termination rules are the ones the daemon's upward walk already carries (api/architect.go,
+// owns): a visited set, since parent is plain nullable text with no foreign key, rewritten from
+// every Dispatch observation, so a cycle is possible and would otherwise spin inside the fact's
+// transaction; only issues the tree lists are followed, so a parent recorded in another tree is
+// never reached; and an issue whose parent is empty, or names a key the tree does not hold, is
+// beneath nothing.
+func (e *Engine) openBeneath(ctx context.Context, tx pgx.Tx, issue record.Issue) ([]string, error) {
+	members, err := e.treeMembers(ctx, tx, issue)
+	if err != nil {
+		return nil, err
+	}
+	children := map[string][]record.Issue{}
+	for _, member := range members {
+		if member.Parent != nil && *member.Parent != "" {
+			children[*member.Parent] = append(children[*member.Parent], member)
+		}
+	}
+	running := []string{}
+	seen := map[string]bool{issue.Key: true}
+	for frontier := []string{issue.Key}; len(frontier) > 0; {
+		current := frontier[len(frontier)-1]
+		frontier = frontier[:len(frontier)-1]
+		for _, child := range children[current] {
+			if seen[child.Key] {
+				continue
+			}
+			seen[child.Key] = true
+			frontier = append(frontier, child.Key)
+			if InWorkflow(child) {
+				running = append(running, child.Key)
+			}
+		}
+	}
+	slices.Sort(running)
+	return running, nil
 }
 
 func (e *Engine) gateForIssue(ctx context.Context, tx pgx.Tx, issue record.Issue) (*record.DesignGate, error) {
