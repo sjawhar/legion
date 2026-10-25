@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { QueryClient } from "@tanstack/react-query";
+import { eventQueryKeys, mergeEventPages, prependEventToLog } from "../api/event-feed";
 import {
   architectureSourcesQuery,
   inboxQuery,
@@ -7,7 +8,6 @@ import {
   userStateQuery,
 } from "../api/queries";
 import { coalescePrefixKeys } from "../api/query-refresh";
-import { eventQueryKeys, mergeEventPages, prependEventToLog } from "../api/sse";
 import type { Event, EventType } from "../api/types";
 
 /**
@@ -579,7 +579,7 @@ const referenceWrites: ReadonlySet<EventType> = new Set([
   "message.created",
 ]);
 
-/** The rows a changed target's backlink count sits on, written independently of `sse.ts`. */
+/** The rows a changed target's backlink count sits on, written apart from `event-feed.ts`. */
 function countedRowKeys(incoming: Event): unknown[][] {
   if (truncatedTargets(incoming)) {
     return [["issue"], ["asks"], ["ask-thread"], ["artifact"], ["inbox"]];
@@ -938,7 +938,7 @@ test("the Replies page refreshes only on events that can move a row, and the vie
   ).toEqual([]);
 });
 
-test("SSE event prepends a newer event to the loaded log page", () => {
+test("a feed event prepends a newer event to the loaded log page", () => {
   const client = new QueryClient();
   client.setQueryData(["events", "CORE-1"], {
     pageParams: [null],

@@ -4,7 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter } from "react-router-dom";
 
 import { api, type ListEventsOptions } from "../../api/client";
-import { prependEventToLog } from "../../api/sse";
+import { prependEventToLog } from "../../api/event-feed";
 import type { Actor, Agent, Event, UserIssueState, UserState } from "../../api/types";
 import { ActivityTab } from "./ActivityTab";
 

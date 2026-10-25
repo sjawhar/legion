@@ -62,7 +62,7 @@ export function useFollowLatest({
   }, [followsLatest]);
 
   // The mutation's `onSuccess` bumps `ownSendCount` and invalidates the events query in the same
-  // tick, but the SSE stream (features/api/sse.ts) can independently invalidate the same query
+  // tick, but the event feed (api/event-feed.ts) can independently invalidate the same query
   // from the server push — sometimes *before* the mutation's own callback runs. `ownSendCount` and
   // `latestItemSeq` therefore change in either order across renders, not always together, so this
   // single effect reacts to a change in either: an own send always follows regardless of scroll

@@ -4,13 +4,7 @@ import { useEffect } from "react";
 import { reaskHeldCredentialList } from "../features/credentials/pending";
 import { markPendingAskThreadInvalidation } from "../features/inbox/ask-thread-freshness";
 
-import {
-  EventStreamHttpError,
-  readEventStream,
-  reconnectDelayMs,
-  type StreamEvent,
-  setConnectionState,
-} from "./live";
+import { liveSocketFor } from "./live-socket";
 import {
   agentMessagesQuery,
   architectureSourcesQuery,
@@ -19,6 +13,7 @@ import {
   projectsQuery,
   userAgentStateQuery,
   userStateQuery,
+  whoAmIQuery,
 } from "./queries";
 import { coalescePrefixKeys, refreshQueries } from "./query-refresh";
 import type { ChangedReference, Event, EventType } from "./types";
@@ -73,16 +68,9 @@ const knownEventTypes: Record<EventType, true> = {
   "subscription.removed": true,
 };
 
-// One window bounds every stream attempt: armed when the attempt starts, re-armed when its
-// response headers arrive and on every chunk (application events or heartbeat comments), and
-// cleared when the attempt settles. An attempt that receives nothing for this long is aborted
-// and reconnects with the backoff, whether its request never got headers or its open connection
-// went silent. The server sends a `: heartbeat` comment every 15s, so 45s is three missed
-// heartbeats.
-const WATCHDOG_MS = 45_000;
-
 const inboxQueryKey = inboxQuery().queryKey;
 const [inboxKey] = inboxQueryKey;
+const whoAmIKey = whoAmIQuery().queryKey;
 
 /** The one documented subtraction, named once so every call site shares it. */
 function withoutInbox(keys: (readonly unknown[])[]): (readonly unknown[])[] {
@@ -330,13 +318,6 @@ function changedReferenceKeys(event: Event): (readonly unknown[])[] {
   return keys;
 }
 
-// 408 (timeout) and 429 (rate limit) are transient — worth retrying. Every other
-// 4xx (404, 409, 422, ...) means the request itself can never succeed unchanged, so
-// backing off and reconnecting forever would just spin instead of ever recovering.
-function isTerminalHttpStatus(status: number): boolean {
-  return status >= 400 && status < 500 && status !== 408 && status !== 429;
-}
-
 export interface EventPages {
   pageParams: unknown[];
   pages: Event[][];
@@ -383,14 +364,14 @@ export function prependEventToLog(queryClient: QueryClient, event: Event): void 
   });
 }
 
-// The live stream reads this directly (`useEventStream`), so every invalidation the app
+// The event feed reads this directly (`useEventFeed`), so every invalidation the app
 // performs is a key this returns.
 export function eventQueryKeys(event: Event, signedInLogin?: string): (readonly unknown[])[] {
   const keys = ownerQueryKeys(event, signedInLogin);
   // A write cites nodes on other issues, whose rows carry those nodes' backlink counts; the
   // event names them, so exactly their rows refresh — including the Inbox, which lists every
   // open ask and is otherwise subtracted for a plain message or comment (#1248).
-  // Duplicates cost nothing: `useEventStream` keys its pending map on the serialised key and
+  // Duplicates cost nothing: `useEventFeed` keys its pending map on the serialised key and
   // then coalesces prefixes, so the same row is never refreshed twice.
   keys.push(...changedReferenceKeys(event));
   if (changesReferenceGraph(event)) {
@@ -663,14 +644,14 @@ function ownerQueryKeys(event: Event, signedInLogin?: string): (readonly unknown
 const INVALIDATION_DEBOUNCE_MS = 100;
 
 // A whole-cache refresh reaches every query the app holds, the GitHub proxy queries included,
-// and two callers ask for one: an event this client cannot parse, and a reconnect. Neither is
-// rate-limited on its own - a mid-deploy stream of a new event type arrives at the frame rate,
-// and `forceReconnect` reopens the stream on every `visibilitychange` - so the throttle belongs
-// to "refresh everything" rather than to either caller. Every request schedules the one pending
-// refresh: a request a window or more after the last one schedules it for now, and any inside
-// the window joins that same pending refresh, so a change no key can be derived from always
-// arrives within the window of the request that asked for it.
-// The backlink panels' own `["references"]` queries are part of "everything", so a reconnect
+// and two callers ask for one: an event this client cannot parse, and a gap in the feed. Neither
+// is rate-limited on its own - a mid-deploy stream of a new event type arrives at the frame rate,
+// and a Dispatch restarting node by node can close the socket again and again - so the throttle
+// belongs to "refresh everything" rather than to either caller. Every request schedules the one
+// pending refresh: a request a window or more after the last one schedules it for now, and any
+// inside the window joins that same pending refresh, so a change no key can be derived from
+// always arrives within the window of the request that asked for it.
+// The backlink panels' own `["references"]` queries are part of "everything", so a gap
 // refreshes them too.
 // Exported for the one test that deliberately runs at the production window rather than an
 // injected one, so it reads the real number instead of keeping a copy that drifts.
@@ -702,33 +683,34 @@ function markAskThreadsSeededByAnInFlightInbox(
   }
 }
 
+/** A decimal event id, comparable; null for anything else. */
+function eventPosition(id: string): bigint | null {
+  return /^\d+$/.test(id) ? BigInt(id) : null;
+}
+
 /**
- * `watchdogMs` overrides the attempt watchdog's window (`WATCHDOG_MS`) and `wholeCacheRefreshMs`
- * the whole-cache refresh throttle; the only callers that set either are tests that would
- * otherwise have to wait out the real 45 s and 5 s windows. Production calls this with no
- * argument.
+ * Keeps the query cache current from the workspace's event feed, one subscription on the page's
+ * live socket (`api/live-socket.ts`). `wholeCacheRefreshMs` overrides the whole-cache refresh
+ * throttle; the only callers that set it are tests that would otherwise have to wait out the real
+ * 5 s window. Production calls this with no argument.
  */
-export function useEventStream({
-  watchdogMs = WATCHDOG_MS,
+export function useEventFeed({
   wholeCacheRefreshMs = WHOLE_CACHE_REFRESH_MS,
 }: {
-  watchdogMs?: number;
   wholeCacheRefreshMs?: number;
 } = {}): void {
   const queryClient = useQueryClient();
 
   useEffect(() => {
-    let stopped = false;
-    let controller: AbortController | null = null;
-    let forced = false;
-    let attempt = 0;
-    // Whether any attempt has ended, by dropping after it opened or by failing before. Only the
-    // page's first attempt opens with nothing to refresh, since the page made its own reads
-    // alongside it; every later open follows a gap in which no stream carried what committed.
-    let anAttemptEnded = false;
-    let lastEventId = 0;
-    let watchdog: number | undefined;
-    let reconnect: number | undefined;
+    // The greatest event id the page has seen, which the subscription resumes after; never
+    // lowered. It starts at the sign-in check's `event_head`: AuthGate mounts the app, and so
+    // every read the page makes, only once that answer is in, so those reads hold every event at
+    // or below it, and the first subscription replays exactly what committed since, which each
+    // event's own invalidation refreshes. It is read once, here: a later check names a head no
+    // read of the page was made after. A server older than the field names none, and the feed
+    // adopts where Dispatch starts it (`events_start`).
+    const eventHead = queryClient.getQueryData(whoAmIKey)?.event_head;
+    let cursor = eventHead === undefined ? null : eventPosition(eventHead);
     let flush: number | undefined;
     // `pendingAll` is the whole-cache entry of the pending set: it means "something changed
     // that no key can be derived from", and it subsumes every individual key already queued.
@@ -738,40 +720,6 @@ export function useEventStream({
     let lastWholeCacheRefresh = Number.NEGATIVE_INFINITY;
     let wholeCacheTrailing: number | undefined;
     const pending = new Map<string, readonly unknown[]>();
-
-    const armWatchdog = () => {
-      window.clearTimeout(watchdog);
-      watchdog = window.setTimeout(() => controller?.abort(), watchdogMs);
-    };
-
-    const onOpen = () => {
-      if (stopped) {
-        return;
-      }
-      setConnectionState("connected");
-      armWatchdog();
-      if (anAttemptEnded) {
-        // Events may have committed since the prior attempt ended - or, when the first attempt
-        // failed, since the page's own reads - so every query the app holds refreshes. TanStack
-        // matches all of them when no filter is given. Nothing is excluded:
-        // the one query that looks expensive to refresh, `["block-schema"]` with an infinite
-        // `staleTime`, resolves from a module-level per-session cache (`features/doc/schema.ts`),
-        // so its refetch issues no request. A genuine reconnect after a gap refreshes on the
-        // leading edge; `visibilitychange` reopening the stream repeatedly does not.
-        refreshEverything();
-        // The one query that refresh skips: a credential list held at `null` (no broker), which
-        // a server restarted since with a broker configured would now answer with a list.
-        reaskHeldCredentialList(queryClient);
-      }
-      attempt = 0;
-    };
-
-    const onChunk = () => {
-      if (stopped) {
-        return;
-      }
-      armWatchdog();
-    };
 
     const scheduleFlush = () => {
       if (flush !== undefined) {
@@ -796,7 +744,7 @@ export function useEventStream({
         return;
       }
       // Clamped: any request more than one window after the last refresh - the first of a
-      // connection, which has none to measure from, most of all - leaves the delay negative.
+      // page, which has none to measure from, most of all - leaves the delay negative.
       // Browsers clamp a negative timeout to zero; saying so here keeps the intent explicit and
       // the runtime from warning about it.
       const remaining = Math.max(
@@ -821,120 +769,64 @@ export function useEventStream({
       scheduleFlush();
     };
 
-    const onEvent = (raw: StreamEvent) => {
-      if (stopped) {
-        return;
-      }
-      // The cursor advances before the frame is parsed on purpose: a frame the client
-      // cannot parse rejects `readEventStream` and is skipped on the reconnect instead
-      // of being replayed forever.
-      const id = Number(raw.id);
-      if (Number.isFinite(id) && id > lastEventId) {
-        lastEventId = id;
-      }
-      // `Object.hasOwn`, not `in`: `knownEventTypes` inherits `Object.prototype`, so `in` reads
-      // a frame named `constructor` or `toString` as a known type and parses it as an event.
-      if (raw.event === undefined || !Object.hasOwn(knownEventTypes, raw.event)) {
-        // The server may add an event this client cannot parse. Refresh everything rather than
-        // leaving a rendered field stale until the next reconnect.
+    const stop = liveSocketFor(queryClient).subscribeEvents({
+      since: () => (cursor === null ? null : cursor.toString()),
+      onStart: (since) => {
+        if (cursor === null) {
+          cursor = eventPosition(since);
+        }
+      },
+      onEvent: (id, raw) => {
+        // The cursor advances before the event is read on purpose: an event this page cannot
+        // read is skipped by the next resume instead of being replayed to it again.
+        const position = eventPosition(id);
+        if (position !== null && (cursor === null || position > cursor)) {
+          cursor = position;
+        }
+        const type = (raw as { type?: unknown } | null)?.type;
+        // `Object.hasOwn`, not `in`: `knownEventTypes` inherits `Object.prototype`, so `in` reads
+        // an event named `constructor` or `toString` as a known type and reads it as an event.
+        if (typeof type !== "string" || !Object.hasOwn(knownEventTypes, type)) {
+          // The server may add an event this client cannot parse. Refresh everything rather than
+          // leaving a rendered field stale until the next gap.
+          refreshEverything();
+          return;
+        }
+        // The socket hands the event over as the JSON Dispatch sent, whose type is now known.
+        const event = raw as Event;
+        try {
+          prependEventToLog(queryClient, event);
+          const keys = eventQueryKeys(event, queryClient.getQueryData(whoAmIKey)?.login);
+          markAskThreadsSeededByAnInFlightInbox(queryClient, keys);
+          queueInvalidations(keys);
+        } catch (error) {
+          // A known type whose payload this page cannot map: no key can be derived from it.
+          console.error("event feed: an event this page cannot read", raw, error);
+          refreshEverything();
+        }
+      },
+      onSubscribed: (afterGap) => {
+        if (!afterGap) {
+          return;
+        }
+        // Events may have committed while no socket carried the feed - or, when the first
+        // handshake failed, since the page's own reads - and the resume may not replay them all,
+        // so every query the app holds refreshes. TanStack matches all of them when no filter is
+        // given. Nothing is excluded: the one query that looks expensive to refresh,
+        // `["block-schema"]` with an infinite `staleTime`, resolves from a module-level
+        // per-session cache (`features/doc/schema.ts`), so its refetch issues no request.
         refreshEverything();
-        return;
-      }
-      const event = JSON.parse(raw.data) as Event;
-      prependEventToLog(queryClient, event);
-      const signedInLogin = queryClient.getQueryData<{ login?: string }>(["whoami"])?.login;
-      const keys = eventQueryKeys(event, signedInLogin);
-      markAskThreadsSeededByAnInFlightInbox(queryClient, keys);
-      queueInvalidations(keys);
-    };
-
-    const open = () => {
-      window.clearTimeout(reconnect);
-      reconnect = undefined;
-      const current = new AbortController();
-      controller = current;
-      armWatchdog();
-      const url = lastEventId > 0 ? `/api/v1/events?since=${lastEventId}` : "/api/v1/events";
-      void readEventStream(url, { onChunk, onEvent, onOpen, signal: current.signal }).then(
-        () => settle(current, undefined),
-        (error: unknown) => settle(current, error)
-      );
-    };
-
-    const settle = (current: AbortController, error: unknown) => {
-      if (stopped) {
-        return;
-      }
-      window.clearTimeout(watchdog);
-      watchdog = undefined;
-      controller = null;
-      anAttemptEnded = true;
-      if (!current.signal.aborted && error instanceof EventStreamHttpError) {
-        if (error.status === 401) {
-          setConnectionState("signed-out");
-          queryClient.invalidateQueries({ queryKey: ["whoami"] });
-          removeListeners();
-          return;
-        }
-        if (isTerminalHttpStatus(error.status)) {
-          setConnectionState("unavailable");
-          removeListeners();
-          return;
-        }
-      }
-      if (forced) {
-        forced = false;
-        open();
-        return;
-      }
-      setConnectionState("reconnecting");
-      reconnect = window.setTimeout(open, reconnectDelayMs(attempt));
-      attempt += 1;
-    };
-
-    const forceReconnect = () => {
-      if (stopped) {
-        return;
-      }
-      attempt = 0;
-      if (controller !== null) {
-        forced = true;
-        controller.abort();
-        return;
-      }
-      open();
-    };
-
-    const handleVisibilityChange = () => {
-      if (document.visibilityState === "visible") {
-        forceReconnect();
-      }
-    };
-    const handleOffline = () => controller?.abort();
-
-    const removeListeners = () => {
-      document.removeEventListener("visibilitychange", handleVisibilityChange);
-      window.removeEventListener("online", forceReconnect);
-      window.removeEventListener("offline", handleOffline);
-    };
-
-    setConnectionState("connecting");
-    document.addEventListener("visibilitychange", handleVisibilityChange);
-    window.addEventListener("online", forceReconnect);
-    window.addEventListener("offline", handleOffline);
-    open();
+        // The one query that refresh skips: a credential list held at `null` (no broker), which
+        // a server restarted since with a broker configured would now answer with a list.
+        reaskHeldCredentialList(queryClient);
+      },
+    });
 
     return () => {
-      stopped = true;
-      removeListeners();
-      window.clearTimeout(watchdog);
-      window.clearTimeout(reconnect);
+      stop();
       window.clearTimeout(flush);
       window.clearTimeout(wholeCacheTrailing);
       pending.clear();
-      controller?.abort();
-      controller = null;
-      setConnectionState("connected");
     };
-  }, [queryClient, watchdogMs, wholeCacheRefreshMs]);
+  }, [queryClient, wholeCacheRefreshMs]);
 }

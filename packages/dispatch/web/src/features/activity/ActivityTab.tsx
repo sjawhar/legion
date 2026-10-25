@@ -2,7 +2,7 @@ import { replaceEqualDeep, useInfiniteQuery } from "@tanstack/react-query";
 import { type ReactNode, useMemo } from "react";
 
 import { api } from "../../api/client";
-import { type EventPages, mergeEventPages } from "../../api/sse";
+import { type EventPages, mergeEventPages } from "../../api/event-feed";
 import type { UserState } from "../../api/types";
 import { PinButton } from "../../components/PinButton";
 import {
@@ -49,7 +49,7 @@ export function ActivityTab({ issueKey, state, visible }: ActivityTabProps): Rea
     // A page can hold more than the server's 200 once streamed events sit above a full response
     // (mergeEventPages, prependEventToLog); it is still a full page with older events beneath it.
     getNextPageParam: (page) => (page.length >= 200 ? page.at(-1)?.seq : undefined),
-    // The stream (api/sse.ts) prepends events as they are published; a refetch whose read
+    // The feed (api/event-feed.ts) prepends events as they are published; a refetch whose read
     // predates one of them must not take it back.
     structuralSharing: (current, incoming) =>
       replaceEqualDeep(

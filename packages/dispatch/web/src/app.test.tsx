@@ -5,10 +5,10 @@ import { MemoryRouter } from "react-router-dom";
 
 import { installFakeLiveSockets } from "./__tests__/live-socket-harness";
 import { ApiError, api } from "./api/client";
-import { type EventsHandlers, liveSocketFor } from "./api/live-socket";
+import { liveSocketFor } from "./api/live-socket";
 import { AuthGate } from "./app";
 
-test("signing out shows the sign-in page without a reload and tears down the event stream", async () => {
+test("signing out shows the sign-in page without a reload and ends the event feed's socket", async () => {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
     ({
@@ -37,17 +37,7 @@ test("signing out shows the sign-in page without a reload and tears down the eve
   const getMyState = spyOn(api, "getMyState").mockResolvedValue({});
   const getInbox = spyOn(api, "getInbox").mockResolvedValue([]);
 
-  // The event stream is a fetch stream torn down via AbortController (#837); any fetch call
-  // the hook makes for the stream never resolves — only its signal matters.
-  const fetchSignals: AbortSignal[] = [];
-  function stubFetch(_input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
-    if (init?.signal !== undefined && init.signal !== null) {
-      fetchSignals.push(init.signal);
-    }
-    return new Promise<Response>(() => {});
-  }
-  stubFetch.preconnect = () => {};
-  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(stubFetch);
+  const sockets = installFakeLiveSockets();
 
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
@@ -60,14 +50,19 @@ test("signing out shows the sign-in page without a reload and tears down the eve
 
   try {
     await screen.findByText("Signed in as alice");
-    expect(fetchSignals.some((signal) => signal.aborted)).toBe(false);
+    const socket = sockets.latest();
+    act(() => socket.open());
+    const { sub } = socket.subscribed("events");
+    expect(socket.closedWith).toBeUndefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
 
     await waitFor(() => expect(logout).toHaveBeenCalled());
     await screen.findByRole("link", { name: "Sign in with Google" });
 
-    expect(fetchSignals.some((signal) => signal.aborted)).toBe(true);
+    // The feed left with the signed-in shell, and with it the socket's last subscription.
+    expect(socket.unsubscribes()).toEqual([{ type: "unsubscribe", sub }]);
+    await waitFor(() => expect(socket.closedWith).toBe(1000));
   } finally {
     view.unmount();
     window.matchMedia = originalMatchMedia;
@@ -76,7 +71,8 @@ test("signing out shows the sign-in page without a reload and tears down the eve
     listIssues.mockRestore();
     getMyState.mockRestore();
     getInbox.mockRestore();
-    fetchSpy.mockRestore();
+    liveSocketFor(queryClient).close();
+    sockets.restore();
   }
 });
 
@@ -122,12 +118,6 @@ test("project routes render the project page and a project document route", asyn
     slug: "design-notes",
     versions: [],
   });
-  function streamFetch(_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
-    return new Promise<Response>(() => {});
-  }
-  streamFetch.preconnect = () => {};
-  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(streamFetch);
-
   const renderRoute = (path: string) => {
     const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
     return render(
@@ -159,7 +149,6 @@ test("project routes render the project page and a project document route", asyn
     );
     document.unmount();
   } finally {
-    fetchSpy.mockRestore();
     getArchitectureSource.mockRestore();
     getInbox.mockRestore();
     getProjectArtifact.mockRestore();
@@ -199,11 +188,6 @@ test("the Inbox page links to the answers page, which renders at /answers", asyn
     rows: [],
     total: 0,
   });
-  function streamFetch(_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
-    return new Promise<Response>(() => {});
-  }
-  streamFetch.preconnect = () => {};
-  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(streamFetch);
   const renderRoute = (path: string) =>
     render(
       <MemoryRouter initialEntries={[path]}>
@@ -228,7 +212,6 @@ test("the Inbox page links to the answers page, which renders at /answers", asyn
     expect(await screen.findByText("You have not answered or replied on an ask yet.")).toBeTruthy();
     answers.unmount();
   } finally {
-    fetchSpy.mockRestore();
     getInbox.mockRestore();
     getMyState.mockRestore();
     listIssues.mockRestore();
@@ -398,16 +381,8 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
   }
 });
 
-/** An event feed that holds no cursor and ignores what arrives: it only keeps the socket open. */
-const idleFeed: EventsHandlers = {
-  since: () => null,
-  onStart: () => {},
-  onEvent: () => {},
-  onSubscribed: () => {},
-};
-
-/** The shell at `/`, signed in as alice, with the event stream's fetch held open forever; returns
- *  the query client and the teardown. */
+/** The shell at `/`, signed in as alice, its event feed subscribed on the page's live socket;
+ *  returns the teardown. */
 async function renderSignedIn(whoAmI: () => Promise<{ kind: "user"; login: string }>) {
   const originalMatchMedia = window.matchMedia;
   window.matchMedia = (() =>
@@ -427,11 +402,6 @@ async function renderSignedIn(whoAmI: () => Promise<{ kind: "user"; login: strin
     spyOn(api, "getMyState").mockResolvedValue({}),
     spyOn(api, "getInbox").mockResolvedValue([]),
   ];
-  function streamFetch(_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
-    return new Promise<Response>(() => {});
-  }
-  streamFetch.preconnect = () => {};
-  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(streamFetch);
   const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
   const view = render(
     <MemoryRouter initialEntries={["/"]}>
@@ -441,28 +411,23 @@ async function renderSignedIn(whoAmI: () => Promise<{ kind: "user"; login: strin
     </MemoryRouter>
   );
   await screen.findByText("Signed in as alice");
-  return {
-    queryClient,
-    teardown: () => {
-      view.unmount();
-      liveSocketFor(queryClient).close();
-      for (const spy of spies) spy.mockRestore();
-      fetchSpy.mockRestore();
-      window.matchMedia = originalMatchMedia;
-    },
+  return () => {
+    view.unmount();
+    liveSocketFor(queryClient).close();
+    for (const spy of spies) spy.mockRestore();
+    window.matchMedia = originalMatchMedia;
   };
 }
 
 test("the connection pill follows the live socket: none while it connects, Reconnecting… once lost, and a Reload once two minutes pass", async () => {
   const sockets = installFakeLiveSockets();
-  const { queryClient, teardown } = await renderSignedIn(async () => ({
+  const teardown = await renderSignedIn(async () => ({
     kind: "user",
     login: "alice",
   }));
   // Every timer the socket sets from here on runs on the test's clock.
   jest.useFakeTimers();
   const random = spyOn(Math, "random").mockReturnValue(0.5);
-  const stop = liveSocketFor(queryClient).subscribeEvents(idleFeed);
   try {
     expect(sockets.sockets).toHaveLength(1);
     expect(screen.queryByTestId("connection-pill")).toBeNull();
@@ -495,7 +460,10 @@ test("the connection pill follows the live socket: none while it connects, Recon
     act(() => sockets.latest().drop(4001));
     expect(screen.queryByTestId("connection-pill")).toBeNull();
   } finally {
-    stop();
+    // A zero-delay timer scheduled on Bun's fake clock (here the event feed's refresh after the
+    // reopen at 121 s) stalls every later `waitFor` in the process once real timers are back,
+    // even when it was cleared; moving the clock on past it does not.
+    act(() => jest.advanceTimersByTime(1));
     random.mockRestore();
     jest.useRealTimers();
     teardown();
@@ -506,11 +474,10 @@ test("the connection pill follows the live socket: none while it connects, Recon
 test("a live socket refused once the person is signed out takes the page to sign-in", async () => {
   const sockets = installFakeLiveSockets();
   let signedIn = true;
-  const { queryClient, teardown } = await renderSignedIn(async () => {
+  const teardown = await renderSignedIn(async () => {
     if (!signedIn) throw new ApiError(401, { error: "unauthorized" });
     return { kind: "user", login: "alice" };
   });
-  const stop = liveSocketFor(queryClient).subscribeEvents(idleFeed);
   try {
     act(() => sockets.latest().open());
     signedIn = false;
@@ -518,7 +485,6 @@ test("a live socket refused once the person is signed out takes the page to sign
     act(() => sockets.latest().drop(1008));
     await screen.findByRole("link", { name: "Sign in with Google" });
   } finally {
-    stop();
     teardown();
     sockets.restore();
   }

@@ -1,7 +1,8 @@
 import type { AgentStreamFrame, AgentStreamReplay, AgentStreamResponder } from "@legion/contracts";
 import { useEffect, useState } from "react";
 
-import { EventStreamHttpError, readEventStream, reconnectDelayMs } from "../../api/live";
+import { EventStreamHttpError, readEventStream } from "../../api/live";
+import { reconnectDelayMs } from "../../api/live-socket";
 import {
   type AgentConversation,
   applyFrame,

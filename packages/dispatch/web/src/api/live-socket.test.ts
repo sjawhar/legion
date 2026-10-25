@@ -1,6 +1,8 @@
 import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
 import type { AgentStreamFrame } from "@legion/contracts";
-import { QueryClient, QueryObserver } from "@tanstack/react-query";
+import { QueryClient, QueryClientProvider, QueryObserver } from "@tanstack/react-query";
+import { act, renderHook } from "@testing-library/react";
+import { createElement, type ReactNode } from "react";
 
 import {
   type FakeLiveSocket,
@@ -12,8 +14,12 @@ import {
   type AgentHandlers,
   createLiveSocket,
   type EventsHandlers,
+  LIVE_SOCKET_STUCK_MS,
   type LiveSocket,
+  type LiveSocketState,
+  liveSocketFor,
   reconnectDelayMs,
+  useLiveSocketPill,
 } from "./live-socket";
 import { refreshQueries } from "./query-refresh";
 import type {
@@ -1014,5 +1020,275 @@ test("an agent error frame reaches onUnavailable and is not retried", () => {
   } finally {
     stopAgent();
     stopFeed();
+  }
+});
+
+test("a handshake that never finishes is replaced after 45 s, and the event feed hears of the gap", () => {
+  jest.useFakeTimers();
+  const feed = eventFeed();
+  const stop = live.subscribeEvents(feed.handlers);
+  try {
+    const first = sockets.latest();
+    jest.advanceTimersByTime(45_000);
+    expect(first.closedWith).toBeUndefined();
+    jest.advanceTimersByTime(15_000);
+    expect(first.closedWith).toBe(4000);
+    expect(live.state().state).toBe("reconnecting");
+    expect(sockets.sockets).toHaveLength(2);
+    // The feed's first send follows an attempt that carried nothing, so it reports a gap.
+    sockets.latest().open();
+    expect(feed.subscribed).toEqual([true]);
+  } finally {
+    stop();
+  }
+});
+
+test("going offline closes the socket and shows reconnecting", () => {
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const feed = eventFeed();
+  const stop = live.subscribeEvents(feed.handlers);
+  try {
+    const socket = sockets.latest();
+    socket.open();
+    const lostAt = Date.now();
+    window.dispatchEvent(new Event("offline"));
+    expect(socket.closedWith).toBe(4000);
+    expect(live.state()).toMatchObject({ state: "reconnecting", since: lostAt, stuck: false });
+    // A frame still in flight on the socket the page let go writes nothing.
+    socket.receive({ type: "events_start", sub: socket.subscribed("events").sub, since: "3" });
+    expect(feed.starts).toEqual([]);
+    // Nothing reopens at once: the page waits out its backoff, or for the network to come back.
+    expect(sockets.sockets).toHaveLength(1);
+    jest.advanceTimersByTime(999);
+    expect(sockets.sockets).toHaveLength(1);
+    jest.advanceTimersByTime(1);
+    expect(sockets.sockets).toHaveLength(2);
+    sockets.latest().open();
+    expect(feed.subscribed).toEqual([false, true]);
+
+    // A handshake still out when the network goes is let go the same way.
+    sockets.latest().drop(1006);
+    jest.advanceTimersByTime(2_000);
+    expect(sockets.sockets).toHaveLength(3);
+    window.dispatchEvent(new Event("offline"));
+    expect(sockets.latest().closedWith).toBe(4000);
+    expect(live.state().state).toBe("reconnecting");
+    // With no socket left, a second `offline` changes nothing.
+    window.dispatchEvent(new Event("offline"));
+    expect(sockets.sockets).toHaveLength(3);
+  } finally {
+    random.mockRestore();
+    stop();
+  }
+});
+
+test("coming online reopens at once", () => {
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const feed = eventFeed();
+  const stop = live.subscribeEvents(feed.handlers);
+  try {
+    sockets.latest().open();
+    // Three losses in a row: the next attempt waits four seconds.
+    sockets.latest().drop(1006);
+    jest.advanceTimersByTime(1_000);
+    sockets.latest().drop(1006);
+    jest.advanceTimersByTime(2_000);
+    sockets.latest().drop(1006);
+    const attempts = sockets.sockets.length;
+    expect(attempts).toBe(3);
+
+    window.dispatchEvent(new Event("online"));
+    expect(sockets.sockets).toHaveLength(attempts + 1);
+    // The backoff timer it preempted opens no second socket.
+    jest.advanceTimersByTime(5_000);
+    expect(sockets.sockets).toHaveLength(attempts + 1);
+    // And the backoff starts over: this attempt failing waits one second again, not eight.
+    sockets.latest().drop(1006);
+    jest.advanceTimersByTime(1_000);
+    expect(sockets.sockets).toHaveLength(attempts + 2);
+
+    // A handshake still out, begun while the network was gone, is replaced at once.
+    const pending = sockets.latest();
+    window.dispatchEvent(new Event("online"));
+    expect(pending.closedWith).toBe(4000);
+    expect(sockets.sockets).toHaveLength(attempts + 3);
+    sockets.latest().open();
+    expect(live.state()).toMatchObject({ state: "open", since: null, stuck: false });
+    expect(feed.subscribed.at(-1)).toBe(true);
+
+    // An open socket carrying frames is left alone.
+    window.dispatchEvent(new Event("online"));
+    expect(sockets.sockets).toHaveLength(attempts + 3);
+    expect(sockets.latest().closedWith).toBeUndefined();
+  } finally {
+    random.mockRestore();
+    stop();
+  }
+});
+
+const endings = [
+  ["the last subscription leaves during the backoff", "leave", "backoff"],
+  ["the last subscription leaves during a handshake", "leave", "handshake"],
+  ["close() is called during the backoff", "close", "backoff"],
+  ["close() is called during a handshake", "close", "handshake"],
+] as const;
+
+test.each(
+  endings
+)("once %s, no timer or window event opens a socket or reports a state", async (_case, end, moment) => {
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const stop = live.subscribeEvents(eventFeed().handlers);
+  try {
+    sockets.latest().open();
+    // The stuck clock runs from this loss, and the first retry is a second away.
+    sockets.latest().drop(1006);
+    if (moment === "handshake") {
+      // The retry's handshake is out, with its silence check armed.
+      jest.advanceTimersByTime(1_000);
+    }
+    expect(sockets.sockets).toHaveLength(moment === "handshake" ? 2 : 1);
+    expect(live.state().state).toBe("reconnecting");
+
+    if (end === "leave") stop();
+    else live.close();
+    await settle();
+    expect(live.state()).toMatchObject({ state: "closed", since: null, stuck: false });
+
+    const opened = sockets.sockets.length;
+    const reported: LiveSocketState[] = [];
+    const stopStates = live.onState((state) => {
+      reported.push(state);
+    });
+    // The browser's late close event for the socket the page let go.
+    sockets.latest().drop(1006);
+    jest.advanceTimersByTime(2_000);
+    jest.advanceTimersByTime(LIVE_SOCKET_STUCK_MS);
+    jest.advanceTimersByTime(60_000);
+    document.dispatchEvent(new Event("visibilitychange"));
+    window.dispatchEvent(new Event("online"));
+    window.dispatchEvent(new Event("offline"));
+    jest.advanceTimersByTime(60_000);
+    expect(sockets.sockets).toHaveLength(opened);
+    expect(reported).toEqual([]);
+    stopStates();
+  } finally {
+    random.mockRestore();
+    stop();
+  }
+});
+
+test("an error frame for the event feed resubscribes it after the socket's backoff", () => {
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const feed = eventFeed();
+  const stop = live.subscribeEvents(feed.handlers);
+  const refusal = (sub: string) =>
+    ({ type: "error", sub, code: "STREAM_UNAVAILABLE", message: "no feed" }) as const;
+  try {
+    const socket = sockets.latest();
+    socket.open();
+    const { sub } = socket.subscribed("events");
+    socket.receive({ type: "events_start", sub, since: "30" });
+    socket.receive(refusal(sub));
+    expect(socket.subscribes()).toHaveLength(1);
+    jest.advanceTimersByTime(999);
+    expect(socket.subscribes()).toHaveLength(1);
+    jest.advanceTimersByTime(1);
+    expect(socket.subscribes()).toHaveLength(2);
+    expect(socket.subscribes().at(-1)).toEqual({
+      type: "subscribe",
+      sub,
+      view: { kind: "events" },
+      resume: { since: "30" },
+    });
+    // Dispatch carried nothing for it in between, so the send reports a gap.
+    expect(feed.subscribed).toEqual([false, true]);
+
+    // A second refusal in a row waits twice as long.
+    socket.receive(refusal(sub));
+    jest.advanceTimersByTime(1_999);
+    expect(socket.subscribes()).toHaveLength(2);
+    jest.advanceTimersByTime(1);
+    expect(socket.subscribes()).toHaveLength(3);
+
+    // A subscription that starts again resets the wait.
+    socket.receive({ type: "events_start", sub, since: "30" });
+    socket.receive(refusal(sub));
+    jest.advanceTimersByTime(1_000);
+    expect(socket.subscribes()).toHaveLength(4);
+    // The socket itself stayed throughout.
+    expect(sockets.sockets).toHaveLength(1);
+    expect(socket.closedWith).toBeUndefined();
+    expect(live.state().state).toBe("open");
+
+    // A retry still waiting when the socket is lost is sent once, by the next socket's open.
+    socket.receive(refusal(sub));
+    socket.drop(1012);
+    sockets.latest().open();
+    expect(sockets.latest().subscribes()).toHaveLength(1);
+    jest.advanceTimersByTime(10_000);
+    expect(sockets.latest().subscribes()).toHaveLength(1);
+
+    // Leaving while a retry waits tells Dispatch nothing: it holds no subscription it refused.
+    sockets.latest().receive(refusal(sub));
+    stop();
+    expect(sockets.latest().unsubscribes()).toEqual([]);
+    jest.advanceTimersByTime(10_000);
+    expect(sockets.latest().subscribes()).toHaveLength(1);
+  } finally {
+    random.mockRestore();
+    stop();
+  }
+});
+
+test("the connection pill holds its value through a delta with a new change time", async () => {
+  const client = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const shared = liveSocketFor(client);
+  const observer = new QueryObserver(client, {
+    queryKey: key,
+    queryFn: ({ queryKey: k }) => shared.subscribe(k, view),
+    meta: { live: true },
+    staleTime: Number.POSITIVE_INFINITY,
+    gcTime: 0,
+    refetchOnWindowFocus: false,
+    refetchOnReconnect: false,
+    retry: false,
+  });
+  const stopObserver = observer.subscribe(() => {});
+  let renders = 0;
+  const wrapper = ({ children }: { children: ReactNode }) =>
+    createElement(QueryClientProvider, { client }, children);
+  const pill = renderHook(
+    () => {
+      renders += 1;
+      return useLiveSocketPill();
+    },
+    { wrapper }
+  );
+  try {
+    await settle();
+    const socket = sockets.latest();
+    act(() => socket.open());
+    const { sub } = socket.subscribed("timeline");
+    act(() => socket.receive(snapshot(sub)));
+    expect(pill.result.current).toBe("none");
+    const rendered = renders;
+
+    act(() => socket.receive(merged(sub)));
+    // The delta moved the change time the freshness row reads, and nothing the pill shows.
+    expect(shared.state().changedAt).toBe("2026-10-01T00:01:00Z");
+    expect(renders).toBe(rendered);
+    expect(pill.result.current).toBe("none");
+
+    act(() => socket.drop(1006));
+    expect(pill.result.current).toBe("reconnecting");
+  } finally {
+    pill.unmount();
+    stopObserver();
+    shared.close();
+    client.clear();
   }
 });

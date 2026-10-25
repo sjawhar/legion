@@ -8,7 +8,7 @@ export function isLiveQuery(query: Pick<Query, "meta">): boolean {
 /**
  * How a stream event refreshes the query cache: which of a batch's keys are worth invalidating,
  * and what to do about a query whose first response is still in flight when the event arrives.
- * `api/sse.ts` owns which keys an event names; this module owns what happens to them.
+ * `api/event-feed.ts` owns which keys an event names; this module owns what happens to them.
  */
 
 /**

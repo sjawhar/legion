@@ -1,13 +1,6 @@
 import { expect, test } from "bun:test";
-import { act, renderHook } from "@testing-library/react";
 
-import {
-  readEventStream,
-  reconnectDelayMs,
-  type StreamEvent,
-  setConnectionState,
-  useConnectionState,
-} from "../api/live";
+import { readEventStream, type StreamEvent } from "../api/live";
 
 function streamResponse(chunks: string[], init: { ok?: boolean; status?: number } = {}): Response {
   const encoder = new TextEncoder();
@@ -81,14 +74,6 @@ test("readEventStream rejects on a non-OK response before calling onOpen", async
   }
 });
 
-test("reconnectDelayMs doubles from a 1s base and caps at 30s", () => {
-  expect(reconnectDelayMs(0)).toBe(1_000);
-  expect(reconnectDelayMs(1)).toBe(2_000);
-  expect(reconnectDelayMs(2)).toBe(4_000);
-  expect(reconnectDelayMs(3)).toBe(8_000);
-  expect(reconnectDelayMs(10)).toBe(30_000);
-});
-
 test("readEventStream persists the last event id across frames that omit their own id", async () => {
   const originalFetch = globalThis.fetch;
   const received: StreamEvent[] = [];
@@ -136,19 +121,4 @@ test("readEventStream throws a typed EventStreamHttpError carrying the HTTP stat
   } finally {
     globalThis.fetch = originalFetch;
   }
-});
-
-test("useConnectionState re-renders only on an actual transition", () => {
-  setConnectionState("connected");
-  const { result } = renderHook(() => useConnectionState());
-  expect(result.current).toBe("connected");
-
-  act(() => setConnectionState("connected"));
-  expect(result.current).toBe("connected");
-
-  act(() => setConnectionState("reconnecting"));
-  expect(result.current).toBe("reconnecting");
-
-  act(() => setConnectionState("connected"));
-  expect(result.current).toBe("connected");
 });

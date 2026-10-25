@@ -4,16 +4,17 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
-import { openStreamResponse } from "../../__tests__/sse-test-harness";
+import { installFakeLiveSockets } from "../../__tests__/live-socket-harness";
 import { api, isRetryableQueryError } from "../../api/client";
+import { useEventFeed } from "../../api/event-feed";
+import { liveSocketFor } from "../../api/live-socket";
 import { refreshQueries } from "../../api/query-refresh";
-import { useEventStream } from "../../api/sse";
 import type { CredentialPendingResponse } from "../../api/types";
 import { Inbox } from "./Inbox";
 
 // A Dispatch with no secrets broker answers the credential-request list with `null`, an answer that
-// holds until the page reloads or the event stream reconnects (the server reads its broker setting
-// at boot). The QueryClient here is main.tsx's own, with no retry delay. Every credential-list call
+// holds until the page reloads or the event feed has a gap (the server reads its broker setting at
+// boot). The QueryClient here is main.tsx's own, with no retry delay. Every credential-list call
 // after the first is held open, so a refetch, had one started, would leave the list loading and the
 // empty state off the screen.
 const never = () => Promise.withResolvers<never>().promise;
@@ -123,21 +124,15 @@ test("with no broker, a focus, a stream refresh and a return to the Inbox neithe
   }
 });
 
-function EventStream(): null {
-  useEventStream();
+function EventFeed(): null {
+  useEventFeed();
   return null;
 }
 
-test("with no broker, a reconnect of the event stream asks the list again once, and a focus does not", async () => {
-  const originalFetch = globalThis.fetch;
-  const streams: string[] = [];
-  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
-    if (!String(input).startsWith("/api/v1/events")) return originalFetch(input, init);
-    streams.push(String(input));
-    return Promise.resolve(openStreamResponse(init?.signal));
-  }) as typeof fetch;
+test("with no broker, a gap in the event feed asks the list again once, and a focus does not", async () => {
+  const sockets = installFakeLiveSockets();
   // The server restarted with a broker: the second answer lists a request, and is held until the
-  // whole-cache refresh the reconnect starts has run.
+  // whole-cache refresh the gap starts has run.
   const relisted = Promise.withResolvers<CredentialPendingResponse>();
   getCredentialPending.mockReturnValueOnce(relisted.promise);
   const queryClient = productionQueryClient();
@@ -145,14 +140,14 @@ test("with no broker, a reconnect of the event stream asks the list again once, 
     shell(
       queryClient,
       <>
-        <EventStream />
+        <EventFeed />
         <Inbox />
       </>
     )
   );
   try {
     expect(await screen.findByText("Nothing needs you")).toBeTruthy();
-    await waitFor(() => expect(streams).toHaveLength(1));
+    act(() => sockets.latest().open());
 
     act(() => {
       focusManager.setFocused(false);
@@ -164,12 +159,12 @@ test("with no broker, a reconnect of the event stream asks the list again once, 
     expect(getCredentialPending).toHaveBeenCalledTimes(1);
 
     const watch = watchEmptyState();
-    act(() => {
-      window.dispatchEvent(new Event("online"));
-    });
-    await waitFor(() => expect(streams).toHaveLength(2));
+    // Dispatch restarted: the socket closes (1012) and the page's next one opens at once.
+    act(() => sockets.latest().drop(1012));
+    act(() => sockets.latest().open());
+    expect(sockets.sockets).toHaveLength(2);
     await waitFor(() => expect(getCredentialPending).toHaveBeenCalledTimes(2));
-    // The reconnect's whole-cache refresh refetches the inbox list; the held answer is not asked a
+    // The gap's whole-cache refresh refetches the inbox list; the held answer is not asked a
     // third time, and nothing blinks while the second call is out.
     await waitFor(() => expect(getInbox).toHaveBeenCalledTimes(2));
     await act(async () => {
@@ -195,6 +190,7 @@ test("with no broker, a reconnect of the event stream asks the list again once, 
     expect(screen.queryByText("Nothing needs you")).toBeNull();
   } finally {
     view.unmount();
-    globalThis.fetch = originalFetch;
+    liveSocketFor(queryClient).close();
+    sockets.restore();
   }
 }, 10_000);

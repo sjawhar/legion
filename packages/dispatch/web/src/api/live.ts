@@ -1,48 +1,5 @@
-import { useSyncExternalStore } from "react";
-
-export type ConnectionState =
-  | "connecting"
-  | "connected"
-  | "reconnecting"
-  | "unavailable"
-  | "signed-out";
-
-let connectionState: ConnectionState = "connected";
-const listeners = new Set<() => void>();
-
-export function getConnectionState(): ConnectionState {
-  return connectionState;
-}
-
-export function setConnectionState(next: ConnectionState): void {
-  if (connectionState === next) {
-    return;
-  }
-  connectionState = next;
-  for (const listener of listeners) {
-    listener();
-  }
-}
-
-function subscribe(listener: () => void): () => void {
-  listeners.add(listener);
-  return () => {
-    listeners.delete(listener);
-  };
-}
-
-/** Reads the live event-stream connection state from the shared store. */
-export function useConnectionState(): ConnectionState {
-  return useSyncExternalStore(subscribe, getConnectionState);
-}
-
-const BASE_RECONNECT_DELAY_MS = 1_000;
-const MAX_RECONNECT_DELAY_MS = 30_000;
-
-/** Exponential backoff for stream reconnect attempts, capped at 30s. */
-export function reconnectDelayMs(attempt: number): number {
-  return Math.min(BASE_RECONNECT_DELAY_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
-}
+// The fetch-based reader of a `text/event-stream` response, which only the agent live view
+// (`features/agent-view/useAgentStream.ts`) still reads its session's stream through.
 
 /**
  * Thrown by `readEventStream` when the connection request itself fails (as opposed to

@@ -3,9 +3,9 @@ import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useS
 import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isUnauthorized } from "./api/client";
-import { useLiveSocketState } from "./api/live-socket";
+import { useEventFeed } from "./api/event-feed";
+import { useLiveSocketPill } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
-import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
@@ -402,7 +402,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // flex column that hands it the height left below the compact header, capped above an iOS
   // on-screen keyboard while its composer has focus.
   const fillsViewport = routeFillsViewport(location.pathname);
-  const connection = useLiveSocketState();
+  const connection = useLiveSocketPill();
   const needsYouCount = useNeedsYouCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
   const unreadThreads = useRepliesCount();
@@ -564,7 +564,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
             phone's bottom bar. A socket Dispatch refuses carries no status the page can read, so
             nothing here is terminal: once reconnecting has gone on for two minutes the pill offers
             a reload, and the page keeps trying underneath. */}
-        {connection.stuck ? (
+        {connection === "stuck" ? (
           <p
             aria-live="polite"
             className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
@@ -575,7 +575,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
               Reload
             </button>
           </p>
-        ) : connection.state === "reconnecting" ? (
+        ) : connection === "reconnecting" ? (
           <p
             aria-live="polite"
             className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
@@ -745,7 +745,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 }
 
 function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
-  useEventStream();
+  useEventFeed();
   return (
     <KeymapProvider>
       <AppShell user={user} />

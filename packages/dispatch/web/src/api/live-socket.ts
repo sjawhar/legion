@@ -51,7 +51,7 @@ export function reconnectDelayMs(attempt: number): number {
   return Math.min(BASE_RECONNECT_DELAY_MS * 2 ** attempt, MAX_RECONNECT_DELAY_MS);
 }
 
-/** How often a socket is checked for silence while the tab stays visible. */
+/** How often the socket is checked for silence, from its creation until the page lets it go. */
 const SILENCE_CHECK_MS = 15_000;
 /** A lost sign-in is checked at most this often, however often the socket fails. */
 const SIGN_IN_CHECK_MS = 30_000;
@@ -108,8 +108,9 @@ export interface EventsHandlers {
   onEvent(id: string, event: unknown): void;
   /** Called each time the subscription is sent on an open socket, from within `subscribeEvents`
    *  when one is already open. `afterGap` is false on its first send and after a 4001; true after
-   *  any other loss of the socket, a failed attempt before the first open included, and after an
-   *  `ended`, when events may have been missed. */
+   *  any other loss of the socket, a failed attempt before the first open included, after an
+   *  `ended`, and after Dispatch refused the subscription (an `error` frame, which the page
+   *  answers by sending it again after a backoff), when events may have been missed. */
   onSubscribed(afterGap: boolean): void;
 }
 
@@ -164,8 +165,14 @@ interface EventsSubscription {
   readonly id: string;
   readonly handlers: EventsHandlers;
   /** Set when events may have been missed since the subscription was last sent: its socket was
-   *  lost, or Dispatch ended it. Cleared by the next send, which reports it (`onSubscribed`). */
+   *  lost, or Dispatch ended or refused it. Cleared by the next send, which reports it
+   *  (`onSubscribed`). */
   gap: boolean;
+  /** Dispatch's refusals of it in a row, since it last started (`events_start`): the backoff of
+   *  its next send. */
+  refusals: number;
+  /** Cancels the send a refusal scheduled, while one waits. */
+  cancelRetry: (() => void) | undefined;
 }
 
 interface AgentSubscription {
@@ -187,6 +194,12 @@ function liveSocketUrl(): string {
 function after(ms: number, fn: () => void): () => void {
   const handle = setTimeout(fn, ms);
   return () => clearTimeout(handle);
+}
+
+/** The backoff of attempt `attempt`, give or take a quarter, so pages that lost Dispatch together
+ *  do not all come back at the same moment. */
+function jittered(attempt: number): number {
+  return reconnectDelayMs(attempt) * (0.75 + Math.random() * 0.5);
 }
 
 export function createLiveSocket(queryClient: QueryClient): LiveSocket {
@@ -253,6 +266,8 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
     if (socket === null || !isOpen) return;
     socket.send(JSON.stringify(subscribeFrame(sub)));
     if (sub.kind !== "events") return;
+    sub.cancelRetry?.();
+    sub.cancelRetry = undefined;
     const afterGap = sub.gap;
     sub.gap = false;
     sub.handlers.onSubscribed(afterGap);
@@ -371,8 +386,16 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
         remove(sub, false);
         return sub.handlers.onUnavailable(frame.code, frame.message);
       case "events":
-        // It stays subscribed, and the next socket sends it again.
+        // Dispatch holds no subscription it refused either, but the page never gives the feed up:
+        // it is sent again after a backoff of its own, and that send reports the gap.
         console.error("live socket: Dispatch refused the event feed", frame);
+        sub.gap = true;
+        sub.cancelRetry?.();
+        sub.cancelRetry = after(jittered(sub.refusals), () => {
+          sub.cancelRetry = undefined;
+          sendSubscribe(sub);
+        });
+        sub.refusals += 1;
     }
   };
 
@@ -389,8 +412,12 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
         return onDelta(frame);
       case "freshness":
         return update({ verdict: { freshness: frame.freshness, stale: frame.stale } });
-      case "events_start":
-        return held(frame.sub, "events")?.handlers.onStart(frame.since);
+      case "events_start": {
+        const sub = held(frame.sub, "events");
+        if (sub === undefined) return;
+        sub.refusals = 0;
+        return sub.handlers.onStart(frame.since);
+      }
       case "event":
         return held(frame.sub, "events")?.handlers.onEvent(frame.id, frame.event);
       case "agent":
@@ -425,19 +452,46 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
     cancelStuck = after(LIVE_SOCKET_STUCK_MS, () => update({ stuck: true }));
   };
 
-  const replaceIfSilent = () => {
-    if (socket === null || Date.now() - lastFrameAt <= LIVE_SOCKET_SILENT_MS) return;
-    const silent = socket;
+  /** Lets the current socket go (4000): its subscriptions resume on the next, after a gap. */
+  const letGo = () => {
+    const dropped = socket;
+    if (dropped === null) return;
     socket = null;
     isOpen = false;
-    silent.close(REPLACED);
+    stopSilenceCheck?.();
+    stopSilenceCheck = undefined;
+    dropped.close(REPLACED);
     markGap();
     reconnecting();
+  };
+
+  const replaceIfSilent = () => {
+    if (socket === null || Date.now() - lastFrameAt <= LIVE_SOCKET_SILENT_MS) return;
+    letGo();
     open();
   };
 
   const onVisibility = () => {
     if (document.visibilityState === "visible") replaceIfSilent();
+  };
+
+  /** The network went: the socket is let go at once rather than left for the silence check, and
+   *  the next one waits out the backoff, unless the network comes back first. */
+  const onOffline = () => {
+    if (socket === null) return;
+    letGo();
+    retryLater();
+  };
+
+  /** The network came back: a backoff still waiting, or a handshake begun while it was gone, gives
+   *  way to a socket opened now, and the backoff starts over. An open socket carrying frames
+   *  stays. */
+  const onOnline = () => {
+    if (isOpen) return;
+    attempt = 0;
+    letGo();
+    cancelReconnect?.();
+    open();
   };
 
   const open = () => {
@@ -493,9 +547,12 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
       open();
       return;
     }
-    const delay = reconnectDelayMs(attempt) * (0.75 + Math.random() * 0.5);
+    retryLater();
+  };
+
+  const retryLater = () => {
+    cancelReconnect = after(jittered(attempt), open);
     attempt += 1;
-    cancelReconnect = after(delay, open);
   };
 
   const shutDown = () => {
@@ -506,6 +563,8 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
     cancelStuck?.();
     cancelStuck = undefined;
     document.removeEventListener("visibilitychange", onVisibility);
+    window.removeEventListener("offline", onOffline);
+    window.removeEventListener("online", onOnline);
     const closing = socket;
     socket = null;
     isOpen = false;
@@ -519,6 +578,8 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
       sendSubscribe(sub);
     } else if (cancelReconnect === undefined) {
       document.addEventListener("visibilitychange", onVisibility);
+      window.addEventListener("offline", onOffline);
+      window.addEventListener("online", onOnline);
       update({ since: null, state: "connecting", stuck: false });
       open();
     }
@@ -528,8 +589,11 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
   const remove = (sub: Subscription, unsubscribe: boolean) => {
     if (subs.get(sub.id) !== sub) return;
     subs.delete(sub.id);
+    // A feed Dispatch refused and the page has not sent again is one Dispatch does not hold.
+    const dispatchHolds = sub.kind !== "events" || sub.cancelRetry === undefined;
+    if (sub.kind === "events") sub.cancelRetry?.();
     if (sub.kind === "delivery" && byHash.get(sub.hash) === sub) byHash.delete(sub.hash);
-    if (unsubscribe) send({ type: "unsubscribe", sub: sub.id });
+    if (unsubscribe && dispatchHolds) send({ type: "unsubscribe", sub: sub.id });
     if (subs.size > 0 || idleClose) return;
     // A query switching keys drops its old subscription just before it adds its new one, so the
     // socket closes only if nothing subscribes again within this task.
@@ -589,7 +653,14 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
       return pending.promise;
     },
     subscribeEvents(handlers) {
-      const sub: EventsSubscription = { kind: "events", id: newId(), handlers, gap: false };
+      const sub: EventsSubscription = {
+        kind: "events",
+        id: newId(),
+        handlers,
+        gap: false,
+        refusals: 0,
+        cancelRetry: undefined,
+      };
       add(sub);
       return () => remove(sub, true);
     },
@@ -607,6 +678,7 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
     },
     close() {
       stopCache();
+      for (const sub of subs.values()) if (sub.kind === "events") sub.cancelRetry?.();
       subs.clear();
       byHash.clear();
       shutDown();
@@ -626,8 +698,22 @@ export function liveSocketFor(queryClient: QueryClient): LiveSocket {
   return live;
 }
 
-/** The live socket's state, for the connection pill and the freshness row. */
+/** The live socket's whole state, for the freshness row, which shows the last change time. */
 export function useLiveSocketState(): LiveSocketState {
   const live = liveSocketFor(useQueryClient());
   return useSyncExternalStore(live.onState, live.state);
+}
+
+/** What the shell's connection pill shows. */
+export type LiveSocketPill = "none" | "reconnecting" | "stuck";
+
+/** The connection pill's one value of the socket's state. The shell reads it rather than the
+ *  whole state, so a change time that moves with every delivery delta re-renders nothing there. */
+export function useLiveSocketPill(): LiveSocketPill {
+  const live = liveSocketFor(useQueryClient());
+  return useSyncExternalStore(live.onState, () => {
+    const { stuck, state } = live.state();
+    if (stuck) return "stuck";
+    return state === "reconnecting" ? "reconnecting" : "none";
+  });
 }
