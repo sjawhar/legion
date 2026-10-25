@@ -527,11 +527,13 @@ var containerRigs = []string{
 // containerModule is the import prefix every testcontainers package shares.
 const containerModule = "github.com/testcontainers/testcontainers-go"
 
-// dockerDriver matches a file of this module driving a container runtime by hand: the two spellings
-// of exec's run with docker as the command, and testcontainers' own Docker client. It is written
-// from pieces so that this file, which has to name them, is not itself a finding.
+// dockerDriver matches a file of this module driving a container runtime by hand: exec's run with
+// docker as the command, however the call spells its context argument, and testcontainers' own
+// Docker client. The context argument runs to the end of the line rather than to the first ')',
+// since the module already passes context.Background() inline and a test's own is t.Context().
+// It is written from pieces so that this file, which has to name them, is not itself a finding.
 var dockerDriver = regexp.MustCompile(
-	`exec\.Command(Context)?\([^)]*` + `"docker"` + `|NewDockerClient` + `WithOpts`)
+	`exec\.Command(Context)?\([^\n]*` + `"docker"` + `|NewDockerClient` + `WithOpts`)
 
 // No package of this module outside the rigs above may start a container: Envoy's agents have no
 // container runtime, and a test that needs one cannot run where they do. This pins the two ways
@@ -540,8 +542,8 @@ var dockerDriver = regexp.MustCompile(
 // own behind natslive, neither of which an untagged go list or this walk sees.
 func TestNoPackageOutsideTestnatsNeedsAContainerRuntime(t *testing.T) {
 	t.Run("imports", func(t *testing.T) {
-		for _, pkg := range containerImporters(t) {
-			t.Errorf("package %s imports %s, which needs a container runtime; start the server with testnats.Start, StartConfig or URL instead", pkg, containerModule)
+		for _, finding := range containerImporters(t) {
+			t.Errorf("package %s imports %s, which belongs to a container runtime; a test that needs a NATS server starts it with testnats.Start, StartConfig or URL", finding.pkg, finding.imported)
 		}
 	})
 	t.Run("docker", func(t *testing.T) {
@@ -573,9 +575,15 @@ func TestTheDockerDriverMatchCatchesEveryContextArgument(t *testing.T) {
 	}
 }
 
+// containerImport is a package of this module importing a testcontainers package, and the import
+// it was found by: a package reaching only testcontainers-go/wait has imported neither a runtime
+// client nor modules/nats, and the finding has to say which it did import.
+type containerImport struct{ pkg, imported string }
+
 // containerImporters lists every package of this module, outside the rigs allowed one, that
-// imports a testcontainers package, from its own sources or its tests'.
-func containerImporters(t *testing.T) []string {
+// imports a testcontainers package, from its own sources or its tests', with the first such
+// import of each.
+func containerImporters(t *testing.T) []containerImport {
 	t.Helper()
 	const format = `{{.ImportPath}} {{join .Imports " "}} {{join .TestImports " "}} {{join .XTestImports " "}}`
 	list := exec.Command("go", "list", "-f", format, "./...")
@@ -588,7 +596,7 @@ func containerImporters(t *testing.T) []string {
 		}
 		t.Fatalf("go list ./...: %v", err)
 	}
-	var importers []string
+	var importers []containerImport
 	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		fields := strings.Fields(line)
 		if len(fields) == 0 || slices.Contains(containerRigs, fields[0]) {
@@ -596,7 +604,7 @@ func containerImporters(t *testing.T) []string {
 		}
 		for _, imported := range fields[1:] {
 			if imported == containerModule || strings.HasPrefix(imported, containerModule+"/") {
-				importers = append(importers, fields[0])
+				importers = append(importers, containerImport{pkg: fields[0], imported: imported})
 				break
 			}
 		}
