@@ -546,3 +546,56 @@ func TestTheApprovalReadNamesTheLatestReviewsEventSequence(t *testing.T) {
 		t.Fatalf("approval of a review with no recorded sequence = %#v, want its at and no seq", read.Approval)
 	}
 }
+
+// The approval read names the review whose event committed last, not the one whose transaction
+// started last. Two reviews are written here as two real transactions: the second begins first and
+// takes the document owner's lock after the first commits, so it carries the earlier created_at
+// (its transaction's start) and the later event sequence. The read must name it, since every
+// reader of the approval — the Legion daemon's design gate above all — decides from the newest
+// review.
+func TestTheApprovalReadNamesTheReviewThatCommittedLast(t *testing.T) {
+	handler, database, deps := newTestServer(t, testServerOptions{})
+	issue := createInteractionIssue(t, handler, "TEST", "Review order", "A spec")
+	artifact := decodeBody[model.Artifact](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+	ctx := context.Background()
+	// The delayed transaction begins before the first review, so its now() — the artifact_reviews
+	// created_at default — is earlier than that review's.
+	delayed, err := database.Pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin the delayed review's transaction: %v", err)
+	}
+	defer func() { _ = delayed.Rollback(ctx) }()
+	if _, err := delayed.Exec(ctx, "select now()"); err != nil {
+		t.Fatalf("start the delayed review's transaction clock: %v", err)
+	}
+	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/reviews",
+		map[string]any{"state": "changes_requested", "reason": "Name the rollback path."}, "alice")
+	if response.Code != http.StatusCreated {
+		t.Fatalf("request changes: status=%d body=%s", response.Code, response.Body.String())
+	}
+	first := decodeBody[model.ArtifactReview](t, response)
+	// The production writer, so no time or sequence is fabricated.
+	reason := "And name who runs the restore."
+	second, event, err := docs.WriteReview(ctx, delayed, deps.Events, artifact, first.Version, "changes_requested",
+		model.Actor{Kind: "user", ID: "alice"}, &reason, nil)
+	if err != nil {
+		t.Fatalf("write the delayed review: %v", err)
+	}
+	if err := delayed.Commit(ctx); err != nil {
+		t.Fatalf("commit the delayed review: %v", err)
+	}
+	if !second.CreatedAt.Before(first.CreatedAt) || second.EventSeq == nil || *second.EventSeq <= *first.EventSeq {
+		t.Fatalf("delayed review at=%s seq=%v, first at=%s seq=%v; want the delayed one earlier in time and later in sequence",
+			second.CreatedAt, second.EventSeq, first.CreatedAt, first.EventSeq)
+	}
+	type orderedRead struct {
+		Approval struct {
+			Reason *string `json:"reason"`
+			Seq    *int64  `json:"seq"`
+		} `json:"approval"`
+	}
+	got := decodeBody[orderedRead](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID, nil, "alice"))
+	if got.Approval.Seq == nil || *got.Approval.Seq != int64(event.Seq) || got.Approval.Reason == nil || *got.Approval.Reason != reason {
+		t.Fatalf("approval = %#v, want the review that committed last (sequence %d, reason %q)", got.Approval, event.Seq, reason)
+	}
+}

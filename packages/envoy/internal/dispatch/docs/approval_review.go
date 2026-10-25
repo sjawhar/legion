@@ -22,6 +22,14 @@ const (
 // ReviewColumns selects one artifact_reviews row in the order ScanReview reads it.
 const ReviewColumns = `id::text, artifact_id::text, version, state, actor, reason, ask_id::text, created_at, event_seq`
 
+// ReviewOrder sorts a document's reviews newest first by the order their events committed: the
+// event sequence each review kept on its document's owner, then, for a review recorded before the
+// sequence was kept, its own time and id. Every row that carries a sequence was written after the
+// migration that added it, so it is newer than every row without one, which `nulls last` says.
+// created_at is the review's transaction start, so it places two reviews only when neither carries
+// a sequence.
+const ReviewOrder = `event_seq desc nulls last, created_at desc, id desc`
+
 // ScanReview decodes one ReviewColumns row.
 func ScanReview(row pgx.Row) (model.ArtifactReview, error) {
 	var review model.ArtifactReview
@@ -89,7 +97,7 @@ func LatestApprovedReview(ctx context.Context, q Queryer, artifactID string) (*m
 		select `+ReviewColumns+`
 		from artifact_reviews
 		where artifact_id = $1 and state = 'approved'
-		order by created_at desc, id desc
+		order by `+ReviewOrder+`
 		limit 1
 	`, artifactID)
 }
@@ -101,21 +109,29 @@ func latestReviewBy(ctx context.Context, q Queryer, artifactID, login string) (*
 		select `+ReviewColumns+`
 		from artifact_reviews
 		where artifact_id = $1 and actor->>'kind' = 'user' and lower(trim(actor->>'id')) = $2
-		order by created_at desc, id desc
+		order by `+ReviewOrder+`
 		limit 1
 	`, artifactID, login)
 }
 
 // changesRequestedSince reports whether anyone requested changes on review's document after
-// review was given.
+// review was given, in the order the two events committed: by their sequences when both carry one,
+// else a sequenced request after one that carries none, and by time and id when neither does
+// (ReviewOrder's rule, read one row at a time).
 func changesRequestedSince(ctx context.Context, q Queryer, review model.ArtifactReview) (bool, error) {
 	var requested bool
 	if err := q.QueryRow(ctx, `
 		select exists(
 			select 1 from artifact_reviews
-			where artifact_id = $1 and state = 'changes_requested' and (created_at, id) > ($2, $3::uuid)
+			where artifact_id = $1 and state = 'changes_requested'
+			and case
+				when $4::bigint is not null and event_seq is not null then event_seq > $4::bigint
+				when $4::bigint is not null then false
+				when event_seq is not null then true
+				else (created_at, id) > ($2, $3::uuid)
+			end
 		)
-	`, review.ArtifactID, review.CreatedAt, review.ID).Scan(&requested); err != nil {
+	`, review.ArtifactID, review.CreatedAt, review.ID, review.EventSeq).Scan(&requested); err != nil {
 		return false, fmt.Errorf("read reviews since the approval: %w", err)
 	}
 	return requested, nil
