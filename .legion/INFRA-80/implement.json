@@ -1,0 +1,75 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-80",
+  "completed": "2026-10-25T05:45:00Z",
+  "proof": [
+    {
+      "criterion": "2. An issue whose branch has been merged and deleted starts its agents.",
+      "surface": "The real `legion workspace-init provision` binary (built with `go build ./cmd/legion`) against a real bare git remote and a real feed mirror, provisioning into an empty root — the same command an issue pod's second init container runs.",
+      "command": "legion workspace-init provision --issue ACME-1 --repo acme/widgets --default-branch main --root /tmp/p2/root --credential-helper '!true' --feed /tmp/p2/feed, with refs/heads/legion/ACME-1 deleted from both the bare remote and the feed mirror",
+      "observed": "Exit 0 and `workspace-init: /tmp/p2/root/workspaces/acme/widgets/acme-1 on legion/ACME-1 from main`. The workspace holds a.txt alone, `jj log` shows legion/ACME-1 as an empty commit on main (5689171 'first'), and .jj/legion-created is written. The provision started the issue at the repository's default branch rather than failing on a branch that is gone.",
+      "headSha": "a5e26319624da4107d61115c7058270a0dceb383",
+      "negativeControl": "The same command with legion/ACME-1 still present on the remote and in the feed put the workspace on legion/ACME-1 at 0a8fec5e 'branch work' with b.txt present — so the deleted-branch run read the deletion rather than never looking for a branch."
+    },
+    {
+      "criterion": "1. No disk outlives a pod; the disk is created with the pod and deleted with it, at today's size and storage, and is found by its name and its pod owner.",
+      "surface": "The rendered Sandbox judged against the pinned production Agent Sandbox custom-resource definition (internal/runtime/sandbox/testdata/sandboxes.agents.x-k8s.io.yaml), whose schema walker reproduces the API server's pruning, plus the byte-for-byte manifest goldens.",
+      "command": "cd packages/daemon && go test ./internal/runtime/sandbox -run 'TestManifestGoldens|TestManifestMatchesTheSandboxCRD|TestAnIssuePodOwnsItsDiskAndItsSandboxOwnsNoVolume|TestTheControllersClaimTemplateCarriesItsProjectAndRoleAlone' -count=1",
+      "observed": "All pass. Every issue pod's `issue` volume is an `ephemeral.volumeClaimTemplate` with ReadWriteOnce, the configured storage class and size and empty metadata, and the Sandbox's spec.volumeClaimTemplates is absent; controller.json and controller-resume.json are unchanged, so the controller's Sandbox-owned claim is untouched.",
+      "headSha": "a5e26319624da4107d61115c7058270a0dceb383",
+      "negativeControl": "Setting ObjectMeta.Labels on that ephemeral claim template made TestManifestMatchesTheSandboxCRD fail on four cases with `.spec.podTemplate.spec.volumes[0].ephemeral.volumeClaimTemplate.metadata.labels: not in the schema; the API server prunes it` — the measurement behind departure 1, and why the disk carries no labels."
+    },
+    {
+      "criterion": "5. The configuration refusal: a deployment cannot keep sessions as files on a disk that dies with its pod.",
+      "surface": "The real `legion start --check-config` CLI against deploy/kubernetes/daemon/legion.yaml.example with its three token files, its two App PEMs and a kubeconfig staged.",
+      "command": "legion start --check-config --config legion.yaml (postgres), then the same file with session_store: pvc and session_dsn_secret removed, then with session_store omitted entirely",
+      "observed": "The example passes: exit 0, `Config OK: project=WIDGETS`. Both the explicit `pvc` and the omitted key exit 1 with `legion start: runtime.kubernetes.session_store must be 'postgres': an issue pod's disk is deleted with the pod, so a session kept as a file on it ('pvc') dies with it and the next launch's resume fails on the missing file, retiring the claim after three failures`.",
+      "headSha": "a5e26319624da4107d61115c7058270a0dceb383",
+      "negativeControl": "The unmodified example, which names postgres and its secret, exits 0 — so the refusal is the store's and not a broken fixture."
+    },
+    {
+      "criterion": "5. No code is left that reuses, repairs or inspects a disk from an earlier pod.",
+      "surface": "The tree itself at the pushed head.",
+      "command": "grep -rn 'LEGION_EXPECT_ISSUE_VOLUME\\|WorkspaceLost\\|workspace-recovered\\|hasRetainedSession\\|IssueHasSessions\\|ensureCloneConnectivity\\|mark-lost' packages docs scripts",
+      "observed": "17 hits, every one either history (packages/*/CHANGELOG.md, docs/solutions/, the contract-36 entries in internal/api/version.go and packages/pi-legion/AGENTS.md recording what was removed), a deliberate statement that the thing is gone (docs/kubernetes.md:723, the sessions-import runbook), or a negative assertion in the live proofs (scripts/e2e/stage4b-sandbox-tree.sh:6462 and scripts/e2e/README.md:1491, which assert the recovery marker and the lost-volume log line never appear in a run).",
+      "headSha": "a5e26319624da4107d61115c7058270a0dceb383",
+      "negativeControl": "The same grep against the branch's base returns the implementations themselves — workspace_init.go's exit-3 branch and recovery marker, observe.go's workspaceLostExitCode, machine.go's relaunchFresh, claims.go's IssueHasSessions, connectivity.go and cmd/legion/sessions.go's mark-lost."
+    }
+  ],
+  "filesChanged": [
+    "packages/daemon/internal/runtime/sandbox/podkind.go, manifest.go, names.go: an issue pod's disk is a generic ephemeral volume it declares itself (podKind.diskSource/claimTemplates, Runtime.diskSpec); the controller's Sandbox keeps its claim template.",
+    "packages/daemon/internal/runtime/sandbox/install.go: the boot census judges the disk by the Sandbox's pod kind and logs an accepted old-shape issue Sandbox by name.",
+    "packages/daemon/internal/runtime/sandbox/relaunch.go: supersededDisk and replaceSupersededSandbox delete and recreate an old-shape issue Sandbox at the issue's next launch; waitedOut reports a Pending pod's events.",
+    "packages/daemon/internal/config/kubernetes.go, internal/api/settings.go, deploy/kubernetes/daemon/legion.yaml.example: session_store must be postgres and session_dsn_secret is required with it.",
+    "packages/daemon/internal/runtime/sandbox/{manifest,podkind}.go, internal/launcher/launcher.go, cmd/legion/workspace_init.go: the file-session branches and the controller's sessions directory are deleted.",
+    "packages/daemon/cmd/legion/{workspace_init,sessions}.go, internal/runtime/{runtime,spawnspec}.go, internal/runtime/sandbox/observe.go, internal/daemon/specs.go, internal/supervise/{machine,table,lifecycle}.go, internal/store/claims.go: the lost-disk machinery is deleted; Observation.InitFailed keeps the one classification that mattered.",
+    "packages/daemon/internal/runtime/sandbox/{issue_suspend,cleanup}.go, internal/record/outbox.go, internal/store/issue_suspend.go, internal/workflow/{linger,check}.go, internal/daemon/outbox.go: stopping an issue always deletes its Sandbox; handOverSandbox is gone.",
+    "packages/daemon/internal/store/migrations/0051_issue_suspend_release.up.sql: strips the release key from queued issue_suspend rows.",
+    "packages/daemon/internal/workspace/{connectivity.go (deleted),config.go,alternates_test.go}: the clone-connectivity report goes; RemoveStaleGitLocks stays.",
+    "packages/daemon/internal/api/version.go, packages/contracts/fixtures/daemon-api/version.json, packages/pi-legion/{package.json,CHANGELOG.md,AGENTS.md}, packages/claude-envoy/{package.json,CHANGELOG.md,dist/envoy-channel.js}: the daemon/plugin contract is 36.",
+    "packages/daemon/internal/runtime/sandbox/live_*.go, scripts/e2e/stage4a-sandbox-runtime.sh, scripts/e2e/stage4b-sandbox-tree.sh, scripts/e2e/lib/{stage4b-verdict,smoke-cleanup}.test.ts: the live proofs read a disk that dies with its pod, under a session database.",
+    "docs/kubernetes.md, AGENTS.md, scripts/e2e/README.md, docs/site/src/content/docs/legion/{concepts,troubleshooting,running-legion}.md, skills/legion-worker/SKILL.md: the documentation, the cutover procedure, the new audit command and the rollback note."
+  ],
+  "trickyParts": [
+    "The claim template's metadata is pruned by the API server: the pinned CRD declares ephemeral.volumeClaimTemplate.metadata a bare `type: object` with no properties and no x-kubernetes-preserve-unknown-fields (testdata/sandboxes.agents.x-k8s.io.yaml:3326-3327). No pod-owned disk can carry the project and issue labels the spec's acceptance 1 originally asked for; it is found by its name (<pod>-issue) and its pod owner instead, and TestManifestMatchesTheSandboxCRD refuses any label set there.",
+    "spec.volumeClaimTemplates is immutable in the CRD (a CEL rule at :4087-4091), so an issue Sandbox of the previous shape can only be delete-and-created. The boot census therefore accepts it rather than refusing the whole daemon, and relaunch replaces it after awaitPodGone and before provision — the order matters, since the foreground delete reaps the role Secrets and the provisioning Secret the launch is about to write.",
+    "Observation.WorkspaceLost was excluded from ends(), and that exclusion is what keeps a pod whose init keeps failing from being read as displaced. It is kept under its own name, Observation.InitFailed, now true for any failed init container rather than exit code 3 alone; displaced() additionally requires the Sandbox's displacedAnnotation, which is written only when the daemon suspends a live pod, so the widening changes no observable behaviour.",
+    "record.IssueSuspend lost its release key while the outbox decodes strictly (DisallowUnknownFields), so a row the running release queued with \"release\":true would stall its issue's lifecycle lane forever after the upgrade. Migration 0051 strips the key from queued rows.",
+    "store.IssueSuspension's wait for every claim of the issue to retire had to go with the release flag, not merely because its reason (sessions on the volume the release deleted) is void, but because keeping it would deadlock: a parked child's claims are suspended, never retired, so a now-unconditional delete would wait on them forever."
+  ],
+  "deviations": [
+    "Plan task 13 (a dispatch ask for the operator's live run) was not done: the architect took the live Stage 4a run over, arranging it with the deployment session directly, and told me not to open the ask.",
+    "Beyond the plan: migration 0051 and the removal of store.IssueSuspension's retire-wait (both above). The architect accepted both as taken, and asked that the pull request body carry their reasoning, which it does.",
+    "Beyond the plan: the controller's init container no longer creates <root>/sessions, which nothing mounts once the sessions subPath mount is gone. Found by the ce-simplify-code pass.",
+    "The plan's departures 1-4 (the pruned labels, the audit command, keeping the stale git-lock sweep, rewriting rather than deleting the disk-full runbook) were all ruled on by the architect before implementation and are built as the plan has them; the spec was updated to match at version 39/40."
+  ],
+  "openQuestions": [
+    "The Agent Sandbox controller's pass-through of an ephemeral pod volume is unexercised: nothing in this repository can show that the controller hands the volume to the pod untouched, and no Legion pod can reach the cluster (kubectl auth can-i answers no to every Sandbox and PersistentVolumeClaim verb in the legion namespace). The live Stage 4a run against this head is its only judge. The architect has it and has been told to treat a failure as a reason to stop rather than to work around.",
+    "Three acceptance clauses are a person's to read, not an agent's: the first real production check after the deploy, the six named issues (INFRA-62, -66, -110, -113, -118, -127) working again or closed, and the cutover's 'every issue stopped with its work pushed'."
+  ],
+  "discoveredComplexity": [
+    "./internal/daemon, ./internal/admit, ./internal/intake, ./internal/natsauth and ./internal/testnats cannot run in a Legion pod: their test binaries need rootless Docker (testcontainers) or LEGION_TEST_PG_DSN, neither of which exists here. ./internal/runtime/tmux fails for want of tmux. ./internal/supervise needs CGO_ENABLED=0 exported or its three go/types tests fail inside the Go standard library (/opt/go/src/net, cgo). .github/scripts/check-bun-version.sh, check-gh-version.sh and check-release-credentials.sh need PyYAML, which the image lacks. Every other package and check was run green here; CI is the judge of the rest.",
+    "Deleting the lost-disk machinery reached further than the plan's file list: the supervise event table's IssueVolumeLost event and its Deps.VolumeLost fan-out, the tmux runtime's refusal of a recovered workspace, runtime.ValidateSpawnSpec's refusal of a resume beside a recovery, and the stage4b carried-child verdict helper, which judged daemon log lines nothing logs any more and now has one right answer."
+  ]
+}
