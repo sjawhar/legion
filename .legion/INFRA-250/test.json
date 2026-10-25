@@ -2,45 +2,42 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T15:53:50Z",
-  "round": 8,
-  "headSha": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
-  "mergeState": "MERGEABLE (BLOCKED only on review) at 67b4eec79930, read first. CI runs exist at this code head.",
-  "rebaseCheck": "rebase re-check 0d5a4bb4ea42 → 9ca2004f5f5f: fingerprint 530f09cb140042c966a4958557ad930dfad36484f1697dc1a9bcb27ec73f85ce at both heads, unchanged. Computed with the unchanged-diff check (jj diff from fork_point(\"main\"@origin | <head>) over '~(.legion | docs/solutions)', --context 0, @@ and index lines dropped, sha256). Round 7's verification of the branch's own content carries over. This round re-ran the bare gates, the acceptance script, and the A1 measurement the merge's new tests change.",
+  "completed": "2026-10-25T16:17:28Z",
+  "round": 9,
+  "headSha": "ae01882052a9",
+  "mergeState": "MERGEABLE (BLOCKED only on review) at 8734a081633e, read first.",
+  "productDelta": "`git diff --stat 9ca2004f5f5f ae01882052a9 -- . ':!.legion'` lists one file, packages/envoy/internal/kvwatch/kvwatch_test.go, +14 lines. `git log 9ca2004f5f5f..ae01882052a9` holds only that commit and three handoff commits. Nothing else moved.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Fingerprint recomputed: unchanged. In a git archive of 9ca2004f5f5f I ran the A1 suite, the acceptance script and the refusal test; results are in proof. The narrowed A1 claim holds on both halves. In the whole-module run 'rootless Docker not found' appears once, in cmd/listener's TestDispatchMentionResolvesASessionTheCacheHasNotRefilled, from testpg.URL (internal/testpg/testpg.go:46-52), reached from #2191's dispatch_resolution_test.go:149 because DISPATCH_TEST_DATABASE_URL is unset. Every one of cmd/listener's other 183 top-level tests passes in the pod. No NATS container is started anywhere."
+    "how": "In a git archive of ae01882052a9, TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache passes at the head (and 20/20 with -count=20), and internal/kvwatch passes whole (ok 60.0 s). Negative control: with the keeper's CreateKeyValue removed and nothing else changed, the test fails at its own assertion, 'kvwatch_test.go:846: the account keeper bucket is gone before the delete: …'. A second mutation shows the assertion reads the server's state, not a local: the keeper is created as written, then deleted through JetStream just before the check, leaving every local the test holds untouched, and the test fails the same way (kvwatch_test.go:851). js.StreamNames() asks the server. Restored, it passes."
   },
+  "notClaimed": "The race itself is not shown fixed. Its window is rare by construction, and a green run, the 20/20 here included, says nothing about it. What is measured: the account provably still holds the keeper's stream at the instant before the delete, so the delete cannot empty it and nats-server has no streams-directory removal to schedule.",
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A1, narrowed: every NATS container dependency is removed, so every package that failed only for want of a NATS server passes in a pod, and no failure or skip has a NATS server as its reason. Not claimed: that no package of this module panics for a container in a pod. That is false at this head because of a Postgres container, which is out of scope and routed to the controller.",
-      "surface": "The whole packages/envoy Go suite in this INFRA-250 worker pod (gVisor, 2 CPUs, go1.27.1, no container runtime), at the merged head.",
-      "command": "cd packages/envoy && go vet ./... ; DISPATCH_TEST_NO_CONTAINERS=1 go list ./... | grep -v /integration | xargs go test -count=1 -json ; go test ./internal/integration/ -timeout 300s -count=1 ; then go test ./cmd/listener/ -count=1 -skip '^(<the 4 tests of dispatch_resolution_test.go>)$' -json",
-      "observed": "vet exit 0. 69 ok, 5 FAIL; integration ok 97.8 s. 'rootless Docker not found' appears once, in cmd/listener / TestDispatchMentionResolvesASessionTheCacheHasNotRefilled, via testpg.URL. That panic ends the cmd/listener binary, which is why cmd/listener is one of the 5. With the 4 testpg-backed tests of dispatch_resolution_test.go skipped, cmd/listener passes 183 of 183 top-level tests (ok 181.6 s), with 0 rootless panics. The other four FAILs are the named residue: cmd/agent-secrets, cmd/agent-secrets-helper and internal/broker/helper (SO_PEERPIDFD and TTY prompts under gVisor), and internal/dispatch/pmdoc (getrusage's 10 ms steps). internal/dispatch/files passed in this batch.",
-      "headSha": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
-      "negativeControl": "Without the skip, the same cmd/listener run dies on the first testpg-backed test; with only that one skipped it dies on the next (TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled). The panic is Postgres's, in exactly that file, and in no NATS test."
+      "criterion": "Review round 3 finding: the restore test's delete-then-restore of one name must not race nats-server's streams-directory removal, because the delete must not empty the account.",
+      "surface": "internal/kvwatch's TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache against the in-process nats-server 2.10.29, in this pod.",
+      "command": "cd packages/envoy && go test ./internal/kvwatch/ -run '^TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache$' -count=1 (and -count=20) ; go test ./internal/kvwatch/ -count=1 ; the two mutations above",
+      "observed": "Passes, 20/20 included; the package passes whole. The assertion fails when the keeper is never created, and fails when the keeper exists in the test's locals but is gone on the server.",
+      "headSha": "ae01882052a9",
+      "negativeControl": "Keeper creation removed: 'kvwatch_test.go:846: the account keeper bucket is gone before the delete: the delete would empty the account and the restore would race the streams-directory removal', FAIL."
     },
     {
-      "criterion": "Bare gates at the merged head: CI green, envoy-go-race included, which is the lane that settles round 7's stream-store race fix.",
-      "surface": "GitHub Actions at 9ca2004f5f5f.",
-      "command": "gh run list --commit 9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb ; gh run view 40206938033 --json jobs ; job logs 121209965645 (envoy-go-race) and 121209965661 (envoy-go)",
-      "observed": "envoy-go-race success: `go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/`, every package ok, internal/bus ok 207.0 s. That is one green run of the configuration that failed at c9b95f0c, and one run does not prove a race gone; the cause fix (a fresh account per subtest) is proved separately, in round 7. envoy-go success: cmd/broker ok 58.0 s, so main's break is repaired through this merge; cmd/listener ok 165.1 s; internal/bus ok; internal/testnats ok; the natslive and integration steps success. Also success: broker-multiprocess, envoy-infra-go, envoy-smoke, envoy-e2e-local, dispatch-multiprocess, dispatch-memory, pi-legion, Tests, Worker Image, Docs. The dispatch job was still running when I read.",
-      "headSha": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
-      "negativeControl": "At c9b95f0c (round 6) envoy-go-race failed TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn/narrow with 'nats: error creating store for stream' (review round 2, job 121177536920)."
-    },
-    {
-      "criterion": "A3 after the merge: e2e-local.sh runs the real listener against its own natsd, including #2191's registry checks, and its refusals still hold.",
-      "surface": "The acceptance script and its refusal test, in a git archive of the merged head in this pod.",
-      "command": "cd packages/envoy && bash scripts/e2e-local.sh ; jq . out/e2e/registry-session-response.json ; cat out/e2e/registry-missing-response.json ; grep Version out/e2e/nats.log ; bash scripts/e2e-local.test.sh ; set -m; bash scripts/e2e-local.sh & kill -INT",
-      "observed": "Exit 0, PASS, 35 files in out/e2e. registry-session-response.json is the live session row (session_id ses_e2e_local, machine_id e2e-local, title 'Envoy local acceptance', capabilities [], three topics). registry-missing-response.json is exactly {\"error\":\"no live session ses_e2e_local_never_registered\"}; the script requires status 404 there and passed. nats.log: 'Starting nats-server … Version: 2.10.29', from the natsd the script built. e2e-local.test.sh: all five cases PASS. SIGINT mid-run: exit 130, lock free.",
-      "headSha": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
-      "negativeControl": "The test file's foreign-NATS case: with a stand-in greeter on the port the driver is told to use, the driver refuses with its own natsd's 'address already in use'; PASS here means that refusal fired."
+      "criterion": "The widened sweep's table accounts for every delete site in packages/envoy, and the one unprotected site is the one fixed.",
+      "surface": "The tree at ae01882052a9.",
+      "command": "grep -rnE '\\.(DeleteStream|DeleteKeyValue|DeleteObjectStore|PurgeStream)\\(' --include=*.go packages/envoy, excluding infra (which has none); spot-checks of the table rows by reading each site",
+      "observed": "26 matches. Two are production purges by subject or sequence, which delete no stream: internal/bus/stream.go:143 and internal/store/interest_markers.go:168. That leaves 24 matches across 23 sites, because the purgeThenDelete wrapper at interest_markers_test.go:529/532 is one site (used at :503, and its bucket is never put back). The table's rows that I spot-checked hold: kvwatch_test.go's six RecreateKeyValue sites (297, 335, 561, 638, 701, 830); cmd/listener main_test.go:4463 and :4565 and interest_markers_test.go:460/:480 never put the name back; kv_key_test.go:36/:160 are t.Cleanup deletes; the fixed site is now kvwatch_test.go:851, after the 14 inserted lines.",
+      "headSha": "ae01882052a9",
+      "negativeControl": "Round 7's call-shape sweep, mine, ran over this same tree and missed kvwatch_test.go:837-840, because a restore is a create under a name its pattern did not contain. The post-condition method finds it."
     }
   ],
+  "corrections": [
+    "My round-7 tester line said the sweep 'finds no third unprotected site'. It was false: kvwatch_test.go:837-840 was one. I marked it false in the PR body, pointing at the round-9 entry.",
+    "The CI line said that at 9ca2004f5f5f the runs 'settled 16 passed, 0 failed, 8 skipped'. GitHub's check runs for that commit are 18 success and 8 skipped (pr-title ran twice, and changes is a job). As the role that reads CI, I updated the counts. The envoy-go-race quote holds: job 121209965645 'ok github.com/sjawhar/envoy/internal/bus 207.027s', and 'WARNING: DATA RACE' appears 0 times in the job log.",
+    "The Size line, '39 files changed, +2057 −813', matches `git diff --shortstat 687c9e6f2b92 ae01882052a9`, the code head with its committed .legion/ files. Excluding .legion/ it is 35 files, +1651 −813. GitHub's pull request counter shows +2075 at the handoff head 8734a081633e because it counts that head's handoff files, and retro's removal of .legion/ will change it again."
+  ],
   "observations": [
-    "The 4 testpg-backed tests in cmd/listener/dispatch_resolution_test.go do not honour DISPATCH_TEST_NO_CONTAINERS, so in a pod the first one panics the cmd/listener binary and hides whatever tests follow. That is #2191's, ruled out of scope by the architect and routed to the controller as a sibling. It is not fixed here.",
-    "internal/dispatch/files passed in this batch. Round 7's implementer saw it fail in a batch and pass alone. Two observations do not decide whether it is load-dependent."
+    "CI at ae01882052a9: Docs success, PR Title success; Tests and Worker Image in progress; Legion Envoy and Contracts queued when I read, so envoy-go-race at this head is not settled. The change is test-only, inside internal/kvwatch, which envoy-go-race does not run."
   ]
 }
