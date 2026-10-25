@@ -121,7 +121,7 @@ export function ArchitecturePage({ project }: { project: string }): ReactNode {
       void queryClient.invalidateQueries({ queryKey: ["architecture-source", project] });
       void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey });
     },
-    write: (_: void, bounds) => api.syncArchitectureSource(project, bounds),
+    write: (_variables, bounds) => api.syncArchitectureSource(project, bounds),
   });
   const { component: selectedId, update, view } = usePaneState();
 

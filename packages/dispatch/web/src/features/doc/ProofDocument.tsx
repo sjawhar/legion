@@ -279,7 +279,7 @@ export function ProofDocument({
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
     },
-    write: (_: void, bounds) => api.rebuildArtifact(artifact.id, undefined, bounds),
+    write: (_variables, bounds) => api.rebuildArtifact(artifact.id, undefined, bounds),
   });
   const liveMarkdown = liveTextQuery.data?.markdown ?? "";
   const versionMarkdown =

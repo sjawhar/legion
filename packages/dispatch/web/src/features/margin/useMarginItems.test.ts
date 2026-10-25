@@ -5,6 +5,7 @@ import { createElement, type ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { Artifact, Comment, Event } from "../../api/types";
 import {
@@ -512,7 +513,7 @@ test("two accepts in one tick reach the server one after the other, in click ord
     // A second press of the same button before its answer is one request, not two.
     fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(1));
-    expect(acceptComment).toHaveBeenLastCalledWith("A");
+    expect(acceptComment).toHaveBeenLastCalledWith("A", keyedAttempt);
     await waitFor(() => expect(actionState().pending).toEqual(["A", "B"]));
 
     await act(async () => {
@@ -520,7 +521,7 @@ test("two accepts in one tick reach the server one after the other, in click ord
       await saves[0]?.promise;
     });
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2));
-    expect(acceptComment).toHaveBeenLastCalledWith("B");
+    expect(acceptComment).toHaveBeenLastCalledWith("B", keyedAttempt);
     await waitFor(() => expect(actionState().pending).toEqual(["B"]));
 
     await act(async () => {
@@ -559,7 +560,7 @@ test("a failed action drops the clicks queued behind it and shows its error", as
     // The queue is gone, not stuck: the next click goes straight out.
     fireEvent.click(screen.getByRole("button", { name: "Accept C" }));
     await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2));
-    expect(acceptComment).toHaveBeenLastCalledWith("C");
+    expect(acceptComment).toHaveBeenLastCalledWith("C", keyedAttempt);
   } finally {
     unmount();
     acceptComment.mockRestore();
@@ -611,7 +612,8 @@ function actionFailureShown(): { message: string; retryable: boolean } | null {
 
 // A failed action says what failed. A refusal of what an accept would write carries the API's own
 // reason and offers no Retry, since the same request is refused every time; any other answer from
-// the API shows its reason and can be retried; a failure with no answer keeps the generic line.
+// the API shows its reason and can be retried; a failure with no answer keeps the generic line. A
+// 5xx is no answer at all: the action is tried again under its key, and nothing shows as failed.
 test("a failed action carries the API's reason, and a refusal of what it writes offers no retry", async () => {
   for (const { error, want } of [
     {
@@ -653,13 +655,6 @@ test("a failed action carries the API's reason, and a refusal of what it writes 
       want: { message: "the suggestion's text is still loading", retryable: true },
     },
     {
-      error: new ApiError(503, {
-        code: "DOC_SERVICE_UNAVAILABLE",
-        error: "document service unavailable",
-      }),
-      want: { message: "document service unavailable", retryable: true },
-    },
-    {
       error: new Error("offline"),
       want: { message: "Could not save this action.", retryable: true },
     },
@@ -673,5 +668,22 @@ test("a failed action carries the API's reason, and a refusal of what it writes 
       unmount();
       acceptComment.mockRestore();
     }
+  }
+
+  const acceptComment = spyOn(api, "acceptComment")
+    .mockRejectedValueOnce(
+      new ApiError(503, { code: "DOC_SERVICE_UNAVAILABLE", error: "document service unavailable" })
+    )
+    .mockResolvedValueOnce({} as never);
+  const { unmount } = renderActionButtons();
+  try {
+    fireEvent.click(screen.getByRole("button", { name: "Accept A" }));
+    await waitFor(() => expect(acceptComment).toHaveBeenCalledTimes(2), { timeout: 3_000 });
+    expect(actionFailureShown()).toBeNull();
+    const [first, again] = acceptComment.mock.calls.map(([, bounds]) => bounds.key);
+    expect(again).toBe(first);
+  } finally {
+    unmount();
+    acceptComment.mockRestore();
   }
 });

@@ -57,6 +57,8 @@ export function useIssueComponents(
   const detailKey = ["issue", issue.key] as const;
   const treeKey = ["architecture", issue.project] as const;
   const mutation = useKeyedWrite({
+    // The components line says why a save was refused, beside the picker it came from.
+    inline: true,
     label: () => `Components of ${issue.key}`,
     write: (input: IssueComponentsInput, bounds) =>
       api.patchIssue(issue.key, { components: input }, bounds),

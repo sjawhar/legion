@@ -70,6 +70,12 @@ function outcome(pending: Promise<unknown>): Promise<unknown> {
   );
 }
 
+/** The bounds one press of a write gives the client: its key, which a `POST` or a `PATCH` sends as
+ *  `Idempotency-Key` and a `PUT` or a `DELETE` leaves off. */
+function keyed(key: string): { key: string } {
+  return { key };
+}
+
 /** Runs `body` on the fake clock. A timer left at zero delay would hang a later test's `waitFor`
  *  once the real clock is back, so the fake one moves a millisecond before it goes. */
 async function onFakeClock(body: () => Promise<void>): Promise<void> {
@@ -252,7 +258,7 @@ test("a POST carries no deadline", async () => {
     const stub = heldFetch();
     const api = createApiClient(stub.fetch);
 
-    const created = api.createIssue({ project: "CORE", title: "Slow to create" });
+    const created = api.createIssue({ project: "CORE", title: "Slow to create" }, keyed("write-1"));
     jest.advanceTimersByTime(10 * 60_000);
     expect(stub.requests[0]?.init?.signal).toBeUndefined();
     stub.answer(Response.json({ key: "CORE-1" }));
@@ -270,8 +276,8 @@ test("a write given a deadline is held to it", async () => {
     const sent = outcome(
       api.createAgentMessage(
         "planner-session",
-        { body: "Ready?", delivery: "btw", idempotency_key: "send-1" },
-        { deadlineMs: 15_000 }
+        { body: "Ready?", delivery: "btw" },
+        { ...keyed("send-1"), deadlineMs: 15_000 }
       )
     );
     jest.advanceTimersByTime(15_000);
@@ -291,8 +297,8 @@ test("a write given a deadline is held to it, its body included", async () => {
 
     const sent = outcome(
       api.createBroadcast(
-        { body: "Ready?", delivery: "btw", idempotency_key: "send-1", session_ids: ["planner"] },
-        { deadlineMs: 15_000 }
+        { body: "Ready?", delivery: "btw", session_ids: ["planner"] },
+        { ...keyed("send-1"), deadlineMs: 15_000 }
       )
     );
     const signal = stub.requests[0]?.init?.signal;
@@ -373,13 +379,18 @@ test("API client uploads inline artifact content as JSON and files as multipart"
   const stub = stubFetch(() => Response.json({ artifact: {}, version: {} }));
   const api = createApiClient(stub.fetch);
 
-  await api.uploadArtifact({ issue: "CORE-1" }, { content: "# Spec\n", name: "spec.md" });
+  await api.uploadArtifact(
+    { issue: "CORE-1" },
+    { content: "# Spec\n", name: "spec.md" },
+    keyed("upload-1")
+  );
   await api.uploadArtifact(
     { issue: "CORE-1" },
     {
       file: new File(["spec"], "spec.md", { type: "text/markdown" }),
       name: "spec.md",
-    }
+    },
+    keyed("upload-2")
   );
 
   const [inline, multipart] = stub.requests;
@@ -397,17 +408,24 @@ test("API client sends the documented method and JSON body for mutations", async
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
 
-  await api.createProject({
-    actor: { id: "session-1", kind: "session" },
-    key: "CORE",
-    name: "Core",
-  });
-  await api.patchIssue("CORE-1", { status: "done" });
-  await api.answerAsk("ask-1", {
-    selected: ["Ship"],
-    text: "Approved",
-    expected_edited_at: "2026-09-12T12:00:00Z",
-  });
+  await api.createProject(
+    {
+      actor: { id: "session-1", kind: "session" },
+      key: "CORE",
+      name: "Core",
+    },
+    keyed("write-1")
+  );
+  await api.patchIssue("CORE-1", { status: "done" }, keyed("write-2"));
+  await api.answerAsk(
+    "ask-1",
+    {
+      selected: ["Ship"],
+      text: "Approved",
+      expected_edited_at: "2026-09-12T12:00:00Z",
+    },
+    keyed("write-3")
+  );
 
   expect(stub.requests.map(({ init, path }) => [init?.method, path])).toEqual([
     ["POST", "/api/v1/projects"],
@@ -431,8 +449,8 @@ test("API client sends comment edits and reopen actions to their endpoints", asy
   const stub = stubFetch();
   const api = createApiClient(stub.fetch);
 
-  await api.editComment("comment-1", { body: "Revised comment" });
-  await api.reopenComment("comment-1");
+  await api.editComment("comment-1", { body: "Revised comment" }, keyed("write-1"));
+  await api.reopenComment("comment-1", keyed("write-2"));
 
   expect(stub.requests.map(({ init, path }) => [init?.method, path])).toEqual([
     ["PATCH", "/api/v1/comments/comment-1"],
@@ -467,7 +485,7 @@ test("API client sends architecture source requests to their routes", async () =
   await settingsApi.listArchitectureSources();
   await settingsApi.getArchitectureSource("CORE");
   await settingsApi.putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" });
-  await settingsApi.syncArchitectureSource("CORE");
+  await settingsApi.syncArchitectureSource("CORE", keyed("write-1"));
   await settingsApi.deleteArchitectureSource("CORE");
 
   expect(stub.requests.map(({ init, path }) => [init?.method ?? "GET", path])).toEqual([
@@ -493,13 +511,17 @@ test("API client sends inline artifacts as JSON", async () => {
       content: "# Draft",
       name: "spec.md",
       summary: "Initial",
-    }
+    },
+    keyed("upload-1")
   );
 
   expect(stub.requests.map(({ init, path }) => [init?.method, path])).toEqual([
     ["POST", "/api/v1/issues/CORE-1/artifacts"],
   ]);
-  expect(stub.requests[0]?.init?.headers).toEqual({ "Content-Type": "application/json" });
+  expect(stub.requests[0]?.init?.headers).toEqual({
+    "Content-Type": "application/json",
+    "Idempotency-Key": "upload-1",
+  });
   expect(JSON.parse(stub.requests[0]?.body as string)).toEqual({
     content: "# Draft",
     name: "spec.md",
@@ -571,13 +593,14 @@ test("API client reaches project artifact and owner-scoped document endpoints", 
   await api.listProjectArtifacts("CORE", true);
   await api.uploadArtifact(
     { project: "CORE" },
-    { content: "# Design notes\n", name: "Design notes" }
+    { content: "# Design notes\n", name: "Design notes" },
+    keyed("upload-1")
   );
   await api.getProjectArtifact("CORE", "design-notes");
   await api.listArtifactAsks("artifact-1", "open");
-  await api.createArtifactAsk("artifact-1", { question: "Ship?" });
+  await api.createArtifactAsk("artifact-1", { question: "Ship?" }, keyed("write-1"));
   await api.listArtifactComments("artifact-1");
-  await api.createArtifactComment("artifact-1", { body: "Looks good" });
+  await api.createArtifactComment("artifact-1", { body: "Looks good" }, keyed("write-2"));
   await api.getArtifactBlocks("artifact-1");
   await api.getIssueReferences("CORE-1");
 
@@ -604,7 +627,8 @@ test("API client reaches an agent conversation's artifacts under the agent's ses
 
   await api.uploadArtifact(
     { session: "ses/1" },
-    { file: new File(["png"], "shot.png", { type: "image/png" }), name: "shot.png" }
+    { file: new File(["png"], "shot.png", { type: "image/png" }), name: "shot.png" },
+    keyed("upload-1")
   );
   await api.getAgentArtifact("ses/1", "shot-png");
 
@@ -771,10 +795,10 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.listProjects();
   await api.listIssues();
   await api.search("astrolabe");
-  await api.createIssue({ project: "CORE", title: "Ship it" });
+  await api.createIssue({ project: "CORE", title: "Ship it" }, keyed("write-1"));
   await api.getIssue("CORE-1");
   await api.getInbox("CORE");
-  await api.createAsk("CORE-1", { question: "Ship?" });
+  await api.createAsk("CORE-1", { question: "Ship?" }, keyed("write-2"));
   await api.listIssueAsks("CORE-1");
   await api.listIssueAskThreads("CORE-1");
   await api.getAsk("ask-1");
@@ -783,17 +807,22 @@ test("API client reaches every remaining documented endpoint", async () => {
   await api.listMyReplies({ issue: "CORE-1", limit: 200 });
   await api.listMyReplies({ artifact: "artifact-1", limit: 200 });
   await api.markThreadRead("comment-1", "2026-10-12T00:00:00.000Z");
-  await api.createComment("CORE-1", { body: "Looks good" });
-  await api.resolveComment("comment-1");
-  await api.acceptComment("comment-1");
-  await api.rejectComment("comment-1");
-  await api.createCommentDelivery("comment-1", "session:planner-session", "steer");
-  await api.createMessage("CORE-1", { body: "Ready" });
-  await api.createAgentMessage("planner-session", {
-    body: "Ready?",
-    delivery: "btw",
-    idempotency_key: "send-1",
-  });
+  await api.createComment("CORE-1", { body: "Looks good" }, keyed("write-3"));
+  await api.resolveComment("comment-1", keyed("write-4"));
+  await api.acceptComment("comment-1", keyed("write-5"));
+  await api.rejectComment("comment-1", keyed("write-6"));
+  await api.createCommentDelivery(
+    "comment-1",
+    "session:planner-session",
+    "steer",
+    keyed("write-7")
+  );
+  await api.createMessage("CORE-1", { body: "Ready" }, keyed("write-8"));
+  await api.createAgentMessage(
+    "planner-session",
+    { body: "Ready?", delivery: "btw" },
+    keyed("send-1")
+  );
   await api.listAgentMessages("planner-session");
   await api.listArtifacts("CORE-1");
   await api.listAgents();
@@ -802,20 +831,21 @@ test("API client reaches every remaining documented endpoint", async () => {
     {
       file: new File(["spec"], "spec.md", { type: "text/markdown" }),
       name: "spec.md",
-    }
+    },
+    keyed("upload-1")
   );
   await api.getArtifact("artifact-1");
   await api.getArtifactText("artifact-1");
   await api.getArtifactVersion("artifact-1", 3);
-  await api.createArtifactVersion("artifact-1", { summary: "Save" });
+  await api.createArtifactVersion("artifact-1", { summary: "Save" }, keyed("write-9"));
   await api.listArtifactReviews("artifact-1");
-  await api.createArtifactReview("artifact-1", { state: "approved" });
+  await api.createArtifactReview("artifact-1", { state: "approved" }, keyed("write-10"));
   await api.getMyState();
   await api.putIssueState("CORE-1", { pinned: true });
   await api.getMyAgentState();
   await api.putAgentState("planner-session", { cleared_before: "2026-09-15T20:51:00.000Z" });
   await api.whoAmI();
-  await api.logout();
+  await api.logout(keyed("write-11"));
   await api.githubRest("repos/acme/dispatch");
   await api.getDeliverySettings();
   await api.putDeliverySettings({
@@ -883,7 +913,7 @@ test("API client keeps only small idempotent /me/ writes alive during navigation
   await api.putIssueState("CORE-1", { pinned: true });
   await api.putAgentState("planner-session", { cleared_before: "2026-09-15T20:51:00.000Z" });
   await api.revokeAgentToken("token-1");
-  await api.createAgentToken({ name: "planner" });
+  await api.createAgentToken({ name: "planner" }, keyed("write-1"));
   await api.putIssueState("CORE-1", { dismissed: oversizedDismissed });
 
   const [smallIssueState, agentState, revokedToken, createdToken, oversizedIssueState] =
@@ -897,6 +927,110 @@ test("API client keeps only small idempotent /me/ writes alive during navigation
     64 * 1024
   );
   expect(oversizedIssueState?.init?.keepalive).toBeUndefined();
+});
+
+/**
+ * The one keyed write path, over every write method the client has. A `POST` or a `PATCH` names
+ * the person's action to Dispatch by the caller's key, so a repeat of it is that one write there;
+ * a `PUT` or a `DELETE` is the same write however often it is made, so it carries no key and is
+ * let finish as the page goes. A method this list forgets is a write that would reach Dispatch
+ * unnamed, which is what this test is for: every write method of the client is called here, and
+ * the ones that carry a key and the ones that do not are both named.
+ */
+test("every POST and PATCH sends its Idempotency-Key, and no PUT or DELETE does", async () => {
+  const stub = stubFetch(() => Response.json({ artifact: {}, version: {} }));
+  const api = createApiClient(stub.fetch);
+  const bounds = keyed("press-1");
+
+  await api.createProject({ key: "CORE", name: "Core" }, bounds);
+  await api.syncArchitectureSource("CORE", bounds);
+  await api.createAgentToken({ name: "planner" }, bounds);
+  await api.createIssue({ project: "CORE", title: "Ship it" }, bounds);
+  await api.patchIssue("CORE-1", { status: "done" }, bounds);
+  await api.createAsk("CORE-1", { question: "Ship?" }, bounds);
+  await api.answerAsk(
+    "ask-1",
+    { expected_edited_at: null, selected: ["Ship"], text: "Yes" },
+    bounds
+  );
+  await api.createComment("CORE-1", { body: "Looks good" }, bounds);
+  await api.resolveComment("comment-1", bounds);
+  await api.reopenComment("comment-1", bounds);
+  await api.editComment("comment-1", { body: "Revised" }, bounds);
+  await api.acceptComment("comment-1", bounds);
+  await api.rejectComment("comment-1", bounds);
+  await api.createCommentDelivery("comment-1", "session:planner", "steer", bounds);
+  await api.createMessage("CORE-1", { body: "Ready" }, bounds);
+  await api.createAgentMessage("planner-session", { body: "Ready?", delivery: "btw" }, bounds);
+  await api.createBroadcast({ body: "All", delivery: "btw", session_ids: ["planner"] }, bounds);
+  await api.createMessageDelivery("message-1", "btw", bounds);
+  await api.uploadArtifact({ issue: "CORE-1" }, { content: "# Spec\n", name: "spec.md" }, bounds);
+  await api.uploadArtifact(
+    { issue: "CORE-1" },
+    { file: new File(["spec"], "spec.md", { type: "text/markdown" }), name: "spec.md" },
+    bounds
+  );
+  await api.rebuildArtifact("artifact-1", undefined, bounds);
+  await api.createArtifactVersion("artifact-1", { summary: "Save" }, bounds);
+  await api.createArtifactReview("artifact-1", { state: "approved" }, bounds);
+  await api.createArtifactAsk("artifact-1", { question: "Ship?" }, bounds);
+  await api.createArtifactComment("artifact-1", { body: "Looks good" }, bounds);
+  await api.createDeliverySessionGroup({ name: "Pair", sessions: ["planner"] }, bounds);
+  await api.updateDeliverySessionGroup("group-1", { name: "Trio" }, bounds);
+  await api.logout(bounds);
+  await api.approveCredentialRecord("record-1", {}, bounds);
+  await api.denyCredentialRecord("record-1", {}, bounds);
+  await api.lookupMachineCredential("ABCD1234", bounds);
+  await api.revokeCredentialGrant("grant-1", bounds);
+  await api.revokeMachineLogin("credential-1", bounds);
+  const keyedWrites = stub.requests.length;
+
+  await api.putRepoProject("owner/repo", { project: "CORE" }, bounds);
+  await api.deleteRepoProject("owner/repo", bounds);
+  await api.putArchitectureSource("CORE", { branch: "main", repo: "legion/arch" }, bounds);
+  await api.deleteArchitectureSource("CORE", bounds);
+  await api.revokeAgentToken("token-1", bounds);
+  await api.releaseIssueClaim("CORE-1", bounds);
+  await api.snoozeAsk("ask-1", "2026-10-26T00:00:00Z", bounds);
+  await api.unsnoozeAsk("ask-1", bounds);
+  await api.markThreadRead("thread-1", "2026-10-25T00:00:00Z", bounds);
+  await api.removeAskFollower("ask-1", "planner", bounds);
+  await api.unsubscribeArtifactSession("artifact-1", "planner", bounds);
+  await api.unsubscribeIssueSession("CORE-1", "planner", bounds);
+  await api.putDeliverySettings(
+    {
+      deploy_repo: "acme/widgets",
+      deploy_workflow_path: ".github/workflows/deploy.yml",
+      excluded_repos: [],
+      population_authors: ["octocat"],
+      pr_checks_workflow_path: ".github/workflows/pr-checks.yml",
+      production_job_names: ["widgets-release"],
+    },
+    bounds
+  );
+  await api.deleteDeliverySessionGroup("group-1", bounds);
+  await api.putIssueState("CORE-1", { pinned: true }, bounds);
+  await api.putAgentState("planner-session", { cleared_before: "2026-10-25T00:00:00Z" }, bounds);
+
+  const keyOf = ({ init }: { init?: RequestInit }) =>
+    new Headers(init?.headers).get("Idempotency-Key");
+  const keyedRequests = stub.requests.slice(0, keyedWrites);
+  const idempotentRequests = stub.requests.slice(keyedWrites);
+  expect(keyedRequests).not.toHaveLength(0);
+  expect(idempotentRequests).not.toHaveLength(0);
+  // Named by path, so a method whose key went missing says which write it was.
+  expect(
+    keyedRequests.filter((request) => keyOf(request) !== "press-1").map((it) => it.path)
+  ).toEqual([]);
+  expect(
+    keyedRequests.filter(({ init }) => init?.method !== "POST" && init?.method !== "PATCH")
+  ).toEqual([]);
+  expect(
+    idempotentRequests.filter((request) => keyOf(request) !== null).map((it) => it.path)
+  ).toEqual([]);
+  expect(
+    idempotentRequests.filter(({ init }) => init?.method !== "PUT" && init?.method !== "DELETE")
+  ).toEqual([]);
 });
 
 test("API client exposes the current state with a stale state-write conflict", async () => {

@@ -103,12 +103,14 @@ test("preselects the route's project, submits title and spec, and opens the crea
   }
 });
 
-test("a failed create keeps the dialog and draft, shows the server message, and retries", async () => {
+// A 5xx is no verdict: the write is tried again under its key on its own. Dispatch's refusal is
+// one, so the dialog keeps the draft, says why, and Retry asks again.
+test("a refused create keeps the dialog and draft, shows the server message, and retries", async () => {
   let attempts = 0;
   const view = renderDialog(async (input) => {
     attempts += 1;
     if (attempts === 1) {
-      throw new ApiError(500, { error: "database unavailable" });
+      throw new ApiError(409, { code: "PROJECT_LOCKED", error: "the project is being moved" });
     }
     return issue(input, "CORE-3");
   });
@@ -120,7 +122,7 @@ test("a failed create keeps the dialog and draft, shows the server message, and 
     fireEvent.submit(screen.getByRole("dialog", { name: "Create issue" }));
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("database unavailable");
+    expect(alert.textContent).toContain("the project is being moved");
     expect(screen.getByRole<HTMLInputElement>("textbox", { name: "Title" }).value).toBe(
       "Flaky create"
     );

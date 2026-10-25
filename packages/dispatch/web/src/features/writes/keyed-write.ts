@@ -1,5 +1,7 @@
 import {
+  AnswerNotKeptError,
   ApiError,
+  isKeyCommitted,
   isKeyInFlight,
   RequestTimeoutError,
   type WriteBounds,
@@ -102,8 +104,10 @@ function undecided(error: unknown): boolean {
  * or with a 2xx `decided` says is not yet the outcome, is made again after 1 s, 2 s, 4 s … never
  * more than 30 s apart, so however many of them reach Dispatch, the key makes it act once.
  * Resolves with any other 2xx; rejects with anything else at once - a 4xx, its refusal;
- * `AnswerNotKeptError` for a write that ran but whose answer Dispatch did not keep; an error of
- * the page's own. `signal` stops the trying between attempts - a wait ends at once, an attempt in
+ * `AnswerNotKeptError` for a write that landed with no answer to give, which a replay that did
+ * not keep the first answer says, and so does `409 KEY_COMMITTED` (the answer was lost before
+ * Dispatch stored it, whether the attempt before was dropped or answered 5xx); an error of the
+ * page's own. `signal` stops the trying between attempts - a wait ends at once, an attempt in
  * flight is let finish, since it may already have reached Dispatch and its answer is still the
  * write's - and the write then rejects with `SendStoppedError`.
  */
@@ -118,6 +122,7 @@ export async function writeUnderKey<T>(
       const answer = await attempt({ deadlineMs: KEYED_SEND_ATTEMPT_MS, key, sent });
       if (decided(answer)) return answer;
     } catch (error) {
+      if (isKeyCommitted(error)) throw new AnswerNotKeptError(error.status, error.message);
       if (!undecided(error)) throw error;
     }
     if (!(await pause(backoff, signal))) throw new SendStoppedError();

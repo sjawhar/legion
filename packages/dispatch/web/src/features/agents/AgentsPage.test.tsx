@@ -1,4 +1,4 @@
-import { expect, jest, spyOn, test } from "bun:test";
+import { expect, jest, type Mock, spyOn, test } from "bun:test";
 import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 import {
   focusManager,
@@ -23,19 +23,24 @@ import type {
   UserAgentStates,
 } from "../../api/types";
 import { AuthGate } from "../../app";
-import { resetKeyedSendStorage } from "../conversation/keyed-send-storage";
-import {
-  KEYED_SEND_ATTEMPT_MS,
-  KEYED_SEND_LATE_TEXT,
-  SendStoppedError,
-} from "../conversation/send-request";
+import { KEYED_SEND_LATE_TEXT } from "../conversation/send-request";
+import { KEYED_SEND_ATTEMPT_MS, SendStoppedError } from "../writes/keyed-write";
+import { resetWriteStorage } from "../writes/write-storage";
 import { orderAgents, partitionAgents } from "./AgentsPage";
 import { matchesFilters, searchWords } from "./agent-search";
 import { broadcastPlan, broadcastSendState, composedBroadcast } from "./broadcast-plan";
 
 /** What each attempt of a message to one agent, or of a broadcast, is held to, beside what it
- *  carries. */
-const keyedAttempt = { deadlineMs: KEYED_SEND_ATTEMPT_MS };
+ *  carries: its deadline and the key that names the press (`Idempotency-Key`). */
+const keyedAttempt = expect.objectContaining({
+  deadlineMs: KEYED_SEND_ATTEMPT_MS,
+  key: expect.any(String),
+});
+
+/** The key each message to one agent went under, in order. */
+function messageKeys(createAgentMessage: Mock<typeof api.createAgentMessage>): string[] {
+  return createAgentMessage.mock.calls.map(([, , bounds]) => bounds.key);
+}
 
 /** Dispatch's refusal of a broadcast. A 4xx is the one failure a broadcast is not tried again
  *  after under its key: a failed fetch, a 5xx or a 429 is. */
@@ -292,7 +297,7 @@ test("an agent card sends a plain message in the mode the session takes", async 
     await waitFor(() =>
       expect(page.createAgentMessage).toHaveBeenCalledWith(
         "reviewer-session",
-        { body: "Is the review done?", delivery: "aside", idempotency_key: expect.any(String) },
+        { body: "Is the review done?", delivery: "aside" },
         keyedAttempt
       )
     );
@@ -823,7 +828,7 @@ test("Agents sends without an issue through the agent message route", async () =
     await waitFor(() =>
       expect(page.createAgentMessage).toHaveBeenCalledWith(
         "planner-session",
-        { body: "Check the deployment", delivery: "btw", idempotency_key: expect.any(String) },
+        { body: "Check the deployment", delivery: "btw" },
         keyedAttempt
       )
     );
@@ -881,11 +886,15 @@ test("Agents keeps selected-issue sends on the issue message route", async () =>
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
     await waitFor(() =>
       // Planner takes Aside and BTW but not Send, so the plain message is an Aside.
-      expect(page.createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "@Planner Track this under Core",
-        delivery: "aside",
-        mentions: [{ target: "session:planner-session" }],
-      })
+      expect(page.createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "@Planner Track this under Core",
+          delivery: "aside",
+          mentions: [{ target: "session:planner-session" }],
+        },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -987,12 +996,16 @@ test("Agents keeps an issue-attached legacy reply on its issue message route", a
     fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
 
     await waitFor(() =>
-      expect(page.createMessage).toHaveBeenCalledWith("CORE-1", {
-        body: "Follow up",
-        delivery: "btw",
-        in_reply_to: "message-1",
-        target: "session:planner-session",
-      })
+      expect(page.createMessage).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "Follow up",
+          delivery: "btw",
+          in_reply_to: "message-1",
+          target: "session:planner-session",
+        },
+        keyedAttempt
+      )
     );
     expect(page.createAgentMessage).not.toHaveBeenCalled();
   } finally {
@@ -1036,13 +1049,13 @@ test("Agents retain targeted-message retries and attempt history", async () => {
     expect(sameMode.hasAttribute("disabled")).toBe(false);
     fireEvent.click(retry);
     await waitFor(() =>
-      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer")
+      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer", keyedAttempt)
     );
     // The same-mode Retry re-sends the attempt's own mode, the only retry that cannot deliver
     // the message twice.
     fireEvent.click(sameMode);
     await waitFor(() =>
-      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "btw")
+      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "btw", keyedAttempt)
     );
   } finally {
     page.view.unmount();
@@ -1460,9 +1473,11 @@ test("Agents Clear hides every exchange up to now for this viewer and persists t
     // The cutoff is the newest visible message's own timestamp, so the Clear hides exactly what
     // was on screen whatever the browser clock says.
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        cleared_before: "2026-09-14T02:00:00Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { cleared_before: "2026-09-14T02:00:00Z" },
+        keyedAttempt
+      )
     );
 
     await waitFor(() =>
@@ -1611,7 +1626,6 @@ test("a reply to an Aside-only agent after a refused Send goes as an Aside", asy
         {
           body: "Can this ship now?",
           delivery: "aside",
-          idempotency_key: expect.any(String),
           in_reply_to: "message-1",
         },
         keyedAttempt
@@ -1680,7 +1694,6 @@ test("Agents replies to an issue-less exchange through the agent route, threaded
         {
           body: "Ship it.",
           delivery: "btw",
-          idempotency_key: expect.any(String),
           in_reply_to: "message-2",
         },
         keyedAttempt
@@ -1729,9 +1742,11 @@ test("Agents marks read and clears through the newest reply even within one mill
 
     fireEvent.click(within(planner).getByRole("button", { name: "Clear conversation" }));
     await waitFor(() =>
-      expect(page.putAgentState).toHaveBeenCalledWith("planner-session", {
-        cleared_before: "2026-09-14T03:00:00.1235Z",
-      })
+      expect(page.putAgentState).toHaveBeenCalledWith(
+        "planner-session",
+        { cleared_before: "2026-09-14T03:00:00.1235Z" },
+        keyedAttempt
+      )
     );
   } finally {
     page.view.unmount();
@@ -1797,7 +1812,6 @@ test("a reply inherits the mode of the exchange's newest attempt even within one
         {
           body: "Ship it.",
           delivery: "btw",
-          idempotency_key: expect.any(String),
           in_reply_to: "message-2",
         },
         keyedAttempt
@@ -1964,7 +1978,6 @@ test("a broadcast leaves out a selected agent that does not advertise the chosen
         {
           body: "Stand down and report status.",
           delivery: "btw",
-          idempotency_key: expect.any(String),
           session_ids: ["planner-session"],
         },
         keyedAttempt
@@ -2007,7 +2020,6 @@ test("a broadcast whose selection holds an Aside-only session goes as an Aside u
         {
           body: "Report status.",
           delivery: "aside",
-          idempotency_key: expect.any(String),
           session_ids: ["planner-session", "reviewer-session"],
         },
         keyedAttempt
@@ -2108,7 +2120,7 @@ test("Restore draft refuses, and says why on screen, while the composer holds a 
 /** The page's `api.createBroadcast` spy, as far as reading back what it was handed. */
 interface BroadcastSpy {
   readonly createBroadcast: {
-    readonly mock: { readonly calls: readonly (readonly [CreateBroadcastInput, ...unknown[]])[] };
+    readonly mock: { readonly calls: readonly Parameters<typeof api.createBroadcast>[] };
   };
 }
 
@@ -2119,10 +2131,17 @@ function posted(page: BroadcastSpy, index: number): CreateBroadcastInput {
   return call[0];
 }
 
+/** The key the i-th broadcast request went under (`Idempotency-Key`). */
+function postedKey(page: BroadcastSpy, index: number): string {
+  const call = page.createBroadcast.mock.calls[index];
+  if (call === undefined) throw new Error(`no broadcast request ${index}`);
+  return call[1].key;
+}
+
 // LEGION-446. A refused send's row is the only copy of its message, and Restore draft is how the
-// human sends it again. Until something is edited the request goes out word for word, key
-// included, so a send that did land behind the refusal is answered as the repeat it is; the first
-// edit makes it a new composition, under a new key.
+// human sends it again. Until something is edited the request goes out word for word; Dispatch
+// refused it, so it goes under a key of its own, since Dispatch would answer the refused key with
+// its stored refusal. The first edit makes it a new composition, under a new key too.
 test("Restore draft re-sends the refused request word for word, and the first edit drops it for a new send", async () => {
   const page = renderAgents();
   page.createBroadcast
@@ -2149,18 +2168,21 @@ test("Restore draft re-sends the refused request word for word, and the first ed
     fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
     const first = posted(page, 0);
-    expect(first.idempotency_key).not.toBe("");
+    const firstKey = postedKey(page, 0);
+    expect(firstKey).not.toBe("");
 
     await restoreDraft(1);
     fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(2));
     expect(posted(page, 1)).toEqual(first);
+    expect(postedKey(page, 1)).not.toBe(firstKey);
 
     await restoreDraft(1);
     fireEvent.change(message(), { target: { value: "Keep this!" } });
     fireEvent.click(screen.getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(3));
-    expect(posted(page, 2).idempotency_key).not.toBe(first.idempotency_key);
+    expect(postedKey(page, 2)).not.toBe(firstKey);
+    expect(postedKey(page, 2)).not.toBe(postedKey(page, 1));
     expect(posted(page, 2).body).toBe("Keep this!");
   } finally {
     page.view.unmount();
@@ -2333,6 +2355,7 @@ test("a selected agent that came back is shown as not in the restored send, and 
     fireEvent.click(within(composer()).getByRole("button", { name: "Send to 1" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(1));
     const first = posted(page, 0);
+    const firstKey = postedKey(page, 0);
     expect(first.session_ids).toEqual(["planner-session"]);
 
     // The Reviewer now takes BTW: the live plan would reach it, the refused request does not.
@@ -2358,7 +2381,7 @@ test("a selected agent that came back is shown as not in the restored send, and 
     fireEvent.click(within(composer()).getByRole("button", { name: "Send to 2" }));
     await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(3));
     expect(posted(page, 2).session_ids).toEqual(["planner-session", "reviewer-session"]);
-    expect(posted(page, 2).idempotency_key).not.toBe(first.idempotency_key);
+    expect(postedKey(page, 2)).not.toBe(firstKey);
   } finally {
     page.view.unmount();
     page.restore();
@@ -2370,11 +2393,13 @@ test("a selected agent that came back is shown as not in the restored send, and 
 test("a restored send names a selected session it leaves out by the reason an edit would keep, unless it has come back", () => {
   const [planner, reviewer] = agents;
   const restored = {
-    body: "Still here?",
-    delivery: "btw",
-    idempotency_key: "refused-key",
-    session_ids: ["planner-session"],
-  } satisfies CreateBroadcastInput;
+    input: {
+      body: "Still here?",
+      delivery: "btw",
+      session_ids: ["planner-session"],
+    } satisfies CreateBroadcastInput,
+    key: "refused-key",
+  };
   const composition = {
     delivery: "btw",
     draft: "Still here?",
@@ -2390,7 +2415,8 @@ test("a restored send names a selected session it leaves out by the reason an ed
   expect(reasons([planner, { ...reviewer, capabilities: ["aside", "btw"] }])).toEqual([
     "not in the refused send; edit to include it",
   ]);
-  expect(composedBroadcast(composition, [planner, reviewer]).input).toBe(restored);
+  expect(composedBroadcast(composition, [planner, reviewer]).input).toBe(restored.input);
+  expect(composedBroadcast(composition, [planner, reviewer]).key).toBe("refused-key");
 });
 
 // Two deliberate sends of the same words are two broadcasts: each composition carries a key of its
@@ -2412,7 +2438,7 @@ test("each composed send carries a key of its own, even when it says the same th
       fireEvent.click(within(region).getByRole("button", { name: "Send to 1" }));
       await waitFor(() => expect(page.createBroadcast).toHaveBeenCalledTimes(count));
     }
-    const keys = [0, 1, 2].map((index) => posted(page, index).idempotency_key);
+    const keys = [0, 1, 2].map((index) => postedKey(page, index));
     expect(new Set(keys).size).toBe(3);
   } finally {
     page.view.unmount();
@@ -2528,6 +2554,7 @@ test("a broadcast Dispatch has not confirmed is tried again under its key until 
     expect(page.createBroadcast.mock.calls).toEqual(
       Array.from({ length: 7 }, () => [request, keyedAttempt])
     );
+    expect(new Set(page.createBroadcast.mock.calls.map(([, bounds]) => bounds.key)).size).toBe(1);
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
@@ -2581,9 +2608,7 @@ test("Stop trying ends a late broadcast, and Retry sends it again under the same
     await tick(0);
     expect(page.createBroadcast).toHaveBeenCalledTimes(6);
     expect(within(sends).getByRole("link", { name: "Sent to 1 agent" })).toBeTruthy();
-    expect(
-      new Set(page.createBroadcast.mock.calls.map(([input]) => input.idempotency_key)).size
-    ).toBe(1);
+    expect(new Set(page.createBroadcast.mock.calls.map(([, bounds]) => bounds.key)).size).toBe(1);
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();
@@ -2599,7 +2624,7 @@ function reloadTab(): void {
   const kept = Array.from({ length: tab.length }, (_, index) => tab.key(index)).flatMap((name) =>
     name === null ? [] : [[name, tab.getItem(name) ?? ""] as const]
   );
-  resetKeyedSendStorage();
+  resetWriteStorage();
   for (const [name, value] of kept) tab.setItem(name, value);
 }
 
@@ -2674,14 +2699,16 @@ test("a live-view send out when the page reloads is sent again under its key and
     expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
     expect(within(held).getByRole("status").textContent).toBe("Sending…");
     expect(after.createAgentMessage.mock.calls).toEqual([
-      [pressed?.[0], pressed?.[1], keyedAttempt],
+      [
+        pressed?.[0],
+        pressed?.[1],
+        expect.objectContaining({ deadlineMs: KEYED_SEND_ATTEMPT_MS, key: pressed?.[2].key }),
+      ],
     ]);
 
     await act(async () => answer.resolve(message("Status please")));
     await waitFor(() => expect(screen.queryByTestId("agent-send-held")).toBeNull());
-    expect(
-      window.sessionStorage.getItem(`dispatch.keyed-send:${pressed?.[1].idempotency_key}`)
-    ).toBeNull();
+    expect(window.sessionStorage.getItem(`dispatch.write:${pressed?.[2].key}`)).toBeNull();
   } finally {
     after.view.unmount();
     after.restore();
@@ -3306,7 +3333,7 @@ test("a live-view send that keeps failing outlives the view, under one key, unti
     expect(
       new Set(
         page.createAgentMessage.mock.calls.map(
-          ([session, input]) => `${session} ${input.body} ${input.idempotency_key}`
+          ([session, input, bounds]) => `${session} ${input.body} ${bounds.key}`
         )
       ).size
     ).toBe(1);
@@ -3367,9 +3394,7 @@ test("the session's Agents row shows a live-view send, refuses its own Send, and
     });
     await tick(0);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(6);
-    expect(
-      new Set(page.createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).size
-    ).toBe(1);
+    expect(new Set(messageKeys(page.createAgentMessage)).size).toBe(1);
     expect(field.value).toBe("");
   } finally {
     jest.advanceTimersByTime(1);
@@ -3401,11 +3426,8 @@ test("the Agents row's Retry of a live-view send re-sends it as it was; an edit 
     });
     await tick(0);
     const pressed = page.createAgentMessage.mock.calls[0]?.[1];
-    expect(pressed).toEqual({
-      body: "Status please",
-      delivery: "aside",
-      idempotency_key: expect.any(String),
-    });
+    const pressedKey = page.createAgentMessage.mock.calls[0]?.[2].key;
+    expect(pressed).toEqual({ body: "Status please", delivery: "aside" });
 
     await act(async () => backToAgents());
     const planner = card(screen.getByRole("region", { name: "Agents" }), "Planner");
@@ -3423,6 +3445,8 @@ test("the Agents row's Retry of a live-view send re-sends it as it was; an edit 
     await tick(0);
     expect(page.createAgentMessage).toHaveBeenCalledTimes(6);
     expect(page.createAgentMessage.mock.calls[5]?.[1]).toEqual(pressed);
+    // Stopped, so Dispatch gave no verdict: the Retry goes under the key the press had.
+    expect(page.createAgentMessage.mock.calls[5]?.[2].key).toBe(pressedKey);
     expect(within(planner).getByText("Couldn't send — Dispatch refused the message")).toBeTruthy();
 
     // Edited: another message, in the row's own mode, under a key of its own.
@@ -3436,11 +3460,8 @@ test("the Agents row's Retry of a live-view send re-sends it as it was; an edit 
     expect(page.createAgentMessage.mock.calls[6]?.[1]).toEqual({
       body: "Status please, now",
       delivery: "steer",
-      idempotency_key: expect.any(String),
     });
-    expect(page.createAgentMessage.mock.calls[6]?.[1].idempotency_key).not.toBe(
-      pressed?.idempotency_key
-    );
+    expect(page.createAgentMessage.mock.calls[6]?.[2].key).not.toBe(pressedKey);
     expect(field.value).toBe("");
   } finally {
     jest.advanceTimersByTime(1);
@@ -3462,6 +3483,7 @@ test("a live-view Retry sends the draft the Agents row wrote over the refusal", 
     await sendFromLiveView("Status please");
     await screen.findByTestId("agent-send-error");
     const pressed = page.createAgentMessage.mock.calls[0]?.[1];
+    const pressedKey = page.createAgentMessage.mock.calls[0]?.[2].key;
 
     // The row holds the same send: the reader rewrites it there and goes back to the view, which
     // is where the composer hands what they wrote back to the held send.
@@ -3483,7 +3505,7 @@ test("a live-view Retry sends the draft the Agents row wrote over the refusal", 
     const sent = page.createAgentMessage.mock.calls[1]?.[1];
     expect(sent?.body).toBe("Status please, now");
     expect(sent?.delivery).toBe(pressed?.delivery);
-    expect(sent?.idempotency_key).not.toBe(pressed?.idempotency_key);
+    expect(page.createAgentMessage.mock.calls[1]?.[2].key).not.toBe(pressedKey);
   } finally {
     page.view.unmount();
     page.restore();
@@ -3648,9 +3670,7 @@ test("a send pressed offline goes late with Stop trying, and lands when the netw
     onlineManager.setOnline(true);
     await tick(30_000);
     expect(screen.queryByTestId("agent-send-held")).toBeNull();
-    expect(
-      new Set(page.createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).size
-    ).toBe(1);
+    expect(new Set(messageKeys(page.createAgentMessage)).size).toBe(1);
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();

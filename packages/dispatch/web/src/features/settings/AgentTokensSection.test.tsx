@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import type { AgentToken } from "../../api/types";
 import { AgentTokensSection } from "./AgentTokensSection";
@@ -67,7 +67,7 @@ test("Settings exposes a new personal token once, copies it, and revokes an exis
     await waitFor(() => expect(writeText).toHaveBeenCalledWith(plaintext));
 
     fireEvent.click(screen.getByRole("button", { name: "Revoke architect" }));
-    await waitFor(() => expect(revokeAgentToken).toHaveBeenCalledWith(token.id));
+    await waitFor(() => expect(revokeAgentToken).toHaveBeenCalledWith(token.id, keyedAttempt));
     await waitFor(() => expect(screen.getByText("Revoked")).toBeDefined());
     expect(screen.queryByRole("button", { name: "Revoke architect" })).toBeNull();
   } finally {

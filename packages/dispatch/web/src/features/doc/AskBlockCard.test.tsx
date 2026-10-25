@@ -126,6 +126,8 @@ const answerAsk = spyOn(api, "answerAsk");
 const getAsk = spyOn(api, "getAsk");
 const createComment = spyOn(api, "createComment");
 const createArtifactComment = spyOn(api, "createArtifactComment");
+/** The bounds every write the card makes carries: its press's key, which a retry reuses. */
+const keyedAttempt = expect.objectContaining({ key: expect.any(String) });
 
 afterEach(() => {
   answerAsk.mockReset();
@@ -392,6 +394,7 @@ test("the hosted card offers the options as the shared choice rows, plus Other, 
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: ["Ship"] },
+      keyedAttempt,
     ]);
     await waitFor(() => expect(answered).toEqual(["ask-1"]));
     // The recorded choice shows at once, before the document round-trips the answer.
@@ -423,6 +426,7 @@ test("Other opens the composer; the words are the answer and no option is record
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: [], text: "Neither, actually." },
+      keyedAttempt,
     ]);
   } finally {
     card.unmount();
@@ -454,6 +458,7 @@ test("with multiple choice, Other sits beside the options and both are sent", as
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: ["Ship"], text: "And a canary first." },
+      keyedAttempt,
     ]);
   } finally {
     card.unmount();
@@ -478,6 +483,7 @@ test("a decision with no options answers in words alone", async () => {
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: [], text: "Go." },
+      keyedAttempt,
     ]);
   } finally {
     card.unmount();
@@ -518,6 +524,7 @@ test("Ask back on an issue document's decision posts a clarification on the issu
     expect(createComment.mock.calls[0]).toEqual([
       "CORE-1",
       { ask_id: "ask-1", body: "Ship to which environment?" },
+      keyedAttempt,
     ]);
     expect(answerAsk).not.toHaveBeenCalled();
     // The composer clears for the next turn and the exchange stays visible under the block.
@@ -555,6 +562,7 @@ test("Ask back on a project document's decision posts the clarification on the d
     expect(createArtifactComment.mock.calls[0]).toEqual([
       "doc-1",
       { ask_id: "ask-1", body: "Before or after the freeze?" },
+      keyedAttempt,
     ]);
     expect(createComment).not.toHaveBeenCalled();
   } finally {
@@ -579,6 +587,7 @@ test("a question-shaped answer with no option chosen offers Ask back instead, as
     expect(createComment.mock.calls[0]).toEqual([
       "CORE-1",
       { ask_id: "ask-1", body: "Which release train?" },
+      keyedAttempt,
     ]);
     expect(answerAsk).not.toHaveBeenCalled();
   } finally {

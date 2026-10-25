@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useState } from "react";
 import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
@@ -515,7 +515,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       writeStorage().clear();
       pendingWrites(queryClient).clear();
     },
-    write: (_: void, bounds) => api.logout(bounds),
+    write: (_variables, bounds) => api.logout(bounds),
   });
   // Tabs within the same issue manage their own focus (roving tabindex); only a
   // genuine page change — a different issue, or a different top-level route —

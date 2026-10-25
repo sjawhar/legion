@@ -1,5 +1,6 @@
 import {
   IDEMPOTENCY_ANSWER_NOT_KEPT,
+  IDEMPOTENCY_KEY_COMMITTED,
   IDEMPOTENCY_KEY_HEADER,
   IDEMPOTENCY_KEY_IN_FLIGHT,
   IDEMPOTENCY_REPLAYED_HEADER,
@@ -157,13 +158,19 @@ export interface WriteBounds extends RequestBounds {
   readonly sent?: (request: WriteRequest) => void;
 }
 
-/** One attempt of a `PUT` or a `DELETE`: as `WriteBounds`, but with no key, since it is the same
- *  write however often it is made. A caller that only lets one go - a read mark - passes none. */
-export type IdempotentBounds = Omit<WriteBounds, "key">;
+/** One attempt of a `PUT` or a `DELETE`: as `WriteBounds`, but its key is optional and never sent,
+ *  since the write is the same however often it is made. A caller on the one write path hands its
+ *  press's bounds over whole; one that only ever makes it once passes none. */
+export interface IdempotentBounds extends RequestBounds {
+  readonly key?: string;
+  readonly sent?: (request: WriteRequest) => void;
+}
 
-/** A write Dispatch had already run, whose first answer was too large for it to keep: it answered
- *  the repeat with the first one's status and no resource (`IDEMPOTENCY_ANSWER_NOT_KEPT`). The
- *  write landed; its caller reads what it wrote again. */
+/** A write Dispatch had already made, with no answer it can give for it: the first answer was too
+ *  large for it to keep, so the repeat came back with the first one's status and no resource
+ *  (`IDEMPOTENCY_ANSWER_NOT_KEPT`), or the answer was lost before Dispatch stored it, so the
+ *  repeat came back `409 KEY_COMMITTED` (`isKeyCommitted`). The write landed; its caller reads
+ *  what it wrote again, and shows no refusal. */
 export class AnswerNotKeptError extends Error {
   readonly status: number;
 
@@ -179,6 +186,15 @@ export class AnswerNotKeptError extends Error {
 export function isKeyInFlight(error: unknown): boolean {
   return (
     error instanceof ApiError && error.status === 409 && error.code === IDEMPOTENCY_KEY_IN_FLIGHT
+  );
+}
+
+/** Whether Dispatch made this write's key's write already, and lost the answer before it stored
+ *  it (`409 KEY_COMMITTED`, even after a 5xx the first attempt was answered): the write landed, and
+ *  Dispatch will not run it again. */
+export function isKeyCommitted(error: unknown): error is ApiError {
+  return (
+    error instanceof ApiError && error.status === 409 && error.code === IDEMPOTENCY_KEY_COMMITTED
   );
 }
 
@@ -466,10 +482,7 @@ export class DispatchApiClient {
    * answered (nothing for an empty body), or rejects with its refusal; a replay of an answer
    * Dispatch did not keep rejects with `AnswerNotKeptError`.
    */
-  send<T>(
-    request: WriteRequest,
-    { deadlineMs, key, sent }: IdempotentBounds & { readonly key?: string }
-  ): Promise<T> {
+  send<T>(request: WriteRequest, { deadlineMs, key, sent }: IdempotentBounds): Promise<T> {
     const { body, method, path } = request;
     const idempotent = method === "PUT" || method === "DELETE";
     const json = body === undefined || body instanceof FormData ? undefined : JSON.stringify(body);

@@ -40,6 +40,10 @@ export interface WriteSpec<T> {
   /** Whether the surface that made the write shows a refusal itself - a form the reader is still
    *  in front of, holding their draft - so the indicator shows the write only while it is out. */
   readonly inline?: boolean;
+  /** The key of a write the surface makes again after it ended without Dispatch's verdict (the
+   *  reader stopped it): that write's own, so Dispatch answers it with what the first did. Left
+   *  out, the press gets a key of its own. */
+  readonly key?: string;
 }
 
 /** What the queue holds of a write beside its row: how to make it again, and how to stop it. */
@@ -96,16 +100,13 @@ export class PendingWrites {
     return () => this.#listeners.delete(listener);
   };
 
-  /** Makes `spec`'s write under a key of its own - one press, one key - and answers with
-   *  Dispatch's 2xx, or rejects with its refusal, `SendStoppedError` once the reader stops it, or
-   *  `AnswerNotKeptError` for a write that landed without an answer to hand back. */
-  run<T>({ inline = false, label, write }: WriteSpec<T>): Promise<T> {
+  /** Makes `spec`'s write under its key - a key of its own unless the surface names the one of the
+   *  write it is making again - and answers with Dispatch's 2xx, or rejects with its refusal,
+   *  `SendStoppedError` once the reader stops it, or `AnswerNotKeptError` for a write that landed
+   *  without an answer to hand back. */
+  run<T>({ inline = false, key = newSendKey(), label, write }: WriteSpec<T>): Promise<T> {
     this.#ids += 1;
-    return this.#start(this.#ids, write, null, inline, {
-      key: newSendKey(),
-      label,
-      pressedAt: Date.now(),
-    });
+    return this.#start(this.#ids, write, null, inline, { key, label, pressedAt: Date.now() });
   }
 
   /** Stops trying the late write `id` (Stop trying): no attempt is made after the one in flight,

@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import type { Artifact } from "../../api/types";
 import { DocumentList } from "./DocumentList";
@@ -106,7 +106,8 @@ test("New document opens its document page", async () => {
     await waitFor(() =>
       expect(uploadArtifact).toHaveBeenCalledWith(
         { project: "CORE" },
-        { content: "# Design notes\n", name: "Design notes" }
+        { content: "# Design notes\n", name: "Design notes" },
+        keyedAttempt
       )
     );
     expect(screen.getByTestId("location").textContent).toBe(

@@ -40,7 +40,7 @@ function startSend(queryClient: QueryClient, mutationKey: MutationKey): () => Pr
  *  composer does, and waits for the server's refusal. */
 async function refuseReply(queryClient: QueryClient, mutationKey: MutationKey): Promise<void> {
   const createComment = spyOn(api, "createComment").mockRejectedValue(
-    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+    new ApiError(400, { code: "COMMENT_INPUT", error: "the comment was refused" })
   );
   const request: SentRequest = {
     anchor: undefined,

@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
 import { MemoryRouter } from "react-router-dom";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import type { Agent, Issue, IssueClaim, IssueDetails } from "../../api/types";
 import { MarginProvider } from "../margin/margin-context";
@@ -120,7 +121,7 @@ test("a claimed issue names its holder and releases the claim from the header", 
     expect(screen.getByText("Implementer")).toBeDefined();
     expect(screen.queryByText("not running")).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Release the claim on CORE-1" }));
-    await waitFor(() => expect(release).toHaveBeenCalledWith("CORE-1"));
+    await waitFor(() => expect(release).toHaveBeenCalledWith("CORE-1", keyedAttempt));
   } finally {
     view.unmount();
     release.mockRestore();

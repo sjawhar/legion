@@ -87,7 +87,7 @@ export function MachineLoginPage(): ReactNode {
       void queryClient.invalidateQueries({ queryKey: ["credential-pending"] });
       void queryClient.invalidateQueries({ queryKey: machineLoginsQuery().queryKey });
     },
-    write: (_: void, bounds) =>
+    write: (_variables, bounds) =>
       api.approveCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }, bounds),
   });
   const deny = useKeyedWrite({
@@ -95,7 +95,7 @@ export function MachineLoginPage(): ReactNode {
     label: () => "Denial of a machine login",
     onSettled: () => submitGuard.release(),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["credential-pending"] }),
-    write: (_: void, bounds) =>
+    write: (_variables, bounds) =>
       api.denyCredentialRecord(record?.record_id ?? "", { code: lookedUpCode }, bounds),
   });
 

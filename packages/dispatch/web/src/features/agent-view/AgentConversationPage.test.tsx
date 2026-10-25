@@ -26,18 +26,22 @@ import {
 import { ApiError, api } from "../../api/client";
 import { liveSocketFor } from "../../api/live-socket";
 import type { Agent, Message, MessageRead, UserAgentStates } from "../../api/types";
-import {
-  KEYED_SEND_ATTEMPT_MS,
-  KEYED_SEND_LATE_TEXT,
-  SEND_DEADLINE_MS,
-  SendStoppedError,
-} from "../conversation/send-request";
+import { KEYED_SEND_LATE_TEXT } from "../conversation/send-request";
 import { Sidebar } from "../sidebar/Sidebar";
+import { KEYED_SEND_ATTEMPT_MS, SEND_DEADLINE_MS, SendStoppedError } from "../writes/keyed-write";
 import { AgentConversationPage } from "./AgentConversationPage";
 
 /** What each attempt of the live view's send is held to, beside the message it carries: its own
- *  deadline, and nothing that would cut it short once it is out. */
-const keyedAttempt = { deadlineMs: KEYED_SEND_ATTEMPT_MS };
+ *  deadline, nothing that would cut it short once it is out, and the key that names the press. */
+const keyedAttempt = expect.objectContaining({
+  deadlineMs: KEYED_SEND_ATTEMPT_MS,
+  key: expect.any(String),
+});
+
+/** The key each send carried (`Idempotency-Key`), in order. */
+function sentKeys(createAgentMessage: Mock<typeof api.createAgentMessage>): string[] {
+  return createAgentMessage.mock.calls.map(([, , bounds]) => bounds.key);
+}
 
 const SESSION = "01a0e090-4848-7473-acc5-fc96e6a646d3";
 
@@ -448,7 +452,7 @@ test("the live view sends as Send by default where the session takes it, and as 
   await waitFor(() =>
     expect(createAgentMessage).toHaveBeenCalledWith(
       SESSION,
-      { body: "try the other branch", delivery: "steer", idempotency_key: expect.any(String) },
+      { body: "try the other branch", delivery: "steer" },
       keyedAttempt
     )
   );
@@ -531,7 +535,7 @@ test("the live view's send retries under one key", async () => {
 
   await sendFromLiveView("and this");
   await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(4));
-  const [first, ...later] = createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key);
+  const [first, ...later] = sentKeys(createAgentMessage);
   expect(first).toMatch(/^[0-9a-f-]{36}$/);
   expect(later.slice(0, 2)).toEqual([first, first]);
   expect(later[2]).not.toBe(first);
@@ -573,9 +577,7 @@ test("leaving the live view leaves its send being tried, under its key", async (
   expect(createAgentMessage.mock.calls.map(([, , bounds]) => bounds)).toEqual(
     Array.from({ length: 5 }, () => keyedAttempt)
   );
-  expect(
-    new Set(createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).size
-  ).toBe(1);
+  expect(new Set(sentKeys(createAgentMessage)).size).toBe(1);
 });
 
 /** Moves the fake clock `ms` on and lets every promise the move released run. */
@@ -647,8 +649,9 @@ test("the live view holds a pressed message until Dispatch confirms it, and Send
 });
 
 // Dispatch's own refusal ends the send: the message stays on screen with the reason, Retry sends
-// it again under the key it was pressed with, and Discard drops it.
-test("a message Dispatch refuses offers Retry under its key, and Discard", async () => {
+// it again under a key of its own - Dispatch would answer the refused key with its refusal - and
+// Discard drops it.
+test("a message Dispatch refuses offers Retry under a new key, and Discard", async () => {
   const refused = new ApiError(400, { code: "MESSAGE_INPUT", error: "Dispatch refused it" });
   const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(refused);
   spies.push(createAgentMessage);
@@ -664,8 +667,8 @@ test("a message Dispatch refuses offers Retry under its key, and Discard", async
   const held = screen.getByTestId("agent-send-held");
   fireEvent.click(within(held).getByRole("button", { name: "Retry" }));
   await waitFor(() => expect(createAgentMessage).toHaveBeenCalledTimes(2));
-  const [first, retried] = createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key);
-  expect(retried).toBe(first);
+  const [first, retried] = sentKeys(createAgentMessage);
+  expect(retried).not.toBe(first);
 
   await screen.findByTestId("agent-send-error");
   fireEvent.click(
@@ -708,9 +711,7 @@ test("Stop trying ends a late live view send, and its Retry goes under the same 
     await tick(0);
   });
   expect(createAgentMessage).toHaveBeenCalledTimes(6);
-  expect(
-    new Set(createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).size
-  ).toBe(1);
+  expect(new Set(sentKeys(createAgentMessage)).size).toBe(1);
   expect(screen.queryByTestId("agent-send-held")).toBeNull();
 });
 
@@ -1025,7 +1026,7 @@ test("picking a command puts /name in the message as plain text, and Enter sends
   await waitFor(() =>
     expect(createAgentMessage).toHaveBeenCalledWith(
       SESSION,
-      { body: "/compact", delivery: "steer", idempotency_key: expect.any(String) },
+      { body: "/compact", delivery: "steer" },
       keyedAttempt
     )
   );
@@ -1060,7 +1061,7 @@ test("arrow keys move through the commands, and after Escape Enter sends what wa
   await waitFor(() =>
     expect(createAgentMessage).toHaveBeenCalledWith(
       SESSION,
-      { body: "/rec", delivery: "steer", idempotency_key: expect.any(String) },
+      { body: "/rec", delivery: "steer" },
       keyedAttempt
     )
   );

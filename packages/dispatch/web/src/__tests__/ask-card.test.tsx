@@ -18,6 +18,7 @@ import { AskCard } from "../features/inbox/AskCard";
 import { AskReplyComposer } from "../features/inbox/AskThread";
 import { Inbox } from "../features/inbox/Inbox";
 import { commentDeliveryFields } from "./comment-fixture";
+import { keyedAttempt } from "./keyed-attempt";
 
 const getReferences = spyOn(api, "getReferences").mockResolvedValue({
   edges: [],
@@ -2117,10 +2118,14 @@ test("asking back from a document ask posts an artifact comment and keeps the se
     fireEvent.click(view.getByRole("button", { name: "Ask back" }));
 
     await waitFor(() =>
-      expect(createArtifactComment).toHaveBeenCalledWith("artifact-1", {
-        ask_id: "ask-1",
-        body: "Does this include the rollback?",
-      })
+      expect(createArtifactComment).toHaveBeenCalledWith(
+        "artifact-1",
+        {
+          ask_id: "ask-1",
+          body: "Does this include the rollback?",
+        },
+        keyedAttempt
+      )
     );
     await waitFor(() => expect(field).toHaveProperty("value", ""));
     expect((ship as HTMLInputElement).checked).toBe(true);

@@ -34,7 +34,7 @@ function ReplyRow({ row }: { row: MyReplyRow }): ReactNode {
   const queryClient = useQueryClient();
   const markRead = useKeyedWrite({
     label: () => "Thread marked read",
-    write: (_: void, bounds) => api.markThreadRead(row.thread_id, row.reply.created_at, bounds),
+    write: (_variables, bounds) => api.markThreadRead(row.thread_id, row.reply.created_at, bounds),
     onSuccess: () => queryClient.invalidateQueries({ queryKey: myRepliesKey }),
   });
   const owner =

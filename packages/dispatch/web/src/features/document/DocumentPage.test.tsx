@@ -4,6 +4,7 @@ import { fireEvent, render, screen, waitFor, within } from "@testing-library/rea
 import { MemoryRouter, Route, Routes } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { Artifact, Subscriber } from "../../api/types";
 import { DocumentRuntime } from "../doc/runtime";
@@ -186,7 +187,11 @@ test("shows Subscribed agents and unsubscribes after confirming the dialog", asy
     fireEvent.click(within(dialog).getByRole("button", { name: "Confirm" }));
 
     await waitFor(() =>
-      expect(unsubscribeArtifactSession).toHaveBeenCalledWith("artifact-1", "0123456789abcdef")
+      expect(unsubscribeArtifactSession).toHaveBeenCalledWith(
+        "artifact-1",
+        "0123456789abcdef",
+        keyedAttempt
+      )
     );
     await waitFor(() =>
       expect(screen.queryByRole("region", { name: "Subscribed agents" })).toBeNull()

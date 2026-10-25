@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import type { InboxRow, Issue, IssueDetails, IssueSummary } from "../../api/types";
 import { PriorityControl } from "./PriorityControl";
@@ -140,7 +140,9 @@ test("PriorityControl saves the picked priority, shows it before the server answ
   try {
     select().focus();
     fireEvent.change(select(), { target: { value: "2" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 2 }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 2 }, keyedAttempt)
+    );
     expect(select().value).toBe("2");
     expect(screen.getByText("P2", { selector: "span" })).toBeTruthy();
     // A disabled control drops focus and leaves the tab order for the length of the save, so
@@ -172,7 +174,9 @@ test("PriorityControl sends null for Unset and shows the muted tag", async () =>
   const { unmount } = renderControl();
   try {
     fireEvent.change(select(), { target: { value: "" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: null }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: null }, keyedAttempt)
+    );
     expect(select().value).toBe("");
     expect(screen.getByText("Priority", { selector: "span" })).toBeTruthy();
     expect(screen.queryByText("P1", { selector: "span" })).toBeNull();
@@ -202,7 +206,7 @@ test("PriorityControl rolls every surface back and offers Retry when the save fa
     patchIssue.mockResolvedValue({ ...issue, priority: 0 });
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(2));
-    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 });
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }, keyedAttempt);
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     expect(select().value).toBe("0");
   } finally {
@@ -220,7 +224,9 @@ test("PriorityControl saves a pick made during the first save once that save set
   const { queryClient, unmount } = renderControl();
   try {
     fireEvent.change(select(), { target: { value: "0" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }, keyedAttempt)
+    );
     fireEvent.change(select(), { target: { value: "3" } });
     fireEvent.change(select(), { target: { value: "2" } });
     // One request at a time: the later picks wait for the first answer, but the badge already
@@ -234,7 +240,7 @@ test("PriorityControl saves a pick made during the first save once that save set
       await first.promise;
     });
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(2));
-    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 2 });
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 2 }, keyedAttempt);
     expect(select().value).toBe("2");
 
     await act(async () => {
@@ -260,7 +266,9 @@ test("a queued pick that fails rolls back to the priority the server last confir
   const { queryClient, unmount } = renderControl();
   try {
     fireEvent.change(select(), { target: { value: "0" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 0 }, keyedAttempt)
+    );
     fireEvent.change(select(), { target: { value: "2" } });
     expect(select().value).toBe("2");
 
@@ -268,7 +276,9 @@ test("a queued pick that fails rolls back to the priority the server last confir
       first.resolve({ ...issue, priority: 0 });
       await first.promise;
     });
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 2 }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { priority: 2 }, keyedAttempt)
+    );
     act(() => {
       second.reject(new Error("offline"));
     });

@@ -58,14 +58,14 @@ export function CredentialRecordPage(): ReactNode {
     label: () => "Approval of the credential request",
     onSettled: () => submitGuard.release(),
     onSuccess: invalidateAfterDecision,
-    write: (_: void, bounds) => api.approveCredentialRecord(recordId ?? "", {}, bounds),
+    write: (_variables, bounds) => api.approveCredentialRecord(recordId ?? "", {}, bounds),
   });
   const deny = useKeyedWrite({
     inline: true,
     label: () => "Denial of the credential request",
     onSettled: () => submitGuard.release(),
     onSuccess: invalidateAfterDecision,
-    write: (_: void, bounds) => api.denyCredentialRecord(recordId ?? "", {}, bounds),
+    write: (_variables, bounds) => api.denyCredentialRecord(recordId ?? "", {}, bounds),
   });
 
   useDocumentTitle("Credential request · Dispatch");

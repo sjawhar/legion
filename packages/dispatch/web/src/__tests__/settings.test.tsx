@@ -7,6 +7,7 @@ import { MemoryRouter } from "react-router-dom";
 import { ApiError, api } from "../api/client";
 import type { ArchitectureSource, Project, RepoProject } from "../api/types";
 import { App } from "../app";
+import { keyedAttempt } from "./keyed-attempt";
 
 /** The mapping routes' server state as the Settings page reaches it: a read answers what the writes
  *  have left, and a write follows the server's default rules (the body's default, else the
@@ -113,10 +114,14 @@ test("human users manage repository project mappings from the settings route", a
     expect(radio("owner/repo").checked).toBe(false);
     fireEvent.click(radio("owner/repo"));
     await waitFor(() =>
-      expect(putRepoProject).toHaveBeenLastCalledWith("owner/repo", {
-        project: "CORE",
-        default: true,
-      })
+      expect(putRepoProject).toHaveBeenLastCalledWith(
+        "owner/repo",
+        {
+          project: "CORE",
+          default: true,
+        },
+        keyedAttempt
+      )
     );
     // The pick moves the project's default at once: one default per project.
     expect(radio("owner/repo").checked).toBe(true);
@@ -126,7 +131,11 @@ test("human users manage repository project mappings from the settings route", a
     fireEvent.change(screen.getByLabelText("Project"), { target: { value: "CORE" } });
     fireEvent.click(screen.getByRole("button", { name: "Add mapping" }));
     await waitFor(() =>
-      expect(putRepoProject).toHaveBeenLastCalledWith("owner/repo", { project: "CORE" })
+      expect(putRepoProject).toHaveBeenLastCalledWith(
+        "owner/repo",
+        { project: "CORE" },
+        keyedAttempt
+      )
     );
     expect(screen.getAllByRole("cell", { name: "owner/repo" })).toHaveLength(1);
     expect(screen.queryByRole("cell", { name: "Owner/Repo.git" })).toBeNull();
@@ -148,7 +157,9 @@ test("human users manage repository project mappings from the settings route", a
     expect(screen.getByRole("cell", { name: "owner/repo" })).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Delete mapping for owner/repo" }));
-    await waitFor(() => expect(deleteRepoProject).toHaveBeenLastCalledWith("owner/repo"));
+    await waitFor(() =>
+      expect(deleteRepoProject).toHaveBeenLastCalledWith("owner/repo", keyedAttempt)
+    );
     await waitFor(() => expect(screen.queryByRole("cell", { name: "owner/repo" })).toBeNull());
   } finally {
     cleanup();
@@ -338,7 +349,7 @@ test("a human creates a project from Settings and it appears in the mappings sel
     fireEvent.click(screen.getByRole("button", { name: "New project" }));
 
     await waitFor(() =>
-      expect(createProject).toHaveBeenLastCalledWith({ key: "QA", name: "Quality" })
+      expect(createProject).toHaveBeenLastCalledWith({ key: "QA", name: "Quality" }, keyedAttempt)
     );
     await waitFor(() => expect(listProjects).toHaveBeenCalledTimes(2));
     expect(await screen.findByRole("cell", { name: "QA" })).toBeDefined();
@@ -474,10 +485,14 @@ test("a human adds an architecture source and the verified row appears", async (
     });
     fireEvent.click(section.getByRole("button", { name: "Add source" }));
     await waitFor(() =>
-      expect(putArchitectureSource).toHaveBeenLastCalledWith("CORE", {
-        branch: "main",
-        repo: "legion/arch",
-      })
+      expect(putArchitectureSource).toHaveBeenLastCalledWith(
+        "CORE",
+        {
+          branch: "main",
+          repo: "legion/arch",
+        },
+        keyedAttempt
+      )
     );
     await waitFor(() => expect(section.getByRole("cell", { name: "legion/arch" })).toBeDefined());
     expect(section.getByRole("cell", { name: "Access verified" })).toBeDefined();

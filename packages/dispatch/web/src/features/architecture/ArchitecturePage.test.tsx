@@ -10,6 +10,7 @@ import {
 } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type {
   ArchitectureTree,
@@ -17,6 +18,7 @@ import type {
   ArchitectureTreeIssue,
 } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
+import { pendingWrites } from "../writes/pending-writes";
 import { ArchitecturePage } from "./ArchitecturePage";
 
 function component(
@@ -401,7 +403,9 @@ test("never synced: the source line says so and an empty model shows the Refresh
       return promise;
     });
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await waitFor(() => expect(pane.syncArchitectureSource).toHaveBeenCalledWith("CORE"));
+    await waitFor(() =>
+      expect(pane.syncArchitectureSource).toHaveBeenCalledWith("CORE", keyedAttempt)
+    );
     const refreshing = await screen.findByRole("button", { name: "Refreshing…" });
     expect(refreshing.hasAttribute("disabled")).toBe(true);
     settle?.();
@@ -411,26 +415,25 @@ test("never synced: the source line says so and an empty model shows the Refresh
   }
 });
 
-test("a Refresh whose request itself fails says so beside the button until the next attempt", async () => {
+// A Refresh Dispatch refuses is the shell's to say, with every other control's write
+// (`PendingWritesIndicator`): the pending-writes queue holds it with Dispatch's reason, the button
+// is ready for the next attempt, and nothing beside it repeats the refusal.
+test("a refused Refresh goes to the shell's pending writes, and the button is ready again", async () => {
   const pane = renderPane(fixture());
   try {
     const source = await screen.findByTestId("architecture-source");
     pane.syncArchitectureSource.mockRejectedValueOnce(
-      new ApiError(500, { error: "GitHub is unreachable" })
+      new ApiError(409, { code: "SOURCE_ACCESS", error: "GitHub is unreachable" })
     );
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    expect(await within(source).findByRole("alert")).toHaveProperty(
-      "textContent",
-      "GitHub is unreachable"
+    await waitFor(() =>
+      expect(pendingWrites(pane.queryClient).rows()[0]?.refusal?.message).toBe(
+        "GitHub is unreachable"
+      )
     );
-    // The next attempt clears it.
-    const { promise, resolve } = Promise.withResolvers<never>();
-    pane.syncArchitectureSource.mockImplementationOnce(() => promise);
-    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
-    await screen.findByRole("button", { name: "Refreshing…" });
-    expect(within(source).queryByRole("alert")).toBeNull();
-    resolve(undefined as never);
+    expect(pendingWrites(pane.queryClient).rows()[0]?.label).toBe("Refresh of CORE's architecture");
     await screen.findByRole("button", { name: "Refresh" });
+    expect(within(source).queryByRole("alert")).toBeNull();
   } finally {
     pane.restore();
   }
@@ -512,9 +515,11 @@ test("Unassigned: the picker PATCHes an explicit set, the row leaves the list at
       key: "Escape",
     });
     await waitFor(() =>
-      expect(pane.patchIssue).toHaveBeenCalledWith("CORE-7", {
-        components: { ids: ["web"], mode: "explicit" },
-      })
+      expect(pane.patchIssue).toHaveBeenCalledWith(
+        "CORE-7",
+        { components: { ids: ["web"], mode: "explicit" } },
+        keyedAttempt
+      )
     );
     expect(await within(list).findByRole("alert")).toHaveProperty(
       "textContent",
@@ -625,7 +630,11 @@ test("Not architectural lists each reason, names the ancestor of an inherited ro
       })
     );
     await waitFor(() =>
-      expect(pane.patchIssue).toHaveBeenCalledWith("CORE-8", { components: { mode: "inherit" } })
+      expect(pane.patchIssue).toHaveBeenCalledWith(
+        "CORE-8",
+        { components: { mode: "inherit" } },
+        keyedAttempt
+      )
     );
   } finally {
     pane.restore();
@@ -643,9 +652,11 @@ test("the Not architectural… form on an Unassigned row PATCHes none with the r
     });
     fireEvent.click(within(list).getByRole("button", { name: "Save reason" }));
     await waitFor(() =>
-      expect(pane.patchIssue).toHaveBeenCalledWith("CORE-7", {
-        components: { mode: "none", reason: "a hiring task" },
-      })
+      expect(pane.patchIssue).toHaveBeenCalledWith(
+        "CORE-7",
+        { components: { mode: "none", reason: "a hiring task" } },
+        keyedAttempt
+      )
     );
   } finally {
     pane.restore();
@@ -677,9 +688,11 @@ test("Retired: the re-attach picker starts from the issue's surviving live compo
       key: "Escape",
     });
     await waitFor(() =>
-      expect(pane.patchIssue).toHaveBeenCalledWith("CORE-2", {
-        components: { ids: ["web", "server"], mode: "explicit" },
-      })
+      expect(pane.patchIssue).toHaveBeenCalledWith(
+        "CORE-2",
+        { components: { ids: ["web", "server"], mode: "explicit" } },
+        keyedAttempt
+      )
     );
   } finally {
     pane.restore();

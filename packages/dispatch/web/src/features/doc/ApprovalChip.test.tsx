@@ -1,7 +1,7 @@
 import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import type { Artifact, ArtifactApproval, ArtifactReview } from "../../api/types";
 import { ApprovalChip } from "./ApprovalChip";
@@ -114,7 +114,11 @@ test("clicking Approve posts an approved review and refreshes the issue and inbo
   try {
     fireEvent.click(screen.getByRole("button", { name: "Approve" }));
     await waitFor(() => expect(createArtifactReview).toHaveBeenCalledTimes(1));
-    expect(createArtifactReview).toHaveBeenCalledWith("artifact-1", { state: "approved" });
+    expect(createArtifactReview).toHaveBeenCalledWith(
+      "artifact-1",
+      { state: "approved" },
+      keyedAttempt
+    );
   } finally {
     createArtifactReview.mockRestore();
     view.unmount();
@@ -146,10 +150,14 @@ test("Request changes requires a reason before it can submit, then posts it", as
 
     fireEvent.click(submit);
     await waitFor(() => expect(createArtifactReview).toHaveBeenCalledTimes(1));
-    expect(createArtifactReview).toHaveBeenCalledWith("artifact-1", {
-      reason: "Needs another pass",
-      state: "changes_requested",
-    });
+    expect(createArtifactReview).toHaveBeenCalledWith(
+      "artifact-1",
+      {
+        reason: "Needs another pass",
+        state: "changes_requested",
+      },
+      keyedAttempt
+    );
   } finally {
     createArtifactReview.mockRestore();
     view.unmount();

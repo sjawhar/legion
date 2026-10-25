@@ -8,6 +8,7 @@ import {
   installIntersectionObserver,
   type Placement,
 } from "../../__tests__/intersection-observer";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type {
   Actor,
@@ -364,7 +365,11 @@ test("Conversation holds Reply while its composer sends", async () => {
 
     sent.reject(new Error("the server is down"));
     await screen.findByText("Couldn't send — network error");
-    expect(createComment.mock.calls[0]).toEqual(["CORE-1", { body: "Status please" }]);
+    expect(createComment.mock.calls[0]).toEqual([
+      "CORE-1",
+      { body: "Status please" },
+      keyedAttempt,
+    ]);
   } finally {
     view.unmount();
     createComment.mockRestore();
@@ -917,7 +922,7 @@ test("a refused Resolve keeps the thread and its reply, and the one that lands c
   const resolves: string[] = [];
   const resolveComment = spyOn(api, "resolveComment").mockImplementation(async (id) => {
     resolves.push(id);
-    if (refuse) throw new ApiError(503, { error: "the server is down" });
+    if (refuse) throw new ApiError(409, { error: "the server is down" });
     return { ...root, resolved: true };
   });
   const view = render(tab({ "CORE-1": issueState() }, true, queryClient));
@@ -974,7 +979,7 @@ function ownResolveOverAReply() {
     },
     refuse: async () => {
       await act(async () => {
-        reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+        reply.reject(new ApiError(409, { code: "UNAVAILABLE", error: "the server is down" }));
         await reply.promise.catch(() => {});
       });
     },
@@ -1125,7 +1130,7 @@ test("on a phone, another comment's Reply opens the thread whose reply was refus
     fireEvent.click(within(dialog).getByRole("button", { name: "Back" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Thread" })).toBeNull());
     await act(async () => {
-      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      reply.reject(new ApiError(409, { code: "UNAVAILABLE", error: "the server is down" }));
       await reply.promise.catch(() => {});
     });
 
@@ -1176,7 +1181,7 @@ test("at a desktop width, another comment's Reply redirects onto the one whose r
     fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createComment).toHaveBeenCalledTimes(1));
     await act(async () => {
-      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      reply.reject(new ApiError(409, { code: "UNAVAILABLE", error: "the server is down" }));
       await reply.promise.catch(() => {});
     });
     await within(composer).findByText(refusedText);
@@ -1223,7 +1228,7 @@ test("another message's Reply redirects onto the one whose refusal the docked co
     fireEvent.click(within(composer).getByRole("button", { name: "Send" }));
     await waitFor(() => expect(createMessage).toHaveBeenCalledTimes(1));
     await act(async () => {
-      reply.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      reply.reject(new ApiError(409, { code: "UNAVAILABLE", error: "the server is down" }));
       await reply.promise.catch(() => {});
     });
     await within(composer).findByText(refusedText);
@@ -1627,7 +1632,11 @@ test("Conversation hides reply editing while its owner saves a comment", async (
     fireEvent.change(screen.getByLabelText("Edit comment"), { target: { value: "Updated root" } });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith("root-comment", { body: "Updated root" })
+      expect(editComment).toHaveBeenCalledWith(
+        "root-comment",
+        { body: "Updated root" },
+        keyedAttempt
+      )
     );
     expect(within(card).queryAllByRole("button", { name: "Edit" })).toHaveLength(0);
     expect((screen.getByRole("textbox", { name: "Reply" }) as HTMLTextAreaElement).disabled).toBe(
@@ -1671,7 +1680,11 @@ test("Conversation restores edit controls and the draft when its owner save reje
     });
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith("root-comment", { body: "Draft survives" })
+      expect(editComment).toHaveBeenCalledWith(
+        "root-comment",
+        { body: "Draft survives" },
+        keyedAttempt
+      )
     );
     expect(within(card).queryAllByRole("button", { name: "Edit" })).toHaveLength(0);
 

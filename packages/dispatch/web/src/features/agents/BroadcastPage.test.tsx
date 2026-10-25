@@ -3,7 +3,7 @@ import { DELIVERY_DUPLICATE_WINDOW_MS } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, Route, Routes } from "react-router-dom";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import type {
   Agent,
@@ -13,7 +13,6 @@ import type {
   MessageDelivery,
   UserAgentStates,
 } from "../../api/types";
-
 import { BroadcastPage } from "./BroadcastPage";
 
 const agents: Agent[] = [
@@ -260,7 +259,7 @@ test("a pending attempt nobody is carrying offers a same-mode retry and no mode 
     ).toBeTruthy();
     fireEvent.click(within(row).getByRole("button", { name: "Retry" }));
     await waitFor(() =>
-      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer")
+      expect(page.createMessageDelivery).toHaveBeenCalledWith("message-1", "steer", keyedAttempt)
     );
   } finally {
     page.view.unmount();

@@ -53,7 +53,7 @@ export function DocumentPage(): ReactNode {
       if (artifact.data === undefined) {
         throw new Error("Document unsubscribe requires an artifact.");
       }
-      return api.unsubscribeArtifactSession(artifact.data.id, sessionId);
+      return api.unsubscribeArtifactSession(artifact.data.id, sessionId, bounds);
     },
     onSuccess: () => {
       if (artifact.data !== undefined) {

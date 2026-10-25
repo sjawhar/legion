@@ -60,7 +60,10 @@ export function useIssueFieldWrite<Value>(
     inbox: queryClient.getQueriesData<InboxRow[]>({ queryKey: inboxKey }),
     lists: queryClient.getQueriesData<IssueSummary[]>({ queryKey: projectListsKey }),
   });
+  // The control says why its save was refused and offers Retry where the reader just picked, so
+  // the shell's indicator shows the save only while it is out.
   const mutation = useKeyedWrite({
+    inline: true,
     label: (value: Value) => field.label(value),
     write: (value: Value, bounds) => api.patchIssue(issueKey, field.patch(value), bounds),
     onMutate: async (value): Promise<Snapshot> => {

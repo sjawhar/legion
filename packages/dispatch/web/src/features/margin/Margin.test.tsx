@@ -5,6 +5,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { Ask, Comment, IssueAskRow, IssueDetails } from "../../api/types";
 import type { RetypeOutcome } from "../doc/editor";
@@ -410,10 +411,14 @@ test("Margin puts an unanchored open ask under Needs you and sends its answer", 
     expect((shipOption as HTMLInputElement).checked).toBe(true);
     fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
     await waitFor(() =>
-      expect(answerAsk).toHaveBeenCalledWith(unanchoredAsk.id, {
-        selected: ["Ship"],
-        expected_edited_at: null,
-      })
+      expect(answerAsk).toHaveBeenCalledWith(
+        unanchoredAsk.id,
+        {
+          selected: ["Ship"],
+          expected_edited_at: null,
+        },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -464,10 +469,14 @@ test("Margin moves an answered anchored ask out of Needs you in place, without t
     fireEvent.click(await within(needsYou).findByRole("radio", { name: "Ship" }));
     fireEvent.click(within(needsYou).getByRole("button", { name: "Answer" }));
     await waitFor(() =>
-      expect(answerAsk).toHaveBeenCalledWith(anchoredAsk.id, {
-        selected: ["Ship"],
-        expected_edited_at: null,
-      })
+      expect(answerAsk).toHaveBeenCalledWith(
+        anchoredAsk.id,
+        {
+          selected: ["Ship"],
+          expected_edited_at: null,
+        },
+        keyedAttempt
+      )
     );
     await waitFor(() => expect(listIssueAsks).toHaveBeenCalled());
     const answered = await within(needsYou).findByTestId(`ask-${anchoredAsk.id}`);
@@ -1191,7 +1200,7 @@ test("a compose left mid-send keeps its draft, its refusal and its mark for the 
       expect(screen.queryByRole("form", { name: "Comment composer" })).toBeNull()
     );
     await act(async () => {
-      sent.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      sent.reject(new ApiError(409, { code: "UNAVAILABLE", error: "the server is down" }));
       await sent.promise.catch(() => {});
     });
     await waitFor(() => expect(queryClient.isMutating()).toBe(0));
@@ -1307,7 +1316,7 @@ test("a newer compose on a document whose send is out waits on it, after visits 
     ).toBeTruthy();
 
     await act(async () => {
-      firstSend.reject(new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" }));
+      firstSend.reject(new ApiError(409, { code: "UNAVAILABLE", error: "the server is down" }));
       await firstSend.promise.catch(() => {});
     });
     const refused = await screen.findByText("Couldn't send — the server is down");
@@ -1705,7 +1714,11 @@ test("Margin keeps sibling edit controls hidden while an owner save is pending",
     const savingCard = await screen.findByTestId(`margin-comment-${saving.id}`);
     await saveMarginEdit(savingCard, "Updated saving comment");
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith(saving.id, { body: "Updated saving comment" })
+      expect(editComment).toHaveBeenCalledWith(
+        saving.id,
+        { body: "Updated saving comment" },
+        keyedAttempt
+      )
     );
 
     const siblingCard = screen.getByTestId(`margin-comment-${sibling.id}`);
@@ -1754,7 +1767,7 @@ test("Margin restores edit controls and the draft when an owner save rejects", a
       await Promise.resolve();
     });
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith(root.id, { body: "Draft survives" })
+      expect(editComment).toHaveBeenCalledWith(root.id, { body: "Draft survives" }, keyedAttempt)
     );
     expect(within(card).queryAllByRole("button", { name: "Edit" })).toHaveLength(0);
     expect((screen.getByLabelText("Reply") as HTMLTextAreaElement).disabled).toBe(false);

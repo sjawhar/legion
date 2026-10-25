@@ -4,7 +4,6 @@ import { type ReactNode, useCallback, useMemo, useState } from "react";
 import { projectIssuesQuery } from "../../api/queries";
 import { MultiSelect } from "../../components/MultiSelect";
 import {
-  dangerText,
   secondaryButtonBorder,
   secondaryButtonDisabledText,
   secondaryButtonHoverBorder,

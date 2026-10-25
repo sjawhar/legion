@@ -5,6 +5,7 @@ import { Link, MemoryRouter, Route, Routes, useLocation } from "react-router-dom
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type {
   Agent,
@@ -486,7 +487,7 @@ test("IssuePage creates a label from the multi-select and saves the final draft 
     fireEvent.click(screen.getByRole("button", { name: "Edit labels" }));
 
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { labels: ["bug", "urgent"] }, keyedAttempt)
     );
     expect(patchIssue).toHaveBeenCalledTimes(1);
   } finally {
@@ -1651,7 +1652,9 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
     expect([...openStatus.options].map((option) => option.value)).not.toContain("done");
 
     fireEvent.click(screen.getByRole("button", { name: "Close issue" }));
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "done" }, keyedAttempt)
+    );
     // While the write is in flight the control is disabled: no second close can be queued.
     expect(
       (screen.getByRole("button", { name: "Close issue" }) as HTMLButtonElement).disabled
@@ -1668,7 +1671,7 @@ test("IssuePage closes an issue and reopens it into Backlog", async () => {
 
     fireEvent.click(screen.getByRole("button", { name: "Reopen issue" }));
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" })
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { status: "backlog" }, keyedAttempt)
     );
     expect(
       (screen.getByRole("button", { name: "Reopen issue" }) as HTMLButtonElement).disabled
@@ -1715,7 +1718,7 @@ test("IssuePage lets a human move a Todo issue to In progress", async () => {
 
     fireEvent.change(status, { target: { value: "in_progress" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { status: "in_progress" }, keyedAttempt)
     );
   } finally {
     view.unmount();

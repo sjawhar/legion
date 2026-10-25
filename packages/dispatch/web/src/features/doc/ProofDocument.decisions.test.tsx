@@ -3,6 +3,7 @@ import { act, fireEvent, waitFor, within } from "@testing-library/react";
 import { type Node as ProseMirrorNode, Schema } from "prosemirror-model";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import {
   answerTextReadsWithTheSeededText,
   createQueryClient,
@@ -130,6 +131,7 @@ test("ProofDocument hands its decision blocks the indexed ask; the hosted card a
     expect(answerAsk.mock.calls[0]).toEqual([
       "ask-1",
       { expected_edited_at: null, selected: ["Ship"], text: "Go." },
+      keyedAttempt,
     ]);
     // The server writes the outcome into the block, so the document's own reads go stale and the
     // text is read again.

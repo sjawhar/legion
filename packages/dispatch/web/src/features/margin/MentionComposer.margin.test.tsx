@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor } from "@testing-library/react";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { ComposerAnchor, ComposerKind } from "../conversation/composer-model";
 import { MentionComposer } from "../conversation/MentionComposer";
@@ -147,13 +148,17 @@ test("Composer posts a document ask and comment to the artifact routes", async (
     fireEvent.change(screen.getByLabelText("Question"), { target: { value: "Why this text?" } });
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
     await waitFor(() =>
-      expect(createArtifactAsk).toHaveBeenCalledWith("document-1", {
-        anchor: { artifact: "document-1", mark_id: "mark-1" },
-        multiple: false,
-        options: [],
-        question: "Why this text?",
-        urgency: "med",
-      })
+      expect(createArtifactAsk).toHaveBeenCalledWith(
+        "document-1",
+        {
+          anchor: { artifact: "document-1", mark_id: "mark-1" },
+          multiple: false,
+          options: [],
+          question: "Why this text?",
+          urgency: "med",
+        },
+        keyedAttempt
+      )
     );
     ask.unmount();
 
@@ -170,11 +175,15 @@ test("Composer posts a document ask and comment to the artifact routes", async (
     fireEvent.change(screen.getByLabelText("Comment"), { target: { value: "Please revise." } });
     fireEvent.click(screen.getByRole("button", { name: "Send" }));
     await waitFor(() =>
-      expect(createArtifactComment).toHaveBeenCalledWith("document-1", {
-        anchor: { artifact: "document-1", mark_id: "mark-1" },
-        body: "Please revise.",
-        reply_to: undefined,
-      })
+      expect(createArtifactComment).toHaveBeenCalledWith(
+        "document-1",
+        {
+          anchor: { artifact: "document-1", mark_id: "mark-1" },
+          body: "Please revise.",
+          reply_to: undefined,
+        },
+        keyedAttempt
+      )
     );
     comment.unmount();
   } finally {
@@ -270,13 +279,17 @@ test("Composer submits the configured ask options, multiple selection, and urgen
     fireEvent.click(screen.getByRole("button", { name: "Ask" }));
 
     await waitFor(() =>
-      expect(createAsk).toHaveBeenCalledWith("CORE-1", {
-        anchor: { artifact: anchor.artifact, mark_id: anchor.mark_id },
-        multiple: true,
-        options: [{ description: "Proceed now", label: "Ship" }, { label: "Hold" }],
-        question: "Which path?",
-        urgency: "high",
-      })
+      expect(createAsk).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          anchor: { artifact: anchor.artifact, mark_id: anchor.mark_id },
+          multiple: true,
+          options: [{ description: "Proceed now", label: "Ship" }, { label: "Hold" }],
+          question: "Which path?",
+          urgency: "high",
+        },
+        keyedAttempt
+      )
     );
     composer.unmount();
   } finally {
@@ -578,10 +591,14 @@ test("inline Composer posts a reply to its thread root with Ctrl+Enter", async (
     fireEvent.keyDown(reply, { ctrlKey: true, key: "Enter" });
 
     await waitFor(() =>
-      expect(createComment).toHaveBeenCalledWith("CORE-1", {
-        body: "Inline reply",
-        reply_to: "root-1",
-      })
+      expect(createComment).toHaveBeenCalledWith(
+        "CORE-1",
+        {
+          body: "Inline reply",
+          reply_to: "root-1",
+        },
+        keyedAttempt
+      )
     );
     expect(screen.getByRole("button", { name: "Send" })).not.toBeNull();
   } finally {
@@ -614,7 +631,11 @@ test("edit Composer PATCHes the author comment body and reads Save", async () =>
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith("comment-1", { body: "Revised comment" })
+      expect(editComment).toHaveBeenCalledWith(
+        "comment-1",
+        { body: "Revised comment" },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();
@@ -648,7 +669,11 @@ test("edit Composer saves the text in the field at Save time, not the text of th
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
 
     await waitFor(() =>
-      expect(editComment).toHaveBeenCalledWith("comment-1", { body: "Edited comment" })
+      expect(editComment).toHaveBeenCalledWith(
+        "comment-1",
+        { body: "Edited comment" },
+        keyedAttempt
+      )
     );
   } finally {
     view.unmount();

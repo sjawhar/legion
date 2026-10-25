@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { InboxRow, Issue, IssueDetails, IssueSummary } from "../../api/types";
 import { AssigneeControl } from "./AssigneeControl";
@@ -168,7 +168,7 @@ test("AssigneeControl reassigns optimistically on every surface and merges the s
     await waitFor(() => expect(select().options.length).toBe(3));
     fireEvent.change(select(), { target: { value: "bob" } });
     await waitFor(() => expect(select().value).toBe("bob"));
-    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { assignee: "bob" });
+    expect(patchIssue).toHaveBeenCalledWith("CORE-1", { assignee: "bob" }, keyedAttempt);
     expect(queryClient.getQueryData<IssueSummary[]>(listKey)?.[0]?.assignee).toBe("bob");
     expect(queryClient.getQueryData<InboxRow[]>(inboxKey)?.[0]?.issue?.assignee).toBe("bob");
 
@@ -191,7 +191,9 @@ test("AssigneeControl sends null for Unassigned", async () => {
     fireEvent.focus(select());
     await waitFor(() => expect(select().options.length).toBe(3));
     fireEvent.change(select(), { target: { value: "" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { assignee: null }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { assignee: null }, keyedAttempt)
+    );
     await waitFor(() => expect(select().value).toBe(""));
     expect(screen.getByText("Unassigned", { selector: "span" })).toBeTruthy();
   } finally {
@@ -234,7 +236,9 @@ test("AssigneeControl keeps focus while a save is in flight and saves a pick mad
     select().focus();
     await waitFor(() => expect(select().options.length).toBe(3));
     fireEvent.change(select(), { target: { value: "bob" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { assignee: "bob" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { assignee: "bob" }, keyedAttempt)
+    );
     // A disabled control drops focus and leaves the tab order for the length of the save.
     expect(select().disabled).toBe(false);
     expect(document.activeElement).toBe(select());
@@ -247,7 +251,7 @@ test("AssigneeControl keeps focus while a save is in flight and saves a pick mad
       await first.promise;
     });
     await waitFor(() => expect(patchIssue).toHaveBeenCalledTimes(2));
-    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { assignee: null });
+    expect(patchIssue).toHaveBeenLastCalledWith("CORE-1", { assignee: null }, keyedAttempt);
     expect(select().value).toBe("");
     await act(async () => {
       second.resolve({ ...issue, assignee: null });

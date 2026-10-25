@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import type { MyRepliesResponse, MyReplyRow } from "../../api/types";
 import { RepliesPage } from "./RepliesPage";
@@ -133,7 +134,9 @@ test("Mark read marks the thread through the reply the row shows, and the list r
     within(row.closest("li") as HTMLElement).getByRole("button", { name: "Mark read" })
   );
   await waitFor(() =>
-    expect(markThreadRead.mock.calls).toEqual([["comment-root", "2026-10-12T02:00:00.123456Z"]])
+    expect(markThreadRead.mock.calls).toEqual([
+      ["comment-root", "2026-10-12T02:00:00.123456Z", keyedAttempt],
+    ])
   );
   expect(await screen.findByText("No new replies in threads you wrote in.")).toBeTruthy();
   expect(listMyReplies.mock.calls.length).toBeGreaterThan(before);

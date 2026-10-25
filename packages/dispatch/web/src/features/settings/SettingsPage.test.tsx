@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { api } from "../../api/client";
 import { SettingsPage } from "./SettingsPage";
 
@@ -80,7 +80,7 @@ test("lists live grants once credential requests are configured, and Revoke is o
     expect(await screen.findByText("DEEL_API_KEY")).toBeDefined();
     fireEvent.click(screen.getByRole("button", { name: "Revoke" }));
     await waitFor(() => expect(revokeCredentialGrant).toHaveBeenCalledTimes(1));
-    expect(revokeCredentialGrant).toHaveBeenCalledWith("grant-1");
+    expect(revokeCredentialGrant).toHaveBeenCalledWith("grant-1", keyedAttempt);
   } finally {
     cleanup();
     getCredentialPending.mockRestore();

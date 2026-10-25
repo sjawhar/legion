@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider, useQuery } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import type { ReactNode } from "react";
-
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { Issue, IssueDetails, IssueSummary, RepoProject } from "../../api/types";
 import { RepoControl } from "./RepoControl";
@@ -179,7 +179,7 @@ test("RepoControl lists the project's mapped repositories, shows the resolved on
     expect(select().value).toBe("");
     fireEvent.change(select(), { target: { value: "acme/gadgets" } });
     await waitFor(() =>
-      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: "acme/gadgets" })
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: "acme/gadgets" }, keyedAttempt)
     );
     await waitFor(() =>
       expect(queryClient.getQueryData<IssueDetails>(detailKey)?.last_seq).toBe(2)
@@ -204,7 +204,9 @@ test("RepoControl sends null for Inherit", async () => {
     // The issue's own repository is selectable before the mapping list has loaded.
     expect(select().value).toBe("acme/gadgets");
     fireEvent.change(select(), { target: { value: "" } });
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: null }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-1", { repo: null }, keyedAttempt)
+    );
     await waitFor(() => expect(screen.getByText("acme/widgets", { selector: badge })).toBeTruthy());
   } finally {
     unmount();

@@ -4,23 +4,30 @@ import { waitFor } from "@testing-library/react";
 
 import { type KeptTab, keptTab, UnloadTarget } from "../../__tests__/kept-sends-harness";
 import { ApiError, api } from "../../api/client";
+import { agentMessagesQuery } from "../../api/queries";
 import type {
   BroadcastCreated,
   CreateBroadcastInput,
   Message,
   MessageDelivery,
 } from "../../api/types";
-import { KEPT_SEND_RESUME_MS } from "../conversation/keyed-send-storage";
-import { SendInterruptedError, SendStoppedError } from "../conversation/send-request";
+import { SendInterruptedError, SendStoppedError } from "../writes/keyed-write";
+import { KEPT_SEND_RESUME_MS } from "../writes/write-storage";
 import { BroadcastQueue, type BroadcastSend } from "./broadcast-queue";
 
 /** A press of Send: `body` to the Planner, under `key`. */
 function press(body: string, key: string): BroadcastSend {
   return {
-    input: { body, delivery: "btw", idempotency_key: key, session_ids: ["planner-session"] },
+    input: { body, delivery: "btw", session_ids: ["planner-session"] },
+    key,
     picked: false,
     selected: ["planner-session"],
   };
+}
+
+/** The key each call of `createBroadcast` went under (`Idempotency-Key`). */
+function keysOf(calls: readonly Parameters<typeof api.createBroadcast>[]): string[] {
+  return calls.map(([, bounds]) => bounds.key);
 }
 
 /** One recipient of `input`, its message's one attempt in `state`. */
@@ -65,7 +72,7 @@ function created(
     created_at: "2026-10-25T00:00:00Z",
     delivery: input.delivery,
     excluded: [],
-    id: `broadcast-${input.idempotency_key}`,
+    id: `broadcast-${input.body}`,
     recipients: state === null ? [] : [recipient(input, state)],
   };
 }
@@ -118,11 +125,7 @@ test("broadcasts out or queued survive a reload and are sent again under their k
 
     answers[0]?.resolve(created(press("First.", "key-1").input));
     await waitFor(() => expect(after.rows().map((row) => row.status)).toEqual(["sent", "sent"]));
-    expect(createBroadcast.mock.calls.map(([input]) => input.idempotency_key)).toEqual([
-      "key-1",
-      "key-1",
-      "key-2",
-    ]);
+    expect(keysOf(createBroadcast.mock.calls)).toEqual(["key-1", "key-1", "key-2"]);
     expect(tab.kept("key-1")).toBeUndefined();
     expect(tab.kept("key-2")).toBeUndefined();
 
@@ -135,9 +138,38 @@ test("broadcasts out or queued survive a reload and are sent again under their k
   }
 });
 
+// A broadcast Dispatch made whose answer was lost is answered `409 KEY_COMMITTED` under its key,
+// and Dispatch will not make it again: the send leaves the strip with no refusal and nothing kept,
+// and each recipient's conversation and the broadcasts are read again.
+test("a broadcast answered KEY_COMMITTED leaves the strip as made, with nothing kept", async () => {
+  const tab = keptTab();
+  const client = new QueryClient();
+  client.setQueryData(["whoami"], { event_head: "0", kind: "user", login: "alice" });
+  const invalidate = spyOn(client, "invalidateQueries");
+  const createBroadcast = spyOn(api, "createBroadcast").mockRejectedValueOnce(
+    new ApiError(409, { code: "KEY_COMMITTED", error: "already made" })
+  );
+  const queue = new BroadcastQueue(client, tab.page());
+
+  try {
+    queue.enqueue(press("First.", "key-1"));
+    await waitFor(() => expect(queue.rows()).toEqual([]));
+    expect(createBroadcast).toHaveBeenCalledTimes(1);
+    expect(tab.kept("key-1")).toBeUndefined();
+    expect(invalidate).toHaveBeenCalledWith({
+      queryKey: agentMessagesQuery("planner-session").queryKey,
+    });
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ["broadcast"] });
+  } finally {
+    createBroadcast.mockRestore();
+    tab.close();
+  }
+});
+
 // A refused send's row is the only copy of a message Send cleared from the composer, so a reload
 // shows it again, Retry and Restore draft with it, and sends nothing. Restore draft's dismissal
-// drops it from what is kept; Retry keeps it until it lands.
+// drops it from what is kept; Retry - after Dispatch's own refusal, under a key of its own, since
+// Dispatch would answer the old one with that refusal - keeps it until it lands.
 test("a refused broadcast survives a reload, and leaves what is kept once dismissed or sent", async () => {
   const tab = keptTab();
   const refusal = new ApiError(409, {
@@ -177,10 +209,13 @@ test("a refused broadcast survives a reload, and leaves what is kept once dismis
 
     createBroadcast.mockImplementation(async (input) => created(input));
     after.retry(second);
-    expect(keptState(tab, "key-2")).toBe("queued");
-    await waitFor(() => expect(after.rows().map((row) => row.status)).toEqual(["sent"]));
-    expect(createBroadcast.mock.calls.at(-1)?.[0].idempotency_key).toBe("key-2");
     expect(tab.kept("key-2")).toBeUndefined();
+    const retriedKey = after.rows()[0]?.send.key ?? "";
+    expect(retriedKey).not.toBe("key-2");
+    expect(keptState(tab, retriedKey)).toBe("queued");
+    await waitFor(() => expect(after.rows().map((row) => row.status)).toEqual(["sent"]));
+    expect(keysOf(createBroadcast.mock.calls).at(-1)).toBe(retriedKey);
+    expect(tab.kept(retriedKey)).toBeUndefined();
   } finally {
     createBroadcast.mockRestore();
     tab.close();
@@ -198,25 +233,14 @@ test("a broadcast being stopped asks once more and resumes stopped", async () =>
   const after = queueOf(tab);
 
   try {
-    tab.storage.setItem(
-      "dispatch.keyed-send:key-1",
-      JSON.stringify({
-        key: "key-1",
-        kind: "broadcast",
-        login: "alice",
-        refusal: null,
-        send: { send: { ...press("First.", "key-1"), pressed: 4 }, submittedAt: Date.now() },
-        state: "stopping",
-        version: 2,
-      })
-    );
+    keepBroadcast(tab, { pressed: 4, pressedAt: Date.now(), state: "stopping" });
     after.resume("alice");
     await waitFor(() => expect(after.rows()[0]?.status).toBe("failed"));
     const [row] = after.rows();
     expect(row?.status === "failed" ? row.error : undefined).toBeInstanceOf(SendStoppedError);
     expect(keptState(tab, "key-1")).toBe("refused");
     expect(createBroadcast).toHaveBeenCalledTimes(1);
-    expect(createBroadcast.mock.calls[0]?.[0].idempotency_key).toBe("key-1");
+    expect(keysOf(createBroadcast.mock.calls)[0]).toBe("key-1");
   } finally {
     createBroadcast.mockRestore();
     tab.close();
@@ -233,18 +257,7 @@ test("a late broadcast resumes late", async () => {
   const after = queueOf(tab);
 
   try {
-    tab.storage.setItem(
-      "dispatch.keyed-send:key-1",
-      JSON.stringify({
-        key: "key-1",
-        kind: "broadcast",
-        login: "alice",
-        refusal: null,
-        send: { send: { ...press("First.", "key-1"), pressed: 1 }, submittedAt: Date.now() },
-        state: "late",
-        version: 2,
-      })
-    );
+    keepBroadcast(tab, { pressed: 1, pressedAt: Date.now(), state: "late" });
     after.resume("alice");
     await waitFor(() => expect(createBroadcast).toHaveBeenCalledTimes(1));
     const [row] = after.rows();
@@ -290,21 +303,11 @@ test("a broadcast kept over five minutes comes back failed rather than sent", as
   const after = queueOf(tab);
 
   try {
-    tab.storage.setItem(
-      "dispatch.keyed-send:key-1",
-      JSON.stringify({
-        key: "key-1",
-        kind: "broadcast",
-        login: "alice",
-        refusal: null,
-        send: {
-          send: { ...press("First.", "key-1"), pressed: 1 },
-          submittedAt: Date.now() - KEPT_SEND_RESUME_MS - 1_000,
-        },
-        state: "sending",
-        version: 2,
-      })
-    );
+    keepBroadcast(tab, {
+      pressed: 1,
+      pressedAt: Date.now() - KEPT_SEND_RESUME_MS - 1_000,
+      state: "sending",
+    });
     after.resume("alice");
     const [row] = after.rows();
     expect(row?.status).toBe("failed");
@@ -320,12 +323,33 @@ test("a broadcast kept over five minutes comes back failed rather than sent", as
     if (row === undefined) throw new Error("the kept row went missing");
     after.retry(row);
     await waitFor(() => expect(after.rows()[0]?.status).toBe("sent"));
-    expect(createBroadcast.mock.calls[0]?.[0].idempotency_key).toBe("key-1");
+    expect(keysOf(createBroadcast.mock.calls)[0]).toBe("key-1");
   } finally {
     createBroadcast.mockRestore();
     tab.close();
   }
 });
+/** Writes the entry a page before a reload kept for the Planner's "First." under key-1, at its
+ *  place `pressed` in the strip, pressed at `pressedAt` and standing at `state`. */
+function keepBroadcast(
+  tab: KeptTab,
+  { pressed, pressedAt, state }: { pressed: number; pressedAt: number; state: string }
+): void {
+  tab.storage.setItem(
+    "dispatch.write:key-1",
+    JSON.stringify({
+      detail: { send: { ...press("First.", "key-1"), pressed } },
+      key: "key-1",
+      kind: "broadcast",
+      login: "alice",
+      pressedAt,
+      refusal: null,
+      request: null,
+      state,
+      version: 3,
+    })
+  );
+}
 
 /** Lets every promise the queue chained run as far as it goes without the clock moving. */
 async function settle(): Promise<void> {
@@ -357,9 +381,7 @@ test("a broadcast with a pending recipient is asked again under its key until it
       expect(createBroadcast).toHaveBeenCalledTimes(index + 2);
     }
     expect(queue.rows()[0]?.status).toBe("sent");
-    expect(new Set(createBroadcast.mock.calls.map(([input]) => input.idempotency_key)).size).toBe(
-      1
-    );
+    expect(new Set(keysOf(createBroadcast.mock.calls)).size).toBe(1);
   } finally {
     jest.advanceTimersByTime(1);
     jest.useRealTimers();

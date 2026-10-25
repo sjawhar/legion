@@ -3,6 +3,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { seedDeliveryReads } from "../../__tests__/live-socket-harness";
 import { ApiError, api } from "../../api/client";
 import type { DeliverySessionGroup } from "../../api/types";
@@ -87,7 +88,10 @@ test("create: two selected sessions and a name become a group; the live views he
     });
     fireEvent.click(screen.getByRole("button", { name: "Create group" }));
     await waitFor(() =>
-      expect(create).toHaveBeenCalledWith({ name: "Release crew", sessions: ["s1", "s3"] })
+      expect(create).toHaveBeenCalledWith(
+        { name: "Release crew", sessions: ["s1", "s3"] },
+        keyedAttempt
+      )
     );
     await waitFor(() => expect(queryClient.getQueryState(reads.run)?.isInvalidated).toBe(true));
     expect(queryClient.getQueryState(reads.live)?.isInvalidated).toBe(false);
@@ -105,17 +109,23 @@ test("rename, add, remove and delete each write their one change", async () => {
     const group = screen.getByRole("group", { name: "Release crew" });
     fireEvent.change(within(group).getByLabelText("Name"), { target: { value: "Ship crew" } });
     fireEvent.click(within(group).getByRole("button", { name: "Rename" }));
-    await waitFor(() => expect(update).toHaveBeenLastCalledWith(crew.id, { name: "Ship crew" }));
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(crew.id, { name: "Ship crew" }, keyedAttempt)
+    );
 
     fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer (s3)" }));
     fireEvent.click(within(group).getByRole("button", { name: "Add selected" }));
-    await waitFor(() => expect(update).toHaveBeenLastCalledWith(crew.id, { add: ["s3"] }));
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(crew.id, { add: ["s3"] }, keyedAttempt)
+    );
 
     fireEvent.click(within(group).getByRole("button", { name: "Remove Planner two (s2)" }));
-    await waitFor(() => expect(update).toHaveBeenLastCalledWith(crew.id, { remove: ["s2"] }));
+    await waitFor(() =>
+      expect(update).toHaveBeenLastCalledWith(crew.id, { remove: ["s2"] }, keyedAttempt)
+    );
 
     fireEvent.click(within(group).getByRole("button", { name: "Delete group" }));
-    await waitFor(() => expect(remove).toHaveBeenCalledWith(crew.id));
+    await waitFor(() => expect(remove).toHaveBeenCalledWith(crew.id, keyedAttempt));
   } finally {
     cleanup();
     update.mockRestore();
@@ -135,7 +145,9 @@ test("group actions are disabled while a save is pending", async () => {
     fireEvent.click(screen.getByRole("checkbox", { name: "Reviewer (s3)" }));
     fireEvent.change(within(group).getByLabelText("Name"), { target: { value: "Ship crew" } });
     fireEvent.click(within(group).getByRole("button", { name: "Rename" }));
-    await waitFor(() => expect(update).toHaveBeenCalledWith(crew.id, { name: "Ship crew" }));
+    await waitFor(() =>
+      expect(update).toHaveBeenCalledWith(crew.id, { name: "Ship crew" }, keyedAttempt)
+    );
 
     for (const name of ["Rename", "Add selected", "Remove Planner two (s2)", "Delete group"]) {
       expect((within(group).getByRole("button", { name }) as HTMLButtonElement).disabled).toBe(

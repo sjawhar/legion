@@ -1,6 +1,6 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import { SEARCH_QUERY_MAX } from "@legion/contracts/dispatch-tools";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   type RefObject,

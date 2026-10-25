@@ -4,6 +4,7 @@ import { act, fireEvent, render, screen, waitFor, within } from "@testing-librar
 import { MemoryRouter, useLocation, useNavigate } from "react-router-dom";
 
 import { commentDeliveryFields } from "../../__tests__/comment-fixture";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import { ApiError, api } from "../../api/client";
 import type { AskRead, Comment, CredentialPendingRow, InboxRow, Issue } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
@@ -1078,10 +1079,14 @@ test("the reader's own Ask back keeps the row under Waiting on you, unscrolled, 
     await waitFor(() =>
       expect(screen.getByTestId("turn-ask-b").textContent).toBe("Waiting on session:session-…")
     );
-    expect(createComment).toHaveBeenCalledWith("CORE-2", {
-      ask_id: "ask-b",
-      body: "Ship what, exactly?",
-    });
+    expect(createComment).toHaveBeenCalledWith(
+      "CORE-2",
+      {
+        ask_id: "ask-b",
+        body: "Ship what, exactly?",
+      },
+      keyedAttempt
+    );
     expect(document.activeElement).toBe(row);
     expect(row.getAttribute("data-inbox-section")).toBe("human");
     expect(rowIds()).toEqual(["ask-a", "ask-b", "ask-c"]);
@@ -1674,7 +1679,9 @@ test("Assign to me PATCHes the viewer's lowercase login and keeps its row until 
   try {
     await screen.findByText("Orphan question?");
     fireEvent.click(screen.getByRole("button", { name: "Assign CORE-3 to me" }));
-    await waitFor(() => expect(patchIssue).toHaveBeenCalledWith("CORE-3", { assignee: "alice" }));
+    await waitFor(() =>
+      expect(patchIssue).toHaveBeenCalledWith("CORE-3", { assignee: "alice" }, keyedAttempt)
+    );
     // The optimistic assignment takes the row out of this filter at once; the live write keeps
     // it on screen, so `Assigning…` is shown by the control the reader clicked.
     await waitFor(() =>
@@ -1918,7 +1925,7 @@ test("Snooze folds a row into Later until the reader un-snoozes it", async () =>
       within(later as HTMLElement).getByRole("button", { name: "Un-snooze CORE-2: Which format?" })
     );
     await waitFor(() => expect(headings()).toEqual(["Waiting on you"]));
-    expect(unsnoozeAsk).toHaveBeenCalledWith("ask-b");
+    expect(unsnoozeAsk).toHaveBeenCalledWith("ask-b", keyedAttempt);
     expect(rowIds()).toEqual(["ask-a", "ask-b"]);
     expect(screen.getByText(/Blocked on you: 2 items/)).toBeTruthy();
   } finally {

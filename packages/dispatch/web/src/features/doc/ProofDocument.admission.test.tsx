@@ -2,6 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { act, fireEvent, screen, waitFor, within } from "@testing-library/react";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { keyedAttempt } from "../../__tests__/keyed-attempt";
 import {
   answerTextReadsWithTheSeededText,
   artifact,
@@ -69,6 +70,7 @@ test("ProofDocument repairs a document outside the schema by an upload under its
     expect(uploadArtifact.mock.calls[0]).toEqual([
       { issue: "CORE-1" },
       { file: picked, name: "spec.md", summary: undefined },
+      keyedAttempt,
     ]);
     await waitFor(() => expect(connections).toHaveLength(1));
     expect(screen.queryByText("Upload markdown to replace and repair this document.")).toBeNull();
@@ -360,7 +362,7 @@ test("ProofDocument offers a rebuild for a history that cannot load and reconnec
     getArtifactText.mockResolvedValue({ markdown: "The live document", version: 1 });
     fireEvent.click(screen.getByRole("button", { name: "Rebuild from the latest version" }));
     await waitFor(() => expect(rebuildArtifact).toHaveBeenCalledTimes(1));
-    expect(rebuildArtifact.mock.calls[0]).toEqual([artifact.id]);
+    expect(rebuildArtifact.mock.calls[0]).toEqual([artifact.id, undefined, keyedAttempt]);
     await waitFor(() => expect(connections).toHaveLength(1));
     expect(screen.queryByRole("button", { name: "Rebuild from the latest version" })).toBeNull();
   } finally {

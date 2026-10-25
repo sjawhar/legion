@@ -183,7 +183,7 @@ export function IssueHeader({
     },
   });
   const releaseClaim = useKeyedWrite({
-    write: (_: void, bounds) => api.releaseIssueClaim(issue.key, bounds),
+    write: (_variables, bounds) => api.releaseIssueClaim(issue.key, bounds),
     inline: true,
     label: () => `Claim on ${issue.key} released`,
     onSuccess: (next) => {

@@ -1,7 +1,7 @@
 import { DELIVERY_CAPABILITIES } from "@legion/contracts";
 import type { QueryClient } from "@tanstack/react-query";
 
-import { api, type WriteRequest } from "../../api/client";
+import { AnswerNotKeptError, api, type WriteRequest } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
 import type { BroadcastCreated, CreateBroadcastInput } from "../../api/types";
 import { newSendKey } from "../../lib/send-key";
@@ -303,6 +303,16 @@ export class BroadcastQueue {
       }
       void this.#client.invalidateQueries({ queryKey: ["broadcast"] });
     } catch (error) {
+      if (error instanceof AnswerNotKeptError) {
+        // Dispatch made the broadcast and has no answer to give for it: it leaves the strip, with
+        // no refusal, and every recipient's conversation and the broadcasts are read again.
+        this.#replace(id, undefined);
+        for (const session of send.input.session_ids) {
+          void this.#client.invalidateQueries({ queryKey: agentMessagesQuery(session).queryKey });
+        }
+        void this.#client.invalidateQueries({ queryKey: ["broadcast"] });
+        return;
+      }
       const failure = error instanceof Error ? error : new Error(String(error));
       this.#replace(id, { error: failure, id, send, status: "failed", submittedAt });
     } finally {
