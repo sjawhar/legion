@@ -55,9 +55,3 @@ retry:
   # the repository's to add, as retry.fallbackChains keys (a record), under the models.yml route
   # above.
   modelFallback: true
-  # Claude Opus 5.5 refuses some attack-path review briefs (`Refusal (cyber)`) that Claude Opus 5
-  # answers; Oh My Pi walks a role's chain on such a refusal, so the review and oracle roles fall
-  # back to Opus 5. Measured against Anthropic's API and the pinned Oh My Pi on 2026-10-25.
-  fallbackChains:
-    review: [anthropic/claude-opus-5:high]
-    oracle: [anthropic/claude-opus-5:high]
