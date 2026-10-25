@@ -1882,6 +1882,10 @@ export default function envoyExtension(pi: PiApi): void {
     // a refusal written in error outlives every later pass (`refusedRoles`), while a refusal left
     // unwritten costs one more claim.
     if (!live() || seen === undefined) return true;
+    // The bound on reading another process's refusal as this process's own stale hold: the
+    // `last_seen` recorded here is the holder's, and a later read that differs drops the hold, so
+    // the misreading costs at most one extra soft claim and ends itself — if another process is
+    // running that session, its registrations move `last_seen`.
     if (abandoned.lastSeen !== undefined && seen !== abandoned.lastSeen) {
       abandonedHolds.delete(key);
       return false;
@@ -2262,32 +2266,38 @@ export default function envoyExtension(pi: PiApi): void {
   let lastHeard = "";
 
   // Settles the holds session events gave up (`pendingHandBacks`), once the pass has handed back
-  // any other role it held. One of the role the host session wants (a resume Oh My Pi rolled back
-  // to the session that held it) is this process's hold again, unconfirmed until a soft claim
-  // naming it checks it at the listener (`holdUnconfirmed`), and kept, carried or handed back as
-  // any hold from then on, so no hand-back opens the role to another claim on the way; a claim of a
-  // role drops every hand-back of it left pending, so there is at most one.
-  // Any other is handed back. One the listener does not take back stays pending while it is under
-  // the host session's own id (a tree navigation), which this process heartbeats and no other can
-  // rightly hold; under a session it has left, it is abandoned to the listener's reaping
-  // (`abandonedHolds`), since nothing heartbeats that session any more and a later try could take
-  // a hold another process made under that id. Answers whether a hold came back.
-  const settleEndedHolds = async (
-    host: string,
-    wanted: string | undefined,
-    live: Fence
-  ): Promise<boolean> => {
+  // any other role it held. A hold is two facts, its role topic and the session id it was
+  // registered under, and nothing else decides what becomes of it.
+  // One of the role the host session wants is this process's hold again only while this process
+  // registers the session it is under, read as it is adopted (`sessionOpen`): a resume Oh My Pi
+  // rolled back to the session that held it. It is unconfirmed until a soft claim naming it checks
+  // it at the listener (`holdUnconfirmed`), and kept, carried or handed back as any hold from then
+  // on, so no hand-back opens the role to another claim on the way; holds are keyed by role and
+  // session, so at most one is adopted. One under a session this process has left is never
+  // adopted: another process may run that session now, and a claim naming it as this pane's
+  // predecessor would take the role from that live process.
+  // Every hold not adopted is handed back. One the listener does not take back is abandoned
+  // (`abandonedHolds`), whatever session it is under. Under a session this process still
+  // registers, the next accepted registration makes it a pending hand-back again
+  // (`registerSession`), for the pass after to hand back; under a session it has left, it waits
+  // for the listener's reaping, since nothing heartbeats that session any more and a later try
+  // could take a hold another process made under that id. Answers whether a hold came back.
+  const settleEndedHolds = async (wanted: string | undefined, live: Fence): Promise<boolean> => {
     let restored = false;
     const failed: { readonly key: string; readonly topic: string; readonly id: string }[] = [];
     for (const [key, hold] of pendingHandBacks) {
       // Abandoned at the deadline, mid-hand-back: the move that replaced this one settles what is
       // still pending, so stop before the delete — a `Map` iterator visits entries inserted after
       // it was created, and an entry a session event added behind this loop belongs to that move,
-      // not this one. The holds whose hand-back already failed are restored below: they are in
+      // not this one. The holds whose hand-back already failed are abandoned below: they are in
       // neither map while this runs, and dropping them would leak them with nothing to settle them.
       if (!live()) break;
       pendingHandBacks.delete(key);
-      if (wanted !== undefined && hold.topic === ROLE_TOPIC_PREFIX + wanted) {
+      if (
+        wanted !== undefined &&
+        hold.topic === ROLE_TOPIC_PREFIX + wanted &&
+        sessionOpen(hold.id)
+      ) {
         claimedRoleTopic = hold.topic;
         claimedRoleSessionID = hold.id;
         holdUnconfirmed = true;
@@ -2305,10 +2315,7 @@ export default function envoyExtension(pi: PiApi): void {
           });
         });
     }
-    for (const { key, topic, id } of failed) {
-      if (id === host) pendingHandBacks.set(key, { topic, id });
-      else abandonedHolds.set(key, { topic, id });
-    }
+    for (const { key, topic, id } of failed) abandonedHolds.set(key, { topic, id });
     // Abandoned during the last hand-back, or at the break above: the restore this pass made is
     // the replacing move's to decide, so answer that no hold came back.
     if (!live()) return false;
@@ -2348,7 +2355,7 @@ export default function envoyExtension(pi: PiApi): void {
       if (ended !== undefined && unheard) warnRoleEnded(context, host, ended);
       if (!owns()) return false;
     }
-    if ((await settleEndedHolds(host, desired, live)) && unheard && desired !== undefined) {
+    if ((await settleEndedHolds(desired, live)) && unheard && desired !== undefined) {
       warnNoticesClosed(context, desired);
     }
     if (!owns()) return false;

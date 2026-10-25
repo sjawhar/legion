@@ -6700,11 +6700,11 @@ describe("envoy OMP extension", () => {
     });
   });
 
-  // A settle abandoned at its deadline mid-hand-back still puts the holds whose hand-back failed
-  // back where it took them from: while its loop runs they are in neither `pendingHandBacks` nor
-  // `abandonedHolds`, and the move that replaced it settles only what it finds there. Dropped,
-  // such a hold leaks: no pass ever hands it back, so the listener keeps naming this session for
-  // a role it gave up, routing that role's tasks to a session that no longer does that work.
+  // A settle abandoned at its deadline mid-hand-back still records the holds whose hand-back
+  // failed: while its loop runs they are in neither `pendingHandBacks` nor `abandonedHolds`, and
+  // the move that replaced it settles only what it finds there. Dropped, such a hold leaks: no
+  // pass ever hands it back, so the listener keeps naming this session for a role it gave up,
+  // routing that role's tasks to a session that no longer does that work.
   test("a settle abandoned mid-hand-back restores the hold whose hand-back failed, for a later pass to hand back", async () => {
     // The waits are real: the role move is abandoned on a real timer, read as the move starts,
     // and the deadline is long enough for the first hand-back below to fail twice — the client
@@ -6725,7 +6725,7 @@ describe("envoy OMP extension", () => {
       const beforeMove = fixture.entries.length;
       expect((await roleTool.execute("", { role: "reviewer" })).isError).not.toBe(true);
       // A tree navigation back to before the move ends reviewer, whose hand-back the listener
-      // fails: it stays pending under the session's own id, and the pass claims legion-controller.
+      // fails: it is abandoned, and the pass claims legion-controller.
       failHandBacks(2);
       manager.branch = () => fixture.entries.slice(0, beforeMove);
       await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_rf_ab"));
@@ -6733,8 +6733,8 @@ describe("envoy OMP extension", () => {
       expect(holders.get("legion-controller")).toBe("ses_rf_ab");
 
       // A tree navigation to records naming release-captain ends legion-controller too. Its pass
-      // fails reviewer's hand-back again, and is abandoned at its deadline while the listener
-      // still holds legion-controller's.
+      // registers ses_rf_ab, which makes reviewer pending again behind legion-controller, and is
+      // abandoned at its deadline while the listener still holds legion-controller's hand-back.
       fixture.pi.appendEntry("envoy-role-claim", { role: "release-captain" });
       manager.branch = () => [...fixture.entries];
       failHandBacks(2);
@@ -6746,20 +6746,21 @@ describe("envoy OMP extension", () => {
       await handingBack.reached;
       await new Promise((resolve) => setTimeout(resolve, 700));
 
-      // The abandoned loop's last hand-back goes through, and the loop ends past its deadline
-      // with reviewer's failure still in hand.
+      // The listener fails that hand-back (the client retries a failure once, 250 ms later), and
+      // the loop ends past its deadline with that failure in hand.
       const settledSoFar = handedBack.length;
       handingBack.release();
       await navigated;
       await new Promise((resolve) => setTimeout(resolve, 300));
       for (let step = 0; step < 10; step += 1) await drain();
 
-      // Later passes hand reviewer back: the abandoned loop left it pending, not lost.
+      // Later passes hand both back: the abandoned loop left reviewer pending and recorded
+      // legion-controller's failure, so neither is lost.
       for (let each = 0; each < 3; each += 1) {
         tick();
         for (let step = 0; step < 10; step += 1) await drain();
       }
-      expect(handedBack.slice(settledSoFar)).toEqual([
+      expect([...handedBack.slice(settledSoFar)].sort()).toEqual([
         "notifications.role.legion-controller@ses_rf_ab",
         "notifications.role.reviewer@ses_rf_ab",
       ]);
@@ -6821,6 +6822,189 @@ describe("envoy OMP extension", () => {
         for (let step = 0; step < 10; step += 1) await drain();
       }
       expect(holders.get(role)).toBe("ses_lk");
+    });
+  });
+
+  // A hand-back the listener fails is abandoned whatever session its hold is under, and the
+  // session this process still registers takes its holds back at its next accepted registration
+  // (`registerSession`), so a later pass hands that hold back. Lost on the way, the listener
+  // names this session for a role it gave up for as long as this process registers it — the
+  // listener never reaps a live session's hold — so that role's tasks keep reaching a pane that
+  // no longer does that work.
+  test("a hand-back the listener fails under the session this process registers is taken back by its next registration and made by a later pass", async () => {
+    const {
+      fixture,
+      live,
+      manager,
+      holders,
+      handedBack,
+      registrations,
+      roleTool,
+      failHandBacks,
+      onHandBack,
+      tick,
+    } = await gatedRoleFixture("own-id-hand-back-reregistered", "ses_t2r");
+    const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+    const reviewer = "notifications.role.reviewer@ses_t2r";
+    const beforeMove = fixture.entries.length;
+    expect((await roleTool.execute("", { role: "reviewer" })).isError).not.toBe(true);
+    // A tree navigation back to before the move: its records name legion-controller, so its
+    // event ends reviewer, and the listener fails that hand-back.
+    failHandBacks(2);
+    manager.branch = () => fixture.entries.slice(0, beforeMove);
+    await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf" }, live("ses_t2r"));
+    expect(holders.get("reviewer")).toBe("ses_t2r");
+    expect(handedBack).not.toContain(reviewer);
+    // The registrations made between that failure and the hand-back that follows it.
+    const failedAt = registrations.length;
+    let registeredBefore: readonly string[] | undefined;
+    onHandBack(() => {
+      if (registeredBefore === undefined && handedBack.includes(reviewer)) {
+        registeredBefore = registrations.slice(failedAt);
+      }
+    });
+    tick();
+    for (let step = 0; step < 10; step += 1) await drain();
+    // Handed back once, after a registration of the session the hold is under took it back.
+    expect(handedBack.filter((each) => each === reviewer)).toHaveLength(1);
+    expect(registeredBefore).toContain("ses_t2r");
+    expect(holders.has("reviewer")).toBe(false);
+    expect(holders.get("legion-controller")).toBe("ses_t2r");
+  });
+
+  // A hold under a session this process has left is the listener's to reap, whether its hand-back
+  // failed before or after the process left: nothing here heartbeats that session, and another
+  // process may resume it and hold the role under it. Tried again, the hand-back ends a role that
+  // live process holds; named in a claim, it hands that process's role to this pane. And a claim
+  // the listener refuses naming it must record no refusal (`refusedRoles`): recorded, the pane
+  // whose records name the role never claims it once the listener reaps the hold, and the role
+  // sits unheld.
+  for (const when of ["after", "before"] as const) {
+    test(`a hand-back the listener fails ${when} the process leaves its session is waited out: never tried again, and a claim refused naming it records no refusal`, async () => {
+      const role = "legion-controller";
+      const { fixture, live, context, holders, handedBack, claimSessions, failHandBacks, tick } =
+        await gatedRoleFixture(`left-session-hand-back-waited-${when}`, "ses_t3w");
+      const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+      const ticks = async (count: number) => {
+        for (let each = 0; each < count; each += 1) {
+          tick();
+          for (let step = 0; step < 10; step += 1) await drain();
+        }
+      };
+      failHandBacks(2);
+      if (when === "after") {
+        // A /new ends the role; its pass hands the hold back under ses_t3w, which it has left.
+        await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+        await fixture.handlers.get("session_switch")?.(
+          { reason: "new" },
+          live("ses_t3w_n", { fresh: true })
+        );
+      } else {
+        // A tree navigation to records that release the role ends it; its pass hands the hold
+        // back under ses_t3w, the session it is still in.
+        fixture.pi.appendEntry("envoy-role-claim", { role: null });
+        await fixture.handlers.get("session_tree")?.({ newLeafId: "leaf-t3w" }, live("ses_t3w"));
+      }
+      expect(handedBack).toEqual([]);
+      expect(holders.get(role)).toBe("ses_t3w");
+
+      // A resume opens a session whose records name the role. Its soft claim, and the next
+      // pass's, are refused with ses_t3w as the holder.
+      await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+      const resumed = live("ses_t3w_c", { fresh: true });
+      fixture.pi.appendEntry("envoy-role-claim", { role });
+      await fixture.handlers.get("session_switch")?.({ reason: "resume" }, resumed);
+      await ticks(1);
+      // The hold under ses_t3w was neither handed back again nor named by a claim: the listener
+      // still names ses_t3w. And each pass claimed again, so no refusal was recorded.
+      expect(handedBack).toEqual([]);
+      expect(holders.get(role)).toBe("ses_t3w");
+      expect(claimSessions.filter((claim) => claim === `${role}@ses_t3w_c`)).toHaveLength(2);
+
+      // The listener reaps the hold; the next pass takes the role.
+      holders.delete(role);
+      await ticks(1);
+      expect(holders.get(role)).toBe("ses_t3w_c");
+    });
+  }
+
+  // A hold is its topic and the session it was registered under, so one pass may meet two holds
+  // of one role: one under the session the host is on, which it adopts, and one under a session
+  // this process has left, whose hand-back the listener fails. That second hold is recorded for
+  // the listener to reap, however the role it holds was just adopted. Dropped, the claim the
+  // listener refuses naming it records a refusal, the pane whose records name the role never
+  // claims it again, and once the listener reaps the hold the role sits unheld.
+  test("a pass that adopts a hold and fails the hand-back of the same role under another session records that hold for the listener to reap", async () => {
+    // The waits are real: the model's role move is abandoned on a real timer, read as the move
+    // starts, and the deadline is long enough for a hand-back to fail twice — the client retries
+    // a failure once, 250 ms later — so only the moves this case wedges are ever abandoned.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 600 }, async () => {
+      const role = "legion-controller";
+      const {
+        fixture,
+        live,
+        context,
+        manager,
+        holders,
+        claimSessions,
+        roleTool,
+        failHandBacks,
+        gate,
+        holdRegistration,
+        tick,
+      } = await gatedRoleFixture("adopt-then-fail-same-role", "ses_t7a");
+      const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+      const claimsForHost = () =>
+        claimSessions.filter((claim) => claim === `${role}@ses_t7a`).length;
+      const own = [...manager.branch()];
+
+      // A resume to a session that records no role ends the role: its hold under ses_t7a is a
+      // pending hand-back, and the resume's pass waits at its registration, so nothing settles it.
+      const registering = holdRegistration("ses_t7a_l");
+      await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+      const switched = fixture.handlers.get("session_switch")?.(
+        { reason: "resume" },
+        live("ses_t7a_l", { fresh: true })
+      );
+      await registering.reached;
+
+      // The model claims the role there. The listener holds that claim past the move's deadline,
+      // then grants it, so its hold under ses_t7a_l is a pending hand-back too, behind ses_t7a's.
+      const claiming = gate(role);
+      const claimed = roleTool.execute("", { role });
+      await claiming.reached;
+      await new Promise((resolve) => setTimeout(resolve, 700));
+      claiming.release();
+      await claimed;
+      for (let step = 0; step < 10; step += 1) await drain();
+      expect(holders.get(role)).toBe("ses_t7a_l");
+
+      // The host rolls back to ses_t7a, with no event; its records name the role.
+      manager.id = "ses_t7a";
+      manager.branch = () => own;
+      registering.release();
+      await switched;
+      for (let step = 0; step < 10; step += 1) await drain();
+
+      // The next pass adopts the hold under ses_t7a, and the listener fails the hand-back of the
+      // one under ses_t7a_l. Its soft claim is refused with ses_t7a_l as the holder.
+      failHandBacks(2);
+      const claimedBefore = claimsForHost();
+      tick();
+      await new Promise((resolve) => setTimeout(resolve, 400));
+      for (let step = 0; step < 10; step += 1) await drain();
+      expect(holders.get(role)).toBe("ses_t7a_l");
+      expect(claimsForHost()).toBe(claimedBefore + 1);
+
+      // That refusal named this process's own abandoned hold, so it recorded nothing: the next
+      // pass claims again, and once the listener reaps the hold, a pass takes the role.
+      tick();
+      for (let step = 0; step < 10; step += 1) await drain();
+      expect(claimsForHost()).toBe(claimedBefore + 2);
+      holders.delete(role);
+      tick();
+      for (let step = 0; step < 10; step += 1) await drain();
+      expect(holders.get(role)).toBe("ses_t7a");
     });
   });
 
