@@ -359,9 +359,23 @@ func (h *deliveryHub) sendLocked(view *deliveryView) int {
 	return sent
 }
 
-// answerLocked sends sub what it needs to hold its view's body: the snapshot, when it holds none,
-// or the delta against its revisions, when anything differs.
+// answerLocked sends sub what it needs to hold its view's body (answerBodyLocked) and, after its
+// first answer, the verdict the hub knows, when it knows one (Subscribe). It reports whether it
+// sent sub a snapshot or a delta.
 func (h *deliveryHub) answerLocked(sub *deliverySub) bool {
+	sent := h.answerBodyLocked(sub)
+	if sub.needsVerdict {
+		sub.needsVerdict = false
+		if h.known {
+			sub.conn.Send(h.freshnessFrameLocked(h.sent))
+		}
+	}
+	return sent
+}
+
+// answerBodyLocked sends sub the snapshot, when it holds none, or the delta against its
+// revisions, when anything differs.
+func (h *deliveryHub) answerBodyLocked(sub *deliverySub) bool {
 	view := sub.view
 	sub.told = false
 	if sub.needsSnapshot {

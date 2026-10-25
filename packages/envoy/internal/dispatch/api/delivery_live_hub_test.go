@@ -305,6 +305,28 @@ func (c *fakeLiveConn) refusal(t *testing.T, within time.Duration, sub, code str
 	return refusal
 }
 
+// firstSnapshots reads the first answers of subs, every one subscribed on conn before the hub knew a
+// verdict, in whichever order the hub's recomputes, one at a time, send them: the first snapshot
+// alone, since its read sets the hub's first verdict silently, and each later one followed by that
+// verdict (Subscribe). It returns the snapshots by sub.
+func (c *fakeLiveConn) firstSnapshots(t *testing.T, within time.Duration, subs ...string) map[string]DeliveryLiveSnapshot {
+	t.Helper()
+	snapshots := map[string]DeliveryLiveSnapshot{}
+	for len(snapshots) < len(subs) {
+		frame := c.next(t, within, "each view's snapshot")
+		snapshot, ok := frame.(DeliveryLiveSnapshot)
+		if _, twice := snapshots[snapshot.Sub]; !ok || twice || !slices.Contains(subs, snapshot.Sub) {
+			raw, _ := json.Marshal(frame)
+			t.Fatalf("frame = %s, want the first snapshot of one of %v", raw, subs)
+		}
+		snapshots[snapshot.Sub] = snapshot
+		if len(snapshots) > 1 {
+			c.freshness(t, within, "the verdict after the snapshot of "+snapshot.Sub)
+		}
+	}
+	return snapshots
+}
+
 // The views the tests subscribe to.
 func timelineRange(from, to time.Time, query string) DeliveryLiveView {
 	f, tt := from.Format(time.RFC3339Nano), to.Format(time.RFC3339Nano)
@@ -522,11 +544,7 @@ func TestAPRChecksRunMarksOnlyPipelineViews(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	rig.hub.Subscribe(conn, subscribeFrame("m", presetView(deliveryLiveMeasures, 7, "")))
 	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
-	for range 3 {
-		if _, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot); !ok {
-			t.Fatal("want a snapshot for each view")
-		}
-	}
+	conn.firstSnapshots(t, 5*time.Second, "t", "m", "p")
 
 	start := rig.mark()
 	now := time.Now().UTC()
@@ -560,11 +578,7 @@ func TestASessionGroupEditReachesEveryView(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	rig.hub.Subscribe(conn, subscribeFrame("m", presetView(deliveryLiveMeasures, 7, "")))
 	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
-	for range 3 {
-		if _, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot); !ok {
-			t.Fatal("want a snapshot for each view")
-		}
-	}
+	conn.firstSnapshots(t, 5*time.Second, "t", "m", "p")
 
 	start := rig.mark()
 	if response := dispatchRequest(t, rig.handler, http.MethodPost, "/api/v1/delivery/session-groups", map[string]any{
@@ -597,14 +611,7 @@ func TestAResetChangeLogIsCaughtAndEveryViewRecomputed(t *testing.T) {
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	rig.hub.Subscribe(conn, subscribeFrame("m", measuresRange(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 8, 0, 0, 0, 0, time.UTC), "")))
-	var timeline json.RawMessage
-	for range 2 {
-		if snapshot, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot); !ok {
-			t.Fatal("want a snapshot for each view")
-		} else if snapshot.Sub == "t" {
-			timeline = snapshot.Body
-		}
-	}
+	timeline := conn.firstSnapshots(t, 5*time.Second, "t", "m")["t"].Body
 
 	// The log restarts at seq 1: one merge, below the hub's cursor.
 	truncateChanges(t, rig.database)
@@ -708,10 +715,12 @@ func TestResumeFromBeforeTheKeptDayGetsASnapshot(t *testing.T) {
 	snapshot := conn.snapshot(t, 5*time.Second, "t")
 	requireSameBody(t, "a resume from before the kept day", snapshot.Body, getBody(t, rig.handler, windowTarget(t, deliveryLiveTimeline, snapshot.Body, "")))
 
-	// A resume from a kept change answers the delta.
+	// A resume from a kept change answers the delta, here none, since the view's body reflects that
+	// change; the verdict the hub knows follows all the same.
 	kept := newFakeLiveConn()
 	frame.Sub, frame.Resume = "u", &DeliveryLiveResume{Seq: snapshot.Seq, Revs: snapshot.Revs}
 	rig.hub.Subscribe(kept, frame)
+	kept.freshness(t, time.Second, "the verdict for a resume with nothing to catch up")
 	kept.none(t, time.Second, "a resume from the change the view's body reflects")
 }
 
@@ -820,16 +829,7 @@ func TestAnIssueTitleChangeReachesPagesThatNameTheIssue(t *testing.T) {
 	conn := newFakeLiveConn()
 	rig.hub.Subscribe(conn, subscribeFrame("names", presetView(deliveryLiveTimeline, 7, "")))
 	rig.hub.Subscribe(conn, subscribeFrame("other", timelineRange(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 8, 0, 0, 0, 0, time.UTC), "")))
-	var held json.RawMessage
-	for range 2 {
-		snapshot, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot)
-		if !ok {
-			t.Fatal("want a snapshot for each view")
-		}
-		if snapshot.Sub == "names" {
-			held = snapshot.Body
-		}
-	}
+	held := conn.firstSnapshots(t, 5*time.Second, "names", "other")["names"].Body
 
 	start := rig.mark()
 	patchHubIssue(t, rig.handler, named, map[string]any{"title": "Ship the widgets"})
@@ -892,16 +892,12 @@ func TestAnUnownedP0ChangeReachesEveryTimelineAndMeasuresView(t *testing.T) {
 	upsertPR(t, rig.database, hubPR(1, time.Now().UTC().Add(-3*time.Hour)))
 	seed := createHubIssue(t, rig.handler, map[string]any{"title": "Raised later", "priority": 1})
 	conn := newFakeLiveConn()
-	held := map[string]json.RawMessage{}
 	kinds := map[string]string{"t": deliveryLiveTimeline, "m": deliveryLiveMeasures}
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	rig.hub.Subscribe(conn, subscribeFrame("m", presetView(deliveryLiveMeasures, 28, "")))
-	for range 2 {
-		snapshot, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot)
-		if !ok {
-			t.Fatal("want a snapshot for each view")
-		}
-		held[snapshot.Sub] = snapshot.Body
+	held := map[string]json.RawMessage{}
+	for sub, snapshot := range conn.firstSnapshots(t, 5*time.Second, "t", "m") {
+		held[sub] = snapshot.Body
 	}
 	var created string
 	for _, step := range []struct {
@@ -953,11 +949,7 @@ func TestAnArchitectureSyncReachesEveryView(t *testing.T) {
 	rig.hub.Subscribe(conn, subscribeFrame("t", presetView(deliveryLiveTimeline, 7, "")))
 	rig.hub.Subscribe(conn, subscribeFrame("m", measuresRange(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 8, 0, 0, 0, 0, time.UTC), "")))
 	rig.hub.Subscribe(conn, subscribeFrame("p", livePipelineView(nil)))
-	for range 3 {
-		if _, ok := conn.next(t, 5*time.Second, "each view's snapshot").(DeliveryLiveSnapshot); !ok {
-			t.Fatal("want a snapshot for each view")
-		}
-	}
+	conn.firstSnapshots(t, 5*time.Second, "t", "m", "p")
 	start := rig.mark()
 	appendHubEvent(t, rig, projectOwner("HUB").event("architecture.synced", model.Actor{Kind: "system", ID: "architecture-importer"}, map[string]any{"commit": "c2"}))
 	for _, kind := range []string{deliveryLiveTimeline, deliveryLiveMeasures, deliveryLivePipeline} {
@@ -1366,6 +1358,55 @@ func TestAnUnfetchablePullRequestSendsAFreshnessFrame(t *testing.T) {
 	conn.none(t, time.Second, "the mark's delta and freshness frame")
 }
 
+// A page keeps the last verdict it was sent, and the hub sends one to its open pages only when the
+// verdict changes, so a socket that was down at a change, and a page that held no delivery view
+// then, would show the old verdict for good. A subscription is therefore sent the verdict the hub
+// knows right after its first answer: a socket opened since, one that resumes with nothing to
+// catch up, and a page's next view on a socket it already holds. The first verdict is set
+// silently, from the read whose body the first subscription is answered, so that one is told
+// nothing more.
+func TestASubscriptionAfterAVerdictChangeIsSentThatVerdict(t *testing.T) {
+	rig := newHubRig(t, nil)
+	seedHubSettings(t, rig.database)
+	// A custom range and a pinned pipeline day have no expiry, so nothing but the answers and the
+	// verdict reaches the conns.
+	measures := measuresRange(time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 8, 0, 0, 0, 0, time.UTC), "")
+	at := time.Date(2024, 6, 4, 12, 0, 0, 0, time.UTC)
+	page := newFakeLiveConn()
+	rig.hub.Subscribe(page, subscribeFrame("m", measures))
+	held := page.snapshot(t, 5*time.Second, "m")
+	page.none(t, time.Second, "the first snapshot, whose verdict is set silently")
+	rig.waitConnected(t)
+
+	if err := delivery.RecordReconcileError(t.Context(), rig.database.Pool, "GitHub answered 502"); err != nil {
+		t.Fatalf("record a reconcile error: %v", err)
+	}
+	requireVerdict := func(conn *fakeLiveConn, what string) {
+		t.Helper()
+		verdict := conn.freshness(t, 3*time.Second, what)
+		if verdict.Freshness.LastError == nil || *verdict.Freshness.LastError != "GitHub answered 502" || len(verdict.Stale) != 0 {
+			t.Fatalf("%s = %+v, want last_error \"GitHub answered 502\" and nothing stale", what, verdict)
+		}
+		conn.none(t, time.Second, what)
+	}
+	requireVerdict(page, "the verdict the change sent the open page")
+
+	opened := newFakeLiveConn()
+	rig.hub.Subscribe(opened, subscribeFrame("m", measures))
+	opened.snapshot(t, 5*time.Second, "m")
+	requireVerdict(opened, "the verdict after a new socket's snapshot")
+
+	resumed := newFakeLiveConn()
+	resume := subscribeFrame("m", measures)
+	resume.Resume = &DeliveryLiveResume{Seq: held.Seq, Revs: held.Revs}
+	rig.hub.Subscribe(resumed, resume)
+	requireVerdict(resumed, "the verdict for a resume with nothing to catch up")
+
+	rig.hub.Subscribe(page, subscribeFrame("p", livePipelineView(&at)))
+	page.snapshot(t, 5*time.Second, "p")
+	requireVerdict(page, "the verdict after the page's next view's snapshot")
+}
+
 func TestASubscriberGetsTheGETBodyAsItsSnapshot(t *testing.T) {
 	rig := newHubRig(t, nil)
 	seedHubSettings(t, rig.database)
@@ -1380,7 +1421,7 @@ func TestASubscriberGetsTheGETBodyAsItsSnapshot(t *testing.T) {
 	from, to := time.Date(2024, 6, 1, 0, 0, 0, 0, time.UTC), time.Date(2024, 6, 8, 0, 0, 0, 0, time.UTC)
 	at := fixed.Add(30 * time.Hour)
 	conn := newFakeLiveConn()
-	for _, test := range []struct {
+	for i, test := range []struct {
 		sub   string
 		view  DeliveryLiveView
 		kind  string
@@ -1394,6 +1435,11 @@ func TestASubscriberGetsTheGETBodyAsItsSnapshot(t *testing.T) {
 	} {
 		rig.hub.Subscribe(conn, subscribeFrame(test.sub, test.view))
 		snapshot := conn.snapshot(t, 5*time.Second, test.sub)
+		if i > 0 {
+			// The first view's read set the hub's verdict silently; every later view's snapshot is
+			// followed by it.
+			conn.freshness(t, time.Second, "the verdict after the snapshot of "+test.sub)
+		}
 		target := test.get
 		if target == "" {
 			target = windowTarget(t, test.kind, snapshot.Body, test.query)
@@ -1549,6 +1595,7 @@ func TestIdenticalViewsShareOneRecompute(t *testing.T) {
 	// The same view, its query's parameters in another order.
 	rig.hub.Subscribe(second, subscribeFrame("b", presetView(deliveryLiveTimeline, 7, "repo=acme%2Fwidgets&author=octocat")))
 	second.snapshot(t, 5*time.Second, "b")
+	second.freshness(t, time.Second, "the verdict the first view's read set, after the second's snapshot")
 	if n := rig.count(start, recomputeBegin("")); n != 1 {
 		t.Fatalf("recomputes for two identical views = %d, want 1", n)
 	}
@@ -1623,14 +1670,12 @@ func TestOneRecomputeAtATime(t *testing.T) {
 		presetView(deliveryLiveTimeline, 7, ""), presetView(deliveryLiveTimeline, 14, ""),
 		presetView(deliveryLiveMeasures, 7, ""), presetView(deliveryLiveMeasures, 28, ""), livePipelineView(nil),
 	}
+	subs := make([]string, len(views))
 	for i, view := range views {
-		rig.hub.Subscribe(conn, subscribeFrame("v"+strconv.Itoa(i), view))
+		subs[i] = "v" + strconv.Itoa(i)
+		rig.hub.Subscribe(conn, subscribeFrame(subs[i], view))
 	}
-	for range views {
-		if _, ok := conn.next(t, 10*time.Second, "every view's snapshot").(DeliveryLiveSnapshot); !ok {
-			t.Fatal("want a snapshot for every view")
-		}
-	}
+	conn.firstSnapshots(t, 10*time.Second, subs...)
 	upsertPR(t, rig.database, hubPR(1, time.Now().UTC().Add(-time.Hour)))
 	for range views {
 		if _, ok := conn.next(t, 10*time.Second, "every view's delta").(DeliveryLiveDelta); !ok {

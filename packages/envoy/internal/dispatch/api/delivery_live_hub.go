@@ -43,6 +43,12 @@ type deliverySubscription struct {
 // left as it was. Otherwise conn's sub follows the view from now on: it is answered a snapshot, or,
 // on a resume, the delta against the revisions the page holds (a snapshot when the page applied
 // nothing since before the oldest kept change, OldestChangeSeq() - 1), and later only the deltas.
+// Right after that first answer, or where it would be for a resume with nothing to catch up, conn
+// is sent the freshness verdict the hub knows: the hub sends its open pages a verdict only when it
+// changes, and a page keeps the last one it was sent, so a socket that was down at a change, or a
+// page that held no delivery view then, would otherwise show the old one for good. Nothing follows
+// before the hub knows a verdict: the first is set silently, from the read that answers the first
+// snapshot (recompute).
 // While delivery is not configured the sub is told DELIVERY_NOT_CONFIGURED once and stays open,
 // and the settings' first save answers its snapshot. A sub id conn already holds is replaced.
 func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame deliverySubscription) bool {
@@ -81,7 +87,7 @@ func (h *deliveryHub) Subscribe(conn deliveryLiveConn, frame deliverySubscriptio
 		view = &deliveryView{spec: spec, subs: map[*deliverySub]struct{}{}}
 		h.views[spec.key] = view
 	}
-	sub := &deliverySub{id: frame.Sub, conn: conn, view: view, needsSnapshot: held == nil}
+	sub := &deliverySub{id: frame.Sub, conn: conn, view: view, needsSnapshot: held == nil, needsVerdict: true}
 	if held != nil {
 		sub.revs = *held
 	}
@@ -258,10 +264,12 @@ type deliverySub struct {
 	id   string
 	conn deliveryLiveConn
 	view *deliveryView
-	// revs is what the page holds; needsSnapshot is set until its first answer; told is set once
-	// it was told delivery is not configured, so it is told once.
+	// revs is what the page holds; needsSnapshot is set until its first answer; needsVerdict is set
+	// until its first answer too, which the verdict the hub knows follows; told is set once it was
+	// told delivery is not configured, so it is told once.
 	revs          DeliveryLiveRevs
 	needsSnapshot bool
+	needsVerdict  bool
 	told          bool
 }
 

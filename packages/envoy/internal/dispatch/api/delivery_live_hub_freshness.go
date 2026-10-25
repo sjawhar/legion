@@ -40,7 +40,8 @@ func (h *deliveryHub) verdictLocked(now time.Time) deliveryFreshnessVerdict {
 }
 
 // judgeLocked sends every open page a freshness frame when the verdict changed since the last one,
-// and nothing otherwise; nothing at all before the first recompute set it.
+// and nothing otherwise; nothing at all before the first recompute set it. A subscription is sent
+// the last one after its first answer (answerLocked).
 func (h *deliveryHub) judgeLocked(now time.Time) {
 	if !h.known {
 		return
@@ -51,15 +52,20 @@ func (h *deliveryHub) judgeLocked(now time.Time) {
 		return
 	}
 	h.sent = verdict
-	frame := DeliveryLiveFreshness{
+	frame := h.freshnessFrameLocked(verdict)
+	for conn := range h.conns {
+		conn.Send(frame)
+	}
+}
+
+// freshnessFrameLocked is the freshness frame naming verdict, with the times as last heard.
+func (h *deliveryHub) freshnessFrameLocked(verdict deliveryFreshnessVerdict) DeliveryLiveFreshness {
+	return DeliveryLiveFreshness{
 		Type: "freshness",
 		Freshness: delivery.DeliveryFreshnessView{
 			LastEventAt: h.fresh.lastEventAt, LastReconcileAt: h.fresh.lastReconcileAt,
-			LastError: h.fresh.lastError, UnfetchableCount: h.fresh.unfetchable,
+			LastError: verdict.lastError, UnfetchableCount: verdict.unfetchable,
 		},
 		Stale: verdict.stale,
-	}
-	for conn := range h.conns {
-		conn.Send(frame)
 	}
 }

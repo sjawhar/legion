@@ -138,9 +138,10 @@ type DeliveryLiveDelta struct {
 	Revs      DeliveryLiveRevChanges                `json:"revs"`
 }
 
-// DeliveryLiveFreshness goes to every subscriber when the freshness row's verdict changes, and
-// never otherwise: the freshness object and the sources past their threshold ("prs", "runs",
-// "ci", "events").
+// DeliveryLiveFreshness goes to every subscriber when the freshness row's verdict changes, and to
+// a subscription right after its first answer, so a page that was not subscribed at a change still
+// learns it; never otherwise. It carries the freshness object and the sources past their threshold
+// ("prs", "runs", "ci", "events").
 type DeliveryLiveFreshness struct {
 	Type      string                         `json:"type"`
 	Freshness delivery.DeliveryFreshnessView `json:"freshness"`
