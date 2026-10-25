@@ -9,7 +9,7 @@
 # record expire, and every other agent asking the listener for it is told there is no live session:
 # messages to it are refused, its role lookups answer gone, and nothing logs an error.
 #
-# Three things must hold, and this check fails unless all three do:
+# Five things must hold, and this check fails unless all five do:
 #
 #   1. Three refresh intervals, plus one listener call's budget, fit inside the record lifetime. A
 #      record that expires unless refreshed is renewed at a third of its lifetime, so two whole
@@ -42,6 +42,16 @@
 #      from those delays moves with it. A copy that drifts re-sends that notice at the wrong
 #      distance - too soon, before a relaunched pane has registered, or too late, holding the
 #      architect's notice past the window it could have been caught in.
+#   5. The daemon's hand-copies of the listener's two liveness windows (`listenerSessionTTL` and
+#      `listenerClaimStale`, packages/daemon/internal/daemon/notice_exceptions.go) equal the
+#      windows themselves - `OpenSessionRegistry`'s default `ttl`
+#      (packages/envoy/internal/session/registry.go) and `ClaimStaleAfter`
+#      (packages/envoy/internal/session/claim.go, read for this rule alone). Those copies are
+#      `noticeReholdDelays`' last delay, which is when the last copy of a notice the listener
+#      could not forward is finally sent and, if still refused, dropped. Rule 1's own remedy says
+#      to "raise the registry's default ttl" - the change that desynchronises them - and a copy
+#      left behind sends that last notice before the stopped session's registration has lapsed,
+#      so it is refused and dropped while the listener still names a holder that is gone.
 #
 # What this check cannot see:
 #
@@ -75,6 +85,7 @@ TRANSPORT_FILE = "packages/envoy-client/src/transport.ts"
 REGISTRY_FILE = "packages/envoy/internal/session/registry.go"
 LIVENESS_FILE = "packages/daemon/internal/controller/liveness.go"
 NOTICE_FILE = "packages/daemon/internal/daemon/notice_exceptions.go"
+CLAIM_FILE = "packages/envoy/internal/session/claim.go"
 
 # A plain decimal, with the digit separators the language writes: TypeScript writes these
 # constants `100_000`, so an underscore between digit runs is accepted and removed before the
@@ -109,6 +120,11 @@ WINDOW_FACTOR_PATTERN = (
 # The daemon's second copy of the refresh interval, one member of the const block it is declared
 # in and the second of `noticeReholdDelays`.
 PLUGIN_HEARTBEAT_PATTERN = rf"^\s*pluginHeartbeat\s*=\s*{GO_DURATION}\s*(?://.*)?$"
+# The daemon's hand-copies of the listener's two liveness windows, the other two members of that
+# same const block, and `ClaimStaleAfter` itself, which is one of the windows they copy.
+LISTENER_TTL_PATTERN = rf"^\s*listenerSessionTTL\s*=\s*{GO_DURATION}\s*(?://.*)?$"
+LISTENER_CLAIM_STALE_PATTERN = rf"^\s*listenerClaimStale\s*=\s*{GO_DURATION}\s*(?://.*)?$"
+CLAIM_STALE_AFTER_PATTERN = rf"^\s*const\s+ClaimStaleAfter\s*=\s*{GO_DURATION}\s*(?://.*)?$"
 
 MILLIS = {"Second": 1_000, "Minute": 60_000}
 # A record that expires unless refreshed is renewed at a third of its lifetime, so two whole
@@ -209,6 +225,7 @@ transport_lines = load(TRANSPORT_FILE)
 registry_lines = load(REGISTRY_FILE)
 liveness_lines = load(LIVENESS_FILE)
 notice_lines = load(NOTICE_FILE)
+claim_lines = load(CLAIM_FILE)
 
 heartbeat = millis(SETTINGS_FILE, settings_lines, HEARTBEAT_CONST, HEARTBEAT_PATTERN)
 timeout = millis(TRANSPORT_FILE, transport_lines, TIMEOUT_CONST, TIMEOUT_PATTERN)
@@ -220,6 +237,11 @@ window_factor = millis(
     LIVENESS_FILE, liveness_lines, "LivenessWindow's heartbeat multiple", WINDOW_FACTOR_PATTERN
 )
 plugin_heartbeat = duration(NOTICE_FILE, notice_lines, "pluginHeartbeat", PLUGIN_HEARTBEAT_PATTERN)
+listener_ttl = duration(NOTICE_FILE, notice_lines, "listenerSessionTTL", LISTENER_TTL_PATTERN)
+listener_claim_stale = duration(
+    NOTICE_FILE, notice_lines, "listenerClaimStale", LISTENER_CLAIM_STALE_PATTERN
+)
+claim_stale = duration(CLAIM_FILE, claim_lines, "ClaimStaleAfter", CLAIM_STALE_AFTER_PATTERN)
 
 # One listener call: every attempt's timeout, plus one retry delay between each pair of them.
 call_budget = attempts.value * timeout.value + max(attempts.value - 1, 0) * retry_delay.value
@@ -293,6 +315,37 @@ if plugin_heartbeat.value != heartbeat.value:
         f"{heartbeat.value} ms - it is a copy of {HEARTBEAT_CONST} and has no independent value",
     )
 
+if listener_ttl.value != lifetime.value:
+    problem(
+        NOTICE_FILE,
+        listener_ttl.line,
+        f"the daemon's listenerSessionTTL is {listener_ttl.value} ms ({listener_ttl.site}) while "
+        f"the listener's own session record lifetime is {lifetime.value} ms ({lifetime.site}): it "
+        f"is a hand-copy of that lifetime, and noticeReholdDelays' last delay is taken from it, "
+        f"so the last copy of a notice the listener could not forward is sent at the wrong "
+        f"distance from the moment a stopped session's registration actually lapses. A copy left "
+        f"behind - which raising the registry's default ttl, the remedy this check names above, "
+        f"is what does - sends that last copy while the listener still names the gone session as "
+        f"the holder, so the forward is refused, nothing is held, and the architect's notice is "
+        f"dropped. Set listenerSessionTTL to {lifetime.value} ms - it is a copy of "
+        f"OpenSessionRegistry's default ttl and has no independent value",
+    )
+
+if listener_claim_stale.value != claim_stale.value:
+    problem(
+        NOTICE_FILE,
+        listener_claim_stale.line,
+        f"the daemon's listenerClaimStale is {listener_claim_stale.value} ms "
+        f"({listener_claim_stale.site}) while the listener's ClaimStaleAfter is "
+        f"{claim_stale.value} ms ({claim_stale.site}): it is a hand-copy of that window, and "
+        f"noticeReholdDelays' last delay is the longer of the two copies, so a copy left behind "
+        f"sends the last copy of an unforwardable notice before the stopped holder's claim has "
+        f"gone stale - the forward is refused, nothing is held, and the architect's notice is "
+        f"dropped - while one left ahead holds it past the window it could have been caught in. "
+        f"Set listenerClaimStale to {claim_stale.value} ms - it is a copy of ClaimStaleAfter and "
+        f"has no independent value",
+    )
+
 if daemon_window < lifetime.value:
     problem(
         LIVENESS_FILE,
@@ -329,6 +382,9 @@ print(
     f"({lifetime.site}); the daemon's Heartbeat {daemon_heartbeat.value} ms "
     f"({daemon_heartbeat.site}) matches and its window {window_factor.value} x Heartbeat = "
     f"{daemon_window} ms ({window_factor.site}) covers that lifetime; its pluginHeartbeat "
-    f"{plugin_heartbeat.value} ms ({plugin_heartbeat.site}) matches too"
+    f"{plugin_heartbeat.value} ms ({plugin_heartbeat.site}) matches too; its listenerSessionTTL "
+    f"{listener_ttl.value} ms ({listener_ttl.site}) matches that lifetime and its "
+    f"listenerClaimStale {listener_claim_stale.value} ms ({listener_claim_stale.site}) matches "
+    f"ClaimStaleAfter {claim_stale.value} ms ({claim_stale.site})"
 )
 PY

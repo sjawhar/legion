@@ -1576,9 +1576,11 @@ export default function envoyExtension(pi: PiApi): void {
     return false;
   };
 
-  // When the listener last accepted a registration of this session (its answer resolved), so the
-  // heartbeat can tell a refresh that is being renewed from one a stalled pass is holding up. A
-  // session that has never had one accepted reads as older than any age.
+  // When the listener last accepted a registration, and the session it was accepted for. The
+  // heartbeat needs both: a registration accepted for an earlier session says nothing about the
+  // one running now, so it reads as no registration at all. A session that has never had one
+  // accepted reads as older than any age.
+  let registeredFor = "";
   let registeredAt = -Infinity;
 
   // The listener delivers nothing to a self-subscribed session (it takes its topics over its own
@@ -1589,6 +1591,7 @@ export default function envoyExtension(pi: PiApi): void {
   // Every accepted registration is timed here — the pass's, `envoy_subscribe`'s and the
   // heartbeat's own direct refresh all feed the one clock.
   const registerSession = () => {
+    const registeringFor = sessionID;
     for (const [topic, hold] of abandonedHolds) {
       if (hold.id !== sessionID) continue;
       abandonedHolds.delete(topic);
@@ -1616,6 +1619,7 @@ export default function envoyExtension(pi: PiApi): void {
         selfSubscribed: true,
       })
       .then((result) => {
+        registeredFor = registeringFor;
         registeredAt = Date.now();
         return result;
       });
@@ -1747,13 +1751,16 @@ export default function envoyExtension(pi: PiApi): void {
       if (context.sessionManager.getSessionId() === "") return;
       if (healing) {
         // A pass that has not settled holds the queue, and with it the registration refresh that
-        // is its last step. The age is measured from the last accepted registration (a session
-        // that never had one accepted counts as older), and a pass still running a whole refresh
-        // interval later has already spent 90 s of the record's 300 s lifetime, so the refresh goes
-        // out on its own, outside the queues, exactly as `envoy_subscribe` posts it. A failure is
-        // ignored: the next tick tries again.
+        // is its last step. The age is measured from the last registration accepted for the
+        // session running now: one accepted for an earlier session, which is what a `/new` during
+        // a wedged pass leaves behind, counts as none at all, or the new session would sit out of
+        // the listener's sessions for a whole interval while its pane runs. A session with no
+        // accepted registration of its own counts as older than any age. A pass still running a
+        // whole refresh interval later has already spent 90 s of the record's 300 s lifetime, so
+        // the refresh goes out on its own, outside the queues, exactly as `envoy_subscribe` posts
+        // it. A failure is ignored: the next tick tries again.
         const refreshMs = requireEnvoy().settings.heartbeatMs;
-        if (Date.now() - registeredAt < refreshMs) return;
+        if (registeredFor === sessionID && Date.now() - registeredAt < refreshMs) return;
         noteStall(
           "a pass has not settled a whole refresh interval after the last accepted registration"
         );

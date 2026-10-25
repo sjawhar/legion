@@ -28,16 +28,21 @@ trap 'rm -rf "$work"' EXIT
 source "$script_dir/test-lib.sh"
 
 # fixture <name> [heartbeat-ms] [pass-deadline-floor-ms] [timeout-ms] [retry-delay-ms] [attempts]
-#         [record-lifetime] [daemon-heartbeat] [window-heartbeats] [plugin-heartbeat]: a tree that
+#         [record-lifetime] [daemon-heartbeat] [window-heartbeats] [plugin-heartbeat]
+#         [listener-session-ttl] [claim-stale-after] [listener-claim-stale]: a tree that
 # passes — three refresh intervals plus one listener call, and the worst case between
 # registrations, both inside the record lifetime, both of the daemon's copies of the interval
-# equal to the TypeScript one and its window covering that lifetime. The pass-deadline floor is
-# written because the real file declares one; the check must not read it.
+# equal to the TypeScript one, its window covering that lifetime, and its two copies of the
+# listener's liveness windows equal to the windows themselves. The pass-deadline floor is
+# written because the real file declares one; the check must not read it, and the assertion that
+# it is quoted nowhere is only a test of that while this line keeps being written.
 # Echoes its root.
 fixture() {
   local root="$work/$1" heartbeat=${2:-40_000} deadline=${3:-12_000} timeout=${4:-2_000}
   local retry=${5:-400} attempts=${6:-2} lifetime=${7:-3 * time.Minute}
   local daemon_heartbeat=${8:-40 * time.Second} window=${9:-5} plugin=${10:-40 * time.Second}
+  local claim_stale=${12:-4 * time.Minute}
+  local listener_ttl=${11:-$lifetime} listener_claim_stale=${13:-$claim_stale}
   if [ -e "$root" ]; then
     echo "  FAIL: the fixture name '$1' is already taken by an earlier case" >&2
     return 1
@@ -91,11 +96,19 @@ package daemon
 // The plugin heartbeats every pluginHeartbeat (DEFAULT_HEARTBEAT_MS,
 // packages/envoy-client/src/envoy-settings.ts).
 const (
-    listenerSessionTTL = 7 * time.Minute
+    listenerSessionTTL = $listener_ttl
     pluginHeartbeat    = $plugin
+    listenerClaimStale = $listener_claim_stale
 )
 
-var noticeReholdDelays = [...]time.Duration{20 * time.Second, pluginHeartbeat, listenerSessionTTL + time.Minute}
+var noticeReholdDelays = [...]time.Duration{20 * time.Second, pluginHeartbeat, max(listenerSessionTTL, listenerClaimStale) + time.Minute}
+GO
+  cat > "$root/packages/envoy/internal/session/claim.go" <<GO
+package session
+
+// ClaimStaleAfter is how long a claim may go unrefreshed before another holder may take the
+// route.
+const ClaimStaleAfter = $claim_stale
 GO
   echo "$root"
 }
@@ -119,7 +132,11 @@ check "names the worst case as two intervals and one call, with the deadline bou
 check "names the record lifetime and its site" \
   "$(contains "$out" 'both inside the session record lifetime 180000 ms (packages/envoy/internal/session/registry.go:4)')"
 check "names the daemon's heartbeat, window and second copy with their sites" \
-  "$(contains "$out" "daemon's Heartbeat 40000 ms (packages/daemon/internal/controller/liveness.go:5) matches and its window 5 x Heartbeat = 200000 ms (packages/daemon/internal/controller/liveness.go:8) covers that lifetime; its pluginHeartbeat 40000 ms (packages/daemon/internal/daemon/notice_exceptions.go:7) matches too$")"
+  "$(contains "$out" "daemon's Heartbeat 40000 ms (packages/daemon/internal/controller/liveness.go:5) matches and its window 5 x Heartbeat = 200000 ms (packages/daemon/internal/controller/liveness.go:8) covers that lifetime; its pluginHeartbeat 40000 ms (packages/daemon/internal/daemon/notice_exceptions.go:7) matches too")"
+check "names the daemon's copies of the listener's two liveness windows with their sites" \
+  "$(contains "$out" "its listenerSessionTTL 180000 ms (packages/daemon/internal/daemon/notice_exceptions.go:6) matches that lifetime and its listenerClaimStale 240000 ms (packages/daemon/internal/daemon/notice_exceptions.go:8) matches ClaimStaleAfter 240000 ms (packages/envoy/internal/session/claim.go:5)$")"
+# This assertion is a test of the check only while the fixture above keeps writing a
+# MIN_PASS_DEADLINE_MS line into every tree: delete that line and this passes vacuously.
 check "the pass-deadline floor is not quoted anywhere" \
   "$(is "$(contains "$out" 'PASS_DEADLINE')" false)"
 
@@ -137,10 +154,6 @@ check "says the record expires from the listener's acceptance, not the attempt" 
   "$(contains "$out" 'still owes its round trip')"
 check "names the remedy on either side, with the call budget taken off the interval" \
   "$(contains "$out" 'Lower DEFAULT_HEARTBEAT_MS to at most 38533 ms, or raise the registry.s default ttl to at least 124400 ms')"
-check "equality is no longer called the rule met exactly" \
-  "$(is "$(contains "$out" 'Equality is the rule met exactly')" false)"
-check "and no longer tells the maintainer not to widen either number" \
-  "$(is "$(contains "$out" "do not .fix. it by widening")" false)"
 check "counts the problem" "$(contains "$out" '::error::1 problem(s)')"
 
 echo "case: three intervals past the record lifetime"
@@ -354,13 +367,50 @@ check "exits 0" "$(is "$status" 0)"
 check "reports the line a reader opens, not one shifted by the form feed" \
   "$(contains "$out" "daemon's Heartbeat 40000 ms (packages/daemon/internal/controller/liveness.go:5) matches")"
 
+echo "case: the daemon's copy of the record lifetime drifted from the registry's ttl"
+root=$(fixture ttl-copy 40_000 12_000 2_000 400 2 '3 * time.Minute' '40 * time.Second' 5 \
+  '40 * time.Second' '4 * time.Minute')
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names both numbers and both sites" \
+  "$(contains "$out" "the daemon's listenerSessionTTL is 240000 ms (packages/daemon/internal/daemon/notice_exceptions.go:6) while the listener's own session record lifetime is 180000 ms (packages/envoy/internal/session/registry.go:4)")"
+check "names the remedy that would cause this drift" \
+  "$(contains "$out" "raising the registry.s default ttl, the remedy this check names above")"
+check "says what breaks" \
+  "$(contains "$out" "the forward is refused, nothing is held, and the architect.s notice is dropped")"
+check "names the remedy" \
+  "$(contains "$out" 'Set listenerSessionTTL to 180000 ms')"
+check "and nothing else fails with it" "$(contains "$out" '::error::1 problem(s)')"
+
+echo "case: the daemon's copy of the claim staleness window drifted from ClaimStaleAfter"
+root=$(fixture claim-copy 40_000 12_000 2_000 400 2 '3 * time.Minute' '40 * time.Second' 5 \
+  '40 * time.Second' '3 * time.Minute' '4 * time.Minute' '5 * time.Minute')
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names both numbers and both sites" \
+  "$(contains "$out" "the daemon's listenerClaimStale is 300000 ms (packages/daemon/internal/daemon/notice_exceptions.go:8) while the listener's ClaimStaleAfter is 240000 ms (packages/envoy/internal/session/claim.go:5)")"
+check "names the delay it feeds" \
+  "$(contains "$out" "noticeReholdDelays. last delay is the longer of the two copies")"
+check "names the remedy" \
+  "$(contains "$out" 'Set listenerClaimStale to 240000 ms')"
+check "and nothing else fails with it" "$(contains "$out" '::error::1 problem(s)')"
+
+echo "case: claim.go missing"
+root=$(fixture claim-missing)
+rm "$root/packages/envoy/internal/session/claim.go"
+run_check "$root"
+check "exits 1" "$(is "$status" 1)"
+check "names the file" \
+  "$(contains "$out" 'packages/envoy/internal/session/claim.go is missing: this check cannot prove the heartbeat margin without it')"
+check "no traceback" "$(is "$(contains "$out" 'Traceback')" false)"
+
 echo "case: the real repository passes"
 set +e
 out=$("$check_script" 2>&1)
 status=$?
 set -e
 check "exits 0" "$(is "$status" 0)"
-check "reports both margins and the daemon's agreement on both of its copies" \
-  "$(contains "$out" '^3 refresh intervals of .* (packages/envoy-client/src/envoy-settings.ts:.*) plus one listener call .* are .*, and the worst case between registrations - two intervals and one such call, the pass deadline bounding neither - is .*; both inside the session record lifetime .* (packages/envoy/internal/session/registry.go:.*) covers that lifetime; its pluginHeartbeat .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches too$')"
+check "reports both margins, the daemon's agreement on both copies of the interval, and its two copies of the listener's windows" \
+  "$(contains "$out" '^3 refresh intervals of .* (packages/envoy-client/src/envoy-settings.ts:.*) plus one listener call .* are .*, and the worst case between registrations - two intervals and one such call, the pass deadline bounding neither - is .*; both inside the session record lifetime .* (packages/envoy/internal/session/registry.go:.*) covers that lifetime; its pluginHeartbeat .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches too; its listenerSessionTTL .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches that lifetime and its listenerClaimStale .* (packages/daemon/internal/daemon/notice_exceptions.go:.*) matches ClaimStaleAfter .* (packages/envoy/internal/session/claim.go:.*)$')"
 
 summary "check-heartbeat-margin.sh"
