@@ -193,6 +193,15 @@
 
 ### Added
 
+- `dispatch read --events N` lists an issue's last N events and `--all-events` every one, on an
+  issue read and on its `dispatch://KEY/log`; without either the read lists the last 10, as before.
+  `DispatchClient.read` takes `{ events: N | "all" }` (`IssueReadOptions`; `DEFAULT_ISSUE_READ_EVENTS`
+  when absent) and reads the newest N with `GET /api/v1/issues/{key}/events`, 200 to a request,
+  the most one request may ask for. Both flags together, or either beside a read that lists no
+  events (a document summary, an ask, a comment, a message's conversation, the issue's children),
+  are refused before any request, naming what the read prints instead. An agent that audits who
+  asked what and which ask was answered reads it with the command, not the events API by hand. A
+  `dispatch://KEY/children` read reads only the issue, no longer its last 10 events.
 - `dispatch issue --repo <owner/name>` and `dispatch issue-update --repo` (`''` clears) set the
   repository an issue targets, and `dispatch read` prints a `Repository:` line: `owner/name (own)`,
   `owner/name (inherited or project default)`, or `none`. Against a Dispatch server older than the

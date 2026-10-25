@@ -126,6 +126,11 @@
 
 ### Added
 
+- `dispatch_read` takes `events` (the issue's last N events) and `all_events` (every one) for an
+  issue read and its `dispatch://KEY/log`, which list the last 10 without either; the `dispatch`
+  command spells them `--events N` and `--all-events`. Both together, or either beside a read
+  that lists no events, are refused before any request. The `dispatch` skill's reading reference
+  names them.
 - The `dispatch` command's `issue` and `issue-update` take `--repo <owner/name>` (`''` clears), and
   `dispatch read` prints the issue's `Repository:` line. Against a Dispatch server older than the
   repository fields the read prints `Repository: unknown (…)`, with a warning on stderr.

@@ -93,6 +93,11 @@
 
 ### Added
 
+- The `dispatch` command (`dist/dispatch.js`) takes `dispatch read --events N` (an issue's last N
+  events) and `--all-events` (every one), on an issue read and its `dispatch://KEY/log`, which list
+  the last 10 without either; the bundled tool specs in `dist/envoy-channel.js` and
+  `dist/session-hook.js` carry the two arguments, and the shipped `dispatch` skill's reading
+  reference names the two flags.
 - A Claude Code session registers with a title, so Dispatch's Agents page names it instead of
   showing its session id: `ENVOY_SESSION_TITLE`; else a name and the session id's first eight
   characters. Inside tmux the name is `session:window` for a window whose `automatic-rename` is

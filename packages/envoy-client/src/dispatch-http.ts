@@ -49,6 +49,7 @@ import type {
   Version,
   WhoamiResponse,
 } from "@legion/contracts";
+import { DEFAULT_ISSUE_READ_EVENTS } from "@legion/contracts";
 
 import { textHead } from "./ask-answer";
 
@@ -152,6 +153,16 @@ export type GraphReferencesQuery = ({ readonly to: string } | { readonly from: s
   /** events.id; keeps mentions introduced after it and excludes structural edges. */
   readonly since?: number;
 };
+
+/** Which of an issue's events `read` returns, oldest first: the newest `events`, or every one. */
+export interface IssueReadOptions {
+  /** `DEFAULT_ISSUE_READ_EVENTS` when absent or undefined. */
+  readonly events?: number | "all" | undefined;
+}
+
+/** The most events one `GET /api/v1/issues/{key}/events` page holds: Dispatch refuses a larger
+ *  `limit` (`parseEventLimit` in packages/envoy/internal/dispatch/api/events.go). */
+const ISSUE_EVENTS_PAGE_MAX = 200;
 
 export const DISPATCH_TOOL_DEADLINE_MS = 60_000;
 
@@ -438,7 +449,7 @@ export class DispatchClient {
     );
   }
 
-  async getIssueEvents(issue: string, after = 0, limit = 200): Promise<Event[]> {
+  async getIssueEvents(issue: string, after = 0, limit = ISSUE_EVENTS_PAGE_MAX): Promise<Event[]> {
     return this.#json(
       "GET",
       ["api", "v1", "issues", await this.#resolveIssue(issue), "events"],
@@ -446,10 +457,38 @@ export class DispatchClient {
       { after, limit }
     );
   }
-  async read(issueReference: string): Promise<IssueRead> {
+
+  /** The issue and its newest `options.events` events (every one for `"all"`), oldest first, up
+   *  to the issue's `last_seq` as read. An issue's events are numbered 1 to `last_seq`, so the
+   *  newest N are the N after `last_seq - N`, read a page of at most `ISSUE_EVENTS_PAGE_MAX` at a
+   *  time, and an event written after the issue was read is left to the next read. */
+  async read(issueReference: string, options: IssueReadOptions = {}): Promise<IssueRead> {
     const issueKey = await this.#resolveIssue(issueReference);
     const issue = await this.getIssue(issueKey);
-    const events = await this.getIssueEvents(issueKey, Math.max(0, issue.last_seq - 10), 10);
+    const requested = options.events;
+    const count =
+      requested === undefined
+        ? DEFAULT_ISSUE_READ_EVENTS
+        : requested === "all"
+          ? issue.last_seq
+          : Math.min(requested, issue.last_seq);
+    const events: Event[] = [];
+    let after = Math.max(0, issue.last_seq - count);
+    while (events.length < count) {
+      const limit = Math.min(ISSUE_EVENTS_PAGE_MAX, count - events.length);
+      const page = await this.getIssueEvents(issueKey, after, limit);
+      events.push(...page);
+      const last = page.at(-1);
+      // A short page is the end of the issue's events; a full one ends the read once it holds
+      // `count`. Only a page the read goes past must have moved past `after`.
+      if (page.length < limit || last === undefined || events.length >= count) break;
+      if (last.seq <= after) {
+        throw new Error(
+          `GET /api/v1/issues/${issueKey}/events?after=${after} answered no event after seq ${after}`
+        );
+      }
+      after = last.seq;
+    }
     return { issue, events };
   }
 

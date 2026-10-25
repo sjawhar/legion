@@ -4,6 +4,12 @@
 
 ### Added
 
+- `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
+  (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
+  read lists the last 10 without either.
+- `DEFAULT_ISSUE_READ_EVENTS` (10), how many of an issue's newest events `dispatch_read` lists
+  without `events` or `all_events`: the number its description names and `DispatchClient.read`'s
+  default.
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`
