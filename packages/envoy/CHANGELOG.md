@@ -236,7 +236,8 @@
   listener previously all showed that listener's own `machine_id` as their machine. `machine_id`
   still names the listener that owns the session's delivery (`store.Registry.Match`), the only
   listener that delivers to it (the next entry), and `host` is where that listener reaches a
-  session on a serving port, unless it has a host bridge. `host` is carried on `POST
+  session on a serving port, unless the session registered through it and it has a host bridge.
+  `host` is carried on `POST
   /v1/interests/subscribe` (`subscribeBody.Host`, every subscribe and heartbeat), stored on the
   session entry (`session.SessionEntry.Host`), and returned from `GET /v1/sessions` and `GET
   /v1/roles/<role>`, falling back to `machine_id` (`SessionEntry.HostOrMachine`) for a session
@@ -271,10 +272,13 @@
   stored subscription names (the interest's `machine_id`, the one `store.Registry.Match` fans its
   topics out on, which a re-registration through another listener keeps), else, with no
   subscription stored, the listener it registered through (the session entry's `machine_id`); a
-  session neither names is every listener's. The owner reaches the session at
+  session neither names is every listener's. The owner reaches a session registered through it at
   `ENVOY_HOST_BRIDGE` when the bridge is set, otherwise at the registration's recorded `host` when
-  it is not empty, otherwise at `host.docker.internal` (`session.Deliverer.hostFor`, an IPv6
-  literal bracketed). A listener without a bridge used to dial `host.docker.internal` for every
+  it is not empty, otherwise at `host.docker.internal`; a session that re-registered through
+  another listener runs on that listener's machine, so the owner reaches it at its recorded `host`,
+  otherwise at that listener's machine id, never through its own bridge
+  (`session.Deliverer.hostFor`, an IPv6 literal bracketed). A listener without a bridge used to
+  dial `host.docker.internal` for every
   session on its machine, whatever host it recorded, so a serving port bound to loopback alone was
   never reached and every delivery to it failed. Another listener's session is now that listener's
   to deliver: this one requests nothing and leaves an inbox message to the owner silently
