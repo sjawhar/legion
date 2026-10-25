@@ -19,9 +19,17 @@ import (
 
 func TestMain(m *testing.M) { os.Exit(storetest.Main(m)) }
 
+// bedrockShaped gives a test embedder the Identity and Limits embed.Embedder asks for: Bedrock's,
+// the identity commitEmbeddings records today. Every fake in this file embeds it.
+type bedrockShaped struct{}
+
+func (bedrockShaped) Identity() string     { return embed.BedrockModel }
+func (bedrockShaped) Limits() embed.Limits { return new(embed.BedrockClient).Limits() }
+
 // fakeEmbedder is a controllable stand-in for Cohere: Embed answers vectors or err, and records
 // every call so a test can assert how many batches ran.
 type fakeEmbedder struct {
+	bedrockShaped
 	vector func(text string) []float32
 	err    error
 	calls  [][]string
@@ -64,6 +72,7 @@ func fakeVectors(n int) [][]float32 {
 // throttleThenSucceedEmbedder throttles its first throttleFor calls, then delegates to inner -
 // standing in for a provider that recovers partway through an unattended run.
 type throttleThenSucceedEmbedder struct {
+	bedrockShaped
 	inner       embed.Embedder
 	throttleFor int
 	calls       int
@@ -165,8 +174,8 @@ func TestProcessBatchEmbedsAPendingRowTheWriteTimeTriggerEnqueued(t *testing.T) 
 	`).Scan(&model, &embeddedAt); err != nil {
 		t.Fatalf("read embedded row: %v", err)
 	}
-	if model != embed.Model || embeddedAt == nil {
-		t.Errorf("model=%q embeddedAt=%v, want model=%q and a timestamp", model, embeddedAt, embed.Model)
+	if model != embed.BedrockModel || embeddedAt == nil {
+		t.Errorf("model=%q embeddedAt=%v, want model=%q and a timestamp", model, embeddedAt, embed.BedrockModel)
 	}
 }
 
@@ -495,6 +504,7 @@ func TestRetryRowsMarksARowDeadAfterRepeatedPermanentFailuresAndStopsRetrying(t 
 // it embed cleanly, exactly as a real "this one row's content is invalid" failure would behave
 // isolated from the rest.
 type poisonTextEmbedder struct {
+	bedrockShaped
 	poison string
 	calls  [][]string
 }
@@ -673,6 +683,7 @@ func TestProcessBatchNeverDeadLettersAUniformNonThrottledFailureHoweverManyTimes
 // embed.RateLimitedEmbedder's pacing wait ending early does in production) without needing real
 // timing or concurrency.
 type cancelAfterNCallsEmbedder struct {
+	bedrockShaped
 	cancelOn int
 	cancel   context.CancelFunc
 	calls    int
@@ -894,6 +905,7 @@ func seedManyIssues(t *testing.T, database *store.Store, projectKey string, coun
 // group) and otherwise succeeds, recording every call's own size so a test can prove exactly how
 // many Embed calls ran and how many total rows they carried.
 type countingGroupEmbedder struct {
+	bedrockShaped
 	poison   string
 	calls    int
 	rowsSent int
@@ -958,6 +970,7 @@ func TestChunkForBudgetSplitsAnOverCeilingBatchAndEmbedRowsCommitsEachGroupOnlyO
 // (nil means always succeed), canaryOK decides embedCanary's own outcome (nil means always
 // succeed) - so a test only ever supplies the one or two closures it actually needs to vary.
 type canaryAwareEmbedder struct {
+	bedrockShaped
 	rowOK    func(texts []string) bool
 	canaryOK func() bool
 	calls    int
@@ -983,6 +996,7 @@ func (e *canaryAwareEmbedder) Embed(_ context.Context, texts []string, _ embed.I
 // call is a row's own or embedCanary's - Deep's and Qual's own probes are both specified this
 // way ("call 1 fails, call 2 succeeds, ...").
 type sequencedEmbedder struct {
+	bedrockShaped
 	results   []bool // results[i] is call i's outcome (0-indexed)
 	afterward bool   // every call past len(results)
 	calls     int
@@ -1376,7 +1390,7 @@ func TestProcessBatchACanaryThatIsItselfThrottledNeverConfirmsAndPropagatesThrot
 
 // canaryThrottledEmbedder fails every row's own call non-throttled, and throttles embedCanary's
 // call specifically - confirmSoloFailure's one branch no other committed test exercises.
-type canaryThrottledEmbedder struct{}
+type canaryThrottledEmbedder struct{ bedrockShaped }
 
 func (canaryThrottledEmbedder) Embed(_ context.Context, texts []string, _ embed.InputType) ([][]float32, error) {
 	if len(texts) == 1 && texts[0] == embedCanary {
@@ -1396,6 +1410,7 @@ func (canaryThrottledEmbedder) Embed(_ context.Context, texts []string, _ embed.
 // which would otherwise hide an intermediate renewal from a check made after ProcessBatch
 // returns. The token budget is checked the ordinary way: it must be measurably drawn down.
 type wiringCheckEmbedder struct {
+	bedrockShaped
 	t          *testing.T
 	database   *store.Store
 	ids        []string

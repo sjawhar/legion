@@ -282,9 +282,9 @@ func main() {
 
 	// embedder is nil (meaning search off, search answers keyword-only and says so) when no AWS
 	// region/credentials reach this process at boot - a CI job or a devbox with no AWS_REGION set
-	// - which embed.New reports as an error rather than a reason to refuse to boot.
+	// - which embed.NewBedrock reports as an error rather than a reason to refuse to boot.
 	var embedder embed.Embedder
-	if client, err := embed.New(ctx); err != nil {
+	if client, err := embed.NewBedrock(ctx); err != nil {
 		slog.Warn("dispatch: meaning search unavailable", "error", err)
 	} else {
 		embedder = client

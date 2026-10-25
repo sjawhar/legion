@@ -59,6 +59,11 @@ func (f *fakeEmbedder) Embed(_ context.Context, texts []string, inputType embed.
 	return out, nil
 }
 
+// Identity and Limits are Bedrock's: the identity embedqueue records today for the vectors these
+// tests embed.
+func (f *fakeEmbedder) Identity() string     { return embed.BedrockModel }
+func (f *fakeEmbedder) Limits() embed.Limits { return new(embed.BedrockClient).Limits() }
+
 // angledVector returns a unit vector in the plane spanned by dimension 0 and axis, whose cosine
 // similarity with queryVector() (dimension 0's own unit vector) is exactly similarity - computed
 // from the angle, not approximated from noisy components, so a test's expected fused score (which
@@ -243,7 +248,7 @@ func TestSearchAnswersKeywordOnlyWhenTheEmbedderFails(t *testing.T) {
 
 // TestSearchAnswersKeywordOnlyWithNoEmbedderConfigured covers the other half of "a Dispatch
 // without Bedrock credentials": Deps.Embedder is nil, exactly the production boot state when
-// embed.New's AWS config load fails (cmd/dispatch's bootConfig), and search still answers,
+// embed.NewBedrock's AWS config load fails (cmd/dispatch's bootConfig), and search still answers,
 // keyword-only, saying so.
 func TestSearchAnswersKeywordOnlyWithNoEmbedderConfigured(t *testing.T) {
 	handler := newTestHandler(t)

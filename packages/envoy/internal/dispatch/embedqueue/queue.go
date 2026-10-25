@@ -25,7 +25,7 @@ import (
 )
 
 const (
-	batchSize        = embed.MaxBatchTexts
+	batchSize        = embed.BedrockMaxBatchTexts
 	retryInterval    = 5 * time.Second
 	backfillPageSize = 500
 	// claimWindow is how long scanPending's claim keeps a row off every other scanner's list.
@@ -606,7 +606,7 @@ func commitEmbeddings(ctx context.Context, deps Deps, rows []pendingRow, vectors
 		from unnest($1::text[], $2::text[], $3::text[], $4::text[]) as v(kind, id, content_hash, embedding)
 		where e.kind = v.kind and e.id = v.id and e.content_hash = v.content_hash
 		returning e.kind
-	`, kinds, ids, hashes, literals, embed.Model)
+	`, kinds, ids, hashes, literals, embed.BedrockModel)
 	if err != nil {
 		return 0, permanent, fmt.Errorf("commit embeddings: %w", err)
 	}

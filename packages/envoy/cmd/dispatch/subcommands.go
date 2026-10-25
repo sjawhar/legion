@@ -269,7 +269,7 @@ func backfillEmbeddings(ctx context.Context, databaseURL string, out io.Writer) 
 		return 1
 	}
 	defer database.Pool.Close()
-	embedder, err := embed.New(ctx)
+	embedder, err := embed.NewBedrock(ctx)
 	if err != nil {
 		fmt.Fprintf(out, "backfill-embeddings: %v\n", err)
 		return 1
