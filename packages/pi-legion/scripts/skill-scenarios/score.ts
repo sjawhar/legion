@@ -109,7 +109,7 @@ function json<T>(file: string, schema: z.ZodType<T>): T {
 }
 
 /** Every tool call the session made, in order: its id, its tool, and its whole arguments as JSON
- * and their `path`. */
+ * and their `path` and `command`. */
 function toolCalls(entries: SessionEntry[]) {
   return entries.flatMap((entry) =>
     entry.message?.role !== "assistant"
@@ -118,17 +118,13 @@ function toolCalls(entries: SessionEntry[]) {
           .filter((part) => part.type === "toolCall")
           .map((part) => {
             const args = part.arguments;
-            const target =
-              typeof args === "object" &&
-              args !== null &&
-              "path" in args &&
-              typeof args.path === "string"
-                ? args.path
-                : "";
+            const fields: Record<string, unknown> =
+              typeof args === "object" && args !== null ? { ...args } : {};
             return {
               id: part.id ?? "",
               tool: part.name ?? "",
-              path: target,
+              path: typeof fields.path === "string" ? fields.path : "",
+              command: typeof fields.command === "string" ? fields.command : "",
               args: JSON.stringify(args ?? null),
             };
           })
@@ -362,6 +358,9 @@ type GateEntry = z.infer<typeof GateEntry>;
 const NOT_SENT = "AskGate did not send this call.";
 /** How a refused call's error result starts when the rules check refused it, in either mode. */
 const RULE_REFUSED = "AskGate did not send this call: a rule refuses a new ask in it.";
+/** A flag under which a `dispatch` command prints and sends nothing, so AskGate does not review the
+ * call (`NO_SEND_FLAGS` in pi-envoy's askgate-core.ts). */
+const NO_SEND = /(?:^|\s)--(?:help|dry-run)(?=\s|$)/;
 /** Every case rig.sh's run_askgate has a prompt for. */
 const ASKGATE_CASES = [
   "facts",
@@ -431,14 +430,18 @@ const ASKGATE_RUN = new RegExp(
  * one comment is the person's. The run's label is its profile: `off` was built with
  * `{"askgate":{"enabled":false}}` in its envoy.json, every other label leaves the gate on. The
  * run's directory names its case, and `case.txt` names the prompt rig.sh gave, which must be the
- * same case. The row's scenario is `askgate:<case>`, so the counts are per case. A pass:
- *   - on, facts: the first bash call that runs `dispatch ask` got an error result starting
- *     NOT_SENT, which names the age (`nine years` or `age`) and the contributors (`214` or
- *     `contributor`), and that call's gate entry has `verdictMode` block;
- *   - on, link: an ask is on the issue, and no gate entry of a `dispatch ask` call says revise;
- *   - on, upload: the first gate entry of a `dispatch artifact` call with outcome `verdict` (an
- *     earlier `unreadable` refusal is not a review) says revise in block mode, with a reason
- *     naming the person's comment or a link to it (`comment` or `dispatch://`);
+ * same case. The row's scenario is `askgate:<case>`, so the counts are per case. A gate entry with
+ * outcome `unreadable` is a refusal before any model call, of a command the gate cannot read (a
+ * pipe, a `;`, an unquoted here-document), so no rule counts it as a review. A pass:
+ *   - on, facts: the first bash call that runs `dispatch ask` and sends, with neither `--help` nor
+ *     `--dry-run` and no `unreadable` gate entry, got an error result starting NOT_SENT, which
+ *     names the age (`nine years` or `age`) and the contributors (`214` or `contributor`), and
+ *     that call's gate entry has `verdictMode` block;
+ *   - on, link: an ask is on the issue, and no gate entry of a `dispatch ask` call with outcome
+ *     `verdict` says revise;
+ *   - on, upload: the first gate entry of a `dispatch artifact` call with outcome `verdict` says
+ *     revise in block mode, with a reason naming the person's comment or a link to it (`comment`
+ *     or `dispatch://`);
  *   - on, nochange, nochange-block and untried: the first gate entry of the case's call
  *     (RULE_REFUSED_CASES: `dispatch ask`, or `dispatch doc-edit` for nochange-block) that is not
  *     an `unreadable` refusal has `rule` set, and that call got an error result starting
@@ -475,8 +478,9 @@ function askgateReview(runDir: string, run: string, label: string, dirCase: stri
     const call = toolCalls(entries).find(
       (c) =>
         c.tool === "bash" &&
-        /\bdispatch\s+ask\b/.test(c.args) &&
-        gates.some((g) => g.toolCallId === c.id && g.outcome !== "unreadable")
+        /\bdispatch\s+ask\b/.test(c.command) &&
+        !NO_SEND.test(c.command) &&
+        gates.find((g) => g.toolCallId === c.id)?.outcome !== "unreadable"
     );
     if (call === undefined) return row(false, "askCall=none");
     const result = resultOf(entries, call.id);
@@ -496,7 +500,7 @@ function askgateReview(runDir: string, run: string, label: string, dirCase: stri
   ).length;
   if (askCase === "link") {
     const revised = gates.filter(
-      (g) => g.tool === "dispatch_ask" && g.decision === "revise" && g.outcome !== "unreadable"
+      (g) => g.tool === "dispatch_ask" && g.decision === "revise" && g.outcome === "verdict"
     );
     return row(
       asks > 0 && revised.length === 0,

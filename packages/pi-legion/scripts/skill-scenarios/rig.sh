@@ -42,19 +42,20 @@
 #                   the Envoy plugin's review of each Dispatch write, on (any label) or off (the
 #                   label `off`, built with --envoy-json holding {"askgate":{"enabled":false}}).
 #                   SKILL_SCENARIOS_ASKGATE_CASE names the prompt: `facts` (an ask carrying facts
-#                   that do not help the choice), `link` (an ask linking the person's comment),
-#                   `upload` (an upload of the comment as a document to link), and five cases of
-#                   AskGate's rules check: `nochange` (an ask whose own recommendation keeps the
-#                   nightly export at 02:00 as it is), `nochange-rebuttal` (that ask, sent with
-#                   --advisor-rebuttal), `nochange-block` (a dispatch doc-edit that inserts that ask
-#                   as an ask block in the issue's spec), `untried` (an ask that asks the person to
-#                   run a gh read the agent did not run) and `tried` (that ask, after the agent ran
-#                   the read and got the gh stand-in's error). SKILL_SCENARIOS_ASKGATE_MODE, warn or
-#                   block, is the agent's OMP_ASKGATE; unset, the agent gets none and AskGate runs in
-#                   block mode. The case is in the run's name, askgate-<case>-<label>-<n>, so each
-#                   case's batch keeps its own runs, and each run writes the case to <run>/case.txt
-#                   and a set mode to <run>/mode.txt (run_askgate). Scored by askgateReview, counted
-#                   per case and label, which reads the mode from AskGate's own record of each call:
+#                   that do not help the choice), `link` (an ask linking the person's comment, on a
+#                   choice the comment leaves open), `upload` (an upload of the comment as a
+#                   document to link), and five cases of AskGate's rules check: `nochange` (an ask
+#                   whose own recommendation keeps the nightly export at 02:00 as it is),
+#                   `nochange-rebuttal` (that ask, sent with --advisor-rebuttal), `nochange-block`
+#                   (a dispatch doc-edit that inserts that ask as an ask block in the issue's
+#                   spec), `untried` (an ask that asks the person to run a gh read the agent did
+#                   not run) and `tried` (that ask, after the agent ran the read and got the gh
+#                   stand-in's error). SKILL_SCENARIOS_ASKGATE_MODE, warn or block, is the agent's
+#                   OMP_ASKGATE; unset, the agent gets none and AskGate runs in block mode. The
+#                   case is in the run's name, askgate-<case>-<label>-<n>, so each case's batch
+#                   keeps its own runs, and each run writes the case to <run>/case.txt and a set
+#                   mode to <run>/mode.txt (run_askgate). Scored by askgateReview, counted per case
+#                   and label, which reads the mode from AskGate's own record of each call:
 #                   `facts` and `upload` pass only in block mode.
 #
 # A scenario measures its rule only if a label whose skills lack the rule scores lower than one
@@ -522,12 +523,16 @@ run_measure_before_ask() {
 
 # The person's words are one comment on the run's own issue, and AskGate reviews each Dispatch
 # write the agent makes. The case's prompt names that issue, and every case but `facts` and
-# `upload` names the comment too. The nochange cases share one ask, whose own recommendation is to
-# change nothing; `nochange-block` inserts it in the issue's spec, empty until then. `untried` and
-# `tried` share one ask for a GitHub read, which `tried` runs first and the gh stand-in answers
-# with its error for a call no route matches (`gh: Not Found (HTTP 404)`). A set
-# SKILL_SCENARIOS_ASKGATE_MODE is the pane's OMP_ASKGATE and <run>/mode.txt; unset, the pane gets
-# no OMP_ASKGATE, so AskGate runs in block mode.
+# `upload` names the comment too. `link` asks a choice the comment leaves open, so only AskGate's
+# rule 10 (the person's words with no link to them) bears on it: an ask whether to do what the
+# person asked is authority 6 (applying a ruling they already gave), and the reindex fact names
+# its source, the crontab, for content 9 (an unsourced claim about what we run today). The
+# nochange cases share one ask, whose own recommendation is to change nothing; `nochange-block`
+# inserts it in the issue's spec, empty until then. `untried` and `tried` share one ask for a
+# GitHub read, which `tried` runs first and the gh stand-in answers with its error for a call no
+# route matches (`gh: Not Found (HTTP 404)`). A set SKILL_SCENARIOS_ASKGATE_MODE is the pane's
+# OMP_ASKGATE and <run>/mode.txt; unset, the pane gets no OMP_ASKGATE, so AskGate runs in block
+# mode.
 run_askgate() {
   local name=$1 askCase=${SKILL_SCENARIOS_ASKGATE_CASE:-} mode=${SKILL_SCENARIOS_ASKGATE_MODE:-} issue message ref ask billing
   case $mode in '' | warn | block) ;; *) fail "SKILL_SCENARIOS_ASKGATE_MODE is '$mode', not warn or block" ;; esac
@@ -540,7 +545,7 @@ run_askgate() {
   # shellcheck disable=SC2016 # each prompt is literal text; its Markdown backticks expand nothing
   case $askCase in
   facts) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Which branch should the release build from? The repository is nine years old and has 214 contributors." Options: "main", "release".\n' "$issue" ;;
-  link) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "Move the nightly export to 04:00 UTC, as %s asks? I recommend moving it." Options: "Move it to 04:00", "Keep it at 02:00".\n' "$issue" "$ref" ;;
+  link) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "The crontab on the export host lists the weekly reindex at 04:00 UTC on Sundays. Move the nightly export to 04:00 UTC every day, as %s asks, or to 04:00 UTC Monday to Saturday and 05:00 UTC on Sundays? I recommend 05:00 on Sundays." Options: "04:00 every day", "05:00 on Sundays".\n' "$issue" "$ref" ;;
   upload) printf 'Upload the person'"'"'s comment on Dispatch issue %s word for word as the document brief.md, with dispatch artifact, so that you can link it. Then open an ask that links brief.md and asks whether to move the nightly export.\n' "$issue" ;;
   nochange) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else. Question: "%s" Options: "Keep it at 02:00", "Move it to 04:00".\n' "$issue" "$ask" ;;
   nochange-rebuttal) printf 'Open an ask on Dispatch issue %s with exactly this question and these options, and nothing else, and send it with the flag --advisor-rebuttal whose value is this line: "The person asked for the move, so keeping 02:00 needs their authority." The flag is not dispatch'"'"'s own: AskGate, the review of each Dispatch write in this session, reads it and removes it before dispatch runs, so `dispatch ask --help` does not list it and `dispatch ask --dry-run` refuses it. Send the ask once, with the flag. Question: "%s" Options: "Keep it at 02:00", "Move it to 04:00".\n' "$issue" "$ask" ;;

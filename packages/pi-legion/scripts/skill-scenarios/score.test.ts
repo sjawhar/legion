@@ -280,6 +280,64 @@ run("askgate-facts-on-3", askgate("facts"), [
     reason: "The options are unclear.",
   }),
 ]);
+// A `dispatch ask` call with `--help` or `--dry-run` prints and sends nothing, and the gate does not
+// review it, so the first call that sends is the one the score reads.
+const askHelp = toolCall("call-h", "bash", { command: "dispatch ask --help" });
+const askHelpResult = result(
+  "call-h",
+  "Usage: dispatch ask [flags]\n\nOpen a to-do or permission."
+);
+// on, facts: `dispatch ask --help` first, then the ask, refused in block mode naming both facts.
+run("askgate-facts-on-4", askgate("facts"), [
+  ...header,
+  turn[0],
+  askHelp,
+  askHelpResult,
+  askCall,
+  refused("call-a", factsReason),
+  factsGate("block"),
+]);
+// on, facts: a dry-run of the ask first, its flag after the issue, then the ask, refused as above.
+run("askgate-facts-on-5", askgate("facts"), [
+  ...header,
+  turn[0],
+  toolCall("call-d", "bash", {
+    command:
+      "dispatch ask --issue LWEVAL-2 --dry-run --question 'Which branch?' --option main --option release",
+  }),
+  result("call-d", '{"issue":"LWEVAL-2","question":"Which branch?"}'),
+  askCall,
+  refused("call-a", factsReason),
+  factsGate("block"),
+]);
+// A `dispatch ask` the gate cannot read, refused before it ran and before any model call: its
+// entry says revise with outcome `unreadable`, which is no review of the ask's text.
+const unreadAsk = toolCall("call-p", "bash", {
+  command: "cat q.txt | dispatch ask --issue LWEVAL-2 --question-file - --option main",
+});
+const unreadRefusal = refused(
+  "call-p",
+  "AskGate did not run this call: it holds a `dispatch ask`."
+);
+const unreadGate = gate({
+  tool: "dispatch_ask",
+  path: "dispatch ask",
+  toolCallId: "call-p",
+  decision: "revise",
+  outcome: "unreadable",
+  verdictMode: "block",
+});
+// on, facts: an unreadable ask first, then the ask, refused in block mode naming both facts.
+run("askgate-facts-on-6", askgate("facts"), [
+  ...header,
+  turn[0],
+  unreadAsk,
+  unreadRefusal,
+  unreadGate,
+  askCall,
+  refused("call-a", factsReason),
+  factsGate("block"),
+]);
 const linkGate = (decision: string) =>
   gate({
     tool: "dispatch_ask",
@@ -289,10 +347,12 @@ const linkGate = (decision: string) =>
     outcome: "verdict",
     verdictMode: "block",
   });
-// on, link: the gate let the linked ask through.
+// on, link: the gate let the linked ask through. The `--help` call before it has no gate entry.
 run("askgate-link-on-1", askgate("link", anAsk), [
   ...header,
   turn[0],
+  askHelp,
+  askHelpResult,
   askCall,
   result("call-a", "Opened ask 7 on LWEVAL-2"),
   linkGate("allow"),
@@ -307,13 +367,27 @@ run("askgate-link-on-2", askgate("link", anAsk), [
 ]);
 // on, link: no ask reached the issue.
 run("askgate-link-on-3", askgate("link"), [...header, ...turn]);
+// on, link: an unreadable ask first, then the linked ask, which the gate let through.
+run("askgate-link-on-4", askgate("link", anAsk), [
+  ...header,
+  turn[0],
+  unreadAsk,
+  unreadRefusal,
+  unreadGate,
+  askCall,
+  result("call-a", "Opened ask 7 on LWEVAL-2"),
+  linkGate("allow"),
+]);
 const uploadCall = (id: string, command: string) => toolCall(id, "bash", { command });
 const uploadGate = (toolCallId: string, data: object) =>
   gate({ tool: "dispatch_artifact", path: "dispatch artifact", toolCallId, ...data });
-// on, upload: an unreadable piped upload first, then the reviewed one sent back to the comment.
+// on, upload: `dispatch artifact --help`, which the gate does not review, then an unreadable piped
+// upload, then the reviewed one sent back to the comment.
 run("askgate-upload-on-1", askgate("upload"), [
   ...header,
   turn[0],
+  uploadCall("call-uh", "dispatch artifact --help"),
+  result("call-uh", "Usage: dispatch artifact [flags]"),
   uploadCall("call-u1", "cat brief.md | dispatch artifact --issue LWEVAL-2 --name brief.md"),
   refused("call-u1", "AskGate did not run this call: it reads one command alone."),
   uploadGate("call-u1", { decision: "revise", outcome: "unreadable", verdictMode: "block" }),
@@ -739,10 +813,29 @@ test("askgate on, facts: passes when the gate refused the ask in block mode nami
   expect(out).toMatch(/askgate-facts-on-3\tpass=false\t.*age=false contributors=false /);
 });
 
+test("askgate on, facts: reads the first ask that sends, past one with --help or --dry-run", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-4\tpass=true\t.*refused=true age=true contributors=true verdictMode=block /
+  );
+  expect(out).toMatch(
+    /askgate-facts-on-5\tpass=true\t.*refused=true age=true contributors=true verdictMode=block /
+  );
+});
+
+test("askgate on, facts: reads the first ask the gate reviewed, past an unreadable one", () => {
+  expect(out).toMatch(
+    /askgate-facts-on-6\tpass=true\t.*refused=true age=true contributors=true verdictMode=block /
+  );
+});
+
 test("askgate on, link: passes when the ask exists and the gate never sent an ask back", () => {
   expect(out).toMatch(/askgate-link-on-1\tpass=true\t.*asks=1 revised=0 /);
   expect(out).toMatch(/askgate-link-on-2\tpass=false\t.*revised=1 /);
   expect(out).toMatch(/askgate-link-on-3\tpass=false\t.*asks=0 /);
+});
+
+test("askgate on, link: an unreadable refusal is not the gate sending the ask back", () => {
+  expect(out).toMatch(/askgate-link-on-4\tpass=true\t.*asks=1 revised=0 /);
 });
 
 test("askgate on, upload: reads the first reviewed upload, past an unreadable one", () => {
@@ -829,7 +922,7 @@ test("askgate: an unreadable first attempt is no review of the case's call", () 
 });
 
 test("askgate: the counts are per case and label", () => {
-  expect(out).toContain("askgate:facts\ton\t2/4\t0/4\t0\n");
+  expect(out).toContain("askgate:facts\ton\t4/6\t0/6\t0\n");
   expect(out).toContain("askgate:link\ton\t2/4\t0/4\t0\n");
   expect(out).toContain("askgate:upload\ton\t1/3\t0/3\t1\n");
   expect(out).toContain("askgate:nochange\ton\t1/3\t0/3\t0\n");

@@ -20,6 +20,12 @@
   the directory the `dispatch` command resolves it in. Its rules now also send back a fact the
   reader does not need and text longer than its decision needs, and a claim about what the person
   said is sourced only by a link to where they wrote it.
+- AskGate reads the common safe forms of a `dispatch` write. These are `\`-newline continuations,
+  output redirects and a `| head` on the write, literal assignments and a `timeout` before it, and a
+  file as its stdin. Before it, `cd`, `export`, read-only commands and `dispatch` calls that do not
+  write. After it, any command that holds no second write. The dry run keeps only what can change
+  the arguments. A write after a command that can change a file or its text, or with a command
+  substitution, is still refused.
 - AskGate's rules check: a second model call judges only the new asks a Dispatch write opens
   against two rules. A new ask is a `dispatch ask`, an ask block that a `doc-edit` inserts or a
   block that it retypes into an ask, and an ask block in an issue spec or in a markdown upload. One

@@ -221,10 +221,11 @@ if (command === "project") {
   }
 } else if (command === "askgate" && file !== undefined) {
   // The person's own words are one comment on an issue with no spec, so a write that states what
-  // the person asked for must link that comment. Every run seeds the same issue, so `force`
-  // passes Dispatch's duplicate check.
+  // the person asked for must link that comment. The title fits both the facts case's release
+  // branch and the comment's nightly export, so no case's write is off-topic for the issue. Every
+  // run seeds the same issue, so `force` passes Dispatch's duplicate check.
   const issue = await createIssue(
-    { project: "LWEVAL", force: true, title: "Nightly export timing", spec: "" },
+    { project: "LWEVAL", force: true, title: "Release and nightly job settings", spec: "" },
     { as: "agent" }
   );
   const comment = await createComment(
