@@ -1,0 +1,138 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-354",
+  "completed": "2026-10-25T06:23:08Z",
+  "plan": "dispatch://INFRA-354/artifact/plan-md (plan.md version 1). It carries the tasks, the file-by-file work, the surface and command for each acceptance line, the risks and these records.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: the phase contract this change is carried out under — the shared workspace, the push procedure, the handoff and the completion gate.",
+      "skill://legion-worker/references/pr-body.md: the body template and the definition of a proof, which decides this issue, since its proofs are the real broker process and never the unit suite.",
+      "skill://legion-worker/references/review-threads.md: each review thread is answered and resolved one by one by the pull request's author.",
+      "skill://legion-worker/references/conflicts-and-rewrites.md: pull request 2162 (legion/INFRA-236) changes every file this change touches, so a forward merge is likely and a rebase is never right.",
+      "skill://legion-worker/references/merge-gate.md: the order from the tester's evidence to READY, and the production check this implementer owes after the close, which reports pending until the broker in the cluster carries the merge.",
+      "skill://ce-simplify-code: the one simplify pass per pull request, which matters here because the change renames a field across nine sites.",
+      "skill://dispatch-first and skill://dispatch: read before any write to Dispatch, which this issue needs for the production record and for anything the implementer must ask.",
+      "skill://envoy: waiting for CI or a merge by subscription rather than a sleep loop, and publishing to a role topic."
+    ],
+    "test": [
+      "skill://legion-worker: the phase contract, the handoff fields a test handoff carries, and the read-only rule once the phase ends.",
+      "skill://legion-worker/references/pr-body.md: what the tester verifies, what it may cite from CI rather than re-run, and the proof array a passing test handoff carries — decisive here, because the deciding proofs need a Postgres the tester starts itself (docs/kubernetes.md, 'Running a workload in the cluster from a role').",
+      "skill://dispatch: read before anything the tester posts to Dispatch."
+    ],
+    "review": [
+      "skill://legion-worker: the phase contract and the order of a review round.",
+      "skill://legion-worker/references/merge-gate.md: the approval of a head by SHA and what READY needs above it.",
+      "skill://legion-worker/references/review-threads.md: listing threads, replying once per thread, and naming the bot threads the implementer must resolve.",
+      "skill://ce-simplify-code: judging the simplify head, and the prose of task F, which no machine check reaches and which the reviewer confirms."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1 — acceptance line 4 does not say what 'starts' means, and the only real start-up harness (cmd/broker/main_test.go's buildBroker/startBroker) skips without BROKER_TEST_DATABASE_URL.",
+        "answer": "The plan fixes the bar at: the compiled binary logs 'broker listening addr=…', answers GET /healthz 200, and serves the service-owned secret through POST /v1/secrets/<NAME>/reread (section 6, line 4). The database is a Postgres the role starts in the cluster as a Job with a Service (task G.1, docs/kubernetes.md:2554-2830); the planner measured all three gate commands answering yes on 2026-10-25."
+      },
+      {
+        "finding": "F2 — acceptance line 3 names no surface, and brokertest cannot express it (its requests.Machine sets no ServiceAccounts and MintPodToken hard-codes one subject at rig.go:280, and it is re-exported to packages/daemon).",
+        "answer": "Decision D5 and task E: a new test in package main beside service_login_test.go drives the real compiled binary over HTTP — one OIDC test issuer, one token login, three pod enrollments under accounts A, B and C — so brokertest is not touched. Section 6 line 3 names the command and records why no surface outside a Go process can mint a projected pod token."
+      },
+      {
+        "finding": "F3 — the Go type stays map[string]string, so the six construction sites keep compiling with their meaning reversed; machine_test.go:1269 would pass for the wrong reason.",
+        "answer": "Decision D1 renames the field to ServicesByAccount on config.Config and requests.Machine, so all nine sites fail to compile until read; task D lists every test site, and calls out machine_test.go:1269 explicitly."
+      },
+      {
+        "finding": "F4 — 'ship an attested image' is asserted in the spec, is in no acceptance line, and is owned by nobody.",
+        "answer": "Decision D8: it is not a task of this issue. .github/workflows/release-envoy-listener.yaml:3-16 runs on every push to main touching packages/envoy/**, so the merge publishes and attests by itself, and dispatch://INFRA-321's task A owns reading the digest into its pin. The implementer's production check records the release run, the digest and the attestation verification. Whether the spec gains an acceptance line for it is the architect's decision, named in the completion summary."
+      },
+      {
+        "finding": "F5 — the production check after the merge can observe nothing about the running broker, which is pinned by digest from the deployment repository.",
+        "answer": "Decision D8 and section 6's closing note: the check reports pending with the reading — the release run, the published digest, the attestation verification and the digest the cluster's broker is running — until dispatch://INFRA-321 applies its broker stack. The risk that the check lapses at its bound is listed in section 8 and escalated to the architect."
+      },
+      {
+        "finding": "F6 — nothing records that the deployment step this enables is forward-only: an older binary refuses a configuration naming a service twice, and the broker is one pod.",
+        "answer": "Decision D9 and task F: the changelog entry and a sentence in packages/envoy/AGENTS.md state that the image and the setting move back together."
+      },
+      {
+        "finding": "F7 — the design names two documentation pages; eight passages state the rule this change retires, and the changelog is named nowhere.",
+        "answer": "Decision D6 and task F name all eight passages with their line ranges, plus the packages/envoy/CHANGELOG.md entry under Unreleased. Recorded as a departure, since the spec names no documentation."
+      },
+      {
+        "finding": "F8 — docs/kubernetes.md:4278-4282 tells an operator that a controller with an account of its own would lose the service's secrets; that advice inverts, and neither issue owns it.",
+        "answer": "Decision D7: this issue rewrites it. Recorded as a departure."
+      },
+      {
+        "finding": "F9 — acceptance line 2's newly reachable case (the same account twice under the same service) has no test, and the surviving message would read 'for both \"a\" and \"a\"'.",
+        "answer": "Decision D4: the parser keeps one refusal with two tails, the existing wording when the services differ and a same-service wording when they are equal; task D adds a test for each, and section 6 line 2 proves both on the real process and in the configuration reader."
+      },
+      {
+        "finding": "F10 — the design's requester expression, services[*e.Subject] == *e.Service, dereferences pointers the row may not have.",
+        "answer": "Decision D2 writes the guarded form and states why both nil guards are load-bearing: a map miss answers the empty string, so without e.Service != nil an unlisted pod would match a nil service and panic."
+      },
+      {
+        "finding": "F11 — the scope sentence omits three consumers, and slices.Sorted(maps.Values(...)) repeats a service once two accounts share it.",
+        "answer": "Decision D3 uses slices.Compact(slices.Sorted(maps.Values(...))); tasks B and C name machine_state.go's field and doc comments, machine_read.go's two call sites and comments, and main.go:133 and :297."
+      },
+      {
+        "finding": "F12 — no acceptance line says the configuration the deployment runs today (one account per service) still loads on the new binary.",
+        "answer": "Task D keeps the existing two-services-one-account-each case of config_test.go rather than replacing it, and section 6 line 1 names it as a pass condition."
+      },
+      {
+        "finding": "F13 — the pull request is in a public repository, while the spec and the design are written in the deployment repository's vocabulary.",
+        "answer": "The plan writes 'the deployment repository' throughout and gives the one path inside it that a run must read; .github/scripts/check-private-names.sh scans every tracked file, which includes this handoff."
+      },
+      {
+        "finding": "F14 — five claims of the spec rest on documents or a repository outside this one and cannot be re-checked from the code.",
+        "answer": "Section 2 of the plan derives every claim it relies on from files in this repository, with line numbers, and cites the outside claims to their issues rather than restating them as measurements of this tree."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 1
+  },
+  "specDepartures": [
+    {
+      "spec": "The spec names no documentation and no changelog; its design (section 5A of dispatch://INFRA-321's plan, version 1) names two pages, broker/operate.md and broker/concepts.md.",
+      "plan": "Tasks F changes eight passages — packages/envoy/AGENTS.md:2357-2358, :2368-2376, :2919-2923, :2926-2931; docs/site/src/content/docs/broker/operate.md:70-89; .../broker/concepts.md:199-207; .../broker/guides/log-a-machine-in.md:108-111; .../dispatch/envoy.md:79-81; docs/kubernetes.md:3805-3814 — and adds a packages/envoy/CHANGELOG.md entry.",
+      "evidence": "Each passage states the one-account-per-service rule as a fact; no machine check reaches any of them, so a reader finds the retired rule documented and believes it over the program.",
+      "outcome": { "kind": "changed", "scope": "The issue's documentation scope grows from two pages to eight passages and the changelog." }
+    },
+    {
+      "spec": "The scope sentence says only that the broker's 'map of accounts is keyed by subject'.",
+      "plan": "The field is also renamed, on config.Config and requests.Machine, from ServiceAccounts to ServicesByAccount.",
+      "evidence": "The Go type stays map[string]string, so the six sites that build or assert it (config.go:395-398, config_test.go:167-172, cmd/broker/main_test.go:84, requests/machine_test.go:150 and :1269, api/request_approver_test.go:38) keep compiling with their meaning reversed; machine_test.go:1269 would still pass, for a different reason. The rename makes every site fail to compile until it is read.",
+      "outcome": { "kind": "changed", "scope": "Nine call and construction sites are touched by a rename the spec does not name." }
+    },
+    {
+      "spec": "Acceptance: 'A configuration naming one account twice is still refused, with a message naming the account.'",
+      "plan": "parseServiceAccounts keeps one refusal with two tails: the existing wording when the two entries name different services, and a same-service wording when they name one.",
+      "evidence": "Deleting Load's duplicate-service refusal makes a=X a=X reach the parser's message, which would read 'names the service account X for both \"a\" and \"a\"'. That case is the likeliest operator mistake (one entry written twice) and no test covers it today: the string 'must give each service once' appears only at config.go:393, and config_test.go:199-204 uses two different services.",
+      "outcome": { "kind": "changed", "acceptance": "Acceptance line 2's observable message differs between the same-service and the cross-service case; both name the account." }
+    },
+    {
+      "spec": "Neither this spec nor dispatch://INFRA-321's plan names docs/kubernetes.md:4278-4282.",
+      "plan": "That paragraph is rewritten.",
+      "evidence": "It tells an operator that 'The broker binds one account to each service (BROKER_SERVICES), so this shared account is what makes the controller the legion-daemon service's own pod: a controller given an account of its own would no longer be granted that service's secrets.' After this change the advice is false as a general statement.",
+      "outcome": { "kind": "changed", "scope": "One operator-facing paragraph outside the design's list is rewritten." }
+    },
+    {
+      "spec": "The spec says the change 'must merge and ship an attested image', and names no rollback rule.",
+      "plan": "The changelog entry and packages/envoy/AGENTS.md record that an older broker binary refuses a configuration naming a service twice, so the image and the BROKER_SERVICES value move back together.",
+      "evidence": "config.go:392-394 is that refusal, and the spec itself states the broker is one pod stopped before its replacement exists. The repository already records a comparable one-way broker step beside migration 0007 in packages/envoy/AGENTS.md.",
+      "outcome": { "kind": "changed", "scope": "A rollback rule is written into the changelog and the contributor guide." }
+    },
+    {
+      "spec": "The spec says nothing about how a role obtains the Postgres its proofs need.",
+      "plan": "Task G.1 starts one in the cluster as a Job with a Service, and task F has the implementer correct docs/kubernetes.md's record (:2777-2810) of which steps of that sequence have been run.",
+      "evidence": "The role container has no docker, psql, postgres or initdb (measured 2026-10-25); docs/kubernetes.md:2796-2810 records two of its three gate commands as 'no' and the Service half as 'Not executed … Read that pair as a design until a role has run it end to end and said so', while all three now answer yes here.",
+      "outcome": { "kind": "changed", "scope": "A documentation correction outside packages/envoy is added, written from the implementer's own run." }
+    },
+    {
+      "spec": "The design (section 5A, item 2) writes the new lookup as services[*e.Subject] == *e.Service.",
+      "plan": "requester uses the guarded form, if e.Kind == \"pod\" && e.Subject != nil && e.Service != nil && services[*e.Subject] == *e.Service.",
+      "evidence": "machine_state.go:188-192 declares Operator, Service and Subject as *string, nil for the kinds of session that do not have them, and a map miss answers the empty string, so the design's expression would match a nil service and then panic on its dereference.",
+      "outcome": { "kind": "unchanged" }
+    }
+  ]
+}
