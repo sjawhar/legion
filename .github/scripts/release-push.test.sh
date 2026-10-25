@@ -8,7 +8,9 @@
 # pushed and refuses one whose name is not <prefix>X.Y.Z; for `release-push.sh
 # tag`, which commits the bump and tags it, pushing nothing; for
 # `release-push.sh release`, which makes a GitHub release carry the run's
-# assets; for `release-push.sh push-tag`, which pushes a tag with the deploy
+# assets; for `release-push.sh restart`, which leaves a lost version's commit
+# to a later unfinished run or starts a run for it, bounded, against a stub gh;
+# for `release-push.sh push-tag`, which pushes a tag with the deploy
 # key; for `release-push.sh handed`, which checks the version and the files a
 # build job hands a publish job and prints the release tag; and for
 # `release-push.sh no-credential`, the build job's tripwire.
@@ -53,8 +55,6 @@ set -euo pipefail
 # core.hooksPath, rerere, rebase.*) must not reach the seed repos or the script
 # under test. Needs git >= 2.32.
 export GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1
-# `version --expect` names the run to re-run from GITHUB_RUN_ID; the cases set it themselves.
-unset GITHUB_RUN_ID
 
 script_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 release_push="$script_dir/release-push.sh"
@@ -696,31 +696,85 @@ version_run "$work/v/c" pkg-v -- packages/pkg/
 check "no tag, no --first-npm: exits 1 printing nothing" "$(is "$rc|$out" "1|")"
 check "no tag, no --first-npm: the error says a release line starts from a tag" \
   "$(contains "$err" '^::error::release-push.sh version: no pkg-v\* tag; a release line starts from a tag (push pkg-v0\.0\.0 on the commit before its first release)$')"
-# --expect: what the build job handed against what the tags give now.
+# --expect: what the build job handed against what the tags give now. Another
+# run that took the tag first leaves nothing on stdout, no ::error:: and one
+# ::notice, and exits 3 when nothing of this checkout is left to release or 4
+# when its commits still need a release.
 git -C "$clone" checkout -q --detach "$fix"
 version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
 check "--expect, the tags agree: exits 0 with the three lines" "$(is "$rc $out" "0 $(outputs 1.0.1 pkg-v1.0.1 false)")"
 git -C "$clone" checkout -q --detach "$feat"
-GITHUB_RUN_ID=424242 version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
-check "--expect, the tags give another version: exits 1 printing nothing" "$(is "$rc|$out" "1|")"
-check "--expect, the tags give another version: the error names both, the race and the run to re-run" \
-  "$(contains "$err" '^::error::release-push.sh version: the build job handed v1\.0\.1; the tags now give 1\.1\.0: another run took the tag first\. Re-run the whole run (gh run rerun 424242), not only the failed jobs: the build job must compute the version again$')"
-check "--expect, the tags give another version: no bump is logged" "$(is "$(contains "$err" 'Bumping')" false)"
 version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
-check "--expect without GITHUB_RUN_ID: the re-run command keeps its placeholder" "$(contains "$err" 'gh run rerun <run id>')"
+check "--expect, the tags give another version: exits 4 printing nothing" "$(is "$rc|$out" "4|")"
+check "--expect, the tags give another version: the notice names both and says a new run must build them" \
+  "$(contains "$err" '^::notice title=Version taken by another run::release-push\.sh version: the build job handed v1\.0\.1; the tags now give 1\.1\.0: another run took the tag first, and this checkout holds commits no release holds yet, so a new run must compute the version again and build them$')"
+check "--expect, the tags give another version: no error, no bump logged" "$(is "$(contains "$err" '::error')|$(contains "$err" 'Bumping')" 'false|false')"
 git -C "$clone" checkout -q --detach "$docs"
 version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
-check "--expect where there is nothing to release: exits 1 printing nothing" "$(is "$rc|$out" "1|")"
-check "--expect where there is nothing to release: says so" "$(contains "$err" 'handed v1\.0\.1; the tags now give nothing to release: another run took the tag first')"
-check "--expect where there is nothing to release: no notice, no job summary" "$(is "$(contains "$err" '::notice')|$summary_md" 'false|')"
+check "--expect where there is nothing to release: exits 3 printing nothing" "$(is "$rc|$out" "3|")"
+check "--expect where there is nothing to release: the notice says nothing is left" \
+  "$(contains "$err" '^::notice title=Nothing left to release::release-push\.sh version: the build job handed v1\.0\.1; the tags now give nothing to release: another run took the tag first, and nothing of this checkout is left to release$')"
+check "--expect where there is nothing to release: no error, no other notice, no job summary" \
+  "$(is "$(contains "$err" '::error')|$(contains "$err" 'No release published')|$summary_md" 'false|false|')"
+# Two fixes land on pkg-v1.0.0. The first two shapes are two overlapping runs
+# whose build jobs both handed 1.0.1 before either published; the third is two
+# runs of one commit, the other run deciding after a third run's release.
+git -C "$clone" checkout -q --detach pkg-v1.0.0
+change "$clone" packages/pkg/index.js "fix: the first bug"
+first=$(git -C "$clone" rev-parse HEAD)
+change "$clone" packages/pkg/index.js "fix: the second bug"
+second=$(git -C "$clone" rev-parse HEAD)
+# The first fix's run published first: the second's commit is in no release.
+git -C "$clone" tag pkg-v1.0.1 "$first"
+version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
+check "--expect, another run tagged an ancestor first: exits 4, the tags giving 1.0.2" \
+  "$(is "$rc|$out|$(contains "$err" 'the tags now give 1\.0\.2: another run took the tag first, and this checkout holds commits no release holds yet')" '4||true')"
+# Another run tagged an ancestor first, but the version is still the one handed:
+# a feat: since pkg-v1.0.1 gives 1.1.0 as a feat: since pkg-v1.0.0 did.
+change "$clone" packages/pkg/index.js "feat: an export after the second fix"
+version_run "$clone" pkg-v --expect 1.1.0 -- packages/pkg/
+check "--expect, another run tagged an ancestor but the version handed is still next: exits 0 with the three lines" \
+  "$(is "$rc $out" "0 $(outputs 1.1.0 pkg-v1.1.0 false)")"
+# The second fix's run published first: its release holds the first fix too.
+git -C "$clone" tag -d pkg-v1.0.1 >/dev/null
+git -C "$clone" tag pkg-v1.0.1 "$second"
+git -C "$clone" checkout -q --detach "$first"
+version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
+check "--expect, another run tagged a descendant first: exits 3, nothing left to release" \
+  "$(is "$rc|$out|$(contains "$err" 'the tags now give nothing to release: another run took the tag first, and nothing of this checkout is left to release')" '3||true')"
+# A run on this very commit published another version first.
+git -C "$clone" tag -d pkg-v1.0.1 >/dev/null
+git -C "$clone" tag pkg-v1.0.2 "$first"
+version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
+check "--expect, another run tagged this checkout with another version: exits 3 printing nothing" "$(is "$rc|$out" '3|')"
+check "--expect, another run tagged this checkout with another version: the notice names its tag" \
+  "$(contains "$err" '^::notice title=Released by another run::release-push\.sh version: the build job handed v1\.0\.1; another run took the tag first and released this checkout as pkg-v1\.0\.2$')"
+version_run "$clone" pkg-v --expect 1.0.2 -- packages/pkg/
+check "--expect, the tag on this checkout is the version handed: exits 0, releasing it again" \
+  "$(is "$rc|$out|$(contains "$err" '^Releasing pkg-v1\.0\.2, already pushed for this checkout$')" "0|$(outputs 1.0.2 pkg-v1.0.2 false)|true")"
+git -C "$clone" tag -d pkg-v1.0.2 >/dev/null
 # Refusals, each printing nothing.
 git -C "$clone" checkout -q --detach "$feat"
 git -C "$clone" tag pkg-v1.0.0-rc.1 "$seed"
 version_run "$clone" pkg-v -- packages/pkg/
-check "a pre-release as the newest tag: exits non-zero printing nothing" "$([ "$rc" != 0 ] && [ -z "$out" ] && echo true || echo false)"
+check "a pre-release as the newest tag: exits 2 printing nothing" "$(is "$rc|$out" "2|")"
 check "a pre-release as the newest tag: release-bump.sh's refusal names it" \
   "$(contains "$err" '^::error::release-bump.sh: previous version 1\.0\.0-rc\.1 (range pkg-v1\.0\.0-rc\.1\.\.HEAD) is not a plain X\.Y\.Z version; refusing it$')"
+version_run "$clone" pkg-v --expect 1.0.1 -- packages/pkg/
+check "a pre-release as the newest tag, with --expect: exits 2, never 3 or 4, and says nothing of another run" \
+  "$(is "$rc|$out|$(contains "$err" '::notice title=')" '2||false')"
 git -C "$clone" tag -d pkg-v1.0.0-rc.1 >/dev/null
+# A release-bump.sh that fails with a status --expect's caller reads as another run's tag (GNU
+# sed, which it pipes into, exits 4 on an I/O error) fails the version step with 1 instead.
+mkdir -p "$work/bump4"
+cp "$release_push" "$work/bump4/release-push.sh"
+printf '%s\n' '#!/usr/bin/env bash' 'echo "sed: couldn'"'"'t flush stdout: No space left on device" >&2' 'exit 4' > "$work/bump4/release-bump.sh"
+chmod +x "$work/bump4/release-bump.sh"
+set +e
+out=$(cd "$clone" && "$work/bump4/release-push.sh" version pkg-v --expect 1.0.1 -- packages/pkg/ 2>"$work/version.err")
+rc=$?
+set -e
+check "a release-bump.sh that exits 4: version --expect exits 1, never 4, printing nothing" "$(is "$rc|$out" '1|')"
 version_run "$clone" 'pkg v' -- packages/pkg/
 check "a prefix with a space: exits 2 printing nothing" "$(is "$rc|$out" "2|")"
 check "a prefix with a space: the error names it" "$(contains "$err" '^::error::release-push.sh version: tag prefix pkg\\ v holds more than letters, digits')"
@@ -854,6 +908,144 @@ release_run none "" pkg-v1.0.1 "Pkg v1.0.1"
 check "no asset: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
 release_run none "" --draft pkg-v1.0.1 "Pkg v1.0.1" a.tgz
 check "an unknown option: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
+
+echo
+echo "Case 11b: restart leaves the release to a later unfinished run that holds this commit, else starts one"
+# The stub gh, first on PATH in a directory of its own. It logs each call to $GH_TEST_DIR/calls
+# as one line, each argument in brackets. `gh run list` prints $GH_TEST_RUNS, as `gh run list
+# --json databaseId,number,headSha,status` does; with $GH_TEST_LAND naming a clone, it first
+# lands a merge on origin's main from that clone, as a merge landing while the runs are listed
+# does, and lists that merge's queued run, number 101. `gh workflow run` prints a run URL, as gh
+# 2.102.0 does (nothing when $GH_TEST_QUIET is set). Either fails when $GH_TEST_FAIL names it
+# (list or run). Any other call fails as unexpected.
+mkdir -p "$work/restart-bin"
+cat > "$work/restart-bin/gh" <<'GH'
+#!/usr/bin/env bash
+{ printf '[%s]' "$@"; printf '\n'; } >> "$GH_TEST_DIR/calls"
+case "$1 $2" in
+  "run list")
+    [ "$GH_TEST_FAIL" != list ] || { echo "HTTP 502: the test failed this list" >&2; exit 1; }
+    if [ -n "$GH_TEST_LAND" ]; then
+      git -C "$GH_TEST_LAND" commit -q --allow-empty -m "fix: a merge landing while the runs are listed"
+      git -C "$GH_TEST_LAND" push -q origin HEAD:main
+      printf '[{"databaseId":9101,"number":101,"headSha":"%s","status":"queued"}]\n' "$(git -C "$GH_TEST_LAND" rev-parse HEAD)"
+    else
+      printf '%s\n' "$GH_TEST_RUNS"
+    fi ;;
+  "workflow run")
+    [ "$GH_TEST_FAIL" != run ] || { echo "HTTP 403: Resource not accessible by integration" >&2; exit 1; }
+    [ -n "$GH_TEST_QUIET" ] || echo "https://github.com/example/repo/actions/runs/7" ;;
+  *) echo "unexpected gh call: $*" >&2; exit 3 ;;
+esac
+GH
+chmod +x "$work/restart-bin/gh"
+# The commits: x1, the run's own checkout, and x2 on main from clone a, both pushed; then x3 on
+# main from clone b, pushed after clone a last fetched, so clone a holds it only once restart's
+# fetch has run. Clone a stands at x1, detached, as a publish job's checkout does.
+setup "$work/rs"
+ra="$work/rs/a"
+rseed=$(git -C "$ra" rev-parse HEAD)
+change "$ra" packages/pkg/index.js "fix: the first bug"
+x1=$(git -C "$ra" rev-parse HEAD)
+change "$ra" packages/pkg/index.js "fix: the second bug"
+x2=$(git -C "$ra" rev-parse HEAD)
+git -C "$ra" push -q origin HEAD:main
+git -C "$work/rs/b" pull -q --ff-only origin main
+change "$work/rs/b" packages/pkg/index.js "fix: the third bug"
+x3=$(git -C "$work/rs/b" rev-parse HEAD)
+git -C "$work/rs/b" push -q origin HEAD:main
+git -C "$ra" checkout -q --detach "$x1"
+# runs <number> <status> <commit>...: what `gh run list --json databaseId,number,headSha,status`
+# prints for those runs, the run numbered N having the id 9000+N.
+runs() {
+  local json='' sep=''
+  while [ $# -gt 0 ]; do
+    json+="$sep{\"databaseId\":$((9000 + $1)),\"number\":$1,\"headSha\":\"$3\",\"status\":\"$2\"}"
+    sep=,
+    shift 3
+  done
+  printf '[%s]' "$json"
+}
+# restart_run <lost-races> [VAR=value]...: runs `release-push.sh restart release.yaml
+# <lost-races>` from clone a as run number 100 of example/repo on main, with those settings,
+# against the stub; leaves its exit code in rc, its combined output in out and the stub's call
+# log in calls.
+restart_run() {
+  local lost=$1
+  shift
+  : > "$work/calls"
+  set +e
+  out=$(cd "$ra" && env GITHUB_REPOSITORY=example/repo GITHUB_REF_NAME=main GITHUB_RUN_NUMBER=100 \
+    GITHUB_SERVER_URL=https://github.com GH_TEST_DIR="$work" GH_TEST_RUNS='[]' GH_TEST_FAIL='' \
+    GH_TEST_QUIET='' GH_TEST_LAND='' PATH="$work/restart-bin:$PATH" "$@" "$release_push" restart release.yaml "$lost" 2>&1)
+  rc=$?
+  set -e
+  calls=$(<"$work/calls")
+}
+list=$(argv run list --repo example/repo --workflow release.yaml --branch main --limit 50 --json databaseId,number,headSha,status)
+dispatch() { argv workflow run release.yaml --repo example/repo --ref main -f "lost_races=$1"; }
+by_hand='gh workflow run release\.yaml --repo example/repo --ref main'
+# First, before anything has fetched x3 into clone a.
+check "clone a does not hold the third fix yet" "$(git -C "$ra" cat-file -e "$x3^{commit}" 2>/dev/null && echo false || echo true)"
+restart_run 0 GH_TEST_RUNS="$(runs 100 in_progress "$x1" 101 in_progress "$x3")"
+check "a later unfinished run on a commit only origin holds: exits 0, starting nothing" "$(is "$rc|$calls" "0|$list")"
+check "a later unfinished run on a commit only origin holds: the notice names the run and its commit" \
+  "$(contains "$out" "^::notice title=No release run started::another run took this run.s version first; run https://github\.com/example/repo/actions/runs/9101, started later and not finished, is on main at $x3, which holds this commit: it releases this commit, or fails where a person sees it$")"
+check "a later unfinished run on a commit only origin holds: restart fetched it" "$(git -C "$ra" cat-file -e "$x3^{commit}" 2>/dev/null && echo true || echo false)"
+restart_run 0 GH_TEST_RUNS="$(runs 100 in_progress "$x1" 99 in_progress "$x2")"
+check "only this run and an older one unfinished: starts a run with lost_races 1" "$(is "$rc|$calls" "0|$list"$'\n'"$(dispatch 1)")"
+check "only this run and an older one unfinished: the notice names the run gh printed" \
+  "$(contains "$out" '^::notice title=Release run started::another run took this run.s version first, so a new run on main, https://github\.com/example/repo/actions/runs/7, releases this commit (lost_races 1)$')"
+restart_run 2
+check "lost_races 2, no other run: starts a run with lost_races 3" "$(is "$rc|$calls" "0|$list"$'\n'"$(dispatch 3)")"
+restart_run 3
+check "lost_races 3, no other run: exits 1, starting nothing" "$(is "$rc|$calls" "1|$list")"
+check "lost_races 3, no other run: the error names the command a person runs" \
+  "$(contains "$out" "^::error title=No release run started::release-push\.sh restart: this run and the 3 before it each lost their version to another run; start a run by hand once releases stop landing: $by_hand$")"
+for status in queued in_progress; do
+  restart_run 0 GH_TEST_RUNS="$(runs 101 "$status" "$x2")"
+  check "a later $status run on a descendant: exits 0, starting nothing" "$(is "$rc|$calls" "0|$list")"
+done
+restart_run 3 GH_TEST_RUNS="$(runs 101 queued "$x2")"
+check "the same at lost_races 3: left to that run, exit 0" "$(is "$rc|$calls" "0|$list")"
+restart_run 0 GH_TEST_RUNS="$(runs 102 in_progress "$x1")"
+check "a later unfinished run on this very commit: exits 0, starting nothing, naming it" \
+  "$(is "$rc|$calls|$(contains "$out" 'actions/runs/9102, started later')" "0|$list|true")"
+restart_run 0 GH_TEST_RUNS="$(runs 101 completed "$x2" 99 in_progress "$x2")"
+check "a later finished run and an older unfinished one on a descendant: starts a run" "$(is "$rc|$calls" "0|$list"$'\n'"$(dispatch 1)")"
+restart_run 0 GH_TEST_RUNS="$(runs 101 in_progress "$rseed")"
+check "a later unfinished run on an ancestor: starts a run" "$(is "$rc|$calls" "0|$list"$'\n'"$(dispatch 1)")"
+restart_run 0 GH_TEST_RUNS="$(runs 101 in_progress 0123456789abcdef0123456789abcdef01234567)"
+check "a later unfinished run on a commit neither side holds: starts a run" "$(is "$rc|$calls" "0|$list"$'\n'"$(dispatch 1)")"
+restart_run 0 GH_TEST_RUNS="$(runs 101 in_progress HEAD)"
+check "a later run whose commit is a ref name, not a sha: not read as git would read it, a run is started" \
+  "$(is "$rc|$calls" "0|$list"$'\n'"$(dispatch 1)")"
+restart_run 0 GH_TEST_QUIET=1
+check "gh prints no URL: the notice says where to look" "$(contains "$out" 'so a new run on main, the newest run of release\.yaml, releases this commit (lost_races 1)$')"
+restart_run 0 GH_TEST_FAIL=list
+check "gh run list fails: exits non-zero, starting nothing" "$([ "$rc" != 0 ] && [ "$calls" = "$list" ] && echo true || echo false)"
+restart_run 0 GH_TEST_FAIL=run
+check "gh workflow run fails: exits non-zero, gh's own error shown" \
+  "$(is "$([ "$rc" != 0 ] && echo failed || echo passed)|$(contains "$out" '^HTTP 403: Resource not accessible by integration$')" 'failed|true')"
+# shellcheck disable=SC2016 # literal $(…), the forged count under test
+for lost in 'a[$(touch pwned)]' 1e3 100 01 ''; do
+  restart_run "$lost"
+  printf -v shown '%q' "$lost"
+  check "lost_races $shown: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
+done
+check "a forged lost_races: nothing in it ran" "$([ ! -e "$ra/pwned" ] && echo true || echo false)"
+check "a forged lost_races: the error names it and the command a person runs" \
+  "$(contains "$out" "^::error title=No release run started::release-push\.sh restart: lost_races '' is not a count from 0 to 99; start a run by hand: $by_hand$")"
+for name in GITHUB_REPOSITORY GITHUB_REF_NAME GITHUB_RUN_NUMBER; do
+  restart_run 0 "$name="
+  check "no $name: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
+done
+restart_run 0 GITHUB_RUN_NUMBER=abc
+check "a GITHUB_RUN_NUMBER that is not a number: exits 2, calling no gh" "$(is "$rc|$calls" "2|")"
+restart_run 0 GH_TEST_LAND="$work/rs/b"
+landed=$(git -C "$work/rs/b" rev-parse HEAD)
+check "a merge that lands while the runs are listed: fetched after the list, so its run is waited for, not doubled" \
+  "$(is "$rc|$calls|$(contains "$out" "is on main at $landed, which holds this commit")" "0|$list|true")"
 
 echo
 echo "Case: push-tag pushes a tag with the deploy key and leaves no key behind"
