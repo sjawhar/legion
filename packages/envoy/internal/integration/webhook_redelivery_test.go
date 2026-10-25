@@ -92,6 +92,32 @@ func TestWebhookRedelivery_ASlackRetryLandsOnceAndAnotherEventLands(t *testing.T
 	}
 }
 
+// An app that posts its words in an attachment rather than in the message's own text — a monitor
+// posting an alert, say — used to wake an agent with an empty summary and a payload that held no
+// words at all. End to end, over a signed post, those words must reach the stream.
+func TestSlackAttachmentWordsReachTheStream(t *testing.T) {
+	env := setupTestEnv(t)
+	handler := webhook.SlackHandler(redeliverySecret, env.client)
+	body := `{"type":"event_callback","team_id":"T1","event_id":"Ev_attachment_1","event":{"type":"message","subtype":"bot_message","channel":"C1","bot_id":"B1","username":"datadog","ts":"1700000000.000100","text":"","attachments":[{"title":"[Triggered] CPU load high","text":"host web-1 is at 97% for 10 minutes","fallback":"[Triggered] CPU load high"}]}}`
+
+	postSlack(t, handler, body)
+
+	items := streamEnvelopes(t, env, "notifications.slack.T1.C1.message")
+	if len(items) != 1 {
+		t.Fatalf("stream holds %d envelopes on the channel topic, want 1", len(items))
+	}
+	if want := "slack bot message in C1 from datadog: [Triggered] CPU load high"; items[0].PayloadSummary != want {
+		t.Fatalf("summary = %q, want %q", items[0].PayloadSummary, want)
+	}
+	var payload map[string]string
+	if err := json.Unmarshal([]byte(items[0].Payload), &payload); err != nil {
+		t.Fatalf("decode payload %q: %v", items[0].Payload, err)
+	}
+	if want := "[Triggered] CPU load high\nhost web-1 is at 97% for 10 minutes"; payload["text"] != want {
+		t.Fatalf("payload text = %q, want %q", payload["text"], want)
+	}
+}
+
 func TestWebhookRedelivery_AGhostWisprRedeliveryLandsOnceAndAnotherDeliveryLands(t *testing.T) {
 	env := setupTestEnv(t)
 	handler := webhook.GhostWisprHandler(redeliverySecret, env.client)
@@ -177,18 +203,18 @@ func hmacHex(secret, message string) string {
 	return hex.EncodeToString(mac.Sum(nil))
 }
 
-// streamDedupeKeys returns the dedupe key of every message the notification stream holds on
-// subject, in stream order.
-func streamDedupeKeys(t *testing.T, env *testEnv, subject string) []string {
+// streamEnvelopes returns every envelope the notification stream holds on subject, in stream
+// order.
+func streamEnvelopes(t *testing.T, env *testEnv, subject string) []contracts.Envelope {
 	t.Helper()
 	info, err := env.client.JS().StreamInfo(bus.Stream, &natsgo.StreamInfoRequest{SubjectsFilter: subject})
 	if err != nil {
 		t.Fatalf("stream info for %s: %v", subject, err)
 	}
 	held := int(info.State.Subjects[subject])
-	keys := make([]string, 0, held)
+	items := make([]contracts.Envelope, 0, held)
 	if held == 0 {
-		return keys
+		return items
 	}
 	sub, err := env.client.JS().SubscribeSync(subject, natsgo.BindStream(bus.Stream), natsgo.OrderedConsumer(), natsgo.DeliverAll())
 	if err != nil {
@@ -198,12 +224,24 @@ func streamDedupeKeys(t *testing.T, env *testEnv, subject string) []string {
 	for range held {
 		msg, err := sub.NextMsg(5 * time.Second)
 		if err != nil {
-			t.Fatalf("read message %d of %d on %s: %v", len(keys)+1, held, subject, err)
+			t.Fatalf("read message %d of %d on %s: %v", len(items)+1, held, subject, err)
 		}
 		var item contracts.Envelope
 		if err := json.Unmarshal(msg.Data, &item); err != nil {
 			t.Fatalf("decode message on %s: %v", subject, err)
 		}
+		items = append(items, item)
+	}
+	return items
+}
+
+// streamDedupeKeys returns the dedupe key of every message the notification stream holds on
+// subject, in stream order.
+func streamDedupeKeys(t *testing.T, env *testEnv, subject string) []string {
+	t.Helper()
+	items := streamEnvelopes(t, env, subject)
+	keys := make([]string, 0, len(items))
+	for _, item := range items {
 		keys = append(keys, item.DedupeKey)
 	}
 	return keys
