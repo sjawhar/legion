@@ -2,6 +2,27 @@
 
 ## [Unreleased]
 
+### Added
+
+- Every Dispatch write a `dispatch` command makes carries one `Idempotency-Key` (INFRA-258):
+  `DispatchClient.#send` mints a UUID per `POST` and `PATCH` call, sends it on every attempt of
+  that call, and encodes the body once (a multipart form under a fixed boundary), so Dispatch runs
+  the write once however many attempts reach it. A transport failure, any 5xx, a 408, a 429 and
+  Dispatch's `409 KEY_IN_FLIGHT` are asked again under the key: at most five attempts, 1, 2, 4 and
+  8 s apart, a longer `Retry-After` waited instead, none starting more than 30 s after the first,
+  all inside the call's 60 s deadline. A `GET`, `PUT` or `DELETE` carries no key and is sent once,
+  and a timeout or a cancellation is never retried. A write whose attempts run out throws the last
+  attempt's own error, except where that answer alone would say the write never took effect while
+  an earlier attempt may have reached Dispatch (a gateway's 408 or 429, Dispatch's 429, and
+  `409 KEY_IN_FLIGHT`): that is a `DispatchWriteUnsettledError`, naming the last answer, the
+  attempts and that the write may or may not have taken effect. A replay whose first answer
+  Dispatch did not keep is a `DispatchAnswerNotKeptError`: the write ran.
+- `DispatchClient.deliveryReply` sends a session's reply to a delivery attempt
+  (`POST /api/v1/{messages,comments}/{id}/reply`), which `postDeliveryReply` used to send as a
+  bare `fetch`: it is now keyed, retried and bounded by the client's 60 s deadline, and its
+  refusals are `DispatchServiceError`s like every other call's, where they used to be a plain
+  `Error` reading `Dispatch reply failed: …`.
+
 ### Fixed
 
 - `resolveOrigin` waits at most 1 s for `tmux display-message` to name the session's pane, then

@@ -326,10 +326,17 @@ until you clear the parent of an ancestor that still loads. That release was dep
 running server stopped first, and no server older than it has run against the database since.
 
 The release that moves live updates onto one WebSocket per tab (INFRA-258) is deployed the same
-way, for its API rather than a migration: its pages send a key with every message to one agent,
-which an older server refuses, so a message that reaches an older server while the release rolls
-is refused. Stop the running server before it starts. A tab opened before that deploy shows
-**Live updates unavailable**, and its messages to one agent are refused, until it is reloaded.
+way, for its API rather than a migration: its pages send a broadcast with its key in a header
+rather than in the body an older server requires, so a broadcast that reaches an older server
+while the release rolls is refused. Stop the running server before it starts. A tab opened before
+that deploy shows **Live updates unavailable**, and its broadcasts are refused, until it is
+reloaded.
+
+From that release on, every change a page or the `dispatch` command makes carries an
+`Idempotency-Key`, and Dispatch keeps each key's answer for 24 hours, so a change tried again after
+a lost answer, a timeout or an outage is made once. A page that has not heard back keeps trying
+and says so, and a script that calls the API itself can send a key of its own
+([For agents](/legion/dispatch/for-agents/#the-http-api)).
 
 ## The HTTP API
 

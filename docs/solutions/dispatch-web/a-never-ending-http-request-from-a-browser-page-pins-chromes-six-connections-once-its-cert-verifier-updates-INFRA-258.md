@@ -79,16 +79,21 @@ Specs: dispatch://INFRA-258 and dispatch://INFRA-292.
   over as every chunk arrives. A request stalled inside the browser, and a body that stops
   mid-download, both fail with `RequestTimeoutError` and are retried instead of hanging the page,
   while a slow body that keeps arriving downloads however long it takes.
-- **An idempotency key on every send** (`idempotency_key`, with `409 MESSAGE_KEY_REUSED`, or
-  `409 BROADCAST_KEY_REUSED` for a broadcast, for a key reused on a different request). The page
-  retries a send to one session, and a broadcast, under its key until Dispatch confirms it
-  (`sendUnderKey`, `packages/dispatch/web/src/features/conversation/send-request.ts`), and keeps
-  the send in `sessionStorage` (`keyed-send-storage.ts`) so a reload resumes it, so a send that
-  timed out is delivered once, never twice. A repeat under a held key also resumes what the server
-  still owes: the message a crash left with no attempt, and each recipient of a broadcast in the
-  same state. A kept send belongs to the login that pressed it and resumes on its own only within
-  five minutes; older, it comes back as a refusal the reader retries or discards, so a tab
-  reopened the next morning never sends yesterday's message by itself.
+- **One keyed path for every write** (dispatch://INFRA-258/ask/4cb71926-38d5-467b-bc7e-6ca1b3305399).
+  A request that times out or loses its answer says nothing about whether it ran, so a retry is
+  only safe when the server can tell it from a new write. The page and the `dispatch` CLI mint an
+  `Idempotency-Key` per intent (a press, a command's write) and retry a transport failure, a
+  timeout, a 5xx, a 429 and a `409 KEY_IN_FLIGHT` under it. One server layer
+  (`packages/envoy/internal/dispatch/api/request_keys.go`, a `request_keys` row per key) runs a
+  key's request once, replays its stored answer to a repeat with `Idempotency-Replayed: ?1`,
+  refuses the key reused for another request (`422 KEY_REUSED`), keeps no 5xx, and keeps each key
+  24 hours. A write that also reaches outside the database (the single-session send and the
+  broadcast) commits a recovery point with what it made, so a repeat resumes what its delivery
+  still owes and answers what it made as it stands, even across a crash between its commit and its
+  answer. The page keeps each unconfirmed write in `sessionStorage` so a reload resumes it; a kept
+  write belongs to the login that pressed it and resumes on its own only within five minutes, so a
+  tab reopened the next morning never sends yesterday's change by itself. The two hand-written key
+  paths that came before it, one per send, are gone.
 
 ## The rule
 

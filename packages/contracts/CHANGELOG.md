@@ -111,11 +111,18 @@
 
 ### Changed
 
-- **Breaking:** `CreateAgentMessageInput.idempotency_key` is required (INFRA-258): it names one
-  session-targeted send for its sender. A repeat with the same session, body, delivery, and reply
-  answers the first message and its deliveries with `200` and sends nothing again; a different
-  request under the held key is `409 MESSAGE_KEY_REUSED` with `message_id`. A missing or malformed
-  key is `400 MESSAGE_INPUT`; a key longer than 128 characters is `400 CAP_EXCEEDED`.
+- **Breaking:** a write names its intent by the `Idempotency-Key` request header
+  (`IDEMPOTENCY_KEY_HEADER`) on every `POST` and `PATCH` route, not by a body field (INFRA-258):
+  `CreateBroadcastInput.idempotency_key` is gone, and a body that still carries it is
+  `400 INVALID_JSON`. The key is optional; a repeat under it is answered with the first answer and
+  `IDEMPOTENCY_REPLAYED_HEADER`, a different request under it is `422 KEY_REUSED`
+  (`IDEMPOTENCY_KEY_REUSED`), and a repeat while the first still runs is `409 KEY_IN_FLIGHT`
+  (`IDEMPOTENCY_KEY_IN_FLIGHT`) with `Retry-After: 1`; a 5xx, 401, 408 or 429 is not kept, so the
+  next attempt runs again. A repeat of `POST /api/v1/agents/{session_id}/messages` or
+  `POST /api/v1/broadcasts` resumes what its delivery still owes and answers the message or
+  broadcast read afresh, under the first's `201`. Added `IDEMPOTENCY_KEY_MAX`,
+  `IDEMPOTENCY_KEY_PATTERN`, `IDEMPOTENCY_KEY_INVALID`, `IDEMPOTENCY_ANSWER_NOT_KEPT`,
+  `IDEMPOTENCY_KEY_TTL_MS` (24 hours) and `IDEMPOTENCY_LEASE_MS` (60 seconds).
 - **Breaking:** the frames every live view shares are renamed (INFRA-258): `DeliveryLiveSubscribe`,
   `DeliveryLiveUnsubscribe`, `DeliveryLiveClientFrame`, `DeliveryLiveError`,
   `DeliveryLiveHeartbeat` and `DeliveryLiveServerFrame` are `LiveSubscribe`, `LiveUnsubscribe`,

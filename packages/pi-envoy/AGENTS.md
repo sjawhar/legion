@@ -63,8 +63,12 @@ transcript entry (`envoy-dispatch-handled-attempt`, `{message_id, attempt}`), re
 entry of the session file (`sessionManager.getEntries()`) on each restore, and a frame naming a
 recorded attempt is a card with no accept call. So a replay, a frame forged inside the minute for
 a Send that arrived as a card, and one forged after a restart are each a card, while a person's
-retry, a new attempt, can still be their turn. Every refusal, error and timeout (10 s), a Dispatch
-configuration that no longer resolves included, keeps the card and posts nothing.
+retry, a new attempt, can still be their turn. The accept is keyed like every Dispatch write: it
+carries one `Idempotency-Key` and asks again under it after a transport failure, a 5xx, a 429 or
+a `409 KEY_IN_FLIGHT` inside its 10 s bound (at 0, 1, 3 and 7 s), so an accept whose 200 was lost
+becomes the person's turn on the replay rather than a card. Every refusal, every error and the
+timeout (10 s), a Dispatch configuration that no longer resolves included, keeps the card and
+posts nothing.
 
 On a host with `pi.sendUserInput` (our Oh My Pi fork, can1357/oh-my-pi#14323) the body runs as if
 typed at the session's terminal (`runTypedInput`), with the Dispatch message id as the host's `tag`

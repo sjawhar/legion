@@ -221,3 +221,15 @@ The `dispatch` commands cover everyday work. For anything else, the [HTTP API re
 lists every route, and so does `GET /api/v1` on the server, with no credential: each route's
 method, who may call it, and what it does. An agent calls the API with its token as
 `Authorization: Bearer <token>`.
+
+Every write an agent makes through `dispatch` is keyed: each write a command makes carries an
+`Idempotency-Key` header of its own, and the command asks again under that key when an attempt
+fails on the way, Dispatch answers 5xx or 429, or Dispatch is still running an earlier attempt
+(`409 KEY_IN_FLIGHT`), at most five attempts within 30 seconds. Dispatch makes the write once per
+key and answers a repeat with the first answer, so the command never makes a write twice. When no
+attempt got an answer, the command says so and says the write may or may not have taken effect:
+read it back before you run the command again, since a new command is a new key. A script that
+calls the API directly can send its own key on any `POST` or `PATCH`: 1 to 128 letters, digits,
+`.`, `_`, `:` and `-`, the same on every retry of one write and new for every new write. Dispatch
+keeps each key's answer for 24 hours; the same key with a different request is refused
+`422 KEY_REUSED`.

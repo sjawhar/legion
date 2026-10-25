@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- Every Dispatch write the bundled `dispatch` command and the channel server make carries one
+  `Idempotency-Key` and is asked again under it after a transport failure, a 5xx, a 429 or a
+  `409 KEY_IN_FLIGHT` (INFRA-258, through `@sjawhar/envoy-client`'s `DispatchClient`), so a write
+  whose answer was lost is made once. A session's reply to a delivery attempt goes through that
+  client too, keyed and bounded by its deadline. The hooks read Dispatch and write nothing, so
+  they carry no key. `dist/dispatch.js`, `dist/envoy-channel.js` and `dist/session-hook.js` are
+  rebuilt.
+
 ### Fixed
 
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on

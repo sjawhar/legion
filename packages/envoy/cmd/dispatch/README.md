@@ -402,13 +402,13 @@ server of the earlier release running, and that is an exception named in the pul
 
 **The release that moves live updates to `/ws/live` (INFRA-258) deploys with no server of the
 earlier release running** (a Kubernetes Deployment's `strategy: Recreate`, never a rolling update),
-because of its API rather than its schema. Its page sends `idempotency_key` on every send to one
-session, which an earlier process refuses as an unknown field, `400 INVALID_JSON`, so a send that
-reaches an earlier process while the release rolls is refused. A tab opened before the deploy
-needs a reload either way: the event feed it reads, `GET /api/v1/events`, is gone, so it shows
-`Live updates unavailable`, and its sends carry no key, which
-`POST /api/v1/agents/{session_id}/messages` now refuses with `400 MESSAGE_INPUT`
-(`packages/envoy/CHANGELOG.md`).
+because of its API rather than its schema. Its page keys every write with an `Idempotency-Key`
+header (Keyed writes, below) and sends a broadcast without the body field `idempotency_key`, which
+an earlier process requires, `400 BROADCAST_INPUT`, so a broadcast that reaches an earlier process
+while the release rolls is refused. A tab opened before the deploy needs a reload either way: the
+event feed it reads, `GET /api/v1/events`, is gone, so it shows `Live updates unavailable`, and
+its broadcasts still carry the body field, which this release refuses as an unknown field,
+`400 INVALID_JSON` (`packages/envoy/CHANGELOG.md`).
 
 What the two processes share, and what each keeps to itself:
 
@@ -715,6 +715,12 @@ image and confirms the stop before it reads the schema, and when the schema has 
 the previous image runs against, it refuses to start that image again and exits `1` for a forward
 recovery.
 
+Migration `0116_request_keys` creates `request_keys`, the one record of every keyed write (Keyed
+writes, below): a new table that touches no row, which the release before it neither reads nor
+writes; its census answers `0`. From its release on, nothing reads or writes
+`broadcast_idempotency_keys` (`0055`), the broadcast's own key table before it; dropping it is a
+contracting migration, so it ships no earlier than the release after this one.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -990,6 +996,35 @@ A ranking or latency change is measured on a restored copy of the production cor
 sees for a list of queries from any build, and `search-latency-compare.sh` runs
 `TestSearchLatencyOnCorpus` from a base checkout and this one alternately and gates on the
 difference (`packages/envoy/scripts/README.md`, "Measuring search on a copy of the corpus").
+
+## Keyed writes
+
+Every `POST` and `PATCH` route takes an optional `Idempotency-Key` request header naming the
+intent behind the write, the same on every retry of it and new for every new one (the IETF
+`Idempotency-Key` draft; Google AIP-155). The dashboard mints one per press and the `dispatch`
+CLI one per command's write, and both retry a failed fetch, a timeout, a 5xx, a 429 and a
+`409 KEY_IN_FLIGHT` under it. No route requires the header: a write without one runs as it always
+did, unkeyed, so a script or the Legion daemon's outbox keeps working. `PUT` and `DELETE` take no
+key, being idempotent already. A key is 1 to 128 letters, digits, `.`, `_`, `:` and `-`, bare or
+double-quoted, and belongs to the caller who sent it: a person's canonical login (from the
+dashboard or through a personal token), a service token's subject, or the shared agent token.
+Dispatch keeps each key's answer for 24 hours (`request_keys`, migration `0116`; the
+suggestion-outcome sweep deletes older rows).
+
+| Status / code | Meaning |
+| --- | --- |
+| The first answer, with `Idempotency-Replayed: ?1` | A repeat under a key whose first request finished, with the same method, route, path values, query, media type and body: the stored status, content type and body, and nothing runs again. |
+| The first status with `ANSWER_NOT_KEPT` | That repeat, when the first answer was larger than the 1 MiB a key keeps: the write ran, and the caller reads what it wrote again. |
+| `409 KEY_IN_FLIGHT`, `Retry-After: 1` | A repeat while the key's first request still runs, inside its 60 s lease; nothing ran, and the caller asks again under the same key. A repeat past the lease takes a key whose holder died over and runs the request. |
+| `422 KEY_REUSED` | The key was already used for a different request; the message names its method and path, and this request did not run. A changed request needs a new key. |
+| `400 IDEMPOTENCY_KEY_INVALID` | The header is not 1 to 128 of those characters, or was sent twice. |
+
+A 5xx, a 401, a 408 and a 429 are not stored: the key is released and the next attempt runs the
+request again. The two sends keep their own recovery point beside the key, so a repeat of
+`POST /api/v1/agents/{session_id}/messages` or `POST /api/v1/broadcasts` resumes whatever delivery
+is still owed and answers the message or broadcast as it stands now, under the first's `201`,
+however the first request ended; a recipient a live sender still holds reads `pending`. Neither
+route takes a body `idempotency_key` any more.
 
 ## Routes
 

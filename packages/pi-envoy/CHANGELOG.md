@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Added
+
+- Every Dispatch write a session makes carries one `Idempotency-Key` and is asked again under it
+  after a transport failure, a 5xx, a 429 or a `409 KEY_IN_FLIGHT` (INFRA-258, through
+  `@sjawhar/envoy-client`'s `DispatchClient`). The accept behind a person's direct Send or Aside
+  (`POST /api/v1/messages/{id}/deliveries/{attempt}/accept`) retries inside its own 10 s bound, at
+  0, 1, 3 and 7 s, so an accept whose `200` was lost becomes the person's turn on the replay where
+  it used to leave the message as a card; every refusal, error and the timeout still keep the card.
+
 ### Fixed
 
 - The run-end self-check's prompt counts as PROCEEDING a wait for a message, an answer or an event

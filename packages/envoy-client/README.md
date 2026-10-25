@@ -241,6 +241,21 @@ them, covers the issue; with Envoy off or no answer from the listener it names n
 `dispatch-first.ts` reads the `dispatch-first` skill from a plugin's staged `skills/` and wraps it in
 `DISPATCH_FIRST_MARKER`, the text pi-envoy and claude-envoy inject into a session with Dispatch.
 
+Every write `DispatchClient` makes carries one key. `#send`, which every JSON, multipart and file
+call goes through, mints a `crypto.randomUUID()` `Idempotency-Key` per `POST` and `PATCH` call and
+sends it on every attempt of that call, so Dispatch runs the write once however many attempts
+reach it and answers a repeat with the first answer (`packages/envoy/cmd/dispatch/README.md`,
+"Keyed writes"); a `GET`, `PUT` or `DELETE` carries none and is sent once. The body is encoded once
+for the whole call, a multipart form under a boundary of its own, since a retry whose bytes differ
+from the first attempt's is a different request to Dispatch and its key is refused. A transport
+failure, any 5xx, a 408, a 429 and Dispatch's `409 KEY_IN_FLIGHT` are asked again under that key,
+`DISPATCH_WRITE_RETRY`'s pace: at most five attempts, 1, 2, 4 and 8 s apart, a longer `Retry-After`
+waited instead, and no attempt started more than 30 s after the first, all inside the call's own
+60 s deadline, so a Dispatch that is down holds a `dispatch` command, and the session waiting on
+it, no longer than that. The call's timeout or its cancellation ends the write at once and is
+never retried. Any other answer - a 2xx, a replay, `422 KEY_REUSED`, another 4xx - is the answer,
+at once.
+
 A non-2xx answer is thrown as `DispatchServiceError`. Dispatch's own refusal, JSON with a string
 `error`, is the error's message under its `code` (`HTTP_<status>` when the server set none), with
 `fromDispatch` true. Any other body — a gateway's HTML page, an empty body, JSON of another shape —
@@ -261,6 +276,17 @@ Dispatch, so the advice is to check whether it took effect before retrying. The 
 request, such as `dispatch issue-update`'s close path, give its own advice instead. The executor
 reads a status as Dispatch's meaning (a 404 as no linked issue, no such document, or a server
 without the route) only when `fromDispatch` is true.
+
+A write whose attempts run out is thrown as the last attempt's own error, with its usual message,
+except where that last answer alone would say the write never took effect while an earlier attempt
+may have reached Dispatch: a gateway's 408 or 429, Dispatch's own 429, and `409 KEY_IN_FLIGHT`.
+Those are a `DispatchWriteUnsettledError`, deliberately not a `DispatchServiceError`, since a
+caller reads one as a refusal Dispatch decided: its message is the last answer, the number of
+attempts, whether an earlier attempt may have reached Dispatch or Dispatch was still running one,
+and that the write may or may not have taken effect, so check before running it again - a new
+command is a new key. A 2xx replay whose first answer Dispatch did not keep is a
+`DispatchAnswerNotKeptError` (`ANSWER_NOT_KEPT`): the write ran, and the caller reads back what it
+wrote.
 
 Successful write responses may include `advice`. The executor preserves that object as
 `details.advice` and appends short pointers after the subscription/follow suffix: a primary spec

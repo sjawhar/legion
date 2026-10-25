@@ -74,6 +74,6 @@ dispatch request-approval --issue <KEY> --summary '<what the human is approving>
 
 ## A document that is reloading
 
-- `DOC_SERVICE_UNAVAILABLE` (503) means the document's live room is reloading. Your call wrote nothing. Nothing retries for you. Wait a few seconds and repeat the same call.
+- `DOC_SERVICE_UNAVAILABLE` (503) means the document's live room is reloading. Your call wrote nothing. `dispatch` already asked again under the call's key, a few times over about 15 seconds, and this is the answer it kept getting. Wait a few seconds and repeat the same call.
 - A second refusal in a row: tell the human, with the document's reference.
 - It comes from calls that write a document. Those are `doc-edit`, a quoted `ask` or `comment`, a reply in an anchored thread, and `suggest`. Also `resolve-comment` on an anchored comment, an `artifact` that replaces a document, and `edit-ask` / `resolve-ask` on a block ask. `doc-read` returns it only when the durable copy is unreadable.

@@ -18,14 +18,21 @@
   age rotation. The agent publish hook, `POST /api/v1/agents/{session_id}/stream/_test/publish`
   (human only), remains, and its `as=drop` result ends agent views as `dropped`. The routes this
   socket replaces are gone: see the Breaking entries under Changed.
-- Migration `0116_agent_message_idempotency_keys` stores the `idempotency_key` of each
-  `POST /api/v1/agents/{session_id}/messages` (required: see the Breaking entry under Changed).
-  The key belongs to its sender, survives for the message's life, and is stored in the message
-  transaction. A matching retry returns `200` with the first message and its deliveries, ensuring
-  an unattempted or stranded delivery resumes without a second message; a conflicting request is
-  `409 MESSAGE_KEY_REUSED` with `message_id`. The delivery runs after commit on a context detached
-  from the request, so an aborted request cannot cancel it, and a deploy lets it finish: shutdown
-  waits for the request, and the listener client's receipt timeout bounds it.
+- Every Dispatch `POST` and `PATCH` route takes an optional `Idempotency-Key` request header
+  (INFRA-258), after the IETF `Idempotency-Key` draft: 1 to 128 letters, digits, `.`, `_`, `:` and
+  `-`, anything else `400 IDEMPOTENCY_KEY_INVALID`. A repeat with the same key and the same
+  request, once the first has finished, is answered the first's stored status and body with
+  `Idempotency-Replayed: ?1`, and nothing runs again; the same key with a different request is
+  `422 KEY_REUSED`, naming the request that used it; a repeat while the first still runs, inside
+  a 60 s lease, is `409 KEY_IN_FLIGHT` with `Retry-After: 1`. A 5xx, 401, 408 or 429 is not
+  stored, so the next attempt runs the request again, and an answer larger than 1 MiB is replayed
+  as its status with `ANSWER_NOT_KEPT`. Keys belong to the caller's login and are kept 24 hours,
+  in migration `0116_request_keys`'s table, which the suggestion-outcome sweep empties of older
+  rows. A write without the header runs as before. The single-session send and the broadcast
+  commit a recovery point with what they made, so a repeat of either resumes whatever delivery it
+  still owes and answers the message or broadcast as it stands, under the first's `201`, even
+  across a crash between the send's commit and its answer. The dashboard and the `dispatch` CLI
+  send a key on every write and retry under it.
 - `GET /auth/whoami` answers `event_head`, the newest committed event id as of the sign-in check
   (INFRA-292). A page's first events subscription on `/ws/live` resumes from it, so a change
   committed between that answer and the socket opening reaches the page instead of being lost
@@ -35,11 +42,11 @@
 - A broadcast reaches every recipient across a deploy or a crash (INFRA-258). Each recipient's
   delivery runs on a context detached from the request's and is registered with the server's
   background wait, so a shutdown waits for it where the server's lifetime used to cancel it, each
-  recipient bounded by the listener client's receipt timeout; and a repeat under a held
-  `idempotency_key` sends every recipient the broadcast still owes - one with no attempt at all,
-  and one whose single attempt is pending under a claim that has lapsed - before it answers
-  `200`, as a repeated send to one session does. A recipient whose pending attempt a live claim
-  holds is left to the sender holding it.
+  recipient bounded by the listener client's receipt timeout; and a repeat under the send's
+  `Idempotency-Key` sends every recipient the broadcast still owes - one with no attempt at all,
+  and one whose single attempt is pending under a claim that has lapsed - before it answers, as a
+  repeated send to one session does. A recipient whose pending attempt a live claim holds is left
+  to the sender holding it.
 
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
@@ -577,15 +584,15 @@
   test hooks `POST /api/v1/events/_test/disconnect` and `POST /api/v1/delivery/_test/disconnect`
   answer `404`. A tab opened before the deploy reads its event feed from the first, so it shows
   `Live updates unavailable` until it is reloaded.
-- **Breaking:** `POST /api/v1/agents/{session_id}/messages` requires `idempotency_key`
-  (INFRA-258). A send without one is `400 MESSAGE_INPUT`, `idempotency_key is required, one per
-  send. On a page loaded before it was required: copy the message, reload the page and send it
-  again`. A tab opened before the deploy sends no key, so each of its sends to one session is
-  refused with its draft kept, and the refusal tells the person to reload.
+- **Breaking:** the body field `idempotency_key` is gone from `POST /api/v1/broadcasts`
+  (INFRA-258), where LEGION-446 required it: a body that still carries it is `400 INVALID_JSON`,
+  and the `Idempotency-Key` header names the send instead. `broadcast_idempotency_keys`
+  (migration `0055`) is neither read nor written; a later release drops it. A tab opened before
+  the deploy sends the field, so its broadcasts are refused until it is reloaded.
 - **Breaking:** deploy this release with no server of the earlier release running (a Recreate
-  rollout, never a rolling one). A page on this release sends `idempotency_key` on every send to
-  one session, and an earlier process refuses that field as unknown, `400 INVALID_JSON`, so a send
-  that reaches one during a rolling deploy is refused.
+  rollout, never a rolling one). A page on this release sends a broadcast without the body
+  `idempotency_key` an earlier process requires, `400 BROADCAST_INPUT`, so a broadcast that
+  reaches one during a rolling deploy is refused.
 - **Breaking:** once any secret with a `kind` tag holds a value, roll the secrets broker forward,
   never back past this release. A broker before kinds reads no `kind` tag and would serve the
   secret's stored GitHub App key or refresh token as its value. `agent-secrets secret` writes

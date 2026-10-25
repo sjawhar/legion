@@ -1228,9 +1228,9 @@ receipt timeout, the one cause whose send may
 already have reached the recipient; `RECEIPT_TIMEOUT_CAUSE` in `packages/contracts` is that
 cause's single literal, generated into Go as `contracts.ReceiptTimeoutCause` so the string
 Dispatch stores and the string the dashboard keys on cannot drift. This window bounds a delivery
-retry only: a broadcast's `idempotency_key` and a session-targeted message's
-`idempotency_key` live as long as the broadcast or message they created, so their repeated creates
-are recognised however late they arrive (the broadcast and targeted-message paragraphs below).
+retry only, not a repeated write: a write's `Idempotency-Key` is recognised for 24 hours
+(`IDEMPOTENCY_KEY_TTL_MS`), however late within that its repeat arrives ("Keyed Dispatch writes"
+below).
 
 An attempt the stream recognised records `duplicate` and no envelope id: an earlier attempt
 landed, so this one is a repeat (`DELIVERY_DUPLICATE_WINDOW_MS` says who drops it), and it reads
@@ -1947,17 +1947,75 @@ holds an empty token or whitespace, or a character outside nats.go's key alphabe
 including the startup gate's 503, is JSON: `{"error":"<message>","expected":["field"]}`.
 `expected` appears when the caller must provide a field.
 
+## Keyed Dispatch writes
+
+Every Dispatch write has one keyed path (INFRA-258, after the IETF `Idempotency-Key` draft and
+Google AIP-155). A caller names the intent behind a `POST` or `PATCH` with the request header
+`Idempotency-Key` (`contracts.IdempotencyKeyHeader`), the same on every retry of that intent and
+new for every new one: the dashboard mints one per press and the agents' client one per command,
+and both retry a failed fetch, a timeout, a 5xx, a 429 and a `409 KEY_IN_FLIGHT` under it, none of
+which says whether the first attempt ran. The key is optional on every route, and no route
+requires it; a write without one runs as it always did, unkeyed, logged at DEBUG only, since the
+Legion daemon's outbox and scripts send such writes. `PUT` and `DELETE` are idempotent already and
+take no key. A key is 1 to 128 (`IDEMPOTENCY_KEY_MAX`) letters, digits, `.`, `_`, `:` and `-`,
+bare or as a structured-field string in double quotes; any other value, or the header sent twice,
+is `400 IDEMPOTENCY_KEY_INVALID`.
+
+`keyedWrites` (`internal/dispatch/api/request_keys.go`), which `register` wraps around every
+`POST` and `PATCH` route, keeps one `request_keys` row per key (migration `0116`), keyed on
+`(login, idempotency_key)`: `login` is a person's canonical login whether they write from the
+dashboard or through an agent's personal token, a service token's subject, or `agent-token` for
+the shared agent token, so one caller's key is never another's. The row holds a SHA-256 of the
+method, the route pattern, its path values, the query, the media type and the body (a multipart
+body with its boundary masked, since a client mints a boundary per attempt), so a repeat is told
+from a reuse:
+
+- The row is inserted in flight, in a statement of its own, before the handler runs. A repeat that
+  finds it answers from it instead. A different request under the key is `422 KEY_REUSED`, whose
+  message names the method and path that used it; nothing runs. A first request still running,
+  inside the 60 s lease (`IDEMPOTENCY_LEASE_MS`), is `409 KEY_IN_FLIGHT` with `Retry-After: 1`,
+  which a client asks again after. A finished one is replayed: its stored status, content type
+  and body, with `Idempotency-Replayed: ?1`, and the handler does not run again.
+- The handler answers on a writer that holds its answer (`keyedAnswer`) until the row has it. A
+  2xx or a 4xx is stored and the row finished in one statement; a 5xx, a 401 (a session that
+  lapsed mid-write), a 408, a 429 and a panic delete the row, so the next attempt runs the handler
+  again. An answer past 1 MiB is answered in full but kept as its status alone, and its replay is
+  that status with the body `ANSWER_NOT_KEPT` (`IDEMPOTENCY_ANSWER_NOT_KEPT`): the write ran, and
+  the client reads what it wrote again.
+- A row whose holder never finished (its process died) is taken over by the first repeat past the
+  lease, `attempt + 1`; every write the holder makes to the row is scoped to its own attempt, so a
+  holder that was only slow changes nothing once it has lost the key.
+- A write that also mutates foreign state keeps its own recovery point (Brandur Leach,
+  "Implementing Stripe-like Idempotency Keys in Postgres"): it commits what it made into the row in
+  its own transaction (`bindRequestKeyRecovery`), and a repeat that finds the point is answered by
+  its route's `keyedReplay` rather than from the stored bytes, however its first request ended:
+  whatever delivery is still owed is resumed first, then what it made is read again. The
+  single-session send and the broadcast are the two (below). The layer replays the answer; the
+  delivery code decides what is still owed.
+
+A key is kept 24 hours (`IDEMPOTENCY_KEY_TTL_MS`): the suggestion-outcome sweep's pass deletes
+every older row (`sweepRequestKeys`), a row a dead process left in flight with it, and a repeat
+that finds an older row not yet swept treats the key as unused. The two hand-written key paths
+before it are gone: the single-session send's table, which this release added and never shipped,
+and `broadcast_idempotency_keys` (migration `0055`), which this release neither reads nor writes
+and a later release drops. Neither send route takes a body `idempotency_key` any more; the header
+carries the key.
+
 ## Targeted Dispatch messages
 
 Any authenticated caller — a browser session or a bearer naming its session in `actor` — can
 create an issue message with `target: "session:<id>"` or `target: "role:<name>"` and
 `delivery: "btw" | "aside" | "steer"`; a bearer-authored targeted message is authored by that
 session, never by a human. A human may also create an issue-less, session-targeted message with
-`POST /api/v1/agents/{session_id}/messages` `{body, delivery, in_reply_to?, idempotency_key}`.
-The key is required, belongs to the sender, and identifies this send for as long as its message
-exists: the same request answers the first message and deliveries with `200`, while another request
-under that key is `409 MESSAGE_KEY_REUSED` with `message_id`. A missing or malformed key is
-`400 MESSAGE_INPUT`; one longer than 128 characters is `400 CAP_EXCEEDED`. `GET
+`POST /api/v1/agents/{session_id}/messages` `{body, delivery, in_reply_to?}`, keyed by its
+`Idempotency-Key` header ("Keyed Dispatch writes" above). Its write commits the message and its
+mode as the key's recovery point (`agentMessageRecovery`), so a repeat under the key is answered
+by `replayAgentMessage` however the first request ended: `sendHeldMessageOn` first puts the
+message on its way when it is owed (no attempt at all, or its only attempt pending under a claim
+that has lapsed), then the message is read as the list below reads it, with its deliveries as they
+stand, under the send's own `201` and `Idempotency-Replayed: ?1`. It is answered from the database
+before the listener is read, so a repeat never fails because the listener is down; a different
+request under the key is `422 KEY_REUSED`. `GET
 /api/v1/agents/{session_id}/messages` returns that session's issue-less and issue-anchored
 targeted roots: the 50 whose thread moved last, plus every conversation holding a reply the caller
 has not read, in one activity order (`greatest(root.created_at, newest reply)`), so the window
@@ -2054,14 +2112,15 @@ row in `packages/envoy/cmd/dispatch/AGENTS.md`, whose requester checks read `req
 a session does with the answer is `packages/pi-envoy/AGENTS.md`'s.
 
 A human reaches many sessions at once with `POST /api/v1/broadcasts`
-`{body, delivery, session_ids, idempotency_key}`. A broadcast is a grouping over the targeted
+`{body, delivery, session_ids}`. A broadcast is a grouping over the targeted
 messages above, not a second delivery mechanism: one row in `broadcasts` plus one issue-less
 message per recipient carrying its `broadcast_id`, all in one transaction, then the ordinary
 `deliverMessage` path per recipient - so each recipient's attempts, retries and replies are
 exactly a single targeted message's. Recipients are judged against one listener read: a
 selected session that is not live, or does not advertise the chosen mode, is excluded before
 anything is written and named in the response's `excluded`, never switched to another mode
-(the mode is part of what the sender said). Exclusions are not stored; a send with no
+(the mode is part of what the sender said). Exclusions are stored only with a keyed send's
+recovery point (below); a send with no
 reachable recipient is `400 BROADCAST_EMPTY` and writes nothing. The send answers 201 as soon
 as the messages are committed and delivers behind the request, `broadcastDeliveryWorkers` (four)
 recipients at a time, on a context detached from the request's (`context.WithoutCancel`), each
@@ -2079,33 +2138,20 @@ message, which a delivery worker then claims and settles.
 order the send named them; all three routes are human-only, like the one-session route they are
 built from.
 
-Every send carries an `idempotency_key` naming that one send (LEGION-446): letters, digits,
-`.`, `_`, `:` and `-`, at most 128 characters; a missing or malformed key is
-`400 BROADCAST_INPUT`, a longer one `400 CAP_EXCEEDED`. A key belongs to the human who sent it:
-its `broadcast_idempotency_keys` row (migration `0055`) is keyed on `(login, idempotency_key)`,
-`login` being `model.CanonicalLogin`, so one person's key is never another's and `Alice` is `alice`.
-The row also stores a SHA-256 of what the send asked for - its body, mode and requested
-sessions in order, after validation trims and de-duplicates them. A repeat (the same human, key
-and request) is answered `200` with the broadcast the key made, in the create response's shape
-and read as `GET /api/v1/broadcasts/{id}` reads it, its `excluded` recomputed as the requested
-sessions it has no recipient for, each with the reason `excluded by the original send`, since
-the original reasons are not stored. A reuse for a different request is
-`409 BROADCAST_KEY_REUSED`, whose text says the request was not sent and whose body names the
-broadcast that used the key as `broadcast_id`; nothing is written. The key is looked up before
-the listener's registry is read, so a retry of a send that landed is answered even while the
-listener is down. Two requests carrying one key at once both miss that lookup and reach the
-write together: the key row is inserted in the broadcast's own transaction, so the second waits
-on the first's uncommitted row, is refused it (`23505`) once the first commits, rolls back
-everything it wrote and answers the first's broadcast - one broadcast, one frame per recipient.
-A repeat is also what puts a stranded recipient back on its way, as `sendHeldMessageOn` does for
-one session: before it answers, `sendOwedBroadcastRecipients` sends every recipient the broadcast
-owes (`owedBroadcastAttempts`: one with no attempt at all, and one whose single attempt is
-pending under a claim that has lapsed) and leaves a recipient whose pending attempt a live claim
-holds to the sender that holds it, then reads the broadcast again so the answer carries the
-attempts that resume settled rather than the pending rows it found. So a
-`200` says every recipient is on its way or already settled, and the page may stop asking. A key
-is recognised for as
-long as its broadcast exists; there is no window, and a broadcast from before `0055` has no key.
+A broadcast is keyed by its `Idempotency-Key` header like every write ("Keyed Dispatch writes"
+above); the body's `idempotency_key` of LEGION-446 and its `broadcast_idempotency_keys` table
+are gone from the route. The send commits the broadcast and its exclusions, with their reasons,
+as the key's recovery point (`broadcastRecovery`) in the broadcast's own transaction, so a repeat
+under the key is answered by `replayBroadcast` however the first request ended, even while the
+listener is down: `sendOwedBroadcastRecipients` first sends every recipient the broadcast owes
+(`owedBroadcastAttempts`: one with no attempt at all, and one whose single attempt is pending
+under a claim that has lapsed), as `sendHeldMessageOn` does for one session, and leaves a
+recipient whose pending attempt a live claim holds to the sender that holds it; then the
+broadcast is read as `GET /api/v1/broadcasts/{id}` reads it, with the send's own `excluded`,
+under the send's own `201` and `Idempotency-Replayed: ?1`. The answer carries the attempts that
+resume settled rather than the pending rows it found, so a recipient still `pending` is one a live
+sender holds, and the page keeps asking until none is. A different request under the key is
+`422 KEY_REUSED`, and nothing is written.
 
 The event feed retains the targeted `message.created`, `message.delivery`, and `message.answered`
 events for the Conversation card. Issue-less targeted-message events have no issue owner, use
