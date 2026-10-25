@@ -1979,7 +1979,12 @@ from a reuse:
 - The handler answers on a writer that holds its answer (`keyedAnswer`) until the row has it. A
   2xx or a 4xx is stored and the row finished in one statement; a 5xx, a 401 (a session that
   lapsed mid-write), a 408, a 429 and a panic release the key, so the next attempt runs the
-  handler again - unless the request had already committed something (below). An answer past
+  handler again - unless the request had already committed something (below). One route keeps no
+  answer at all: `POST /api/v1/me/agent-tokens`, whose answer carries the plaintext token, which
+  `request_keys` would otherwise hold for 24 hours beside `agent_tokens`' hash. A repeat of a keyed
+  mint, its answer lost or not, is `409 KEY_COMMITTED`, never a replay of the token, and no second
+  token is minted; a route whose answer holds a credential is the one exception to "a 2xx or a 4xx
+  is stored and replayed", and the mint is the one such route. An answer past
   1 MiB is answered in full but kept as its status alone, and its replay is that status with the
   body `ANSWER_NOT_KEPT` (`IDEMPOTENCY_ANSWER_NOT_KEPT`): the write ran, and the client reads what
   it wrote again.

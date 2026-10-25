@@ -32,7 +32,10 @@
   but whose answer was lost (its lease lapsed in flight, or it ended in a 5xx or a panic after
   committing) is `409 KEY_COMMITTED`, with no `Retry-After`: the write landed and is not run again,
   and the client reads what it wrote; every transaction a keyed request commits marks the key in
-  that same transaction. The single-session send, the broadcast, the issue message and both
+  that same transaction. `POST /api/v1/me/agent-tokens` keeps no answer under its key, since the
+  answer carries the plaintext token: a repeat of a keyed mint is always `409 KEY_COMMITTED`, never
+  a replay of the token, and mints nothing more.
+  The single-session send, the broadcast, the issue message and both
   comment routes commit a recovery point with what they made, so a repeat of any of them resumes
   whatever delivery it still owes (a comment's mentions under their own attempt numbers) and
   answers what it made as it stands, under the first's `201`, even across a crash between the
