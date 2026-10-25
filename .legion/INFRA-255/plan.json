@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-255",
+  "completed": "2026-10-25T23:58:00Z",
+  "planDocument": "dispatch://INFRA-255/artifact/plan-md",
+  "summary": "worker.Dockerfile names its apt stage runtime-base; a build-only stage debian-packages (FROM runtime-base) runs trixie's own dpkg-query and writes one installed package per line; the notices stage COPYs it and passes it as the first titled section to the unchanged assemble-third-party-notices.sh; the intro drops its hand list; the final stage is FROM runtime-base AS runtime, unchanged otherwise (no new shipped layer, package or guard). tools.md (+ regenerated claude-envoy copy), the INFRA-221 learning, Dockerfile comments (L31, L331-334, L505-511, L648-650) and the pi-legion and claude-envoy CHANGELOGs follow.",
+  "sectionTitle": "Debian packages installed in the image, one per line, each with its terms in /usr/share/doc/<package>/copyright",
+  "commits": [
+    "C1 feat(worker-image): list the Debian packages in THIRD_PARTY_NOTICES from dpkg-query (all edits)",
+    "C2 test(worker-image): probe — add tree to the apt line (image A = sha-<C2 12 hex>)",
+    "C3 jj revert of C2 (image B = sha-<C3 12 hex>, content equal to C1, the head that merges)"
+  ],
+  "proofSurface": "The images Worker Image publishes for the PR heads (ghcr.io/sjawhar/legion-worker:sha-<12 hex>, public), read with `go run github.com/google/go-containerregistry/cmd/crane@v0.20.6 export` under $TMPDIR and dpkg-query --admindir over the extracted var/lib/dpkg; exact commands in plan.md 'Proof'. Negative control for acceptance 2: ghcr.io/sjawhar/legion-worker:14.6.0 (empty Debian section, diff non-zero). Acceptance 1: tree in A's section and not in B's.",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: phase rules, the push and skip-checks trailer, PR body template and proof rules (references/pr-body.md), the probe commit pushes",
+      "ce-simplify-code: the one simplify pass over the diff, which changes the Dockerfile (build code)",
+      "envoy: subscribe to the PR's checks topic to be woken when the two Worker Image runs finish, instead of polling",
+      "dispatch: any write to the issue (comments, the PR's Dispatch link) follows its rules"
+    ],
+    "test": [
+      "legion-worker: test phase rules, verifying the implementer's proof by re-running the plan's crane/dpkg-query commands on images A, B and 14.6.0, the test.json proof array, reading CI rather than re-running it"
+    ],
+    "review": [
+      "legion-worker: the review round order and merge gate (references/merge-gate.md), review threads",
+      "thermonuclear-code-quality: the reviewer's maintainability pass over the Dockerfile stage split and the docs",
+      "thermonuclear-deep-review: the reviewer's correctness pass (stage order, layer order, file ownership, ENV in the final stage)"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "Reading the dpkg database outside the final stage departs from the spec's 'read in the image's final stage'.", "answer": "Recorded in specDepartures and plan.md 'Departure from the spec', with the evidence; the stage comment states that every package install belongs in runtime-base's apt RUN. Reported to the architect in the completion summary."},
+      {"finding": "Bookworm's dpkg-query (notices stage FROM tools) over trixie's database was never measured.", "answer": "Removed the skew: the list is written by trixie's own dpkg-query in a build-only stage FROM runtime-base; the notices stage only copies the file."},
+      {"finding": "Naming the apt stage `runtime` collides with comments that mean the final stage by 'the runtime stage'.", "answer": "The apt stage is `runtime-base`; the final stage is `FROM runtime-base AS runtime`, so Dockerfile L22, L123, L126, L222, L261, L267, L270 and docs/kubernetes.md L103, L230 stay true unchanged."},
+      {"finding": "The probe commit for acceptance 1 has ordering, head-rule, drift, grep and history problems.", "answer": "Order fixed: C1+C2 pushed with the PR open (image A), C3 = jj revert of C2 pushed at once (image B, queued not cancelled; content equals C1 and is the merging head). Check is a whole-line match inside the Debian section, each image's section equal to its own dpkg set, comm -3 B A expected to print only tree (drift recorded); negative control is B. Precedent: LEGION-767's pushed-commit control. Squash merge carries C1's content only."},
+      {"finding": "No acceptance criterion names the command that decides it; the proof query could mirror the build's filter.", "answer": "plan.md 'Proof' gives exact commands and expected output per criterion, with an installed-set query written differently (Status-Abbrev/awk vs Status-Status/sed), LC_ALL=C sorting, discriminators (libssl3t64 present; libssl3, make, g++ absent), a copyright-file check, a layer-count check, the shipped tools.md sha256, and negative controls. The extraction and query were run against 14.6.0 during planning (312 names; empty section today)."},
+      {"finding": "Without pipefail, a dpkg-query that fails part-way can still yield a partial list.", "answer": "dpkg-query writes to a file first in an && chain, so its exit status fails the RUN; the filter reads the file."},
+      {"finding": "claude-envoy CHANGELOG, the bind9-dnsutils rationale and the future-tense tools.md sentence are missing from the edit list.", "answer": "Added: claude-envoy and pi-legion [Unreleased] Changed entries; drop the notices clause from L505-511 keeping the virtual-package reason; delete the future-tense INFRA-255 sentences in tools.md and keep the narrowed comments/smoke-step warning."},
+      {"finding": "Moving ARG PI_CODEGRAPH_VERSION below the apt stage changes the apt layer's cache key.", "answer": "Stated in decision 4: one cold apt layer on this PR, and pin bumps no longer rerun apt; the PR body notes Debian versions may differ from 14.6.0's."},
+      {"finding": "TestImageEnvIsWhatTheWorkerImageSets reads only the last stage; an ENV in runtime-base would be missed.", "answer": "runtime-base holds only the apt comments and RUN; ENV/USER/WORKDIR stay in the final stage, and the stage comment says so. The test is in the implementer's local checks."},
+      {"finding": "Every RUN must survive shlex in the trigger-path check.", "answer": "The new RUN has no nested quotes; the implementer runs `uv run --no-project --with pyyaml==6.0.2 -- bash .github/scripts/check-image-trigger-paths.sh` (passes at base: 'every image trigger covers every input its build reads (4 image build(s))')."},
+      {"finding": "INFRA-257 adds gcc to the same apt line and asks for it in the licence inventory.", "answer": "INFRA-257 is in progress with its spec awaiting approval. Plan decision 10 covers both merge orders; the architect is told so it can tell INFRA-257's owner."},
+      {"finding": "The Envoy image is out of scope.", "answer": "Agreed: its intro names no Debian package; assemble-third-party-notices.sh stays unchanged so the Envoy and release workflows are not triggered."},
+      {"finding": "Copyright presence over the 312 names, anonymous ghcr pull and Job permission were unverified by the analyst.", "answer": "Verified by the planner: anonymous ghcr pull works (14.6.0 exported); all 312 installed packages have usr/share/doc/<Package>/copyright in that image; the proof needs no Job (crane only); kubectl auth can-i get pods/log is yes if a Job is ever wanted."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 1},
+  "specDepartures": [
+    {
+      "spec": "Fix: 'The list has to be read in the image's final stage, after its apt-get install.'",
+      "plan": "The list is read by trixie's own dpkg-query in a build-only stage `debian-packages`, built FROM `runtime-base`, the stage that holds the final stage's apt-get install; the final stage is itself FROM runtime-base. Same dpkg database, same dpkg version; the notices stage copies the file.",
+      "evidence": "worker.Dockerfile: the final stage installs no package after L517-523 (L524-747 are COPYs, ln -s, and the probe, toolchain and final-check RUNs). A RUN in the final stage would sit before USER 1000:1000 (L557), so a notices change reruns the probe and toolchain layers against the L648-649 ordering constraint, or after the notices COPY, needing USER root and an extra shipped layer against the architect's 'no extra image layer'.",
+      "outcome": {"kind": "unchanged"}
+    }
+  ]
+}
