@@ -130,9 +130,11 @@ covers the tree. When the gate is armed, run this exact sequence **before the tr
 
 2. Settle its ask blocks as [Approval](skill://dispatch-writing-specs/SKILL.md#approval)
    says.
-3. Run `task(agent="plan-gap-analyst")` with the current root spec, the code and command output
-   it relies on, and the human's words; resolve every finding in the root spec.
-4. Request approval:
+3. Before you request approval, check every factual claim in the spec against the code, the docs
+   or a command, and resolve each finding of the fresh-reader check. Run
+   `task(agent="plan-gap-analyst")` with the current root spec, the code and command output it
+   relies on, and the human's words; resolve every finding in the root spec.
+4. Request approval once:
 
    ```bash
    dispatch request-approval --issue <root issue> --summary '<what the human is approving>'

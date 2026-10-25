@@ -66,9 +66,9 @@ At your next edit, rewrite a spec outside the outline whole, in one version. Mov
 
 ## Approval
 
-- Request approval once each ask block is answered or waived and this version is unapproved. Unbuilt acceptance checks never delay it.
+- Request approval once, when each ask block is answered or waived, each claim is checked, and this version is unapproved. Unbuilt acceptance checks never delay it.
 - When their answer is the whole change since approval, Dispatch carries the approval.
-- After approval, make a new version only for a change to scope, acceptance, cost, risk or a decision the person made, all in one version. Put any other fix in the plan or a comment.
+- After approval, version only a change to scope, acceptance, cost, risk or a person's decision, all at once. Put other fixes in the plan or a comment.
 - A Legion root spec's design gate follows `skill://legion-architect`.
 
 ## The plan
