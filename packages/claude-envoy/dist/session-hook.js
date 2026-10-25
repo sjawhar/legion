@@ -14060,6 +14060,7 @@ var SEARCH_QUERY_HINT = "search with a short phrase of a few words, not a passag
 var SEARCH_KIND_DEPTH = 100;
 var PROJECT_KEY_PATTERN = /^[A-Z][A-Z0-9]{1,9}$/;
 var PROJECT_KEY_RULE = "an uppercase letter, then 1 to 9 uppercase letters or digits, such as CORE";
+var ARCHITECTURE_SOURCE_REPO_PATTERN = /^[A-Za-z0-9-]+\/(?!\.\.?$)[A-Za-z0-9._-]+$/;
 var ISSUE_STATUSES = [
   "triage",
   "icebox",
@@ -14455,11 +14456,19 @@ var dispatchToolSpecs = [
   },
   {
     name: "dispatch_architecture_sync",
-    example: { project: "CORE" },
-    description: "Import a project's architecture model from its configured source repository now, instead of " + "waiting for the server's five-minute schedule. Returns the imported commit and component " + "count, or the recorded error when the model was rejected (the previous model stays up). " + "The source itself is configured by a human in Settings; 404 SOURCE_NOT_FOUND without one.",
+    example: { project: "CORE", repo: "acme/infra" },
+    description: "Import a project's architecture model from its source repositories now, instead of waiting " + "for the server's five-minute schedule. A project may have several sources, one per " + "repository, and its model is every source's components together. Without repo every " + "source imports and each answers on its own line; with repo only that source does. Each " + "line names the imported commit, or the recorded error when that source's model was " + "rejected (its previous components stay up, and every other source is untouched). Sources " + "are saved in Settings or with PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo}; " + "404 SOURCE_NOT_FOUND when the project has none, or none for that repository.",
     arguments: (z2) => ({
-      project: z2.string().describe("Project key whose architecture source to sync, such as CORE.")
+      project: z2.string().describe("Project key whose architecture sources to sync, such as CORE."),
+      repo: z2.string().describe("One source repository of the project to sync alone, owner/name; omit it to sync every source.").optional()
     }),
+    validation: {
+      check: (value) => {
+        const { repo } = value;
+        return typeof repo !== "string" || ARCHITECTURE_SOURCE_REPO_PATTERN.test(repo);
+      },
+      message: "repo is not a repository: give it as owner/name, such as acme/infra."
+    },
     strict: true
   },
   {
@@ -15400,18 +15409,27 @@ class DispatchClient {
   async listProjects() {
     return this.#json("GET", ["api", "v1", "projects"]);
   }
-  async syncArchitectureSource(project) {
-    return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
+  async listArchitectureSources(project) {
+    return this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
   }
-  async getArchitectureSource(project) {
-    try {
-      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
-    } catch (error48) {
-      if (error48 instanceof DispatchServiceError && error48.status === 404 && error48.code === "SOURCE_NOT_FOUND") {
-        return null;
-      }
-      throw error48;
+  async syncArchitectureSources(project) {
+    return this.#json("POST", ["api", "v1", "projects", project, "architecture-sources", "sync"]);
+  }
+  async syncArchitectureSource(project, repo2) {
+    const [owner, name, ...rest] = repo2.split("/");
+    if (owner === undefined || name === undefined || rest.length > 0) {
+      throw new Error(`repository must be owner/name, got ${JSON.stringify(repo2)}`);
     }
+    return this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-sources",
+      owner,
+      name,
+      "sync"
+    ]);
   }
   async resolveAsk(id, input) {
     return this.#json("POST", ["api", "v1", "asks", id, "resolve"], input);
@@ -16517,13 +16535,22 @@ async function architectureGuidance(client, project, components) {
   if (components.mode === "none" || components.ids.length > 0)
     return;
   try {
-    if (await client.getArchitectureSource(project) === null) {
+    if ((await client.listArchitectureSources(project)).length === 0)
       return;
-    }
     return `Project ${project} has an architecture model, but this issue is not linked to any of its current components. ${architectureComponentsAction}`;
   } catch (error48) {
     return `Could not check whether project ${project} has an architecture model: ${messageFor(error48)}. ${architectureComponentsAction}`;
   }
+}
+function architectureSyncLines(project, source) {
+  if (source.last_error === null) {
+    return `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${source.last_sync_at ?? "unknown time"}).`;
+  }
+  return [
+    `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
+    source.last_commit === null ? `No model has ever imported from ${source.repo}.` : `The previous model of ${source.repo} stays up (commit ${source.last_commit}).`
+  ].join(`
+`);
 }
 function isDuplicateCandidate(value) {
   if (typeof value !== "object" || value === null)
@@ -18124,20 +18151,19 @@ async function executeDispatchTool(input) {
     }
     case "dispatch_architecture_sync": {
       const project = stringArg(args, "project");
-      const source = await client.syncArchitectureSource(project);
-      const at = source.last_sync_at ?? "unknown time";
+      const repo2 = optionalString(args, "repo");
+      const sources = repo2 === undefined ? await client.syncArchitectureSources(project) : [await client.syncArchitectureSource(project, repo2)];
       return {
-        text: source.last_error === null ? `Synced ${project} architecture from ${source.repo}@${source.branch}: commit ${source.last_commit ?? "unknown"} (${at}).` : [
-          `Sync failed for ${project} (${source.repo}@${source.branch}): ${source.last_error}`,
-          source.last_commit === null ? "No model has ever imported for this project." : `The previous model stays up (commit ${source.last_commit}).`
-        ].join(`
+        text: sources.map((source) => architectureSyncLines(project, source)).join(`
 `),
         details: {
           project,
-          repo: source.repo,
-          branch: source.branch,
-          commit: source.last_commit,
-          error: source.last_error
+          sources: sources.map((source) => ({
+            repo: source.repo,
+            branch: source.branch,
+            commit: source.last_commit,
+            error: source.last_error
+          }))
         }
       };
     }

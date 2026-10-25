@@ -502,30 +502,39 @@ export class DispatchClient {
     return this.#json("GET", ["api", "v1", "projects"]);
   }
 
-  /** `POST /api/v1/projects/{key}/architecture-source/sync`: import the
-   *  project's architecture model now; the row's `last_error` says whether the
-   *  import replaced the model or the previous one stays up. */
-  async syncArchitectureSource(project: string): Promise<ArchitectureSource> {
-    return this.#json("POST", ["api", "v1", "projects", project, "architecture-source", "sync"]);
+  /** `GET /api/v1/projects/{key}/architecture-sources`: the project's architecture sources, one
+   *  per repository, in the order the project added them; `[]` when it has none. */
+  async listArchitectureSources(project: string): Promise<ArchitectureSource[]> {
+    return this.#json("GET", ["api", "v1", "projects", project, "architecture-sources"]);
   }
 
-  /** `GET /api/v1/projects/{key}/architecture-source`: the configured source row, or `null`
-   *  when the project has none. Having none is an answer, not a failure: a current server says
-   *  `200 null`, an older one `404 SOURCE_NOT_FOUND`, and a client meets both while a rollout
-   *  mixes versions. Any other failure, a different 404 included, throws. */
-  async getArchitectureSource(project: string): Promise<ArchitectureSource | null> {
-    try {
-      return await this.#json("GET", ["api", "v1", "projects", project, "architecture-source"]);
-    } catch (error) {
-      if (
-        error instanceof DispatchServiceError &&
-        error.status === 404 &&
-        error.code === "SOURCE_NOT_FOUND"
-      ) {
-        return null;
-      }
-      throw error;
+  /** `POST /api/v1/projects/{key}/architecture-sources/sync`: import every source of the
+   *  project now. Every source is attempted, and each row's `last_error` says whether its
+   *  import replaced its components or its previous ones stay up. 404 SOURCE_NOT_FOUND when the
+   *  project has no source. */
+  async syncArchitectureSources(project: string): Promise<ArchitectureSource[]> {
+    return this.#json("POST", ["api", "v1", "projects", project, "architecture-sources", "sync"]);
+  }
+
+  /** `POST /api/v1/projects/{key}/architecture-sources/{owner}/{repo}/sync`: import the one
+   *  source `repo` (`owner/name`) now; the row's `last_error` says whether the import replaced
+   *  its components or its previous ones stay up. 404 SOURCE_NOT_FOUND when the project has no
+   *  such source. */
+  async syncArchitectureSource(project: string, repo: string): Promise<ArchitectureSource> {
+    const [owner, name, ...rest] = repo.split("/");
+    if (owner === undefined || name === undefined || rest.length > 0) {
+      throw new Error(`repository must be owner/name, got ${JSON.stringify(repo)}`);
     }
+    return this.#json("POST", [
+      "api",
+      "v1",
+      "projects",
+      project,
+      "architecture-sources",
+      owner,
+      name,
+      "sync",
+    ]);
   }
 
   async resolveAsk(id: string, input: ResolveAskInput): Promise<Ask> {

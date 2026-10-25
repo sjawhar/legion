@@ -90,23 +90,12 @@ const createdIssueLine =
 const architectureSourceUnavailableGuidance =
   'Could not check whether project LEGION has an architecture model: architecture source network error. Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
 
-/** A project with no architecture source, as a current server answers it: `200 null`. */
-function sourceNull(): Response {
-  return new Response("null", { headers: { "Content-Type": "application/json" } });
+/** A project with no architecture source, as the list route answers it: `[]`. */
+function noSources(): Response {
+  return new Response("[]", { headers: { "Content-Type": "application/json" } });
 }
 
-/** The same project as an older server answers it, which a client still meets mid-rollout. */
-function sourceNotFound(): Response {
-  return new Response(
-    JSON.stringify({
-      code: "SOURCE_NOT_FOUND",
-      error: "no architecture source configured for LEGION",
-    }),
-    { status: 404, headers: { "Content-Type": "application/json" } }
-  );
-}
-
-/** A 404 that is not the no-source answer: a project the server does not know. */
+/** A 404 from the list route: a project the server does not know. */
 function projectNotFound(): Response {
   return new Response(JSON.stringify({ code: "NOT_FOUND", error: "project LEGION not found" }), {
     status: 404,
@@ -114,10 +103,10 @@ function projectNotFound(): Response {
   });
 }
 
-function architectureSource(project: string) {
+function architectureSource(project: string, repo = "sjawhar/legion") {
   return {
     project,
-    repo: "sjawhar/legion",
+    repo,
     branch: "main",
     enabled: true,
     created_by: { kind: "user", login: "sjawhar" },
@@ -125,6 +114,7 @@ function architectureSource(project: string) {
     last_sync_at: null,
     last_commit: null,
     last_error: null,
+    components: 0,
   };
 }
 function issueComponents(
@@ -137,16 +127,11 @@ function issueComponents(
   return { mode, ids, unknown, reason, inherited_from: inheritedFrom };
 }
 
-type ArchitectureSourceState =
-  | "exists"
-  | "null"
-  | "source-not-found"
-  | "project-not-found"
-  | "fails";
+type ArchitectureSourceState = "one" | "several" | "none" | "project-not-found" | "fails";
 
 async function createIssueWithComponents(
   components: IssueComponents,
-  source: ArchitectureSourceState = "exists"
+  source: ArchitectureSourceState = "one"
 ): Promise<{ readonly result: DispatchToolResult; readonly requests: string[] }> {
   const requests: string[] = [];
   const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
@@ -160,12 +145,15 @@ async function createIssueWithComponents(
         components,
       });
     }
-    if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
-      if (source === "exists") {
-        return response(architectureSource("LEGION"));
+    if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
+      if (source === "one") return response([architectureSource("LEGION")]);
+      if (source === "several") {
+        return response([
+          architectureSource("LEGION"),
+          architectureSource("LEGION", "theorem-labs/agent-infra"),
+        ]);
       }
-      if (source === "null") return sourceNull();
-      if (source === "source-not-found") return sourceNotFound();
+      if (source === "none") return noSources();
       if (source === "project-not-found") return projectNotFound();
       throw new Error("architecture source network error");
     }
@@ -1462,9 +1450,8 @@ describe("executeDispatchTool", () => {
     expect(requests).toBe(0);
   });
 
-  test("dispatch_architecture_sync posts the sync route and reports the imported commit", async () => {
-    const requests: string[] = [];
-    const source = {
+  function syncedSource(overrides: Record<string, unknown> = {}) {
+    return {
       project: "CORE",
       repo: "legion/arch",
       branch: "main",
@@ -1474,16 +1461,20 @@ describe("executeDispatchTool", () => {
       last_sync_at: "2026-09-17T00:05:00Z",
       last_commit: "c0ffee",
       last_error: null,
+      components: 4,
+      ...overrides,
     };
-    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      const target = new URL(String(url));
-      requests.push(`${init?.method ?? "GET"} ${target.pathname}`);
-      return response(source);
-    }) as typeof fetch;
+  }
 
-    const result = await executeDispatchTool({
+  function runArchitectureSync(args: Record<string, unknown>, answer: () => Response) {
+    const requests: string[] = [];
+    const fetchImpl = (async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+      requests.push(`${init?.method ?? "GET"} ${new URL(String(url)).pathname}`);
+      return answer();
+    }) as typeof fetch;
+    const result = executeDispatchTool({
       tool: "dispatch_architecture_sync",
-      args: { project: "CORE" },
+      args,
       cwd: "/workspace",
       host: "omp",
       config,
@@ -1491,55 +1482,125 @@ describe("executeDispatchTool", () => {
       exec: repoExec("owner/repo"),
       fetchImpl,
     });
+    return { result, requests };
+  }
 
-    expect(requests).toEqual(["POST /api/v1/projects/CORE/architecture-source/sync"]);
-    expect(result.text).toBe(
-      "Synced CORE architecture from legion/arch@main: commit c0ffee (2026-09-17T00:05:00Z)."
+  test("dispatch_architecture_sync imports every source and answers one line per source", async () => {
+    const { result, requests } = runArchitectureSync({ project: "CORE" }, () =>
+      response([
+        syncedSource(),
+        syncedSource({
+          repo: "acme/infra",
+          branch: "release",
+          last_sync_at: "2026-09-17T00:06:00Z",
+          last_commit: "beef01",
+          last_error: 'component id "api" is already a component of CORE from legion/arch',
+        }),
+        syncedSource({
+          repo: "acme/tools",
+          last_sync_at: "2026-09-17T00:07:00Z",
+          last_commit: null,
+          last_error: "tools.md: missing title",
+          components: 0,
+        }),
+      ])
     );
-    expect(result.details).toEqual({
+    const answered = await result;
+
+    expect(requests).toEqual(["POST /api/v1/projects/CORE/architecture-sources/sync"]);
+    expect(answered.text).toBe(
+      [
+        "Synced CORE architecture from legion/arch@main: commit c0ffee (2026-09-17T00:05:00Z).",
+        'Sync failed for CORE (acme/infra@release): component id "api" is already a component of CORE from legion/arch',
+        "The previous model of acme/infra stays up (commit beef01).",
+        "Sync failed for CORE (acme/tools@main): tools.md: missing title",
+        "No model has ever imported from acme/tools.",
+      ].join("\n")
+    );
+    expect(answered.details).toEqual({
       project: "CORE",
-      repo: "legion/arch",
-      branch: "main",
-      commit: "c0ffee",
-      error: null,
+      sources: [
+        { repo: "legion/arch", branch: "main", commit: "c0ffee", error: null },
+        {
+          repo: "acme/infra",
+          branch: "release",
+          commit: "beef01",
+          error: 'component id "api" is already a component of CORE from legion/arch',
+        },
+        {
+          repo: "acme/tools",
+          branch: "main",
+          commit: null,
+          error: "tools.md: missing title",
+        },
+      ],
     });
   });
 
-  test("dispatch_architecture_sync reports a rejected model with the surviving commit", async () => {
-    const fetchImpl = (async (): Promise<Response> =>
-      response({
-        project: "CORE",
-        repo: "legion/arch",
-        branch: "main",
-        enabled: true,
-        created_by: { kind: "user", id: "alice" },
-        created_at: "2026-09-17T00:00:00Z",
-        last_sync_at: "2026-09-17T00:10:00Z",
-        last_commit: "c0ffee",
-        last_error: "api.md: duplicate component id",
-      })) as unknown as typeof fetch;
+  test("dispatch_architecture_sync --repo imports only that source", async () => {
+    const { result, requests } = runArchitectureSync({ project: "CORE", repo: "acme/infra" }, () =>
+      response(syncedSource({ repo: "acme/infra", last_commit: "beef01" }))
+    );
+    const answered = await result;
 
-    const result = await executeDispatchTool({
-      tool: "dispatch_architecture_sync",
-      args: { project: "CORE" },
-      cwd: "/workspace",
-      host: "omp",
-      config,
-      env: {},
-      exec: repoExec("owner/repo"),
-      fetchImpl,
+    expect(requests).toEqual(["POST /api/v1/projects/CORE/architecture-sources/acme/infra/sync"]);
+    expect(answered.text).toBe(
+      "Synced CORE architecture from acme/infra@main: commit beef01 (2026-09-17T00:05:00Z)."
+    );
+    expect(answered.details).toEqual({
+      project: "CORE",
+      sources: [{ repo: "acme/infra", branch: "main", commit: "beef01", error: null }],
     });
+  });
 
-    expect(result.text).toBe(
+  test("dispatch_architecture_sync --repo reports a rejected model with that source's surviving commit", async () => {
+    const { result } = runArchitectureSync({ project: "CORE", repo: "legion/arch" }, () =>
+      response(
+        syncedSource({
+          last_sync_at: "2026-09-17T00:10:00Z",
+          last_error: "api.md: duplicate component id",
+        })
+      )
+    );
+
+    expect((await result).text).toBe(
       [
         "Sync failed for CORE (legion/arch@main): api.md: duplicate component id",
-        "The previous model stays up (commit c0ffee).",
+        "The previous model of legion/arch stays up (commit c0ffee).",
       ].join("\n")
     );
-    expect(result.details).toMatchObject({
-      commit: "c0ffee",
-      error: "api.md: duplicate component id",
-    });
+  });
+
+  test.each([
+    [{ project: "CORE" }, "SOURCE_NOT_FOUND", 404, "no architecture source configured for CORE"],
+    [
+      { project: "CORE", repo: "acme/infra" },
+      "SOURCE_NOT_FOUND",
+      404,
+      "no architecture source acme/infra configured for CORE",
+    ],
+    [
+      { project: "CORE", repo: "acme/infra" },
+      "SOURCE_ACCESS",
+      409,
+      "the GitHub App cannot read acme/infra",
+    ],
+  ] as const)("dispatch_architecture_sync %j exits with the server's %s", async (args, code, status, error) => {
+    const { result } = runArchitectureSync(args, () => response({ code, error }, status));
+
+    await expect(result).rejects.toMatchObject({ code, status, message: error });
+  });
+
+  test("dispatch_architecture_sync refuses a repo that is not owner/name before any request", async () => {
+    const { result, requests } = runArchitectureSync(
+      { project: "CORE", repo: "acme/infra/extra" },
+      () => response(syncedSource())
+    );
+
+    await expect(result).rejects.toThrow(
+      "repo is not a repository: give it as owner/name, such as acme/infra."
+    );
+    expect(requests).toEqual([]);
   });
 
   test("dispatch_project posts the key and name as this session and prints the created project", async () => {
@@ -2547,8 +2608,8 @@ describe("executeDispatchTool", () => {
   test("dispatch_issue forwards force", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -2587,8 +2648,8 @@ describe("executeDispatchTool", () => {
     [null, "; unassigned"],
   ] as const)("dispatch_issue links the public dashboard and names the assignee %p", async (assignee, said) => {
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return noSources();
       }
       return response({
         key: "LEGION-13",
@@ -2619,13 +2680,19 @@ describe("executeDispatchTool", () => {
     );
   });
 
-  test("guides an unassigned new issue to architecture components when its project has a source", async () => {
-    const { result, requests } = await createIssueWithComponents(issueComponents("inherit", []));
+  test.each([
+    ["one source", "one"],
+    ["several sources", "several"],
+  ] as const)("guides an unassigned new issue to architecture components when its project has %s", async (_sources, source) => {
+    const { result, requests } = await createIssueWithComponents(
+      issueComponents("inherit", []),
+      source
+    );
 
     expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
@@ -2643,8 +2710,8 @@ describe("executeDispatchTool", () => {
           components: issueComponents("inherit", []),
         });
       }
-      if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return response(architectureSource("LEGION"));
+      if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return response([architectureSource("LEGION")]);
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
@@ -2663,7 +2730,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(architectureComponentsGuidance);
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
@@ -2684,8 +2751,8 @@ describe("executeDispatchTool", () => {
           components: issueComponents("inherit", []),
         });
       }
-      if (target.pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return response(architectureSource("LEGION"));
+      if (target.pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return response([architectureSource("LEGION")]);
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
@@ -2704,29 +2771,24 @@ describe("executeDispatchTool", () => {
     expect(result.text).toContain(architectureComponentsGuidance);
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
-  // A rollout mixes servers and clients, so both answers a server gives for a project with no
-  // source mean no source: a current server's 200 null and an older one's 404 SOURCE_NOT_FOUND.
-  test.each([
-    ["200 null", "null"],
-    ["404 SOURCE_NOT_FOUND", "source-not-found"],
-  ] as const)("does not guide an unassigned new issue when the source read answers %s", async (_answer, source) => {
+  test("does not guide an unassigned new issue when its project has no source", async () => {
     const { result, requests } = await createIssueWithComponents(
       issueComponents("inherit", []),
-      source
+      "none"
     );
 
     expect(result.text).toBe(createdIssueLine);
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
-  test("reports a 404 other than SOURCE_NOT_FOUND as a source it could not check", async () => {
+  test("reports a 404 from the source list as a source it could not check", async () => {
     const { result } = await createIssueWithComponents(
       issueComponents("inherit", []),
       "project-not-found"
@@ -2766,7 +2828,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe([createdIssueLine, architectureComponentsGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
@@ -2779,7 +2841,7 @@ describe("executeDispatchTool", () => {
     expect(result.text).toBe([createdIssueLine, architectureSourceUnavailableGuidance].join("\n"));
     expect(requests).toEqual([
       "POST /api/v1/issues",
-      "GET /api/v1/projects/LEGION/architecture-source",
+      "GET /api/v1/projects/LEGION/architecture-sources",
     ]);
   });
 
@@ -2795,8 +2857,8 @@ describe("executeDispatchTool", () => {
   test("dispatch_issue forwards initial labels", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -2826,8 +2888,8 @@ describe("executeDispatchTool", () => {
   test("dispatch_issue forwards an initial priority", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -2855,8 +2917,8 @@ describe("executeDispatchTool", () => {
   test("dispatch_issue forwards an assignee login", async () => {
     const requests: Array<{ readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/LEGION/architecture-sources") {
+        return noSources();
       }
       requests.push({ body: JSON.parse(String(init?.body)) });
       return response({
@@ -2885,7 +2947,7 @@ describe("executeDispatchTool", () => {
     const requests: Array<{ readonly method: string; readonly body: unknown }> = [];
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
-      if (pathname === "/api/v1/projects/LEGION/architecture-source") return sourceNull();
+      if (pathname === "/api/v1/projects/LEGION/architecture-sources") return noSources();
       const method = init?.method ?? "GET";
       if (method === "GET") {
         return response({
@@ -2952,8 +3014,8 @@ describe("executeDispatchTool", () => {
       components: issueComponents("inherit", []),
     };
     const fetchImpl = async (url: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
-      if (new URL(String(url)).pathname === "/api/v1/projects/ACME/architecture-source") {
-        return sourceNull();
+      if (new URL(String(url)).pathname === "/api/v1/projects/ACME/architecture-sources") {
+        return noSources();
       }
       const method = init?.method ?? "GET";
       if (method === "PATCH") bodies.push(JSON.parse(String(init?.body)));
@@ -3006,7 +3068,7 @@ describe("executeDispatchTool", () => {
     };
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
       const pathname = new URL(String(url)).pathname;
-      if (pathname === "/api/v1/projects/LEGION/architecture-source") return sourceNull();
+      if (pathname === "/api/v1/projects/LEGION/architecture-sources") return noSources();
       return response(olderIssue);
     };
     const run = (tool: string, args: Record<string, unknown>) =>
@@ -6863,8 +6925,8 @@ describe("executeDispatchTool", () => {
           components: issueComponents("inherit", []),
         });
       }
-      if (target.pathname === "/api/v1/projects/TEST/architecture-source") {
-        return sourceNull();
+      if (target.pathname === "/api/v1/projects/TEST/architecture-sources") {
+        return noSources();
       }
       throw new Error(`unexpected request: ${target.pathname}`);
     };
@@ -6887,7 +6949,7 @@ describe("executeDispatchTool", () => {
     ).resolves.toMatchObject({ details: { issue: "TEST-1" } });
     expect(
       requests.map((request) => new URL(request.url).pathname + new URL(request.url).search)
-    ).toEqual(["/api/v1/issues", "/api/v1/projects/TEST/architecture-source"]);
+    ).toEqual(["/api/v1/issues", "/api/v1/projects/TEST/architecture-sources"]);
     expect(JSON.parse(requests[0]?.init.body as string)).toMatchObject({
       project: "TEST",
       title: "External issue",
