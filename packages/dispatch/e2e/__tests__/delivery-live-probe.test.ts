@@ -5,22 +5,22 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { Server, ServerWebSocket } from "bun";
 
-import after from "../../../contracts/fixtures/delivery-live/after.json";
-import delta from "../../../contracts/fixtures/delivery-live/delta.json";
-import error from "../../../contracts/fixtures/delivery-live/error.json";
-import heartbeat from "../../../contracts/fixtures/delivery-live/heartbeat.json";
-import snapshot from "../../../contracts/fixtures/delivery-live/snapshot.json";
+import after from "../../../contracts/fixtures/live/after.json";
+import delta from "../../../contracts/fixtures/live/delta.json";
+import error from "../../../contracts/fixtures/live/error.json";
+import heartbeat from "../../../contracts/fixtures/live/heartbeat.json";
+import snapshot from "../../../contracts/fixtures/live/snapshot.json";
 import type {
-  DeliveryLiveClientFrame,
   DeliveryLiveDelta,
   DeliveryLiveSnapshot,
   DeliveryLiveView,
   DeliveryTimelineResponse,
+  LiveClientFrame,
 } from "../../web/src/api/types";
 import type { ProbeCompareLine, ProbeHeld, ProbeLine } from "../delivery-live-probe";
 
 // The probe runs as an agent runs it, a process of its own, against a stand-in for Dispatch that
-// replays the frames Dispatch's own diff writes (packages/contracts/fixtures/delivery-live): a
+// replays the frames Dispatch's own diff writes (packages/contracts/fixtures/live): a
 // timeline snapshot, the delta of a deploy, a merge and two pull requests leaving the window, a
 // heartbeat, an error, and the snapshot a page subscribing after the delta gets.
 
@@ -55,7 +55,7 @@ interface Script {
 interface FakeDispatch {
   readonly url: string;
   /** Every frame the probe sent, in order. */
-  readonly received: readonly DeliveryLiveClientFrame[];
+  readonly received: readonly LiveClientFrame[];
   /** Every GET route the probe read. */
   readonly reads: readonly URL[];
   /** The Authorization header of every upgrade the probe asked for. */
@@ -100,7 +100,7 @@ function scratch(): string {
 const forSub = (fixture: object, sub: string) => JSON.stringify({ ...fixture, sub });
 
 function fakeDispatch(script: Script): FakeDispatch {
-  const received: DeliveryLiveClientFrame[] = [];
+  const received: LiveClientFrame[] = [];
   const reads: URL[] = [];
   const upgrades: (string | null)[] = [];
   let subscribes = 0;
@@ -131,7 +131,7 @@ function fakeDispatch(script: Script): FakeDispatch {
     websocket: {
       message(socket, data) {
         // The probe's own frame, which the assertions below hold to the contract.
-        const frame = JSON.parse(String(data)) as DeliveryLiveClientFrame;
+        const frame = JSON.parse(String(data)) as LiveClientFrame;
         received.push(frame);
         if (frame.type === "subscribe") {
           subscribes += 1;

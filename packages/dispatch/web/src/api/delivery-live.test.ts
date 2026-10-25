@@ -408,7 +408,7 @@ test("a socket silent past two heartbeats is replaced when the tab becomes visib
     jest.advanceTimersByTime(0);
     expect(sockets.sockets).toHaveLength(2);
     sockets.latest().open();
-    expect(sockets.latest().subscribed("timeline").resume?.seq).toBe("40");
+    expect(sockets.latest().subscribed("timeline").resume).toMatchObject({ seq: "40" });
   } finally {
     unsubscribe();
   }

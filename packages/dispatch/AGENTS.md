@@ -1069,7 +1069,7 @@ resumes as `api/delivery-live.ts` does, and with `--compare` reads the GET route
 window it applied and writes whether the pull request ids, run ids and every measure are equal,
 exiting 1 when one is not. `docs/site/src/content/docs/dispatch/delivery.md` ("For agents") is its
 user's guide. `e2e/__tests__/delivery-live-probe.test.ts` (`bun run test`) runs it as a process
-against a Bun websocket server that replays `packages/contracts/fixtures/delivery-live`, and holds
+against a Bun websocket server that replays `packages/contracts/fixtures/live`, and holds
 the body it applies to `after.json`.
 
 The `webkit` Playwright project runs `e2e/collab-cursor.e2e.ts`, `e2e/deep-links.e2e.ts`,

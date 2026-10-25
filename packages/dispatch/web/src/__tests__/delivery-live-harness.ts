@@ -3,15 +3,15 @@ import type { QueryClient } from "@tanstack/react-query";
 import { deliveryRunQuery, deliveryTimelineQuery } from "../api/queries";
 import type {
   DeliveryLiveBody,
-  DeliveryLiveClientFrame,
-  DeliveryLiveError,
   DeliveryLiveRevs,
-  DeliveryLiveServerFrame,
   DeliveryLiveSnapshot,
-  DeliveryLiveSubscribe,
   DeliveryLiveView,
   DeliveryRunDetail,
   DeliveryTimelineResponse,
+  LiveClientFrame,
+  LiveError,
+  LiveServerFrame,
+  LiveSubscribe,
 } from "../api/types";
 
 type Listener = (event: Event) => void;
@@ -21,7 +21,7 @@ type Listener = (event: Event) => void;
  *  close event later and the page has already let the socket go. */
 export class FakeDeliverySocket {
   readyState = 0;
-  readonly sent: DeliveryLiveClientFrame[] = [];
+  readonly sent: LiveClientFrame[] = [];
   closedWith: number | undefined;
   private readonly listeners = new Map<string, Set<Listener>>();
 
@@ -47,7 +47,7 @@ export class FakeDeliverySocket {
 
   send(data: string): void {
     if (this.readyState !== 1) throw new Error(`sent on a socket in state ${this.readyState}`);
-    this.sent.push(JSON.parse(data) as DeliveryLiveClientFrame);
+    this.sent.push(JSON.parse(data) as LiveClientFrame);
   }
 
   close(code = 1000): void {
@@ -60,7 +60,7 @@ export class FakeDeliverySocket {
     this.emit("open", new Event("open"));
   }
 
-  receive(frame: DeliveryLiveServerFrame): void {
+  receive(frame: LiveServerFrame): void {
     this.emit("message", new MessageEvent("message", { data: JSON.stringify(frame) }));
   }
 
@@ -76,12 +76,12 @@ export class FakeDeliverySocket {
   }
 
   /** The subscribe frames sent, in order. */
-  subscribes(): DeliveryLiveSubscribe[] {
-    return this.sent.filter((frame): frame is DeliveryLiveSubscribe => frame.type === "subscribe");
+  subscribes(): LiveSubscribe[] {
+    return this.sent.filter((frame): frame is LiveSubscribe => frame.type === "subscribe");
   }
 
   /** The subscribe frame sent last for a view of `kind`. */
-  subscribed(kind: DeliveryLiveView["kind"]): DeliveryLiveSubscribe {
+  subscribed(kind: DeliveryLiveView["kind"]): LiveSubscribe {
     const frame = this.subscribes()
       .filter((sent) => sent.view.kind === kind)
       .at(-1);
@@ -146,7 +146,7 @@ export function snapshotFrame(
 }
 
 /** Dispatch refusing subscription `sub` with the code the matching GET route would answer. */
-export function errorFrame(sub: string, code: string, message: string): DeliveryLiveError {
+export function errorFrame(sub: string, code: string, message: string): LiveError {
   return { type: "error", sub, code, message };
 }
 

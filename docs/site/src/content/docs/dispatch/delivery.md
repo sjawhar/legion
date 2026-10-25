@@ -129,8 +129,8 @@ code, so they agree. `flags_source` says whether recorded flags fed the change f
 `none` means no flags are recorded yet.
 
 `GET /ws/delivery` is the websocket the pages keep themselves current over, and any signed-in
-person or agent token may open it. Each frame is one JSON object; `DeliveryLive*` in
-`packages/contracts/src/dispatch-api.ts` types them all. A client subscribes to a view with
+person or agent token may open it. Each frame is one JSON object; `Live*` and `DeliveryLive*` in
+`packages/contracts/src/dispatch-api.ts` type them all. A client subscribes to a view with
 `{"type": "subscribe", "sub": "<its own id>", "view": ...}`, where the view is
 `{"kind": "timeline" | "measures", "window": {"preset": 28}, "query": "repo=acme%2Fwidgets"}`
 (a window is a preset of 7, 14, 28 or 84 days, or a custom `{"from", "to"}`; `query` is the GET

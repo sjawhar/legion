@@ -1,4 +1,5 @@
 import { z } from "zod";
+import type { AgentStreamFrame, AgentStreamReplay, AgentStreamResponder } from "./agent-stream";
 import type {
   ASK_URGENCIES,
   DOC_EDIT_OPS,
@@ -1189,9 +1190,11 @@ export type DeliveryCapability = (typeof DELIVERY_CAPABILITIES)[number];
  * under a MsgId of its delivery id, and GitHub redelivers deliveries up to three days old, so a
  * window shorter than that lets a GitHub redelivery be stored, and handed to a host, twice.
  *
- * This window bounds a *delivery* retry, not a broadcast *create*:
- * `CreateBroadcastInput.idempotency_key` is a database row that lives as long as its broadcast,
- * so a repeated `POST /api/v1/broadcasts` is recognised with no window, however late it arrives.
+ * This window bounds a *delivery* retry, not a keyed *create*:
+ * `CreateBroadcastInput.idempotency_key` and `CreateAgentMessageInput.idempotency_key` are kept as
+ * long as the broadcast or message they made, so a repeated `POST /api/v1/broadcasts` or
+ * `POST /api/v1/agents/{session_id}/messages` is recognised with no window, however late it
+ * arrives.
  */
 export const DELIVERY_DUPLICATE_WINDOW_MS = 72 * 60 * 60 * 1000;
 
@@ -2161,6 +2164,17 @@ export interface CreateAgentMessageInput {
   readonly body: string;
   readonly delivery: MessageDeliveryMode;
   readonly in_reply_to?: string;
+  /** Names this one send, the same on every retry of it: letters, digits, `.`, `_`, `:` and `-`,
+   *  at most 128 characters; a malformed key is 400 MESSAGE_INPUT and a longer one
+   *  400 CAP_EXCEEDED. A key belongs to the person who sent it. The server answers a repeat (same
+   *  person, same key, and the same session, body, delivery and in_reply_to) with the message the
+   *  first request made, its deliveries with it, 200 instead of 201, and sends nothing again; it
+   *  refuses a reuse of the key for a different request with 409 MESSAGE_KEY_REUSED, whose body
+   *  names the message that already used the key as `message_id`; that request is not sent.
+   *  Recognised for as long as the message exists: there is no window (see
+   *  DELIVERY_DUPLICATE_WINDOW_MS). Optional until every sender carries one; then it is required,
+   *  and a missing key is 400 MESSAGE_INPUT. */
+  readonly idempotency_key?: string;
 }
 
 /** The targeted session's answer to one delivery attempt of a message
@@ -3151,19 +3165,59 @@ export interface DeliveryLiveRevChanges {
   readonly fields?: Readonly<Record<string, string>>;
 }
 
-export interface DeliveryLiveSubscribe {
+/** A delivery view's resume: the page's last applied change and what it holds; Dispatch answers
+ *  the delta. */
+export interface DeliveryLiveResume {
+  readonly seq: string;
+  readonly revs: DeliveryLiveRevs;
+}
+
+/** The close code Dispatch ends a live socket with once the socket reaches its age, a random point
+ *  in [LIVE_SOCKET_MIN_AGE_MS, LIVE_SOCKET_MAX_AGE_MS). It is in the private 4000-4999 range, apart
+ *  from the 4000 a page closes a silent socket with: the page reopens at once and resumes every
+ *  subscription, showing no pill and refreshing nothing. */
+export const LIVE_SOCKET_MAX_AGE_CLOSE = 4001;
+/** The youngest age at which Dispatch ends a live socket: 30 minutes. */
+export const LIVE_SOCKET_MIN_AGE_MS = 1_800_000;
+/** The age before which Dispatch ends every live socket: 60 minutes. */
+export const LIVE_SOCKET_MAX_AGE_MS = 3_600_000;
+/** The most subscriptions one live socket holds at once; a subscribe past it is refused with a
+ *  `TOO_MANY_SUBSCRIPTIONS` error frame. */
+export const LIVE_SOCKET_MAX_SUBSCRIPTIONS = 64;
+
+/** The Dispatch event feed, event by event in id order. */
+export interface EventsLiveView {
+  readonly kind: "events";
+}
+/** One session's agent stream: whether it is responding, its replay, and each frame it publishes. */
+export interface AgentLiveView {
+  readonly kind: "agent";
+  /** The session's id, a UUID. */
+  readonly session_id: string;
+}
+/** One view a live socket subscription shows. */
+export type LiveView = DeliveryLiveView | EventsLiveView | AgentLiveView;
+
+/** An events view's resume: the decimal id of the last event the page applied. */
+export interface EventsLiveResume {
+  readonly since: string;
+}
+
+export interface LiveSubscribe {
   readonly type: "subscribe";
   /** The page's own id for this subscription, echoed on every frame for it. */
   readonly sub: string;
-  readonly view: DeliveryLiveView;
-  /** A reconnecting page's last applied change and what it holds; Dispatch answers the delta. */
-  readonly resume?: { readonly seq: string; readonly revs: DeliveryLiveRevs };
+  readonly view: LiveView;
+  /** A reconnecting page's resume point: a `DeliveryLiveResume` for a delivery view, an
+   *  `EventsLiveResume` for an events view, and none for an agent view, which starts from the
+   *  session's replay. Any other pairing is an `INVALID_FRAME` error frame. */
+  readonly resume?: DeliveryLiveResume | EventsLiveResume;
 }
-export interface DeliveryLiveUnsubscribe {
+export interface LiveUnsubscribe {
   readonly type: "unsubscribe";
   readonly sub: string;
 }
-export type DeliveryLiveClientFrame = DeliveryLiveSubscribe | DeliveryLiveUnsubscribe;
+export type LiveClientFrame = LiveSubscribe | LiveUnsubscribe;
 
 export type DeliveryLiveBody =
   | DeliveryTimelineResponse
@@ -3215,7 +3269,47 @@ export interface DeliveryLiveFreshness {
   /** The sources past their threshold: "prs", "runs", "ci", "events". */
   readonly stale: readonly string[];
 }
-export interface DeliveryLiveError {
+/** Sent once at the start of every events subscription, before any `event`: the id it starts
+ *  after, which is the page's `since` clamped to the feed's head, or the head when the page sent
+ *  none. A page holding no cursor adopts it, so a page that has applied no event still resumes
+ *  without a gap. */
+export interface LiveEventsStart {
+  readonly type: "events_start";
+  readonly sub: string;
+  /** A decimal event id. */
+  readonly since: string;
+}
+/** One event of the feed. */
+export interface LiveEventFrame {
+  readonly type: "event";
+  readonly sub: string;
+  /** The event's decimal id, which an `EventsLiveResume` names as `since`. */
+  readonly id: string;
+  readonly event: DispatchEvent;
+}
+interface LiveAgentEvent<E extends string, D> {
+  readonly type: "agent";
+  readonly sub: string;
+  readonly event: E;
+  /** The session's own JSON, which Dispatch relays and never parses: a page checks it before it
+   *  renders it. */
+  readonly data: D;
+}
+/** One message of a session's agent stream; `event` names what `data` is. */
+export type LiveAgentFrame =
+  | LiveAgentEvent<"responder", AgentStreamResponder>
+  | LiveAgentEvent<"replay", AgentStreamReplay>
+  | LiveAgentEvent<"frame", AgentStreamFrame>;
+/** Dispatch ended this one subscription: it fell behind (`behind`), or the relay dropped the
+ *  viewer (`dropped`). The page subscribes it again at once. */
+export interface LiveEnded {
+  readonly type: "ended";
+  readonly sub: string;
+  readonly reason: "behind" | "dropped";
+}
+/** A refusal: of the subscription `sub` names, or, without `sub`, of a frame Dispatch could not
+ *  read. */
+export interface LiveError {
   readonly type: "error";
   readonly sub?: string;
   readonly code: string;
@@ -3223,15 +3317,19 @@ export interface DeliveryLiveError {
 }
 /** Sent every heartbeat interval beside the socket's own ping, carrying nothing: a browser never
  *  shows a ping to the page, so this is how the page tells a quiet socket from a dead one. */
-export interface DeliveryLiveHeartbeat {
+export interface LiveHeartbeat {
   readonly type: "heartbeat";
 }
-export type DeliveryLiveServerFrame =
+export type LiveServerFrame =
   | DeliveryLiveSnapshot
   | DeliveryLiveDelta
   | DeliveryLiveFreshness
-  | DeliveryLiveError
-  | DeliveryLiveHeartbeat;
+  | LiveEventsStart
+  | LiveEventFrame
+  | LiveAgentFrame
+  | LiveEnded
+  | LiveError
+  | LiveHeartbeat;
 
 /**
  * The delivery timeline's one configuration record: `GET /api/v1/settings/delivery` answers it, or

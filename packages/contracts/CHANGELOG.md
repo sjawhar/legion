@@ -4,6 +4,17 @@
 
 ### Added
 
+- The live socket's views and frames beside the delivery views' (INFRA-258): `LiveView`, which is
+  a `DeliveryLiveView`, an `EventsLiveView` (the Dispatch event feed) or an `AgentLiveView` (one
+  session's agent stream); `DeliveryLiveResume` (`seq`, `revs`) and `EventsLiveResume` (`since`);
+  `LiveEventsStart`, `LiveEventFrame`, `LiveAgentFrame` and `LiveEnded`; and
+  `LIVE_SOCKET_MAX_AGE_CLOSE` (4001), the code a socket closes with at its age, a random point in
+  [`LIVE_SOCKET_MIN_AGE_MS`, `LIVE_SOCKET_MAX_AGE_MS`) (30 to 60 minutes), and
+  `LIVE_SOCKET_MAX_SUBSCRIPTIONS` (64). `fixtures/delivery-live/` is now `fixtures/live/`.
+- `CreateAgentMessageInput.idempotency_key`, optional for now: names one send to a session, so the
+  server answers a repeat with the message the first request made and refuses the key's reuse for
+  a different request with `409 MESSAGE_KEY_REUSED`, naming that message as `message_id`
+  (INFRA-258).
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`
@@ -106,6 +117,12 @@
 
 ### Changed
 
+- **Breaking:** the frames every live view shares are renamed (INFRA-258): `DeliveryLiveSubscribe`,
+  `DeliveryLiveUnsubscribe`, `DeliveryLiveClientFrame`, `DeliveryLiveError`,
+  `DeliveryLiveHeartbeat` and `DeliveryLiveServerFrame` are `LiveSubscribe`, `LiveUnsubscribe`,
+  `LiveClientFrame`, `LiveError`, `LiveHeartbeat` and `LiveServerFrame`. `LiveSubscribe.view` is
+  any `LiveView` and its `resume` a `DeliveryLiveResume` or an `EventsLiveResume`, and
+  `LiveServerFrame` adds the events and agent views' frames.
 - `DISPATCH_BODY_MAX` is 32,000, up from 2,000: the longest comment, comment-edit, message and
   broadcast body in UTF-16 units that `POST /api/v1/issues/{key}/messages`,
   `POST /api/v1/.../comments` and `POST /api/v1/broadcasts` accept, generated into Go as

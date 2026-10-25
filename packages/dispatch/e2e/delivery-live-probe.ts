@@ -26,14 +26,21 @@ import type {
   DeliveryLiveDelta,
   DeliveryLiveMap,
   DeliveryLiveRevs,
-  DeliveryLiveServerFrame,
-  DeliveryLiveSubscribe,
   DeliveryLiveView,
   DeliveryMeasuresResponse,
   DeliveryPipelineResponse,
   DeliveryTimelineResponse,
+  LiveServerFrame,
+  LiveSubscribe,
 } from "../web/src/api/types";
 import { applyDelta, applyRevs } from "../web/src/features/delivery/lib/applyDelta";
+
+/** The frames `GET /ws/delivery` sends: a delivery view's own, the freshness verdict, a refusal
+ *  and the heartbeat. */
+type DeliveryServerFrame = Extract<
+  LiveServerFrame,
+  { readonly type: "snapshot" | "delta" | "freshness" | "error" | "heartbeat" }
+>;
 
 /** A delta's changes to one list: the ids of the items it upserts, whole, and of those that left. */
 export interface ProbeListChanges {
@@ -48,7 +55,7 @@ export interface ProbeListChanges {
  *  carry is null; an error frame adds its code and message, a freshness frame the verdict. */
 export interface ProbeFrameLine {
   readonly at: string;
-  readonly type: DeliveryLiveServerFrame["type"];
+  readonly type: DeliveryServerFrame["type"];
   readonly bytes: number;
   readonly seq: string | null;
   readonly changed_at: string | null;
@@ -160,7 +167,7 @@ const PIPELINE_FIELDS: Readonly<Record<PipelineField, true>> = {
   targets: true,
 };
 
-const SERVER_FRAME_TYPES: Readonly<Record<DeliveryLiveServerFrame["type"], true>> = {
+const SERVER_FRAME_TYPES: Readonly<Record<DeliveryServerFrame["type"], true>> = {
   delta: true,
   error: true,
   freshness: true,
@@ -191,7 +198,7 @@ const now = () => new Date().toISOString();
 const write = (line: ProbeLine) => console.log(JSON.stringify(line));
 const message = (error: unknown) => (error instanceof Error ? error.message : String(error));
 
-function isServerFrame(value: unknown): value is DeliveryLiveServerFrame {
+function isServerFrame(value: unknown): value is DeliveryServerFrame {
   return (
     typeof value === "object" &&
     value !== null &&
@@ -357,7 +364,7 @@ function changes(delta: DeliveryLiveDelta): Sections {
   };
 }
 
-function frameLine(frame: DeliveryLiveServerFrame, bytes: number): ProbeFrameLine {
+function frameLine(frame: DeliveryServerFrame, bytes: number): ProbeFrameLine {
   const line: ProbeFrameLine = {
     at: now(),
     bytes,
@@ -401,7 +408,7 @@ async function watch(options: Options, token: string): Promise<ProbeHeld | null>
   const ended = Promise.withResolvers<Error | undefined>();
   const fail = (reason: string) => ended.resolve(new Error(reason));
 
-  const subscribeFrame = (): DeliveryLiveSubscribe =>
+  const subscribeFrame = (): LiveSubscribe =>
     held === null
       ? { sub: SUB, type: "subscribe", view: options.view }
       : {
@@ -411,7 +418,7 @@ async function watch(options: Options, token: string): Promise<ProbeHeld | null>
           view: options.view,
         };
 
-  const apply = (frame: DeliveryLiveServerFrame) => {
+  const apply = (frame: DeliveryServerFrame) => {
     if (frame.type === "error") {
       if (frame.sub === SUB && Object.hasOwn(REFUSALS, frame.code)) {
         fail(`Dispatch refused the view: ${frame.code}: ${frame.message}`);

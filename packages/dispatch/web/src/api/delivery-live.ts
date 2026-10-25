@@ -14,14 +14,14 @@ import { ApiError } from "./client";
 import { reconnectDelayMs } from "./live";
 import type {
   DeliveryLiveBody,
-  DeliveryLiveClientFrame,
   DeliveryLiveDelta,
-  DeliveryLiveError,
   DeliveryLiveRevs,
-  DeliveryLiveServerFrame,
   DeliveryLiveSnapshot,
-  DeliveryLiveSubscribe,
   DeliveryLiveView,
+  LiveClientFrame,
+  LiveError,
+  LiveServerFrame,
+  LiveSubscribe,
 } from "./types";
 
 /** A socket that has carried no frame for this long, two of the server's 15 s heartbeats
@@ -126,11 +126,11 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
     for (const listener of listeners) listener();
   };
 
-  const send = (frame: DeliveryLiveClientFrame) => {
+  const send = (frame: LiveClientFrame) => {
     if (socket !== null && isOpen) socket.send(JSON.stringify(frame));
   };
 
-  const subscribeFrame = (sub: Subscription): DeliveryLiveSubscribe =>
+  const subscribeFrame = (sub: Subscription): LiveSubscribe =>
     sub.seq !== null && sub.revs !== null
       ? { type: "subscribe", sub: sub.id, view: sub.view, resume: { seq: sub.seq, revs: sub.revs } }
       : { type: "subscribe", sub: sub.id, view: sub.view };
@@ -174,7 +174,7 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
     }
   };
 
-  const onError = (frame: DeliveryLiveError) => {
+  const onError = (frame: LiveError) => {
     const sub = frame.sub === undefined ? undefined : subs.get(frame.sub);
     if (sub === undefined) {
       console.error("delivery live: Dispatch refused a frame this page sent", frame);
@@ -205,7 +205,7 @@ export function createDeliveryLive(queryClient: QueryClient): DeliveryLive {
   const receive = (data: unknown) => {
     lastFrameAt = Date.now();
     attempt = 0;
-    const frame = JSON.parse(String(data)) as DeliveryLiveServerFrame;
+    const frame = JSON.parse(String(data)) as LiveServerFrame;
     switch (frame.type) {
       case "heartbeat":
         return;

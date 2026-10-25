@@ -12,10 +12,10 @@ import {
 } from "../../__tests__/delivery-live-harness";
 import type {
   DeliveryLeadTimeTiming,
-  DeliveryLiveSubscribe,
   DeliveryPipelineResponse,
   DeliveryTiming,
   DeliveryTimingCell,
+  LiveSubscribe,
 } from "../../api/types";
 import { PipelinePage, PipelineView } from "./PipelinePage";
 
@@ -388,7 +388,7 @@ function renderPage(path = "/pipeline") {
 }
 
 /** The page's delivery socket, accepted, and the pipeline subscription it sent on it. */
-async function subscribed(): Promise<{ socket: FakeDeliverySocket; frame: DeliveryLiveSubscribe }> {
+async function subscribed(): Promise<{ socket: FakeDeliverySocket; frame: LiveSubscribe }> {
   await waitFor(() => expect(sockets.sockets.length).toBeGreaterThan(0));
   const socket = sockets.latest();
   act(() => socket.open());

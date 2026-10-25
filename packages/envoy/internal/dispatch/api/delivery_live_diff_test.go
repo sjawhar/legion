@@ -20,7 +20,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
-var updateDeliveryLiveFixtures = flag.Bool("update", false, "rewrite packages/contracts/fixtures/delivery-live from the frames the diff writes")
+var updateDeliveryLiveFixtures = flag.Bool("update", false, "rewrite packages/contracts/fixtures/live from the frames the diff writes")
 
 // liveJSONField is one JSON field of a struct as encoding/json writes it: its name and type.
 type liveJSONField struct {
@@ -912,7 +912,7 @@ func TestAListWithARepeatedIDIsRefused(t *testing.T) {
 	}
 }
 
-// TestTheLiveFixturesAreWhatTheDiffWrites holds packages/contracts/fixtures/delivery-live, which the
+// TestTheLiveFixturesAreWhatTheDiffWrites holds packages/contracts/fixtures/live, which the
 // contracts' and the dashboard's Bun tests read, to the frames this package writes: a timeline
 // snapshot, the delta of one deploy, a merge and a pull request leaving the window, the snapshot
 // a page subscribing afterwards gets (applying the delta to the first gives its body, but for the
@@ -962,7 +962,7 @@ func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 			t.Fatalf("encode %s: %v", name, err)
 		}
 		got = append(got, '\n')
-		path := filepath.Join("..", "..", "..", "..", "contracts", "fixtures", "delivery-live", name)
+		path := filepath.Join("..", "..", "..", "..", "contracts", "fixtures", "live", name)
 		if *updateDeliveryLiveFixtures {
 			if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 				t.Fatal(err)

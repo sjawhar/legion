@@ -12,13 +12,13 @@ import {
 } from "../../__tests__/delivery-live-harness";
 import { api } from "../../api/client";
 import type {
-  DeliveryLiveServerFrame,
-  DeliveryLiveSubscribe,
   DeliveryLiveView,
   DeliveryMeasuresResponse,
   DeliveryPR,
   DeliverySettings,
   DeliveryTimelineResponse,
+  LiveServerFrame,
+  LiveSubscribe,
 } from "../../api/types";
 import { KeymapProvider } from "../shell/KeymapProvider";
 import { DeliveryPage } from "./DeliveryPage";
@@ -172,7 +172,7 @@ async function openSocket(): Promise<FakeDeliverySocket> {
 function subscription(
   socket: FakeDeliverySocket,
   kind: DeliveryLiveView["kind"]
-): Promise<DeliveryLiveSubscribe> {
+): Promise<LiveSubscribe> {
   return waitFor(() => socket.subscribed(kind));
 }
 
@@ -180,7 +180,7 @@ function subscription(
 function subscriptionTo(
   socket: FakeDeliverySocket,
   view: DeliveryLiveView
-): Promise<DeliveryLiveSubscribe> {
+): Promise<LiveSubscribe> {
   return waitFor(() => {
     const frame = socket.subscribed(view.kind);
     expect(frame.view).toEqual(view);
@@ -189,7 +189,7 @@ function subscriptionTo(
 }
 
 /** Dispatch sends `frame` to the page. */
-function serve(socket: FakeDeliverySocket, frame: DeliveryLiveServerFrame): void {
+function serve(socket: FakeDeliverySocket, frame: LiveServerFrame): void {
   act(() => socket.receive(frame));
 }
 

@@ -1,29 +1,44 @@
 import { expect, test } from "bun:test";
-import after from "../fixtures/delivery-live/after.json";
-import delta from "../fixtures/delivery-live/delta.json";
-import error from "../fixtures/delivery-live/error.json";
-import heartbeat from "../fixtures/delivery-live/heartbeat.json";
-import snapshot from "../fixtures/delivery-live/snapshot.json";
-import type {
-  DeliveryLiveCounts,
-  DeliveryLiveDelta,
-  DeliveryLiveError,
-  DeliveryLiveHeartbeat,
-  DeliveryLiveItemChanges,
-  DeliveryLiveList,
-  DeliveryLiveMap,
-  DeliveryLiveRevChanges,
-  DeliveryLiveRevs,
-  DeliveryLiveServerFrame,
-  DeliveryLiveSnapshot,
-  DeliveryTimelineResponse,
+import after from "../fixtures/live/after.json";
+import delta from "../fixtures/live/delta.json";
+import error from "../fixtures/live/error.json";
+import heartbeat from "../fixtures/live/heartbeat.json";
+import snapshot from "../fixtures/live/snapshot.json";
+import {
+  type DeliveryLiveCounts,
+  type DeliveryLiveDelta,
+  type DeliveryLiveFreshness,
+  type DeliveryLiveItemChanges,
+  type DeliveryLiveList,
+  type DeliveryLiveMap,
+  type DeliveryLiveResume,
+  type DeliveryLiveRevChanges,
+  type DeliveryLiveRevs,
+  type DeliveryLiveSnapshot,
+  type DeliveryTimelineResponse,
+  type EventsLiveResume,
+  LIVE_SOCKET_MAX_AGE_CLOSE,
+  LIVE_SOCKET_MAX_AGE_MS,
+  LIVE_SOCKET_MAX_SUBSCRIPTIONS,
+  LIVE_SOCKET_MIN_AGE_MS,
+  type LiveAgentFrame,
+  type LiveClientFrame,
+  type LiveEnded,
+  type LiveError,
+  type LiveEventFrame,
+  type LiveEventsStart,
+  type LiveHeartbeat,
+  type LiveServerFrame,
+  type LiveSubscribe,
+  type LiveUnsubscribe,
+  type LiveView,
 } from "./dispatch-api";
 
-// The frames in fixtures/delivery-live are written by the Dispatch server's own diff
+// The frames in fixtures/live are written by the Dispatch server's own diff
 // (TestTheLiveFixturesAreWhatTheDiffWrites, packages/envoy/internal/dispatch/api), so each is what
-// GET /ws/delivery sends. These tests hold them to the DeliveryLive* contract key for key: each
-// list below must name every key of its type, or the type check fails, so a key the contract
-// gains or loses fails here until the server writes it too.
+// the live socket sends. These tests hold them to the Live* and DeliveryLive* contract key for
+// key: each list below must name every key of its type, or the type check fails, so a key the
+// contract gains or loses fails here until the server writes it too.
 
 /** `list`, which must hold every member of U. */
 function allOf<U extends string>() {
@@ -51,15 +66,41 @@ const DELTA_KEYS = allOf<keyof DeliveryLiveDelta>()([
   "counts",
   "revs",
 ]);
-const ERROR_KEYS = allOf<keyof DeliveryLiveError>()(["type", "sub", "code", "message"]);
-const HEARTBEAT_KEYS = allOf<keyof DeliveryLiveHeartbeat>()(["type"]);
-const SERVER_FRAME_TYPES = allOf<DeliveryLiveServerFrame["type"]>()([
-  "snapshot",
-  "delta",
-  "freshness",
-  "error",
-  "heartbeat",
+/** Every frame Dispatch sends, by its type, with the keys it carries: a frame type without a row,
+ *  or a row naming a key its type lacks or missing one it has, fails the type check. */
+const SERVER_FRAME_KEYS = {
+  snapshot: SNAPSHOT_KEYS,
+  delta: DELTA_KEYS,
+  freshness: allOf<keyof DeliveryLiveFreshness>()(["type", "freshness", "stale"]),
+  events_start: allOf<keyof LiveEventsStart>()(["type", "sub", "since"]),
+  event: allOf<keyof LiveEventFrame>()(["type", "sub", "id", "event"]),
+  agent: allOf<keyof LiveAgentFrame>()(["type", "sub", "event", "data"]),
+  ended: allOf<keyof LiveEnded>()(["type", "sub", "reason"]),
+  error: allOf<keyof LiveError>()(["type", "sub", "code", "message"]),
+  heartbeat: allOf<keyof LiveHeartbeat>()(["type"]),
+} satisfies Record<LiveServerFrame["type"], readonly string[]>;
+/** Every frame a page sends, by its type, with the keys it carries. */
+const CLIENT_FRAME_KEYS = {
+  subscribe: allOf<keyof LiveSubscribe>()(["type", "sub", "view", "resume"]),
+  unsubscribe: allOf<keyof LiveUnsubscribe>()(["type", "sub"]),
+} satisfies Record<LiveClientFrame["type"], readonly string[]>;
+const VIEW_KINDS = allOf<LiveView["kind"]>()([
+  "timeline",
+  "measures",
+  "pipeline",
+  "events",
+  "agent",
 ]);
+const DELIVERY_RESUME_KEYS = allOf<keyof DeliveryLiveResume>()(["seq", "revs"]);
+const EVENTS_RESUME_KEYS = allOf<keyof EventsLiveResume>()(["since"]);
+const AGENT_EVENTS = allOf<LiveAgentFrame["event"]>()(["responder", "replay", "frame"]);
+const ENDED_REASONS = allOf<LiveEnded["reason"]>()(["behind", "dropped"]);
+/** The frames that are not one subscription's: freshness goes to every subscriber of the socket,
+ *  heartbeat to the socket itself. */
+const SOCKET_WIDE: Partial<Record<LiveServerFrame["type"], true>> = {
+  freshness: true,
+  heartbeat: true,
+};
 const TIMELINE_KEYS = allOf<keyof DeliveryTimelineResponse>()([
   "window",
   "prs",
@@ -174,7 +215,7 @@ test("a delta frame carries lists by id, maps by key, counts two levels deep, an
 });
 
 test("an error frame names its code and its message", () => {
-  expect(keysOf(error)).toEqual(sorted(ERROR_KEYS));
+  expect(keysOf(error)).toEqual(sorted(SERVER_FRAME_KEYS.error));
   expect(error).toEqual({
     type: "error",
     sub: "timeline-1",
@@ -185,7 +226,38 @@ test("an error frame names its code and its message", () => {
 });
 
 test("a heartbeat frame carries its type and nothing else", () => {
-  expect(keysOf(heartbeat)).toEqual(sorted(HEARTBEAT_KEYS));
+  expect(keysOf(heartbeat)).toEqual(sorted(SERVER_FRAME_KEYS.heartbeat));
   expect(heartbeat).toEqual({ type: "heartbeat" });
-  expect(SERVER_FRAME_TYPES).toContain(heartbeat.type as DeliveryLiveServerFrame["type"]);
+  expect(Object.keys(SERVER_FRAME_KEYS)).toContain(heartbeat.type);
+});
+
+test("every frame names its type, and every frame of one subscription names the subscription", () => {
+  for (const [type, keys] of Object.entries({ ...SERVER_FRAME_KEYS, ...CLIENT_FRAME_KEYS })) {
+    expect(keys).toContain("type");
+    if (SOCKET_WIDE[type as LiveServerFrame["type"]] !== true) expect(keys).toContain("sub");
+  }
+  for (const list of [
+    ...Object.values(SERVER_FRAME_KEYS),
+    ...Object.values(CLIENT_FRAME_KEYS),
+    VIEW_KINDS,
+    AGENT_EVENTS,
+    ENDED_REASONS,
+  ]) {
+    expect(new Set(list).size).toBe(list.length);
+  }
+});
+
+test("a resume's keys tell a delivery view's resume from an events view's", () => {
+  // Dispatch refuses a resume whose shape is not its view's kind, so the two share no key.
+  for (const key of DELIVERY_RESUME_KEYS) expect(EVENTS_RESUME_KEYS).not.toContain(key);
+});
+
+test("a socket ends at an age between thirty minutes and an hour, with a close code of its own", () => {
+  expect(LIVE_SOCKET_MIN_AGE_MS).toBe(30 * 60 * 1000);
+  expect(LIVE_SOCKET_MAX_AGE_MS).toBe(60 * 60 * 1000);
+  // An application code, apart from 4000, the page's own close of a silent socket.
+  expect(LIVE_SOCKET_MAX_AGE_CLOSE).toBeGreaterThan(4000);
+  expect(LIVE_SOCKET_MAX_AGE_CLOSE).toBeLessThan(5000);
+  expect(Number.isInteger(LIVE_SOCKET_MAX_SUBSCRIPTIONS)).toBe(true);
+  expect(LIVE_SOCKET_MAX_SUBSCRIPTIONS).toBeGreaterThan(0);
 });
