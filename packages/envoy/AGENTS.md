@@ -2453,7 +2453,13 @@ written, since `pglisten` splices a channel into its listen statement as written
 secret's name and this process's own boot-minted sender id, under `notifyRereadTimeout` (5 s) on a
 context of its own, so a caller that hangs up cannot stop the other pods from learning of a reread
 that already happened. Every process runs `reread.Listener` for its whole life (started after the
-first policy load and before `net.Listen`, on the process context), drops what carries its own
+first policy load, and the bind then waits up to `rereadListenWait` (5 s) for its first dial,
+successful or not, so an address the load balancer can reach is an address a retag can reach). It
+runs on a context derived with `context.WithoutCancel` from the signal's, not on the signal's own,
+and so does the five-minute policy reload: a pod is sent requests for the whole of its drain, so a
+listener and a reload stopped at `SIGTERM` would leave the one pod the load balancer is still
+choosing serving the tags it read before the retag, with no backstop either. Both end after
+`srv.Shutdown` returns, where `st.Close` then releases the store. The listener drops what carries its own
 sender id, and calls `Current.RefreshOne` under `refreshTimeout` (30 s) on the listener's one
 goroutine. It dials `store.Store.Listener`: a one-connection pool opened from `s.Pool.Config()`
 (so `BeforeConnect`'s RDS IAM minter still mints a token per redial) and hijacked, which costs one
@@ -3076,11 +3082,14 @@ the policy's writer lock for one `DescribeSecret`, so a flood spread over addres
 reload; a reread spends a token from either bucket only when both allow it
 (`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
-with the refusing limit's `Retry-After`: 1 s for the shared bucket, 2 s for the GCP one and for an
-address's own). Both shared figures are half what one pod was allowed, in rate and in burst alike,
-under the invariant that replicas × rate and replicas × burst are the fleet's whole cap (GCP:
-0.5 reread/s per pod × 2 pods × 2 metadata reads is the same 120 reads a minute as before) — read
-them as that arithmetic, never as the number two. A reread `reread.Listener` drives spends no
+with the refusing limit's `Retry-After`: 1 s for the shared bucket, 4 s for the GCP one and 2 s for
+an address's own). Both shared figures are the fleet's whole store budget divided by the replica
+count **squared**, in rate and in burst alike, because one accepted reread costs the store one read
+per pod — the pod that served it and every peer the fan-out tells — so the fleet spends
+replicas × rate × replicas (default: 2 pods × 1 reread/s × 2 store reads = the 4 store reads a
+second one pod alone was allowed; GCP: 2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads =
+the same 120 reads a minute) — read them as that arithmetic, never as the number two, since a
+third replica divides by nine rather than by four. A reread `reread.Listener` drives spends no
 token at all, since the pod that served the original call already paid for it. Every other limiter
 is one process's and unchanged, so a fleet of N pods allows N times each: the per-address reread
 bucket, both `LauncherLimits` buckets, `DefaultTokenLimit` and `DefaultMissRereads`. The

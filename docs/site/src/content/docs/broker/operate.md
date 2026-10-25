@@ -223,29 +223,37 @@ to start while the removed `BROKER_DATABASE_PASSWORD` is set or the URL names it
   Rereads are limited twice, by fixed limits rather than settings (`DefaultRereadLimit`,
   `DefaultRereadOverallLimit` and `GCPRereadOverallLimit` in
   `packages/envoy/internal/broker/api/limits.go`): each source address gets a burst of 30,
-  refilled one every 2 seconds, and the broker as a whole takes two a second, burst 5, however
+  refilled one every 2 seconds, and the broker as a whole takes one a second, burst 2, however
   many addresses the rereads come from — each one takes the policy's writer lock while it reads
   the secret, so that lock, not the caller, is what the second limit bounds. On Google Secret
   Manager, where a reread spends two reads of the project's shared metadata quota, that
-  broker-wide limit is half a reread a second, burst 5. A reread counts against either limit only
-  when both let it run, so one address flooding past its own limit leaves the broker-wide one to
-  everyone else. Past either, the broker answers `429 RATE_LIMITED` with a `Retry-After` header
-  naming the limit that refused: 1 second for the broker-wide limit, 2 seconds for Secret
+  broker-wide limit is one reread every 4 seconds, burst 2. A reread counts against either limit
+  only when both let it run, so one address flooding past its own limit leaves the broker-wide
+  one to everyone else. Past either, the broker answers `429 RATE_LIMITED` with a `Retry-After`
+  header naming the limit that refused: 1 second for the broker-wide limit, 4 seconds for Secret
   Manager's, and 2 seconds for an address's own.
-  Each of these buckets is one process's, which is what the broker-wide pair is sized from: it is
-  the fleet's whole reread budget divided by the replica count, so at two pods each takes half of
-  what a single pod was allowed, in rate and in burst alike, and Secret Manager's share stays
-  where it was — 120 metadata reads a minute for the fleet. Read the figures as that arithmetic
-  rather than as the number two: a third replica makes each of them a third of the fleet's cap.
+  Each of these buckets is one process's, and the broker-wide pair is sized from what the whole
+  fleet spends of the secret store, which is not the same as what it spends in HTTP rereads: one
+  reread the broker accepts costs the store **one read per pod**, because the pod that served it
+  rereads the secret and then tells every other pod to reread it too. So the fleet reads the
+  store `replicas × this rate × replicas` times a second, and each bucket is the fleet's whole
+  budget divided by the replica count **squared**. At two pods: `2 pods × 1 reread/s × 2 store
+  reads = 4 store reads a second`, which is what one pod alone was allowed, and on Secret
+  Manager `2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads = 2 a second`, the same 120
+  metadata reads a minute as before. Read those as the arithmetic rather than as the number two:
+  a third replica divides the fleet's budget by nine, not by four.
   A reread one pod's notification drives on another spends nothing from either bucket, since the
-  pod that served the original call already paid for it
+  pod that served the original call already paid for it — which is what makes the figures above
+  the whole of the fleet's store traffic rather than a floor under it
   ([Running more than one pod](#running-more-than-one-pod)). Every other limiter is per process
   and unchanged, so a fleet of N pods allows N times each: this per-address reread bucket, the
   two machine-login buckets, the token endpoint's, and each enrollment's budget of rereads for
   names it was not served.
   `agent-secrets secret` sends one reread after each write it makes, from the person's own
-  address. When a limit refuses it, the write stands in the secret store and the CLI exits 1 saying
-  so ([manage a secret](/legion/broker/guides/manage-a-secret/#what-the-broker-answers-after-a-write)).
+  address, so writing several secrets at once meets the broker-wide burst of 2 after two of them.
+  When a limit refuses it, the write stands in the secret store and the CLI exits 1 saying
+  so ([manage a secret](/legion/broker/guides/manage-a-secret/#what-the-broker-answers-after-a-write));
+  only the narrowing of who may read that secret waits for the next token.
 - Agents never see the broker's database or the secret store; whoever can write the database can
   forge a record, so its access control is part of the broker's. Whoever can tag (or annotate) a
   secret under the namespace decides who gets it, so that write access is part of the broker's too.
@@ -375,21 +383,29 @@ a transaction pooler (pgbouncer in transaction mode, RDS Proxy) hands each trans
 backend is free and carries no long-lived `LISTEN`. A pod that cannot hold the connection still
 boots and still serves; its listener redials for as long as it runs.
 
-**A reread that reaches every pod.** `POST /v1/secrets/{name}/reread` rereads the secret on the
-pod the load balancer picked and then, on its `200` answer alone, tells every other pod serving
-the same database to reread the same name, over Postgres `LISTEN`/`NOTIFY` on a channel of its
-own. So one call puts a retag in force across the fleet within seconds rather than at each pod's
-own next five-minute reload, and it needs no infrastructure beyond the database the broker already
-has. The exception, plainly: while a pod's listener is redialing it hears nothing, and nothing is
+**A reread that reaches every pod, draining ones included.** `POST /v1/secrets/{name}/reread`
+rereads the secret on the pod the load balancer picked and then, on its `200` answer alone, tells
+every other pod serving the same database to reread the same name, over Postgres `LISTEN`/`NOTIFY`
+on a channel of its own. So one call puts a retag in force across the fleet within seconds rather
+than at each pod's own next five-minute reload, and it needs no infrastructure beyond the database
+the broker already has. A pod that is draining is still one of those pods: it goes on being sent
+requests for the whole drain, so its listener and its five-minute reload both run until the
+shutdown has answered the last request, not until the signal. A pod waits for its first `LISTEN`
+dial before it binds, so an address the load balancer can reach is an address a retag can reach.
+The exception, plainly: while a pod's listener is redialing it hears nothing, and nothing is
 caught up when it reconnects, so that pod goes on serving what it last read until its own
 five-minute reload. The promise is therefore "within seconds, except while a pod's listener is
 redialing, where the next five-minute reload is the backstop". A reread a notification drives
 spends no rate-limit token: the pod that served the original call already paid for it.
 
-**Halved reread limits, and nothing else halved.** The broker-wide reread limit is the fleet's
-whole budget divided by the replica count, so two pods each take half of what one pod alone was
-allowed; every other limiter is per process, so a fleet of N pods allows N times each
-([Network and trust](#network-and-trust)).
+**The reread limits are divided by the replica count squared, and nothing else is divided at
+all.** One reread the broker accepts costs the secret store one read on every pod — the pod that
+served it, and each peer the fan-out tells — so the fleet's store traffic is `replicas² × the
+per-pod rate`, and the broker-wide buckets are the fleet's whole budget divided by that. At two
+pods each pod takes one reread a second with a burst of 2 (one every 4 seconds against Google
+Secret Manager), which leaves the store exactly the 4 reads a second, and Secret Manager the 120
+metadata reads a minute, that one pod alone was allowed. Every other limiter is per process, so a
+fleet of N pods allows N times each ([Network and trust](#network-and-trust)).
 
 ## The renew token check
 
