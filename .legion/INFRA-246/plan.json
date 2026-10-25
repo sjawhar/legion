@@ -1,0 +1,109 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-246",
+  "completed": "2026-10-25T01:11:26Z",
+  "plan": "dispatch://INFRA-246/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the phase worker contract this issue runs under — the workspace binding, the handoff write, the push with its trailer rules, and completion through the legion tool.",
+      "legion-worker/references/pr-body.md: the implementer writes the pull request body from the template and its own E2E line, and this issue's proof is a live run against the production Envoy listener, not a unit suite.",
+      "legion-worker/references/default-branch-check.md: the identity check this plan's commits must pass before the push, since every role of the issue shares the workspace.",
+      "ce-simplify-code: the diff touches runtime code in packages/pi-envoy and packages/envoy-client, so the implementer runs the simplify pass once in its first implementing round, after its own proof.",
+      "dispatch: any write this phase makes to INFRA-246 (a message to the architect's decision, a comment carrying a run's output) goes through the dispatch command's rules."
+    ],
+    "test": [
+      "legion-worker: the tester's contract — read the predecessor handoffs, record implementerProof, failures and its own proof, and complete with a verdict.",
+      "legion-worker/references/pr-body.md: the tester drives the application rather than re-running CI, and this change's application is a real headless Oh My Pi pane observed at the Envoy listener; lint, types and the unit suites are cited from the CI line.",
+      "dispatch: the tester's writes to the issue follow the same rules."
+    ],
+    "review": [
+      "legion-worker: the reviewer's phase order — read the code commit's checks on GitHub, push its handoff, review the head that push made, then complete.",
+      "legion-worker/references/review-threads.md: one disposition reply per thread, never in bulk, and the reviewer resolves none itself.",
+      "legion-worker/references/merge-gate.md: the approval of a head by SHA and what READY is held to afterwards."
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: the stall the spec localises (the NATS-opening block at envoy.ts:2002-2017) is skipped on every steady tick once inboundOpenFor === host, so it cannot be the stall that hit two already-registered panes; the reachable await for a steady pane is behind roleMoves, which the pass awaits after registerSession().",
+        "answer": "The plan drops the inner bound on that block as the fix and bounds both queues instead (passes at :1953 and roleMoves at :587), and makes the refresh itself independent of either. I went further than the finding: I measured that no unbounded await exists at all today — the NATS dial is bounded by nats.js's own 20 s default (node_modules/nats/lib/nats-base-client/protocol.js:415) and I proved it live with a black-holed NATS address, where the current plugin still registered three times in 75 s. The plan records that as a departure and builds the bound as a guard the acceptance asks for, not as a fix for a demonstrated await."
+      },
+      {
+        "finding": "F2: ensureHeartbeat is armed only after a successful registration (envoy.ts:2027-2028), so a first pass that hangs or whose registration fails leaves a pane with no timer and no retry — 'resumes on the next tick' would have no next tick.",
+        "answer": "Measured and not supported: session_start's own fallback retries every 15 s until one registration succeeds (envoy.ts:2339-2351, NATS_RETRY_INTERVAL_MS at :139). I proved it live by putting a proxy in front of the production listener that answered 503 for the first 35 s; the pane retried and registered at the first success. The plan therefore adds no second cold-start retry, and says so."
+      },
+      {
+        "finding": "F3: a stall-aborted pass is not an outage, so the recovery tick fires no role regain and Legion's claims/ready call never re-runs; the listener reaps a role claim whose holder left the session registry after one record lifetime (listener main.go:805).",
+        "answer": "Taken. Design section 3: a pass abandoned at its deadline sets registrationFailed (envoy.ts:1626, 1644), so the next healthy tick runs reassertRoleNow with afterOutage and fires the regain hook. Plugin test (d) asserts exactly one {role, reason: 'reregistered'}."
+      },
+      {
+        "finding": "F4: the five-minute expiry is a Go default, not the live bucket's lifetime — EnsureKeyValue creates only when absent (bus/kv.go:27-37) and the registry adopts the live bucket's MaxAge (registry.go:133-143) — so a static margin check proves nothing about production.",
+        "answer": "Taken, and I tried to close it: I connected to the production NATS from this pod and the JetStream API refused the read, so the live lifetime is unverified rather than wrong. The plan states the limit in the check script's own header, following check-body-embed-limit.sh:33-35, and adds one boot log line to the listener naming the record lifetime it resolved (cmd/listener/main.go:660-667) so an operator can read the live value without JetStream rights."
+      },
+      {
+        "finding": "F5: moving DEFAULT_HEARTBEAT_MS reaches six places the design did not name, one a cross-version hazard: LivenessWindow = max(bootTimeout, 2 x Heartbeat) would narrow from 240 s to 200 s while panes still refresh every 120 s until they restart.",
+        "answer": "Taken in full. The window becomes max(bootTimeout, 3 x interval) = 300 s, wider than today's 240 s and safe for a pane still on the old interval, so no release ordering is required. The plan lists every other reach: the three committed claude-envoy dist bundles under check-dist, the two sibling registration loops, the four pinned 120_000 expectations, the five documents and two comments, and the ~20% extra listener write load measured against the 239 live sessions I counted."
+      },
+      {
+        "finding": "F6: both reported symptoms read the listener's in-memory cache only (api.go:511-513 and :672-675 into registry.go:290-300 and :403-406), and the curing write repairs a lost cache exactly as it repairs an expired record (registry.go:276-296), so the spec's claim that INFRA-141 'would not have helped these two panes' is not supported.",
+        "answer": "Taken as a departure, recorded in specDepartures and in the plan's section for the architect. The plan states the cause as unproven, names the three observations that would separate a wedged pass from a lost cache, and leaves the spec for the architect to change."
+      },
+      {
+        "finding": "F7: acceptance line 2 is two checks in one sentence — a plugin test and a listener observation — and the listener half can only run against the production registry from a worker pod.",
+        "answer": "The plan does both and says what each writes: the plugin test cases (a) to (e) for the never-settling pass, and the live run for 'stays listed by envoy_sessions'. Each live run leaves one scratch session that the pane deletes on exit and the listener would expire within one record lifetime. Raised to the architect as item 4 of the plan's last section rather than narrowed."
+      },
+      {
+        "finding": "F8: 'the pane or its log says that it happened' has two readings with different costs and no stated check, and the margin inequality ignores the pass deadline and the HTTP budget.",
+        "answer": "Both settled in the plan. Design section 3 fixes the reading: one context.ui.notify and one logger.warn per stall episode, cleared when a pass settles, nothing on a healthy tick, following the existing outage warning at envoy.ts:1648-1654, asserted by plugin test (c). The margin check's second condition is interval + pass deadline + HTTP budget <= record lifetime."
+      },
+      {
+        "finding": "F9: the epoch fence must cover more than four variables — a resumed task can append a role claim to the transcript (envoy.ts:1810), drop a role, close a live subscription or overwrite the NATS connection — and an abandoned dial would leak a dialer per stalled tick.",
+        "answer": "Taken: the plan fences at eight named call sites (reconcileNow, settleRole, settleEndedHolds, reassertRoleNow, setEnvoyRole, subscribe, watchAgentStream, recoverRegisteredInterests), and plugin test (e) asserts an abandoned task that resolves later writes nothing. The dialer leak does not arise, since the plan adds no inner deadline around the dial: nats.js already bounds it at 20 s."
+      },
+      {
+        "finding": "F10: nothing says how a deployed pane gets the fix, and the interval is read once when the timer is armed (envoy.ts:1658), so the fleet runs mixed versions for as long as panes live.",
+        "answer": "Stated at the head of the plan ('What still will not work') and settled by the F5 answer: the daemon's window widens rather than narrows, so a mixed fleet is safe in either release order and no operator action is needed beyond the standard release path."
+      },
+      {
+        "finding": "F11: the 14:40-14:45Z lower bound rests on a step the send path does not perform — the send handler reads only the recipient's record (api.go:494-528) and nothing refreshes the sender's.",
+        "answer": "Taken as a departure, recorded in specDepartures and raised to the architect as item 2 of the plan's last section. The plan relies on no time window."
+      },
+      {
+        "finding": "F12: a live run with a black-holed NATS address tests the cold-start path, not the reported mid-life lapse, so presenting it as proof of acceptance 1 and 4 would prove something else.",
+        "answer": "Taken, and the measurement made it moot: the current plugin registers anyway with NATS black-holed, so that arm has no negative control at all. The plan replaces it: acceptance 1 is proven live by a fixture extension that wedges the third registration post so it never settles and ignores its abort signal, with the base commit as the negative control, and acceptance 4 by deleting the pane's record at the listener while it runs and watching it return."
+      }
+    ]
+  },
+  "planReview": { "verdict": "approved", "rounds": 1 },
+  "specDepartures": [
+    {
+      "spec": "'What the code does' says the refresh pass 'awaits work that is not bounded by a deadline, unlike every HTTP call it makes', and that 'one await that never settles wedges the latch for the life of the process'.",
+      "plan": "The plan builds the bound and the visibility the acceptance asks for, but as a guard against a future await rather than a fix for an existing one, and makes the registration refresh independent of the pass instead of only bounding the pass. It states the cause of the 2026-10-24 incident as unproven.",
+      "evidence": "Every await in the pass is bounded today. HTTP: AbortSignal.timeout(5000) with at most two attempts (packages/envoy-client/src/transport.ts:6-7, 249-281). The NATS dial: nats.js applies its own 20 s default (node_modules/nats/lib/nats-base-client/protocol.js:415, 'this.options.timeout || 20000'). Measured live: a real headless Oh My Pi on this checkout's plugin, with ENVOY_NATS_URL=nats://192.0.2.1:4222 (an address I first measured drops connection attempts), still registered at the production listener three times in 75 s.",
+      "outcome": {
+        "kind": "changed",
+        "scope": "The work is no longer 'bound the unbounded await'. It is: make the refresh independent of the pass; give both serial queues (passes at envoy.ts:1953 and roleMoves at :587) a per-task deadline and a generation fence; say a stall happened once per episode; and move the refresh rate. The cold-start retry the spec implies is missing is already present and was measured working (envoy.ts:2339-2351), so the plan adds none."
+      }
+    },
+    {
+      "spec": "'Why this is separate from the listener's lookup' says that INFRA-141 'would not have helped these two panes: what cured them was a write, not a better read, which says their records were gone from the store itself and not merely missing from the listener's cache.'",
+      "plan": "The plan treats the cause as undetermined between a wedged pass and a listener cache that lost the keys, builds this issue's guard regardless, and names the three observations that would tell the two apart. It does not assert that INFRA-141 would not have helped.",
+      "evidence": "Both reported symptoms read the listener's in-memory cache only: envoy_send's refusal (packages/envoy/cmd/listener/api.go:511-513 into packages/envoy/internal/session/registry.go:290-300) and envoy_sessions (api.go:672-675 into registry.go:403-406). The curing registration write goes through Put, which writes through to the cache (registry.go:276-296), so it repairs a cache that lost the key exactly as it repairs an expired record. A watcher reset or a NATS reconnect empties and refills that cache (registry.go:176-196).",
+      "outcome": {
+        "kind": "changed",
+        "summary": ["The spec's statement that the records were gone from the store itself and not merely missing from the listener's cache is not supported by the read paths; the cause is undetermined."],
+        "scope": "No scope change: the four acceptance lines are built as written. Whether the spec's text changes is the architect's decision."
+      }
+    },
+    {
+      "spec": "'What happened' says 'Both panes had sent Envoy messages at 14:40 to 14:45Z, so their registrations lapsed somewhere between then and 15:09Z.'",
+      "plan": "The plan relies on no lapse window and does not repeat the inference.",
+      "evidence": "The send handler looks up only the recipient's record (packages/envoy/cmd/listener/api.go:494-528); nothing in it reads or refreshes the sender's. The only write that refreshes a session's own record is registerSession's POST /v1/interests/subscribe (packages/pi-envoy/extensions/envoy.ts:1505-1531). Sending shows the sender's process was alive, not that its registration was.",
+      "outcome": {
+        "kind": "changed",
+        "summary": ["The 14:40-14:45Z lower bound on the lapse is not supported by the send path; the window in which the refresh stopped is unknown."]
+      }
+    }
+  ]
+}
