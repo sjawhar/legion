@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T17:10:00Z",
+  "completed": "2026-10-25T17:12:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2189",
   "proof": [
     {
@@ -260,7 +260,8 @@
     "ROUND 6 - two lanes red at the previous code head are main's, not this branch's, and only visible because a pull request builds the merge commit: #2185 and #2162 each changed cmd/broker's startBroker and its callers without conflicting textually, so cmd/broker fails to build in every open pull request's merge while go vet ./cmd/broker/ exits 0 on this branch. A clean merge is a claim about text, for the second time on this issue.",
     "ROUND 7 - my first diagnosis of this red was the symptom: I read 'error creating store for stream', found the helper that swallows it, and proposed wrapping the create in it. The reviewer read the test instead and found that the two subtests shared the parent's account against the rig's own documented contract. A retry would have made the violation permanent and silent - the next test to hoist URL into a parent would get a slower pass instead of a failure - which is the same family as the guards this issue spent its rounds deleting. Reasoning from an error message to the nearest thing that absorbs it is treating a symptom.",
     "ROUND 9 - the instrument failed four times in one day, each time differently: a sweep asking for ENVOY_TEST_NATS_BIN while the thing was spelled E2E_NATS_SERVER; a sentence checked against the model I remembered rather than the code; a create spelled restoreStream that neither of round 7's pattern sets contained; and finally a class no pattern can fix, a delete inside t.Cleanup being textually above and temporally below its create. A completeness claim resting on a pattern is only as true as the pattern, and its author is the worst judge of whether the pattern is complete, because the pattern is made of what they already thought of.",
-    "ROUND 10 - the three corrected comments were found by a fresh-eyes pass in retro, not by any check, and each had survived a tester round and a reviewer round including a code-quality pass that saw one of them and let it through as a wording note. A false comment has no lane: it is caught by a reader who reads the code and the sentence together, or not at all. The guard's case is the sharpest, because its name carried the overclaim independently of its comment - a corrected comment under a wrong name is the same defect with a smaller audience."
+    "ROUND 10 - the three corrected comments were found by a fresh-eyes pass in retro, not by any check, and each had survived a tester round and a reviewer round including a code-quality pass that saw one of them and let it through as a wording note. A false comment has no lane: it is caught by a reader who reads the code and the sentence together, or not at all. The guard's case is the sharpest, because its name carried the overclaim independently of its comment - a corrected comment under a wrong name is the same defect with a smaller audience.",
+    "ROUND 10 - this round's first two commits were authored by legion-reviewer[bot] rather than by this pane, because I split the working-copy commit I found at the turn's start and that commit had been created by the reviewer's pane in the shared workspace. The rule exists for exactly this and I read past it. handoff_complete caught the handoff commit and refused it by author; the code commit b882ed81da45 was already pushed and is reported to the architect rather than rewritten, since rewriting a pushed commit is a non-fast-forward move that needs its own guard and its own decision."
   ],
   "round": 10
 }
