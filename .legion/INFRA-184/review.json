@@ -2,44 +2,35 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-184",
-  "completed": "2026-10-25T06:55:00Z",
+  "completed": "2026-10-25T08:05:00Z",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
-  "minor": 3,
-  "round": 2,
-  "roundOneClosed": [
-    "packages/envoy/internal/dispatch/api/suggestions_test.go — both cases of TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails now file their asks as a session, and at 347d8432fb17 each logs 'WARN dispatch: write advice omitted … query=session_writes_since_human … SQLSTATE 57014', so the armed hook fires and the suggestions-only fallback is reached. In round 1 the same test logged nothing. The conflict resolution against main's 116821ebfebc kept both cases and the allowance parameter: the diff of that file from 116821ebfebc is the session-actor conversion alone.",
-    "packages/envoy/internal/dispatch/api/write_advice_test.go and issue_claim_test.go — a grandchild two links below a labelled root and a LEGION label are rows in both tables; twelve subtests pass at this head.",
-    "packages/contracts/src/dispatch-api.ts — ClaimedIssue.legion_managed_status is optional with a comment on what absence means, and the client reads === true rather than relying on truthiness.",
-    "packages/envoy/internal/dispatch/api/write_advice.go — the comment says 'A human write' and records why no other actor kind reaches it.",
-    "packages/envoy/internal/dispatch/api/issue_claim.go and issue_parent.go — the walk moved to issue_parent.go beside parentDepthCap and is named in its list, and the claim-side failure is contained in a real savepoint: TestClaimSurvivesAFailingLegionLabelWalk logs 'claim legion_managed_status omitted … SQLSTATE 42P01' and proves the claim committed by re-reading the issue."
+  "important": 0,
+  "minor": 2,
+  "round": 3,
+  "roundTwoClosed": [
+    "packages/envoy/internal/dispatch/api/issue_claim.go — the claim walk now runs on context.WithoutCancel inside a savepoint bounded at 500 ms, reset before release, and the call moved to before writeIssueClaim, so nothing sits between appendEvent and tx.Commit. TestClaimSurvivesAHangingLegionLabelWalk passes at this head logging 'claim legion_managed_status omitted … SQLSTATE 57014', with the claim intact on the response and on the re-read and the field absent; TestClaimSurvivesAFailingLegionLabelWalk still passes on SQLSTATE 42P01.",
+    "The deterministic cancellation test I required was not written, and I accepted the argument after reading it against the package: with the walk before the write, a cancellation inside it means writeIssueClaim never runs, so the assertion would be about a claim that was never written. The hazard is removed rather than made testable. That half of the fix is proven by inspection, and the reason is recorded.",
+    "packages/envoy/internal/dispatch/api/write_advice.go — legionManagedStatusAdvice takes a savepoint of its own inside the advice savepoint and logs rather than returning an adviceQueryError. TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails, armed on legion_managed_status, passes with issue_status, session_writes_since_human = 2 and the one open ask present and the field absent.",
+    "packages/envoy/AGENTS.md:414-415 now cites internal/dispatch/api/issue_parent.go and names claimLegionManagedStatus as the claim-side wrapper; :1835 now says both routes answer claimAnswer.",
+    "packages/envoy/internal/dispatch/api/issue_claim_test.go:491-496 records the no-t.Parallel constraint the swap depends on and why server.adviceQueryHook is not used instead."
   ],
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/issue_claim.go:338-355, 404-410",
-      "description": "claimLegionManagedStatus contains a statement error, but not the two failures the architect's ruling was about. It runs with no statement bound inside the transaction that holds the issue row 'for no key update', where its advice twin bounds the identical predicate at `set local statement_timeout = '500ms'` (write_advice.go:167-173) for the stated reason that a plan regression must not hold the issue row lock and a pool connection indefinitely; and it runs on the request context, so a cancellation landing between appendEvent and tx.Commit prevents walk.Rollback and discards a claim that had otherwise succeeded — the outcome the failure-tolerant shape was authorised to prevent. Required: the precedent's statement_timeout inside the savepoint, context.WithoutCancel for the walk, and the comments at :331-337 and :404-409 narrowed to say the guarantee covers statement errors."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/dispatch/api/write_advice.go:117-128",
-      "description": "The same walk is fatal on the advice path: its error returns an adviceQueryError, writeAdvice rolls the savepoint back and returns nil, and on issue creation a nil advice also drops the LEGION-550 suggestions (issue_create.go:404-407). Every issue is created in triage, so this diff adds a third failure mode to a query path that runs on every session-authored `dispatch issue`. The architect ruled this required for symmetry with the claim path: a failed label walk leaves legion_managed_status nil and returns the advice already assembled, which is what issue_parent.go:82-83 already tells the reader the answer is. The spec's design sentence about the all-or-nothing savepoint describes what was there rather than requiring it, and no acceptance line changes, so the design gate does not reopen."
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/write_advice.go:135, packages/envoy/internal/dispatch/api/write_advice_test.go:578-580, packages/envoy/AGENTS.md:410-411",
+      "description": "Three comments this round added state the mechanism backwards. Each says a fatal advice failure would drop the suggestions an issue creation 'already computed and persisted'. issue_create.go:384-386 calls writeAdvice first and :404-407 calls computeAndPersistSuggestions only inside `if advice != nil`, so on a fatal advice failure nothing had been computed and no suggestion row had been written: the fix makes suggestions get computed where they were previously skipped, rather than preventing persisted rows from being dropped. The effect is real and the tester measured it; the stated reason is not. AGENTS.md:410-411 in particular would tell a reader that suggestion rows survive a fatal advice failure too, which contradicts issue_create.go:399-403."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/AGENTS.md:413-414",
-      "description": "The paragraph this diff adds cites `internal/dispatch/api/issue_claim.go` for legionManagedStatus, and the same round moved that symbol to issue_parent.go. The diff invalidated its own citation in the file an agent reads to locate code."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/AGENTS.md:1830",
-      "description": "The canonical claim-route paragraph still says 'Both answer the issue.' Both routes now answer claimAnswer — the issue flat, with the optional legion_managed_status beside it, omitted when the walk failed — so the two descriptions of one route disagree. Not in the diff, so it carries no inline comment."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/dispatch/api/issue_claim_test.go:494-496",
-      "description": "The test swaps the package-level legionManagedStatusSQL and restores it in t.Cleanup. Safe only because nothing in internal/dispatch/api calls t.Parallel; the first test that does turns this into a data race that fails unrelated claim and advice tests with no signal pointing here. Required: one sentence naming that constraint beside the swap."
+      "file": "packages/envoy/internal/dispatch/api/issue_claim_test.go:510-517",
+      "description": "TestClaimSurvivesAFailingLegionLabelWalk inlines `var body map[string]json.RawMessage`, json.Unmarshal and a decode t.Fatalf — byte for byte what rawClaimFields does, which this same round added at :582-589 of the same file and which the sibling test uses at :559. Replace the inline block with rawClaimFields(t, claimed)."
     }
-  ]
+  ],
+  "recordedNotRequested": [
+    "thermonuclear-code-quality asked for the claim-side walk to move out of the claim's transaction onto the pool (deleting claimLegionManagedStatus, the context.WithoutCancel reasoning, both statement_timeout statements and the claimApplied field) and for the two savepoint wrappers to collapse into one with a deferred rollback. Both are maintainability proposals against code that is correct and now covered by two tests, not defects, and the architect scoped this round to the acceptance lines and the correctness and contracts of what the change touches. Recorded for him to route, not requested here.",
+    "The no-t.Parallel constraint both package-level legionManagedStatusSQL swaps depend on is recorded in a comment and enforced by nothing.",
+    "context.WithoutCancel keeps a disconnected client's claim transaction holding its pool connection and the issue's row lock for up to the 500 ms bound past the hang-up, where a cancellation used to end it at once. Bounded and self-limiting."
+  ],
+  "ciAtHead": "The code head is ab8f1ee2004d (7fb29bd85bda and 9bb00ac9db1a above it change only .legion/). main requires lint, typecheck, test and pr-title; at the time of writing typecheck and pr-title are success and lint and test are in_progress, so this round's decision rests on the findings and not on CI, as a request for changes does."
 }
