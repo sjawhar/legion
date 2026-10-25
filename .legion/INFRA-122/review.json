@@ -2,30 +2,26 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-122",
-  "completed": "2026-10-25T19:53:30Z",
-  "round": 2,
-  "reviewedHead": "0b2e878f014922b1f6de04567fc8077a4bdf7eac",
-  "codeHead": "c6889bb0b56b16176234b16a738ea213c35493fa",
+  "completed": "2026-10-25T20:47:30Z",
+  "round": 3,
+  "reviewedHead": "44bb6e82fa6450479954b6df51fd932fbad72157",
+  "codeHead": "311640e7692341d75896ce75e491b702f3e18281",
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/session/session.go:74",
-      "description": "The owner-only refusal ErrWrongMachine reaches HandleAgentMessage, which returns Delivered:false, Err:nil (internal/session/handler.go:33,46). agentSubjectDelivery reads that as a missing session and publishes a no_holder exception (cmd/listener/delivery.go:593, publishNoHolderExceptionOrNak; isControlTopic covers notifications.agent.*). The exception goes to the stored subject notifications.envoy.exceptions.notifications.agent.<session>, once per non-owning listener, for every inbox message to a serving-port session that its owner delivered. If that publish fails, the message is NAKed. Second source: the tester's round-3 run shows m2 logging 'listener agent session not found anywhere', the line logged after that publish. Required: a non-owner's ErrWrongMachine is ACKed silently, and the two-listener test asserts that no exception is published."
-    },
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/session/session.go:74",
-      "description": "A serving-port session that re-registers through listener B after A keeps its interest's MachineID A (internal/store/kv.go:396 keeps the stored value), while its session entry moves to B (claim_wiring.go sessionEntryFromSubscribe plus mergeForClaim). For a stored topic, Registry.Match selects it only on A. A now gets ErrWrongMachine, which fanoutDelivery treats as retryable while the session is live (cmd/listener/delivery.go:701): it logs 'listener delivery failed' at ERROR and NAKs until the durable's attempts run out. B matches nothing. Before this PR, A dialled B's machine name. This breaks acceptance 2 (nothing else the listener delivers changes). Required: the interest's owner and the session's owner agree (or the owner check reads the same ownership Match uses), with a two-listener re-home regression on a stored topic."
+      "file": "packages/envoy/internal/session/session.go:215",
+      "description": "Round 2 finding 2 still stands when the owner has a host bridge. Ownership now follows the stored subscription (session.go:82), so a session that re-registered through B keeps A as its owner. But hostFor returns ENVOY_HOST_BRIDGE whenever one is set, so A dials its own machine's bridge for a session now running on B's machine. Every compose host listener sets ENVOY_HOST_BRIDGE=127.0.0.1. Measured: TestARehomedSessionStillReceivesItsStoredTopicOnce, run through a go overlay with the first listener on ENVOY_HOST_BRIDGE=127.0.0.2, gave no prompt in 10 s. A logged ERROR 'listener delivery failed ... Post http://127.0.0.2:<port>/session/<id>/prompt_async: dial tcp 127.0.0.2:<port>: connect: connection refused' and NAKed. The committed test passes only because its listeners have no bridge. Round 1's rule took the bridge only for a session whose entry names this listener (or none); before this PR, A dialled B's machine name. Required: the bridge only for a session registered through this listener, else the recorded host, and the re-home test run with a bridge on the first listener."
     }
   ],
-  "roundOneThreads": "PRRT_kwDORFy7ds6wDn2M (fixed in 7139c129/d73383ee), PRRT_kwDORFy7ds6wDn2S (census in 6efd412a), PRRT_kwDORFy7ds6wDn2U (envoy.md in 6efd412a): each answered as accepted; the implementer had already resolved all three.",
-  "hardening": "nats.go onAsyncError compares the server's %q-quoted queue with the raw queue name, so a machine id holding a double quote would evade the refusal mark. No host name or deployed machine id holds one.",
-  "fastFollow": "Move onAsyncError, its regexes and the subscription-refusal state out of internal/bus/nats.go (now 1016 lines) into a subscription-focused file, in this pull request's next push.",
-  "specDeparture": "Owner-only delivery departs from the approved spec's sentence that another machine's session is reached at its recorded host, else that machine's name. The architect decided it, and the PR body and census record it. Acceptance 5 still holds through the owner's recorded-host rule.",
-  "ci": "Required set on main: lint, typecheck, test, pr-title. Code head c6889bb0: lint, typecheck and test succeeded (Tests run 40226426511); pr-title succeeded (run 40226524652). Legion Envoy and Contracts run 40226426618 was still running at 19:50Z. The compare from c6889bb0 to 0b2e878f touches only .legion/.",
-  "thermonuclear": "Both run at 0b2e878f (code c6889bb0). Deep review: CHANGES (findings 1 and 2, plus the hardening item). Code quality: CHANGES (finding 1, plus file size)."
+  "roundTwoThreads": "PRRT_kwDORFy7ds6wEdnO (no_holder): accepted, fixed in 095cb522. PRRT_kwDORFy7ds6wEdnP (re-home): replied that it still stands in the bridged case, and unresolved.",
+  "risksRecorded": [
+    "Accepted by the architect, dispatch://INFRA-429: a re-homed session depends on its first listener. With that listener stopped, an inbox message gets no prompt and no exception. Round 2's code delivered it (deep review, built listeners).",
+    "A duplicate in the interest-watcher lag window during an ownership cutover (deep review, frozen-watcher overlay). Before this PR, both listeners delivered there too, so it is not a regression from main."
+  ],
+  "ci": "Required set on main: lint, typecheck, test, pr-title. At code head 311640e7 (read 20:45Z): typecheck and pr-title succeeded (PR Title run 40231089313). lint and test were still in progress in Tests run 40231008552, and Legion Envoy and Contracts run 40231008588 was queued. Changes are requested, so the review does not wait for them. The compare from 311640e7 to 44bb6e82 is complete (status ahead, 2 commits, 2 files returned, list not truncated) and touches only .legion/. changed_files 63, and the paginated files call returns 63 rows.",
+  "thermonuclear": "Both run at 44bb6e82 (code 311640e7). Deep review: CHANGES (cache-lag duplicate, recorded as a risk; stopped-owner inbox, accepted under INFRA-429). Code quality: APPROVE (mutation runs show the new tests fail without the fix)."
 }
