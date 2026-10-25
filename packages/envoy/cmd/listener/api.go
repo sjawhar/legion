@@ -358,8 +358,15 @@ const (
 	// outcomeBusUnavailable, which keeps its meaning of a bus that did not answer.
 	outcomeRoleHolderChanged requestOutcome = "role_holder_changed"
 	// outcomePublishDenied is a publish the server refused under this listener's own publish
-	// permissions (bus.ErrPublishDenied). Both message routes can record it, and neither records
-	// it as outcomeBusUnavailable: the bus answered, with a denial no retry can get past.
+	// permissions (bus.ErrPublishDenied). Only the publish route can record it, and only for a
+	// topic the stream does not capture: bus.ErrPublishDenied is made in one place,
+	// confirmPublished (internal/bus/confirm.go), which only the core publishes (publishCoreTo,
+	// RequestCoreTo) reach, and a publish takes the core path only when usesCoreTransport
+	// (internal/bus/nats.go) finds its topic outside streamSubjects (internal/bus/stream.go) - a
+	// role lane or an ad-hoc topic. The send route publishes contracts.AgentSubject(target),
+	// which notifications.agent.> captures, so it goes through publishJetStream and is never
+	// denied this way. The publish route does not record it as outcomeBusUnavailable: the bus
+	// answered, with a denial no retry can get past.
 	outcomePublishDenied requestOutcome = "publish_denied"
 )
 

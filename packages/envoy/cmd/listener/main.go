@@ -759,6 +759,11 @@ func main() {
 		deliveryDuration:  deliveryDuration,
 
 		unplaceableRetryWindow: unplaceableRetryWindow,
+		// One deferral set for the life of the process, shared by the three handlers built from
+		// this config below - the role lane's, the durable's and the one the self-health rebind
+		// builds - so a rebind after a NATS flap draws on the budget the handler it replaces was
+		// holding rather than opening a second one beside it (unplaceableDeferrals, delivery.go).
+		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
 
 	// The role lane is a core-NATS queue subscription in this machine's group. During a rolling

@@ -7,7 +7,7 @@ import (
 	"fmt"
 	"log/slog"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/nats-io/nats.go"
@@ -63,13 +63,17 @@ type listenerDeliveryHandlerConfig struct {
 	// to defaultUnplaceableRetryWindow. It is spent as whole deferrals of unplaceableRetryDelay
 	// each, counted from the message's first delivery, so a window shorter than one delay - a
 	// zero one, what a caller that does not set this field asks for - retries nothing: every
-	// unplaceable delivery is given up on its first attempt.
+	// unplaceable delivery is given up on its first attempt. A push that failed is retried
+	// within it at most pushFailedDeferrals times, however long it is.
 	unplaceableRetryWindow time.Duration
-	// deferredUnplaceable counts the agent deliveries this handler is holding deferred right
-	// now, the count unplaceableDeferralCap bounds. listenerDeliveryHandler fills it in before
-	// it builds its closure, so every caller - test harnesses included - gets a live counter
-	// without setting one; a caller that wants to read or preload it sets its own.
-	deferredUnplaceable *atomic.Int64
+	// deferredUnplaceable is the set of agent deliveries this listener is holding deferred right
+	// now, the budget unplaceableDeferralCap bounds. It is required: main.go makes one and sets
+	// it once, in its deliveryConfig, so every handler built from that config - the role lane's
+	// core handler, the durable's, and the one the self-health rebind builds after a NATS flap -
+	// draws on the one budget. listenerDeliveryHandler refuses a config without one rather than
+	// drawing a private set, since a set per handler is a second budget beside the first on the
+	// very rebind this retry exists for. A test that builds a config sets its own.
+	deferredUnplaceable *unplaceableDeferrals
 }
 
 type deliveryMode uint8
@@ -290,12 +294,12 @@ func publishNoHolderExceptionOrNak(cfg listenerDeliveryHandlerConfig, message de
 // lane (arbitrated to whichever session currently holds the role), a direct
 // agent subject, or the general interest fanout.
 //
-// cfg arrives by value, so the deferral counter the unplaceable retry bounds itself with is
-// filled in here when its caller set none: every handler owns one live counter, shared by the
-// closure's attempts and by nothing else, with no field for a caller to remember to set.
+// cfg arrives by value, so every handler built from one config shares the deferral set the
+// unplaceable retry bounds itself with only because the field is a pointer; a config without one
+// is a programming error, refused here at construction rather than at the first deferral.
 func listenerDeliveryHandler(cfg listenerDeliveryHandlerConfig) func(deliveryMessage) {
 	if cfg.deferredUnplaceable == nil {
-		cfg.deferredUnplaceable = &atomic.Int64{}
+		panic("listener delivery handler built without its deferral set (deferredUnplaceable)")
 	}
 	return func(message deliveryMessage) {
 		var item contracts.Envelope
@@ -567,14 +571,15 @@ const unplaceableRetryDelay = 5 * time.Second
 // against max_deliver.
 const unplaceableMaxDeliveries = consumerMaxDeliver - 2
 
-// unplaceableDeferralCap bounds how many agent deliveries this handler holds deferred at one
-// time. A deferred message is NAKed rather than ACKed, so it keeps one of the durable's
-// MaxAckPending slots (consumerMaxAckPending, durable.go: 256) for the whole window instead of
-// giving it back at once: without a bound, enough concurrently unplaceable messages would hold
-// every slot this machine's durable has and stall it for every topic, including the deliveries
-// that would land on their first attempt. A quarter of the budget leaves three quarters for that
-// traffic. A message that arrives while the cap is reached is given up now, with the ordinary
-// give-up record. TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins the relation.
+// unplaceableDeferralCap bounds how many agent deliveries this listener holds deferred at one
+// time, across every handler it builds (unplaceableDeferrals). A deferred message is NAKed
+// rather than ACKed, so it keeps one of the durable's MaxAckPending slots
+// (consumerMaxAckPending, durable.go: 256) for the whole window instead of giving it back at
+// once: without a bound, enough concurrently unplaceable messages would hold every slot this
+// machine's durable has and stall it for every topic, including the deliveries that would land
+// on their first attempt. A quarter of the budget leaves three quarters for that traffic. A
+// message that arrives while the cap is reached is given up now, with the ordinary give-up
+// record. TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins the relation.
 const unplaceableDeferralCap = consumerMaxAckPending / 4
 
 // defaultUnplaceableRetryWindow is the window main.go uses when ENVOY_UNPLACEABLE_RETRY_WINDOW
@@ -585,24 +590,82 @@ const unplaceableDeferralCap = consumerMaxAckPending / 4
 // TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins both.
 const defaultUnplaceableRetryWindow = 60 * time.Second
 
-// releaseDeferredUnplaceable gives one slot of unplaceableDeferralCap back, never letting the
-// count fall below zero. The count is this process's own bookkeeping, not the stream's, and it
-// is wrong in two directions no accounting here can fix: a listener restart forgets every
-// deferral it was holding, which under-counts, and a redelivery this handler never deferred -
-// one whose AckWait expired, or one another branch NAKed - releases a slot it never took, which
-// under-counts too. Both err towards handing out slots, which the cap's distance from
-// consumerMaxAckPending absorbs; letting the count go negative would not be absorbed, since it
-// would hand out the whole budget.
-func releaseDeferredUnplaceable(deferred *atomic.Int64) {
-	for {
-		held := deferred.Load()
-		if held <= 0 {
-			return
-		}
-		if deferred.CompareAndSwap(held, held-1) {
-			return
-		}
+// pushFailedDeferrals is how many times a push_failed delivery (session.ReasonPushFailed) is
+// deferred, whatever the window would buy the other two causes: one, so such a message is
+// delivered at most twice. The other causes push nothing, so retrying them repeats nothing; this
+// one is different. A deferral clears the attempt-cache entry the delivery recorded, the entry
+// that otherwise keeps a redelivery from pushing a second time, and session.Deliverer's prompt
+// returns the same error for a session server that refused the prompt, a connection that never
+// reached it, and an answer lost after the server had taken the prompt - so every retry of a
+// push that may have landed repeats an instruction the session may already have. One retry
+// covers the blip the retry exists for, a peer restarting or a connection refused for a moment,
+// and bounds that repeat at one; a window's dozen would let the same instruction arrive thirteen
+// times. TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther pins it.
+const pushFailedDeferrals = 1
+
+// unplaceableDeferrals is the set of agent deliveries this listener holds deferred right now,
+// keyed on each message's stream sequence (nats.MsgMetadata.Sequence.Stream), and the budget
+// unplaceableDeferralCap bounds. It is keyed rather than counted so that only a slot this
+// listener took ever comes back: a redelivery is no evidence that this listener deferred the
+// message - the interest path's ShouldNAK, publishNoHolderExceptionOrNak's NAK and an expired
+// AckWait all redeliver too, and they come in step with deferrals (a local session whose server
+// is down produces interest-path NAKs and direct-path deferrals at once) - so a count released on
+// every redelivery could read zero while the cap's worth of messages were still held.
+//
+// What the set guarantees: it never holds more than unplaceableDeferralCap entries, an entry is
+// added only by a deferral this listener made and removed only by that same message's next
+// delivery, so at any moment the messages this process is holding deferred number at most the
+// cap. What it cannot know, since it is this process's memory and not the stream's:
+//   - a listener restart forgets it. The previous process's deferrals stay pending in the durable
+//     until each one's NAK delay ends and it is redelivered, when the new process either takes a
+//     slot for it or gives it up; until then the durable can hold the old process's cap beside
+//     the new one's, which TestUnplaceableRetryWindowFitsTheBoundsItDependsOn keeps under
+//     consumerMaxAckPending (twice the cap is below it).
+//   - a message deferred and never delivered here again - one the stream drops first, or whose
+//     redelivery reaches some other subscriber - keeps its entry for the life of the process.
+//     Such an entry holds no slot of the durable's, and the set's own bound caps the cost: at
+//     worst every entry is one of these, and this listener gives each unplaceable message up on
+//     its first delivery, with its record, until it restarts.
+type unplaceableDeferrals struct {
+	mu   sync.Mutex
+	held map[uint64]struct{}
+}
+
+func newUnplaceableDeferrals() *unplaceableDeferrals {
+	return &unplaceableDeferrals{held: make(map[uint64]struct{}, unplaceableDeferralCap)}
+}
+
+// take records the message at stream sequence seq as deferred and reports whether it fits inside
+// unplaceableDeferralCap. Past the cap it records nothing and reports false, and the caller gives
+// the message up. A sequence already held reports true without a second slot: one message holds
+// one slot however many deliveries of it race. The check and the insert are one critical section,
+// so two deliveries racing for the last slot cannot both take it.
+func (d *unplaceableDeferrals) take(seq uint64) bool {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if _, ok := d.held[seq]; ok {
+		return true
 	}
+	if len(d.held) >= unplaceableDeferralCap {
+		return false
+	}
+	d.held[seq] = struct{}{}
+	return true
+}
+
+// release gives back the slot the message at stream sequence seq holds, and nothing when it holds
+// none: a delivery this listener never deferred has no slot to return.
+func (d *unplaceableDeferrals) release(seq uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	delete(d.held, seq)
+}
+
+// size reports how many slots are held, for a test to read the budget back.
+func (d *unplaceableDeferrals) size() int {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return len(d.held)
 }
 
 // agentSubjectDelivery delivers directly to the session named by the topic
@@ -613,21 +676,23 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 	sessionID := strings.TrimPrefix(item.Topic, contracts.AgentTopicPrefix)
 	// The JetStream metadata carries everything the unplaceable branch below bounds this
 	// message by - its delivery count, against the deferrals the window buys and against
-	// unplaceableMaxDeliveries - and the one mark of a redelivery, so it is read once here for
-	// both. A core delivery has none, and a durable message whose metadata will not parse can
-	// be bounded by nothing, which the branch below gives up on rather than retrying without
-	// end.
+	// unplaceableMaxDeliveries - and its stream sequence, the key of the slot a deferral of it
+	// holds, so it is read once here for both. A core delivery has none, and a durable message
+	// whose metadata will not parse can be bounded by nothing, which the branch below gives up
+	// on rather than retrying without end.
 	var metadata *nats.MsgMetadata
 	if message.mode == durableDelivery {
 		if md, mdErr := message.msg.Metadata(); mdErr == nil {
 			metadata = md
 		}
 	}
-	// Every delivery after the first is a message that has left the deferred set, so its slot
-	// goes back before any disposition below takes one: the redelivery itself is what freed it,
-	// not what this attempt decides to do with the message.
-	if metadata != nil && metadata.NumDelivered > 1 {
-		releaseDeferredUnplaceable(cfg.deferredUnplaceable)
+	// A message this listener deferred has left the deferred state by the time it is delivered
+	// again, so its slot goes back before any disposition below takes one: the delivery itself is
+	// what freed it, not what this attempt decides to do with the message. The release is keyed
+	// on the message, so a delivery this listener never deferred - a first one, or a redelivery
+	// another branch's NAK or an expired AckWait produced - gives nothing back.
+	if metadata != nil {
+		cfg.deferredUnplaceable.release(metadata.Sequence.Stream)
 	}
 	if cfg.dedupeCache.Seen(item.DedupeKey, sessionID) {
 		applyDeliveryOutcome(cfg, item, deliveryOutcome{
@@ -711,14 +776,17 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		// to the port it names did not land. Each can be true of a session that is about to be
 		// placeable - a record still propagating from the bucket, a server still binding its
 		// serve port, a session process restarting - so the message is kept in the stream and
-		// redelivered for as long as cfg.unplaceableRetryWindow, and only then given up, with
-		// a record and a counter of its own rather than the ACKed skip that lost it.
+		// redelivered for as long as cfg.unplaceableRetryWindow, or once for a push that failed
+		// (pushFailedDeferrals), and only then given up, with a record and a counter of its own
+		// rather than the ACKed skip that lost it.
 		//
 		// reason names which of the three causes this is, for the operator and for the counter
-		// label. session.ReasonNone keeps no_push_target's: the only outcome that reaches here
-		// with it is ErrWrongMachine, a record this listener resolved that names another
-		// machine, and what an operator acts on there is the same fact - a record exists and
-		// this listener had nothing to push to.
+		// label. session.ReasonNone keeps no_push_target's label only because the switch needs a
+		// default: in a deployed listener nothing reaches here with it. HandleAgentMessage
+		// answers undelivered, error-free and ReasonNone only for session.ErrWrongMachine, and
+		// no production code returns that error - its one producer is the test transport in
+		// TestE2E_AgentToAgent_RemoteMachine (internal/integration/e2e_test.go). The arm is
+		// defensive, and no_push_target on a dashboard never means it.
 		reason := "no_push_target"
 		giveUpStatus := "unplaceable_no_push_target"
 		switch result.Reason {
@@ -743,26 +811,32 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 		if cfg.unplaceableRetryWindow > 0 {
 			windowDeferrals = uint64(cfg.unplaceableRetryWindow / unplaceableRetryDelay)
 		}
-		// What does not hold the retry open is session.ReasonNone: a session another listener
-		// owns, whose message this listener is not the one to place however often it is
-		// redelivered. Nothing else reaches here with it - a push that failed on the wire is
-		// ReasonPushFailed, which is retried, and the interest path's failures return
-		// ShouldNAK with an Err set (internal/session/handler.go) and are answered above. A
-		// read that did not answer is no evidence of absence and must not end the retries, and
-		// it does not: it leaves no entry, and an attempt with no entry reports
-		// ReasonNoSessionRecord here, so the reason alone already holds the window open for it.
+		// A push that failed may have landed, so it is retried once and no more
+		// (pushFailedDeferrals); the two causes that push nothing keep the window's whole
+		// allowance. The deferral line below reports this allowance, the number the decision
+		// was made on, under window_deferrals.
+		if result.Reason == session.ReasonPushFailed {
+			windowDeferrals = min(windowDeferrals, pushFailedDeferrals)
+		}
+		// What does not hold the retry open is session.ReasonNone, the defensive arm above:
+		// should a deliverer ever return session.ErrWrongMachine, the session it names is
+		// another listener's to place, however often this one sees the message. Every outcome a
+		// deployed listener reaches here with carries one of the three reasons - no entry is
+		// ReasonNoSessionRecord, a record with no port ReasonNoPushTarget, and any error the
+		// push itself returns, a refusal or an unreachable peer, ReasonPushFailed
+		// (internal/session/handler.go, reasonFor) - and the interest path's failures return
+		// ShouldNAK with an Err set and are answered above. A read that did not answer is no
+		// evidence of absence and must not end the retries, and it does not: it leaves no
+		// entry, and an attempt with no entry reports ReasonNoSessionRecord here, so the reason
+		// alone already holds the window open for it.
 		placementMayChange := result.Reason != session.ReasonNone
 		deferred := false
 		if metadata != nil && placementMayChange && metadata.NumDelivered <= windowDeferrals &&
 			metadata.NumDelivered < unplaceableMaxDeliveries {
-			// The cap is taken by incrementing first and giving the slot straight back when
-			// the count was already spent, so two deliveries racing for the last slot cannot
-			// both take it: each sees its own post-increment count, and only one of them is
-			// inside the cap.
-			deferred = cfg.deferredUnplaceable.Add(1) <= unplaceableDeferralCap
-			if !deferred {
-				cfg.deferredUnplaceable.Add(-1)
-			}
+			// The slot is this message's own, keyed on its stream sequence, so only this
+			// message's next delivery gives it back. A full set takes nothing, and the delivery
+			// falls through to the ordinary give-up below.
+			deferred = cfg.deferredUnplaceable.take(metadata.Sequence.Stream)
 		}
 		if deferred {
 			// No exception and no delivery counter: the message is not disposed of yet, and
@@ -789,10 +863,10 @@ func agentSubjectDelivery(cfg listenerDeliveryHandlerConfig, message deliveryMes
 			message.finalizeAfter(unplaceableRetryDelay)
 			return
 		}
-		// Given up: the window's deferrals are spent, the delivery count is reached, this
-		// handler is already holding unplaceableDeferralCap messages, the metadata could not be
-		// read, or this is a core delivery nothing would redeliver. The no_holder exception
-		// goes out here, once per message rather than once per attempt.
+		// Given up: the deferrals this cause is allowed are spent, the delivery count is reached,
+		// this listener is already holding unplaceableDeferralCap messages, the metadata could
+		// not be read, or this is a core delivery nothing would redeliver. The no_holder
+		// exception goes out here, once per message rather than once per attempt.
 		if !publishNoHolderExceptionOrNak(cfg, message, item, sessionID) {
 			return
 		}

@@ -26,7 +26,10 @@ func TestUnplaceableRetryWindowFitsTheBoundsItDependsOn(t *testing.T) {
 	}
 	// A deferred message is NAKed rather than ACKed, so it holds one of the durable's pending
 	// slots for its whole window instead of giving it back at once. The cap on how many this
-	// handler defers at a time is what keeps those holds from becoming every slot there is.
+	// listener defers at a time is what keeps those holds from becoming every slot there is.
+	// Twice the cap is also what one restart can leave pending at once: the new process starts with
+	// an empty deferral set while the old one's deferrals wait out their NAK delay
+	// (unplaceableDeferrals), so this bound is what keeps that moment under MaxAckPending too.
 	if unplaceableDeferralCap*2 >= consumerMaxAckPending {
 		t.Fatalf("a cap of %d messages deferred at once against the durable's MaxAckPending of %d leaves most of the pending budget to deferrals: enough concurrently unplaceable messages would hold every slot at once and stall this machine's durable for every topic, including the deliveries that would land on their first attempt",
 			unplaceableDeferralCap, consumerMaxAckPending)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -218,6 +219,13 @@ func startUnplaceableDeliveryRun(t *testing.T, target string, window, soak time.
 // handler sees its second.
 func startUnplaceableDelivery(t *testing.T, harness listenerDeliveryHarness, cfg listenerDeliveryHandlerConfig, target string, soak time.Duration) unplaceableDeliveryRun {
 	t.Helper()
+	return startDeliveryThrough(t, harness, jetStreamDeliveryHandler(cfg), target, soak)
+}
+
+// startDeliveryThrough is startUnplaceableDelivery with the subscription's handler given whole,
+// for a run that must put something in front of the listener's own handler.
+func startDeliveryThrough(t *testing.T, harness listenerDeliveryHarness, handler natsgo.MsgHandler, target string, soak time.Duration) unplaceableDeliveryRun {
+	t.Helper()
 	subject := contracts.AgentSubject(target)
 	item := listenerTestEnvelope(subject, "unplaceable-"+target)
 	exceptions, err := harness.client.Conn.SubscribeSync("notifications.envoy.exceptions." + subject)
@@ -234,7 +242,7 @@ func startUnplaceableDelivery(t *testing.T, harness listenerDeliveryHarness, cfg
 	time.Sleep(soak)
 
 	inbox := natsgo.NewInbox()
-	subscription, err := harness.client.Conn.Subscribe(inbox, jetStreamDeliveryHandler(cfg))
+	subscription, err := harness.client.Conn.Subscribe(inbox, handler)
 	if err != nil {
 		t.Fatalf("subscribe the delivery handler on %s: %v", inbox, err)
 	}
@@ -546,7 +554,20 @@ func TestGiveUpCounterSeparatesItsThreeCauses(t *testing.T) {
 	}
 }
 
-// The deferral cap is what keeps this handler's deferrals from taking the durable's whole pending
+// preloadDeferrals takes n slots of set for messages no test stream will ever number: sequences
+// counted down from the top of the range, far above anything a stream these tests publish to
+// assigns, so a release keyed on a real message's sequence can never give one of them back - only
+// a release that is not keyed on the message can.
+func preloadDeferrals(t *testing.T, set *unplaceableDeferrals, n int) {
+	t.Helper()
+	for i := range n {
+		if !set.take(math.MaxUint64 - uint64(i)) {
+			t.Fatalf("preloading slot %d of %d was refused: the set's cap is %d", i+1, n, unplaceableDeferralCap)
+		}
+	}
+}
+
+// The deferral cap is what keeps this listener's deferrals from taking the durable's whole pending
 // budget: a deferred message is NAKed rather than ACKed, so it holds one of consumerMaxAckPending
 // slots for its whole window, and enough of them at once would stall this machine's durable for
 // every topic. At the cap, a message every other bound would have deferred is given up at once
@@ -559,8 +580,8 @@ func TestUnplaceableDeferralsStopAtTheirCap(t *testing.T) {
 		harness := unplaceableHarness(t)
 		cfg := harness.config
 		cfg.unplaceableRetryWindow = oneDeferralWindow
-		held := &atomic.Int64{}
-		held.Store(unplaceableDeferralCap)
+		held := newUnplaceableDeferrals()
+		preloadDeferrals(t, held, unplaceableDeferralCap)
 		cfg.deferredUnplaceable = held
 		run := startUnplaceableDelivery(t, harness, cfg, "ses_cap_reached", 0)
 
@@ -578,8 +599,8 @@ func TestUnplaceableDeferralsStopAtTheirCap(t *testing.T) {
 		if giveUps[0].Reason != "no_session_record" || giveUps[0].DeliveryStatus != "unplaceable_no_record" {
 			t.Fatalf("the give-up at the cap names reason %q and delivery_status %q, want no_session_record and unplaceable_no_record - a message given up at the cap gets the ordinary record of its own cause:\n%s", giveUps[0].Reason, giveUps[0].DeliveryStatus, logs)
 		}
-		if got := held.Load(); got != unplaceableDeferralCap {
-			t.Fatalf("the deferred count is %d after the give-up, want the %d it started at - a message that was not deferred must give its slot straight back", got, int64(unplaceableDeferralCap))
+		if got := held.size(); got != unplaceableDeferralCap {
+			t.Fatalf("the set holds %d slots after the give-up, want the %d it started with - a message that was not deferred takes no slot", got, unplaceableDeferralCap)
 		}
 		body := metricsBody(t, harness)
 		if got := counterValue(t, body, nakedCounter); got != -1 {
@@ -592,16 +613,16 @@ func TestUnplaceableDeferralsStopAtTheirCap(t *testing.T) {
 		harness := unplaceableHarness(t)
 		cfg := harness.config
 		cfg.unplaceableRetryWindow = oneDeferralWindow
-		held := &atomic.Int64{}
-		held.Store(unplaceableDeferralCap - 1)
+		held := newUnplaceableDeferrals()
+		preloadDeferrals(t, held, unplaceableDeferralCap-1)
 		cfg.deferredUnplaceable = held
 		startUnplaceableDelivery(t, harness, cfg, "ses_cap_last_slot", 0)
 
 		waitFor(t, 15*time.Second, "the delivery in the last slot to be deferred", func() bool {
 			return len(deliveryRecords(t, harness.logs.String(), "listener agent delivery deferred")) > 0
 		})
-		if got := held.Load(); got != unplaceableDeferralCap {
-			t.Fatalf("the deferred count is %d after the deferral, want the cap of %d - the deferral takes the last slot", got, int64(unplaceableDeferralCap))
+		if got := held.size(); got != unplaceableDeferralCap {
+			t.Fatalf("the set holds %d slots after the deferral, want the cap of %d - the deferral takes the last slot", got, unplaceableDeferralCap)
 		}
 		logs := harness.logs.String()
 		deferrals := deliveryRecords(t, logs, "listener agent delivery deferred")
@@ -618,27 +639,26 @@ func TestUnplaceableDeferralsStopAtTheirCap(t *testing.T) {
 // whole unplaceableRetryDelay steps, and the half-step keeps the arithmetic off the boundary.
 const twoDeferralWindow = 2*unplaceableRetryDelay + unplaceableRetryDelay/2
 
-// A redelivery gives its deferral slot back. The cap (unplaceableDeferralCap) counts the
-// messages this handler is holding deferred right now, so a slot that is taken and never
-// released is a slot gone for the life of the process: after unplaceableDeferralCap deferrals
-// the handler would defer nothing ever again, give every unplaceable message up on its first
-// delivery, and say nothing about why - the whole retry quietly stopping, which is the shape of
-// failure this issue exists to end. Nothing else pins it: the cap's own test preloads the count
-// and reads it back after one disposition, and every other unplaceable test runs with the count
-// at zero, far from the cap, so deleting the release leaves them all green.
+// A redelivery gives its deferral slot back. The set (unplaceableDeferrals) holds the messages
+// this listener is holding deferred right now, so a slot that is taken and never released is a
+// slot gone for the life of the process: after unplaceableDeferralCap deferrals the listener
+// would defer nothing ever again, give every unplaceable message up on its first delivery, and
+// say nothing about why - the whole retry quietly stopping, which is the shape of failure this
+// issue exists to end. Nothing else pins it: the cap's own test preloads the set and reads it
+// back after one disposition, and every other unplaceable test runs with the set nearly empty,
+// far from the cap, so deleting the release leaves them all green.
 //
-// The run starts one slot under the cap, so the second deferral is possible only if the
-// redelivery released the first: without the release the count is already past the cap when the
-// redelivery arrives, and this message is given up at attempt 2 instead. The negative control is
-// the count itself, read at both ends - it returns to the cap after each deferral and to the
-// slot below it once the message is given up, so the message is holding exactly one slot
-// throughout and the pair cannot be produced by a handler that counts nothing.
+// The run starts one slot under the cap, so the message holds the last slot while it is deferred,
+// and the set is read at both ends: at the cap after each deferral, and back at the slot below it
+// once the message is given up. Without the release the message's slot outlives it - the set
+// still holds it after the give-up - and a release that is not keyed on the message would show up
+// here as a count below the cap while the message is still held.
 func TestARedeliveryGivesItsDeferralSlotBack(t *testing.T) {
 	harness := unplaceableHarness(t)
 	cfg := harness.config
 	cfg.unplaceableRetryWindow = twoDeferralWindow
-	held := &atomic.Int64{}
-	held.Store(unplaceableDeferralCap - 1)
+	held := newUnplaceableDeferrals()
+	preloadDeferrals(t, held, unplaceableDeferralCap-1)
 	cfg.deferredUnplaceable = held
 	startUnplaceableDelivery(t, harness, cfg, "ses_slot_released", 0)
 
@@ -654,9 +674,9 @@ func TestARedeliveryGivesItsDeferralSlotBack(t *testing.T) {
 		t.Fatalf("the deferrals are attempts %d and %d, want 1 and 2 - the second is the redelivery the first asked for:\n%s",
 			deferrals[0].Attempt, deferrals[1].Attempt, logs)
 	}
-	if got := held.Load(); got != unplaceableDeferralCap {
-		t.Fatalf("the deferred count is %d while one message is deferred, want the cap of %d - a redelivery that took a second slot without giving the first back would read %d",
-			got, int64(unplaceableDeferralCap), int64(unplaceableDeferralCap)+1)
+	if got := held.size(); got != unplaceableDeferralCap {
+		t.Fatalf("the set holds %d slots while one message is deferred, want the cap of %d - the message holds exactly one slot across its deferrals",
+			got, unplaceableDeferralCap)
 	}
 	if got := len(deliveryRecords(t, logs, "listener agent delivery given up")); got != 0 {
 		t.Fatalf("%d give-up lines while the window still has a deferral left, want none:\n%s", got, logs)
@@ -665,8 +685,173 @@ func TestARedeliveryGivesItsDeferralSlotBack(t *testing.T) {
 	waitFor(t, 30*time.Second, "the message to be given up once its deferrals are spent", func() bool {
 		return len(deliveryRecords(t, harness.logs.String(), "listener agent delivery given up")) > 0
 	})
-	if got := held.Load(); got != unplaceableDeferralCap-1 {
-		t.Fatalf("the deferred count is %d after the give-up, want the %d the run started at - a message no longer held must leave no slot behind",
-			got, int64(unplaceableDeferralCap)-1)
+	if got := held.size(); got != unplaceableDeferralCap-1 {
+		t.Fatalf("the set holds %d slots after the give-up, want the %d the run started with - a message no longer held must leave no slot behind",
+			got, unplaceableDeferralCap-1)
+	}
+}
+
+// A redelivery this listener never deferred gives no slot back. Only a message this listener
+// deferred holds a slot, so only that message's next delivery may return one: a redelivery that
+// another branch's NAK produced - the interest path's ShouldNAK, publishNoHolderExceptionOrNak's
+// NAK - or an expired AckWait is no sign a slot was ever taken for it. Those redeliveries come in
+// step with deferrals, too: a local session whose server is down produces interest-path NAKs and
+// direct-path deferrals at once. A release on every redelivery gives back slots it never took,
+// until the budget reads empty while the listener is holding its whole cap, and the cap bounds
+// nothing.
+//
+// The NAK here is the run's own, put in front of the listener's handler in place of those
+// branches: it takes the message's first delivery and asks for it again at once, so the handler's
+// first sight of the message is delivery 2, a redelivery it never deferred. The set starts full of
+// other messages' slots. A release keyed on the message returns none of them, so the redelivery
+// finds the cap reached and is given up; a release on any redelivery would hand one back and the
+// handler would defer the message instead. The negative control is the sibling subtest: one slot
+// under the cap, the same redelivery on the same rig is deferred at attempt 2, so the give-up
+// above is the cap holding and not a rig whose redeliveries can never be deferred.
+func TestARedeliveryThisListenerNeverDeferredGivesNoSlotBack(t *testing.T) {
+	start := func(t *testing.T, target string, preload int) (listenerDeliveryHarness, *unplaceableDeferrals) {
+		t.Helper()
+		harness := unplaceableHarness(t)
+		cfg := harness.config
+		// Two deferrals, so attempt 2 is inside the window: the redelivery is deferred whenever
+		// a slot is free, and only the cap can give it up.
+		cfg.unplaceableRetryWindow = twoDeferralWindow
+		held := newUnplaceableDeferrals()
+		preloadDeferrals(t, held, preload)
+		cfg.deferredUnplaceable = held
+		handler := jetStreamDeliveryHandler(cfg)
+		var firstTaken atomic.Bool
+		startDeliveryThrough(t, harness, func(msg *natsgo.Msg) {
+			if firstTaken.CompareAndSwap(false, true) {
+				if err := msg.Nak(); err != nil {
+					t.Errorf("NAK the first delivery of %s: %v", target, err)
+				}
+				return
+			}
+			handler(msg)
+		}, target, 0)
+		return harness, held
+	}
+
+	t.Run("at the cap, the redelivery is given up and every slot stays held", func(t *testing.T) {
+		harness, held := start(t, "ses_untaken_release_at_cap", unplaceableDeferralCap)
+
+		waitFor(t, 15*time.Second, "the redelivery that found the cap reached to be given up", func() bool {
+			return len(deliveryRecords(t, harness.logs.String(), "listener agent delivery given up")) > 0
+		})
+		logs := harness.logs.String()
+		if got := len(deliveryRecords(t, logs, "listener agent delivery deferred")); got != 0 {
+			t.Fatalf("%d deferral lines with the set full, want none - a redelivery this listener never deferred freed a slot it never took:\n%s", got, logs)
+		}
+		giveUps := deliveryRecords(t, logs, "listener agent delivery given up")
+		if len(giveUps) != 1 || giveUps[0].Reason != "no_session_record" {
+			t.Fatalf("want exactly one give-up line naming no_session_record, got %d:\n%s", len(giveUps), logs)
+		}
+		if got := held.size(); got != unplaceableDeferralCap {
+			t.Fatalf("the set holds %d slots after the redelivery, want the %d it started with - the redelivery gave back a slot it never took", got, unplaceableDeferralCap)
+		}
+	})
+
+	t.Run("one slot under the cap, the same redelivery is deferred", func(t *testing.T) {
+		harness, held := start(t, "ses_untaken_release_last_slot", unplaceableDeferralCap-1)
+
+		waitFor(t, 15*time.Second, "the redelivery to be deferred in the last slot", func() bool {
+			return len(deliveryRecords(t, harness.logs.String(), "listener agent delivery deferred")) > 0
+		})
+		logs := harness.logs.String()
+		deferrals := deliveryRecords(t, logs, "listener agent delivery deferred")
+		if deferrals[0].Attempt != 2 {
+			t.Fatalf("the deferral is attempt %d, want 2 - the handler's first sight of the message is the redelivery the run's own NAK asked for:\n%s", deferrals[0].Attempt, logs)
+		}
+		if got := held.size(); got != unplaceableDeferralCap {
+			t.Fatalf("the set holds %d slots after the deferral, want the cap of %d - the redelivery takes the last slot", got, unplaceableDeferralCap)
+		}
+	})
+}
+
+// recordsFor keeps the records that name sessionID, for runs that share one harness's log.
+func recordsFor(records []deliveryRecord, sessionID string) []deliveryRecord {
+	var kept []deliveryRecord
+	for _, record := range records {
+		if record.SessionID == sessionID {
+			kept = append(kept, record)
+		}
+	}
+	return kept
+}
+
+// A push that failed is retried once, however long the window, and the causes that push nothing
+// keep the window's whole allowance. A failed push may have landed: session.Deliverer's prompt
+// returns the same error for a session server that refused the prompt, a connection that never
+// reached it, and an answer lost after the server took the prompt, and every deferral clears the
+// attempt-cache entry that would otherwise stop a redelivery pushing again - so each retry of such
+// a push can hand the session an instruction it already has. At the default window's dozen
+// deferrals that is the same instruction up to thirteen times; at pushFailedDeferrals it is twice
+// at most.
+//
+// Both messages run at the default window on one harness. The push-failed one is deferred on its
+// first delivery and given up on its second, having been pushed exactly twice; the no-record one,
+// in the same window, is deferred again on its second delivery - which is the negative control:
+// the give-up at attempt 2 is the push-failure bound and not a window that ran out.
+func TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther(t *testing.T) {
+	const (
+		pushFailed = "ses_bound_push_failed"
+		noRecord   = "ses_bound_no_record"
+	)
+	windowDeferrals := uint64(defaultUnplaceableRetryWindow / unplaceableRetryDelay)
+	if windowDeferrals < pushFailedDeferrals+2 {
+		t.Fatalf("the default window buys %d deferrals, which cannot show a push failure stopping at %d while another cause goes on", windowDeferrals, pushFailedDeferrals)
+	}
+	var pushes atomic.Int32
+	harness := newListenerDeliveryHarness(t, listenerTransport(func(request *http.Request) (*http.Response, error) {
+		if !strings.Contains(request.URL.Path, pushFailed) {
+			t.Errorf("only %s has a port to push to, got a push to %s", pushFailed, request.URL)
+		}
+		pushes.Add(1)
+		return nil, fmt.Errorf("dial tcp: connect: connection refused")
+	}))
+	if err := harness.sessions.Put(pushFailed, session.SessionEntry{Port: 1, MachineID: "test-machine"}); err != nil {
+		t.Fatalf("register the unreachable session: %v", err)
+	}
+	cfg := harness.config
+	cfg.unplaceableRetryWindow = defaultUnplaceableRetryWindow
+	startUnplaceableDelivery(t, harness, cfg, pushFailed, 0)
+	startUnplaceableDelivery(t, harness, cfg, noRecord, 0)
+
+	waitFor(t, 20*time.Second, "the push-failed message to be given up", func() bool {
+		return len(recordsFor(deliveryRecords(t, harness.logs.String(), "listener agent delivery given up"), pushFailed)) > 0
+	})
+	waitFor(t, 20*time.Second, "the no-record message to be deferred on its second delivery", func() bool {
+		return len(recordsFor(deliveryRecords(t, harness.logs.String(), "listener agent delivery deferred"), noRecord)) >= 2
+	})
+	logs := harness.logs.String()
+
+	pushDeferrals := recordsFor(deliveryRecords(t, logs, "listener agent delivery deferred"), pushFailed)
+	if len(pushDeferrals) != pushFailedDeferrals {
+		t.Fatalf("%d deferral lines for the failed push, want %d - a push that may have landed is retried once:\n%s", len(pushDeferrals), pushFailedDeferrals, logs)
+	}
+	if pushDeferrals[0].Attempt != 1 || pushDeferrals[0].Reason != "push_failed" {
+		t.Fatalf("the failed push's deferral is attempt %d with reason %q, want attempt 1 and push_failed:\n%s", pushDeferrals[0].Attempt, pushDeferrals[0].Reason, logs)
+	}
+	if pushDeferrals[0].WindowDeferrals != pushFailedDeferrals {
+		t.Fatalf("the failed push's deferral names window_deferrals %d, want %d - the line names the allowance the decision was made on, not the window's:\n%s", pushDeferrals[0].WindowDeferrals, pushFailedDeferrals, logs)
+	}
+	pushGiveUps := recordsFor(deliveryRecords(t, logs, "listener agent delivery given up"), pushFailed)
+	if len(pushGiveUps) != 1 || pushGiveUps[0].Reason != "push_failed" || pushGiveUps[0].DeliveryStatus != "unplaceable_push_failed" {
+		t.Fatalf("want exactly one give-up line for the failed push, naming push_failed and unplaceable_push_failed:\n%s", logs)
+	}
+	if got := pushes.Load(); got != pushFailedDeferrals+1 {
+		t.Fatalf("the session was pushed %d times, want %d - each retry of a push that may have landed repeats it", got, pushFailedDeferrals+1)
+	}
+
+	recordDeferrals := recordsFor(deliveryRecords(t, logs, "listener agent delivery deferred"), noRecord)
+	if recordDeferrals[1].Attempt != 2 || recordDeferrals[1].Reason != "no_session_record" {
+		t.Fatalf("the no-record message's second deferral is attempt %d with reason %q, want attempt 2 and no_session_record:\n%s", recordDeferrals[1].Attempt, recordDeferrals[1].Reason, logs)
+	}
+	if recordDeferrals[1].WindowDeferrals != windowDeferrals {
+		t.Fatalf("the no-record message's deferral names window_deferrals %d, want the window's %d:\n%s", recordDeferrals[1].WindowDeferrals, windowDeferrals, logs)
+	}
+	if got := len(recordsFor(deliveryRecords(t, logs, "listener agent delivery given up"), noRecord)); got != 0 {
+		t.Fatalf("%d give-up lines for the no-record message at attempt 2, want none - the window still has deferrals for it:\n%s", got, logs)
 	}
 }

@@ -15,9 +15,11 @@ type HandleAgentReason uint8
 
 const (
 	// ReasonNone is every outcome that is none of the three causes below: a push that landed, a
-	// self-subscribed skip (the session reads the message off its own subscription), and a
-	// session another listener owns (ErrWrongMachine, which its callers answer before the
-	// mapping below is reached).
+	// self-subscribed skip (the session reads the message off its own subscription), and the
+	// ErrWrongMachine answer both paths keep for a session another listener owns - which no
+	// production deliverer produces: the one producer of ErrWrongMachine is a test transport
+	// (TestE2E_AgentToAgent_RemoteMachine, internal/integration/e2e_test.go), so in a deployed
+	// listener an undelivered, error-free result never carries this reason.
 	ReasonNone HandleAgentReason = iota
 	// ReasonNoSessionRecord is a session the resolution found no record of. A caller holding a
 	// record source that trails the store - or one whose read did not answer - may ask again.
@@ -28,18 +30,19 @@ const (
 	// out, and the listener's delivery does, deferring such a message for its whole retry
 	// window before it gives up (cmd/listener/delivery.go).
 	ReasonNoPushTarget
-	// ReasonPushFailed is a record that named a serve port the push did not reach: an
-	// unreachable peer, a session process restarting, a connection refused. The attempt failed
-	// and learned nothing about the session, which is an unverified absence like the two above,
-	// so a caller may ask again and the listener's delivery retries it in the same window.
+	// ReasonPushFailed is a record that named a serve port the push did not land on: an
+	// unreachable peer, a session process restarting, a connection refused, or a server that
+	// answered with anything but 204. The attempt failed and cannot tell whether the session
+	// took the prompt, so a caller may ask again only at the cost of repeating it; the
+	// listener's delivery retries it once (pushFailedDeferrals, cmd/listener/delivery.go).
 	ReasonPushFailed
 )
 
 // reasonFor maps the delivery sentinels onto the reason the caller acts on. Every other error -
 // a refused push, an unreachable machine - is ReasonPushFailed: it is a failure of this attempt,
 // not a statement about the session's record, and a later attempt may well land. ErrWrongMachine
-// never reaches here: both call sites answer it before they map, since a session another listener
-// owns is not this one's to retry.
+// never reaches here: both call sites answer it before they map, as defence only, since nothing
+// outside a test returns it (see ReasonNone).
 func reasonFor(err error) HandleAgentReason {
 	switch {
 	case errors.Is(err, ErrNoSessionRecord):
@@ -58,9 +61,11 @@ type HandleAgentResult struct {
 	ShouldNAK bool
 	Err       error
 	// Reason tells apart the three causes of an undelivered message that carries no error for
-	// the caller to act on. It is set on every outcome a failed delivery produced - the two
-	// sentinels and the push that failed on the wire - including the NAKing interest path, so
-	// the caller reads one field rather than branching on which path produced the result.
+	// the caller to act on: the registry path's undelivered result, which the listener's delivery
+	// retries or gives up on by this field alone. The NAKing interest path sets it too, but its
+	// result carries Err and ShouldNAK, and the listener answers that result by those before it
+	// ever reads Reason (cmd/listener/delivery.go, agentSubjectDelivery), so there it is read by
+	// nothing.
 	Reason HandleAgentReason
 }
 

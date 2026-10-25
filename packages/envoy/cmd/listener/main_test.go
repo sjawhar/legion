@@ -3511,6 +3511,9 @@ func newListenerDeliveryHarness(t *testing.T, transport http.RoundTripper) liste
 		messagesDelivered: met.NewCounter("test_messages_delivered", "test"),
 		messagesNAKed:     met.NewCounter("test_messages_naked", "test"),
 		deliveryDuration:  met.NewHistogram("test_delivery_duration", "test", metrics.DefaultBuckets),
+		// The handler refuses a config without its deferral set, as main.go's always has one;
+		// the harness's two handlers share this one as main.go's do.
+		deferredUnplaceable: newUnplaceableDeferrals(),
 	}
 	return listenerDeliveryHarness{
 		client:      client,
