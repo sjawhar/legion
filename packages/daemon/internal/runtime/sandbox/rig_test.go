@@ -883,10 +883,12 @@ func (g *rig) sent(token claim.Token) []shimwire.Frame {
 	return slices.Clone(g.commands[token])
 }
 
-// sandboxObject is a Sandbox as the API would hold it, for a test's starting state: one the runtime
-// made, so it owns its volume (the `issue` claim template), and carrying a resourceVersion, as every
-// object the API serves does. A test that needs the tree-volume layout, a Sandbox owning no volume,
-// drops the template itself (withoutVolume).
+// sandboxObject is a Sandbox as the API would hold it, for a test's starting state: one owning the
+// `issue` claim template, which is the controller's Sandbox as this runtime makes it and an issue's
+// as the release before the pod-owned disk made it, and carrying a resourceVersion, as every object
+// the API serves does. A test that needs the issue Sandbox this runtime now makes, or the
+// tree-volume layout's child, which owned no volume either, drops the template itself
+// (withoutVolume).
 func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]string, conditions ...metav1.Condition) *unstructured.Unstructured {
 	t.Helper()
 	s := sandbox{
@@ -908,8 +910,8 @@ func sandboxObject(t *testing.T, name, uid, mode string, labels map[string]strin
 	return u
 }
 
-// withoutVolume is u in the tree-volume layout: a Sandbox that mounted its tree root's volume and
-// owns none of its own.
+// withoutVolume is u owning no claim template: the issue Sandbox this runtime makes, whose disk its
+// own pod carries, and the tree-volume layout's child, which mounted its tree root's volume.
 func withoutVolume(u *unstructured.Unstructured) *unstructured.Unstructured {
 	unstructured.RemoveNestedField(u.Object, "spec", "volumeClaimTemplates")
 	return u

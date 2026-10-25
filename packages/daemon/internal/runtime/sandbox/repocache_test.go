@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log/slog"
 	"maps"
 	"net"
@@ -557,7 +558,7 @@ func TestCensusAcceptsACacheSandboxAndRefusesAMalformedOne(t *testing.T) {
 	}
 	g.spawn(rootSpec(t))
 	sandboxes := g.dyn.Resource(sandboxGVR).Namespace(testNamespace)
-	if err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject); err != nil {
+	if err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject, slogTo(io.Discard)); err != nil {
 		t.Fatalf("census of a cache Sandbox and an issue pod = %v, want none", err)
 	}
 	malformed := map[string]func(u *unstructured.Unstructured){
@@ -589,7 +590,7 @@ func TestCensusAcceptsACacheSandboxAndRefusesAMalformedOne(t *testing.T) {
 	if err := g.dyn.Tracker().Create(sandboxGVR, issue, testNamespace); err != nil {
 		t.Fatal(err)
 	}
-	err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject)
+	err := rejectLegacyIssueSandboxes(g.ctx, sandboxes, testProject, slogTo(io.Discard))
 	if err == nil {
 		t.Fatal("census of malformed caches passed")
 	}

@@ -240,9 +240,10 @@ func (rig *initRig) launch(spec runtime.SpawnSpec) corev1.PodSpec {
 }
 
 // run executes the pod's init containers in order, as the kubelet does: each volume a directory —
-// the tree volume the rig's, every other one the pod's own, gone with the pod — and each container
-// a process of the Go legion built from this commit, with the manifest's argv, environment, and
-// working directory, every pod path in them moved to the directory of the volume mounted there.
+// the pod's disk the rig's tree, whether the pod takes it from a claim or from an ephemeral volume
+// of its own, every other one the pod's own, gone with the pod — and each container a process of
+// the Go legion built from this commit, with the manifest's argv, environment, and working
+// directory, every pod path in them moved to the directory of the volume mounted there.
 // While a container runs, every volume it does not mount, and every other container's filesystem,
 // is unreadable; a read-only mount is not writable. The first container that fails ends the pod.
 func (rig *initRig) run(pod corev1.PodSpec) error {
@@ -272,7 +273,7 @@ func (rig *initRig) run(pod corev1.PodSpec) error {
 	volumes := map[string]string{}
 	for _, volume := range pod.Volumes {
 		dir := filepath.Join(podDir, "volumes", volume.Name)
-		if volume.PersistentVolumeClaim != nil {
+		if volume.PersistentVolumeClaim != nil || volume.Ephemeral != nil {
 			dir = rig.tree
 		} else if err := os.MkdirAll(dir, 0o700); err != nil {
 			return err

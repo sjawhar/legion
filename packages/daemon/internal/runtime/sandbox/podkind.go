@@ -14,13 +14,13 @@ import (
 )
 
 // podKind is which of the runtime's two pods a Sandbox runs: an issue pod (issuePod), which runs
-// every workflow role of one issue on the issue's own volume and provisions the issue's workspace,
-// or the project controller's pod (controllerPod, `controller: daemon`), which runs the controller
-// alone on a volume of its own and provisions nothing. prepare decides a launch's kind once, from
-// its claim, and a stored Sandbox's kind is the one its labels name (podKindOf). Building a pod
-// asks the launch's kind for every facet the two build differently; supervision — relaunch's check
-// of the running pod, the launchers, Probe, Suspend and the address records — asks a kind only its
-// roles.
+// every workflow role of one issue on a disk its own pod owns and provisions the issue's
+// workspace, or the project controller's pod (controllerPod, `controller: daemon`), which runs the
+// controller alone on the volume its Sandbox owns and provisions nothing. prepare decides a
+// launch's kind once, from its claim, and a stored Sandbox's kind is the one its labels name
+// (podKindOf). Building a pod asks the launch's kind for every facet the two build differently;
+// supervision — relaunch's check of the running pod, the launchers, Probe, Suspend and the
+// address records — asks a kind only its roles.
 type podKind interface {
 	// roles are the pod's launcher roles, one container each.
 	roles() []claim.Role
@@ -31,8 +31,14 @@ type podKind interface {
 	// must already hold what it left, refusing a spec it cannot honour.
 	prepare(l *launch) error
 	// labels are the pod's resource labels, on its Sandbox, pod template and Secrets, which name
-	// its kind (podKindOf); its volume claim template carries them less the tree (claimLabels).
+	// its kind (podKindOf).
 	labels(project string, l launch) map[string]string
+	// claimTemplates are the volumes the kind's Sandbox owns, which outlive its pods: the
+	// controller's one `issue` template, and none at all for an issue, whose disk its pod owns.
+	claimTemplates(r *Runtime, l launch) []volumeClaimTemplate
+	// diskSource is where the pod's one disk, mounted under the fixed name issueVolume, comes
+	// from: the claim its Sandbox owns, or an ephemeral volume of the pod's own.
+	diskSource(r *Runtime, l launch) corev1.VolumeSource
 	// secretAnnotations are the annotations each of the pod's Secrets carries.
 	secretAnnotations(l launch) map[string]string
 	// initContainers are the pod's init containers, and initVolumes the volumes only they mount,
@@ -101,6 +107,22 @@ func (issuePod) labels(project string, l launch) map[string]string {
 		labelTree:    labelValue(l.spec.Tree),
 		labelIssue:   labelValue(l.spec.Issue),
 	}
+}
+
+// claimTemplates are none: an issue's Sandbox owns no volume, so nothing of the issue's disk
+// outlives a pod (INFRA-80). The disk itself is the pod's own (diskSource).
+func (issuePod) claimTemplates(*Runtime, launch) []volumeClaimTemplate { return nil }
+
+// diskSource is a generic ephemeral volume: the kubelet creates its claim when the pod starts and
+// deletes it when the pod goes, so a suspended, relaunched or swept issue leaves no volume behind
+// and every pod starts on a workspace its init containers provision afresh. Its claim template
+// carries no metadata at all: the pinned Sandbox CRD declares the template's `metadata` a bare
+// object with no properties and no preserve-unknown-fields, so a label set there is pruned by the
+// API server without a word (TestManifestMatchesTheSandboxCRD).
+func (issuePod) diskSource(r *Runtime, _ launch) corev1.VolumeSource {
+	return corev1.VolumeSource{Ephemeral: &corev1.EphemeralVolumeSource{
+		VolumeClaimTemplate: &corev1.PersistentVolumeClaimTemplate{Spec: r.diskSpec()},
+	}}
 }
 
 // secretAnnotations carry the exact issue key (annotationIssue), from which the launcher resolver
@@ -289,6 +311,26 @@ func (controllerPod) prepare(l *launch) error {
 // tree's cleanup lists its Sandbox (CleanupTree), and the labels name its kind (podKindOf).
 func (controllerPod) labels(project string, _ launch) map[string]string {
 	return map[string]string{labelProject: project, labelRole: string(claim.RoleController)}
+}
+
+// claimTemplates are the one `issue` volume the controller's Sandbox owns, so the session a pod
+// left on it is there for the next one to resume. Its labels are the pod's own (labels), which
+// carry the project and the controller role and no tree: the controller belongs to none, and the
+// daemon's restricted identity has no PVC verb, so a label put on the claim at creation is the
+// label it keeps for life.
+func (controllerPod) claimTemplates(r *Runtime, l launch) []volumeClaimTemplate {
+	return []volumeClaimTemplate{{
+		Metadata: volumeClaimMetadata{Name: issueVolume, Labels: r.labels(l)},
+		Spec:     r.diskSpec(),
+	}}
+}
+
+// diskSource is the claim of the controller's own Sandbox (IssueClaimName), the name the Agent
+// Sandbox controller gives the claim it makes from that template.
+func (controllerPod) diskSource(_ *Runtime, l launch) corev1.VolumeSource {
+	return corev1.VolumeSource{PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{
+		ClaimName: IssueClaimName(l.spec.Claim),
+	}}
 }
 
 // secretAnnotations are none: the controller's claim is the project's (claimToken).

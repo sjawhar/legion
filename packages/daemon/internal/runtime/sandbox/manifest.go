@@ -356,56 +356,52 @@ func (l launch) agentArgv(agent []string) []string {
 // labels are the pod's resource labels, as its kind gives them (podKind.labels).
 func (r *Runtime) labels(l launch) map[string]string { return l.kind.labels(r.project, l) }
 
-// claimLabels are the volume claim template's labels, the pod's (labels) less the tree: an issue's
-// claim carries the project and the issue, the controller's the project and its role. The volume is
-// the issue's, not the tree's: a child re-admitted as a root of its own keeps its Sandbox and volume
-// under its new tree, and the relabel (ensureSandbox) patches the Sandbox alone — the daemon's
-// restricted identity has no PVC verb — so a tree label on the claim would name the volume's first
-// tree for life. A PVC is read by its issue, never by a tree.
-func (r *Runtime) claimLabels(l launch) map[string]string {
-	labels := r.labels(l)
-	delete(labels, labelTree)
-	return labels
+// diskSpec is the claim of a pod's disk, wherever it is declared: ReadWriteOnce on the operator's
+// StorageClass at the operator's size (runtime.kubernetes.issue_volume). The controller's Sandbox
+// declares it as the claim template it owns, an issue pod as the template of its own ephemeral
+// volume, so the two disks are provisioned alike and differ only in who deletes them.
+func (r *Runtime) diskSpec() corev1.PersistentVolumeClaimSpec {
+	storageClass := r.storageClass
+	return corev1.PersistentVolumeClaimSpec{
+		AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+		StorageClassName: &storageClass,
+		Resources: corev1.VolumeResourceRequirements{
+			Requests: corev1.ResourceList{corev1.ResourceStorage: r.volumeSize},
+		},
+	}
 }
 
 // sandboxManifest is the Sandbox a relaunch creates when none exists: Suspended, so no pod starts
-// before the claim's Secret is written, with the claim template of the volume its pod mounts, the
-// Sandbox's own: an issue's Sandbox owns the issue's volume, the controller's its own. The template
-// carries no tree label (claimLabels): the volume is the issue's, its tree changes on re-admission,
-// and the claim is never relabelled. Its pod template never runs: the relaunch's Running patch
-// replaces it with the template the launch computes before the controller creates a pod.
+// before the claim's Secret is written, with whatever volume its kind has the Sandbox own
+// (podKind.claimTemplates). An issue's Sandbox owns none: its pod's disk is a generic ephemeral
+// volume the pod itself owns, created with the pod and deleted with it (INFRA-80), so nothing of
+// an issue survives the pod that did it. The controller's Sandbox still owns its one `issue`
+// template, so a relaunch finds the session its last pod left. Its pod template never runs: the
+// relaunch's Running patch replaces it with the template the launch computes before the controller
+// creates a pod.
 func (r *Runtime) sandboxManifest(l launch) sandbox {
-	storageClass := r.storageClass
 	return sandbox{
 		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},
 		ObjectMeta: metav1.ObjectMeta{Name: l.name, Namespace: r.namespace, Labels: r.labels(l)},
 		Spec: sandboxSpec{
 			PodTemplate: r.podTemplate(l), OperatingMode: modeSuspended,
-			VolumeClaimTemplates: []volumeClaimTemplate{{
-				Metadata: volumeClaimMetadata{Name: issueVolume, Labels: r.claimLabels(l)},
-				Spec: corev1.PersistentVolumeClaimSpec{
-					AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
-					StorageClassName: &storageClass,
-					Resources: corev1.VolumeResourceRequirements{
-						Requests: corev1.ResourceList{corev1.ResourceStorage: r.volumeSize},
-					},
-				},
-			}},
+			VolumeClaimTemplates: l.kind.claimTemplates(r, l),
 		},
 	}
 }
 
-// podTemplate is the pod a launch runs (decisions 7 and 10). Every pod mounts its own Sandbox's
-// volume by its claim's name (IssueClaimName), the name the controller gives the claim it makes
-// from the Sandbox's template, so the pod reads what the template provisioned whether or not the
-// controller rewrites the volume itself. The pod runs as the operator's ServiceAccount (the
-// namespace's default when the operator names none), and its launcher containers mount the
-// providers Secret's configured keys and the operator's mounts, are told the operator's variables,
-// and start Oh My Pi on the pod's baseline (`--pod-safety`, internal/podsafety). Its init
-// containers and the volumes only they mount are its kind's (podKind). Beyond the Legion pool's
-// selector and tolerations it asks nothing of its placement: every pod owns its volume and shares
-// nothing with another pod, so the scheduler puts it wherever the pool has room. The controller
-// applies a template only to the next pod it creates, so the template is rebuilt for every relaunch.
+// podTemplate is the pod a launch runs (decisions 7 and 10). Every pod mounts one disk at the same
+// volume name (issueVolume), from the source its kind gives it (podKind.diskSource): an issue
+// pod's is its own ephemeral claim, made with the pod and deleted with it, the controller's the
+// claim its Sandbox owns and that outlives every pod it makes. The pod runs as the operator's
+// ServiceAccount (the namespace's default when the operator names none), and its launcher
+// containers mount the providers Secret's configured keys and the operator's mounts, are told the
+// operator's variables, and start Oh My Pi on the pod's baseline (`--pod-safety`,
+// internal/podsafety). Its init containers and the volumes only they mount are its kind's
+// (podKind). Beyond the Legion pool's selector and tolerations it asks nothing of its placement:
+// every pod owns a disk of its own and shares nothing with another pod, so the scheduler puts it
+// wherever the pool has room. The controller applies a template only to the next pod it creates,
+// so the template is rebuilt for every relaunch.
 func (r *Runtime) podTemplate(l launch) podTemplate {
 	_, providersMounts := r.providers()
 	spec := corev1.PodSpec{
@@ -496,8 +492,10 @@ func kubeletEscape(text string) string {
 	return strings.ReplaceAll(text, "$", "$$")
 }
 
-// volumes are the pod's volume and jj config home with, between them, the volumes only its kind's
-// init containers mount (podKind.initVolumes), then each launcher role's token projection, private
+// volumes are the pod's disk (issueVolume, from its kind's source: an issue pod's own ephemeral
+// claim, which the kubelet creates with the pod and deletes with it, or the claim the controller's
+// Sandbox owns) and jj config home with, between them, the volumes only its kind's init
+// containers mount (podKind.initVolumes), then each launcher role's token projection, private
 // credential directory, state and gh volume: each owner's two gh files of its role Secret
 // (GitHubHostsKey(owner) as <owner>/hosts.yml, GitHubConfigKey(owner) as <owner>/config.yml) for
 // the launch's owners (gitHubOwners), read-only to the pod's user, from the same Secret as the
@@ -536,9 +534,7 @@ func (r *Runtime) volumes(l launch) []corev1.Volume {
 		}
 		roleVolumes = append(roleVolumes, corev1.Volume{Name: roleVolume(ghVolume, role), VolumeSource: gh})
 	}
-	volume := corev1.Volume{Name: issueVolume, VolumeSource: corev1.VolumeSource{
-		PersistentVolumeClaim: &corev1.PersistentVolumeClaimVolumeSource{ClaimName: IssueClaimName(l.spec.Claim)},
-	}}
+	volume := corev1.Volume{Name: issueVolume, VolumeSource: l.kind.diskSource(r, l)}
 	config := corev1.Volume{Name: configVolume, VolumeSource: memory}
 	return slices.Concat([]corev1.Volume{volume}, l.kind.initVolumes(l), []corev1.Volume{config}, roleVolumes,
 		r.agentSecretsVolumes(l.roles), providers, r.pod.Volumes)

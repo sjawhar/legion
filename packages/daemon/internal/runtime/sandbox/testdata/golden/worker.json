@@ -770,10 +770,23 @@
         ],
         "volumes": [
           {
-            "name": "issue",
-            "persistentVolumeClaim": {
-              "claimName": "issue-legion-legion-legion-208"
-            }
+            "ephemeral": {
+              "volumeClaimTemplate": {
+                "metadata": {},
+                "spec": {
+                  "accessModes": [
+                    "ReadWriteOnce"
+                  ],
+                  "resources": {
+                    "requests": {
+                      "storage": "20Gi"
+                    }
+                  },
+                  "storageClassName": "gp2"
+                }
+              }
+            },
+            "name": "issue"
           },
           {
             "name": "provision",
@@ -1106,28 +1119,6 @@
           }
         ]
       }
-    },
-    "volumeClaimTemplates": [
-      {
-        "metadata": {
-          "labels": {
-            "legion.dev/issue": "LEGION-208",
-            "legion.dev/project": "legion"
-          },
-          "name": "issue"
-        },
-        "spec": {
-          "accessModes": [
-            "ReadWriteOnce"
-          ],
-          "resources": {
-            "requests": {
-              "storage": "20Gi"
-            }
-          },
-          "storageClassName": "gp2"
-        }
-      }
-    ]
+    }
   }
 }

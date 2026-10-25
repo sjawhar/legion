@@ -438,6 +438,25 @@ func containerNamed(t *testing.T, pod corev1.PodSpec, name string) corev1.Contai
 	return corev1.Container{}
 }
 
+// podDisk is the claim template of an issue pod's own disk: its issue volume is a generic
+// ephemeral volume, which Kubernetes creates with the pod and deletes with the pod, never a claim
+// that outlived an earlier pod (INFRA-80).
+func podDisk(t *testing.T, pod corev1.PodSpec) *corev1.PersistentVolumeClaimTemplate {
+	t.Helper()
+	at := slices.IndexFunc(pod.Volumes, func(v corev1.Volume) bool { return v.Name == issueVolume })
+	if at < 0 {
+		t.Fatalf("the pod's volumes %+v carry no %s volume", pod.Volumes, issueVolume)
+	}
+	disk := pod.Volumes[at].VolumeSource
+	if disk.PersistentVolumeClaim != nil {
+		t.Fatalf("the pod's %s volume is the claim %s, want an ephemeral volume of its own", issueVolume, disk.PersistentVolumeClaim.ClaimName)
+	}
+	if disk.Ephemeral == nil || disk.Ephemeral.VolumeClaimTemplate == nil {
+		t.Fatalf("the pod's %s volume is %+v, want an ephemeral volume with a claim template", issueVolume, disk)
+	}
+	return disk.Ephemeral.VolumeClaimTemplate
+}
+
 // mountHolding is the deepest of c's mounts at or above path, the one path lands on, or nil when
 // none holds it.
 func mountHolding(c corev1.Container, path string) *corev1.VolumeMount {
@@ -1760,14 +1779,55 @@ func TestEveryLegionPodAsksNothingOfItsPlacementBeyondThePool(t *testing.T) {
 	}
 }
 
-// The volume claim template of every Sandbox, an issue's and the controller's alike, carries no
-// tree label: an issue's claim is labelled by project and issue, the controller's by project and
-// role, while the Sandbox itself keeps the tree, which its tree's cleanup selects by. The volume is
-// the issue's, not the tree's: a child re-admitted as a root of its own keeps its Sandbox and
-// volume, and the relabel (ensureSandbox) patches the Sandbox's labels alone — the daemon's
-// restricted identity has no PVC verb — so a tree label on the claim would name the volume's first
-// tree for life (LEGION-632).
-func TestTheClaimTemplateCarriesTheIssueAndNeverTheTree(t *testing.T) {
+// An issue's Sandbox owns no volume at all: its pod's disk is a generic ephemeral volume declared
+// in the pod template, which Kubernetes creates with the pod and deletes with the pod, so an
+// issue's work never outlives the pod that did it (INFRA-80). The claim it is made from is the
+// operator's StorageClass at the operator's size, and carries no metadata: the pinned CRD declares
+// ephemeral.volumeClaimTemplate.metadata a bare object with no properties, so a label set there
+// would be pruned by the API server without a word (TestManifestMatchesTheSandboxCRD).
+func TestAnIssuePodOwnsItsDiskAndItsSandboxOwnsNoVolume(t *testing.T) {
+	opts := goldenOptions()
+	r, err := configure(opts)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, tc := range manifestCases(t) {
+		t.Run(name, func(t *testing.T) {
+			r.agentSecrets = tc.agentSecrets
+			l, err := r.prepare(tc.spec)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if l.kind == (controllerPod{}) {
+				t.Skip("the controller's Sandbox owns its volume")
+			}
+			if got := r.sandboxManifest(l).Spec.VolumeClaimTemplates; len(got) != 0 {
+				t.Errorf("the issue's Sandbox owns %+v, want no volume claim template: its pod owns its disk", got)
+			}
+			template := podDisk(t, r.podTemplate(l).Spec)
+			if !reflect.ValueOf(template.ObjectMeta).IsZero() {
+				t.Errorf("its claim template carries metadata %+v, want none: the CRD prunes every field of it", template.ObjectMeta)
+			}
+			want := corev1.PersistentVolumeClaimSpec{
+				AccessModes:      []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+				StorageClassName: &opts.StorageClass,
+				Resources: corev1.VolumeResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceStorage: opts.IssueVolume},
+				},
+			}
+			if !reflect.DeepEqual(template.Spec, want) {
+				t.Errorf("its claim is %+v, want %+v", template.Spec, want)
+			}
+		})
+	}
+}
+
+// The controller's Sandbox is the one this runtime still has own a volume claim template, so a
+// relaunch finds the session its last pod left on it. The template's labels are its pod's: the
+// project and the controller role, and no tree, which the controller has none of. The daemon's
+// restricted identity has no PVC verb, so the labels the claim is created with are the labels it
+// keeps for life (LEGION-632).
+func TestTheControllersClaimTemplateCarriesItsProjectAndRoleAlone(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
 		t.Fatal(err)
@@ -1779,14 +1839,15 @@ func TestTheClaimTemplateCarriesTheIssueAndNeverTheTree(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			s := r.sandboxManifest(l)
-			want := map[string]string{labelProject: testProject, labelIssue: labelValue(tc.spec.Issue)}
-			if l.kind == (controllerPod{}) {
-				want = map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}
-			} else if s.Labels[labelTree] != labelValue(tc.spec.Tree) {
-				t.Errorf("the Sandbox carries %s=%q, want its tree %q: the tree's cleanup selects it by that label", labelTree, s.Labels[labelTree], tc.spec.Tree)
+			if l.kind != (controllerPod{}) {
+				t.Skip("an issue's Sandbox owns no claim template")
 			}
-			if got := s.Spec.VolumeClaimTemplates[0].Metadata.Labels; !maps.Equal(got, want) {
+			templates := r.sandboxManifest(l).Spec.VolumeClaimTemplates
+			if len(templates) != 1 || templates[0].Metadata.Name != issueVolume {
+				t.Fatalf("the controller's Sandbox owns %+v, want the one %s template", templates, issueVolume)
+			}
+			want := map[string]string{labelProject: testProject, labelRole: string(claim.RoleController)}
+			if got := templates[0].Metadata.Labels; !maps.Equal(got, want) {
 				t.Errorf("the claim template carries %v, want exactly %v", got, want)
 			}
 		})
