@@ -73,9 +73,11 @@ func newFixtureWith(t *testing.T, adjust func(*oauth.Config)) *fixture {
 	cfg := oauth.Config{
 		Secret:          secret,
 		DeviceLifetime:  15 * time.Minute,
+		AccessLifetime:  15 * time.Minute,
 		RefreshLifetime: time.Hour,
 		ProofSkew:       10 * time.Second,
 		VerificationURL: "https://dispatch.example/credentials/machine",
+		Exchange:        oauth.ExchangeConfig{Policy: newPolicy(t, nil, nil)},
 	}
 	adjust(&cfg)
 	provider, err := oauth.New(cfg, store)
@@ -624,17 +626,33 @@ func TestABeforeFailureIsAServerError(t *testing.T) {
 	}
 }
 
-func TestNewRefusesLifetimesAndASkewThatAreNotPositive(t *testing.T) {
+// TestNewRefusesAConfigurationItCouldNotServe: every lifetime and the proof skew must be
+// positive, the secret long enough, and an issuer named must be named whole.
+func TestNewRefusesAConfigurationItCouldNotServe(t *testing.T) {
 	secret := make([]byte, 32)
-	for _, c := range []oauth.Config{
-		{Secret: secret, DeviceLifetime: 0, RefreshLifetime: time.Hour, VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute},
-		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: 0, VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute},
-		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: -1, VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute},
-		{Secret: secret, DeviceLifetime: time.Minute, RefreshLifetime: time.Hour, VerificationURL: "https://dispatch.example/credentials/machine"},
+	sound := oauth.Config{
+		Secret: secret, DeviceLifetime: time.Minute, AccessLifetime: time.Minute, RefreshLifetime: time.Hour,
+		VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute,
+		Exchange: oauth.ExchangeConfig{Policy: newPolicy(t, nil, nil)},
+	}
+	for name, spoil := range map[string]func(*oauth.Config){
+		"no device lifetime":          func(c *oauth.Config) { c.DeviceLifetime = 0 },
+		"no refresh lifetime":         func(c *oauth.Config) { c.RefreshLifetime = 0 },
+		"a negative refresh lifetime": func(c *oauth.Config) { c.RefreshLifetime = -1 },
+		"no access lifetime":          func(c *oauth.Config) { c.AccessLifetime = 0 },
+		"no proof skew":               func(c *oauth.Config) { c.ProofSkew = 0 },
+		"a secret too short":          func(c *oauth.Config) { c.Secret = make([]byte, 31) },
+		"an issuer configured in part": func(c *oauth.Config) {
+			c.Exchange.Kubernetes = oauth.IssuerConfig{Issuer: "https://kubernetes.example"}
+		},
 	} {
-		if _, err := oauth.New(c, nil); err == nil {
-			t.Errorf("oauth.New(device %v, refresh %v, skew %v) = nil, want an error", c.DeviceLifetime, c.RefreshLifetime, c.ProofSkew)
-		}
+		t.Run(name, func(t *testing.T) {
+			c := sound
+			spoil(&c)
+			if _, err := oauth.New(c, nil); err == nil {
+				t.Errorf("oauth.New with %s = nil, want an error", name)
+			}
+		})
 	}
 }
 

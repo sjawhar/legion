@@ -33,7 +33,7 @@ func withOAuth(t *testing.T, deviceLogin func(context.Context, url.Values, strin
 			t.Fatalf("Secret: %v", err)
 		}
 		provider, err := oauth.New(oauth.Config{
-			Secret: secret, DeviceLifetime: 15 * time.Minute, RefreshLifetime: time.Hour,
+			Secret: secret, DeviceLifetime: 15 * time.Minute, AccessLifetime: 15 * time.Minute, RefreshLifetime: time.Hour,
 			VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute,
 		}, store)
 		if err != nil {
@@ -87,8 +87,9 @@ func TestTheOAuthRoutesNeedTheProvider(t *testing.T) {
 // it at wiring.
 func TestRegisterRefusesAProviderWithoutItsSteps(t *testing.T) {
 	provider, err := oauth.New(oauth.Config{
-		Secret: make([]byte, 32), DeviceLifetime: time.Minute, RefreshLifetime: time.Hour,
-		VerificationURL: "https://dispatch.example/credentials/machine", ProofSkew: time.Minute,
+		Secret: make([]byte, 32), DeviceLifetime: time.Minute, AccessLifetime: 15 * time.Minute,
+		RefreshLifetime: time.Hour, VerificationURL: "https://dispatch.example/credentials/machine",
+		ProofSkew: time.Minute,
 	}, nil)
 	if err != nil {
 		t.Fatal(err)

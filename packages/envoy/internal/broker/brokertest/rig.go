@@ -22,6 +22,7 @@ import (
 
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
@@ -170,8 +171,9 @@ func NewRig(t *testing.T, options ...Option) *Rig {
 const MachineLoginURL = "https://dispatch.example/credentials/machine"
 
 // newOAuthProvider builds the machine login's OAuth provider on st's database as
-// cmd/broker/main.go does: device codes live as long as a pending machine login, refresh tokens
-// as long as a launcher credential.
+// cmd/broker/main.go does: device codes live as long as a pending machine login, access tokens
+// fifteen minutes, refresh tokens as long as a launcher credential. Its token exchange lists no
+// identity, which is the rig's deployment: no pod or workflow run calls the rig's broker.
 func newOAuthProvider(t *testing.T, st *store.Store) *oauth.Provider {
 	t.Helper()
 	oauthStore := oauthstore.New(st.Pool)
@@ -180,8 +182,14 @@ func newOAuthProvider(t *testing.T, st *store.Store) *oauth.Provider {
 	if err != nil {
 		t.Fatalf("OAuth secret: %v", err)
 	}
+	policy, err := exchange.NewSet(nil, nil)
+	if err != nil {
+		t.Fatalf("exchange.NewSet: %v", err)
+	}
 	provider, err := oauth.New(oauth.Config{
-		Secret: secret, DeviceLifetime: 15 * time.Minute, RefreshLifetime: 7 * 24 * time.Hour, VerificationURL: MachineLoginURL, ProofSkew: time.Minute,
+		Secret: secret, DeviceLifetime: 15 * time.Minute, AccessLifetime: 15 * time.Minute,
+		RefreshLifetime: 7 * 24 * time.Hour, VerificationURL: MachineLoginURL, ProofSkew: time.Minute,
+		Exchange: oauth.ExchangeConfig{Policy: policy},
 	}, oauthStore)
 	if err != nil {
 		t.Fatalf("oauth.New: %v", err)

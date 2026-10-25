@@ -49,6 +49,11 @@ import (
 // terminal, type the code" UX the confirmation-code flow is built around.
 const machineLoginPendingTTL = 15 * time.Minute
 
+// accessTokenLifetime is how long an issued access token lasts, the value that was compiled into
+// the OAuth provider before it became oauth.Config.AccessLifetime. The deployment setting that
+// replaces this literal lands with the token exchange's own configuration.
+const accessTokenLifetime = 15 * time.Minute
+
 // agentSecretPendingTTL bounds how long an agent_secret request waits for approval before the
 // Sweeper expires it. Unchanged from the pre-v9 poller's own hardcoded value.
 const agentSecretPendingTTL = 12 * time.Hour
@@ -192,8 +197,9 @@ func main() {
 	fatal(err)
 	// verification_uri is Dispatch's machine-login page, where the person types the code.
 	provider, err := oauth.New(oauth.Config{
-		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL, RefreshLifetime: credentialLifetime,
-		VerificationURL: cfg.MachineLoginURL, ProofSkew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
+		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL, AccessLifetime: accessTokenLifetime,
+		RefreshLifetime: credentialLifetime, VerificationURL: cfg.MachineLoginURL,
+		ProofSkew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
 	}, oauthStore)
 	fatal(err)
 	mach := &machine.Service{
