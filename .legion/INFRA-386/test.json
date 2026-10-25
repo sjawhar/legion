@@ -2,66 +2,97 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T16:11:30Z",
+  "completed": "2026-10-25T16:42:30Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "round": 2,
-  "testedHead": "feda29facc745cd103d31bed0fc57979aaf08017",
-  "roundReason": "Sent back from retro by the architect: three sentences changed (trap paragraph's empty-listing/closing-comment sentence, 'No wait was measured', recovery paragraph names the late-stored create). The recovery paragraph (base 3198-3202) is now in scope by that ruling.",
+  "round": 3,
+  "testedHead": "3f864ba10cddca4711714a9dc0ee9470a089a0ee",
+  "roundReason": "Sent back from retro a second time: the recovery delete 'removes that Job once the server has stored it', the closing comment's list of what the trap can miss (a failed clean-up step added), and the implementer's full-diff sweep (label delete wording, the 0.33 s/0.35 s stops no longer classed 'in flight', 'a SIGKILL left before its name was printed').",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran the round-2 page checks on my own copy fetched at feda29fa (all seven A2 patterns 1, 'neither the listing nor the block' 0, recovery lines <=100), A4-A6, the reader probe with two fresh scouts, check-private-names and the sweep; matches the implementer's observations. The implementer did not re-run P1 (block byte-identical to 97e9883b's, confirmed by cmp); I re-ran it and its control at this head."
+    "how": "Re-ran the round-3 page checks on my own copy fetched at 3f864ba1 (99aa5c8c serves the same bytes): A1 0; A2 1 for all seven patterns; 'while the create was in flight, 0.33' 0; A3 date 4 and both timing pairs; A4 abe1b4cf... (base); A5 five hunks ok with the ruled recovery range; A6 no NONCOMMENT, old-closing 0, old-listing 1; A7 0; A8 0. Its observations match. It did not re-run P1; I did (below)."
   },
-  "failures": [],
-  "failed": 0,
-  "proof": [
+  "failures": [
     {
-      "criterion": "A1-A3, A7, A8 and round 2: no wait is claimed, an empty re-list proves only that no Job was stored by then, no sentence says the closing comment fails to cover the case, the recovery paragraph names the late-stored create",
-      "surface": "docs/kubernetes.md fetched with gh api at the head from this issue's role container",
-      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=feda29facc745cd103d31bed0fc57979aaf08017\" -H \"Accept: application/vnd.github.raw\" > k-h2.md; awk -f trap.awk | tr '\\n' ' ' then grep -c/-cF per plan.md section 4 plus 'No wait was measured', 'shows only that no such Job was stored by the time the listing ran', 'neither the listing nor the block'; recovery paragraph lines 3215-3220 width",
-      "observed": "A1 0; A2 1 for all seven patterns; 'neither the listing nor the block' 0; A3 date 4, INFRA-232 1, both timing pairs 1; A7 0; A8 0; recovery paragraph 0 lines over 100; A11 grep 0; f7ec909f serves the same bytes",
-      "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
-      "negativeControl": "base 371d6c87: A1 1, A2 first four 0, A3 date 2, A7 1 (round 1 run); 97e9883b's text gives 'neither the listing nor the block' 1 and both new patterns 0"
-    },
-    {
-      "criterion": "A4-A6, A5 as amended: block identical in every non-comment line; only the trap paragraph, two block comments, the bullet's lead and (round 2 ruling) the recovery paragraph change",
-      "surface": "the page at the head and the branch diff against main@origin (371d6c87)",
-      "command": "bash code.sh k-h2.md | sha256sum; cmp of block.awk output at 97e9883b and feda29fa; diff -U0 k-base.md k-h2.md | awk -f hunks2.awk (hunks.awk plus 3198-3202); bash a6.sh k-base.md k-h2.md; jj diff --stat --from main@origin --to legion/INFRA-386@origin",
-      "observed": "A4 abe1b4cf... (base value); block byte-identical to round 1; five hunks old 3022, 3131, 3155-3165, 3200-3202, 3260-3261 all ok, exit 0; A6 no NONCOMMENT, old-closing 0, old-listing 1; stat docs/kubernetes.md and .legion/INFRA-386 only",
-      "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
-      "negativeControl": "the plan's original hunks.awk ranges print 'OUT old 3200-3202' and exit 1 on the same diff"
-    },
-    {
-      "criterion": "A10: the edited block still runs end to end",
-      "surface": "this issue's role container, against the applied cluster, through the role's own bash tool; can-i create jobs / create services / get services yes",
-      "command": "bash fill.sh k-h2.md t2-p1.sh (cmp-identical to round 1's filled copy); bash t2-p1.sh, started 2026-10-25T16:07:48Z",
-      "observed": "run: sequence-run=06d813ee; workload: infra-386-postgres-tqx97; service created; pod condition met twice; answered; job deleted; No resources found; sequence: exit 0 at 16:09:13Z; 0 jobs or services named infra-386-postgres- left; kubectl get jobs -l sequence-run=06d813ee 'No resources found'",
-      "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
-      "negativeControl": "cpu \"1\" copy at 16:09:13Z: create refused by admission naming the four-processor rule (policy, binding and rule text elided), 'cleanup: no Job name was read; deleting by label sequence-run=46be577a', 'No resources found' twice, sequence: exit 1; re-list by label 'No resources found'; 0 left"
-    },
-    {
-      "criterion": "A11 round 2: a reader no longer concludes an empty re-list proves nothing is left, and does not read the label delete as measured on the late-stored case",
-      "surface": "fresh scout subagents given only the trap and recovery paragraphs, an in-create SIGTERM stop's output, and an empty re-list one minute later",
-      "command": "task(agent=scout) x2 over probe2-h2.txt (feda29fa) and probe2-head.txt (97e9883b)",
-      "observed": "head: \"1. No. ... 'No wait was measured either: how long after its client is gone the server can still store a create is not known, so an empty listing shows only that no such Job was stored by the time the listing ran.' ... 2. ... No, it was not measured on this kind of run ... That is a SIGKILL case, not a late-stored create after a SIGTERM.\"",
-      "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
-      "negativeControl": "97e9883b's paragraphs: \"1. Yes, as far as the passage goes. ... The role ran that check and it was empty. ... One caveat: the passage gives no time limit after which a late create can no longer show up.\""
-    },
-    {
-      "criterion": "A9: no private name enters the change",
-      "surface": "repository at the head, added lines, commit messages, live PR title and body, handoffs",
-      "command": "bash .github/scripts/check-private-names.sh; sweep.sh over each",
-      "observed": "exit 0 (5005 files); 0 literal, 0 whole-word for every file; the raw refusal text counts 1 whole-word (the rule message), so every recorded copy elides it",
-      "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
-      "negativeControl": "scratch file holding one live pattern: whole-word 1"
+      "criterion": "The trap paragraph states what was measured, and its evidence is dated to the runs that support it (spec lines 1-2), read with its neighbours (plan section 8: the INFRA-212 learning governs every sentence written)",
+      "evidence": "Round 3 added, at docs/kubernetes.md:3170-3171 of 3f864ba1, 'Nothing those runs printed shows whether their stop landed while the create was in flight or after its answer.' about the 0.33 s and 0.35 s stops the same sentence sends the reader to ('two of the twenty-six stops in the bullet below'). That bullet, unchanged, still says at 3303-3304 'two that landed inside the create deleted the Job it had made by the label', and at 3306-3307 'A `kill -KILL -- -<process>` that landed inside the create left a Job with no name printed' (the same output-only classification: a kill after the create answered and before `echo \"workload: …\"` also prints no name). The page now contradicts itself. Mechanism read from the block: `created=$(kubectl create …)` at 3084 and `workload=${created% *}` at 3085 are separate steps, and a stop between them takes the label path and finds a stored Job, so the new trap sentence is the true one and the bullet overclaims. Reproduced with a fresh scout given only the trap paragraph, the recovery paragraph and the INFRA-232 bullet (probe3.txt): 'The excerpts disagree. The bullet says the two stops landed \"inside the create\", but the clean-up paragraph says nothing the runs printed shows that. On Q2, the bullet says the SIGKILL landed \"inside the create\" ... the bullet gives no evidence for its claim.' Secondary, same class, in a sentence this PR wrote: the recovery paragraph (3220-3222) defines 'A run that left a Job without printing its name' as 'a `SIGKILL` or the role's pod going away during the create, or …', which leaves out a SIGKILL after the create answered and before the name printed, the case round 3 itself named in the trap paragraph ('a Job a `SIGKILL` left before its name was printed'). The fix touches bullet lines outside the plan's ranges (Decision 3, A5): a scope decision sent to the architect. No red test: the change is prose, no suite reads it, and the deployment instructions bar tests that assert a file's contents; the probe and the two quoted line pairs are the reproduction."
     }
   ],
-  "ci": "At feda29fa: Tests 40210014851 in progress (typecheck success; lint, test, pi-legion in progress); Legion Envoy and Contracts 40210014833 in progress; PR Title 40210070247 success (40210014839 cancelled). Cited, not waited for. f7ec909f is handoff-only with skip-checks.",
-  "regressionTests": "Docs-only change: no suite reads this prose and the deployment instructions bar content-asserting tests; nothing for a red test to pin.",
-  "notesForReviewer": [
-    "The round-1 note on 'neither the listing nor the block's closing comment covers it' is resolved: the sentence was rewritten.",
-    "docs/kubernetes.md:3022's code line remains 108 characters (judged not a defect in review)."
+  "failed": 1,
+  "otherObservations": [
+    {
+      "what": "A10 at this head: the edited block still runs end to end (its comment lines changed again this round)",
+      "command": "bash fill.sh k-h3.md t3-p1.sh (diff against round 2's filled copy: only the closing comment lines); bash t3-p1.sh from 2026-10-25T16:38:38Z",
+      "observed": "run: sequence-run=1039ee71; workload: infra-386-postgres-g9zzg; service created; condition met twice; answered; job deleted; No resources found; sequence: exit 0 at 16:40:05Z; 0 left; re-list by label No resources found",
+      "negativeControl": "cpu \"1\" copy: refused by admission (policy, binding and rule text elided), 'cleanup: no Job name was read; deleting by label sequence-run=817225dd', No resources found, sequence: exit 1; 0 left; re-list No resources found"
+    },
+    {
+      "what": "A9",
+      "observed": "check-private-names.sh exit 0 (5005 files) at the head"
+    },
+    {
+      "what": "The closing comment's new claims checked against the block: a failed delete prints 'cleanup: the Job's delete failed' (3021, 3036) and a Service left prints 'cleanup: the Service is still there' (3038); SIGKILL and pod loss run no trap (3209-3210 of the page). True as written."
+    }
   ],
+  "ci": "At 3f864ba1: Tests 40212398690 in progress (typecheck success; lint, test, pi-legion in progress); Legion Envoy and Contracts 40212398703 in progress; PR Title 40212449624 and 40212398666 success. Cited, not waited for.",
   "previousRounds": [
+    {
+      "round": 2,
+      "testedHead": "feda29facc745cd103d31bed0fc57979aaf08017",
+      "roundReason": "Sent back from retro by the architect: three sentences changed (trap paragraph's empty-listing/closing-comment sentence, 'No wait was measured', recovery paragraph names the late-stored create). The recovery paragraph (base 3198-3202) is now in scope by that ruling.",
+      "implementerProof": {
+        "verdict": "verified",
+        "how": "Re-ran the round-2 page checks on my own copy fetched at feda29fa (all seven A2 patterns 1, 'neither the listing nor the block' 0, recovery lines <=100), A4-A6, the reader probe with two fresh scouts, check-private-names and the sweep; matches the implementer's observations. The implementer did not re-run P1 (block byte-identical to 97e9883b's, confirmed by cmp); I re-ran it and its control at this head."
+      },
+      "failures": [],
+      "failed": 0,
+      "proof": [
+        {
+          "criterion": "A1-A3, A7, A8 and round 2: no wait is claimed, an empty re-list proves only that no Job was stored by then, no sentence says the closing comment fails to cover the case, the recovery paragraph names the late-stored create",
+          "surface": "docs/kubernetes.md fetched with gh api at the head from this issue's role container",
+          "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=feda29facc745cd103d31bed0fc57979aaf08017\" -H \"Accept: application/vnd.github.raw\" > k-h2.md; awk -f trap.awk | tr '\\n' ' ' then grep -c/-cF per plan.md section 4 plus 'No wait was measured', 'shows only that no such Job was stored by the time the listing ran', 'neither the listing nor the block'; recovery paragraph lines 3215-3220 width",
+          "observed": "A1 0; A2 1 for all seven patterns; 'neither the listing nor the block' 0; A3 date 4, INFRA-232 1, both timing pairs 1; A7 0; A8 0; recovery paragraph 0 lines over 100; A11 grep 0; f7ec909f serves the same bytes",
+          "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
+          "negativeControl": "base 371d6c87: A1 1, A2 first four 0, A3 date 2, A7 1 (round 1 run); 97e9883b's text gives 'neither the listing nor the block' 1 and both new patterns 0"
+        },
+        {
+          "criterion": "A4-A6, A5 as amended: block identical in every non-comment line; only the trap paragraph, two block comments, the bullet's lead and (round 2 ruling) the recovery paragraph change",
+          "surface": "the page at the head and the branch diff against main@origin (371d6c87)",
+          "command": "bash code.sh k-h2.md | sha256sum; cmp of block.awk output at 97e9883b and feda29fa; diff -U0 k-base.md k-h2.md | awk -f hunks2.awk (hunks.awk plus 3198-3202); bash a6.sh k-base.md k-h2.md; jj diff --stat --from main@origin --to legion/INFRA-386@origin",
+          "observed": "A4 abe1b4cf... (base value); block byte-identical to round 1; five hunks old 3022, 3131, 3155-3165, 3200-3202, 3260-3261 all ok, exit 0; A6 no NONCOMMENT, old-closing 0, old-listing 1; stat docs/kubernetes.md and .legion/INFRA-386 only",
+          "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
+          "negativeControl": "the plan's original hunks.awk ranges print 'OUT old 3200-3202' and exit 1 on the same diff"
+        },
+        {
+          "criterion": "A10: the edited block still runs end to end",
+          "surface": "this issue's role container, against the applied cluster, through the role's own bash tool; can-i create jobs / create services / get services yes",
+          "command": "bash fill.sh k-h2.md t2-p1.sh (cmp-identical to round 1's filled copy); bash t2-p1.sh, started 2026-10-25T16:07:48Z",
+          "observed": "run: sequence-run=06d813ee; workload: infra-386-postgres-tqx97; service created; pod condition met twice; answered; job deleted; No resources found; sequence: exit 0 at 16:09:13Z; 0 jobs or services named infra-386-postgres- left; kubectl get jobs -l sequence-run=06d813ee 'No resources found'",
+          "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
+          "negativeControl": "cpu \"1\" copy at 16:09:13Z: create refused by admission naming the four-processor rule (policy, binding and rule text elided), 'cleanup: no Job name was read; deleting by label sequence-run=46be577a', 'No resources found' twice, sequence: exit 1; re-list by label 'No resources found'; 0 left"
+        },
+        {
+          "criterion": "A11 round 2: a reader no longer concludes an empty re-list proves nothing is left, and does not read the label delete as measured on the late-stored case",
+          "surface": "fresh scout subagents given only the trap and recovery paragraphs, an in-create SIGTERM stop's output, and an empty re-list one minute later",
+          "command": "task(agent=scout) x2 over probe2-h2.txt (feda29fa) and probe2-head.txt (97e9883b)",
+          "observed": "head: \"1. No. ... 'No wait was measured either: how long after its client is gone the server can still store a create is not known, so an empty listing shows only that no such Job was stored by the time the listing ran.' ... 2. ... No, it was not measured on this kind of run ... That is a SIGKILL case, not a late-stored create after a SIGTERM.\"",
+          "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
+          "negativeControl": "97e9883b's paragraphs: \"1. Yes, as far as the passage goes. ... The role ran that check and it was empty. ... One caveat: the passage gives no time limit after which a late create can no longer show up.\""
+        },
+        {
+          "criterion": "A9: no private name enters the change",
+          "surface": "repository at the head, added lines, commit messages, live PR title and body, handoffs",
+          "command": "bash .github/scripts/check-private-names.sh; sweep.sh over each",
+          "observed": "exit 0 (5005 files); 0 literal, 0 whole-word for every file; the raw refusal text counts 1 whole-word (the rule message), so every recorded copy elides it",
+          "headSha": "feda29facc745cd103d31bed0fc57979aaf08017",
+          "negativeControl": "scratch file holding one live pattern: whole-word 1"
+        }
+      ],
+      "ci": "At feda29fa: Tests 40210014851 in progress (typecheck success; lint, test, pi-legion in progress); Legion Envoy and Contracts 40210014833 in progress; PR Title 40210070247 success (40210014839 cancelled). Cited, not waited for. f7ec909f is handoff-only with skip-checks.",
+      "notesForReviewer": [
+        "The round-1 note on 'neither the listing nor the block's closing comment covers it' is resolved: the sentence was rewritten.",
+        "docs/kubernetes.md:3022's code line remains 108 characters (judged not a defect in review)."
+      ]
+    },
     {
       "round": 1,
       "testedHead": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
