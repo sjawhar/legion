@@ -15,7 +15,6 @@ package oidctest
 import (
 	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -29,6 +28,7 @@ import (
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
+	"golang.org/x/oauth2"
 )
 
 // TB is the part of *testing.T this package uses. Taking the interface keeps
@@ -542,7 +542,10 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 			tokenError(w, http.StatusBadRequest, "invalid_grant")
 			return
 		}
-		if grant.challenge != "" && s256Challenge(r.PostForm.Get("code_verifier")) != grant.challenge {
+		// A missing verifier is refused outright rather than hashed, so it can
+		// never match a recorded challenge.
+		verifier := r.PostForm.Get("code_verifier")
+		if grant.challenge != "" && (verifier == "" || oauth2.S256ChallengeFromVerifier(verifier) != grant.challenge) {
 			tokenError(w, http.StatusBadRequest, "invalid_grant")
 			return
 		}
@@ -590,16 +593,6 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)
-}
-
-// s256Challenge is the PKCE S256 code_challenge of verifier, and empty for no
-// verifier, which matches no recorded challenge.
-func s256Challenge(verifier string) string {
-	if verifier == "" {
-		return ""
-	}
-	sum := sha256.Sum256([]byte(verifier))
-	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // handleRevoke answers a revocation as Cognito's /oauth2/revoke does for a

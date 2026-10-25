@@ -53,9 +53,6 @@ const (
 	maxFormBytes = 64 << 10
 )
 
-// signInSettings are the four settings that turn sign-in on, which the page names while it is off.
-var signInSettings = []string{"BROKER_SIGNIN_ISSUER", "BROKER_SIGNIN_CLIENT_ID", "BROKER_SIGNIN_CLIENT_SECRET_FILE", "BROKER_SIGNIN_DOMAIN"}
-
 //go:embed templates/*.html assets/approve.css
 var files embed.FS
 
@@ -149,14 +146,14 @@ func (p *Page) Authenticate(w http.ResponseWriter, r *http.Request) (Session, bo
 	if p.cfg.SignIn == nil {
 		writeMessage(w, http.StatusServiceUnavailable, say("Approval sign-in is off",
 			"This secrets broker has no sign-in configured, so no person can approve a secret request here.",
-			"Its operator turns sign-in on by setting "+strings.Join(signInSettings, ", ")+"."))
+			"Its operator turns sign-in on by setting "+strings.Join(config.SignInSettings, ", ")+"."))
 		return Session{}, false
 	}
 	secret, ok := sessionSecret(r)
 	if !ok {
 		return Session{}, true
 	}
-	login, _, err := p.cfg.Store.BrowserSession(r.Context(), sha256.Sum256(secret), time.Now())
+	login, err := p.cfg.Store.BrowserSession(r.Context(), sha256.Sum256(secret), time.Now())
 	switch {
 	case errors.Is(err, pgx.ErrNoRows):
 		return Session{}, true
@@ -196,17 +193,19 @@ func setCookie(w http.ResponseWriter, name, value string, maxAge time.Duration) 
 // clearCookie tells the browser to drop one of the page's cookies, with the attributes it was set
 // with, since a browser refuses a __Host- cookie without them.
 func clearCookie(w http.ResponseWriter, name string) {
-	http.SetCookie(w, &http.Cookie{
-		Name: name, Path: "/", MaxAge: -1,
-		Secure: true, HttpOnly: true, SameSite: http.SameSiteLaxMode,
-	})
+	setCookie(w, name, "", -time.Second)
+}
+
+// randomBytes is secretBytes bytes from crypto/rand.
+func randomBytes() []byte {
+	b := make([]byte, secretBytes)
+	_, _ = rand.Read(b) // crypto/rand.Read never fails.
+	return b
 }
 
 // randomValue is secretBytes random bytes, base64url without padding.
 func randomValue() string {
-	b := make([]byte, secretBytes)
-	_, _ = rand.Read(b) // crypto/rand.Read never fails.
-	return base64.RawURLEncoding.EncodeToString(b)
+	return base64.RawURLEncoding.EncodeToString(randomBytes())
 }
 
 // sameOrigin reports whether a POST comes from the broker's own origin: its one Origin header is

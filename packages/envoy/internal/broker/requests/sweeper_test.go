@@ -163,7 +163,7 @@ func TestSweeperTickDeletesExpiredBrowserSessions(t *testing.T) {
 	if !rowOf(live) {
 		t.Fatal("the tick deleted the live browser session")
 	}
-	if login, _, err := m.Store.BrowserSession(ctx, live, time.Now()); err != nil || login != "ada@example.com" {
+	if login, err := m.Store.BrowserSession(ctx, live, time.Now()); err != nil || login != "ada@example.com" {
 		t.Fatalf("the live session after the tick = %q, %v; want ada@example.com", login, err)
 	}
 }

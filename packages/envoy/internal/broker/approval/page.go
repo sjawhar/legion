@@ -121,7 +121,7 @@ func (p *Page) ServeRecord(w http.ResponseWriter, r *http.Request, sess Session)
 		Records:         []recordView{main},
 		MachineLoginURL: p.cfg.MachineLoginURL,
 	}
-	if view.Outcomes, err = p.outcomes(r.Context(), r.URL.Query().Get("decided"), sess.Login, now); err != nil {
+	if view.Outcomes, err = p.outcomes(r.Context(), r.URL.Query().Get("decided"), sess.Login, now, detail); err != nil {
 		writeUnavailable(w, "read the decided requests", err)
 		return
 	}
@@ -200,8 +200,9 @@ func approverText(approver string) string {
 
 // outcomes is one line for each record id the comma-separated decided names, at most maxRecords
 // of them, each said from the broker's own record now and never from the URL: an id that is not a
-// record id, or names no record, gets none.
-func (p *Page) outcomes(ctx context.Context, decided, login string, now time.Time) ([]string, error) {
+// record id, or names no record, gets none. read is the record the page has just read, which a
+// decision's own page always names, so it is not read again.
+func (p *Page) outcomes(ctx context.Context, decided, login string, now time.Time, read requests.RecordDetail) ([]string, error) {
 	var lines []string
 	var seen []string
 	for id := range strings.SplitSeq(decided, ",") {
@@ -212,12 +213,16 @@ func (p *Page) outcomes(ctx context.Context, decided, login string, now time.Tim
 			break
 		}
 		seen = append(seen, id)
-		d, err := p.cfg.Machine.ReadRecord(ctx, id)
-		switch {
-		case errors.Is(err, pgx.ErrNoRows):
-			continue
-		case err != nil:
-			return nil, err
+		d := read
+		if id != read.RecordID {
+			var err error
+			d, err = p.cfg.Machine.ReadRecord(ctx, id)
+			switch {
+			case errors.Is(err, pgx.ErrNoRows):
+				continue
+			case err != nil:
+				return nil, err
+			}
 		}
 		lines = append(lines, outcome(d, login, now))
 	}
@@ -260,15 +265,20 @@ func outcome(d requests.RecordDetail, login string, now time.Time) string {
 	return what + d.Decided.Event + " at " + at + "."
 }
 
-// pageToken binds a page's decision forms to the session whose secret it is and to exactly the
+// pageMAC binds a page's decision forms to the session whose secret it is and to exactly the
 // records printed with a button: HMAC-SHA256 under the raw session secret, which only the browser
 // holding the cookie has (Postgres keeps its hash), over "approve-page", the expiry and the sorted
 // record ids, each line-separated. Record ids are fixed-length hex, so the message is unambiguous.
-func pageToken(secret []byte, expires int64, printed []string) string {
+func pageMAC(secret []byte, expires int64, printed []string) []byte {
 	sorted := slices.Sorted(slices.Values(printed))
 	mac := hmac.New(sha256.New, secret)
 	mac.Write([]byte("approve-page\n" + strconv.FormatInt(expires, 10) + "\n" + strings.Join(sorted, "\n")))
-	return hex.EncodeToString(mac.Sum(nil))
+	return mac.Sum(nil)
+}
+
+// pageToken is pageMAC hex-encoded, as a page's decision forms carry it.
+func pageToken(secret []byte, expires int64, printed []string) string {
+	return hex.EncodeToString(pageMAC(secret, expires, printed))
 }
 
 // recordIDs reads a form's record ids, in order and each once, refusing any that is not a record
@@ -326,9 +336,8 @@ func (p *Page) ServeDecide(w http.ResponseWriter, r *http.Request, sess Session)
 		writeMessage(w, http.StatusBadRequest, say("Not a decision", "The form names no request it may decide, so nothing was decided."))
 		return
 	}
-	want, _ := hex.DecodeString(pageToken(sess.secret, expires, printed))
 	switch {
-	case !hmac.Equal(token, want):
+	case !hmac.Equal(token, pageMAC(sess.secret, expires, printed)):
 		writeMessage(w, http.StatusForbidden, say("Refused",
 			"This form was not made for your sign-in, so nothing was decided. Open the request again."))
 		return

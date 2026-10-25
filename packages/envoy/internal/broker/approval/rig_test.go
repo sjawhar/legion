@@ -342,37 +342,12 @@ func (r *rig) requirePending(t *testing.T, recordID string) {
 
 // --- the browser: brokertest.Browser, every answer of the broker held to the page's headers ---
 
-// response is one answer as a browser received it.
-type response struct {
-	status int
-	header http.Header
-	body   string
-}
-
-func answer(res brokertest.Response) response {
-	return response{status: res.Status, header: res.Header, body: res.Body}
-}
-
-func (res response) wire() brokertest.Response {
-	return brokertest.Response{Status: res.status, Header: res.header, Body: res.body}
-}
-
-func (res response) location(t *testing.T) *url.URL {
-	t.Helper()
-	return res.wire().Location(t)
-}
-
-// cookie is the Set-Cookie of the answer naming name, or nil.
-func (res response) cookie(name string) *http.Cookie { return res.wire().Cookie(name) }
-
 // browser is a person's browser on the rig's broker, trusting its TLS test server.
-type browser struct{ b *brokertest.Browser }
-
-func (r *rig) browser(t *testing.T) *browser {
+func (r *rig) browser(t *testing.T) *brokertest.Browser {
 	t.Helper()
 	b := brokertest.NewBrowser(t, r.url, r.srv.Client().Transport, r.issuer)
 	b.Check = checkPageHeaders
-	return &browser{b}
+	return b
 }
 
 // pageHeaders are the headers every answer of the approval page must carry.
@@ -397,48 +372,6 @@ func checkPageHeaders(t *testing.T, req *http.Request, res brokertest.Response) 
 			t.Errorf("%s %s answered the CORS header %s", req.Method, req.URL.Path, name)
 		}
 	}
-}
-
-func (b *browser) get(t *testing.T, path string, cookies ...*http.Cookie) response {
-	t.Helper()
-	return answer(b.b.Get(t, path, cookies...))
-}
-
-// post posts form to path with headers; fromPage adds the Origin the broker's own page sends.
-func (b *browser) post(t *testing.T, path string, form url.Values, headers map[string]string, cookies ...*http.Cookie) response {
-	t.Helper()
-	return answer(b.b.Post(t, path, form, headers, cookies...))
-}
-
-func (b *browser) fromPage(t *testing.T, path string, form url.Values) response {
-	t.Helper()
-	return answer(b.b.FromPage(t, path, form))
-}
-
-// cookie is the value of the jar's cookie name for the broker, or "".
-func (b *browser) cookie(t *testing.T, name string) string {
-	t.Helper()
-	return b.b.Cookie(t, name)
-}
-
-func (b *browser) startSignIn(t *testing.T, path string) *url.URL {
-	t.Helper()
-	return b.b.StartSignIn(t, path)
-}
-
-func (b *browser) authorize(t *testing.T, authURL *url.URL, claims map[string]any) string {
-	t.Helper()
-	return b.b.Authorize(t, authURL, claims)
-}
-
-func (b *browser) signIn(t *testing.T, recordID string, claims map[string]any) {
-	t.Helper()
-	b.b.SignIn(t, recordID, claims)
-}
-
-func (b *browser) page(t *testing.T, recordID string) response {
-	t.Helper()
-	return answer(b.b.Page(t, recordID))
 }
 
 // --- reading the page ---
@@ -489,7 +422,7 @@ func encodePending(t *testing.T, fields map[string]string) string {
 }
 
 // getWith GETs target with exactly the cookies given, from a browser holding none.
-func (r *rig) getWith(t *testing.T, target string, cookies ...*http.Cookie) response {
+func (r *rig) getWith(t *testing.T, target string, cookies ...*http.Cookie) brokertest.Response {
 	t.Helper()
-	return r.browser(t).get(t, target, cookies...)
+	return r.browser(t).Get(t, target, cookies...)
 }

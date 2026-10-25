@@ -68,12 +68,12 @@ func TestTheTokenFileVerifiesAgainstTheIssuerAndIsRewrittenBeforeItLapses(t *tes
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan int, 1)
 	go func() {
-		done <- serve(ctx, []tokenSpec{{audience: testAudience, account: testAccount, file: file}}, lifetime, &stderr)
+		done <- serveIssuer(ctx, issuerConfig{specs: []tokenSpec{{audience: testAudience, account: testAccount, file: file}}, lifetime: lifetime}, &stderr)
 	}()
 	t.Cleanup(func() {
 		cancel()
 		if code := <-done; code != 0 {
-			t.Errorf("serve returned %d after its context ended, want 0\n%s", code, stderr.String())
+			t.Errorf("serveIssuer returned %d after its context ended, want 0\n%s", code, stderr.String())
 		}
 	})
 

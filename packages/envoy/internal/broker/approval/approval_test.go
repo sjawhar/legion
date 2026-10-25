@@ -29,7 +29,7 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 	second := r.request(t, enrollmentID, key, "rotate the second key", &lifetime, "", "SECOND_SECRET")
 
 	b := r.browser(t)
-	auth := b.startSignIn(t, "/approve/"+first.recordID)
+	auth := b.StartSignIn(t, "/approve/"+first.recordID)
 	issuerURL, err := url.Parse(r.issuer.URL())
 	if err != nil {
 		t.Fatal(err)
@@ -53,13 +53,13 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 	case query.Has("access_type") || query.Has("prompt"):
 		t.Errorf("the sign-in asks access_type=%q prompt=%q, want neither", query.Get("access_type"), query.Get("prompt"))
 	}
-	res := b.get(t, b.authorize(t, auth, person(ada)))
-	if res.status != http.StatusSeeOther || res.header.Get("Location") != "/approve/"+first.recordID {
-		t.Fatalf("callback = %d to %q, want 303 back to the record", res.status, res.header.Get("Location"))
+	res := b.Get(t, b.Authorize(t, auth, person(ada)))
+	if res.Status != http.StatusSeeOther || res.Header.Get("Location") != "/approve/"+first.recordID {
+		t.Fatalf("callback = %d to %q, want 303 back to the record", res.Status, res.Header.Get("Location"))
 	}
 
-	res = b.page(t, first.recordID)
-	got := pageText(t, res.body)
+	res = b.Page(t, first.recordID)
+	got := pageText(t, res.Body)
 	for _, want := range []string{
 		"Signed in as " + ada,
 		"TEST_SECRET",
@@ -87,67 +87,67 @@ func TestThePagePrintsTheRecordAfterTheBrokersOwnSignIn(t *testing.T) {
 			t.Errorf("the page does not print the instant %s:\n%s", want, got)
 		}
 	}
-	if !strings.Contains(res.body, `href="/approve/`+first.recordID+`?switch=1"`) {
-		t.Errorf("the page has no switch link to the record:\n%s", res.body)
+	if !strings.Contains(res.Body, `href="/approve/`+first.recordID+`?switch=1"`) {
+		t.Errorf("the page has no switch link to the record:\n%s", res.Body)
 	}
 	for _, p := range []pending{first, second} {
-		form := decisionForm(t, res.body, p.recordID)
+		form := decisionForm(t, res.Body, p.recordID)
 		if form == nil {
-			t.Fatalf("the page offers no Approve/Deny form for %s:\n%s", p.recordID, res.body)
+			t.Fatalf("the page offers no Approve/Deny form for %s:\n%s", p.recordID, res.Body)
 		}
 	}
-	if _, label := approveAll(t, res.body); label != "Approve all 2 shown" {
+	if _, label := approveAll(t, res.Body); label != "Approve all 2 shown" {
 		t.Errorf("approve-all button = %q, want \"Approve all 2 shown\"", label)
 	}
-	if !strings.Contains(res.body, `<button type="submit" name="decision" value="approve">Approve</button>`) ||
-		!strings.Contains(res.body, `<button type="submit" name="decision" value="deny" class="deny">Deny</button>`) {
-		t.Errorf("the page has no Approve and Deny buttons:\n%s", res.body)
+	if !strings.Contains(res.Body, `<button type="submit" name="decision" value="approve">Approve</button>`) ||
+		!strings.Contains(res.Body, `<button type="submit" name="decision" value="deny" class="deny">Deny</button>`) {
+		t.Errorf("the page has no Approve and Deny buttons:\n%s", res.Body)
 	}
-	if strings.Contains(strings.ToLower(res.body), "<script") {
-		t.Errorf("the page carries a script:\n%s", res.body)
+	if strings.Contains(strings.ToLower(res.Body), "<script") {
+		t.Errorf("the page carries a script:\n%s", res.Body)
 	}
 
 	t.Run("a machine login links Dispatch's page and offers no button", func(t *testing.T) {
 		machineRecord, _ := r.machineLogin(t, newKey(t), ada, "ada-laptop")
-		res := b.page(t, machineRecord)
-		if !strings.Contains(pageText(t, res.body), "Machine login for ada-laptop") ||
-			!strings.Contains(res.body, `href="`+brokertest.MachineLoginURL+`"`) {
-			t.Errorf("the machine login's page does not link %s:\n%s", brokertest.MachineLoginURL, res.body)
+		res := b.Page(t, machineRecord)
+		if !strings.Contains(pageText(t, res.Body), "Machine login for ada-laptop") ||
+			!strings.Contains(res.Body, `href="`+brokertest.MachineLoginURL+`"`) {
+			t.Errorf("the machine login's page does not link %s:\n%s", brokertest.MachineLoginURL, res.Body)
 		}
-		if decisionForm(t, res.body, machineRecord) != nil {
-			t.Errorf("the machine login's page offers a decision form:\n%s", res.body)
+		if decisionForm(t, res.Body, machineRecord) != nil {
+			t.Errorf("the machine login's page offers a decision form:\n%s", res.Body)
 		}
 	})
 
 	t.Run("another person's record names who decides it and offers only the switch", func(t *testing.T) {
 		other := r.browser(t)
-		other.signIn(t, first.recordID, person(carol))
-		res := other.page(t, first.recordID)
-		got := pageText(t, res.body)
+		other.SignIn(t, first.recordID, person(carol))
+		res := other.Page(t, first.recordID)
+		got := pageText(t, res.Body)
 		if !strings.Contains(got, "Only "+ada+" may decide this request, and you are signed in as "+carol) {
 			t.Errorf("carol's page does not say ada decides it:\n%s", got)
 		}
-		if decisionForm(t, res.body, first.recordID) != nil || decisionForm(t, res.body, second.recordID) != nil {
-			t.Errorf("carol's page offers a decision form for ada's records:\n%s", res.body)
+		if decisionForm(t, res.Body, first.recordID) != nil || decisionForm(t, res.Body, second.recordID) != nil {
+			t.Errorf("carol's page offers a decision form for ada's records:\n%s", res.Body)
 		}
-		if !strings.Contains(res.body, `href="/approve/`+first.recordID+`?switch=1"`) {
-			t.Errorf("carol's page has no switch link:\n%s", res.body)
+		if !strings.Contains(res.Body, `href="/approve/`+first.recordID+`?switch=1"`) {
+			t.Errorf("carol's page has no switch link:\n%s", res.Body)
 		}
 	})
 
 	t.Run("an unknown record is a 404 and a malformed id a 400", func(t *testing.T) {
-		if res := b.get(t, "/approve/"+strings.Repeat("0", 64)); res.status != http.StatusNotFound {
-			t.Errorf("unknown record = %d, want 404", res.status)
+		if res := b.Get(t, "/approve/"+strings.Repeat("0", 64)); res.Status != http.StatusNotFound {
+			t.Errorf("unknown record = %d, want 404", res.Status)
 		}
-		if res := b.get(t, "/approve/"+strings.ToUpper(first.recordID)); res.status != http.StatusBadRequest {
-			t.Errorf("malformed record id = %d, want 400", res.status)
+		if res := b.Get(t, "/approve/"+strings.ToUpper(first.recordID)); res.Status != http.StatusBadRequest {
+			t.Errorf("malformed record id = %d, want 400", res.Status)
 		}
 	})
 
 	t.Run("the stylesheet is served", func(t *testing.T) {
-		res := b.get(t, "/approve/assets/approve.css")
-		if res.status != http.StatusOK || !strings.HasPrefix(res.header.Get("Content-Type"), "text/css") {
-			t.Errorf("stylesheet = %d %q, want 200 text/css", res.status, res.header.Get("Content-Type"))
+		res := b.Get(t, "/approve/assets/approve.css")
+		if res.Status != http.StatusOK || !strings.HasPrefix(res.Header.Get("Content-Type"), "text/css") {
+			t.Errorf("stylesheet = %d %q, want 200 text/css", res.Status, res.Header.Get("Content-Type"))
 		}
 	})
 }
@@ -164,71 +164,71 @@ func TestTheApproverApprovesWithOnePost(t *testing.T) {
 
 	t.Run("another person's session", func(t *testing.T) {
 		approver := r.browser(t)
-		approver.signIn(t, p.recordID, person(ada))
-		form := decisionForm(t, approver.page(t, p.recordID).body, p.recordID)
+		approver.SignIn(t, p.recordID, person(ada))
+		form := decisionForm(t, approver.Page(t, p.recordID).Body, p.recordID)
 		other := r.browser(t)
-		other.signIn(t, p.recordID, person(carol))
-		if res := other.fromPage(t, "/approve", decision(form, "approve")); res.status != http.StatusForbidden {
-			t.Errorf("carol posting ada's form = %d, want 403", res.status)
+		other.SignIn(t, p.recordID, person(carol))
+		if res := other.FromPage(t, "/approve", decision(form, "approve")); res.Status != http.StatusForbidden {
+			t.Errorf("carol posting ada's form = %d, want 403", res.Status)
 		}
 		r.requirePending(t, p.recordID)
 	})
 
 	t.Run("an expired session", func(t *testing.T) {
 		b := r.browser(t)
-		b.signIn(t, p.recordID, person(ada))
-		form := decisionForm(t, b.page(t, p.recordID).body, p.recordID)
+		b.SignIn(t, p.recordID, person(ada))
+		form := decisionForm(t, b.Page(t, p.recordID).Body, p.recordID)
 		if _, err := r.st.Pool.Exec(t.Context(), `update browser_sessions set expires_at = now() - interval '1 second'`); err != nil {
 			t.Fatal(err)
 		}
-		if res := b.fromPage(t, "/approve", decision(form, "approve")); res.status != http.StatusForbidden {
-			t.Errorf("POST with an expired session = %d, want 403", res.status)
+		if res := b.FromPage(t, "/approve", decision(form, "approve")); res.Status != http.StatusForbidden {
+			t.Errorf("POST with an expired session = %d, want 403", res.Status)
 		}
-		if res := b.get(t, "/approve/"+p.recordID); res.status != http.StatusFound {
-			t.Errorf("the page with an expired session = %d, want 302 to sign in again", res.status)
+		if res := b.Get(t, "/approve/"+p.recordID); res.Status != http.StatusFound {
+			t.Errorf("the page with an expired session = %d, want 302 to sign in again", res.Status)
 		}
 		r.requirePending(t, p.recordID)
 	})
 
 	t.Run("a logged-out session's replayed cookie", func(t *testing.T) {
 		b := r.browser(t)
-		b.signIn(t, p.recordID, person(ada))
-		form := decisionForm(t, b.page(t, p.recordID).body, p.recordID)
-		stolen := &http.Cookie{Name: "__Host-broker-session", Value: b.cookie(t, "__Host-broker-session")}
+		b.SignIn(t, p.recordID, person(ada))
+		form := decisionForm(t, b.Page(t, p.recordID).Body, p.recordID)
+		stolen := &http.Cookie{Name: "__Host-broker-session", Value: b.Cookie(t, "__Host-broker-session")}
 		before := r.sessions(t)
-		res := b.fromPage(t, "/signin/logout", url.Values{"next": {"/approve/" + p.recordID}})
-		if res.status != http.StatusOK || !strings.Contains(res.body, `href="/approve/`+p.recordID+`"`) {
-			t.Fatalf("logout = %d, want 200 linking back to the record:\n%s", res.status, res.body)
+		res := b.FromPage(t, "/signin/logout", url.Values{"next": {"/approve/" + p.recordID}})
+		if res.Status != http.StatusOK || !strings.Contains(res.Body, `href="/approve/`+p.recordID+`"`) {
+			t.Fatalf("logout = %d, want 200 linking back to the record:\n%s", res.Status, res.Body)
 		}
-		if c := res.cookie("__Host-broker-session"); c == nil || c.MaxAge >= 0 {
+		if c := res.Cookie("__Host-broker-session"); c == nil || c.MaxAge >= 0 {
 			t.Errorf("logout's Set-Cookie = %v, want the session cookie cleared", c)
 		}
 		if after := r.sessions(t); after != before-1 {
 			t.Errorf("sessions after logout = %d, want %d", after, before-1)
 		}
-		if res := r.browser(t).post(t, "/approve", decision(form, "approve"), map[string]string{"Origin": r.url}, stolen); res.status != http.StatusForbidden {
-			t.Errorf("POST with the logged-out cookie = %d, want 403", res.status)
+		if res := r.browser(t).Post(t, "/approve", decision(form, "approve"), map[string]string{"Origin": r.url}, stolen); res.Status != http.StatusForbidden {
+			t.Errorf("POST with the logged-out cookie = %d, want 403", res.Status)
 		}
 		r.requirePending(t, p.recordID)
 	})
 
 	t.Run("no session", func(t *testing.T) {
 		approver := r.browser(t)
-		approver.signIn(t, p.recordID, person(ada))
-		form := decisionForm(t, approver.page(t, p.recordID).body, p.recordID)
-		if res := r.browser(t).fromPage(t, "/approve", decision(form, "approve")); res.status != http.StatusForbidden {
-			t.Errorf("POST with no session = %d, want 403", res.status)
+		approver.SignIn(t, p.recordID, person(ada))
+		form := decisionForm(t, approver.Page(t, p.recordID).Body, p.recordID)
+		if res := r.browser(t).FromPage(t, "/approve", decision(form, "approve")); res.Status != http.StatusForbidden {
+			t.Errorf("POST with no session = %d, want 403", res.Status)
 		}
 		r.requirePending(t, p.recordID)
 	})
 
 	t.Run("the approver", func(t *testing.T) {
 		b := r.browser(t)
-		b.signIn(t, p.recordID, person(ada))
-		form := decisionForm(t, b.page(t, p.recordID).body, p.recordID)
-		res := b.fromPage(t, "/approve", decision(form, "approve"))
-		if res.status != http.StatusSeeOther || res.header.Get("Location") != "/approve/"+p.recordID+"?decided="+p.recordID {
-			t.Fatalf("approve = %d to %q, want 303 to the record with its outcome:\n%s", res.status, res.header.Get("Location"), res.body)
+		b.SignIn(t, p.recordID, person(ada))
+		form := decisionForm(t, b.Page(t, p.recordID).Body, p.recordID)
+		res := b.FromPage(t, "/approve", decision(form, "approve"))
+		if res.Status != http.StatusSeeOther || res.Header.Get("Location") != "/approve/"+p.recordID+"?decided="+p.recordID {
+			t.Fatalf("approve = %d to %q, want 303 to the record with its outcome:\n%s", res.Status, res.Header.Get("Location"), res.Body)
 		}
 		if state, grants := r.state(t, p.recordID), r.grants(t, p.recordID); state != "approved" || grants != 1 {
 			t.Fatalf("record after the approval = %s with %d grants, want approved with one", state, grants)
@@ -247,16 +247,16 @@ func TestTheApproverApprovesWithOnePost(t *testing.T) {
 			t.Fatalf("values = %d %s, want TEST_SECRET=test-v1", status, body)
 		}
 
-		after := b.get(t, res.header.Get("Location"))
-		got := pageText(t, after.body)
+		after := b.Get(t, res.Header.Get("Location"))
+		got := pageText(t, after.Body)
 		if !strings.Contains(got, "TEST_SECRET: granted (approved by "+ada+" at ") || !strings.Contains(got, "State approved by "+ada) {
 			t.Errorf("the page after the approval does not say it is granted by ada:\n%s", got)
 		}
-		if decisionForm(t, after.body, p.recordID) != nil {
-			t.Errorf("the decided record still offers a decision form:\n%s", after.body)
+		if decisionForm(t, after.Body, p.recordID) != nil {
+			t.Errorf("the decided record still offers a decision form:\n%s", after.Body)
 		}
-		if res := b.fromPage(t, "/approve", decision(form, "approve")); res.status != http.StatusSeeOther {
-			t.Errorf("a replayed form = %d, want 303 deciding nothing", res.status)
+		if res := b.FromPage(t, "/approve", decision(form, "approve")); res.Status != http.StatusSeeOther {
+			t.Errorf("a replayed form = %d, want 303 deciding nothing", res.Status)
 		}
 		if grants, events := r.grants(t, p.recordID), r.terminalEvents(t, p.recordID); grants != 1 || events != 1 {
 			t.Errorf("after a replay the record has %d grants and %d terminal events, want 1 and 1", grants, events)
@@ -266,19 +266,19 @@ func TestTheApproverApprovesWithOnePost(t *testing.T) {
 	t.Run("a shared secret's request, by anyone signed in", func(t *testing.T) {
 		shared := r.request(t, enrollmentID, key, "shared deploy", nil, "", "SHARED_SECRET")
 		b := r.browser(t)
-		auth := b.startSignIn(t, "/approve/"+shared.recordID)
+		auth := b.StartSignIn(t, "/approve/"+shared.recordID)
 		if auth.Query().Has("login_hint") {
 			t.Errorf("a shared secret's sign-in hints %q, want no login_hint", auth.Query().Get("login_hint"))
 		}
-		if res := b.get(t, b.authorize(t, auth, person(carol))); res.status != http.StatusSeeOther {
-			t.Fatalf("callback = %d, want 303", res.status)
+		if res := b.Get(t, b.Authorize(t, auth, person(carol))); res.Status != http.StatusSeeOther {
+			t.Fatalf("callback = %d, want 303", res.Status)
 		}
-		form := decisionForm(t, b.page(t, shared.recordID).body, shared.recordID)
+		form := decisionForm(t, b.Page(t, shared.recordID).Body, shared.recordID)
 		if form == nil {
 			t.Fatal("carol is offered no form for a shared secret's request")
 		}
-		if res := b.fromPage(t, "/approve", decision(form, "approve")); res.status != http.StatusSeeOther {
-			t.Fatalf("carol's approval = %d, want 303", res.status)
+		if res := b.FromPage(t, "/approve", decision(form, "approve")); res.Status != http.StatusSeeOther {
+			t.Fatalf("carol's approval = %d, want 303", res.Status)
 		}
 		if state, grants := r.state(t, shared.recordID), r.grants(t, shared.recordID); state != "approved" || grants != 1 {
 			t.Fatalf("shared record = %s with %d grants, want approved with one", state, grants)
@@ -293,19 +293,19 @@ func TestTheTokenBindsTheSessionAndThePrintedRecords(t *testing.T) {
 	enrollmentID, key := r.benSession(t, "ben-box")
 	a := r.request(t, enrollmentID, key, "first", nil, "", "TEST_SECRET")
 	b := r.browser(t)
-	b.signIn(t, a.recordID, person(ada))
-	formA := decisionForm(t, b.page(t, a.recordID).body, a.recordID)
+	b.SignIn(t, a.recordID, person(ada))
+	formA := decisionForm(t, b.Page(t, a.recordID).Body, a.recordID)
 
 	t.Run("a record the page did not print", func(t *testing.T) {
 		later := r.request(t, enrollmentID, key, "later", nil, "", "SECOND_SECRET")
 		forged := decision(formA, "approve")
 		forged.Set("record", later.recordID)
-		if res := b.fromPage(t, "/approve", forged); res.status != http.StatusForbidden {
-			t.Errorf("A's form naming B = %d, want 403", res.status)
+		if res := b.FromPage(t, "/approve", forged); res.Status != http.StatusForbidden {
+			t.Errorf("A's form naming B = %d, want 403", res.Status)
 		}
 		forged.Add("printed", later.recordID)
-		if res := b.fromPage(t, "/approve", forged); res.status != http.StatusForbidden {
-			t.Errorf("A's form with B added to its printed set = %d, want 403", res.status)
+		if res := b.FromPage(t, "/approve", forged); res.Status != http.StatusForbidden {
+			t.Errorf("A's form with B added to its printed set = %d, want 403", res.Status)
 		}
 		r.requirePending(t, later.recordID)
 		r.requirePending(t, a.recordID)
@@ -313,15 +313,15 @@ func TestTheTokenBindsTheSessionAndThePrintedRecords(t *testing.T) {
 
 	t.Run("another session's token", func(t *testing.T) {
 		second := r.browser(t)
-		second.signIn(t, a.recordID, person(ada))
-		if res := second.fromPage(t, "/approve", decision(formA, "approve")); res.status != http.StatusForbidden {
-			t.Errorf("one session's form posted with another session of the same person = %d, want 403", res.status)
+		second.SignIn(t, a.recordID, person(ada))
+		if res := second.FromPage(t, "/approve", decision(formA, "approve")); res.Status != http.StatusForbidden {
+			t.Errorf("one session's form posted with another session of the same person = %d, want 403", res.Status)
 		}
 		r.requirePending(t, a.recordID)
 	})
 
 	t.Run("an expired token", func(t *testing.T) {
-		secret, err := base64.RawURLEncoding.DecodeString(b.cookie(t, "__Host-broker-session"))
+		secret, err := base64.RawURLEncoding.DecodeString(b.Cookie(t, "__Host-broker-session"))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -331,14 +331,14 @@ func TestTheTokenBindsTheSessionAndThePrintedRecords(t *testing.T) {
 			form.Set("token", approval.PageToken(secret, expires.Unix(), form["printed"]))
 			return form
 		}
-		if res := b.fromPage(t, "/approve", at(time.Now().Add(-time.Second))); res.status != http.StatusForbidden {
-			t.Errorf("a token that expired a second ago = %d, want 403", res.status)
+		if res := b.FromPage(t, "/approve", at(time.Now().Add(-time.Second))); res.Status != http.StatusForbidden {
+			t.Errorf("a token that expired a second ago = %d, want 403", res.Status)
 		}
 		r.requirePending(t, a.recordID)
 		// The same token computed for an unexpired page is accepted, so the refusal above was its
 		// expiry's.
-		if res := b.fromPage(t, "/approve", at(time.Now().Add(time.Minute))); res.status != http.StatusSeeOther {
-			t.Fatalf("the token for an unexpired page = %d, want 303", res.status)
+		if res := b.FromPage(t, "/approve", at(time.Now().Add(time.Minute))); res.Status != http.StatusSeeOther {
+			t.Fatalf("the token for an unexpired page = %d, want 303", res.Status)
 		}
 		if state := r.state(t, a.recordID); state != "approved" {
 			t.Fatalf("record = %s, want approved", state)
@@ -350,18 +350,18 @@ func TestTheTokenBindsTheSessionAndThePrintedRecords(t *testing.T) {
 		one := r.request(t, enrollmentID, key, "one", nil, "", "TEST_SECRET")
 		two := r.request(t, enrollmentID, key, "two", nil, "", "THIRD_SECRET")
 		b := r.browser(t)
-		b.signIn(t, one.recordID, person(ada))
-		page := b.page(t, one.recordID)
-		all, label := approveAll(t, page.body)
+		b.SignIn(t, one.recordID, person(ada))
+		page := b.Page(t, one.recordID)
+		all, label := approveAll(t, page.Body)
 		// SECOND_SECRET's request from the first session is still pending and ada's, so it is
 		// printed too.
 		if label != "Approve all 3 shown" {
-			t.Fatalf("approve-all = %q, want \"Approve all 3 shown\":\n%s", label, pageText(t, page.body))
+			t.Fatalf("approve-all = %q, want \"Approve all 3 shown\":\n%s", label, pageText(t, page.Body))
 		}
 		after := r.request(t, enrollmentID, key, "after the page", nil, "", "SHARED_SECRET")
-		res := b.fromPage(t, "/approve", all)
-		if res.status != http.StatusSeeOther {
-			t.Fatalf("approve all = %d, want 303:\n%s", res.status, res.body)
+		res := b.FromPage(t, "/approve", all)
+		if res.Status != http.StatusSeeOther {
+			t.Fatalf("approve all = %d, want 303:\n%s", res.Status, res.Body)
 		}
 		for _, p := range []pending{one, two} {
 			if state := r.state(t, p.recordID); state != "approved" {
@@ -381,8 +381,8 @@ func TestOnlyTheBrokersOriginDecides(t *testing.T) {
 	enrollmentID, key := r.benSession(t, "ben-box")
 	p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
 	b := r.browser(t)
-	b.signIn(t, p.recordID, person(ada))
-	form := decision(decisionForm(t, b.page(t, p.recordID).body, p.recordID), "approve")
+	b.SignIn(t, p.recordID, person(ada))
+	form := decision(decisionForm(t, b.Page(t, p.recordID).Body, p.recordID), "approve")
 	broker, err := url.Parse(r.url)
 	if err != nil {
 		t.Fatal(err)
@@ -402,13 +402,13 @@ func TestOnlyTheBrokersOriginDecides(t *testing.T) {
 		"a sibling origin claiming same-origin too": {"Origin": sibling, "Sec-Fetch-Site": "same-origin"},
 	} {
 		t.Run(name, func(t *testing.T) {
-			if res := b.post(t, "/approve", form, headers); res.status != http.StatusForbidden {
-				t.Errorf("POST /approve with %v = %d, want 403", headers, res.status)
+			if res := b.Post(t, "/approve", form, headers); res.Status != http.StatusForbidden {
+				t.Errorf("POST /approve with %v = %d, want 403", headers, res.Status)
 			}
 			r.requirePending(t, p.recordID)
 			sessions := r.sessions(t)
-			if res := b.post(t, "/signin/logout", url.Values{}, headers); res.status != http.StatusForbidden {
-				t.Errorf("POST /signin/logout with %v = %d, want 403", headers, res.status)
+			if res := b.Post(t, "/signin/logout", url.Values{}, headers); res.Status != http.StatusForbidden {
+				t.Errorf("POST /signin/logout with %v = %d, want 403", headers, res.Status)
 			}
 			if r.sessions(t) != sessions {
 				t.Errorf("a refused logout ended a session")
@@ -416,8 +416,8 @@ func TestOnlyTheBrokersOriginDecides(t *testing.T) {
 		})
 	}
 
-	if res := b.post(t, "/approve", form, map[string]string{"Sec-Fetch-Site": "same-origin"}); res.status != http.StatusSeeOther {
-		t.Fatalf("POST with Sec-Fetch-Site same-origin and no Origin = %d, want 303", res.status)
+	if res := b.Post(t, "/approve", form, map[string]string{"Sec-Fetch-Site": "same-origin"}); res.Status != http.StatusSeeOther {
+		t.Fatalf("POST with Sec-Fetch-Site same-origin and no Origin = %d, want 303", res.Status)
 	}
 	if state := r.state(t, p.recordID); state != "approved" {
 		t.Fatalf("record = %s, want approved", state)
@@ -435,16 +435,16 @@ func TestTheCallbackRefusesAndMakesNoSession(t *testing.T) {
 
 	// started is a browser with a sign-in started and completed at the provider as claims: its
 	// sign-in cookie and the callback URL the provider returned.
-	started := func(t *testing.T, claims map[string]any) (*browser, string) {
+	started := func(t *testing.T, claims map[string]any) (*brokertest.Browser, string) {
 		b := r.browser(t)
-		return b, b.authorize(t, b.startSignIn(t, page), claims)
+		return b, b.Authorize(t, b.StartSignIn(t, page), claims)
 	}
-	refused := func(t *testing.T, res response, want int) {
+	refused := func(t *testing.T, res brokertest.Response, want int) {
 		t.Helper()
-		if res.status != want {
-			t.Errorf("callback = %d, want %d:\n%s", res.status, want, res.body)
+		if res.Status != want {
+			t.Errorf("callback = %d, want %d:\n%s", res.Status, want, res.Body)
 		}
-		if res.cookie("__Host-broker-session") != nil {
+		if res.Cookie("__Host-broker-session") != nil {
 			t.Errorf("a refused callback set a session cookie")
 		}
 		if n := r.sessions(t); n != 0 {
@@ -452,13 +452,13 @@ func TestTheCallbackRefusesAndMakesNoSession(t *testing.T) {
 		}
 	}
 	// withPending is callback sent with the sign-in cookie value given and no other.
-	withPending := func(t *testing.T, callback, value string) response {
+	withPending := func(t *testing.T, callback, value string) brokertest.Response {
 		return r.getWith(t, callback, &http.Cookie{Name: "__Host-broker-signin", Value: value})
 	}
 
 	t.Run("no sign-in cookie", func(t *testing.T) {
 		_, callback := started(t, person(ada))
-		refused(t, r.browser(t).get(t, callback), http.StatusBadRequest)
+		refused(t, r.browser(t).Get(t, callback), http.StatusBadRequest)
 	})
 	t.Run("a state that is not the sign-in's", func(t *testing.T) {
 		b, callback := started(t, person(ada))
@@ -466,7 +466,7 @@ func TestTheCallbackRefusesAndMakesNoSession(t *testing.T) {
 		q := u.Query()
 		q.Set("state", "not-the-state")
 		u.RawQuery = q.Encode()
-		refused(t, b.get(t, u.String()), http.StatusBadRequest)
+		refused(t, b.Get(t, u.String()), http.StatusBadRequest)
 	})
 	t.Run("a forged code", func(t *testing.T) {
 		b, callback := started(t, person(ada))
@@ -474,23 +474,23 @@ func TestTheCallbackRefusesAndMakesNoSession(t *testing.T) {
 		q := u.Query()
 		q.Set("code", "forged-code")
 		u.RawQuery = q.Encode()
-		refused(t, b.get(t, u.String()), http.StatusForbidden)
+		refused(t, b.Get(t, u.String()), http.StatusForbidden)
 	})
 	t.Run("a wrong PKCE verifier", func(t *testing.T) {
 		b, callback := started(t, person(ada))
-		fields := pendingCookie(t, b.cookie(t, "__Host-broker-signin"))
+		fields := pendingCookie(t, b.Cookie(t, "__Host-broker-signin"))
 		fields["verifier"] = strings.Repeat("v", 43)
 		refused(t, withPending(t, callback, encodePending(t, fields)), http.StatusForbidden)
 	})
 	t.Run("a next outside /approve/", func(t *testing.T) {
 		for _, next := range []string{"https://evil.example/approve/" + p.recordID, "//evil.example/", "/v1/pending", "/approve/" + p.recordID + "/../../v1"} {
 			b, callback := started(t, person(ada))
-			fields := pendingCookie(t, b.cookie(t, "__Host-broker-signin"))
+			fields := pendingCookie(t, b.Cookie(t, "__Host-broker-signin"))
 			fields["next"] = next
 			res := withPending(t, callback, encodePending(t, fields))
 			refused(t, res, http.StatusBadRequest)
-			if res.header.Get("Location") != "" {
-				t.Errorf("next %q redirected to %q", next, res.header.Get("Location"))
+			if res.Header.Get("Location") != "" {
+				t.Errorf("next %q redirected to %q", next, res.Header.Get("Location"))
 			}
 		}
 	})
@@ -503,33 +503,33 @@ func TestTheCallbackRefusesAndMakesNoSession(t *testing.T) {
 			r.issuer.SpoilIDTokens(spoil)
 			t.Cleanup(func() { r.issuer.SpoilIDTokens(nil) })
 			b, callback := started(t, person(ada))
-			refused(t, b.get(t, callback), http.StatusForbidden)
+			refused(t, b.Get(t, callback), http.StatusForbidden)
 		})
 	}
 	t.Run("an account of another domain", func(t *testing.T) {
 		claims := person(ada)
 		claims["hd"] = "other.example"
 		b, callback := started(t, claims)
-		refused(t, b.get(t, callback), http.StatusForbidden)
+		refused(t, b.Get(t, callback), http.StatusForbidden)
 	})
 	t.Run("an unverified email", func(t *testing.T) {
 		claims := person(ada)
 		claims["email_verified"] = false
 		b, callback := started(t, claims)
-		refused(t, b.get(t, callback), http.StatusForbidden)
+		refused(t, b.Get(t, callback), http.StatusForbidden)
 	})
 
 	t.Run("a good sign-in, its cookies, and its replay", func(t *testing.T) {
 		b := r.browser(t)
-		start := b.get(t, page)
-		signInCookie := start.cookie("__Host-broker-signin")
-		callback := b.authorize(t, start.location(t), person(ada))
-		res := b.get(t, callback)
-		if res.status != http.StatusSeeOther || r.sessions(t) != 1 {
-			t.Fatalf("callback = %d with %d sessions, want 303 and one", res.status, r.sessions(t))
+		start := b.Get(t, page)
+		signInCookie := start.Cookie("__Host-broker-signin")
+		callback := b.Authorize(t, start.Location(t), person(ada))
+		res := b.Get(t, callback)
+		if res.Status != http.StatusSeeOther || r.sessions(t) != 1 {
+			t.Fatalf("callback = %d with %d sessions, want 303 and one", res.Status, r.sessions(t))
 		}
-		sessionCookie := res.cookie("__Host-broker-session")
-		if cleared := res.cookie("__Host-broker-signin"); cleared == nil || cleared.MaxAge >= 0 {
+		sessionCookie := res.Cookie("__Host-broker-session")
+		if cleared := res.Cookie("__Host-broker-signin"); cleared == nil || cleared.MaxAge >= 0 {
 			t.Errorf("the callback's Set-Cookie for the sign-in = %v, want it cleared", cleared)
 		}
 		for _, c := range []*http.Cookie{signInCookie, sessionCookie} {
@@ -540,7 +540,7 @@ func TestTheCallbackRefusesAndMakesNoSession(t *testing.T) {
 				t.Errorf("cookie %s = %+v, want __Host-, Secure, HttpOnly, Path=/, SameSite=Lax and no Domain", c.Name, c)
 			}
 		}
-		for _, raw := range append(start.header.Values("Set-Cookie"), res.header.Values("Set-Cookie")...) {
+		for _, raw := range append(start.Header.Values("Set-Cookie"), res.Header.Values("Set-Cookie")...) {
 			if strings.Contains(strings.ToLower(raw), "domain=") {
 				t.Errorf("Set-Cookie %q names a Domain", raw)
 			}
@@ -556,11 +556,11 @@ func TestTheCallbackRefusesAndMakesNoSession(t *testing.T) {
 
 		// The browser's own replay has no sign-in cookie left; one replayed with the spent cookie
 		// finds the code spent at the provider.
-		if res := b.get(t, callback); res.status != http.StatusBadRequest || r.sessions(t) != 1 {
-			t.Errorf("replayed callback = %d with %d sessions, want 400 and still one", res.status, r.sessions(t))
+		if res := b.Get(t, callback); res.Status != http.StatusBadRequest || r.sessions(t) != 1 {
+			t.Errorf("replayed callback = %d with %d sessions, want 400 and still one", res.Status, r.sessions(t))
 		}
-		if res := withPending(t, callback, signInCookie.Value); res.status != http.StatusForbidden || r.sessions(t) != 1 {
-			t.Errorf("replayed callback with its spent sign-in cookie = %d with %d sessions, want 403 and still one", res.status, r.sessions(t))
+		if res := withPending(t, callback, signInCookie.Value); res.Status != http.StatusForbidden || r.sessions(t) != 1 {
+			t.Errorf("replayed callback with its spent sign-in cookie = %d with %d sessions, want 403 and still one", res.Status, r.sessions(t))
 		}
 	})
 }
@@ -575,14 +575,14 @@ func TestMarkupRendersInert(t *testing.T) {
 	enrollmentID, key := r.enroll(t, "ben-box", runtimeID, `<em>enrolled</em>`)
 	p := r.request(t, enrollmentID, key, reason, nil, claim, "TEST_SECRET")
 	b := r.browser(t)
-	b.signIn(t, p.recordID, person(ada))
-	res := b.page(t, p.recordID)
+	b.SignIn(t, p.recordID, person(ada))
+	res := b.Page(t, p.recordID)
 	for _, raw := range []string{"<script", "<b>bold", "<img", "<i>claimed", "<em>enrolled"} {
-		if strings.Contains(res.body, raw) {
-			t.Errorf("the page carries %q unescaped:\n%s", raw, res.body)
+		if strings.Contains(res.Body, raw) {
+			t.Errorf("the page carries %q unescaped:\n%s", raw, res.Body)
 		}
 	}
-	got := pageText(t, res.body)
+	got := pageText(t, res.Body)
 	for _, want := range []string{reason, runtimeID, claim, `<em>enrolled</em>`} {
 		if !strings.Contains(got, want) {
 			t.Errorf("the page does not print %q as text:\n%s", want, got)
@@ -604,8 +604,8 @@ func TestABatchDecidesEachRecordOnItsOwn(t *testing.T) {
 	ending := r.request(t, endingEnrollment, endingKey, "ending", nil, "", "THIRD_SECRET")
 
 	b := r.browser(t)
-	b.signIn(t, valid.recordID, person(ada))
-	all, label := approveAll(t, b.page(t, valid.recordID).body)
+	b.SignIn(t, valid.recordID, person(ada))
+	all, label := approveAll(t, b.Page(t, valid.recordID).Body)
 	if label != "Approve all 3 shown" {
 		t.Fatalf("approve-all = %q, want \"Approve all 3 shown\"", label)
 	}
@@ -619,9 +619,9 @@ func TestABatchDecidesEachRecordOnItsOwn(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	res := b.fromPage(t, "/approve", all)
-	if res.status != http.StatusSeeOther {
-		t.Fatalf("approve all = %d, want 303:\n%s", res.status, res.body)
+	res := b.FromPage(t, "/approve", all)
+	if res.Status != http.StatusSeeOther {
+		t.Fatalf("approve all = %d, want 303:\n%s", res.Status, res.Body)
 	}
 	for _, c := range []struct {
 		p      pending
@@ -631,7 +631,7 @@ func TestABatchDecidesEachRecordOnItsOwn(t *testing.T) {
 			t.Errorf("record %s has %d grants and %d terminal events, want %d and 1", c.p.recordID, grants, events, c.grants)
 		}
 	}
-	got := pageText(t, b.get(t, res.header.Get("Location")).body)
+	got := pageText(t, b.Get(t, res.Header.Get("Location")).Body)
 	for _, want := range []string{
 		"TEST_SECRET: granted (approved by " + ada,
 		"SECOND_SECRET: expired at ",
@@ -643,7 +643,7 @@ func TestABatchDecidesEachRecordOnItsOwn(t *testing.T) {
 	}
 
 	t.Run("an outcome is read from the record, never from the URL", func(t *testing.T) {
-		got := pageText(t, b.get(t, "/approve/"+valid.recordID+"?decided="+valid.recordID+",granted,"+strings.Repeat("f", 64)).body)
+		got := pageText(t, b.Get(t, "/approve/"+valid.recordID+"?decided="+valid.recordID+",granted,"+strings.Repeat("f", 64)).Body)
 		if strings.Count(got, "TEST_SECRET: granted") != 1 || strings.Contains(got, "SECOND_SECRET: ") {
 			t.Errorf("forged decided ids changed the outcomes:\n%s", got)
 		}
@@ -659,15 +659,15 @@ func TestSignInOffAndAnUnreachableProvider(t *testing.T) {
 		enrollmentID, key := r.benSession(t, "ben-box")
 		p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
 		b := r.browser(t)
-		for _, res := range []response{
-			b.get(t, "/approve/"+p.recordID),
-			b.fromPage(t, "/approve", url.Values{"decision": {"approve"}, "record": {p.recordID}}),
-			b.get(t, "/signin/callback?code=x&state=y"),
-			b.fromPage(t, "/signin/logout", url.Values{}),
+		for _, res := range []brokertest.Response{
+			b.Get(t, "/approve/"+p.recordID),
+			b.FromPage(t, "/approve", url.Values{"decision": {"approve"}, "record": {p.recordID}}),
+			b.Get(t, "/signin/callback?code=x&state=y"),
+			b.FromPage(t, "/signin/logout", url.Values{}),
 		} {
-			got := pageText(t, res.body)
-			if res.status != http.StatusServiceUnavailable {
-				t.Errorf("answer = %d, want 503", res.status)
+			got := pageText(t, res.Body)
+			if res.Status != http.StatusServiceUnavailable {
+				t.Errorf("answer = %d, want 503", res.Status)
 			}
 			for _, setting := range []string{"BROKER_SIGNIN_ISSUER", "BROKER_SIGNIN_CLIENT_ID", "BROKER_SIGNIN_CLIENT_SECRET_FILE", "BROKER_SIGNIN_DOMAIN"} {
 				if !strings.Contains(got, setting) {
@@ -675,8 +675,8 @@ func TestSignInOffAndAnUnreachableProvider(t *testing.T) {
 				}
 			}
 		}
-		if res := b.get(t, "/approve/assets/approve.css"); res.status != http.StatusOK {
-			t.Errorf("stylesheet with sign-in off = %d, want 200", res.status)
+		if res := b.Get(t, "/approve/assets/approve.css"); res.Status != http.StatusOK {
+			t.Errorf("stylesheet with sign-in off = %d, want 200", res.Status)
 		}
 		r.requirePending(t, p.recordID)
 	})
@@ -687,12 +687,12 @@ func TestSignInOffAndAnUnreachableProvider(t *testing.T) {
 		p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
 		r.issuer.FailDiscovery(http.StatusInternalServerError)
 		b := r.browser(t)
-		res := b.get(t, "/approve/"+p.recordID)
-		if res.status != http.StatusServiceUnavailable || !strings.Contains(pageText(t, res.body), r.issuer.URL()) {
-			t.Fatalf("sign-in with discovery failing = %d, want 503 naming %s:\n%s", res.status, r.issuer.URL(), res.body)
+		res := b.Get(t, "/approve/"+p.recordID)
+		if res.Status != http.StatusServiceUnavailable || !strings.Contains(pageText(t, res.Body), r.issuer.URL()) {
+			t.Fatalf("sign-in with discovery failing = %d, want 503 naming %s:\n%s", res.Status, r.issuer.URL(), res.Body)
 		}
 		r.issuer.FailDiscovery(0)
-		b.signIn(t, p.recordID, person(ada))
+		b.SignIn(t, p.recordID, person(ada))
 	})
 }
 
@@ -704,23 +704,23 @@ func TestSwitchingAccountsReplacesTheSession(t *testing.T) {
 	enrollmentID, key := r.benSession(t, "ben-box")
 	p := r.request(t, enrollmentID, key, "deploy", nil, "", "TEST_SECRET")
 	b := r.browser(t)
-	b.signIn(t, p.recordID, person(carol))
-	old := &http.Cookie{Name: "__Host-broker-session", Value: b.cookie(t, "__Host-broker-session")}
+	b.SignIn(t, p.recordID, person(carol))
+	old := &http.Cookie{Name: "__Host-broker-session", Value: b.Cookie(t, "__Host-broker-session")}
 
-	auth := b.startSignIn(t, "/approve/"+p.recordID+"?switch=1")
+	auth := b.StartSignIn(t, "/approve/"+p.recordID+"?switch=1")
 	if q := auth.Query(); q.Get("prompt") != "select_account" || q.Get("login_hint") != ada {
 		t.Fatalf("the switch's sign-in asks prompt=%q login_hint=%q, want select_account and %s", q.Get("prompt"), q.Get("login_hint"), ada)
 	}
-	if res := b.get(t, b.authorize(t, auth, person(ada))); res.status != http.StatusSeeOther || res.header.Get("Location") != "/approve/"+p.recordID {
-		t.Fatalf("callback = %d to %q, want 303 back to the record", res.status, res.header.Get("Location"))
+	if res := b.Get(t, b.Authorize(t, auth, person(ada))); res.Status != http.StatusSeeOther || res.Header.Get("Location") != "/approve/"+p.recordID {
+		t.Fatalf("callback = %d to %q, want 303 back to the record", res.Status, res.Header.Get("Location"))
 	}
 	if n := r.sessions(t); n != 1 {
 		t.Fatalf("sessions after the switch = %d, want only the new one", n)
 	}
-	if got := pageText(t, b.page(t, p.recordID).body); !strings.Contains(got, "Signed in as "+ada) {
+	if got := pageText(t, b.Page(t, p.recordID).Body); !strings.Contains(got, "Signed in as "+ada) {
 		t.Errorf("the page after the switch is not ada's:\n%s", got)
 	}
-	if res := r.getWith(t, "/approve/"+p.recordID, old); res.status != http.StatusFound {
-		t.Errorf("the page with carol's old cookie = %d, want 302 to sign in", res.status)
+	if res := r.getWith(t, "/approve/"+p.recordID, old); res.Status != http.StatusFound {
+		t.Errorf("the page with carol's old cookie = %d, want 302 to sign in", res.Status)
 	}
 }

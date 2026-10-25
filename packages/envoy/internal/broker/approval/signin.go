@@ -1,7 +1,6 @@
 package approval
 
 import (
-	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
@@ -140,8 +139,7 @@ func (p *Page) ServeCallback(w http.ResponseWriter, r *http.Request, _ Session) 
 		writeMessage(w, http.StatusForbidden, say("Sign-in refused", workspaceRefusal(err, p.cfg.SignIn.Domain)))
 		return
 	}
-	secret := make([]byte, secretBytes)
-	_, _ = rand.Read(secret) // crypto/rand.Read never fails.
+	secret := randomBytes()
 	if old, ok := sessionSecret(r); ok {
 		if err := p.cfg.Store.DeleteBrowserSession(r.Context(), sha256.Sum256(old)); err != nil {
 			writeUnavailable(w, "end the previous sign-in", err)

@@ -12,8 +12,9 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 )
 
-// A session is found by its secret's hash, with the login and expiry it was made with, until its
-// logout deletes it; a lookup by the hash of another secret finds nothing.
+// A session is found by its secret's hash, with the login it was made with, live until the last
+// instant before the expiry it was made with, until its logout deletes it; a lookup by the hash of
+// another secret finds nothing.
 func TestBrowserSessionIsFoundByItsHashUntilItsLogout(t *testing.T) {
 	st := storetest.Open(t)
 	ctx := context.Background()
@@ -24,18 +25,19 @@ func TestBrowserSessionIsFoundByItsHashUntilItsLogout(t *testing.T) {
 		t.Fatalf("CreateBrowserSession: %v", err)
 	}
 
-	login, gotExpires, err := st.BrowserSession(ctx, hash, now)
-	if err != nil || login != "ada@example.com" || !gotExpires.Equal(expires) {
-		t.Fatalf("BrowserSession = %q, %v, %v; want ada@example.com, %v", login, gotExpires, err, expires)
+	for _, at := range []time.Time{now, expires.Add(-time.Microsecond)} {
+		if login, err := st.BrowserSession(ctx, hash, at); err != nil || login != "ada@example.com" {
+			t.Fatalf("BrowserSession at %v, before its expiry %v = %q, %v; want ada@example.com", at, expires, login, err)
+		}
 	}
-	if _, _, err := st.BrowserSession(ctx, sha256.Sum256([]byte("another secret")), now); !errors.Is(err, pgx.ErrNoRows) {
+	if _, err := st.BrowserSession(ctx, sha256.Sum256([]byte("another secret")), now); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("BrowserSession(another secret's hash) error = %v, want pgx.ErrNoRows", err)
 	}
 
 	if err := st.DeleteBrowserSession(ctx, hash); err != nil {
 		t.Fatalf("DeleteBrowserSession: %v", err)
 	}
-	if _, _, err := st.BrowserSession(ctx, hash, now); !errors.Is(err, pgx.ErrNoRows) {
+	if _, err := st.BrowserSession(ctx, hash, now); !errors.Is(err, pgx.ErrNoRows) {
 		t.Fatalf("BrowserSession after the logout: error = %v, want pgx.ErrNoRows", err)
 	}
 	if err := st.DeleteBrowserSession(ctx, hash); err != nil {
@@ -54,7 +56,7 @@ func TestBrowserSessionPastItsExpiryIsAbsent(t *testing.T) {
 		t.Fatalf("CreateBrowserSession: %v", err)
 	}
 	for _, at := range []time.Time{expires, expires.Add(time.Second)} {
-		if login, _, err := st.BrowserSession(ctx, hash, at); !errors.Is(err, pgx.ErrNoRows) {
+		if login, err := st.BrowserSession(ctx, hash, at); !errors.Is(err, pgx.ErrNoRows) {
 			t.Fatalf("BrowserSession at %v, its expiry %v = %q, %v; want pgx.ErrNoRows", at, expires, login, err)
 		}
 	}
@@ -88,7 +90,7 @@ func TestDeleteExpiredBrowserSessionsDeletesOnlyTheExpired(t *testing.T) {
 	if err != nil || deleted != 2 {
 		t.Fatalf("DeleteExpiredBrowserSessions = %d, %v; want 2", deleted, err)
 	}
-	if login, _, err := st.BrowserSession(ctx, sha256.Sum256([]byte("live")), now); err != nil || login != "ada@example.com" {
+	if login, err := st.BrowserSession(ctx, sha256.Sum256([]byte("live")), now); err != nil || login != "ada@example.com" {
 		t.Fatalf("the live session after the sweep = %q, %v; want ada@example.com", login, err)
 	}
 	var rows int

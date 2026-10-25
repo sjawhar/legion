@@ -19,13 +19,13 @@ func (s *Store) CreateBrowserSession(ctx context.Context, hash [sha256.Size]byte
 	return err
 }
 
-// BrowserSession answers the login and expiry of the session whose secret hashes to hash while it
-// is live at now. A session past its expiry is absent, as one never made or logged out is: each
-// answers pgx.ErrNoRows.
-func (s *Store) BrowserSession(ctx context.Context, hash [sha256.Size]byte, now time.Time) (login string, expires time.Time, err error) {
-	err = s.Pool.QueryRow(ctx, `select login, expires_at from browser_sessions where secret_hash = $1 and expires_at > $2`,
-		hash[:], now).Scan(&login, &expires)
-	return login, expires, err
+// BrowserSession answers the login of the session whose secret hashes to hash while it is live at
+// now. A session past its expiry is absent, as one never made or logged out is: each answers
+// pgx.ErrNoRows.
+func (s *Store) BrowserSession(ctx context.Context, hash [sha256.Size]byte, now time.Time) (login string, err error) {
+	err = s.Pool.QueryRow(ctx, `select login from browser_sessions where secret_hash = $1 and expires_at > $2`,
+		hash[:], now).Scan(&login)
+	return login, err
 }
 
 // DeleteBrowserSession deletes the session whose secret hashes to hash, its logout. A session

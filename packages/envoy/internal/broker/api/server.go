@@ -385,9 +385,7 @@ type pageRefusal struct {
 // writePageRefusal is writeError for a refusal naming the record's approval page, approveURL,
 // which its body carries as approve_url (pageRefusal) for a caller to link.
 func writePageRefusal(w http.ResponseWriter, status int, code, msg, approveURL string) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(pageRefusal{Code: code, Error: msg, ApproveURL: approveURL})
+	writeJSON(w, status, pageRefusal{Code: code, Error: msg, ApproveURL: approveURL})
 }
 
 // approveURL is recordID's page on the broker's own approval page (GET /approve/{record}), on the

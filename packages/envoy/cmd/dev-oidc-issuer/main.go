@@ -210,11 +210,6 @@ func checkLoopback(address string) error {
 	return nil
 }
 
-// serve runs the issuer for specs alone, on a random loopback port and with no sign-in.
-func serve(ctx context.Context, specs []tokenSpec, lifetime time.Duration, stderr io.Writer) int {
-	return serveIssuer(ctx, issuerConfig{specs: specs, lifetime: lifetime}, stderr)
-}
-
 // serveIssuer runs the issuer until ctx ends, writing every spec's token before it reports its URL
 // and again each time four fifths of the lifetime has passed. A token it cannot write, or an
 // address it cannot listen on, ends it, 1.

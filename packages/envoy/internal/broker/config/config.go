@@ -242,6 +242,11 @@ type SignIn struct {
 	SessionLifetime time.Duration
 }
 
+// SignInSettings are the four settings that turn the broker's sign-in on, set together or not at
+// all: the provider's issuer, the client's id, the file holding the client's secret, and the
+// Workspace domain. Every message that names them names them in this order.
+var SignInSettings = []string{"BROKER_SIGNIN_ISSUER", "BROKER_SIGNIN_CLIENT_ID", "BROKER_SIGNIN_CLIENT_SECRET_FILE", "BROKER_SIGNIN_DOMAIN"}
+
 // noUIToken is why BROKER_UI_TOKEN and its file are gone: the routes it authenticated take the
 // caller's own Kubernetes ServiceAccount token now.
 const noUIToken = "the broker's approval routes take the calling service's own Kubernetes ServiceAccount token, verified against BROKER_K8S_OIDC_ISSUER, so list that account in BROKER_API_ACCOUNTS instead of sharing a bearer with Dispatch's server"
@@ -680,34 +685,34 @@ func Load(getenv func(string) string) (Config, error) {
 // that is not an absolute https URL, or http to a loopback host; and an unreadable or blank secret
 // file. No refusal carries the secret.
 func parseSignIn(getenv func(string) string, sessionLifetime time.Duration) (*SignIn, error) {
-	settings := []struct{ name, value string }{
-		{"BROKER_SIGNIN_ISSUER", strings.TrimSpace(getenv("BROKER_SIGNIN_ISSUER"))},
-		{"BROKER_SIGNIN_CLIENT_ID", strings.TrimSpace(getenv("BROKER_SIGNIN_CLIENT_ID"))},
-		{"BROKER_SIGNIN_CLIENT_SECRET_FILE", getenv("BROKER_SIGNIN_CLIENT_SECRET_FILE")},
-		{"BROKER_SIGNIN_DOMAIN", strings.TrimSpace(getenv("BROKER_SIGNIN_DOMAIN"))},
-	}
-	var names, missing []string
-	for _, s := range settings {
-		names = append(names, s.name)
-		if strings.TrimSpace(s.value) == "" {
-			missing = append(missing, s.name)
+	values := make([]string, len(SignInSettings))
+	var missing []string
+	for i, name := range SignInSettings {
+		values[i] = getenv(name)
+		if strings.TrimSpace(values[i]) == "" {
+			missing = append(missing, name)
 		}
 	}
-	if len(missing) == len(settings) {
+	if len(missing) == len(SignInSettings) {
 		if getenv("BROKER_SIGNIN_SESSION_SECONDS") != "" {
-			return nil, fmt.Errorf("BROKER_SIGNIN_SESSION_SECONDS is set while sign-in is off, so it would set nothing; set %s with it, or unset it", strings.Join(names, ", "))
+			return nil, fmt.Errorf("BROKER_SIGNIN_SESSION_SECONDS is set while sign-in is off, so it would set nothing; set %s with it, or unset it", strings.Join(SignInSettings, ", "))
 		}
 		return nil, nil
 	}
 	if len(missing) > 0 {
-		return nil, fmt.Errorf("sign-in needs %s set together, or none of them; missing %s", strings.Join(names, ", "), strings.Join(missing, ", "))
+		return nil, fmt.Errorf("sign-in needs %s set together, or none of them; missing %s", strings.Join(SignInSettings, ", "), strings.Join(missing, ", "))
 	}
-	signIn := &SignIn{Issuer: settings[0].value, ClientID: settings[1].value, Domain: settings[3].value, SessionLifetime: sessionLifetime}
+	signIn := &SignIn{
+		Issuer:          strings.TrimSpace(values[0]),
+		ClientID:        strings.TrimSpace(values[1]),
+		Domain:          strings.TrimSpace(values[3]),
+		SessionLifetime: sessionLifetime,
+	}
 	if !signInIssuerOK(signIn.Issuer) {
 		return nil, fmt.Errorf("BROKER_SIGNIN_ISSUER must be an absolute https URL, or http to a loopback host, got %q", signIn.Issuer)
 	}
 	var err error
-	if signIn.ClientSecret, err = secretFile(settings[2].name, settings[2].value); err != nil {
+	if signIn.ClientSecret, err = secretFile(SignInSettings[2], values[2]); err != nil {
 		return nil, err
 	}
 	return signIn, nil
