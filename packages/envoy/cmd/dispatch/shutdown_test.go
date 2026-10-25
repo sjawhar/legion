@@ -298,6 +298,110 @@ func TestSIGTERMWithAKeyedSendAtTheListenerSettlesItSentBeforeExit(t *testing.T)
 	}
 }
 
+// A broadcast answers as soon as its messages are committed and delivers behind the response, so
+// a deploy can stop Dispatch with recipients of it still at the listener. Those deliveries are
+// not requests, so the HTTP drain does not cover them: shutdown waits for them itself
+// (api.Register's wait), each on a context the signal does not cancel. The listener answers the
+// held recipient after the signal, every recipient's attempt settles sent, and only then does
+// Dispatch exit. Bound to the process lifetime instead, the signal cut the held recipient off
+// and left every recipient the workers had not reached with a pending attempt no process holds.
+func TestSIGTERMWithABroadcastAtTheListenerSettlesEveryRecipientBeforeExit(t *testing.T) {
+	const heldSession = "s2"
+	sessions := `[
+		{"session_id":"s1","title":"Planner","capabilities":["btw","steer"],"last_seen":300},
+		{"session_id":"s2","title":"Tester","capabilities":["btw","steer"],"last_seen":200},
+		{"session_id":"s3","title":"Reviewer","capabilities":["btw","steer"],"last_seen":100}
+	]`
+	held, release := make(chan struct{}), make(chan struct{})
+	var holding atomic.Bool
+	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
+			_, _ = w.Write([]byte(sessions))
+		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
+			var request struct {
+				TargetSession string `json:"target_session"`
+			}
+			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+				t.Errorf("decode the broadcast's send: %v", err)
+			}
+			if request.TargetSession == heldSession && holding.CompareAndSwap(false, true) {
+				close(held)
+				select {
+				case <-release:
+				case <-r.Context().Done():
+					// Dispatch gave the recipient up: the listener never answers it.
+					return
+				}
+			}
+			_, _ = w.Write([]byte(`{"event_id":"envelope-` + request.TargetSession + `","recipient":"` + request.TargetSession + `"}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	t.Cleanup(listener.Close)
+	// Registered after the listener's close, so it runs first and a failed test never leaves the
+	// held recipient blocking that close.
+	releaseOnce := sync.OnceFunc(func() { close(release) })
+	t.Cleanup(releaseOnce)
+
+	database := storetest.Open(t)
+	process := startDispatchProcessWith(t, database.Pool.Config().ConnString(), dispatchOptions{
+		Env: map[string]string{"ENVOY_URL": listener.URL},
+	})
+	process.waitHealthy(t)
+	process.call(t, http.MethodPost, "/api/v1/broadcasts",
+		`{"body":"Status before the deploy?","delivery":"btw","session_ids":["s1","s2","s3"],"idempotency_key":"press-1"}`,
+		http.StatusCreated)
+	select {
+	case <-held:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the broadcast never reached the listener:\n%s", process.Output.String())
+	}
+
+	signalled := process.Terminate(t)
+	select {
+	case <-process.Exited:
+		t.Fatalf("Dispatch exited %v after SIGTERM with a recipient still at the listener:\n%s", time.Since(signalled), process.Output.String())
+	case <-time.After(time.Second):
+	}
+	releaseOnce()
+	t.Logf("the listener answered the held recipient %v after SIGTERM", time.Since(signalled))
+	process.WaitExit(t, "the listener's answer")
+	t.Logf("exited %v after SIGTERM", time.Since(signalled))
+	if code := process.Cmd.ProcessState.ExitCode(); code != 0 {
+		t.Errorf("Dispatch exited %d after SIGTERM, want 0", code)
+	}
+
+	// Read once the process is gone: what it wrote before it exited is all there is.
+	rows, err := database.Pool.Query(context.Background(), `
+		select m.target, d.attempt, d.state
+		from messages m join message_deliveries d on d.message_id = m.id
+		where m.broadcast_id is not null
+		order by m.target, d.attempt
+	`)
+	if err != nil {
+		t.Fatalf("read the broadcast's attempts: %v", err)
+	}
+	defer rows.Close()
+	var attempts []string
+	for rows.Next() {
+		var target, state string
+		var attempt int
+		if err := rows.Scan(&target, &attempt, &state); err != nil {
+			t.Fatalf("read an attempt: %v", err)
+		}
+		attempts = append(attempts, target+" "+strconv.Itoa(attempt)+" "+state)
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatalf("read the broadcast's attempts: %v", err)
+	}
+	want := []string{"session:s1 1 sent", "session:s2 1 sent", "session:s3 1 sent"}
+	if !slices.Equal(attempts, want) {
+		t.Fatalf("the broadcast's attempts after exit = %v, want %v", attempts, want)
+	}
+}
+
 // A live socket is hijacked from net/http, so HTTP shutdown does not wait for it. Production
 // shutdown must wait for the socket handler and the delivery hub after cancelling Lifetime, before
 // it closes the database pool they use.

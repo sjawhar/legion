@@ -38,11 +38,20 @@ import (
 // Broadcasting is human-only, like the one-session route it is built from.
 
 // broadcastDeliveryWorkers is how many recipients are delivered to at once, once the create
-// request has already answered. Each worker takes a tracking context of its own: the pool's
-// one-connection guard is per context (store.WithTransactionTracking), so workers sharing one
-// would both trip it and race on its flag. Four keeps a large send's wall time down without
+// request has already answered. Each worker takes a tracking context of its own
+// (store.ForConcurrentRead): the pool's one-connection guard is per context, so workers sharing
+// one would both trip it and race on its flag. Four keeps a large send's wall time down without
 // holding more than four of the shared pool's connections for one broadcast.
 const broadcastDeliveryWorkers = 4
+
+// broadcastSend is one recipient's message and the attempt the sender owes it: the attempt the
+// write opened for a new send, and the attempt a repeat found owed (owedBroadcastAttempts).
+// Every send is bound to an attempt, so two senders that both find a recipient owed deliver one
+// frame between them rather than one each.
+type broadcastSend struct {
+	message model.Message
+	attempt int
+}
 
 // errBroadcastKeyHeld is writeBroadcast's answer when the key row already exists: another request
 // of this human's committed the same key first, and the caller answers with its broadcast.
@@ -179,16 +188,31 @@ func (s *server) createBroadcast(w http.ResponseWriter, r *http.Request) {
 		s.publish(event)
 	}
 	// The send answers as soon as the messages are committed, and delivery runs behind it.
-	// Tying delivery to the request meant a request cut off partway - a closed tab, a deploy's
-	// five-second shutdown, the load balancer's idle timeout - left one attempt stranded
-	// pending and every later recipient with a message and no attempt at all, which nothing
-	// recovers. Every recipient's attempt, receipt and reply reaches an open broadcast view
-	// over the live event feed, so nothing is lost by answering first.
-	messages := make([]model.Message, 0, len(created.Recipients))
+	// Tying delivery to the request meant a request cut off partway - a closed tab, the load
+	// balancer's idle timeout - left one attempt stranded pending and every later recipient
+	// with a message and no attempt at all. Every recipient's attempt, receipt and reply
+	// reaches an open broadcast view over the live event feed, so nothing is lost by answering
+	// first.
+	//
+	// The delivery runs on a context detached from the request, and the server's background
+	// wait holds shutdown for it (waitBackground): SIGTERM cancels Deps.Lifetime before
+	// http.Server.Shutdown drains, so a delivery bound to the lifetime was cut off by a deploy
+	// with recipients it had not reached and nothing resumed them. Each recipient's send is
+	// bounded by the listener client's receipt timeout instead, and a deploy that kills the
+	// process before they all settle leaves owed recipients a repeat under the key resumes
+	// (answerHeldBroadcastKey).
+	sends := make([]broadcastSend, 0, len(created.Recipients))
 	for _, recipient := range created.Recipients {
-		messages = append(messages, recipient.Message)
+		// The write opened each recipient's first attempt, unclaimed, so every worker is bound
+		// to that attempt rather than opening one of its own.
+		sends = append(sends, broadcastSend{message: recipient.Message, attempt: 1})
 	}
-	go s.deliverBroadcast(messages, input.Delivery, actor)
+	sending := context.WithoutCancel(r.Context())
+	s.detachedSends.Add(1)
+	go func() {
+		defer s.detachedSends.Done()
+		s.deliverBroadcast(sending, sends, input.Delivery, actor)
+	}()
 	WriteJSON(w, http.StatusCreated, broadcastCreated{broadcastRead: created, Excluded: excluded})
 }
 
@@ -251,13 +275,10 @@ func newBroadcastKey(actor model.Actor, key, body, delivery string, requested []
 
 // answerHeldBroadcastKey answers a send whose key this human has already used, and reports
 // whether it did: the broadcast that key made, as GET /api/v1/broadcasts/{id} reads it, when the
-// request is the same one (200); 409 BROADCAST_KEY_REUSED, naming the broadcast that used the
-// key and saying this request was not sent, when the key was reused for a different message,
-// mode or selection. It writes nothing, and reports false, when the key is not held. The replay
-// reads the broadcast as it stands: a recipient whose attempt was stranded pending by a process
-// death before delivery comes back pending, for the broadcast view's same-mode retry to resume
-// (deliverBroadcast's comment), so a 200 says the broadcast exists, not that delivery is under
-// way.
+// request is the same one (200), once sendOwedBroadcastRecipients has put every recipient it
+// still owes on its way; 409 BROADCAST_KEY_REUSED, naming the broadcast that used the key and
+// saying this request was not sent, when the key was reused for a different message, mode or
+// selection. It writes nothing, and reports false, when the key is not held.
 func (s *server) answerHeldBroadcastKey(ctx context.Context, w http.ResponseWriter, key idempotencyKey, requested []string) bool {
 	var broadcastID, digest string
 	err := s.deps.Store.Pool.QueryRow(ctx, `
@@ -284,6 +305,20 @@ func (s *server) answerHeldBroadcastKey(ctx context.Context, w http.ResponseWrit
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return true
+	}
+	resumed, err := s.sendOwedBroadcastRecipients(ctx, read)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return true
+	}
+	if resumed {
+		// Read again, so the answer carries the attempts the resume settled rather than the
+		// pending rows it found: the page reads a recipient still pending as a send it must
+		// ask about again.
+		if read, err = s.readBroadcast(ctx, broadcastID); err != nil {
+			s.writeHandlerError(w, err)
+			return true
+		}
 	}
 	WriteJSON(w, http.StatusOK, broadcastCreated{
 		broadcastRead: read, Excluded: replayedExclusions(requested, read.Recipients),
@@ -440,44 +475,124 @@ func (s *server) writeBroadcast(
 	return sent, events, nil
 }
 
-// deliverBroadcast sends each recipient's message after the create request has answered,
-// broadcastDeliveryWorkers at a time. It runs on the server's lifetime rather than the
-// request's, so a browser that goes away cannot strand a recipient, and a shutdown cancels it
-// rather than leaving the goroutine behind. One recipient's failure never stops another's: a
-// send the listener refused settles that recipient's attempt as failed, a recipient whose
-// attempt was taken over from the agent card is skipped, and a delivery this
-// cannot record at all leaves the attempt pending and unclaimed, which the broadcast view
-// shows as sending and, once the claim lease has passed, offers a same-mode retry for.
-func (s *server) deliverBroadcast(messages []model.Message, delivery string, actor model.Actor) {
-	workers := min(broadcastDeliveryWorkers, len(messages))
-	pending := make(chan model.Message)
+// deliverBroadcast sends each recipient's owed attempt, broadcastDeliveryWorkers at a time, and
+// returns once every one of them has settled. It runs on ctx, which its callers detach from the
+// request (context.WithoutCancel): a browser that goes away, and a deploy's signal, must not cut
+// a recipient off mid-flight. One recipient's failure never stops another's: a send the listener
+// refused settles that recipient's attempt as failed, a recipient whose attempt was taken over
+// from the agent card is skipped, and a delivery this cannot record at all leaves the attempt
+// pending and unclaimed, which the broadcast view shows as sending and which a repeat under the
+// send's key resumes once the claim lease has passed (sendOwedBroadcastRecipients).
+func (s *server) deliverBroadcast(ctx context.Context, sends []broadcastSend, delivery string, actor model.Actor) {
+	workers := min(broadcastDeliveryWorkers, len(sends))
+	pending := make(chan broadcastSend)
 	var wait sync.WaitGroup
 	for range workers {
 		wait.Add(1)
 		go func() {
 			defer wait.Done()
-			for message := range pending {
-				ctx := store.WithTransactionTracking(s.lifetime())
-				// Bound to the attempt the write opened. A human who changes the mode from the
+			for send := range pending {
+				// A mark of this worker's own: workers sharing one would refuse each other a
+				// connection (store.ErrNestedAcquire), and the caller holds none by now - the
+				// create's transaction committed before it detached this delivery, and a
+				// repeat's reads are closed before it resumes anyone.
+				sending, err := store.ForConcurrentRead(ctx)
+				if err != nil {
+					slog.Error("dispatch: broadcast delivery",
+						"message", send.message.ID, "target", messageTarget(send.message.Target), "error", err)
+					continue
+				}
+				// Bound to the attempt this send owes. A human who changes the mode from the
 				// agent card while this worker is queued settles that attempt and sends their
 				// own; the worker must then send nothing, because an attempt of its own would
-				// put a second frame on the session's subject.
-				_, err := s.deliverMessageResuming(ctx, message, delivery, nil, actor, nil, 1)
+				// put a second frame on the session's subject. Of two senders that both found
+				// the attempt owed, the one that claims it sends and the other stops here.
+				_, err = s.deliverMessageResuming(sending, send.message, delivery, nil, actor, nil, send.attempt)
 				if errors.Is(err, errAttemptNotPending) {
 					continue
 				}
 				if err != nil {
 					slog.Error("dispatch: broadcast delivery",
-						"message", message.ID, "target", messageTarget(message.Target), "error", err)
+						"message", send.message.ID, "target", messageTarget(send.message.Target), "error", err)
 				}
 			}
 		}()
 	}
-	for _, message := range messages {
-		pending <- message
+	for _, send := range sends {
+		pending <- send
 	}
 	close(pending)
 	wait.Wait()
+}
+
+// sendOwedBroadcastRecipients puts every recipient the broadcast still owes on its way before a
+// repeat under its key is answered, as sendHeldMessageOn does for one session, and reports
+// whether it sent to any of them. The process that answered the original send may have been
+// stopped, or have died, with recipients it had not reached: nothing else resumes those, and the
+// broadcast's own page only ever repeats the send. A listener it cannot reach is recorded on the
+// attempt, never returned, so only the read of what is owed can fail here.
+func (s *server) sendOwedBroadcastRecipients(ctx context.Context, read broadcastRead) (bool, error) {
+	messageIDs := make([]string, 0, len(read.Recipients))
+	for _, recipient := range read.Recipients {
+		messageIDs = append(messageIDs, recipient.Message.ID)
+	}
+	owed, err := s.owedBroadcastAttempts(ctx, messageIDs)
+	if err != nil || len(owed) == 0 {
+		return false, err
+	}
+	sends := make([]broadcastSend, 0, len(owed))
+	for _, recipient := range read.Recipients {
+		if attempt, ok := owed[recipient.Message.ID]; ok {
+			sends = append(sends, broadcastSend{message: recipient.Message, attempt: attempt})
+		}
+	}
+	// Detached from the request, as the original send's delivery is: a page that gives up on the
+	// repeat must not strand the recipients it started. The repeat is a request, so
+	// http.Server.Shutdown waits for it, and the listener client's receipt timeout bounds each
+	// recipient's send.
+	s.deliverBroadcast(context.WithoutCancel(ctx), sends, read.Delivery, read.Author)
+	return true, nil
+}
+
+// owedBroadcastAttempts is the attempt each of the broadcast's messages owes, keyed by message
+// id, with a message that owes nothing absent. It is attemptOwed's rule for one message, asked
+// once for all of them: the first attempt of a message with no attempt at all - its process died
+// between the commit and the send - or the only attempt of a message whose one attempt is
+// pending with a lapsed claim, which Postgres judges against the claimed_at it wrote
+// (claimLapsed). A pending attempt whose claim is live is in flight and left to its sender; an
+// attempt that settled, and a message with more than one attempt, which a person has already
+// retried from the agent card, owe nothing.
+func (s *server) owedBroadcastAttempts(ctx context.Context, messageIDs []string) (map[string]int, error) {
+	owed := make(map[string]int, len(messageIDs))
+	if len(messageIDs) == 0 {
+		return owed, nil
+	}
+	rows, err := s.deps.Store.Pool.Query(ctx, `
+		select m.id::text, count(d.attempt), coalesce(min(d.attempt), 1),
+		       coalesce(bool_and(d.state = 'pending' and `+claimLapsed+`), false)
+		from unnest($1::uuid[]) as m(id)
+		left join message_deliveries d on d.message_id = m.id
+		group by m.id
+	`, messageIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID string
+		var attempts, attempt int
+		var stranded bool
+		if err := rows.Scan(&messageID, &attempts, &attempt, &stranded); err != nil {
+			return nil, err
+		}
+		switch {
+		case attempts == 0:
+			owed[messageID] = 1
+		case attempts == 1 && stranded:
+			owed[messageID] = attempt
+		}
+	}
+	return owed, rows.Err()
 }
 
 // lifetime is the process context background work runs on: cancelled when the server shuts

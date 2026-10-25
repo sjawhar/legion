@@ -199,11 +199,11 @@ func newRegisteredTestServer(t *testing.T, options testServerOptions) (http.Hand
 	if options.agentWatchInterval != 0 {
 		served.agentWatchInterval = options.agentWatchInterval
 	}
-	t.Cleanup(served.eventRelay.wait)
-	if served.deliveryHub != nil {
-		t.Cleanup(served.deliveryHub.wait)
-		t.Cleanup(served.liveSockets.wait)
-	}
+	// waitBackground, as production's shutdown calls it: every delivery a handler detached from
+	// its request, then the sockets, the hub and the relay. A broadcast's deliveries outlive the
+	// request that started them, so a test that did not wait for them would close its database
+	// under a worker still writing.
+	t.Cleanup(served.waitBackground)
 	return mux, database, deps, served
 }
 

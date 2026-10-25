@@ -259,6 +259,13 @@ type server struct {
 	// eventRelay is the live feed every events subscription reads (INFRA-66), on every server
 	// register mounts: it starts its listening connection on the first subscription.
 	eventRelay *eventStreamRelay
+	// detachedSends is every delivery a handler started and did not wait for: a broadcast's
+	// recipients. Each runs on a context the request's end does not cancel, and shutdown waits
+	// for them (waitBackground) before the database pool closes, so a deploy finishes the sends
+	// in flight as http.Server.Shutdown finishes the requests in flight. A send bound to
+	// Deps.Lifetime instead was cut off by SIGTERM, which cancels that context before the HTTP
+	// drain even begins.
+	detachedSends sync.WaitGroup
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job or no configured apply step, so a read that judges a run again
 	// does not warn about it again. Nothing evicts an entry: the map holds one per configured job
@@ -300,7 +307,8 @@ type queryer interface {
 // document websocket, under the same wrappers; a server without one (a test's) has neither, so
 // nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
 // events subscription reads and which starts its own listening connection on the first of them,
-// also on Lifetime. The returned wait blocks until the hub, every live socket (and every
+// also on Lifetime. The returned wait blocks until every delivery a handler detached from its
+// request (a broadcast's recipients) has settled, and until the hub, every live socket (and every
 // subscription it ran) and the relay have ended. Call it only after Lifetime has been cancelled
 // and before the database pool closes.
 //
@@ -313,9 +321,13 @@ func Register(mux *http.ServeMux, deps Deps) func() {
 	return s.waitBackground
 }
 
-// waitBackground waits for every live socket and the subscriptions it ran, then for the hub's
-// goroutines and the relay's.
+// waitBackground waits for every delivery a request left running past its answer, then for every
+// live socket and the subscriptions it ran, then for the hub's goroutines and the relay's. The
+// deliveries come first because they are the only ones Lifetime does not stop: each is bounded by
+// the listener client's receipt timeout per recipient, and each reads and writes through the
+// database pool this wait is holding open for it.
 func (s *server) waitBackground() {
+	s.detachedSends.Wait()
 	if s.deliveryHub != nil {
 		s.liveSockets.wait()
 		s.deliveryHub.wait()

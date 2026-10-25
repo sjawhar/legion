@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"sort"
@@ -12,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
 
@@ -270,5 +272,99 @@ func TestConcurrentBroadcastsWithOneKeyMakeOneBroadcast(t *testing.T) {
 	}
 	if got := sends.targets(); !equalStrings(got, []string{"planner", "tester"}) {
 		t.Fatalf("listener sends = %v, want one frame per recipient", got)
+	}
+}
+
+// A deploy, or a crash, can stop the process that answered a send while recipients of it are
+// still being delivered: their attempts stay pending under a claim nobody holds. Nothing else
+// resumes them - the broadcast's page only ever repeats the send under its key - so the repeat
+// puts every recipient the broadcast still owes on its way before it answers, as a repeat of a
+// single-session send does (sendHeldMessageOn). It hands no recipient a second frame: not the
+// one already delivered, and not the one a live sender is delivering right now.
+func TestBroadcastRepeatResumesEveryOwedRecipientAndDeliversEachOnce(t *testing.T) {
+	const body = "Status before the deploy?"
+	requested := []string{"planner", "tester", "reviewer", "archivist"}
+	listener, sends := newBroadcastListener(t, broadcastSessionsJSON(t, requested))
+	handler, database, deps := newTestServer(t, testServerOptions{envoyURL: listener.URL})
+	direct := directServer(deps)
+	actor := model.Actor{Kind: "user", ID: "alice"}
+	ctx := store.WithTransactionTracking(context.Background())
+
+	// The send as the stopped process left it: writeBroadcast commits the broadcast, its key
+	// and one pending, unclaimed attempt per recipient, and the delivery it answers runs behind
+	// the response - so this is the state of a send whose process never got that far.
+	targets := make([]broadcastTarget, 0, len(requested))
+	for _, sessionID := range requested {
+		targets = append(targets, broadcastTarget{sessionID: sessionID, title: sessionID})
+	}
+	written, _, err := direct.writeBroadcast(ctx, actor,
+		newBroadcastKey(actor, "press-1", body, "btw", requested), body, "btw", targets)
+	if err != nil {
+		t.Fatalf("write the broadcast whose process stopped mid-delivery: %v", err)
+	}
+	recipient := func(sessionID string) model.Message {
+		t.Helper()
+		for _, sent := range written.Recipients {
+			if sent.SessionID == sessionID {
+				return sent.Message
+			}
+		}
+		t.Fatalf("the broadcast has no recipient %q", sessionID)
+		return model.Message{}
+	}
+	claimed := func(sessionID, ago string) {
+		t.Helper()
+		if _, err := database.Pool.Exec(context.Background(),
+			`update message_deliveries set claimed_at = now() - $2::interval where message_id = $1`,
+			recipient(sessionID).ID, ago); err != nil {
+			t.Fatalf("claim %s's attempt %s ago: %v", sessionID, ago, err)
+		}
+	}
+	// The planner's frame landed before the process stopped.
+	if _, err := direct.deliverMessageResuming(ctx, recipient("planner"), "btw", nil, actor, nil, 1); err != nil {
+		t.Fatalf("deliver the one recipient the process reached: %v", err)
+	}
+	// The tester's sender claimed its attempt and died inside the send: the claim has lapsed.
+	claimed("tester", "5 minutes")
+	// The archivist's sender is alive and inside its claim's lease, so that attempt is its own.
+	claimed("archivist", "0 seconds")
+	// The reviewer's attempt was never claimed at all: the write opened it and nothing took it.
+
+	repeat := postBroadcast(t, handler, map[string]any{
+		"body": body, "delivery": "btw", "session_ids": requested, "idempotency_key": "press-1",
+	}, "alice")
+	if repeat.Code != http.StatusOK {
+		t.Fatalf("the repeat: status=%d body=%s, want 200 with the broadcast", repeat.Code, repeat.Body.String())
+	}
+	replayed := decodeBody[broadcastResponse](t, repeat)
+	if replayed.ID != written.ID {
+		t.Fatalf("the repeat answered broadcast %s, want the original %s", replayed.ID, written.ID)
+	}
+
+	settled := make([]string, 0, len(requested))
+	for _, sent := range replayed.Recipients {
+		for _, attempt := range sent.Message.Deliveries {
+			settled = append(settled, fmt.Sprintf("%s %d %s", sent.SessionID, attempt.Attempt, attempt.State))
+		}
+	}
+	sort.Strings(settled)
+	// The archivist is left to the sender that holds it; every other recipient is settled by
+	// the time the repeat answers, since the page reads a pending recipient as a send it must
+	// ask about again.
+	if want := []string{"archivist 1 pending", "planner 1 sent", "reviewer 1 sent", "tester 1 sent"}; !equalStrings(settled, want) {
+		t.Fatalf("the repeat answered %v, want %v", settled, want)
+	}
+	if got := sends.targets(); !equalStrings(got, []string{"planner", "reviewer", "tester"}) {
+		t.Fatalf("listener sends = %v, want the planner's first frame and one each for the two owed", got)
+	}
+	if messages := countMessages(t, database); messages != len(requested) {
+		t.Fatalf("the database holds %d messages, want one per recipient", messages)
+	}
+	var attempts int
+	if err := database.Pool.QueryRow(ctx, `select count(*) from message_deliveries`).Scan(&attempts); err != nil {
+		t.Fatalf("count the attempts: %v", err)
+	}
+	if attempts != len(requested) {
+		t.Fatalf("the database holds %d attempts, want the one the write opened per recipient", attempts)
 	}
 }
