@@ -17,6 +17,7 @@ import {
   buildDispatchReference,
   buildReferencePath,
   type DispatchReferenceRoute,
+  type IssueRoute,
   isProjectRoute,
   referencedArtifact,
   referenceTargetKind,
@@ -224,16 +225,21 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
     ...referencesQuery(blockReference),
     enabled: blockReference !== undefined,
   });
-  const artifact =
-    document !== undefined
-      ? projectArtifact.data
-      : agentArtifact !== undefined
-        ? sessionArtifact.data
-        : route?.kind === "spec" && blockReference !== undefined
-          ? primarySpec(issue.data)
-          : issue.data?.artifacts.find(
-              (candidate) => route?.kind === "artifact" && candidate.slug === route.slug
-            );
+  let artifact: Artifact | undefined;
+  switch (route?.kind) {
+    case "document":
+      artifact = projectArtifact.data;
+      break;
+    case "agent-artifact":
+      artifact = sessionArtifact.data;
+      break;
+    case "spec":
+      artifact = blockReference === undefined ? undefined : primarySpec(issue.data);
+      break;
+    case "artifact":
+      artifact = issue.data?.artifacts.find((candidate) => candidate.slug === route.slug);
+      break;
+  }
   const text = useQuery({
     ...artifactTextQuery(artifact?.id, version),
     enabled: artifact?.kind === "doc" && blockReference === undefined,
@@ -249,6 +255,12 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
     message: messageQueryResult.data,
     block: block.data,
   };
+}
+
+/** The text a block reference shows: the text the pinned version held for a pinned reference, the
+ *  block's current text otherwise. */
+export function blockText(node: GraphReferences["node"]): string | undefined {
+  return node.pin === undefined ? node.text : node.pin.text;
 }
 
 /**
@@ -272,20 +284,18 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
 export function useReferenceTarget(route: DispatchReferenceRoute | undefined): ReferenceTarget {
   const { artifact, ask, block, comment, issue, markdown, message } = useReferenceData(route);
   const kind = route === undefined ? undefined : referenceTargetKind(route);
-  const blockText =
-    block === undefined
-      ? undefined
-      : block.node.pin === undefined
-        ? block.node.text
-        : block.node.pin.text;
-  const authored =
-    kind === "ask"
-      ? ask?.ask.question
-      : kind === "comment"
-        ? comment?.comment.body
-        : kind === "block"
-          ? blockText
-          : undefined;
+  let authored: string | undefined;
+  switch (kind) {
+    case "ask":
+      authored = ask?.ask.question;
+      break;
+    case "comment":
+      authored = comment?.comment.body;
+      break;
+    case "block":
+      authored = block === undefined ? undefined : blockText(block.node);
+      break;
+  }
   const headline = useMarkdownHeadline(authored, TITLE_HEADLINE_MAX);
 
   if (kind === "message") {
@@ -319,6 +329,14 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
   };
 }
 
+/** Whether a reference's path waits on its issue: a block of an issue's spec pinned to a version
+ *  opens that version under the spec's own slug, which only the issue names. */
+export function needsSpecSlug(
+  route: DispatchReferenceRoute
+): route is Extract<IssueRoute, { kind: "spec" }> & { pin: number } {
+  return route.kind === "spec" && route.pin !== undefined;
+}
+
 /** The SPA path a reference opens (`buildReferencePath`). A block of an issue's spec pinned to a
  *  version opens that version under the spec's own slug, so its path reads the issue (the query
  *  the reference's title and card already share); until the issue is read it is the live spec at
@@ -326,7 +344,7 @@ export function useReferenceTarget(route: DispatchReferenceRoute | undefined): R
 export function useReferencePath(route: DispatchReferenceRoute): string;
 export function useReferencePath(route: DispatchReferenceRoute | undefined): string | undefined;
 export function useReferencePath(route: DispatchReferenceRoute | undefined): string | undefined {
-  const specKey = route?.kind === "spec" && route.pin !== undefined ? route.key : undefined;
+  const specKey = route !== undefined && needsSpecSlug(route) ? route.key : undefined;
   const issue = useQuery({ ...issueQuery(specKey), enabled: specKey !== undefined });
   return route === undefined ? undefined : buildReferencePath(route, primarySpec(issue.data)?.slug);
 }
@@ -338,7 +356,7 @@ export async function fetchReferencePath(
   queryClient: QueryClient,
   route: DispatchReferenceRoute
 ): Promise<string> {
-  if (route.kind !== "spec" || route.pin === undefined) {
+  if (!needsSpecSlug(route)) {
     return buildReferencePath(route);
   }
   const issue = await queryClient.fetchQuery(issueQuery(route.key)).catch(() => undefined);

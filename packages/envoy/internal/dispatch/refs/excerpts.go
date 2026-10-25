@@ -24,8 +24,16 @@ type Execer interface {
 // and its markdown cut to BlockExcerptRunes. A target none of whose mentions lies inside a block
 // has none. located is text.ExtractAt(markdown, …), the one extraction a version's index reads.
 func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []text.Located) map[Target]model.GraphExcerpt {
+	starts := make([]int, len(located))
+	for i, mention := range located {
+		starts[i] = mention.Offset
+	}
+	holders := innermostBlocks(blocks, starts)
 	excerpts := make(map[Target]model.GraphExcerpt)
-	for _, mention := range located {
+	for i, mention := range located {
+		if holders[i] < 0 {
+			continue
+		}
 		target, ok := targetOf(mention.Ref)
 		if !ok {
 			continue
@@ -33,21 +41,10 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []te
 		if _, found := excerpts[target]; found {
 			continue
 		}
-		holder := -1
-		for index, block := range blocks {
-			// Blocks come in document order, each parent before its children, so a child
-			// spanning its parent's whole range is the inner one.
-			if block.From <= mention.Offset && mention.Offset < block.To &&
-				(holder < 0 || block.To-block.From <= blocks[holder].To-blocks[holder].From) {
-				holder = index
-			}
-		}
-		if holder >= 0 {
-			block := blocks[holder]
-			excerpts[target] = model.GraphExcerpt{
-				BlockID: block.ID,
-				Text:    text.HeadRunes(markdown[block.From:block.To], BlockExcerptRunes),
-			}
+		block := blocks[holders[i]]
+		excerpts[target] = model.GraphExcerpt{
+			BlockID: block.ID,
+			Text:    text.HeadRunes(markdown[block.From:block.To], BlockExcerptRunes),
 		}
 	}
 	return excerpts

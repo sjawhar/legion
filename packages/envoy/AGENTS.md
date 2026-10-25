@@ -1419,10 +1419,13 @@ transaction held, then, under the document's owner lock, indexes it only while i
 and its owed mark are the ones it listed, taking the version's time and the `source_seq` of the
 event that recorded the version (`stampVersionEvent`). A document that owes a settlement and whose
 live markdown differs from its latest version's is skipped, counted `live_ahead` and left owed; on
-a closed issue that lasts until the issue reopens. An item is re-read `for no key update`
-(`refs.SourceText`) and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a new edge
-taking the time its text was written and no `source_seq`; its owed row is deleted only while it
-holds the `enqueued_at` the tick listed, so an edit that lands meanwhile leaves the item owed.
+a closed issue that lasts until the issue reopens. The loop remembers such a document and counts it
+again without reading it while its latest version and its pending settlement's `marked_at` (which
+every update append moves) stay as they were and this server holds no room for it. An item is
+re-read `for no key update` and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a
+new edge taking the time its text was written and no `source_seq`; its owed row is deleted only
+while it holds the `enqueued_at` the tick listed, so an edit that lands meanwhile leaves the item
+owed.
 `rebuild-refs` marks every document owed and prints `blocks_owed=`; it leaves
 `block_grammar_owed` alone, since it has just re-read every item itself.
 

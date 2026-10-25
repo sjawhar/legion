@@ -3,13 +3,15 @@ package refs
 import (
 	"slices"
 	"testing"
+
+	"github.com/sjawhar/envoy/internal/dispatch/model"
 )
 
 // A mention starts at the tightest block whose [From, To) holds its start: a child inside its
 // parent, the parent between its children, and no block at all between top-level blocks or past
 // the last one. A block ending where a mention starts does not hold it.
 func TestInnermostBlocksPicksTheTightestRangeHoldingEachStart(t *testing.T) {
-	blocks := []Block{{ID: "a", From: 0, To: 100}, {ID: "b", From: 10, To: 20}, {ID: "c", From: 30, To: 40}, {ID: "d", From: 120, To: 130}}
+	blocks := []model.ArtifactBlock{{ID: "a", From: 0, To: 100}, {ID: "b", From: 10, To: 20}, {ID: "c", From: 30, To: 40}, {ID: "d", From: 120, To: 130}}
 	got := innermostBlocks(blocks, []int{5, 15, 20, 25, 35, 50, 110, 125, 200})
 	want := []int{0, 1, 0, 0, 2, 0, -1, 3, -1}
 	if !slices.Equal(got, want) {
@@ -21,7 +23,7 @@ func TestInnermostBlocksPicksTheTightestRangeHoldingEachStart(t *testing.T) {
 // is the node. An id Postgres cannot store in a text[] (empty, holding a NUL, or not UTF-8) is
 // no node.
 func TestUniqueBlocksKeepsTheFirstHolderOfEachID(t *testing.T) {
-	got := uniqueBlocks([]Block{
+	got := uniqueBlocks([]model.ArtifactBlock{
 		{ID: "a", From: 0, To: 10},
 		{ID: "a", From: 20, To: 30},
 		{ID: "", From: 40, To: 50},
@@ -29,8 +31,16 @@ func TestUniqueBlocksKeepsTheFirstHolderOfEachID(t *testing.T) {
 		{ID: "\xff", From: 70, To: 75},
 		{ID: "b", From: 80, To: 90},
 	})
-	want := []Block{{ID: "a", From: 0, To: 10}, {ID: "b", From: 80, To: 90}}
-	if !slices.Equal(got, want) {
-		t.Fatalf("uniqueBlocks = %#v, want %#v", got, want)
+	type node struct {
+		ID       string
+		From, To int
+	}
+	nodes := make([]node, len(got))
+	for i, block := range got {
+		nodes[i] = node{block.ID, block.From, block.To}
+	}
+	want := []node{{"a", 0, 10}, {"b", 80, 90}}
+	if !slices.Equal(nodes, want) {
+		t.Fatalf("uniqueBlocks = %#v, want %#v", nodes, want)
 	}
 }

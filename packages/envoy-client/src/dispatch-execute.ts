@@ -48,6 +48,7 @@ import {
   claimHolds,
   DEFAULT_ISSUE_PAGE_LIMIT,
   DISPATCH_BODY_MAX,
+  decodeBlockId,
   dispatchToolSchema,
   dispatchToolSpecs,
   encodeBlockId,
@@ -78,7 +79,6 @@ import {
   type GraphReferencesQuery,
 } from "./dispatch-http";
 import {
-  decodeBlockId,
   dispatchChildRef,
   dispatchDocumentRef,
   dispatchIssueRef,

@@ -1,3 +1,5 @@
+import { hasControlCharacter } from "./dispatch-href";
+
 /**
  * The `#b-` fragment of a block reference: every UTF-8 byte of the block id percent-encoded in
  * upper-case hex except ASCII letters, digits and `-`, so no character a reference ends at or the
@@ -20,6 +22,44 @@ export function encodeBlockId(id: string): string {
       : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
   }
   return encoded;
+}
+
+/**
+ * The block id a `#b-` fragment (`encoded`, after the `b-`) names, or undefined when it names
+ * none: empty, holding a raw `@` (a pin is no part of the id; `encodeBlockId` writes `@` as `%40`),
+ * not decoding, or decoding to an empty id or one holding a control character. Any valid
+ * percent-encoding is read, as the server's `text` package reads it.
+ */
+export function decodeBlockId(encoded: string): string | undefined {
+  if (encoded === "" || encoded.includes("@")) {
+    return undefined;
+  }
+  let id: string;
+  try {
+    id = decodeURIComponent(encoded);
+  } catch {
+    return undefined;
+  }
+  return id === "" || hasControlCharacter(id) ? undefined : id;
+}
+
+/**
+ * The block a `#b-` fragment (`encoded`, after the `b-`) names, and the version `pin` it pins when
+ * it ends in `@v<N>`, as the server's `text.parseBlock` reads it: a raw `@` only as the start of
+ * a well-formed pin (`N` a positive integer with no leading zero), and the id before it as
+ * `decodeBlockId` reads it. Undefined for any other fragment.
+ */
+export function parseBlockFragment(encoded: string): { block: string; pin?: number } | undefined {
+  const at = encoded.indexOf("@");
+  const pin = at === -1 ? undefined : encoded.slice(at + 1).match(/^v([1-9][0-9]*)$/)?.[1];
+  if (at !== -1 && pin === undefined) {
+    return undefined;
+  }
+  const block = decodeBlockId(at === -1 ? encoded : encoded.slice(0, at));
+  if (block === undefined) {
+    return undefined;
+  }
+  return pin === undefined ? { block } : { block, pin: Number(pin) };
 }
 
 export const DISPATCH_BLOCK_ID_ENCODINGS: readonly { id: string; encoded: string }[] = [

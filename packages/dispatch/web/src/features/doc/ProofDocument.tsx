@@ -36,7 +36,7 @@ import {
 } from "../artifacts/ArtifactUpload";
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
-import { fetchReferencePath } from "../refs/reference-target";
+import { fetchReferencePath, needsSpecSlug } from "../refs/reference-target";
 import {
   blockFragment,
   buildIssuePath,
@@ -784,7 +784,7 @@ export function ProofDocument({
           event.preventDefault();
           // A block of a spec pinned to a version opens that version under the spec's slug, which
           // only the issue names; every other reference's path is known at once.
-          if (route.kind === "spec" && route.pin !== undefined) {
+          if (needsSpecSlug(route)) {
             void fetchReferencePath(queryClient, route).then((path) => navigate(path));
             return;
           }

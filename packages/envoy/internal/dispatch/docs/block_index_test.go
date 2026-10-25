@@ -93,9 +93,10 @@ func blockIndexAt(t *testing.T, database *store.Store, artifactID string) *int {
 	return version
 }
 
+// reconcileBlockIndex runs one tick of a loop that has found no document live ahead before.
 func reconcileBlockIndex(t *testing.T, service *Service, cursor string) BlockIndexTick {
 	t.Helper()
-	tick, err := service.ReconcileBlockIndex(context.Background(), cursor)
+	tick, err := service.ReconcileBlockIndex(context.Background(), cursor, liveAheadDocuments{})
 	if err != nil {
 		t.Fatalf("block index tick: %v", err)
 	}
@@ -339,6 +340,100 @@ func TestBlockIndexIsNotHeldByDocumentsItSkips(t *testing.T) {
 	}
 }
 
+// A loop remembers the documents it found live ahead: one listed again at the same version, with
+// the same pending-settlement mark and no room resident, is counted live ahead without being read,
+// so a closed issue's document is not re-read every tick. A live update, a new version or a
+// resident room has the next tick read it again, and a document indexed elsewhere is forgotten.
+func TestBlockIndexDoesNotRereadALiveAheadDocumentUntilItMoves(t *testing.T) {
+	database, service := blockIndexService(t)
+	ctx := context.Background()
+	edited := createOwedDocument(t, database, service, "", "edited", "Live text one.\n", "Earlier text one.\n")
+	versioned := createOwedDocument(t, database, service, "", "versioned", "Live text two.\n", "Earlier text two.\n")
+	opened := createOwedDocument(t, database, service, "", "opened", "Live text three.\n", "Earlier text three.\n")
+	indexedElsewhere := createOwedDocument(t, database, service, "", "indexed", "Live text four.\n", "Earlier text four.\n")
+	documents := []string{edited, versioned, opened, indexedElsewhere}
+	for _, id := range documents {
+		closeDocumentRoom(t, service, id)
+	}
+	liveAhead := liveAheadDocuments{}
+	tick := func() BlockIndexTick {
+		t.Helper()
+		tick, err := service.ReconcileBlockIndex(ctx, "", liveAhead)
+		if err != nil {
+			t.Fatalf("block index tick: %v", err)
+		}
+		return tick
+	}
+	live := func(id string) string {
+		t.Helper()
+		markdown, _, err := service.TextWithBlocks(ctx, id)
+		if err != nil {
+			t.Fatalf("read %s: %v", id, err)
+		}
+		return markdown
+	}
+	storeAsVersion1 := func(id string) {
+		t.Helper()
+		if _, err := database.Pool.Exec(ctx, `update artifact_versions set markdown = $2 where artifact_id = $1 and number = 1`, id, live(id)); err != nil {
+			t.Fatalf("store the live text of %s as version 1: %v", id, err)
+		}
+	}
+	settlementMark := func(id string) time.Time {
+		t.Helper()
+		var markedAt time.Time
+		if err := database.Pool.QueryRow(ctx, `select marked_at from doc_settlements_pending where artifact_id = $1`, id).Scan(&markedAt); err != nil {
+			t.Fatalf("read the pending settlement of %s: %v", id, err)
+		}
+		return markedAt
+	}
+
+	if first := tick(); first.LiveAhead != 4 || first.Documents != 0 {
+		t.Fatalf("first tick = %#v, want the four documents live ahead", first)
+	}
+	// Each version 1 now holds its document's live text, which a read would index.
+	for _, id := range documents {
+		storeAsVersion1(id)
+	}
+	if second := tick(); second.LiveAhead != 4 || second.Documents != 0 || second.OwedDocuments != 4 {
+		t.Fatalf("second tick = %#v, want the four documents counted live ahead unread", second)
+	}
+
+	// A live update moves the settlement mark; version 1 then holds the edited text.
+	later, err := pmdoc.Parse("Later text one.\n")
+	if err != nil {
+		t.Fatal(err)
+	}
+	editLiveTree(t, service, edited, func(*pmdoc.Node) *pmdoc.Node { return later })
+	waitForLandedAppends(t, service, edited)
+	closeDocumentRoom(t, service, edited)
+	storeAsVersion1(edited)
+	// A version 2 holding the live text, with the settlement mark as it was.
+	if _, err := database.Pool.Exec(ctx, `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		values ($1, 2, $2, '[{"kind":"user","id":"alice"}]')
+	`, versioned, live(versioned)); err != nil {
+		t.Fatalf("write version 2 of %s: %v", versioned, err)
+	}
+	// A resident room, which moves neither.
+	mark := settlementMark(opened)
+	if err := service.warmLiveDocument(ctx, opened); err != nil {
+		t.Fatalf("open the room of %s: %v", opened, err)
+	}
+	if service.srv.GetDoc(opened) == nil || !settlementMark(opened).Equal(mark) {
+		t.Fatalf("opening the room of %s left none resident or moved its settlement mark", opened)
+	}
+	if _, err := database.Pool.Exec(ctx, `update document_block_versions set version = 1 where artifact_id = $1`, indexedElsewhere); err != nil {
+		t.Fatalf("index %s elsewhere: %v", indexedElsewhere, err)
+	}
+
+	if third := tick(); third.Documents != 3 || third.LiveAhead != 0 || third.OwedDocuments != 0 {
+		t.Fatalf("third tick = %#v, want the three documents read again and indexed", third)
+	}
+	if len(liveAhead) != 0 {
+		t.Fatalf("the loop still remembers %v, want nothing", liveAhead)
+	}
+}
+
 // writeAsAnOlderBuild writes the document's next version as a build without the block index does:
 // the edit (from replaced by to in a text of the live document) reaches the store through the room,
 // and its settlement writes the version, the document's reference to CORE-2 with the old grammar,
@@ -569,7 +664,7 @@ func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 	var tick BlockIndexTick
 	go func() {
 		var err error
-		tick, err = service.ReconcileBlockIndex(ctx, "")
+		tick, err = service.ReconcileBlockIndex(ctx, "", liveAheadDocuments{})
 		ticked <- err
 	}()
 	waitForLockWait(t, ctx, database, "%from comments where id%", ticked)
@@ -587,7 +682,7 @@ func TestADrainedItemKeepsAConcurrentEdit(t *testing.T) {
 	if tick.Items != 1 || tick.OwedItems != 1 {
 		t.Fatalf("tick beside the edit = %#v, want the comment indexed and still owed for the edit", tick)
 	}
-	next, err := service.ReconcileBlockIndex(ctx, "")
+	next, err := service.ReconcileBlockIndex(ctx, "", liveAheadDocuments{})
 	if err != nil {
 		t.Fatalf("second tick: %v", err)
 	}

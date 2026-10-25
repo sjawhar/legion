@@ -1,7 +1,7 @@
 import {
   dispatchDocumentSubject,
   dispatchIssueSubject,
-  hasControlCharacter,
+  parseBlockFragment,
 } from "@legion/contracts";
 
 /**
@@ -85,35 +85,15 @@ export interface ParsedDispatchRef {
 }
 
 /**
- * The block id a `#b-` fragment (`encoded`, after the `b-`) names, or undefined when it names
- * none: empty, holding a raw `@` (a pin is no part of the id; `encodeBlockId` writes `@` as `%40`),
- * not decoding, or decoding to an empty id or one holding a control character. Any valid
- * percent-encoding is read, as the server's `text` package reads it.
- */
-export function decodeBlockId(encoded: string): string | undefined {
-  if (encoded === "" || encoded.includes("@")) return undefined;
-  let id: string;
-  try {
-    id = decodeURIComponent(encoded);
-  } catch {
-    return undefined;
-  }
-  return id === "" || hasControlCharacter(id) ? undefined : id;
-}
-
-/**
  * `ref` as the block reference `<document ref>#b-<block id>[@v<N>]` names, or null when it is no
- * such reference: the document is an issue's spec or document, or a project's document, at no
- * version, and a raw `@` in the fragment is only ever a well-formed pin.
+ * such reference: the fragment as `parseBlockFragment` reads it, and the document an issue's spec
+ * or document, or a project's document, at no version.
  */
 function parseBlockRef(document: string, fragment: string): ParsedDispatchRef | null {
-  const at = fragment.indexOf("@");
-  const pinned = at === -1 ? null : fragment.slice(at + 1).match(/^v([1-9][0-9]*)$/);
-  if (at !== -1 && pinned === null) return null;
-  const block = decodeBlockId(at === -1 ? fragment : fragment.slice(0, at));
+  const target = parseBlockFragment(fragment);
   const parsed = parseDispatchRef(document);
   if (
-    block === undefined ||
+    target === undefined ||
     parsed === null ||
     parsed.version !== undefined ||
     (parsed.kind !== "spec" && parsed.kind !== "artifact")
@@ -124,10 +104,10 @@ function parseBlockRef(document: string, fragment: string): ParsedDispatchRef | 
     owner: parsed.owner,
     kind: "block",
     id: parsed.id,
-    block,
+    block: target.block,
     document,
     ...(parsed.owner.kind === "project" ? { artifact: parsed.id } : {}),
-    ...(pinned?.[1] === undefined ? {} : { pin: Number(pinned[1]) }),
+    ...(target.pin === undefined ? {} : { pin: target.pin }),
   };
 }
 

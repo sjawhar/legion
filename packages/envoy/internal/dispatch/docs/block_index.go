@@ -64,6 +64,7 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 	// logged is the last tick this loop logged: a tick that indexed nothing and leaves the same
 	// counts (a closed document whose live text stays ahead, skipped every tick) logs nothing.
 	var logged BlockIndexTick
+	liveAhead := liveAheadDocuments{}
 	// period is this loop's own interval at this moment, the wait the last tick asked for, as
 	// in RunReferenceExcerptReconciliation: a tick inside it is one some process already made.
 	period := BlockIndexReconcileInterval
@@ -72,7 +73,7 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 		// served, waits the full interval: that process is doing this work.
 		wait := BlockIndexReconcileInterval
 		duty.Exclusive(ctx, leases, blockIndexLease, period, func(ctx context.Context) {
-			wait, cursor = s.blockIndexTick(ctx, cursor, &logged)
+			wait, cursor = s.blockIndexTick(ctx, cursor, liveAhead, &logged)
 		})
 		period = wait
 		select {
@@ -86,8 +87,8 @@ func (s *Service) RunBlockIndexReconciliation(ctx context.Context, leases duty.L
 // blockIndexTick runs one tick from cursor, logs what it did unless it indexed nothing and left the
 // counts *logged holds, and returns how long to wait before the next tick and the cursor it starts
 // from.
-func (s *Service) blockIndexTick(ctx context.Context, cursor string, logged *BlockIndexTick) (time.Duration, string) {
-	tick, err := s.ReconcileBlockIndex(ctx, cursor)
+func (s *Service) blockIndexTick(ctx context.Context, cursor string, liveAhead liveAheadDocuments, logged *BlockIndexTick) (time.Duration, string) {
+	tick, err := s.ReconcileBlockIndex(ctx, cursor, liveAhead)
 	if ctx.Err() != nil {
 		return BlockIndexReconcileInterval, cursor
 	}
@@ -106,11 +107,23 @@ func (s *Service) blockIndexTick(ctx context.Context, cursor string, logged *Blo
 	return BlockIndexReconcileInterval, tick.Cursor
 }
 
-// owedDocument is a document owed a block index, with its latest version when it was listed.
+// owedDocument is a document owed a block index as it was listed: its latest version, and the
+// marked_at of its pending settlement, zero when it owes none.
 type owedDocument struct {
-	id      string
-	version int
+	id       string
+	version  int
+	markedAt time.Time
 }
+
+// liveAheadDocuments is, by id, each owed document a tick found live ahead (indexOwedDocument), as
+// it was listed then. Every update appended to a document's store moves its pending settlement's
+// marked_at (markSettlementPending), and every version write moves its version, so a document
+// listed again with both unchanged still holds the stored live text a tick found ahead: it is
+// counted live ahead without being read or locked. Only the store's text is remembered: a room
+// this server holds can be ahead of the store (an edit not yet appended) or behind it (another
+// process's append it has not yet been evicted for), so a document is neither remembered nor
+// taken from here while one is resident.
+type liveAheadDocuments map[string]owedDocument
 
 // ReconcileBlockIndex runs one tick: one batch of the documents owed a block index past after (a
 // document id; empty is the start), and one batch of the items owed an index with the block
@@ -118,29 +131,41 @@ type owedDocument struct {
 // it skips never holds back the ones past it: the tick's Cursor moves past every document its
 // batch lists, indexed or not, and goes back to the start once a batch lists fewer than a full
 // one. A document or item it cannot index for a reason of its own is logged and left owed, so one
-// never holds back the rest of its batch.
-func (s *Service) ReconcileBlockIndex(ctx context.Context, after string) (BlockIndexTick, error) {
+// never holds back the rest of its batch. liveAhead is the documents the calling loop's earlier
+// ticks found live ahead, which this tick counts again without reading and keeps up to date.
+func (s *Service) ReconcileBlockIndex(ctx context.Context, after string, liveAhead liveAheadDocuments) (BlockIndexTick, error) {
 	tick := BlockIndexTick{Cursor: after}
 	owed, err := s.owedDocuments(ctx, after)
 	if err != nil {
 		return tick, err
 	}
+	documentsFull := len(owed) == blockIndexDocumentBatch
+	liveAhead.forgetUnlisted(after, owed, documentsFull)
 	for _, document := range owed {
-		indexed, liveAhead, err := s.indexOwedDocument(ctx, document)
+		if s.stillLiveAhead(liveAhead, document) {
+			tick.LiveAhead++
+			tick.Cursor = document.id
+			continue
+		}
+		delete(liveAhead, document.id)
+		cold := s.srv.GetDoc(document.id) == nil
+		indexed, ahead, err := s.indexOwedDocument(ctx, document)
 		switch {
 		case ctx.Err() != nil:
 			return tick, ctx.Err()
 		case err != nil:
 			slog.Error("dispatch: block index skipped a document it could not index",
 				"artifact", document.id, "error", err)
-		case liveAhead:
+		case ahead:
 			tick.LiveAhead++
+			if cold && !document.markedAt.IsZero() && s.srv.GetDoc(document.id) == nil {
+				liveAhead[document.id] = document
+			}
 		case indexed:
 			tick.Documents++
 		}
 		tick.Cursor = document.id
 	}
-	documentsFull := len(owed) == blockIndexDocumentBatch
 	if !documentsFull {
 		tick.Cursor = ""
 	}
@@ -171,9 +196,33 @@ func (s *Service) ReconcileBlockIndex(ctx context.Context, after string) (BlockI
 	return tick, nil
 }
 
+// stillLiveAhead reports whether document, as listed now, is one liveAhead holds at the same
+// version and settlement mark, with no room of this server resident for it.
+func (s *Service) stillLiveAhead(liveAhead liveAheadDocuments, document owedDocument) bool {
+	found, ok := liveAhead[document.id]
+	return ok && found.version == document.version && found.markedAt.Equal(document.markedAt) &&
+		s.srv.GetDoc(document.id) == nil
+}
+
+// forgetUnlisted drops each document past after, up to the last of owed while the batch is full,
+// that owed does not list: it is owed no block index any more.
+func (liveAhead liveAheadDocuments) forgetUnlisted(after string, owed []owedDocument, full bool) {
+	listed := make(map[string]struct{}, len(owed))
+	for _, document := range owed {
+		listed[document.id] = struct{}{}
+	}
+	for id := range liveAhead {
+		_, found := listed[id]
+		if !found && id > after && (!full || id <= owed[len(owed)-1].id) {
+			delete(liveAhead, id)
+		}
+	}
+}
+
 // owedDocuments lists, in id order, at most blockIndexDocumentBatch documents owed a block index
-// past after, each with its latest markdown version. A document with none has nothing to index
-// and is listed with version 0, which indexOwedDocument passes over.
+// past after, each with its latest markdown version and its pending settlement's marked_at. A
+// document with no markdown version has nothing to index and is listed with version 0, which
+// indexOwedDocument passes over.
 func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocument, error) {
 	var cursor any
 	if after != "" {
@@ -182,7 +231,8 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 	rows, err := s.store.Pool.Query(ctx, `
 		select b.artifact_id::text,
 		       coalesce((select max(v.number) from artifact_versions v
-		                 where v.artifact_id = b.artifact_id and v.markdown is not null), 0)
+		                 where v.artifact_id = b.artifact_id and v.markdown is not null), 0),
+		       (select p.marked_at from doc_settlements_pending p where p.artifact_id = b.artifact_id)
 		from document_block_versions b
 		where b.version is null and ($1::uuid is null or b.artifact_id > $1::uuid)
 		order by b.artifact_id
@@ -195,8 +245,12 @@ func (s *Service) owedDocuments(ctx context.Context, after string) ([]owedDocume
 	owed := []owedDocument{}
 	for rows.Next() {
 		var document owedDocument
-		if err := rows.Scan(&document.id, &document.version); err != nil {
+		var markedAt *time.Time
+		if err := rows.Scan(&document.id, &document.version, &markedAt); err != nil {
 			return nil, fmt.Errorf("scan a document owed a block index: %w", err)
+		}
+		if markedAt != nil {
+			document.markedAt = *markedAt
 		}
 		owed = append(owed, document)
 	}

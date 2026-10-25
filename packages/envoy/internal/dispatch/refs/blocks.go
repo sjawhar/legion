@@ -5,23 +5,13 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"strings"
 	"time"
-	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
-
-// Block is one identified block of a rendered document version, as GET …/blocks lists it: its
-// id, its type and its byte range [From, To) in the version's markdown, children included.
-type Block struct {
-	ID       string
-	Type     string
-	From, To int
-}
 
 // IndexBlocks records version `version` (written at versionAt) of document artifactID's blocks as
 // graph nodes, and each mention written inside a block as an edge out of the innermost block
@@ -48,7 +38,7 @@ func IndexBlocks(
 	version int,
 	versionAt time.Time,
 	markdown string,
-	blocks []Block,
+	blocks []model.ArtifactBlock,
 	located []text.Located,
 ) ([]Target, error) {
 	stored, err := storedBlockSums(ctx, tx, artifactID)
@@ -162,7 +152,7 @@ type blockPair struct {
 
 // blockPairs is each distinct link the mentions in located write from the innermost of nodes
 // holding its start. A mention no block holds, and an external URL, write none.
-func blockPairs(nodes []Block, located []text.Located) []blockPair {
+func blockPairs(nodes []model.ArtifactBlock, located []text.Located) []blockPair {
 	starts := make([]int, len(located))
 	for i, mention := range located {
 		starts[i] = mention.Offset
@@ -299,11 +289,11 @@ func BlockLinks(ctx context.Context, q Queryer, fromArtifact, toArtifact string)
 // that id: a rendered version can repeat an id (pmdoc/block_ids.go), and document_blocks holds one
 // row per id. It skips an empty id, and one that is not valid UTF-8 or holds a NUL, which a
 // Postgres text[] cannot hold.
-func uniqueBlocks(blocks []Block) []Block {
-	nodes := make([]Block, 0, len(blocks))
+func uniqueBlocks(blocks []model.ArtifactBlock) []model.ArtifactBlock {
+	nodes := make([]model.ArtifactBlock, 0, len(blocks))
 	seen := make(map[string]struct{}, len(blocks))
 	for _, block := range blocks {
-		if block.ID == "" || !utf8.ValidString(block.ID) || strings.ContainsRune(block.ID, 0) {
+		if block.ID == "" || !text.Storable(block.ID) {
 			continue
 		}
 		if _, dup := seen[block.ID]; dup {
@@ -317,7 +307,7 @@ func uniqueBlocks(blocks []Block) []Block {
 
 // innermostBlocks names, for each start (ascending), the index of the tightest block whose
 // [From, To) holds it, or -1. blocks are in document order, each parent before its children.
-func innermostBlocks(blocks []Block, starts []int) []int {
+func innermostBlocks(blocks []model.ArtifactBlock, starts []int) []int {
 	holders := make([]int, len(starts))
 	stack := make([]int, 0, 8)
 	next := 0

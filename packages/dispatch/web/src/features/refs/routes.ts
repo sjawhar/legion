@@ -1,8 +1,10 @@
 import {
+  decodeBlockId,
   encodeBlockId,
   hasControlCharacter,
   isSessionId,
   itemFromSearch,
+  parseBlockFragment,
   SESSION_ID_PATTERN,
 } from "@legion/contracts";
 import { matchPath } from "react-router-dom";
@@ -254,13 +256,6 @@ function parseIssueReference(key: string, target: string | undefined): IssueRout
   };
 }
 
-/** The block id a `#b-` fragment names after its `b-`: not empty, holding no raw `@`
- *  (`encodeBlockId` writes one as `%40`, so a raw `@` is only ever a pin), and decoding as a path
- *  segment does, with any percent-encoding; undefined otherwise. */
-function blockIdOf(encoded: string): string | undefined {
-  return encoded.includes("@") ? undefined : decodedSegment(encoded);
-}
-
 /** `route` naming its document's block `block`, pinned to version `pin` when one is given: only a
  *  spec, an issue artifact or a project document, at no version and naming no item, holds blocks
  *  a reference can name; undefined for any other route. */
@@ -281,8 +276,8 @@ function withBlock(
 }
 
 /** `<document reference>#b-<block id>[@v<N>]`, as the server's `text.parseBlock` reads it: the
- *  fragment's id with any percent-encoding, a raw `@` only as the start of a well-formed pin, and
- *  a document that `withBlock` admits. Any other fragment names nothing. */
+ *  fragment as `parseBlockFragment` reads it, and a document that `withBlock` admits. Any other
+ *  fragment names nothing. */
 function parseBlockReference(
   document: string,
   fragment: string
@@ -290,20 +285,10 @@ function parseBlockReference(
   if (!fragment.startsWith("b-") || document.includes("@")) {
     return undefined;
   }
-  const encoded = fragment.slice(2);
-  const at = encoded.indexOf("@");
-  const pin = at === -1 ? undefined : encoded.slice(at + 1).match(/^v([1-9]\d*)$/)?.[1];
-  if (at !== -1 && pin === undefined) {
-    return undefined;
-  }
-  const block = blockIdOf(at === -1 ? encoded : encoded.slice(0, at));
-  return block === undefined
+  const target = parseBlockFragment(fragment.slice(2));
+  return target === undefined
     ? undefined
-    : withBlock(
-        parseDispatchReference(document),
-        block,
-        pin === undefined ? undefined : Number(pin)
-      );
+    : withBlock(parseDispatchReference(document), target.block, target.pin);
 }
 
 /** A `dispatch://` reference's route. One holding a control character names nothing, as the
@@ -503,7 +488,7 @@ export function referenceRouteFromHref(
       return { id: item.id, key: route.key, kind: item.kind };
     }
   }
-  const block = url.hash.startsWith("#b-") ? blockIdOf(url.hash.slice(3)) : undefined;
+  const block = url.hash.startsWith("#b-") ? decodeBlockId(url.hash.slice(3)) : undefined;
   return (block === undefined ? undefined : withBlock(route, block)) ?? route;
 }
 
@@ -605,10 +590,21 @@ export function blockFragment(blockId: string): string {
   return `#b-${encodeBlockId(blockId)}`;
 }
 
+/** The block of its document a reference names (`#b-`) and the version of the document it pins,
+ *  or undefined for a reference to anything else. */
+export function blockTarget(
+  route: DispatchReferenceRoute
+): { block: string; pin?: number } | undefined {
+  if (!("block" in route) || route.block === undefined) {
+    return undefined;
+  }
+  return route.pin === undefined ? { block: route.block } : { block: route.block, pin: route.pin };
+}
+
 /** The block of its document a reference names (`#b-`), or undefined for a reference to anything
  *  else. */
 export function routeBlock(route: DispatchReferenceRoute): string | undefined {
-  return "block" in route ? route.block : undefined;
+  return blockTarget(route)?.block;
 }
 
 export function buildDispatchReference(route: DispatchReferenceRoute): string {
@@ -617,10 +613,11 @@ export function buildDispatchReference(route: DispatchReferenceRoute): string {
       route.version === undefined ? "" : `@v${route.version}`
     }`;
   }
+  const target = blockTarget(route);
   const block =
-    "block" in route && route.block !== undefined
-      ? `${blockFragment(route.block)}${route.pin === undefined ? "" : `@v${route.pin}`}`
-      : "";
+    target === undefined
+      ? ""
+      : `${blockFragment(target.block)}${target.pin === undefined ? "" : `@v${target.pin}`}`;
   if ("project" in route) {
     return `dispatch://${route.project}/artifact/${encodeURIComponent(route.slug)}${
       route.version === undefined ? "" : `@v${route.version}`
@@ -821,10 +818,9 @@ export function shortForm(route: DispatchReferenceRoute): string {
   if (route.kind === "agent-artifact") {
     return `agent/${shortSessionId(route.session)}/${route.slug}`;
   }
+  const target = blockTarget(route);
   const block =
-    "block" in route && route.block !== undefined
-      ? ` block${route.pin === undefined ? "" : ` v${route.pin}`}`
-      : "";
+    target === undefined ? "" : ` block${target.pin === undefined ? "" : ` v${target.pin}`}`;
   if (isProjectRoute(route)) {
     const base = `${route.project}/${route.slug}`;
     return route.item === undefined ? `${base}${block}` : `${base} ${route.item.kind}`;
@@ -865,11 +861,12 @@ export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: str
     return route.version === undefined ? artifact : `${artifact}?v=${route.version}`;
   }
   const path = isProjectRoute(route) ? buildProjectPath(route) : buildIssuePath(route);
-  if (!("block" in route) || route.block === undefined) {
+  const target = blockTarget(route);
+  if (target === undefined) {
     return path;
   }
-  const live = `${path}${blockFragment(route.block)}`;
-  if (route.pin === undefined) {
+  const live = `${path}${blockFragment(target.block)}`;
+  if (target.pin === undefined) {
     return live;
   }
   if (route.kind === "document") {
@@ -877,13 +874,13 @@ export function buildReferencePath(route: DispatchReferenceRoute, specSlug?: str
       kind: "document",
       project: route.project,
       slug: route.slug,
-      version: route.pin,
+      version: target.pin,
     });
   }
   const slug = route.kind === "artifact" ? route.slug : specSlug;
   return slug === undefined
     ? live
-    : buildIssuePath({ key: route.key, kind: "artifact", slug, version: route.pin });
+    : buildIssuePath({ key: route.key, kind: "artifact", slug, version: target.pin });
 }
 
 export function buildIssuePath(route: IssueRoute): string {

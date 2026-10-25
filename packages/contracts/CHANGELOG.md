@@ -12,8 +12,9 @@
   `BlockLink` / `BlockLinks` are `GET /api/v1/block-links`. `encodeBlockId` writes a block id as a
   `#b-` fragment carries it (every byte but ASCII letters, digits and `-` percent-encoded, so `@` is
   `%40` and a raw `@` is only the pin), tested with Go's `text.EncodeBlockID` against
-  `DISPATCH_BLOCK_ID_ENCODINGS`; `DISPATCH_TEXT_REFERENCES` gains the block and pin rows both
-  reference readers are held to.
+  `DISPATCH_BLOCK_ID_ENCODINGS`; `decodeBlockId` and `parseBlockFragment` read a fragment's id and
+  pin back, for the dashboard and the client alike; `DISPATCH_TEXT_REFERENCES` gains the block and
+  pin rows both reference readers are held to.
 - The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
   `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
   still names a person who has signed in, and `dispatch_whoami` says a session under the shared

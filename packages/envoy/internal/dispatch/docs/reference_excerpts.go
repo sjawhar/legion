@@ -72,15 +72,11 @@ func (s *Service) indexVersion(ctx context.Context, tx pgx.Tx, artifactID string
 	located := text.ExtractAt(markdown, s.serverURL)
 	var moved []refs.Target
 	if rendered {
-		nodes := make([]refs.Block, len(blocks))
-		for i, block := range blocks {
-			nodes[i] = refs.Block{ID: block.ID, Type: block.Type, From: block.From, To: block.To}
-		}
 		// The blocks are indexed before the document's own references are reconciled: a first
 		// indexing dates a block's mention from the document's refs row for its target, which a
 		// surviving target already holds and a new one gets with this same time.
 		var err error
-		if moved, err = refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, markdown, nodes, located); err != nil {
+		if moved, err = refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, markdown, blocks, located); err != nil {
 			return model.ReferenceChanges{}, err
 		}
 	}

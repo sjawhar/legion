@@ -36,7 +36,7 @@ type Rebuild struct {
 // RebuildAll reparses every reference source and reconciles refs with it, one transaction per
 // source, so the index converges on what the live write paths produce: the latest version of
 // every document, every ask question, every comment body, and every issue message (issue-less
-// messages are never indexed), each read by SourceText. An edge that survives keeps its
+// messages are never indexed), each read by sourceText. An edge that survives keeps its
 // created_at and source_seq; one the rebuild introduces has no source_seq, since no event
 // introduced it, and no current excerpt: a document mention's excerpt is cut from the document's
 // tree, which only the document service reads, so its reconciliation
@@ -112,16 +112,7 @@ func loadSourceIDs(ctx context.Context, pool Pool, query string) ([]string, erro
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	ids := []string{}
-	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
-			return nil, err
-		}
-		ids = append(ids, id)
-	}
-	return ids, rows.Err()
+	return pgx.CollectRows(rows, pgx.RowTo[string])
 }
 
 // replaceInTx reconciles one source's refs with its text in a transaction of its own, and
@@ -132,7 +123,7 @@ func replaceInTx(ctx context.Context, pool Pool, fromKind, fromID, serverURL str
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	body, _, found, err := SourceText(ctx, tx, fromKind, fromID, false)
+	body, _, found, err := sourceText(ctx, tx, fromKind, fromID, false)
 	if err != nil || !found {
 		return false, err
 	}
@@ -142,14 +133,14 @@ func replaceInTx(ctx context.Context, pool Pool, fromKind, fromID, serverURL str
 	return true, tx.Commit(ctx)
 }
 
-// SourceText reads the text one reference source writes, with the time that text was written: a
+// sourceText reads the text one reference source writes, with the time that text was written: a
 // document's latest version's markdown (fromID its uuid) and that version's created_at, an ask's
 // question, a comment's body, or an issue message's body, with the row's edited_at where its table
 // has one (asks, comments) and its created_at otherwise. found is false when no such source
 // exists: a deleted row, a document with no markdown version, a direct message, which nothing
 // indexes. forUpdate takes the row read `for no key update`, the lock an edit of that text takes,
 // so the caller's index of the text and a concurrent edit of it are ordered.
-func SourceText(ctx context.Context, q Queryer, kind, id string, forUpdate bool) (body string, writtenAt time.Time, found bool, err error) {
+func sourceText(ctx context.Context, q Queryer, kind, id string, forUpdate bool) (body string, writtenAt time.Time, found bool, err error) {
 	var query string
 	switch kind {
 	case "artifact":
@@ -209,11 +200,11 @@ func OwedItems(ctx context.Context, q Queryer, limit int) ([]OwedItem, error) {
 }
 
 // ReindexOwedItem reconciles one owed item's refs with its text, read with this build's grammar,
-// and settles its owed row, in one transaction. It takes the source row first (SourceText,
+// and settles its owed row, in one transaction. It takes the source row first (sourceText,
 // forUpdate) and the owed row after, the order an edit takes them in (the row's update, then its
 // trigger's upsert), so the two never deadlock. The owed row is deleted only while it holds the
 // enqueued_at item was listed with: an edit that lands meanwhile moves it, and the item stays
-// owed for the next pass. A new edge takes the time the text was written (SourceText) and no
+// owed for the next pass. A new edge takes the time the text was written (sourceText) and no
 // source_seq, since no event introduced it, as a rebuild's does; a re-index of text no one
 // rewrote appends no event, as rebuild-refs appends none. An item whose source is gone has its
 // edges deleted with its owed row.
@@ -223,7 +214,7 @@ func ReindexOwedItem(ctx context.Context, pool Pool, item OwedItem, serverURL st
 		return err
 	}
 	defer tx.Rollback(ctx)
-	body, writtenAt, found, err := SourceText(ctx, tx, item.Kind, item.ID, true)
+	body, writtenAt, found, err := sourceText(ctx, tx, item.Kind, item.ID, true)
 	if err != nil {
 		return err
 	}

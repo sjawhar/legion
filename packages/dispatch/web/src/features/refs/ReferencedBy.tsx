@@ -19,8 +19,7 @@ import { Timestamp } from "./Timestamp";
 const NODE_LABELS: Record<GraphEdge["node"]["kind"], string> = {
   artifact: "Artifact",
   ask: "Ask",
-  // A block that cites a node shows as the document holding it, linked to the block, as that
-  // document's row showed before blocks were graph nodes.
+  // A block that cites a node shows as the document holding it, linked to the block.
   block: "Artifact",
   comment: "Comment",
   component: "Component",

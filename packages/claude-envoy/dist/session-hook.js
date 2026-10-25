@@ -13863,15 +13863,6 @@ function claimHolds(claim, titles) {
   }
   return titles.has(claim.actor.id) ? "holds" : "lapsed";
 }
-// ../contracts/src/dispatch-block-ref.ts
-function encodeBlockId(id) {
-  let encoded = "";
-  for (const byte of new TextEncoder().encode(id)) {
-    const bare = byte >= 48 && byte <= 57 || byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte === 45;
-    encoded += bare ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
-  }
-  return encoded;
-}
 // ../contracts/src/dispatch-href.ts
 function hasControlCharacter(value) {
   return /\p{Cc}/u.test(value);
@@ -13900,6 +13891,40 @@ function itemFromSearch(search) {
     return null;
   }
   return ask === null ? { id, kind: "comment" } : { id, kind: "ask" };
+}
+
+// ../contracts/src/dispatch-block-ref.ts
+function encodeBlockId(id) {
+  let encoded = "";
+  for (const byte of new TextEncoder().encode(id)) {
+    const bare = byte >= 48 && byte <= 57 || byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte === 45;
+    encoded += bare ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return encoded;
+}
+function decodeBlockId(encoded) {
+  if (encoded === "" || encoded.includes("@")) {
+    return;
+  }
+  let id;
+  try {
+    id = decodeURIComponent(encoded);
+  } catch {
+    return;
+  }
+  return id === "" || hasControlCharacter(id) ? undefined : id;
+}
+function parseBlockFragment(encoded) {
+  const at = encoded.indexOf("@");
+  const pin = at === -1 ? undefined : encoded.slice(at + 1).match(/^v([1-9][0-9]*)$/)?.[1];
+  if (at !== -1 && pin === undefined) {
+    return;
+  }
+  const block = decodeBlockId(at === -1 ? encoded : encoded.slice(0, at));
+  if (block === undefined) {
+    return;
+  }
+  return pin === undefined ? { block } : { block, pin: Number(pin) };
 }
 // ../contracts/src/dispatch-snippet.ts
 var HTML_ENTITIES = [
@@ -15686,35 +15711,20 @@ function dispatchDocumentRef(owner, slug) {
 function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
-function decodeBlockId(encoded) {
-  if (encoded === "" || encoded.includes("@"))
-    return;
-  let id;
-  try {
-    id = decodeURIComponent(encoded);
-  } catch {
-    return;
-  }
-  return id === "" || hasControlCharacter(id) ? undefined : id;
-}
 function parseBlockRef(document, fragment) {
-  const at = fragment.indexOf("@");
-  const pinned = at === -1 ? null : fragment.slice(at + 1).match(/^v([1-9][0-9]*)$/);
-  if (at !== -1 && pinned === null)
-    return null;
-  const block = decodeBlockId(at === -1 ? fragment : fragment.slice(0, at));
+  const target = parseBlockFragment(fragment);
   const parsed = parseDispatchRef(document);
-  if (block === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
+  if (target === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
     return null;
   }
   return {
     owner: parsed.owner,
     kind: "block",
     id: parsed.id,
-    block,
+    block: target.block,
     document,
     ...parsed.owner.kind === "project" ? { artifact: parsed.id } : {},
-    ...pinned?.[1] === undefined ? {} : { pin: Number(pinned[1]) }
+    ...target.pin === undefined ? {} : { pin: target.pin }
   };
 }
 function parseDispatchRef(ref) {

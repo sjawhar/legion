@@ -43,8 +43,7 @@ type Query struct {
 	ExcludeKinds []string
 	Since        *int64
 	// WholeDocuments, on a document's "in" read, lists the items and documents that cite it or
-	// one of its current blocks, and no block: a citing document is listed by its own edges, as
-	// the older references route names each source.
+	// one of its current blocks, and no block: a citing document is listed by its own edges.
 	WholeDocuments bool
 }
 
@@ -205,21 +204,19 @@ func readEdgeRows(ctx context.Context, q Queryer, query Query) ([]edgeRow, error
 	document := query.Kind == "artifact"
 	var arms string
 	switch {
-	case query.Direction == "in" && document && query.WholeDocuments:
-		arms = `select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, null::text
-			from graph_edges g where g.to_kind = $1 and g.to_id = $2 and g.from_kind <> 'block'
-			union all
-			select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, g.to_id
-			from graph_edges g where g.to_kind = 'block' and g.to_id in ` + documentBlockIDs("$2") + ` and g.from_kind <> 'block'`
-	case query.Direction == "in" && document:
-		arms = `select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, null::text
-			from graph_edges g where g.to_kind = $1 and g.to_id = $2 and not ` + heldByABlock("g") + `
-			union all
-			select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, g.to_id
-			from graph_edges g where g.to_kind = 'block' and g.to_id in ` + documentBlockIDs("$2") + ` and not ` + heldByABlock("g")
 	case query.Direction == "in":
+		source := `not ` + heldByABlock("g")
+		if document && query.WholeDocuments {
+			source = `g.from_kind <> 'block'`
+		}
 		arms = `select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, null::text
-			from graph_edges g where g.to_kind = $1 and g.to_id = $2 and not ` + heldByABlock("g")
+			from graph_edges g where g.to_kind = $1 and g.to_id = $2 and ` + source
+		if document {
+			arms += `
+			union all
+			select g.kind, g.from_kind, g.from_id, g.created_at, g.source_seq, g.to_id
+			from graph_edges g where g.to_kind = 'block' and g.to_id in ` + documentBlockIDs("$2") + ` and ` + source
+		}
 	case query.Direction == "out" && document:
 		// The document's id again, bound as the uuid block_refs keys its rows by.
 		args = append(args, query.ID)
