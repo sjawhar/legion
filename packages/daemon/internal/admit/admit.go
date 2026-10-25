@@ -152,13 +152,26 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 		// an event moving the key out of todo, or taking its label off, is real information about
 		// what Dispatch shows now, and leaving the held summary as Reconcile's stale boot listing
 		// found it would have release admit on that stale information instead.
+		//
+		// Every exit below still promotes, though it records nothing: the blockers.Mirror handler,
+		// which runs first, has already written this issue's row in this transaction, and a root
+		// or a child may be waiting on exactly this issue. Its close is an observation of an
+		// unrecorded issue out of todo, so without this look a waiting root whose last blocker is
+		// an issue Legion keeps no record of would wait for the controller tick to be admitted.
 		if observation.Status != "todo" {
 			a.refreshHeldSummary(observation)
-			return nil, nil
+			_, err := a.promote(ctx, tx)
+			return nil, err
 		}
 		if !handed {
 			a.log.Debug("admission: not handed to Legion", "issue", observation.Key, "label", dispatch.LegionLabel)
 			a.refreshHeldSummary(observation)
+			// Promotion comes before the slot is judged: a root this look admits takes a slot that
+			// was free before it, and the wake must name a slot still free once this fact commits,
+			// never one the same transaction has just filled.
+			if _, err := a.promote(ctx, tx); err != nil {
+				return nil, err
+			}
 			// An issue in todo that nobody handed to Legion wakes the controller while a slot stands
 			// free; the controller takes nothing for it, since only a person hands Legion work
 			// (skill://legion-controller, "Free slots"). The notice waits todoWakeDelay, so the
@@ -176,7 +189,7 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 			// Reconcile already holds this key on the listing's own summary because it found it
 			// behind the stream: an unrecorded key has no record to fence a live event against, so
 			// a replay at or behind that summary's own sequence — a nak's redelivery, the outbox's
-			// own publish backoff — decides nothing. release applies that summary once the
+			// own publish backoff — decides nothing about it. release applies that summary once the
 			// consumer catches up. A newer event, past the sequence the summary was taken at, is
 			// not a stale replay: it is recorded normally below, even while the key is still
 			// technically held — a release that has already committed but not yet run its
@@ -184,8 +197,11 @@ func (a *Admission) applyFact(ctx context.Context, tx pgx.Tx, fact intake.Fact) 
 			// event here would lose it once that hook clears pending out from under it, the
 			// event already acknowledged as processed. promote's own pending membership check —
 			// not this one — is what still holds the freshly recorded candidate back from a slot
-			// until pending is actually clear; a later pass once the hold clears promotes it.
-			return nil, nil
+			// until pending is actually clear; a later pass once the hold clears promotes it. The
+			// replay records nothing of itself, but it is still a look at what Legion could now
+			// start, as every fact is.
+			_, err := a.promote(ctx, tx)
+			return nil, err
 		}
 		if err := a.putNewRoot(ctx, tx, observation, true); err != nil {
 			return nil, err

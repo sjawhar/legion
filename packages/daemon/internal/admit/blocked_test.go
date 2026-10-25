@@ -2,6 +2,7 @@ package admit
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"log/slog"
 	"reflect"
@@ -12,6 +13,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/sjawhar/legion/daemon/internal/blockers"
+	"github.com/sjawhar/legion/daemon/internal/dispatch"
 	"github.com/sjawhar/legion/daemon/internal/intake"
 	"github.com/sjawhar/legion/daemon/internal/phase"
 	"github.com/sjawhar/legion/daemon/internal/record"
@@ -100,8 +102,8 @@ func TestABlockerThatIsNotDoneHoldsTheRoot(t *testing.T) {
 // A root whose blockers are all done is admitted exactly as a root that waited on nothing: the
 // close of the last issue it waited on writes the same records and the same outbox rows an
 // unblocked admission writes, compared here row for row against a control admission of the same
-// root. The blocker is a recorded child of another tree, since admission promotes on an
-// observation of an issue it records.
+// root. The blocker here is a recorded child of another tree; one Legion keeps no record of is
+// TestTheCloseOfABlockerLegionKeepsNoRecordOfAdmitsTheRoot's.
 func TestTheRootIsAdmittedOnItsLastBlockersCloseExactlyAsAnUnblockedOneIs(t *testing.T) {
 	seed := func(t *testing.T, pool *pgxpool.Pool, blockerStatus string) {
 		t.Helper()
@@ -137,6 +139,101 @@ func TestTheRootIsAdmittedOnItsLastBlockersCloseExactlyAsAnUnblockedOneIs(t *tes
 	}
 	if got, want := slots(t, subject), slots(t, control); !reflect.DeepEqual(got, want) {
 		t.Fatalf("slots = %#v, want a control admission's, %#v", got, want)
+	}
+}
+
+// The acceptance line's own words: a root's last blocker closing admits it on that closing event
+// alone, including when the blocker is an issue Legion keeps no record of and nobody handed to it.
+// Admission records nothing of such an issue, yet the mirror has already written its row in the
+// same transaction, so the close is a look at the waiting line like any other fact. The blocker
+// either never stood in todo, or stood in todo without the label — the not-handed exit, which
+// leaves the root waiting on a blocker that is not done — before it closed. Neither event records
+// the blocker.
+func TestTheCloseOfABlockerLegionKeepsNoRecordOfAdmitsTheRoot(t *testing.T) {
+	const root, blocker = "LEGION-ROOT", "LEGION-OUTSIDE"
+	moved := func(seq int64, status string) intake.DispatchIssue {
+		return intake.DispatchIssue{Key: blocker, ResolvedRepo: "acme/widgets", Seq: seq, Type: "issue.updated",
+			Status: status, Title: "someone else's work", Rank: "Z"}
+	}
+	for _, tc := range []struct {
+		name   string
+		before []intake.DispatchIssue
+	}{
+		{name: "a blocker that never stood in todo", before: []intake.DispatchIssue{moved(2, "backlog")}},
+		{name: "a blocker in todo without the label", before: []intake.DispatchIssue{moved(2, "todo")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := quiet(t, 1)
+			seedWaiting(t, pool, root, "A")
+			seedMirror(t, pool, root, "todo", blocker)
+
+			for i, event := range tc.before {
+				applyMirrored(t, pool, admission, fmt.Sprintf("before-%d", i), event, engineStub{})
+			}
+			assertSlots(t, pool, nil)
+			assertWaiting(t, pool, []string{root})
+
+			applyMirrored(t, pool, admission, "blocker-done", moved(5, "done"), engineStub{})
+
+			assertSlots(t, pool, []record.Slot{{Issue: root, Index: 0, AdmittedAt: fixedNow}})
+			assertWaiting(t, pool, nil)
+			if got := maybeIssue(t, pool, blocker); got != nil {
+				t.Fatalf("the blocker Legion keeps no record of was recorded = %#v, want no record of it", got)
+			}
+		})
+	}
+}
+
+// Every exit admission takes for an issue it keeps no record of is still a look at what Legion
+// could now start: a move out of todo, a todo nobody handed to Legion, and a stale replay of a key
+// Reconcile holds. Each finds a root whose blocker is already done in the mirror and admits it,
+// and each still records nothing of the issue it observed. The not-handed exit judges its wake
+// after that promotion: with one slot the admitted root takes it and the controller is not woken
+// for a slot that is no longer free; with two the slot still free after it wakes the controller.
+func TestEveryFactOfAnIssueLegionKeepsNoRecordOfIsALook(t *testing.T) {
+	const root, blocker, observed = "LEGION-ROOT", "LEGION-BLOCKER", "LEGION-OUTSIDE"
+	todoNotice := []effect{{kind: record.OutboxKindControllerNotice, issue: observed, payload: record.ControllerNotice{Kind: record.TodoNotice}}}
+	for _, tc := range []struct {
+		name    string
+		cap     int
+		hold    bool
+		fact    intake.DispatchIssue
+		notices []effect
+	}{
+		{name: "a move out of todo", cap: 1, fact: intake.DispatchIssue{Key: observed, ResolvedRepo: "acme/widgets",
+			Seq: 2, Type: "issue.updated", Status: "backlog", Title: observed, Rank: "M"}},
+		{name: "a todo nobody handed to Legion, its slot taken", cap: 1, fact: unlabelledTodo(observed)},
+		{name: "a todo nobody handed to Legion, a slot still free", cap: 2, fact: unlabelledTodo(observed), notices: todoNotice},
+		{name: "a stale replay of a held key", cap: 1, hold: true, fact: intake.DispatchIssue{Key: observed, ResolvedRepo: "acme/widgets",
+			Seq: 3, Type: "issue.updated", Status: "todo", Title: observed, Rank: "M", HandedOver: handed}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := quiet(t, tc.cap)
+			registerController(t, pool)
+			seedWaiting(t, pool, root, "A")
+			seedMirror(t, pool, root, "todo", blocker)
+			if tc.hold {
+				reconcileWithPosition(t, pool, admission, []dispatch.IssueSummary{
+					{Key: observed, ResolvedRepo: "acme/widgets", Title: observed, Status: "backlog", Rank: "M", HandedOver: handed, LastSeq: 5},
+				}, 10, 2, false)
+				if !admission.Held() {
+					t.Fatalf("Held() = false, want %s held behind the stream", observed)
+				}
+			}
+			assertSlots(t, pool, nil)
+			// The blocker's close reached the mirror, and no pass has looked since.
+			seedMirror(t, pool, blocker, "done")
+
+			applyMirrored(t, pool, admission, "observed", tc.fact, engineStub{})
+
+			assertSlots(t, pool, []record.Slot{{Issue: root, Index: 0, AdmittedAt: fixedNow}})
+			if got := maybeIssue(t, pool, observed); got != nil {
+				t.Fatalf("%s was recorded = %#v, want no record of it", observed, got)
+			}
+			assertControllerNotices(t, pool, tc.notices)
+		})
 	}
 }
 
@@ -411,7 +508,6 @@ func TestANeverStartedChildHandedOverFromAFinishedTreeIsStillChecked(t *testing.
 
 	applyMirrored(t, pool, admission, "blocker-done", intake.DispatchIssue{Key: blocker, ResolvedRepo: "acme/widgets",
 		Seq: 5, Type: "issue.updated", Status: "done", Title: blocker, Rank: "Z"}, engineStub{})
-	tick(t, pool, admission, "tick")
 
 	assertSlots(t, pool, []record.Slot{{Issue: child, Index: 0, AdmittedAt: fixedNow}})
 }

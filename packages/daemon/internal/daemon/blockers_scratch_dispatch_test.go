@@ -34,7 +34,7 @@ import (
 // links, and every close — so every decision below is reached from an event the daemon consumed,
 // never from a fact or a row the test wrote.
 //
-// It drives the five things the feature promises, in one run over one tree of issues, because
+// It drives the six things the feature promises, in one run over one tree of issues, because
 // each step is the state the next one starts from:
 //
 //  1. a blocked root is passed over while a slot stands free, and the roots nothing blocks take
@@ -47,7 +47,9 @@ import (
 //  4. a child released through release_children is held, the answer naming the issue it waits on,
 //     and starts when that issue closes;
 //  5. a waiting root a person moves to backlog and back to todo is still checked, since only a tree
-//     that ran starts again when Legion takes it back, and is admitted when its blocker closes.
+//     that ran starts again when Legion takes it back, and is admitted when its blocker closes;
+//  6. a root waiting on an issue Legion keeps no record of and nobody handed to it is admitted by
+//     that issue's closing event alone, not by the controller tick that follows.
 func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	// The NATS server is taken first: testnats.URL empties it of every stream, and Dispatch's own
 	// start reconciles ENVOY_NOTIFICATIONS on it, which the daemon then consumes from.
@@ -61,6 +63,10 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	cfg.PostgresDSN = blockersDatabase(t)
 	// Three slots for three roots, so the slot the blocked root does not take stands visibly free.
 	cfg.AdmissionCap = 3
+	// The controller tick admits a root whose blocker is done whatever the event did, so it must
+	// not be what step 6 sees: an hour between ticks leaves the runtime's first tick, a minute
+	// after it starts, the only one this run can ever apply.
+	cfg.ControllerWakeInterval = time.Hour
 	// With the design gate off, the architect's own registration opens its tree, which is what
 	// makes starting a released child possible at all.
 	cfg.Gates.Design = config.DesignGateOff
@@ -347,6 +353,70 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 	if waits, ok := blockedOn(state, returned); ok {
 		t.Fatalf("%s is admitted and the state still lists it blocked by %v\nstate %s", returned, waits, body)
 	}
+
+	// 6. The blocker is an issue Legion keeps no record of: created without the legion label, so
+	// nobody handed it to Legion, and never in todo, so admission never records it. Someone else
+	// works it, and its close, a real Dispatch write, is what admits the root waiting on it.
+	outside := createUnhandedIssue(t, baseURL, cfg.Project, "External library patch")
+	setDispatchStatus(t, baseURL, outside, "in_progress")
+	awaiting := createBlockersIssue(t, baseURL, cfg.Project, "Adopt newer dependency release", "", []string{outside})
+	setDispatchStatus(t, baseURL, awaiting, "todo")
+	state, body = settled(t, d, "take "+awaiting+" into its waiting line or a slot", func(s api.State) bool {
+		return slices.Contains(s.Admission.Waiting, awaiting) || slices.Contains(s.Admission.Active, awaiting)
+	})
+	t.Logf("the state once %s, waiting on %s, which nobody handed to Legion, was handed to Legion:\n%s", awaiting, outside, body)
+	if slices.Contains(state.Admission.Active, awaiting) {
+		t.Fatalf("Legion admitted %s though %s, the issue it waits on, is in progress; active = %v\nstate %s",
+			awaiting, outside, state.Admission.Active, body)
+	}
+	if waits, ok := blockedOn(state, awaiting); !ok || !slices.Equal(waits, []string{outside}) {
+		t.Fatalf("the state's admission.blocked is %v; want %s named as waiting on %s\nstate %s",
+			state.Admission.Blocked, awaiting, outside, body)
+	}
+	if len(state.Admission.Active) >= state.Admission.Cap {
+		t.Fatalf("Legion took all %d slots with %v, so its blocker is not all that holds %s\nstate %s",
+			state.Admission.Cap, state.Admission.Active, awaiting, body)
+	}
+	if _, recorded := state.Issues[outside]; recorded {
+		t.Fatalf("Legion keeps a record of %s, which nobody handed to it\nstate %s", outside, body)
+	}
+
+	// The tick cannot be what admits the root: the step waits for the runtime's first tick, the
+	// only one an hour's interval allows this run, before the close, and then judges that no tick
+	// at all was applied between the close and the admission.
+	ticks := func() int {
+		t.Helper()
+		var n int
+		if err := pool.QueryRow(t.Context(), `select count(*) from processed_events where source = 'controller' and event_id like 'controller-tick:%'`).
+			Scan(&n); err != nil {
+			t.Fatalf("read the controller ticks the daemon applied: %v", err)
+		}
+		return n
+	}
+	testwait.Eventually(t, "the runtime's first controller tick", func() bool { return ticks() > 0 })
+	ticked := ticks()
+	closed := time.Now()
+	setDispatchStatus(t, baseURL, outside, "done")
+	state, body = settled(t, d, "admit "+awaiting+" once "+outside+", which Legion keeps no record of, closed", func(s api.State) bool {
+		return slices.Contains(s.Admission.Active, awaiting)
+	})
+	took := time.Since(closed)
+	var mirroredStatus string
+	if err := pool.QueryRow(t.Context(), `select status from dispatch_issues where key = $1`, outside).Scan(&mirroredStatus); err != nil {
+		t.Fatalf("read the daemon's mirror of %s: %v", outside, err)
+	}
+	t.Logf("%s closed through Dispatch, mirrored %s, and %s was admitted %s after the close:\n%s",
+		outside, mirroredStatus, awaiting, took, body)
+	if now := ticks(); now != ticked {
+		t.Fatalf("%d controller ticks were applied between the close of %s and the admission of %s, %s after it: the tick, not "+
+			"the close, may have admitted it\nstate %s", now-ticked, outside, awaiting, took, body)
+	}
+	if waits, ok := blockedOn(state, awaiting); ok {
+		t.Fatalf("%s is admitted and the state still lists it blocked by %v\nstate %s", awaiting, waits, body)
+	}
+	if _, recorded := state.Issues[outside]; recorded {
+		t.Fatalf("Legion recorded %s on its close, though nobody handed it to Legion\nstate %s", outside, body)
+	}
 }
 
 // settled polls the daemon's state until want holds and returns it with the JSON it was read
@@ -545,6 +615,19 @@ func createBlockersIssue(t *testing.T, baseURL, project, title, parent string, w
 	if len(waits) > 0 {
 		body["blocked_by"] = waits
 	}
+	return createDispatchIssue(t, baseURL, title, body)
+}
+
+// createUnhandedIssue creates one issue of project through Dispatch's own API without the legion
+// label: someone else's work, which nobody hands to Legion. It is created in triage.
+func createUnhandedIssue(t *testing.T, baseURL, project, title string) string {
+	t.Helper()
+	return createDispatchIssue(t, baseURL, title, map[string]any{"project": project, "title": title})
+}
+
+// createDispatchIssue posts body as a new issue to Dispatch and answers the key Dispatch gave it.
+func createDispatchIssue(t *testing.T, baseURL, title string, body map[string]any) string {
+	t.Helper()
 	var created struct {
 		Key string `json:"key"`
 	}
