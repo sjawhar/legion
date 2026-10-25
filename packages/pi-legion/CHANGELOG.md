@@ -176,6 +176,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   comment on the issue or the next handoff, and every change that needs approval goes into one
   version, so the person approves the spec again only when scope, acceptance or their decision
   changes.
+- The `legion-controller` skill and its `backlog-stewardship` reference name no person: a ruling is
+  a direct Dispatch message to this controller from a person rather than from one named individual,
+  and the duty list, the pass trigger and both definitions say so (dispatch://INFRA-227). The
+  daemon's `controller-root` role prompt and `packages/envoy/AGENTS.md` drop the same name, and the
+  root `AGENTS.md` now carries the standing rule that a skill, a role prompt and an `AGENTS.md`
+  name no person and write the role instead. The controller behaves as it did: a ruling still sets
+  off the full reconciliation pass and a weekly-plan record.
+
 - Retro's push never carries the `skip-checks: true` trailer line, whatever paths its commits
   touch (INFRA-149). Before, the `legion-worker` skill, the `legion-retro` skill and the daemon's
   worker and implementer prompts all decided the line by the paths a push changed, so a retro with

@@ -6,12 +6,14 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/proof"
 	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
@@ -118,13 +120,35 @@ func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(
 		}
 		return compact
 	}
+	deviceLogin := func(key *ecdsa.PrivateKey, host, service, loginHint string) (int, []byte) {
+		t.Helper()
+		jkt, err := proof.Thumbprint(&key.PublicKey)
+		if err != nil {
+			t.Fatal(err)
+		}
+		form := url.Values{
+			"client_id": {oauthwire.ClientID}, "scope": {oauthwire.Scope}, "dpop_jkt": {jkt},
+			"request": {signRequest(key, host, service, loginHint)},
+		}
+		response, err := http.Post(base+"/v1/oauth/device_authorization", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+		if err != nil {
+			t.Fatal(err)
+		}
+		defer response.Body.Close()
+		answer, err := io.ReadAll(response.Body)
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Logf("> POST /v1/oauth/device_authorization (%s, service %q, login_hint %q)\n< %d %s", host, service, loginHint, response.StatusCode, bytes.TrimSpace(answer))
+		return response.StatusCode, answer
+	}
 	startLogin := func(key *ecdsa.PrivateKey, host, loginHint string) (code, recordID string) {
 		t.Helper()
-		status, answer := call(http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": signRequest(key, host, "", loginHint)})
-		if status != http.StatusAccepted {
-			t.Fatalf("start the login = %d %s, want 202", status, answer)
+		status, answer := deviceLogin(key, host, "", loginHint)
+		if status != http.StatusOK {
+			t.Fatalf("start the login = %d %s, want 200", status, answer)
 		}
-		code = field(answer, "code")
+		code = field(answer, "user_code")
 		status, answer = ui(http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
 		if status != http.StatusOK {
 			t.Fatalf("look the login up = %d %s", status, answer)
@@ -171,10 +195,14 @@ func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(
 	if err != nil {
 		t.Fatal(err)
 	}
-	status, answer := call(http.MethodPost, "/v1/launcher-credentials", nil,
-		map[string]any{"request": signRequest(daemonKey, "example-host-cluster", "legion-daemon", "ada@example.com")})
-	if status != http.StatusBadRequest || field(answer, "code") != "SERVICE_LOGS_IN_WITH_TOKEN" {
+	status, answer := deviceLogin(daemonKey, "example-host-cluster", "legion-daemon", "ada@example.com")
+	if status != http.StatusBadRequest || !strings.HasPrefix(field(answer, "error_description"), "SERVICE_LOGS_IN_WITH_TOKEN: ") {
 		t.Fatalf("the daemon's device-code login = %d %s, want 400 SERVICE_LOGS_IN_WITH_TOKEN", status, answer)
+	}
+	status, answer = call(http.MethodPost, "/v1/launcher-credentials", nil,
+		map[string]any{"request": signRequest(daemonKey, "example-host-devbox", "", "ada@example.com")})
+	if status != http.StatusMethodNotAllowed {
+		t.Fatalf("the removed POST /v1/launcher-credentials = %d %s, want 405", status, answer)
 	}
 
 	t.Log("--- the daemon logs in with its token, and its credential enrolls a pod")

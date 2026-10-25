@@ -463,6 +463,33 @@ func TestGoldenDigest(t *testing.T) {
 	}
 }
 
+// TestGoldenDigestWithKindAndMaxGrant pins the lines of secrets that carry a max-grant or
+// github-owners: a kind is in the Source (KindSource), and the two tags are a fifth field in
+// time.Duration's own form (0s for none) and a sixth (empty for none). The expected value is the
+// SHA-256 of the lines printed by hand, so it holds the bytes, not just their stability:
+// printf 'A_B\tada@example.com\thuman\t<arn>/a-b\nA0\t…\tagent\t<arn>/a0\n
+// DEEL_API_KEY\tshared\thuman\t<arn>/deel-api-key\n
+// GOLDEN_APP\tada@example.com\tagent\tmint:github-app:<arn>/golden-app\t0s\tacme ada\n
+// GOLDEN_KIND\tada@example.com\tagent\tmint:google-login:<arn>/golden-kind\t1h0m0s\t\n' | sha256sum,
+// with <arn> arn:aws:secretsmanager:local:000000000000:secret:example/agent-secrets.
+func TestGoldenDigestWithKindAndMaxGrant(t *testing.T) {
+	store := goldenFixture()
+	kind := policytest.KindSecret("GOLDEN_KIND", "ada@example.com", policy.TierAgent, policy.KindGoogleLogin, "v1")
+	kind.Tags[policy.TagMaxGrant] = "1h"
+	store.Put(kind)
+	app := policytest.KindSecret("GOLDEN_APP", "ada@example.com", policy.TierAgent, policy.KindGitHubApp, "v1")
+	app.Tags[policy.TagGitHubOwners] = "Ada  acme"
+	store.Put(app)
+	const want = "88c77e2ce85b8174fcfaa88ce25c7905ae902d12bc5584cf82cb3089aa7c364e"
+	set, err := policytest.Loader(store).Load(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if set.Version != want {
+		t.Fatalf("Version = %s, want the kind golden %s", set.Version, want)
+	}
+}
+
 // TestMergedSetVersionEqualsAFullLoads pins the digest contract: building the same contents by a
 // full Load and by single-name merges gives byte-equal Versions — including names whose slug order
 // differs from their Name order ("A_B" vs "A0": '-' < '0' but '_' > '0').
