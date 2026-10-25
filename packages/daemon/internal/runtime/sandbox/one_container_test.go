@@ -202,6 +202,41 @@ func toEarlierLayout(p *corev1.Pod) {
 	p.Status = runningStatusOf(p.Spec)
 }
 
+// A running pod of the earlier layout is read by its own containers: a sidecar another controller
+// injected into it (a mesh's proxy), which is in the pod and never in the Sandbox's template,
+// leaves it the earlier layout, so it is still reported moved and replaced rather than read
+// Uncertain at every observation. A pod missing a role's container, one already running `roles`,
+// or one running `roles` beside them is not that layout.
+func TestAnInjectedSidecarLeavesAPodOfTheEarlierLayout(t *testing.T) {
+	roles := make([]string, len(claim.Roles))
+	for i, role := range claim.Roles {
+		roles[i] = string(role)
+	}
+	podOf := func(names ...string) *corev1.Pod {
+		pod := &corev1.Pod{}
+		for _, name := range names {
+			pod.Spec.Containers = append(pod.Spec.Containers, corev1.Container{Name: name})
+		}
+		return pod
+	}
+	for _, tc := range []struct {
+		name  string
+		names []string
+		moved string
+	}{
+		{"the six role containers", roles, "architect, planner, implementer, tester, reviewer, merger"},
+		{"the six with an injected sidecar", append([]string{"istio-proxy"}, roles...), "architect, planner, implementer, tester, reviewer, merger"},
+		{"the one roles container with a sidecar", []string{runtime.IssuePodContainer, "istio-proxy"}, ""},
+		{"the six beside a roles container", append(slices.Clone(roles), runtime.IssuePodContainer), ""},
+		{"a role's container missing", append(slices.Clone(roles[1:]), "istio-proxy"), ""},
+	} {
+		moved, ok := movedLayout(podOf(tc.names...))
+		if ok != (tc.moved != "") || moved.held != tc.moved {
+			t.Errorf("%s %v: movedLayout = %+v, %v; want moved %q", tc.name, tc.names, moved, ok, tc.moved)
+		}
+	}
+}
+
 // A running issue pod of the layout before one container — exactly one container per workflow
 // role — is a pod a pod created now is not: every role recorded there is StaleAddress, before its
 // launcher's state is read, so the supervisor repoints each uncharged. The first relaunch replaces

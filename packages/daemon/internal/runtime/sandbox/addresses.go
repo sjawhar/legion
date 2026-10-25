@@ -196,26 +196,37 @@ func (r *Runtime) movedStream(pod *corev1.Pod, container string) (movedAddress, 
 	return movedAddress{}, false
 }
 
-// earlierLayout is whether names, a pod's containers, are an issue pod's of the layout before one
-// container: one container per workflow role, each named for its role. No other code reads that
-// layout: the boot census passes such a pod (legacyIssueSandbox) and movedLayout replaces it.
+// earlierLayout is whether names, the containers of a pod Legion built, are an issue pod's of the
+// layout before one container: exactly one container per workflow role, each named for its role.
+// No other code reads that layout: the boot census passes such a Sandbox (legacyIssueSandbox) and
+// movedLayout replaces its pod.
 func earlierLayout(names []string) bool {
-	roles := make([]string, len(claim.Roles))
-	for i, role := range claim.Roles {
-		roles[i] = string(role)
-	}
-	return len(names) == len(roles) && !slices.ContainsFunc(roles, func(role string) bool { return !slices.Contains(names, role) })
+	return len(names) == len(claim.Roles) &&
+		!slices.ContainsFunc(claim.Roles, func(role claim.Role) bool { return !slices.Contains(names, string(role)) })
 }
 
-// movedLayout is a running issue pod of the layout before one container (earlierLayout); ok is
-// whether pod is one. Its launchers run one role each and read the per-role paths a pod of that
-// layout mounted, so no role of it can run as one launched now: every role of it is StaleAddress,
-// and the next launch of any of them replaces the pod, an installing launch included.
+// legionContainers are the names among names Legion gives a container: a launcher role's (the
+// earlier layout's) or the one container of either pod this runtime builds. The rest were added to
+// the running pod by another controller (a mesh's injected sidecar, say), which never writes the
+// Sandbox's template, so only a pod's own containers are read through it.
+func legionContainers(names []string) []string {
+	return slices.DeleteFunc(slices.Clone(names), func(name string) bool {
+		return name != runtime.IssuePodContainer && !slices.Contains(launcherRoles, claim.Role(name))
+	})
+}
+
+// movedLayout is a running issue pod of the layout before one container (earlierLayout, read over
+// the pod's own containers, legionContainers, since an injected sidecar is in the running pod and
+// never in the Sandbox's template the census reads); ok is whether pod is one. Its launchers run
+// one role each and read the per-role paths a pod of that layout mounted, so no role of it can run
+// as one launched now: every role of it is StaleAddress, and the next launch of any of them
+// replaces the pod, an installing launch included.
 func movedLayout(pod *corev1.Pod) (movedAddress, bool) {
 	names := make([]string, len(pod.Spec.Containers))
 	for i, c := range pod.Spec.Containers {
 		names[i] = c.Name
 	}
+	names = legionContainers(names)
 	if !earlierLayout(names) {
 		return movedAddress{}, false
 	}

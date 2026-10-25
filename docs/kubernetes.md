@@ -1094,12 +1094,14 @@ with the daemon release, since the image probe refuses an image whose `pi-legion
 contract. **Dump the database first** (`pg_dump` with the daemon's `postgres_dsn`), with the
 daemon stopped: it is the only way back (below). At boot, store migration 0051 rewrites every
 stored claim locator naming a per-role container to `roles`, and the boot census passes a pod of
-either layout and refuses everything else as before. A running issue pod whose containers are
-exactly the six role names is reported moved for every role recorded in it, with the detail `the
-pod's containers architect, planner, implementer, tester, reviewer, merger, now roles`, and the
-supervisor relaunches each uncharged. The first relaunch replaces the pod — even an installing
-(stale-plugin) launch — on the configured image, and its siblings resume into the new pod; a turn
-a role was in is sent again once its session resumes, as a moved address's relaunch does.
+either layout and refuses everything else as before. A running issue pod whose own containers are
+exactly the six role names (a container another controller injected into the running pod, a
+mesh's sidecar say, is not counted) is reported moved for every role recorded in it, with the
+detail `the pod's containers architect, planner, implementer, tester, reviewer, merger, now
+roles`, and the supervisor relaunches each uncharged. The first relaunch replaces the pod — even
+an installing (stale-plugin) launch — on the configured image, and its siblings resume into the
+new pod; a turn a role was in is sent again once its session resumes, as a moved address's
+relaunch does.
 `legion.yaml`'s `resources` takes one `issue` entry in place of the per-role entries
 ([Configuration](#configuration)).
 
