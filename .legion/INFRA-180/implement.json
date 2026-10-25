@@ -2,53 +2,67 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-180",
-  "completed": "2026-10-25T05:08:00Z",
-  "round": 2,
+  "completed": "2026-10-25T05:27:00Z",
+  "round": 3,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2166",
-  "headSha": "ba073fa8485e72128fded3b0c9ece780d7b508e9",
+  "headSha": "3f13dcc25f794e041aeaaeb9ca187b1ce566ef80",
+  "answersTesterFailure": {
+    "testHandoff": "47df020521480a01f174ed7b9efe52d16ab43738",
+    "redTest": "TestSlackDeliveredText/an app's rich-text words beside a short text of its own, committed by the tester at 0a049686c832 and unmodified here: the diff from 47df0205 to this head deletes no line of packages/envoy/internal/contracts/normalize_test.go.",
+    "nowPasses": "cd packages/envoy && go test ./internal/contracts/ -count=1 passes in full, unfiltered, 27 TestSlackDeliveredText subtests."
+  },
   "proof": [
     {
-      "criterion": "The symptom itself: an agent woken by a Slack message whose words are only in an attachment reads those words, in the summary and in the delivery.",
-      "surface": "A real nats-server v2.11.4, a real envoy-listener built from this head (go build ./cmd/listener), and a fake agent session subscribed to notifications.slack.> that receives Slack deliveries over prompt_async, which is the path Deliverer.Text writes. The rig posts a signed Slack bot_message to the listener's /webhook/slack address.",
+      "criterion": "The tester's failure: an app that posts its content in a rich_text block beside a short text of its own must have those words delivered. Round 2 dropped them, which is the issue's own symptom for the shape Slack tells app authors to post.",
+      "surface": "A real nats-server v2.11.4, a real envoy-listener built from this head, and a fake agent session subscribed to notifications.slack.> receiving over prompt_async, driven through the tester's own rig and its own case file so the shapes are the ones it drove as failing.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && LISTENER=$PWD/packages/envoy/out/bin/envoy-listener NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server CASES=$PWD/packages/envoy/out/e2e/infra180-rt-cases.jsonl bash packages/envoy/out/e2e/infra180-tester-rig.sh",
+      "observed": "3 posts, 3 wakes. app_richtext_only_block delivers \"Build failed\\nFAIL TestFoo at line 42: want 3, got 4\"; app_richtext_mixed delivers \"Build failed\\npipeline 991\\nFAIL TestBar at line 7\"; app_richtext_in_attachment delivers \"Build failed\\nFAIL TestBaz at line 9\". At ba073fa8485e each of the three delivered \"Build failed\" alone.",
+      "headSha": "3f13dcc25f794e041aeaaeb9ca187b1ce566ef80",
+      "negativeControl": "In the same run, the same body with the signature v0=deadbeef was refused HTTP 401 and woke nobody, and a correct HMAC over a timestamp 4,000 s old was refused HTTP 401 and woke nobody."
+    },
+    {
+      "criterion": "The symptom itself: an agent woken by a Slack message whose words are only in an attachment reads those words, in the summary and in the delivery. Unchanged by this round and re-proven at its head.",
+      "surface": "The same real nats-server, a real envoy-listener built from this head, and a subscribed session; the rig posts a signed Slack bot_message to /webhook/slack.",
       "command": "cd -- \"$LEGION_WORKSPACE\" && LISTENER=$PWD/packages/envoy/out/bin/envoy-listener NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server bash packages/envoy/out/e2e/infra180-slack-wake-rig.sh",
-      "observed": "The wake the session received carried 'Summary: slack bot message in C_RIG from datadog: [Triggered] CPU load high' and the payload field \"text\":\"[Triggered] CPU load high\\nhost web-1 is at 97% for 10 minutes\". At the branch's base commit the same post gave 'Summary: slack bot message in C_RIG from datadog: ' and a payload with no text field at all.",
-      "headSha": "ba073fa8485e72128fded3b0c9ece780d7b508e9",
-      "negativeControl": "The same body posted with the signature v0=deadbeef was refused HTTP 401 and woke nobody: the rig reported 'unsigned post status (want 401) : 401' and 'wakes delivered: 1', the one wake being the signed post's."
+      "observed": "The wake carried 'Summary: slack bot message in C_RIG from datadog: [Triggered] CPU load high' and \"text\":\"[Triggered] CPU load high\\nhost web-1 is at 97% for 10 minutes\". At the branch's base commit the same post gave a summary ending at the colon and no text field at all.",
+      "headSha": "3f13dcc25f794e041aeaaeb9ca187b1ce566ef80",
+      "negativeControl": "The same body with the signature v0=deadbeef was refused HTTP 401: 'unsigned post status (want 401) : 401', 'wakes delivered: 1', the one wake being the signed post's."
     },
     {
       "criterion": "Acceptance 1: Go tests in packages/envoy/internal/contracts assert the delivered text exactly for every shape the rule names, and fail at the commit before the change.",
-      "surface": "The contracts package's own test binary, driving SlackEnvelope end to end (summary and payload JSON) rather than the walk in isolation.",
+      "surface": "The contracts package's own test binary, driving SlackEnvelope end to end (summary and payload JSON).",
       "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && go test ./internal/contracts/ -count=1 -run 'TestSlack'",
-      "observed": "ok github.com/sjawhar/envoy/internal/contracts, with all 23 TestSlackDeliveredText subtests passing and the pre-existing TestSlackSummary (8) and TestSlackPayload (5) unchanged and still passing. The round 2 cases: an attachment's label and value fields; a section's own text before its fields; a button's label before its hidden value; an author's escaped characters are delivered once; a rich-text block on a message with no words of its own; a field value the words merely contain; own words that are only whitespace.",
-      "headSha": "ba073fa8485e72128fded3b0c9ece780d7b508e9",
-      "negativeControl": "The same 23-case table run against the base commit's normalize.go in a scratch copy of packages/envoy (jj file show -r 499564c1 packages/envoy/internal/contracts/normalize.go) fails 16 cases: words_only_in_an_attachment, words_only_in_a_block, a_block_kind_the_test_invents, own_words_and_an_attachment, a_rich-text_block_on_a_message_with_no_words_of_its_own, a_field_value_the_words_merely_contain, a_piece_that_extends_one_already_taken, an_attachment's_label_and_value_fields, a_section's_own_text_before_its_fields, a_button's_label_before_its_hidden_value, an_edited_message, an_edited_message_whose_new_message_has_no_attachments, own_words_that_are_only_whitespace, 'shapes_that_carry_nothing:_a_loose_string_in_an_array', the_2,048-rune_cut and exactly_2,048_runes,_nothing_dropped. The 7 that pass are guards asserting today's behaviour: a repeated piece, the client's rich-text copy, the escaped characters, the two shapes that carry nothing, the file-only message and the deleted message."
+      "observed": "ok github.com/sjawhar/envoy/internal/contracts, 27 TestSlackDeliveredText subtests passing with the tester's red case among them unmodified, and the pre-existing TestSlackSummary (8) and TestSlackPayload (5) still passing. Round 3's cases: an app's rich text beside a section block; an app's rich text inside an attachment; a rich-text block behind own words that are only whitespace.",
+      "headSha": "3f13dcc25f794e041aeaaeb9ca187b1ce566ef80",
+      "negativeControl": "The same 27-case table run against the base commit's normalize.go in a scratch copy of packages/envoy (jj file show -r 499564c1 …) fails 20 cases. The 7 that pass are guards asserting today's behaviour: a repeated piece, the client's rich-text copy, the escaped characters, the two shapes that carry nothing, the file-only message and the deleted message."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/contracts/normalize.go — the delivered-text walk: slackDeliveredText and slackTextWalk, slackWalkKeys (one key order per object), slackEventSlice (one helper for the message/event list fallback, replacing slackFiles and the inline attachment_count fallback), and the delivered text computed once in SlackEnvelope and passed to slackSummary and slackPayload.",
-    "packages/envoy/internal/contracts/normalize_test.go — TestSlackDeliveredText, 23 cases, each asserting the summary and the payload's text exactly.",
-    "packages/envoy/internal/integration/webhook_redelivery_test.go — streamEnvelopes (the stream reader streamDedupeKeys now reads through) and TestSlackAttachmentWordsReachTheStream, a signed post to /webhook/slack asserted on the envelope the NATS stream holds.",
-    "packages/envoy/CHANGELOG.md — the Fixed entry, rewritten in round 2 for the rule that ships.",
-    "skills/legion-controller/references/slack-mentions.md — the text clause of 'What a mention carries', rewritten in round 2 for the same rule.",
-    "packages/claude-envoy/legion/skills/legion-controller/references/slack-mentions.md — the committed plugin bundle's copy of that file, regenerated with bun run build so the required check-dist step stays green."
+    "packages/envoy/internal/contracts/normalize.go — slackOwnTextEntities and slackOwnWordsOnly, the walk's own field replacing skipRichText, beside the round 1 and 2 parts of the walk (slackDeliveredText, slackTextWalk, slackWalkKeys, slackEventSlice, and the delivered text computed once in SlackEnvelope).",
+    "packages/envoy/internal/contracts/normalize_test.go — TestSlackDeliveredText, 27 cases.",
+    "packages/envoy/internal/integration/webhook_redelivery_test.go — streamEnvelopes and TestSlackAttachmentWordsReachTheStream.",
+    "packages/envoy/CHANGELOG.md — the Fixed entry, rewritten in round 3 for the narrowed rule.",
+    "skills/legion-controller/references/slack-mentions.md — the text clause of 'What a mention carries', rewritten for the same rule.",
+    "packages/claude-envoy/legion/skills/legion-controller/references/slack-mentions.md — the committed plugin bundle's copy, regenerated with bun run build (check-dist: 'dist/ and legion/ match a fresh build')."
   ],
   "trickyParts": [
-    "A section block carries its words in a nested object (text: {type: mrkdwn, text: ...}), so the walk must descend into a display name whose value is not a string. One ordered key list handles both: a string under a display name is taken, any value that is not a string is descended into, in display rank and then alphabetically, so the section's own text precedes its fields and a button's label its hidden value.",
-    "Equality dedupe keeps a set of the pieces already taken rather than searching the collected text. The set is created lazily and is bounded by the collection stop, since only a piece that is appended is added to it.",
-    "The rich_text exception is keyed on the message's own text holding a non-whitespace character, the same test take() uses to decide that a piece holds a word, so a message whose own text is only whitespace still has its rich_text blocks read.",
-    "The committed claude-envoy plugin bundle mirrors skills/, and the required 'Check the committed bundle is fresh' CI step (bun run check-dist) fails if the skill file is edited without rebuilding it."
+    "The copy test is scoped: it reads only the rich_text object's own display strings and the message's own text with Slack's three entities resolved, and it decides nothing but whether to skip that one object. It never removes a piece already taken and never bears on a piece gathered elsewhere, which is how round 1's containment rule deleted field values.",
+    "A Slack client's rich_text copy satisfies the test by construction, since every leaf is a segment of the words the own text holds, once &amp;, &lt; and &gt; are resolved there; a mention, emoji, broadcast or link element carries no display string at all, so it cannot fail the test.",
+    "The predicate walks through slackWalkKeys, the same key list the walk itself reads, so the names a display string can sit under stay one list.",
+    "An object whose type is rich_text is measured at any depth, so an app's rich_text inside an attachment is read as well."
   ],
   "deviations": [
-    "The repeat rule is exact equality: a piece is skipped only when it is exactly equal to a piece already taken, the message's own text counted among them, which is what approved spec version 11 states. Beside it one named exception: a message that carries words of its own does not have its rich_text blocks read, since that tree is the Slack client's structured copy of those same words. This is the architect's ruling of 2026-10-25T04:55:00Z (Envoy message d2bf744d502b32e22f038606045cd18b to notifications.role.legion-infra-infra-180-implementer), which withdrew its earlier containment decision (message 2283f04bcf184186ab5c6990da702222) after the reviewer drove containment deleting whole field values — own text '<@U0LEG> page: incident 4213' with fields Severity=1 and Hosts down=2 lost both values, because each occurs inside 4213. It is a return to the approved comparison rule, so no new spec version. No entity-aware comparison was added: the double delivery of a message whose author typed &, < or > disappears because the client's copy is never read.",
-    "The order inside one object, also the architect's ruling in the same message: an object's keys are ordered once — the display names in the rank pretext, author_name, title, text, value, footer, fallback, then the remaining keys alphabetically — and that one order is followed whether a value is taken or descended into. Round 1 took the seven display strings first and then descended the remaining keys alphabetically, which put a section's fields before its own text and a button's hidden value before its label.",
-    "The three departures the plan recorded stand as the architect accepted them in round 1: the order inside one object is Slack's display order (Go's decoded map keeps no key order), the guard cases cannot fail before the change, and T4 edits skills/legion-controller/references/slack-mentions.md as well as the changelog. The regenerated claude-envoy bundle copy of that skill file is the one file beyond T4's two, and it is generated rather than written.",
-    "The reviewer's Security[prompt] finding on fallback and a button's value is not fixed in this pull request: the architect ruled that the approved seven fields stay and that it is taking the question to the human itself. It stands in the pull request body's 'Not proven / risk' list and is answered as 'declined here' on its thread.",
-    "ce-simplify-code ran once at e587427d7f0c in round 1, the one slot per pull request; a round answering a review runs no second pass. Two of six findings were applied there, giving 4ea17e805b03; one of them (the walk collecting keys before sorting them) is superseded by round 2's single ordered key list, which keeps the same property: a remaining key whose value is a string is left out of the list."
+    "The rich_text exception is narrowed: a rich_text object is skipped only when every display string it carries holds no word or is already held by the message's own text, compared after Slack's &amp;, &lt; and &gt; are resolved in that own text; otherwise it is read like any other block. This is the architect's ruling of 2026-10-25T05:18:01Z (Envoy message d7ac4a19e3e6eeb53c232d618d7c8470), which narrows its ruling of 2026-10-25T04:55:00Z (d2bf744d502b32e22f038606045cd18b) and leaves every other part of it standing: exact equality for repeats across all pieces, the one ordered key list per object, the seven display fields, the cut, the deleted-message guard.",
+    "RECORDED DEPARTURE FROM THE APPROVED SPEC, named by the architect in the same message: approved spec version 11 says the walk 'never has to know the kind of a block or an attachment' and that 'the one exception is a deleted message'. Both sentences are contradicted by this code, which knows the block kind rich_text by name and has two exceptions. The architect has told the human what the code does and ruled that no new spec version follows.",
+    "The order inside one object, the architect's ruling of 2026-10-25T04:55:00Z: an object's keys are ordered once — the display names in rank, then the remaining keys alphabetically — and that order is followed whether a value is taken or descended into.",
+    "The exact-equality repeat rule, same ruling: a piece is skipped only when exactly equal to one already taken, the message's own text counted among them, which is what approved spec version 11 states.",
+    "Not in this round, all three recorded by the tester as risks and ruled not defects by the architect: a field value exactly equal to one already delivered arrives once, which is what the approved rule says; an attachment's fields arrive after its footer and fallback, which is the key-order ruling; and the reviewer's Security[prompt] shape on fallback and value, which the human has been told about and which stays as approved.",
+    "ce-simplify-code ran once at e587427d7f0c in round 1, the one slot per pull request; a round answering a review or a tester failure runs no second pass."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Acceptance 2's lane cannot run on an issue pod: packages/envoy/internal/integration starts a real NATS server through testcontainers and this pod has neither Docker nor Podman. The test is compiled and type-checked here (go vet ./... and go test -run NoSuchTest ./internal/integration/ both clean) and runs in CI, in the envoy-go job of 'Legion Envoy and Contracts', run 40164236837 on this head. It is a regression lock, not the proof of the symptom, which the rig carries.",
-    "The rig is a throwaway at packages/envoy/out/e2e/infra180-slack-wake-rig.sh, an ignored path, so nothing of it is committed; its text is in the plan document (dispatch://INFRA-180/artifact/plan-md, 'The live rig'), and its prerequisites on a pod are go, bun, jq, openssl, curl and a nats-server binary from GOBIN=<dir> go install github.com/nats-io/nats-server/v2@v2.11.4."
+    "Acceptance 2's lane cannot run on an issue pod (no Docker, no Podman): packages/envoy/internal/integration starts a real NATS server through testcontainers. The test is compiled and type-checked here (go vet ./... and go test -run NoSuchTest ./internal/integration/ clean) and runs in CI, in the envoy-go job of 'Legion Envoy and Contracts', run 40165482757 on this head. It is a regression lock, not the proof of the symptom, which the rigs carry.",
+    "Round 2's CI on this pull request hit container-registry pull failures in run 40164236837, which the architect re-ran; that is an infrastructure failure of the runner, not of this change."
   ],
   "reviewRound": {
     "round": 1,
@@ -57,16 +71,16 @@
     "answeredAt": "ba073fa8485e72128fded3b0c9ece780d7b508e9",
     "threads": [
       {"id": "PRRT_kwDORFy7ds6v-fe6", "disposition": "fixed in f1dea8261c690cc996c0fd5dc2e3e3834fe42598", "note": "exact equality replaces containment; take also skips a whitespace-only piece", "resolved": true},
-      {"id": "PRRT_kwDORFy7ds6v-fe7", "disposition": "fixed in f1dea8261c690cc996c0fd5dc2e3e3834fe42598", "note": "a message with words of its own leaves its rich_text blocks unread, so the client's unescaped copy is never delivered", "resolved": true},
+      {"id": "PRRT_kwDORFy7ds6v-fe7", "disposition": "fixed in f1dea8261c690cc996c0fd5dc2e3e3834fe42598, narrowed in 551bbe6e", "note": "a rich_text block is left unread only when it repeats the message's own words", "resolved": true},
       {"id": "PRRT_kwDORFy7ds6v-fe9", "disposition": "fixed in f1dea8261c690cc996c0fd5dc2e3e3834fe42598; the Security[prompt] part declined here on the architect's ruling", "note": "one ordered key list per object, followed whether a value is taken or descended into", "resolved": true},
-      {"id": "PRRT_kwDORFy7ds6v-fe_", "disposition": "fixed in ba073fa8485e72128fded3b0c9ece780d7b508e9", "note": "both sentences rewritten for the shipped rule, bundle copy regenerated", "resolved": true},
+      {"id": "PRRT_kwDORFy7ds6v-fe_", "disposition": "fixed in ba073fa8485e72128fded3b0c9ece780d7b508e9, rewritten again in 3f13dcc25f79", "note": "both sentences describe the narrowed rule, bundle copy regenerated", "resolved": true},
       {"id": "PRRT_kwDORFy7ds6v-ffB", "disposition": "fixed in aca73749d226bd83750018a613c844af23da8b02", "note": "attachment fields, section text-before-fields and button cases added; wantNoText removed", "resolved": true}
     ]
   },
   "localChecks": [
     "cd packages/envoy && gofmt -l . — no output",
     "cd packages/envoy && go vet ./... — clean (the whole module, tests included)",
-    "cd packages/envoy && go test ./internal/contracts/ ./internal/webhook/ -count=1 — both ok",
+    "cd packages/envoy && go test ./internal/contracts/ ./internal/webhook/ -count=1 — both ok, the contracts package unfiltered",
     "cd packages/envoy && go test -run NoSuchTest ./internal/integration/ -count=1 — builds, ok",
     "cd packages/claude-envoy && bun run check-dist — 'dist/ and legion/ match a fresh build'"
   ]
