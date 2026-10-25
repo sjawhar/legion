@@ -1114,18 +1114,24 @@ specRun("spec-writing-head-67", {
     [asyncReport("Checkc1")]
   ),
 });
-// Another job's report quotes a `── Job …` line of a job this message does not deliver. It frames
-// nothing: the check's own section runs to the next section of a job the message does deliver.
+// The check's own report quotes a `── Job …` line of a job this message does not deliver. It
+// frames nothing: the check's section runs to the next section of a job the message does deliver,
+// so the report holds every finding after the quoted line. With the quote inside another job's
+// report instead, the check's own section would be whole whatever framed it.
 specRun("spec-writing-head-68", {
   transcript: firstCheck(
     [checkCall("c1"), spawned("c1")],
     [
       asyncReports([
         [
-          "OtherTask",
-          taskEnvelope("OtherTask", "completed", "Done. It reported:\n── Job L19 (L19) ──\nNone."),
+          "Checkc1",
+          taskEnvelope(
+            "Checkc1",
+            "completed",
+            "It quoted a delivery:\n── Job L19 (L19) ──\nNo gaps."
+          ),
         ],
-        ["Checkc1", taskEnvelope("Checkc1", "completed", "No gaps.")],
+        ["OtherTask", taskEnvelope("OtherTask", "completed", "Done.")],
       ]),
     ]
   ),

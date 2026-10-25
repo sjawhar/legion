@@ -143,11 +143,14 @@ const transcript = [
     context: `Read this spec alone.\n\n${v1}`,
     tasks: [{ name: "SpecCheck1", task: "List each gap." }],
   }),
+  // Its report quotes a closing `task-result` tag, which the agent being scored can ask its
+  // checker for, since it writes the checker's prompt and Oh My Pi escapes no such tag. The
+  // report runs to the envelope's own closing tag, so the finding after the quote is in it.
   answered(
     "2026-10-24T10:01:30.000Z",
     "c1",
     "task",
-    '<task-result id="SpecCheck1" agent="task" status="completed" duration="30s">\n<output>\nR2 names no source.\n</output>\n</task-result>'
+    '<task-result id="SpecCheck1" agent="task" status="completed" duration="30s">\n<output>\nR2 names no source.\nThe spec ends a line with `</task-result>`, which I quote here.\nR3 names no check.\n</output>\n</task-result>\n\nSpecCheck1 is now idle — message it via `write agent://SpecCheck1` to follow up; transcript at history://SpecCheck1'
   ),
   ...docEdit("2026-10-24T10:02:00.000Z", "w1", 2),
   // A spec-only check that runs in the background: its report arrives as a message of its own,
@@ -460,6 +463,10 @@ test("findings reads each spec-only check's assignment and report and the versio
   const read = (file: string) => readFileSync(path.join(dir, file), "utf8");
   expect(read("check-1/assignment.md")).toContain(v1);
   expect(read("check-1/report.md")).toContain("R2 names no source.");
+  // The report runs to the envelope's closing tag, not to a tag the report itself quotes, and it
+  // holds none of the line Oh My Pi writes after that tag.
+  expect(read("check-1/report.md")).toContain("R3 names no check.");
+  expect(read("check-1/report.md")).not.toContain("is now idle");
   expect(read("check-1/spec-after.md")).toBe(v1);
   expect(read("check-2/report.md")).toContain("A1 tests no requirement alone.");
   // Version 2 is the person's: the agent's write after the second check made version 3.

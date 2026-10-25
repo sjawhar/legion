@@ -1400,8 +1400,10 @@ function checkOutcome(
         index: own.index,
       });
     }
+  // As in the delivered branch below: the end anchor is gone, because Oh My Pi writes a line
+  // after the closing tag, and the capture stays greedy, so a tag the report quotes never ends it.
   else {
-    const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*?)<\/task-result>/.exec(own.text);
+    const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*)<\/task-result>/.exec(own.text);
     if (envelope !== null)
       ended.push({
         name: attribute(envelope[1] ?? "", "id") ?? "",
@@ -1437,7 +1439,11 @@ function checkOutcome(
           : jobSection(strings(entry.content).join(""), name, delivered);
       // Oh My Pi writes a line of its own after the closing tag of most deliveries (the agent is
       // idle, how to message it, where its transcript is), so the envelope is not the text's end.
-      const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*?)<\/task-result>/.exec(text);
+      // The capture stays greedy: only that line follows the real closing tag, so a greedy match
+      // ends there, while a lazy one would end at the first `</task-result>` the report itself
+      // quotes and drop every finding after it. The agent being scored writes its checker's
+      // prompt, and Oh My Pi escapes no `task-result` tag, so it could ask for exactly that.
+      const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*)<\/task-result>/.exec(text);
       const body =
         envelope !== null && attribute(envelope[1] ?? "", "id") === name ? (envelope[2] ?? "") : "";
       ended.push({ name, status, report: reportOf(body), index });
@@ -1450,7 +1456,11 @@ function checkOutcome(
   const reports: string[] = [];
   for (const name of names) {
     // A job snapshot of a task still running is no end: a `wait` answers with every job it waited
-    // on, the running ones included, and the completion follows in a later entry.
+    // on, the running ones included, and the completion follows in a later entry. Taking a
+    // completed record over a running one is safe only because Oh My Pi gives a repeated task name
+    // a new id (`C`, then `C-2`), so every record of one name belongs to one run of that task.
+    // This code ties no record to the call that started it: were two runs to share a name, a
+    // second run's completion could answer for the first.
     const seen = ended.filter((one) => one.name === name && one.index < before);
     const end = seen.find((one) => one.status === "completed") ?? seen[0];
     if (end === undefined)
