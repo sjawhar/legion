@@ -283,12 +283,16 @@ func podAbsent(v view) string {
 
 // ended is the terminal pod verdict. A failed init container applies to every role; otherwise the
 // pod's one container, container, is what ended, and with it every role it ran. The quote is the
-// init container's log, or role's own lines of the container's (roleLog).
+// init container's log, or role's own lines of the container's (roleLog). A pod of the layout
+// before one container (movedLayout) that ended before this daemon replaced it has no `roles`
+// container: role's own container there is what ended, and its log is role's alone.
 func (r *Runtime) ended(ctx context.Context, v view, container string, role claim.Role, initName string, initExit *corev1.ContainerStateTerminated) (string, bool) {
 	pod := v.pod
 	kind, state := "container", initExit
 	if initExit != nil {
 		kind, container = "init container", initName
+	} else if _, earlier := movedLayout(pod); earlier {
+		container = string(role)
 	}
 	if state == nil {
 		if status := containerStatus(pod, container); status != nil {

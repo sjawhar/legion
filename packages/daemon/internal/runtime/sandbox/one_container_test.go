@@ -297,6 +297,47 @@ func TestAnIssuePodOfTheEarlierLayoutIsStaleForEveryRoleAndReplacedByTheNextLaun
 	}
 }
 
+// A pod of the earlier layout that ended before this daemon replaced it has no `roles` container:
+// each role's Gone names its own container's end and quotes that container's log, as the release
+// that built the pod did, rather than a status and a log of a container the pod never ran.
+func TestAnEndedPodOfTheEarlierLayoutReportsTheRolesOwnContainer(t *testing.T) {
+	labels := claimLabels(claim.RoleTester)
+	name := SandboxName(workerToken)
+	pod := podObject(name, recorded, sandboxUID, labels, corev1.PodStatus{})
+	toEarlierLayout(pod)
+	pod.Status.Phase = corev1.PodFailed
+	for i := range pod.Status.ContainerStatuses {
+		status := &pod.Status.ContainerStatuses[i]
+		status.State = corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 1, Reason: "Error"}}
+		if status.Name == string(claim.RoleTester) {
+			status.State.Terminated = &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}
+		}
+	}
+	g := newRig(t, []k8sruntime.Object{sandboxObject(t, name, sandboxUID, modeRunning, labels), pod}, withoutController())
+	g.kube.PrependReactor("get", "pods", func(action k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if action.GetSubresource() != "log" {
+			return false, nil, nil
+		}
+		opts, _ := action.(k8stesting.GenericAction).GetValue().(*corev1.PodLogOptions)
+		if opts == nil || opts.Container == runtime.IssuePodContainer {
+			return true, nil, fmt.Errorf("container %s is not valid for pod %s", runtime.IssuePodContainer, name)
+		}
+		return true, &k8sruntime.Unknown{Raw: []byte("the " + opts.Container + " container's last words\n")}, nil
+	})
+	for token, want := range map[claim.Token]string{
+		workerToken: "container tester terminated (OOMKilled, exit code 137); last lines of tester:\nthe tester container's last words",
+		otherToken:  "container reviewer terminated (Error, exit code 1); last lines of reviewer:\nthe reviewer container's last words",
+	} {
+		obs, err := g.r.Probe(g.ctx, rolesLocator(token, recorded))
+		if err != nil {
+			t.Fatalf("Probe %s: %v", token, err)
+		}
+		if obs.Kind != runtime.Gone || !strings.Contains(obs.Detail, "pod "+name+" (uid "+recorded+") Failed: ") || !strings.HasSuffix(obs.Detail, want) {
+			t.Errorf("%s: %s %q, want Gone ending %q", token, obs.Kind, obs.Detail, want)
+		}
+	}
+}
+
 // A role's locator in an issue pod names the pod's one container, `roles`, so the role whose
 // enrollment, address record and launcher are read is the claim's: an enrolled pod holding the
 // role's own key directory is alive, and a generation the role's record says was told a moved
