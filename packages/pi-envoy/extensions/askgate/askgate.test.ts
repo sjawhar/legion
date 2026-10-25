@@ -660,7 +660,7 @@ describe("breaker (test 7)", () => {
   });
   test("the second refusal on a target says the third unchanged resend goes out unreviewed; a warn revise, which refuses nothing, says no such thing", async () => {
     const SECOND =
-      "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
+      "This is the second refusal of this call on its target: a third unchanged resend is sent without review and recorded.";
     const block = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
     const first =
       (await block.device("a", "dispatch_comment", { issue: "X-1", body: "one" }))?.reason ?? "";
@@ -2817,6 +2817,22 @@ describe("rules check", () => {
       "Please run `gh api orgs/example-org/settings/billing/actions` and paste the output here.",
     options: [],
   };
+  /** A second ask on KEEP_INPUT's target, which the breaker must tell apart from it. */
+  const HOLD_INPUT = {
+    ...KEEP_INPUT,
+    question:
+      "The soak is still running and the deploy window closes at 18:00. Should I hold the release? Recommendation: hold it.",
+  };
+  /** A doc-edit on one target that inserts an ask block, and one that opens no ask there. */
+  const SPEC_TARGET = { issue: "X-1", artifact: "spec" };
+  const INSERT_ASK = {
+    ...SPEC_TARGET,
+    ops: [{ op: "insert", after: "end", markdown: `:::ask{#cache}\n${KEEP_INPUT.question}\n:::` }],
+  };
+  const replaceWith = (text: string) => ({
+    ...SPEC_TARGET,
+    ops: [{ op: "replace", find: "Old.", with: text }],
+  });
   const NO_CHANGE = rulesAnswer([{ ask: 1, rule: "no_change", quote: "keep it as it is" }]);
   const UNTRIED = rulesAnswer([
     {
@@ -2826,7 +2842,7 @@ describe("rules check", () => {
     },
   ]);
   const SECOND =
-    "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
+    "This is the second refusal of this call on its target: a third unchanged resend is sent without review and recorded.";
   const RULES_NOTICE =
     "AskGate's rule check failed 3 times in a row; new asks are not checked against the two rules.";
   const RETYPE = [{ op: "retype", block: "b-2", type: "ask" }];
@@ -3193,12 +3209,7 @@ describe("rules check", () => {
     for (const id of ["a", "b"])
       expect((await g.device(id, "dispatch_ask", KEEP_INPUT))?.block).toBe(true);
     const asked = g.calls.length;
-    const other = {
-      ...KEEP_INPUT,
-      question:
-        "The soak is still running and the deploy window closes at 18:00. Should I hold the release? Recommendation: hold it.",
-    };
-    const different = await g.device("c", "dispatch_ask", other);
+    const different = await g.device("c", "dispatch_ask", HOLD_INPUT);
     expect(different?.block).toBe(true);
     expect(different?.reason).toContain('matches the rule "no change"');
     // The charter call and the rules call both ran on it: the breaker bought it no free pass.
@@ -3212,6 +3223,78 @@ describe("rules check", () => {
       ["verdict", "revise"],
       ["verdict", "revise"],
       ["breaker", "allow"],
+    ]);
+  });
+  test("an ask refused once on a target whose other ask tripped the breaker is reviewed again, never sent as a third attempt (rules test 14c)", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: bySystem(ALLOW, NO_CHANGE) });
+    for (const id of ["a", "b"])
+      expect((await g.device(id, "dispatch_ask", KEEP_INPUT))?.block).toBe(true);
+    const first = await g.device("c", "dispatch_ask", HOLD_INPUT);
+    expect(first?.block).toBe(true);
+    expect(first?.reason).not.toContain(SECOND);
+    const asked = g.calls.length;
+    // Its second send is its second refusal, not a third attempt: both checks run on it, and the
+    // warning is the one owed to the refusal before a pass.
+    const second = await g.device("d", "dispatch_ask", HOLD_INPUT);
+    expect(second?.additionalContext).toBeUndefined();
+    expect(second?.block).toBe(true);
+    expect(second?.reason).toContain('matches the rule "no change"');
+    expect(second?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    expect(g.calls).toHaveLength(asked + 2);
+    const third = await g.device("e", "dispatch_ask", HOLD_INPUT);
+    expect(third?.additionalContext).toContain('outcome="breaker"');
+    expect(g.calls).toHaveLength(asked + 2);
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual([
+      ...Array(4).fill(["verdict", "revise"]),
+      ["breaker", "allow"],
+    ]);
+  });
+  test("on a target whose refusal named an ask, two refusals of a call that opens none send the third unreviewed (rules test 14d)", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: bySystem(REVISE, NO_CHANGE) });
+    const named = await g.device("a", "dispatch_doc_edit", INSERT_ASK);
+    expect(named?.reason).toContain('matches the rule "no change"');
+    const first = await g.device("b", "dispatch_doc_edit", replaceWith("New."));
+    expect(first?.block).toBe(true);
+    expect(first?.reason).not.toContain(SECOND);
+    const second = await g.device("c", "dispatch_doc_edit", replaceWith("Newer."));
+    expect(second?.block).toBe(true);
+    expect(second?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    const asked = g.calls.length;
+    const third = await g.device("d", "dispatch_doc_edit", replaceWith("Newest."));
+    expect(third?.block).toBeUndefined();
+    expect(third?.additionalContext).toContain('outcome="breaker"');
+    expect(g.calls).toHaveLength(asked);
+    expect(g.entries.map((e) => [e.outcome, e.decision, e.rule])).toEqual([
+      ["verdict", "revise", "no_change"],
+      ["verdict", "revise", undefined],
+      ["verdict", "revise", undefined],
+      ["breaker", "allow", undefined],
+    ]);
+  });
+  test("a charter refusal counts on the asks the call opens: two refusals of a call that opens none give a new ask no pass, and its own loop still ends (rules test 14e)", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: bySystem(REVISE, RULES_NONE) });
+    for (const [id, text] of [
+      ["a", "New."],
+      ["b", "Newer."],
+    ])
+      expect((await g.device(id, "dispatch_doc_edit", replaceWith(text)))?.block).toBe(true);
+    const asked = g.calls.length;
+    // The call as a whole was refused twice, never the ask this call opens: both checks run.
+    const first = await g.device("c", "dispatch_doc_edit", INSERT_ASK);
+    expect(first?.block).toBe(true);
+    expect(first?.reason).not.toContain(SECOND);
+    expect(g.calls).toHaveLength(asked + 2);
+    const second = await g.device("d", "dispatch_doc_edit", INSERT_ASK);
+    expect(second?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    const third = await g.device("e", "dispatch_doc_edit", INSERT_ASK);
+    expect(third?.additionalContext).toContain('outcome="breaker"');
+    expect(g.calls).toHaveLength(asked + 4);
+    expect(g.entries.map((e) => [e.outcome, e.decision, e.ruleOutcome])).toEqual([
+      ["verdict", "revise", undefined],
+      ["verdict", "revise", undefined],
+      ["verdict", "revise", "none"],
+      ["verdict", "revise", "none"],
+      ["breaker", "allow", undefined],
     ]);
   });
   test("the rules call never sees the charter's frame or answer format (rules test 15)", async () => {

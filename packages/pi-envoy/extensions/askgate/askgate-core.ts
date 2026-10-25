@@ -91,14 +91,16 @@
 //   - halted: three consecutive failures to reach a verdict (no model, timeout, every model of the
 //     chain erroring, no parsable answer) stop the gate for the session, with one UI notice. The
 //     halt, the count, the breaker and the rebuttals reset on session_switch and session_branch.
-//   - breaker: two refusals on one target (the device plus its issue/ask/artifact/project
-//     values) send the third attempt unasked, and say so; the second refusal already warns that
-//     it will. Only a refusal counts: a warn-mode charter revise sends the call, so it never
-//     advances the breaker, while a rules match refuses in either mode and always does. The pass
-//     covers the thing that was refused and nothing else: a target whose refusals named no ask
-//     (the call as a whole was refused), or a call opening one of the asks the rules check
-//     refused there. Any other call is reviewed as usual, its count untouched. An allow, a
-//     rebuttal or a trip resets the target.
+//   - breaker: two refusals of one thing on one target (the device plus its issue/ask/artifact/
+//     project values) send the third attempt at it unasked, and say so; the second refusal
+//     already warns that it will. A thing is each new ask a call opens, or the call as a whole
+//     when it opens none: a charter refusal counts on each thing of the call, a rules refusal on
+//     the asks it refused. A call trips when one of its own things has been refused twice, so the
+//     pass goes to the thing that was refused and nothing else: an ask refused once, or never, on
+//     a target whose other ask was refused twice is reviewed as usual. Only a refusal counts: a
+//     warn-mode charter revise sends the call, so it never advances the breaker, while a rules
+//     match refuses in either mode and always does. An allow, a rebuttal or a trip resets the
+//     target, every thing on it.
 //   - no-model-role / skipped: neither `@askgate` (modelRoles.askgate) nor `@default` resolves, or
 //     the session's primary model is on another provider than the gate's. Nothing is rendered or
 //     sent. With no model role the call is refused in both modes, naming the roles to set; it never
@@ -323,6 +325,10 @@ export interface GateEntry {
   /** The answer's tail when it held no verdict. */
   raw?: string;
   latencyMs: number;
+  /**
+   * The revises the gate answered on this call's target, the warn-mode ones included, since the
+   * breaker last reset it (an allow, a rebuttal or a trip there), this call included when it is one.
+   */
   revisesForKey: number;
   argsDigest: string;
   /** The call's breaker target in readable form: the tool, then each of the issue, ask, artifact, project and reply it names. */
@@ -1971,56 +1977,87 @@ export function parseVerdict(
 const askIdentity = (ask: NewAsk): string =>
   ask.kind === "retype" ? `retype\u0000${ask.id ?? ""}` : `ask\u0000${ask.opening}`;
 
-/**
- * One revise on a target: the charter's reason, the rules check's, or both when both answered on
- * one call. `refused` is set when the call did not go out, which is what the breaker counts: a
- * warn-mode charter revise sends the call as the agent wrote it, and a loop needs a refusal to
- * loop on. `asks` names each new ask a rules refusal refused (`askIdentity`); a refusal of the
- * call as a whole names none.
- */
-type Revise = { charter?: string; rules?: string; refused: boolean; asks?: readonly string[] };
+/** The breaker's name for a call that opens no new ask: the call as a whole. No ask identity is empty. */
+const WHOLE_CALL = "";
 
-/** Revises per target since its last allowed call. */
+/**
+ * What a call is to the breaker on its target: each new ask it opens, or the call as a whole when
+ * it opens none. A refusal counts on these things and a later call trips on them, so a pass only
+ * ever goes to a thing that was refused: a call whose asks were refused too few times on that
+ * target, or never, is reviewed, and a call opening no ask counts its own refusals, whatever asks
+ * were refused there before it.
+ */
+const breakerThings = (asks: readonly NewAsk[]): string[] =>
+  asks.length === 0 ? [WHOLE_CALL] : asks.map(askIdentity);
+
+/**
+ * What the gate has said on one target since the breaker last reset it. `refusals` counts, per
+ * thing (`breakerThings`), the calls the gate did not send; `revises` counts every revise,
+ * the warn-mode charter ones that sent the call included; `charter` keeps the charter's reasons.
+ */
+type Held = { refusals: Map<string, number>; revises: number; charter: string[] };
+
+/**
+ * The breaker: a loop of refusals of one thing on one target ends on the third attempt, which goes
+ * out unreviewed. It counts refusals, since a warn-mode revise sends the call and leaves no loop.
+ *
+ * A call trips when one of its own things has been refused GATE_BREAKER_REVISES times, and the
+ * refusal that brings a thing to that count warns of it, so the warning and the pass are about the
+ * same thing. A call opening several asks trips on any one of them: a pass that needed every ask
+ * refused would never end a loop on one ask of several that the rules check keeps refusing.
+ *
+ * The reset stays per target while the count is per thing: an allow, a rebuttal or a trip sends a
+ * call on the target, which ends every loop there, so each thing on it starts again from zero.
+ * Clearing more than the call's own things only ever costs a review, never gives a pass. A halted
+ * gate sends calls before the breaker sees them, so a halt neither counts nor resets anything; a
+ * session_switch or session_branch clears the halt and the breaker together.
+ */
 class Breaker {
-  readonly #revises = new Map<string, Revise[]>();
-  revised(key: string, revise: Revise): void {
-    const revises = this.#revises.get(key) ?? [];
-    revises.push(revise);
-    this.#revises.set(key, revises);
-  }
-  tripped(key: string): boolean {
-    return this.count(key) >= GATE_BREAKER_REVISES;
-  }
-  reset(key: string): void {
-    this.#revises.delete(key);
-  }
-  clear(): void {
-    this.#revises.clear();
-  }
-  /** How many times the gate refused this target, whichever check refused it. */
-  count(key: string): number {
-    return (this.#revises.get(key) ?? []).filter((revise) => revise.refused).length;
-  }
-  /** How many times the gate answered revise on this target, the warn-mode ones included. */
-  revises(key: string): number {
-    return (this.#revises.get(key) ?? []).length;
+  readonly #held = new Map<string, Held>();
+  /**
+   * Records one revise on a target: the charter's reason when it gave one, and the things it
+   * refused, none for a revise that sent the call. Returns whether a thing it refused has now
+   * been refused GATE_BREAKER_REVISES times, so this refusal must warn that the same call again
+   * goes out unreviewed.
+   */
+  revised(key: string, refused: readonly string[], charter?: string): boolean {
+    let held = this.#held.get(key);
+    if (held === undefined) {
+      held = { refusals: new Map(), revises: 0, charter: [] };
+      this.#held.set(key, held);
+    }
+    held.revises++;
+    if (charter !== undefined) held.charter.push(charter);
+    let tripsNext = false;
+    for (const thing of refused) {
+      const count = (held.refusals.get(thing) ?? 0) + 1;
+      held.refusals.set(thing, count);
+      if (count >= GATE_BREAKER_REVISES) tripsNext = true;
+    }
+    return tripsNext;
   }
   /**
-   * Whether a tripped breaker's pass covers a call opening these asks (`askIdentity`). The
-   * breaker ends a loop on one refused thing. Where the refusals named no ask, that thing is the
-   * call itself and a third attempt on the target is the loop. Where they named asks, a call
-   * opening a different ask asks the person something the gate has refused nothing of: it is not
-   * the loop the breaker ends, so it is reviewed like any other call.
+   * Whether one of a call's things has been refused often enough on its target to send it
+   * unreviewed. The things are asked for only where the target holds a refusal.
    */
-  covers(key: string, asks: readonly string[]): boolean {
-    const refused = (this.#revises.get(key) ?? []).flatMap((revise) => revise.asks ?? []);
-    return refused.length === 0 || asks.some((ask) => refused.includes(ask));
+  tripped(key: string, things: () => readonly string[]): boolean {
+    const refusals = this.#held.get(key)?.refusals;
+    if (refusals === undefined || refusals.size === 0) return false;
+    return things().some((thing) => (refusals.get(thing) ?? 0) >= GATE_BREAKER_REVISES);
+  }
+  reset(key: string): void {
+    this.#held.delete(key);
+  }
+  clear(): void {
+    this.#held.clear();
+  }
+  /** How many times the gate answered revise on this target since its reset, the warn-mode ones included. */
+  revises(key: string): number {
+    return this.#held.get(key)?.revises ?? 0;
   }
   /** The charter's own reasons. They alone feed the charter request, so a rules reason never reads as one the charter gave. */
-  charterReasons(key: string): string[] {
-    return (this.#revises.get(key) ?? []).flatMap((revise) =>
-      revise.charter === undefined ? [] : [revise.charter]
-    );
+  charterReasons(key: string): readonly string[] {
+    return this.#held.get(key)?.charter ?? [];
   }
 }
 
@@ -2055,9 +2092,11 @@ function renderRequest(
 }
 
 // What the agent reads after each gated call: silence only for an allow or a fail-open, since a
-// pass it cannot see is indistinguishable from a gate that broke.
+// pass it cannot see is indistinguishable from a gate that broke. The breaker counts the refusals
+// of one thing on a target, the call or one of its new asks, not every revise there, so the
+// warning and the pass speak of this call's refusals and never of the target's count.
 const SECOND_REVISE =
-  "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
+  "This is the second refusal of this call on its target: a third unchanged resend is sent without review and recorded.";
 /**
  * How the agent overrides a revise on each surface: a key in the device JSON, or a flag on the
  * command. `how` completes a charter revise; `again` completes the rules refusal's "send the call
@@ -2102,7 +2141,7 @@ const renderWarn = (reason: string) =>
 const renderRebuttalAck = (rebuttal: string, override: Override) =>
   `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${override.name} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that ${override.what} removed before sending.\n</advisor-gate>`;
 const renderBreakerAck = () =>
-  `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt on this target after two refusals: sent without review and recorded.\n</advisor-gate>`;
+  `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt after two refusals of this call on its target: sent without review and recorded.\n</advisor-gate>`;
 /** Characters for a reason, each in code; a backtick, which inline code cannot hold, is named. */
 function characters(chars: readonly string[]): string {
   const named = chars.map((char) => (char === "`" ? "a backtick" : `\`${char}\``));
@@ -2471,14 +2510,14 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       if (halted) return pass("halted");
       // The new asks this call opens, read from its own arguments as the rules check reads them:
       // a parse of the arguments, which costs no model call and no Dispatch read. Only the
-      // breaker needs them here, so they are read where it asks.
+      // breaker needs them, so they are read where it asks, and never for a target it holds
+      // nothing on.
       let opened: NewAsk[] | undefined;
       const callAsks = () => (opened ??= newAsks(event.toolName, event.input));
-      // A tripped breaker sends the call unasked only where this call is the refused thing it
-      // ended the loop on: a target whose refusals named no ask, or one of the asks refused here.
-      // Any other ask on the same target is a question the gate has refused nothing of, so the
-      // review runs and the count stays where it is, leaving the loop its own way out.
-      if (breaker.tripped(key) && breaker.covers(key, callAsks().map(askIdentity))) {
+      // A tripped breaker sends the call unasked only where one of its own things was refused
+      // enough times here. Any other call on the same target is something the gate has refused
+      // too few times or never, so the review runs and every count stays where it is.
+      if (breaker.tripped(key, () => breakerThings(callAsks()))) {
         breaker.reset(key);
         return {
           fields: { decision: "allow", outcome: "breaker" },
@@ -2579,29 +2618,28 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       const matches = ruled?.matches ?? [];
       if (ruled !== undefined && matches.length > 0) {
         // A rule matched: refused in every mode, the charter's revise reason after the rules reason. The
-        // charter's own outcome stays on the record and alone moves the halt count. The refusal counts
-        // once toward the breaker, the rules reason labelled apart so it never feeds the charter request.
+        // charter's own outcome stays on the record and alone moves the halt count. The rules reason is
+        // never kept for the breaker, so it never feeds the charter request.
         const rulesReason = [
           ...matchLines(matches, ruled.names),
           ...(ruled.reason === "" ? [] : [ruled.reason]),
         ].join("\n");
         const charterReason = verdict?.decision === "revise" ? verdict.reason : undefined;
-        // Which of this call's asks the refusal refused, so that a later call opening one of them
-        // is the loop the breaker ends and a call opening another ask is not. The rules check
-        // numbers the asks it judged in the order this scan of the same arguments reads them,
-        // except for an upload, whose judged list leaves out the asks the document it replaces
-        // already holds: where the two do not line up, every ask of the call counts as refused,
-        // which keeps the pass the breaker may later give inside the call that earned it.
+        // The refusal is the rules check's in either mode, so it counts on the asks that check
+        // refused, and a charter revise beside it adds its reason only: a rules refusal counts the
+        // same in warn and block mode. The rules check numbers the asks it judged in the order this
+        // scan of the same arguments reads them, except for an upload, whose judged list leaves out
+        // the asks the document it replaces already holds: where the two do not line up, every ask
+        // of the call counts as refused, which keeps the pass the breaker may later give inside the
+        // call that earned it.
         const asks = callAsks();
-        breaker.revised(key, {
-          refused: true,
-          rules: rulesReason,
-          asks:
-            asks.length === ruled.names.length
-              ? matches.map((match) => askIdentity(asks[match.ask - 1]))
-              : asks.map(askIdentity),
-          ...(charterReason === undefined ? {} : { charter: charterReason }),
-        });
+        const tripsNext = breaker.revised(
+          key,
+          asks.length === ruled.names.length
+            ? matches.map((match) => askIdentity(asks[match.ask - 1]))
+            : breakerThings(asks),
+          charterReason
+        );
         const delivered = [
           agentFacing(rulesReason),
           ...(charterReason === undefined
@@ -2636,7 +2674,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
             reason: renderRuleRefusal(
               delivered,
               matches.map((match) => match.rule),
-              breaker.count(key) === GATE_BREAKER_REVISES,
+              tripsNext,
               override,
               SECOND_REVISE
             ),
@@ -2668,17 +2706,15 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         return pass("verdict", called, "verdict");
       }
       // A warn-mode revise sends the call as the agent wrote it: it refused nothing, so it is no
-      // loop to break and the breaker's count of refusals stays where it is. Its reason is kept
-      // all the same, since the next charter request on this target carries the reasons already
-      // given.
+      // loop to break and no count of refusals moves. Its reason is kept all the same, since the
+      // next charter request on this target carries the reasons already given. A block-mode one
+      // refuses the call, which counts on each of its things.
       const refused = base.verdictMode === "block";
-      breaker.revised(key, { charter: verdict.reason, refused });
-      // The third attempt goes out unreviewed only where the breaker's pass would cover it: say
-      // so only there.
-      const second =
-        refused &&
-        breaker.count(key) === GATE_BREAKER_REVISES &&
-        breaker.covers(key, callAsks().map(askIdentity));
+      const tripsNext = breaker.revised(
+        key,
+        refused ? breakerThings(callAsks()) : [],
+        verdict.reason
+      );
       return {
         fields: {
           decision: "revise",
@@ -2689,7 +2725,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           ...called,
         },
         result: refused
-          ? { block: true, reason: renderRevise(verdict.reason, second, override) }
+          ? { block: true, reason: renderRevise(verdict.reason, tripsNext, override) }
           : { additionalContext: renderWarn(verdict.reason) },
         effect: "verdict",
       };

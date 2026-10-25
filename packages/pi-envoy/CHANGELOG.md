@@ -36,20 +36,21 @@
   rule refuses an ask whose own recommendation is to change nothing. The other refuses an ask for a
   step the person must do with their own hands when the agent did not try its own access first. A
   match refuses the call in `warn` mode as well as in `block` mode. `--advisor-rebuttal '<line>'`
-  on a command, `"advisor_rebuttal": "<line>"` in a device's JSON, or the third attempt on the same
-  target sends the call anyway. The breaker counts only the calls the gate refused, so a charter
-  revise in `warn` mode, which sends the call, never moves it, and its free pass covers only the
-  thing that was refused: a target whose refusals named no ask, or a call opening one of the asks
-  a rules refusal named there. An upload's ask block is new only while the version it replaces
-  does not already hold it, and when that version cannot be read the blocks carrying an `#id` are
-  left out of the check (`ruleAsksPartial`), so a re-upload of an unchanged document is never
-  refused for an ask block it already held. When every block of such an upload carries an `#id`,
-  the rules check asks no model and refuses nothing, but it is not silent: `ruleOutcome` reads
-  `unjudged`, with `ruleAsksPartial`, and the decision record and the report count it. The
-  `advisor-gate` entry gains `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleModel`,
-  `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut`, `ruleAsksPartial` and
-  `target`, and `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors
-  and the refusals the agent overrode.
+  on a command, `"advisor_rebuttal": "<line>"` in a device's JSON, or the third attempt at the
+  same thing on the same target sends the call anyway. The breaker counts only the calls the gate
+  refused, so a charter revise in `warn` mode, which sends the call, never moves it. It counts
+  each thing apart: each new ask a call opens, or the call as a whole when it opens none, so its
+  free pass covers only the thing that was refused twice, and an ask refused once on a target
+  whose other ask was refused twice is still reviewed. An upload's ask block is new only while the
+  version it replaces does not already hold it, and when that version cannot be read the blocks
+  carrying an `#id` are left out of the check (`ruleAsksPartial`), so a re-upload of an unchanged
+  document is never refused for an ask block it already held. When every block of such an upload
+  carries an `#id`, the rules check asks no model and refuses nothing, but it is not silent:
+  `ruleOutcome` reads `unjudged`, with `ruleAsksPartial`, and the decision record and the report
+  count it. The `advisor-gate` entry gains `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`,
+  `ruleModel`, `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut`, `ruleAsksPartial`
+  and `target`, and `scripts/askgate-report.ts` reports the rules check's matches, outcomes and
+  errors and the refusals the agent overrode.
 - AskGate publishes each rule decision, and each refused call the agent sent again with a rebuttal
   or the breaker (recorded with `ruleOutcome: null` and the refusal's own target), to a Dispatch
   project document of the session's own, `askgate-decisions-<session id>.md`, so a session holding

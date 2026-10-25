@@ -288,14 +288,16 @@ instead and how to send the call anyway. The agent sends the call anyway in one 
 
 - `--advisor-rebuttal '<line>'` on a `dispatch` command.
 - `"advisor_rebuttal": "<line>"` in a device's JSON.
-- The third attempt on the same target: after the gate refuses two calls in a row on one target,
-  it sends the third without review. Only a refusal counts: in `warn` mode a charter `revise`
-  sends the call, so it never moves the breaker, while a match of the rules check refuses the
-  call in either mode and always does. The third call goes out unreviewed only where it is the
-  thing that was refused: a target whose refusals named no ask (the call as a whole was sent
-  back), or a call opening one of the asks a rules refusal named there. A call opening a
-  different ask on that target is reviewed like any other, and leaves the count for the ask that
-  raised it.
+- The third attempt at the same thing on the same target: after the gate refuses one thing twice
+  on one target, it sends the third call that holds it without review. A thing is each new ask a
+  call opens, or the call as a whole when it opens none. A charter refusal counts on every thing
+  of the call, and a rules refusal counts on the asks it refused. Only a refusal counts: in `warn`
+  mode a charter `revise` sends the call, so it never moves the breaker, while a match of the
+  rules check refuses the call in either mode and always does. A call that opens an ask refused
+  once, or never, on that target is reviewed like any other, however often the gate refused other
+  asks there, and a call that opens no ask counts its own refusals, whatever asks were refused
+  there before it. An allow, a rebuttal or the third attempt starts every count on the target
+  again.
 
 A rebuttal sends the call with no review by either check, and the entry records the line. A rules
 call that ends in an error, a timeout or an answer that does not parse refuses nothing: the
@@ -321,8 +323,10 @@ load refuses every Dispatch write it would have reviewed.
 **The record.** Every gated call writes one `advisor-gate` entry into the session's transcript.
 Every entry but an `unreadable` one carries `target`, the call's target in readable form: the tool
 name, then each of `issue`, `ask`, `artifact`, `project` and `in_reply_to` that the input carries,
-as `dispatch_ask issue=ACME-1`. The third attempt (`outcome: "breaker"`) counts the calls on one
-such target. A call that opens a new ask adds the fields of the rules check:
+as `dispatch_ask issue=ACME-1`. The third attempt (`outcome: "breaker"`) counts the refusals of
+one thing on one such target, and `revisesForKey` counts every `revise` on it, the `warn` ones
+included, since its counts last started again. A call that opens a new ask adds the fields of the
+rules check:
 
 - `rule`: `no_change` or `untried_access`, the rule that the first matching ask broke. The gate
   sets it exactly when the rules check refused the call.
