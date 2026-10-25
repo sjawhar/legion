@@ -2,39 +2,31 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-122",
-  "completed": "2026-10-25T18:56:53Z",
+  "completed": "2026-10-25T19:32:25Z",
   "proof": [
     {
-      "criterion": "Review finding 1 (plan decision 6): /healthz answers 503 live subscription inactive while the server refuses the live lane's subscription",
-      "surface": "built envoy-listener against a real nats-server v2.10.29 with an authorization config: user granted notifications.>, then NATS restarted on the same port and store without that grant",
-      "command": "bash $TMPDIR/smoke/refusal.sh $TMPDIR/bin/envoy-listener-head refusal-head3; in-process: cd packages/envoy && go test ./internal/bus/ -count=1 (TestCoreSubOKIsFalseWhileTheServerRefusesTheResentSubscription, TestCoreSubOKIsFalseOnceAReloadRevokesTheSubscription)",
-      "observed": "before the restart 200 healthy live_topics=subscribed; after it, the first poll answered 503 {\"error\":\"live subscription inactive\",\"status\":\"unhealthy\"} and the listener logged Permissions Violation for Subscription to \"notifications.>\" using queue \"envoy-listener-live-smoke\"; internal/bus ok 223 s",
-      "headSha": "d73383ee860fca625b2499da5fd3f632f671f382",
-      "negativeControl": "round-1 binary 5bdf1607 under the same restart stayed 200 healthy live_topics=subscribed for 10 s with the same violation logged; the bus regression test failed (timed out waiting for CoreSubOK) with the refusal mark disabled"
+      "criterion": "2. Nothing arrives twice (tester's failure): an inbox message reaches a serving-port session once with another machine's listener on the bus",
+      "surface": "two built envoy-listener processes (m1 owner, m2) on one real nats-server -js, python fake serving port on 0.0.0.0:18081, session registered through m1 with host = pod IP 10.1.10.198",
+      "command": "bash $TMPDIR/smoke/inbox.sh $TMPDIR/bin/envoy-listener-head head-nobridge; ... head-bridge ENVOY_HOST_BRIDGE=127.0.0.1; in-process go test ./cmd/listener/ -run TestAnInboxMessageReachesAServingPortOnceWithAnotherMachinesListenerOnTheBus",
+      "observed": "POST /v1/messages/send through m2 answered 200; exactly one prompt at the port, m1 'listener agent delivered', m2 'listener agent session not found anywhere', both with and without m1's bridge; the tester's test (unmodified) PASS 7.0 s",
+      "headSha": "c6889bb0b56b16176234b16a738ea213c35493fa",
+      "negativeControl": "round-2 binary d73383ee in the same inbox.sh -> two prompts, m1 and m2 both 'listener agent delivered'; CI at c9801bcb failed exactly that test (live_topics_test.go:525); the test fails with the ownership check removed"
     },
     {
-      "criterion": "1. A serving-port session receives a topic the stream does not store within 2 s; fails before, passes after",
-      "surface": "built envoy-listener, real nats-server -js, python fake serving port on 0.0.0.0:18080, session host = pod IP 10.1.10.198, no ENVOY_HOST_BRIDGE",
-      "command": "bash $TMPDIR/smoke/run.sh $TMPDIR/bin/envoy-listener-head head3-on ENVOY_SUBSCRIBE_ALL_TOPICS=1; CI before-run run 40210282599 job 121220517750 at d6cf8f38; after-run run 40217683605 job 121242446536 at 5bdf1607; this head's run 40223528605",
-      "observed": "one POST /session/smoke-s/prompt_async carrying 'Topic: notifications.team.smoke-1792954517' at 18:55:18, the publish's own second; before-run red on exactly the two acceptance tests, after-run green",
-      "headSha": "d73383ee860fca625b2499da5fd3f632f671f382",
-      "negativeControl": "variable unset -> live_topics not_applicable and 0 prompts in 4 s; parent binary d6cf8f38 with the variable set -> 0 prompts"
+      "criterion": "1. A serving-port session receives a topic the stream does not store within 2 s",
+      "surface": "built envoy-listener, real nats-server -js, fake serving port at pod IP, no bridge",
+      "command": "bash $TMPDIR/smoke/run.sh $TMPDIR/bin/envoy-listener-head head4-on ENVOY_SUBSCRIBE_ALL_TOPICS=1",
+      "observed": "one prompt carrying 'Topic: notifications.team.smoke-1792956646' at 19:30:47, the publish's second; malformed host 400",
+      "headSha": "c6889bb0b56b16176234b16a738ea213c35493fa",
+      "negativeControl": "variable unset -> 0 prompts; parent binary d6cf8f38 -> 0 prompts (round 1/2 runs)"
     },
     {
-      "criterion": "5. A session is reached at its recorded host; a malformed host is refused",
-      "surface": "same rig, no bridge, host = pod IP",
-      "command": "bash $TMPDIR/smoke/run.sh $TMPDIR/bin/envoy-listener-head head3-on ENVOY_SUBSCRIBE_ALL_TOPICS=1",
-      "observed": "the prompt reached 10.1.10.198:18080; host evil.example:80/x answered 400 {\"error\":\"host is not a host name or address\",\"expected\":[\"host\"]}",
-      "headSha": "d73383ee860fca625b2499da5fd3f632f671f382",
-      "negativeControl": "parent binary d6cf8f38 accepted the malformed host 200 and delivered nothing"
-    },
-    {
-      "criterion": "4. Text corrected (and review finding 3)",
-      "surface": "the files the plan names",
-      "command": "grep -rnE 'receives nothing on such a topic|receives no team topic|never the routing key' docs/site/src/content/docs/dispatch/envoy.md packages/envoy-client/src/tool-contract.ts packages/claude-envoy/dist skills/envoy/SKILL.md packages/envoy/AGENTS.md packages/envoy/CHANGELOG.md packages/envoy/internal/session/registry.go packages/envoy/cmd/listener/claim_wiring.go",
-      "observed": "prints nothing; the site row now includes the publisher only for a session with its own NATS connection",
-      "headSha": "d73383ee860fca625b2499da5fd3f632f671f382",
-      "negativeControl": "the same grep at the base 064cc728 matches envoy.md, claude-envoy dist/envoy-channel.js, tool-contract.ts, registry.go and skills/envoy/SKILL.md"
+      "criterion": "Review finding 1: /healthz 503 while the server refuses the live subscription",
+      "surface": "built envoy-listener under a NATS user granted notifications.>, NATS restarted without it",
+      "command": "bash $TMPDIR/smoke/refusal.sh $TMPDIR/bin/envoy-listener-head refusal-head4",
+      "observed": "503 {\"error\":\"live subscription inactive\",\"status\":\"unhealthy\"} at the first poll after the restart",
+      "headSha": "c6889bb0b56b16176234b16a738ea213c35493fa",
+      "negativeControl": "round-1 binary 5bdf1607 stayed 200 healthy, live_topics subscribed"
     }
   ],
   "filesChanged": [
@@ -108,9 +100,10 @@
   "deviations": [
     "Acceptance 4's grep is narrowed to the stale claims, dropping the literal INFRA-122, at the architect's direction: the envoy CHANGELOG entry names the issue it closes.",
     "Simplify pass: 0 applied; six priority-3 findings skipped as cosmetic (listed in the PR's Thermo line).",
-    "Round 2 also marks a config reload's revocation of the live subscription as a refusal (not asked by the review; same defect class, found while adapting to in-process NATS)."
+    "Round 2 also marks a config reload's revocation of the live subscription as a refusal (not asked by the review; same defect class, found while adapting to in-process NATS).",
+    "Round 3, architect's decision: only the owning listener delivers to a serving-port session (session.ErrWrongMachine for another machine's entry); the approved spec's sentence reaching another machine's session at its recorded host, else that machine's name, is not built. The spec stays as approved; the PR body records the departure and the census names the removed behaviour."
   ],
   "openQuestions": [],
-  "round": 2,
-  "answersReview": "review round 1 at e2fe0e27 (review 5644561518): findings 1-3 and the fast-follow"
+  "round": 3,
+  "answersReview": "tester round 2 failure at c9801bcb: an inbox message reached a serve-port session twice with a second machine's listener on the bus"
 }
