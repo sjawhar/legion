@@ -1,0 +1,134 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-194",
+  "completed": "2026-10-25T16:28:19Z",
+  "plan": "dispatch://INFRA-194/artifact/plan-md (version 1)",
+  "summary": "The root's own change is scripts/dispatch/meaning-search-check.ts, a re-runnable production check of A1 (search answer not degraded), A2 (three pre-registered word-disjoint query/issue pairs, issue row in the top five) and A3 (INFRA-393's GET /api/v1/search/coverage: zero lacking, zero failed, configured identity). The implementer builds it and runs it on production before the deploy, waits idle for the architect's go once INFRA-394 closes, then runs it after the deploy; A4 is mapped to INFRA-393's merged tests on main.",
+  "requiredSkills": {
+    "implement": [
+      "skill://legion-worker: phase contract, the jj/push/handoff rules, and waiting idle without completing until the architect says INFRA-394 has closed (architect-root.md:96-98).",
+      "skill://legion-worker/references/pr-body.md: the PR body template, the E2E (implementer) line and proof array, with the dated before run as negative control, and the simplify pass.",
+      "skill://legion-worker/references/merge-gate.md: the production check after the root closes (run the script from the merge commit against production).",
+      "skill://ce-simplify-code: the simplify pass pr-body.md asks for on the settled script."
+    ],
+    "test": [
+      "skill://legion-worker/references/pr-body.md: what the tester verifies, the E2E (tester) line and proof array; drive production with the script and try to break it, read CI for Biome/tsc/bun test instead of rerunning them.",
+      "skill://legion-worker: phase contract and handoff rules; A4 evidence on main at INFRA-393's merge commit with a throwaway Postgres (plan.md section 7)."
+    ],
+    "review": [
+      "skill://legion-worker/references/merge-gate.md: reviewing and approving the head by SHA, and what READY needs of it.",
+      "skill://legion-worker/references/review-threads.md: one disposition per thread if the round opens threads.",
+      "skill://thermonuclear-deep-review: the script's correctness hazards (an unavailable check counting as a pass, an owned document counting as a find, error paths leaking a URL or body into public output)."
+    ]
+  },
+  "acceptance": [
+    {
+      "criterion": "A1",
+      "surface": "production Dispatch: CLI and GET /api/v1/search",
+      "command": "dispatch search --query 'meaning search'; bun scripts/dispatch/meaning-search-check.ts --a1-query 'meaning search'",
+      "pass": "no 'Searched by keyword only' line and 'A1 pass' after the deploy; the line and 'A1 fail' before (negative control)"
+    },
+    {
+      "criterion": "A2",
+      "surface": "production GET /api/v1/search?q=<query>&limit=5",
+      "command": "bun scripts/dispatch/meaning-search-check.ts --pair 'INFRA-43=…' --pair 'INFRA-30=…' --pair 'INFRA-32=…' --lexeme-database <throwaway Postgres>",
+      "pass": "at least one 'A2 <KEY> shared=0 position=1..5 pass' after the deploy; every pair 'position=none' before; all three reported"
+    },
+    {
+      "criterion": "A3",
+      "surface": "production GET /api/v1/search/coverage (INFRA-393)",
+      "command": "bun scripts/dispatch/meaning-search-check.ts --coverage --expect-model <azure identity> [--coverage-wait 600]",
+      "pass": "one snapshot with identity=match, items>0, lacking=0, failed=0 after the deploy; 'unavailable: not-found' before"
+    },
+    {
+      "criterion": "deployed build",
+      "surface": "production /healthz",
+      "command": "script 'build' line, then gh api repos/sjawhar/legion/compare/<INFRA-393 merge>...<commit> --jq .status",
+      "pass": "ahead or identical"
+    },
+    {
+      "criterion": "A4",
+      "surface": "INFRA-393's tests on main at its merge commit",
+      "command": "go test -list '<names>' ./internal/dispatch/...; DISPATCH_TEST_DATABASE_URL=<throwaway Postgres> go test -count=1 -v -run '<names>' ./internal/dispatch/...; the envoy-go job of the merge commit's CI run",
+      "pass": "every A4 clause maps to a named test and assertion line that PASSes (not SKIP)"
+    }
+  ],
+  "baseline": {
+    "a1": "2026-10-25T15:59:32Z production: dispatch search --query 'meaning search' printed 'Searched by keyword only: meaning search was unavailable for this request.'",
+    "a2": "2026-10-25T16:06:12Z production: each pre-registered exact query printed 'No results' and 'Searched by keyword only'.",
+    "pairs": [
+      {
+        "issue": "INFRA-43",
+        "query": "watching a running bot, the screen keeps scrolling down whenever output arrives, so earlier lines are impossible to study",
+        "sharedWithKeyAndTitle": 0
+      },
+      {
+        "issue": "INFRA-30",
+        "query": "language model vendor billing balance ran dry and automated code checks halted",
+        "sharedWithKeyAndTitle": 0
+      },
+      {
+        "issue": "INFRA-32",
+        "query": "flowchart markup inside pages shows as raw text instead of a drawn picture",
+        "sharedWithKeyAndTitle": 0
+      }
+    ],
+    "lexemesMeasuredWith": "Postgres 16.2 to_tsvector('english') via uvx --python 3.12 --from pgserver==0.1.4"
+  },
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "F1: the pre-registered pairs were candidates; 'No results' for the AND query does not prove zero lexeme overlap with the target.",
+        "answer": "Measured with Postgres 16.2 over every text search indexes as owned by each target: zero lexemes shared with key and title for all three; each shares some with its own spec. The predicate is judged on key and title (the issue row's indexed text, migration 0088:39-43), agreed with the architect; if no pair passes after the deploy, A2 has failed and is reported; no post-deploy query replaces them (plan.md section 4)."
+      },
+      {
+        "finding": "F2: no executable tokenizer or data path for the overlap check.",
+        "answer": "Lexemes come from a real Postgres 16 (any server, built-in english config only) through --lexeme-database: to_tsvector('english', search_text(key)) || to_tsvector('english', search_text(title)) with search_text from migration 0056, and querytree(websearch_to_tsquery('english', q)). A pod starts one with pgserver; Bun SQL connects by socket path (measured). No --lexeme-database means shared=unchecked and exit 2 (plan.md section 3)."
+      },
+      {
+        "finding": "F3: A2 predicate ambiguous (lexeme vs word, owned text vs issue row, one pair vs three).",
+        "answer": "Predicate stated and agreed by the architect (Envoy 8fb4dae8): no shared english lexeme with key and title, the whole query matched nothing anywhere before the deploy, the issue's own row (kind issue) in positions 1-5 after; one pair suffices, all three reported; tests cover an owned document at position 1 without the issue row (fail)."
+      },
+      {
+        "finding": "F4: ranking claims overstated (keyword leg empty after deploy, nearest-issue requirement).",
+        "answer": "Removed as predictions; the check judges the actual post-deploy response of the exact request. The plan names the ranking risk (RRF per kind, floor, approximate HNSW) and tests fewer-than-five-kinds and dual-list competitors."
+      },
+      {
+        "finding": "F5: the coverage report contract is unspecified in INFRA-393.",
+        "answer": "Architect added it to INFRA-393's spec v3; INFRA-393's planner confirmed GET /api/v1/search/coverage with identity, place, model, total and per-kind items/current/lacking/failed/oldest_lacking_seconds, one snapshot, 'current' detecting missing rows, null vectors, other identity and stale hash (Envoy a668e1dd). The judge takes the kinds the report lists and its own runtime types, never a contracts import."
+      },
+      {
+        "finding": "F6: INFRA-394 closing is not proof of a deployed build; held-implementer wake; post-merge production check.",
+        "answer": "The after run first reads /healthz commit and checks gh compare against INFRA-393's merge (ahead/identical); the architect wakes the idle implementer with envoy_publish per architect-root.md:96-98; the root's production check runs the merged script against production, which needs no Dispatch build of the root commit."
+      },
+      {
+        "finding": "F7: no before/after invocation or exit contract.",
+        "answer": "One invocation for both runs; exit 0 all pass, 1 a check failed, 2 a check unavailable (never a pass, never 'before' evidence); the expected before result is A1 fail, pairs position=none, A3 not-found; the planner's 2026-10-25 baseline is quoted as such if the deploy came first; Dispatch is resolved from the session's config, no address committed."
+      },
+      {
+        "finding": "F8: go test -list plus CI does not prove every A4 clause.",
+        "answer": "The tester maps each A4 clause to a named test and assertion line on main at INFRA-393's merge commit, runs them verbose against a throwaway Postgres to show PASS not SKIP (measured working 2026-10-25), and quotes the envoy-go job; a clause without a test is reported as a missing INFRA-393 deliverable."
+      },
+      {
+        "finding": "F9: error paths can leak URL, body or config into public output.",
+        "answer": "Allowlisted output on both streams; client errors mapped to fixed categories; the identity string is never printed (only match/mismatch); tests feed private-looking URLs and bodies through failures; the tester scans captured output with check-private-names.sh given the file path, with a positive control."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 2
+  },
+  "specDepartures": [
+    {
+      "spec": "Spec v8 'What changes' names no script; the architect's tree comment gives the root only the integration check, which changes no file.",
+      "plan": "The root's pull request adds scripts/dispatch/meaning-search-check.ts to sjawhar/legion as its own change, the re-runnable form of that integration check.",
+      "evidence": "close_root is refused once a phase has started (packages/daemon/internal/workflow/close_root.go:29-30) and READY refuses an issue with no pull request (packages/daemon/internal/api/ready.go:82); the architect agreed on 2026-10-25 (Envoy b79ce484).",
+      "outcome": {
+        "kind": "changed",
+        "scope": "Adds one script, its tests and a README section under scripts/dispatch in sjawhar/legion to the root issue; the spec's summary, acceptance A1-A4 and settled decisions are unchanged."
+      }
+    }
+  ]
+}
