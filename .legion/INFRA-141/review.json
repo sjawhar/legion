@@ -11,8 +11,9 @@
   "roundSixFindingClosed": "packages/envoy/AGENTS.md (faef510529d0): the sentence attributing a live fanout retry to deliveryOutcome.exceptionFailureRetries is deleted, not rewritten. Verified at this head rather than from the commit subject: grep for exceptionFailureRetries in packages/envoy/AGENTS.md returns 0, the file changes at one line, and a sentence-by-sentence diff of that bullet against its version at 9ef9fe7505 shows exactly one removal and no addition, so no replacement claim appeared elsewhere. The complement was re-derived from the code at this head rather than from the implementer's line numbers: the only two fanoutRefusal: true sites are delivery.go:948 and :968, neither the generic fanout outcome at :990, and listenerDeliveryHandler routes both control prefixes away at :301-305 before the fanout default at :306, so isControlTopic || fanoutRefusal is false for every topic reaching the fanout. The live retry there is retry: retryable at :992 - not :991, which is clearAttempt: retryable; the tester caught that off-by-one in my round-six review and I carry the correction.",
   "keyFindings": [],
   "approval": {
-    "head": "APPROVED_HEAD_PLACEHOLDER",
-    "basis": "No finding stands. Every behavioural finding of rounds one to six is closed and was verified in the code by the reviewer at the head that closed it, and this round's diff is docs-only, so the code verified at the round-six head 9ef9fe7505 carries over whole."
+    "head": "238d8547f84630fdcc2d2e40b5192cc85f9b2778",
+    "basis": "No finding stands. Every behavioural finding of rounds one to six is closed and was verified in the code by the reviewer at the head that closed it, and this round's diff is docs-only, so the code verified at the round-six head 9ef9fe7505 carries over whole.",
+    "reviewId": 5643425186
   },
   "docsOnlyRound": "Between the round-six code head 9ef9fe7505464c4c7ce267d0a0b9a08f3af691dd and this head, four files change: .legion/INFRA-141/implement.json, review.json and test.json, and packages/envoy/AGENTS.md at one line. No .go, .ts, .sh, .yaml or .json line moves outside .legion/. By the role's own carve-out a docs-only diff gets no thermonuclear pair, so none ran this round and the pair's verdicts at c1d45f90 stand.",
   "ciRead": {
