@@ -4505,21 +4505,27 @@ describe("envoy OMP extension", () => {
       const roleRead = /^\/v1\/roles\/([^/]+)$/.exec(url.pathname);
       if (roleRead !== null && (init?.method ?? "GET") === "GET") {
         const role = decodeURIComponent(roleRead[1] ?? "");
+        // The listener settles its answer as it takes the read, so a gated read is one whose
+        // answer is already in flight: it names the holder of that moment, not the holder of the
+        // moment the caller finally hears it.
+        let answer: Response;
+        if (failingRoleReads > 0) {
+          failingRoleReads -= 1;
+          answer = new Response(JSON.stringify({ error: "listener failed" }), { status: 500 });
+        } else {
+          const holder = holders.get(role);
+          answer =
+            holder === undefined
+              ? new Response(JSON.stringify({ error: "no live holder" }), { status: 404 })
+              : response({ role, holder, last_seen: lastSeen.get(holder) ?? 1 });
+        }
         if (roleReadGate?.role === role) {
           const { reached, release } = roleReadGate;
           roleReadGate = undefined;
           reached();
           await release;
         }
-        if (failingRoleReads > 0) {
-          failingRoleReads -= 1;
-          return new Response(JSON.stringify({ error: "listener failed" }), { status: 500 });
-        }
-        const holder = holders.get(role);
-        if (holder === undefined) {
-          return new Response(JSON.stringify({ error: "no live holder" }), { status: 404 });
-        }
-        return response({ role, holder, last_seen: lastSeen.get(holder) ?? 1 });
+        return answer;
       }
       if (url.pathname === "/v1/interests/unsubscribe") {
         if (
@@ -6303,6 +6309,89 @@ describe("envoy OMP extension", () => {
     holders.delete(role);
     await ticks(2);
     expect(holders.has(role)).toBe(false);
+  });
+
+  // A refusal a soft claim records (`refusedRoles`) outlives every later pass for that session:
+  // `desiredRole` answers undefined for the role from then on, the next pass sees a role held
+  // that nothing wants, and `endRole` hands it back and closes every notice subscription a plugin
+  // opened `whileHolding` it. So a move abandoned at its deadline must record none of the refusal
+  // it read: by the time the read of the abandoned hold answers, the claim that replaced that move
+  // has taken the role for that same session and cleared the refusal this one would write over.
+  // Recorded late, it costs a live pane the role it holds — for a controller pane, the daemon then
+  // reads no live holder and takes the role from a process that is still running.
+  test("a refusal an abandoned move read does not take the role from the claim that replaced it", async () => {
+    // The waits are real: the role move is abandoned on a real timer, read as the move starts,
+    // and the deadline is long enough for the hand-back below to fail twice — the client retries
+    // a failure once, 250 ms later — so only the move this case wedges is ever abandoned.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 600 }, async () => {
+      const role = "legion-controller";
+      const notice = "notifications.legion.ACME.controller";
+      const {
+        fixture,
+        live,
+        context,
+        handedBack,
+        holders,
+        lastSeen,
+        roleTool,
+        failHandBacks,
+        gateRoleRead,
+        tick,
+      } = await gatedRoleFixture("abandoned-refusal-not-recorded", "ses_nr");
+      const drain = () => new Promise<void>((resolve) => setImmediate(resolve));
+      // A /new gives up ses_nr's hold and the listener fails the hand-back: the hold is abandoned
+      // to the listener's reaping (`abandonedHolds`), and the listener still names ses_nr for the
+      // role. That is the one state in which a refusal makes `observeAbandonedHold` read the
+      // listener rather than answer at once.
+      failHandBacks(2);
+      await fixture.handlers.get("session_before_switch")?.({ reason: "new" }, context);
+      await fixture.handlers.get("session_switch")?.(
+        { reason: "new" },
+        live("ses_nr_n", { fresh: true })
+      );
+      expect(handedBack).toEqual([]);
+      expect(holders.get(role)).toBe("ses_nr");
+      // A resume opens a session whose records name the role: its soft claim is refused with that
+      // abandoned hold as the holder, and the refusal records the hold's first `last_seen`.
+      await fixture.handlers.get("session_before_switch")?.({ reason: "resume" }, context);
+      const resumed = live("ses_nr_c", { fresh: true });
+      fixture.pi.appendEntry("envoy-role-claim", { role });
+      await fixture.handlers.get("session_switch")?.({ reason: "resume" }, resumed);
+      expect(holders.get(role)).toBe("ses_nr");
+      // Another process heartbeats ses_nr, so the next read of the hold finds a `last_seen` that
+      // moved: from here the hold is a newer holder, and the refusal it carries would stand.
+      lastSeen.set("ses_nr", (lastSeen.get("ses_nr") ?? 1) + 1);
+
+      // The next move's claim is refused too, and the read of the hold inside it parks at the
+      // listener: the move is abandoned at its deadline with that read still in flight.
+      const reading = gateRoleRead(role);
+      tick();
+      await reading.reached;
+      await new Promise((resolve) => setTimeout(resolve, 700));
+
+      // A newer claim of the same role, for the same session, wins, and a plugin opens the
+      // notices that last while it holds it.
+      expect((await roleTool.execute("", { role })).isError).toBeFalsy();
+      expect(holders.get(role)).toBe("ses_nr_c");
+      await subscribeLegionNotice("ses_nr_c", notice, resumed, role);
+      expect(natsState.controls.get(notice)?.active()).toBe(true);
+
+      // The abandoned move's read answers at last.
+      reading.release();
+      for (let step = 0; step < 10; step += 1) await drain();
+
+      // It recorded no refusal, so the next pass still wants the role the newer claim won: it
+      // hands nothing back, the notices stay open, and the transcript's claim stands.
+      const settled = handedBack.length;
+      tick();
+      for (let step = 0; step < 10; step += 1) await drain();
+      expect(handedBack.slice(settled)).toEqual([]);
+      expect(holders.get(role)).toBe("ses_nr_c");
+      expect(natsState.controls.get(notice)?.active()).toBe(true);
+      expect(
+        fixture.entries.filter((entry) => entry.customType === "envoy-role-claim").at(-1)
+      ).toEqual({ type: "custom", customType: "envoy-role-claim", data: { role } });
+    });
   });
 
   test("an abandoned hold's session this process registers again is its own hold again, not a newer holder", async () => {
@@ -8372,6 +8461,73 @@ describe("envoy OMP extension", () => {
         ).toHaveLength(1);
       } finally {
         stopSink();
+      }
+    });
+  });
+
+  // The backstop's clock is per session: a registration accepted for the session the host has
+  // left says nothing about the one running now. A `/new` during a wedged pass is exactly that —
+  // the new session's own pass is queued behind the wedge and cannot register it — so an age
+  // measured from the old session's acceptance leaves the new session out of `GET /v1/sessions`
+  // for a whole refresh interval while its pane runs, and every peer that asks for it is told
+  // there is no live session: the symptom this issue is about.
+  test("a session the host moves to during a stall is registered on the next tick", async () => {
+    // The waits are real: the refresh is decided on a real-clock age, and the interval is long
+    // here on purpose, so the old session's registration is far younger than it when the host
+    // moves and only the session it was accepted for can decide the tick.
+    await withEnvoyTimings({ heartbeatMs: 1000, passDeadlineMs: 5000 }, async () => {
+      const registered: string[] = [];
+      let wedgePass = false;
+      const answered = Promise.withResolvers<void>();
+      globalThis.fetch = async (input, init) => {
+        if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
+          const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+            readonly session_id: string;
+          };
+          registered.push(body.session_id);
+          if (wedgePass) {
+            wedgePass = false;
+            await answered.promise;
+          }
+        }
+        return responseWithRegistration(input, init, {});
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?heartbeat-stall-new-session");
+      const fixture = createPi();
+      const intervals: (() => void)[] = [];
+      const context: SessionContext = {
+        ...sessionContext("ses_stall_moved"),
+        setInterval: (callback) => intervals.push(callback),
+      };
+      envoyExtension(fixture.pi);
+      const switched = Promise.withResolvers<void>();
+      try {
+        await fixture.handlers.get("session_start")?.({}, context);
+        expect(registered).toEqual(["ses_stall_moved"]);
+
+        // A tick's pass parks at its registration: the `healing` latch stays set, so the backstop
+        // is what registers from here.
+        wedgePass = true;
+        intervals[0]?.();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+
+        // The host opens a new session; its own pass is queued behind the wedged one, so nothing
+        // in it registers the session the pane is now running.
+        void fixture.handlers
+          .get("session_switch")?.({ reason: "new" }, sessionContext("ses_stall_moved_b"))
+          .then(switched.resolve, switched.resolve);
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        const before = registered.length;
+
+        // The next tick registers the session running now, though the last registration the
+        // listener accepted — the one the host left — is milliseconds old.
+        intervals[0]?.();
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(registered.slice(before)).toEqual(["ses_stall_moved_b"]);
+      } finally {
+        answered.resolve();
+        await switched.promise;
+        for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
       }
     });
   });
