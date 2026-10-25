@@ -5,13 +5,16 @@ import (
 	"testing"
 )
 
-// A tree Legion takes back after it has finished and lingered starts again whatever Dispatch says
-// it waits on, while a never-started child the same tree hands over as a root of its own is
-// checked like any other root. Re-admission leaves the two records the same shape, so 0052 gives
-// the issue the mark that tells them apart, durably: a returning root whose project has no free
-// slot is judged again by a later pass, which has nothing of the re-admission left to read. Its
-// default leaves every row already recorded judged exactly as it was: not exempt until its own
-// next re-admission says so.
+// A tree that ran, taken back after it has finished and lingered, starts again whatever Dispatch
+// says it waits on, while a root that only waited and a never-started child handed over as a root
+// of its own are checked like any other root. Re-admission leaves the three records the same shape,
+// so 0052 gives the issue the mark that tells them apart, durably: whether it has stood in a phase
+// of its own. A returning root whose project has no free slot is judged again by a later pass,
+// long after the run it is judged on.
+//
+// The rows an older daemon recorded are marked from what they still show of a run — a phase that
+// carries one, or a phase worker's row — so a tree that ran before the upgrade is not checked as
+// though it never had; a row showing neither keeps the default and is checked.
 func TestTheTakenBackMarkArrivesWith0052(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
@@ -24,24 +27,36 @@ func TestTheTakenBackMarkArrivesWith0052(t *testing.T) {
 	if before != 0 {
 		t.Fatalf("issues.taken_back exists at 51, want it to arrive with 0052")
 	}
-	// A root recorded by the older daemon, which knew no such mark.
-	if _, err := store.Pool().Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over)
-		values ('LEGION-910', 'LEGION-910', 'LEGION', 'an older root', 'admitted', 2, 'todo', 'A', 1, true)`); err != nil {
-		t.Fatalf("record a root before 0052: %v", err)
+	// Records of the older daemon, which knew no such mark.
+	for _, seed := range []string{
+		// A root that only waited for its slot.
+		`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over)
+			values ('LEGION-910', 'LEGION-910', 'LEGION', 'an older root', 'admitted', 2, 'todo', 'A', 1, true)`,
+		// A root running when the daemon was upgraded.
+		`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over)
+			values ('LEGION-913', 'LEGION-913', 'LEGION', 'a running root', 'implementing', 1, 'in_progress', 'D', 6, true)`,
+		// A root whose tree ran and finished, lingering when the daemon was upgraded.
+		`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over, linger_until)
+			values ('LEGION-914', 'LEGION-914', 'LEGION', 'a finished tree', 'done', 1, 'done', 'E', 7, true, now() + interval '1 hour')`,
+		`insert into phases (issue, role, claim, handoff_commit, rounds, verdict)
+			values ('LEGION-914', 'planner', 'planner-claim', 'plan-1', 0, '')`,
+		// A root a person moved out of the waiting line, closed without ever running a phase: its
+		// architect, which admission starts, is no phase of its own.
+		`insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over, linger_until)
+			values ('LEGION-915', 'LEGION-915', 'LEGION', 'a root that only waited', 'done', 1, 'backlog', 'F', 8, true, now() + interval '1 hour')`,
+		`insert into phases (issue, role, claim, handoff_commit, rounds, verdict)
+			values ('LEGION-915', 'architect', 'architect-claim', '', 0, '')`,
+	} {
+		if _, err := store.Pool().Exec(ctx, seed); err != nil {
+			t.Fatalf("record before 0052: %v", err)
+		}
 	}
 
 	if _, err := store.Migrate(ctx); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	var existing bool
-	if err := store.Pool().QueryRow(ctx, `select taken_back from issues where key = 'LEGION-910'`).Scan(&existing); err != nil {
-		t.Fatalf("read the older root's mark: %v", err)
-	}
-	if existing {
-		t.Fatalf("a root recorded before 0052 = taken back, want it judged as it was")
-	}
-	// The column takes the mark both ways, and a row written without it is not exempt either.
+	// The column takes the mark both ways, and a row written without it carries none either.
 	if _, err := store.Pool().Exec(ctx, `insert into issues (key, tree, project, title, phase, generation, status, rank, last_dispatch_seq, handed_over, taken_back)
 		values ('LEGION-911', 'LEGION-911', 'LEGION', 'a tree taken back', 'admitted', 3, 'todo', 'B', 4, true, true)`); err != nil {
 		t.Fatalf("record a taken-back root: %v", err)
@@ -50,7 +65,10 @@ func TestTheTakenBackMarkArrivesWith0052(t *testing.T) {
 		values ('LEGION-912', 'LEGION-912', 'LEGION', 'a handed-over child', 'admitted', 2, 'todo', 'C', 5, true)`); err != nil {
 		t.Fatalf("record a handed-over child: %v", err)
 	}
-	for key, want := range map[string]bool{"LEGION-911": true, "LEGION-912": false} {
+	for key, want := range map[string]bool{
+		"LEGION-910": false, "LEGION-911": true, "LEGION-912": false,
+		"LEGION-913": true, "LEGION-914": true, "LEGION-915": false,
+	} {
 		var got bool
 		if err := store.Pool().QueryRow(ctx, `select taken_back from issues where key = $1`, key).Scan(&got); err != nil {
 			t.Fatalf("read %s: %v", key, err)

@@ -68,14 +68,17 @@ type Issue struct {
 	// HandedOver is whether the issue carried LegionLabel when Dispatch last showed it: what hands
 	// a root, or an orphan admitted as one, to Legion. A child running under its tree needs none.
 	HandedOver bool
-	// TakenBack is whether this record is a tree Legion took back after it had finished and
-	// lingered: a root set back to todo in its linger, or after it closed, which the re-admission
-	// of the root's own tree sets (admit.readmit). Every re-admission that carries another tree's
-	// work into a root of its own — a hand-over's child, an orphan a person labelled — clears it,
-	// so no record keeps a mark the next arrival contradicts. Promotion reads it because such a
-	// tree starts again whatever its links say, and once re-admission has written them a returning
-	// root and a never-started child handed over from a finished tree are the same shape; only the
-	// mark tells the exempt one from the one still checked (blockers.Exempt).
+	// TakenBack is whether the issue has stood in a phase of its own — one that carries a run
+	// (CarriesRun's rule: neither phase.Admitted nor phase.Done) — in this generation or an earlier
+	// one. The workflow's transition sets it as the issue moves into such a phase
+	// (workflow.Engine.transition), the only way an issue first leaves phase.Admitted for one, and
+	// nothing clears it: an issue that ran once has run, so a new generation, a child's re-entry and
+	// a hand-over all keep it, and re-admission neither writes nor clears it. Promotion reads it
+	// because a tree that ran, taken back after it finished and lingered, starts again whatever its
+	// links say, though re-admission leaves it at phase.Admitted carrying no run. By then a root that
+	// only left the waiting line and came back, or a child handed over without ever starting, is the
+	// same shape, and only the mark, which neither has, tells it from the exempt one
+	// (blockers.Exempt).
 	TakenBack bool
 	// DispatchStatus is the status Dispatch showed at the newest event or boot listing applied to the
 	// record (LastDispatchSeq's), whatever the daemon has queued since: every event carries the whole

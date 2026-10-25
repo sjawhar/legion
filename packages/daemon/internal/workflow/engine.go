@@ -338,7 +338,7 @@ func (e *Engine) recordChild(ctx context.Context, tx pgx.Tx, root record.Issue, 
 	if resolution.Refusal != "" {
 		return e.refuseChild(ctx, tx, root, fact.Key, fact.ResolvedRepo, resolution)
 	}
-	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution)
+	return e.enterChild(ctx, tx, root, fact, root.Generation, resolution, false)
 }
 
 // ReenterChild takes a recorded child set back to todo into a new run under its live tree, the way
@@ -402,7 +402,7 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 	if err := e.store.ClearGeneration(ctx, tx, child.Key); err != nil {
 		return err
 	}
-	if err := e.enterChild(ctx, tx, *root, fact, next, Resolution{Repo: child.Repo, DefaultBranch: child.DefaultBranch, GitHubRepo: child.GitHubRepo}); err != nil {
+	if err := e.enterChild(ctx, tx, *root, fact, next, Resolution{Repo: child.Repo, DefaultBranch: child.DefaultBranch, GitHubRepo: child.GitHubRepo}, child.TakenBack); err != nil {
 		return err
 	}
 	return e.notice(ctx, tx, child.Key, ChildReenteredNotice(child.Key, root.Key))
@@ -410,7 +410,8 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 
 // enterChild records a todo child under root's live tree, admitted at generation on the repository
 // at names, at its default branch and with GitHub's spelling of it, and starts its planning when the
-// tree's gate is open. A re-entered child keeps the repository it was first recorded with.
+// tree's gate is open. A re-entered child keeps the repository it was first recorded with, and the
+// mark of a run it had before (ran, its record.Issue.TakenBack), which no new run clears.
 //
 // It is the one door every child start funnels through — the architect's release_children, a
 // person's move of a child to todo, and a rerun or reopen through ReenterChild — so it is where a
@@ -419,10 +420,10 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 // StartUnblockedChildren starts it once the last issue it waits on is done. What it waits on is
 // read from the mirror, which the blockers.Mirror handler wrote this very event's row into, in
 // this same transaction, before the engine was asked anything.
-func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution) error {
+func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution, ran bool) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
-		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status,
+		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, TakenBack: ran, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status,
 		Repo: at.Repo, DefaultBranch: at.DefaultBranch, GitHubRepo: at.GitHubRepo}
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
@@ -779,6 +780,13 @@ func (e *Engine) transition(ctx context.Context, tx pgx.Tx, issue record.Issue, 
 	}
 	from := issue.Phase
 	issue.Phase, issue.Hold = row.To, nil
+	// This is the one write that moves an issue into a phase of its own, so it is where the issue
+	// earns record.Issue.TakenBack: it has run. Nothing clears the mark — not the phase's end, a
+	// new generation, a re-entry or a hand-over — since an issue that ran once has run, and a tree
+	// that ran is what promotion admits whatever its links say when Legion takes it back.
+	if issue.CarriesRun() {
+		issue.TakenBack = true
+	}
 	if row.Status != "" {
 		issue.Status = row.Status
 	}
@@ -888,9 +896,15 @@ func (e *Engine) row(from phase.Phase, trigger TriggerKind, target phase.Phase, 
 }
 
 // advanceAdmittedTree starts every member of root's tree the opening of its design gate releases.
-// A member that waits on an unfinished Dispatch issue is not one of them: the gate it was held by
-// is its tree's, the issues it waits on are its own, and only StartUnblockedChildren, when the
-// last of them closes, starts it.
+// A child that waits on an unfinished Dispatch issue is not one of them (blockers.Holdable): the
+// gate it was held by is its tree's, the issues it waits on are its own, and only
+// StartUnblockedChildren, when the last of them closes, starts it.
+//
+// The tree's root is started whatever its links say. Its links are read once, when promotion
+// admits it into a slot, and a root at admitted here has passed that moment: it holds its slot and
+// its tree runs, and a blocker added to a tree already running never re-checks it. Held here, it
+// would hold its slot with nothing left to start it — StartUnblockedChildren starts children, and
+// the state's `blocked` names no slotted root — so it would be neither started nor reported.
 func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record.Issue, gate record.DesignGate) error {
 	if !classify.DesignGateOpen(gate) {
 		return nil
@@ -907,10 +921,12 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 		if issue.Phase != phase.Admitted {
 			continue
 		}
-		if waits := blockers.Unfinished(rows, issue.Key); len(waits) > 0 {
-			e.logOnCommit(ctx, "workflow: the tree's gate opened, but this member waits on unfinished work",
-				"issue", issue.Key, "tree", root.Tree, "blockers", waits)
-			continue
+		if blockers.Holdable(issue) {
+			if waits := blockers.Unfinished(rows, issue.Key); len(waits) > 0 {
+				e.logOnCommit(ctx, "workflow: the tree's gate opened, but this member waits on unfinished work",
+					"issue", issue.Key, "tree", root.Tree, "blockers", waits)
+				continue
+			}
 		}
 		if err := e.gateOpened(ctx, tx, issue); err != nil {
 			return err
@@ -919,12 +935,18 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	return nil
 }
 
-// StartUnblockedChildren starts every child among issues whose last blocker has closed: one that
-// is no tree root of its own, stands where enterChild or the gate's opening left it
-// (phase.Admitted), names at least one blocker in the mirror rows and has none of them unfinished,
-// and whose tree would start it now — live (record.TreeLive) with its design gate open. A child
-// that never waited on anything is not this function's business and hears nothing from it; nor is
-// one whose tree is still closed, which the gate's own opening starts.
+// StartUnblockedChildren starts every child among issues that nothing holds any longer: one that is
+// no tree root of its own, stands where enterChild or the gate's opening left it (phase.Admitted),
+// has no unfinished blocker in the mirror rows, and whose tree would start it now — live
+// (record.TreeLive) with its design gate open. One whose tree is still closed is the gate's, whose
+// own opening starts it.
+//
+// Such a child either waited until the last issue it named closed, which its tree's architect is
+// told (ChildUnblockedNotice), or had its links taken off while it waited: an edit that changes no
+// status, which the engine's own handling of the event does not act on, and after which the state's
+// `blocked` no longer names it. Left here, that child would stand unstarted and unreported for good;
+// it starts as a child whose tree's gate opened onto it does, and its architect hears nothing more
+// than such a child's would.
 //
 // Its caller is admission's promoteHolds, which holds both the issues and the mirror rows already,
 // so every fact, tick, hold release and boot reconcile is a look at every held child. Each tree's
@@ -932,11 +954,7 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, rows map[string]blockers.Row) error {
 	starts := make(map[string]bool)
 	for _, issue := range issues {
-		if !blockers.Holdable(issue) {
-			continue
-		}
-		waited := rows[issue.Key].Blockers
-		if len(waited) == 0 || len(blockers.Unfinished(rows, issue.Key)) > 0 {
+		if !blockers.Holdable(issue) || len(blockers.Unfinished(rows, issue.Key)) > 0 {
 			continue
 		}
 		open, read := starts[issue.Tree]
@@ -952,6 +970,12 @@ func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues [
 		}
 		if err := e.gateOpened(ctx, tx, issue); err != nil {
 			return err
+		}
+		waited := rows[issue.Key].Blockers
+		if len(waited) == 0 {
+			e.logOnCommit(ctx, "workflow: this child names no issue it waits on any longer, so it starts",
+				"issue", issue.Key, "tree", issue.Tree)
+			continue
 		}
 		e.logOnCommit(ctx, "workflow: every issue this child waited on is done, so it starts",
 			"issue", issue.Key, "tree", issue.Tree, "blockers", waited)

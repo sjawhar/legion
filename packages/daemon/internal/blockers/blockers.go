@@ -110,10 +110,12 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.Block
 //
 // Two kinds of issue are exempt. One that carries a run into a tree of its own — a handed-over
 // child, a re-admitted tree — is work already under way, which is never stopped and never
-// re-checked (record.Issue.CarriesRun). And a tree Legion takes back after it has finished and
-// lingered starts again at its person's word (record.Issue.TakenBack), though re-admission leaves
-// it carrying no run. Everything else is checked like any other issue, a child that has been
-// released but never started among them.
+// re-checked (record.Issue.CarriesRun). And one that has run before, in this generation or an
+// earlier one (record.Issue.TakenBack), starts again at its person's word: a tree Legion takes
+// back after it has finished and lingered, though re-admission leaves it carrying no run.
+// Everything else is checked like any other issue: a child that has been released but never
+// started, a never-started child handed over as a root of its own, and a waiting root that only
+// left the line and came back among them, since none of them has stood in a phase of its own.
 func Exempt(issue record.Issue) bool { return issue.CarriesRun() || issue.TakenBack }
 
 // WaitsOn is what issue still waits on, from rows: the issues Dispatch says it is blocked by

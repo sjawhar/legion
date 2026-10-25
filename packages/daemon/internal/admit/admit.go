@@ -653,9 +653,11 @@ func readmittable(stored record.Issue) bool {
 // merged again, and a review, acceptance or READY would otherwise rerun work already decided or
 // landed.
 //
-// This is also the one place that knows whose tree is arriving, which outlives it as
-// record.Issue.TakenBack: afterwards a root whose own tree came back and a child another tree
-// handed over are the same shape, both tree roots at admitted, handed over, a generation on.
+// The record's record.Issue.TakenBack passes through untouched. It is the workflow's mark that the
+// issue has stood in a phase of its own (workflow.Engine.transition writes it), and an arrival here
+// neither earns nor loses one: a root whose own tree ran comes back carrying it and starts again
+// whatever its links say, while a waiting root that only left the line and returned, and a child
+// handed over without ever starting, come back without it and are checked like any other root.
 func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue, title, parentKey, rank string, seq int64, carry bool) error {
 	if stored.Generation == ^uint64(0) {
 		return fmt.Errorf("re-admit %s: generation overflows", stored.Key)
@@ -680,11 +682,6 @@ func (a *Admission) readmit(ctx context.Context, tx pgx.Tx, stored record.Issue,
 	stored.HandedOver = true
 	stored.Parent = record.ParentOf(parentKey)
 	stored.Tree = stored.Key
-	// The root's own tree coming back is the re-admission promotion exempts: such a tree starts
-	// again whatever its links say. Every other arrival here is another tree's work reaching a
-	// root of its own — a hand-over's carry, an orphan a person labelled, a child that never
-	// started — and clears the mark, so no record keeps one its next arrival contradicts.
-	stored.TakenBack = claim.IsTreeRoot(stored.Key, oldTree)
 	if !orphan {
 		stored.Phase, stored.Hold, stored.ReadyPendingVersion = phase.Admitted, nil, nil
 	}

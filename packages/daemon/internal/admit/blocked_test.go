@@ -305,12 +305,13 @@ func TestACandidateThatCarriesARunIsAdmittedWhateverItsLinksSay(t *testing.T) {
 }
 
 // A tree Legion takes back after it has finished and lingered starts again whatever its links
-// say. Re-admission marks the root's own tree coming back (record.Issue.TakenBack) and the
-// promotion rule exempts a candidate carrying that mark beside one carrying a run
-// (blockers.Exempt), which such a root does not: re-admitting a root clears its phase to
-// phase.Admitted, its carry being an orphan's alone. So a root set back to todo during its linger
-// takes its slot at once while Dispatch still says it waits on an unfinished issue, and a root
-// whose linger has already expired, left closed at phase done, comes back the same way.
+// say. Its root ran, so the workflow marked it as it moved into its first phase
+// (record.Issue.TakenBack); re-admission keeps that mark and the promotion rule exempts a
+// candidate carrying it beside one carrying a run (blockers.Exempt), which such a root does not:
+// re-admitting a root clears its phase to phase.Admitted, its carry being an orphan's alone. So a
+// root set back to todo during its linger takes its slot at once while Dispatch still says it waits
+// on an unfinished issue, and a root whose linger has already expired, left closed at phase done,
+// comes back the same way.
 func TestATreeTakenBackAfterItsLingerStartsAgainWhateverItsLinksSay(t *testing.T) {
 	const root, blocker = "LEGION-LINGER", "LEGION-BLOCKER"
 	for _, tc := range []struct {
@@ -325,7 +326,7 @@ func TestATreeTakenBackAfterItsLingerStartsAgainWhateverItsLinksSay(t *testing.T
 			admission := quiet(t, 1)
 			finished := record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
 				Project: testProject, Title: "a finished tree", Tree: root, Phase: phase.Done, Generation: 3,
-				Status: "done", Rank: "A", HandedOver: true, LastDispatchSeq: 1}
+				Status: "done", Rank: "A", HandedOver: true, TakenBack: true, LastDispatchSeq: 1}
 			if tc.lingers {
 				until := fixedNow.Add(time.Hour)
 				finished.LingerUntil = &until
@@ -339,7 +340,7 @@ func TestATreeTakenBackAfterItsLingerStartsAgainWhateverItsLinksSay(t *testing.T
 				Blockers: []string{blocker}}, engineStub{})
 
 			if got := issue(t, pool, root); got.Generation != 4 || got.Phase != phase.Admitted || !got.TakenBack || got.LingerUntil != nil {
-				t.Fatalf("the tree taken back = %#v, want its next generation at admitted, marked taken back, not lingering", got)
+				t.Fatalf("the tree taken back = %#v, want its next generation at admitted, still marked as having run, not lingering", got)
 			}
 			assertSlots(t, pool, []record.Slot{{Issue: root, Index: 0, AdmittedAt: fixedNow}})
 			assertWaiting(t, pool, nil)
@@ -381,10 +382,10 @@ func TestABlockedRootThatLeftTheQueueAndCameBackIsStillChecked(t *testing.T) {
 
 // A child still waiting on blockers when its tree finishes is handed to Legion as a root of its
 // own, carrying no run, and starting no phase, where the blocked-root rule admits it once its
-// blockers are done. It is no tree taken back: the re-admission that gives it a tree of its own
-// is another tree's work arriving, which writes no mark (readmit), so nothing exempts it and the
-// unfinished blocker Dispatch names holds it in the waiting line. The blocker's close is what
-// admits it, exactly as for a root that never ran.
+// blockers are done. It is no tree taken back: it never stood in a phase of its own, so it carries
+// no mark (record.Issue.TakenBack) and the re-admission that gives it a tree of its own invents
+// none (readmit). Nothing exempts it, and the unfinished blocker Dispatch names holds it in the
+// waiting line. The blocker's close is what admits it, exactly as for a root that never ran.
 func TestANeverStartedChildHandedOverFromAFinishedTreeIsStillChecked(t *testing.T) {
 	const root, child, blocker = "LEGION-208", "LEGION-209", "LEGION-BLOCKER"
 	pool := migratedPool(t)
@@ -419,8 +420,8 @@ func TestANeverStartedChildHandedOverFromAFinishedTreeIsStillChecked(t *testing.
 // are the deciders' own rule read rather than made (blockers.Blocked, blockers.Exempt), so a tree
 // Legion took back is named in neither while a blocker of it stands unfinished. The mark is
 // durable for exactly this moment: with every slot taken the returning root keeps its place in
-// the waiting line, and the pass that judges it when a slot frees has nothing of the re-admission
-// left to read but the record — and admits it, its blocker still unfinished.
+// the waiting line, and the pass that judges it when a slot frees has nothing of its run left to
+// read but the mark its record keeps — and admits it, its blocker still unfinished.
 func TestATreeTakenBackIsNeitherHeldNorReportedBlockedOnALaterPass(t *testing.T) {
 	const running, root, blocker = "LEGION-208", "LEGION-LINGER", "LEGION-BLOCKER"
 	pool := migratedPool(t)
@@ -430,7 +431,7 @@ func TestATreeTakenBackIsNeitherHeldNorReportedBlockedOnALaterPass(t *testing.T)
 	until := fixedNow.Add(time.Hour)
 	putIssue(t, pool, record.Issue{Key: root, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
 		Project: testProject, Title: "a finished tree", Tree: root, Phase: phase.Done, Generation: 3,
-		Status: "done", Rank: "B", HandedOver: true, LastDispatchSeq: 1, LingerUntil: &until})
+		Status: "done", Rank: "B", HandedOver: true, TakenBack: true, LastDispatchSeq: 1, LingerUntil: &until})
 	seedMirror(t, pool, root, "done", blocker)
 	seedMirror(t, pool, blocker, "in_progress")
 
@@ -452,6 +453,108 @@ func TestATreeTakenBackIsNeitherHeldNorReportedBlockedOnALaterPass(t *testing.T)
 	tick(t, pool, admission, "tick-2")
 
 	assertSlots(t, pool, []record.Slot{{Issue: root, Index: 0, AdmittedAt: fixedNow}})
+}
+
+// The whole path, with nothing seeded but a root in its slot: the opening of its design gate starts
+// its first phase, which marks it as having run; a person then moves it out of the workflow, and
+// its tree lingers; and set back to todo while Dispatch says it waits on an unfinished issue, it
+// is re-admitted into a slot at once. Re-admission wrote no mark: the one the root's own run earned
+// is what exempts it.
+func TestATreeThatRanAndCameBackIsAdmittedOnTheMarkItsRunEarned(t *testing.T) {
+	const root, blocker = "LEGION-208", "LEGION-BLOCKER"
+	pool := migratedPool(t)
+	admission := quiet(t, 1)
+	seedSlotted(t, pool, root, "A")
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutGate(context.Background(), tx, record.DesignGate{Issue: root, ArtifactID: "artifact-208", LatestVersion: 2}); err != nil {
+			t.Fatalf("seed the root's gate: %v", err)
+		}
+	})
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "approved", intake.DispatchArtifact{
+		Key: root, ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2}, admission.engine, admission); err != nil {
+		t.Fatalf("approve the root's design: %v", err)
+	}
+	if got := issue(t, pool, root); got.Phase != phase.Planning || !got.TakenBack {
+		t.Fatalf("the root once its gate opened = %#v, want planning and marked as having run", got)
+	}
+	moved := func(seq int64, status string, waits ...string) intake.DispatchIssue {
+		return intake.DispatchIssue{Key: root, ResolvedRepo: "acme/widgets", Seq: seq, Type: "issue.updated",
+			Status: status, Title: root, Rank: "A", HandedOver: handed, Blockers: waits}
+	}
+
+	applyMirrored(t, pool, admission, "to-backlog", moved(2, "backlog"), admission.engine)
+	if got := issue(t, pool, root); got.Phase != phase.Done || !got.Lingers() || !got.TakenBack {
+		t.Fatalf("the root out of the workflow = %#v, want it done, lingering and still marked", got)
+	}
+	assertSlots(t, pool, nil)
+
+	seedMirror(t, pool, blocker, "in_progress")
+	applyMirrored(t, pool, admission, "back-to-todo", moved(3, "todo", blocker), admission.engine)
+
+	if got := issue(t, pool, root); got.Generation != 2 || got.Phase != phase.Admitted || !got.TakenBack || got.Lingers() {
+		t.Fatalf("the tree taken back = %#v, want its next generation at admitted, still marked, not lingering", got)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: root, Index: 0, AdmittedAt: fixedNow}})
+	assertWaiting(t, pool, nil)
+}
+
+// No issue is both unstarted and unreported. Every issue Legion is waiting to start that its links
+// hold is named in `admission.blocked` (the tick notice and the state read the same judgement), and
+// one nothing holds any longer is started. A root's links are read once, when promotion admits it
+// into a slot, so a slotted root at phase.Admitted whose mirror row names an unfinished blocker is
+// held by nothing: `blocked` does not name it, and the opening of its tree's design gate starts it.
+// A waiting root and a held child with exactly the same links are still held, and both are named,
+// before the gate opens and after.
+func TestNoIssueIsBothUnstartedAndUnreported(t *testing.T) {
+	const slotted, waiting, child, blocker = "LEGION-208", "LEGION-ROOT", "LEGION-209", "LEGION-BLOCKER"
+	pool := migratedPool(t)
+	admission := quiet(t, 1)
+	seedSlotted(t, pool, slotted, "A")
+	seedWaiting(t, pool, waiting, "B")
+	parent := slotted
+	putIssue(t, pool, record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Project: testProject, Title: child, Tree: slotted, Parent: &parent, Phase: phase.Admitted, Generation: 1,
+		Status: "todo", Rank: "C", HandedOver: true})
+	seedMirror(t, pool, slotted, "in_progress", blocker)
+	seedMirror(t, pool, waiting, "todo", blocker)
+	seedMirror(t, pool, child, "todo", blocker)
+	seedMirror(t, pool, blocker, "in_progress")
+	inTx(t, pool, func(tx pgx.Tx) {
+		if err := record.NewStore().PutGate(context.Background(), tx, record.DesignGate{Issue: slotted, ArtifactID: "artifact-208", LatestVersion: 2}); err != nil {
+			t.Fatalf("seed the slotted root's gate: %v", err)
+		}
+	})
+	want := []record.BlockedIssue{{Issue: child, BlockedBy: []string{blocker}}, {Issue: waiting, BlockedBy: []string{blocker}}}
+	assertBlocked := func(when string) {
+		t.Helper()
+		inTx(t, pool, func(tx pgx.Tx) {
+			got, err := admission.blocked(context.Background(), tx)
+			if err != nil {
+				t.Fatalf("read what is blocked %s: %v", when, err)
+			}
+			if !reflect.DeepEqual(got, want) {
+				t.Fatalf("blocked %s = %#v, want %#v: the waiting root and the held child, never the slotted root", when, got, want)
+			}
+		})
+	}
+
+	assertBlocked("before the gate opens")
+
+	if _, err := intake.ApplyFact(context.Background(), pool, "dispatch", "approved", intake.DispatchArtifact{
+		Key: slotted, ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2}, admission.engine, admission); err != nil {
+		t.Fatalf("approve the slotted root's design: %v", err)
+	}
+
+	if got := issue(t, pool, slotted); got.Phase != phase.Planning {
+		t.Fatalf("the slotted root = %s once its gate opened, want planning: nothing holds it, so it starts", got.Phase)
+	}
+	for _, held := range []string{waiting, child} {
+		if got := issue(t, pool, held); got.Phase != phase.Admitted {
+			t.Fatalf("%s = %s, want it held at admitted by its unfinished blocker", held, got.Phase)
+		}
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: slotted, Index: 0, AdmittedAt: fixedNow}})
+	assertBlocked("after the gate opened")
 }
 
 // countingStore counts the mirror reads of the calls under test; every other read and write is

@@ -386,12 +386,11 @@ func TestStoreRoundTripsEveryRecord(t *testing.T) {
 	})
 }
 
-// A tree Legion took back after it had finished and lingered is marked on its record, and the
-// mark is what promotion reads when the root comes up again on a later pass, so it has to survive
-// the write: PutIssue stores it and Issue, like every read behind issueColumns, gives it back.
-// The write that clears it matters as much — a re-admission carrying another tree's work into a
-// root of its own leaves no mark behind for the next pass to read — so a record written without
-// it reads back without it.
+// The mark that an issue has stood in a phase of its own is what promotion reads when a tree that
+// ran comes up again on a later pass, long after its run, so it has to survive the write: PutIssue
+// stores it and Issue, like every read behind issueColumns, gives it back. The store keeps
+// whatever the record says, both ways — the workflow never clears the mark, but a record written
+// without it, as every issue that never ran is, must read back without it.
 func TestStoreRoundTripsATreeTakenBack(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)

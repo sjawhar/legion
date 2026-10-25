@@ -113,14 +113,12 @@ func TestAChildReleasedWhileABlockerIsUnfinishedStaysAdmitted(t *testing.T) {
 
 // The close of the last issue a held child waited on starts it: its branch row, its planner's
 // start behind that row, and one child-status notice to the tree's architect naming the issues it
-// waited on. A child that waited on nothing hears nothing from this pass.
+// waited on.
 func TestAHeldChildStartsWhenItsLastBlockerCloses(t *testing.T) {
 	pool := migratedPool(t)
 	seedHeldTree(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: new(3)})
 	seedAdmittedChild(t, pool, "LEGION-209")
-	seedAdmittedChild(t, pool, "LEGION-210")
 	seedMirror(t, pool, "LEGION-209", "todo", "LEGION-300", "LEGION-301")
-	seedMirror(t, pool, "LEGION-210", "todo")
 	seedMirror(t, pool, "LEGION-300", "done")
 	seedMirror(t, pool, "LEGION-301", "in_progress")
 	engine := testEngine(config.DesignGateRootIssues, nil)
@@ -138,9 +136,6 @@ func TestAHeldChildStartsWhenItsLastBlockerCloses(t *testing.T) {
 	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Planning {
 		t.Fatalf("the child = %s once every issue it waited on is done, want planning", got)
 	}
-	if got := phaseOf(t, pool, "LEGION-210"); got != phase.Admitted {
-		t.Fatalf("the child that waited on nothing = %s, want it untouched at admitted", got)
-	}
 	assertOutboxKinds(t, pool, []string{"issue_branch", "supervise", "notice", "notice"})
 	assertBranchRow(t, pool, "LEGION-209", 4)
 	assertPlannerStart(t, pool, "LEGION-209")
@@ -148,6 +143,66 @@ func TestAHeldChildStartsWhenItsLastBlockerCloses(t *testing.T) {
 	if got := childStatusNotices(t, pool); len(got) != 1 || got[0] != want {
 		t.Fatalf("child-status notices = %#v, want one reading %q", got, want)
 	}
+}
+
+// A held child whose links a person takes off while it waits is held by nothing any longer, and
+// starts at the next look: left admitted, it would stand unstarted with nothing naming it, since
+// the state's `blocked` names only a child with an unfinished blocker and the edit, which changes
+// no status, is not one the engine's handling of the event acts on. It starts as a child its tree's
+// gate opened onto does, its architect told nothing it would not be told of that one.
+func TestAHeldChildWhoseLinksAreTakenOffStarts(t *testing.T) {
+	pool := migratedPool(t)
+	seedHeldTree(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 3, ApprovedVersion: new(3)})
+	seedAdmittedChild(t, pool, "LEGION-209")
+	seedMirror(t, pool, "LEGION-209", "todo", "LEGION-300")
+	seedMirror(t, pool, "LEGION-300", "in_progress")
+	engine := testEngine(config.DesignGateRootIssues, nil)
+
+	startUnblockedChildren(t, pool, engine)
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted {
+		t.Fatalf("the child = %s while the issue it waits on is unfinished, want admitted", got)
+	}
+
+	applyMirrored(t, pool, engine, "links-taken-off", intake.DispatchIssue{
+		Key: "LEGION-209", ResolvedRepo: "sjawhar/legion", Seq: 2, Type: "issue.updated", Status: "todo",
+		Title: "LEGION-209", Parent: "LEGION-208", Rank: "V"})
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted {
+		t.Fatalf("the child = %s on the edit itself, want it still admitted: the event changes no status", got)
+	}
+	if got := blockedNow(t, pool); len(got) != 0 {
+		t.Fatalf("blocked = %#v once the child names no blocker, want nothing", got)
+	}
+	startUnblockedChildren(t, pool, engine)
+
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Planning {
+		t.Fatalf("the child = %s once it names no blocker, want planning", got)
+	}
+	assertBranchRow(t, pool, "LEGION-209", 4)
+	assertPlannerStart(t, pool, "LEGION-209")
+	if got := childStatusNotices(t, pool); len(got) != 0 {
+		t.Fatalf("child-status notices = %#v, want none: no issue it waited on closed", got)
+	}
+}
+
+// blockedNow is the state's `blocked` as the project stands: every recorded issue and the whole
+// mirror, judged as the projection judges them, with no root waiting for a slot.
+func blockedNow(t *testing.T, pool *pgxpool.Pool) []record.BlockedIssue {
+	t.Helper()
+	var blocked []record.BlockedIssue
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		store := record.NewStore()
+		issues, err := store.Issues(t.Context(), tx)
+		if err != nil {
+			return err
+		}
+		mirrored, err := store.DispatchIssues(t.Context(), tx, "LEGION")
+		if err != nil {
+			return err
+		}
+		blocked = blockers.Blocked(blockers.Rows(mirrored), issues, nil)
+		return nil
+	})
+	return blocked
 }
 
 // The opening of a tree's design gate starts every admitted member it was holding, but not one
@@ -266,6 +321,95 @@ func TestALingerHandsOverTheAdmittedChildThatStillWaits(t *testing.T) {
 	if err := pool.QueryRow(t.Context(),
 		`select count(*) from outbox where kind = 'dispatch_status' and issue <> 'LEGION-209'`).Scan(&others); err != nil || others != 0 {
 		t.Fatalf("status writes for another member = %d, %v; want none, the unblocked admitted child left as it was", others, err)
+	}
+}
+
+// An issue earns its mark (record.Issue.TakenBack) as it moves into a phase of its own, and keeps
+// it for good: through a child's re-entry into its next generation, held there by a blocker
+// without starting again, and through its root's leave into a linger. So the record a tree that
+// ran leaves for its taken-back root is already one promotion exempts (blockers.Exempt), whatever
+// re-admission later writes of its phase and generation, which never touches the mark — while a
+// member that never started carries none.
+func TestTheRunMarkIsWrittenAsAPhaseStartsAndOutlivesTheRun(t *testing.T) {
+	pool := migratedPool(t)
+	seedIssue(t, pool, record.Issue{Key: "LEGION-208", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
+		Tree: "LEGION-208", Project: "LEGION", Title: "root", Phase: phase.Admitted, Generation: 4, Status: "in_progress", Rank: "U",
+		HandedOver: true, LastDispatchSeq: 1})
+	seedGate(t, pool, record.DesignGate{Issue: "LEGION-208", ArtifactID: "artifact-208", LatestVersion: 2})
+	seedSlot(t, pool, record.Slot{Issue: "LEGION-208", Index: 0, AdmittedAt: time.Date(2026, 9, 23, 0, 0, 0, 0, time.UTC)})
+	seedAdmittedChild(t, pool, "LEGION-209")
+	seedAdmittedChild(t, pool, "LEGION-210")
+	seedMirror(t, pool, "LEGION-210", "todo", "LEGION-300")
+	seedMirror(t, pool, "LEGION-300", "in_progress")
+	engine := testEngine(config.DesignGateRootIssues, nil)
+	marked := func(key string) bool {
+		t.Helper()
+		var got bool
+		if err := pool.QueryRow(t.Context(), "select taken_back from issues where key = $1", key).Scan(&got); err != nil {
+			t.Fatalf("read the mark of %s: %v", key, err)
+		}
+		return got
+	}
+	for _, key := range []string{"LEGION-208", "LEGION-209", "LEGION-210"} {
+		if marked(key) {
+			t.Fatalf("%s is marked before any phase of it started", key)
+		}
+	}
+
+	applyMirrored(t, pool, engine, "approved", intake.DispatchArtifact{
+		Key: "LEGION-208", ArtifactID: "artifact-208", Kind: intake.DispatchArtifactApproved, Version: 2})
+	for key, want := range map[string]struct {
+		at     phase.Phase
+		marked bool
+	}{
+		"LEGION-208": {phase.Planning, true}, "LEGION-209": {phase.Planning, true}, "LEGION-210": {phase.Admitted, false},
+	} {
+		if got := phaseOf(t, pool, key); got != want.at || marked(key) != want.marked {
+			t.Fatalf("%s = %s marked %t once the gate opened, want %s marked %t", key, got, marked(key), want.at, want.marked)
+		}
+	}
+
+	// The child that ran, in_progress as its run's status writes leave it, is set back to todo
+	// while an issue it now waits on is unfinished: its next generation is held at admitted, and
+	// still marked.
+	if _, err := pool.Exec(t.Context(), "update issues set status = 'in_progress', dispatch_status = 'in_progress' where key = 'LEGION-209'"); err != nil {
+		t.Fatalf("record the running child in_progress: %v", err)
+	}
+	seedMirror(t, pool, "LEGION-301", "in_progress")
+	applyMirrored(t, pool, engine, "child-set-back", intake.DispatchIssue{
+		Key: "LEGION-209", ResolvedRepo: "sjawhar/legion", Seq: 2, Type: "issue.updated", Status: "todo",
+		Title: "LEGION-209", Parent: "LEGION-208", Rank: "V", Blockers: []string{"LEGION-301"}})
+	var generation int
+	if err := pool.QueryRow(t.Context(), "select generation from issues where key = 'LEGION-209'").Scan(&generation); err != nil {
+		t.Fatalf("read the re-entered child's generation: %v", err)
+	}
+	if got := phaseOf(t, pool, "LEGION-209"); got != phase.Admitted || generation != 5 || !marked("LEGION-209") {
+		t.Fatalf("the re-entered child = %s at generation %d marked %t, want held at admitted in generation 5 and still marked",
+			got, generation, marked("LEGION-209"))
+	}
+
+	// The root leaves the workflow: its tree lingers, its run over, and its record keeps the mark.
+	applyMirrored(t, pool, engine, "root-backlog", intake.DispatchIssue{
+		Key: "LEGION-208", ResolvedRepo: "sjawhar/legion", Seq: 3, Type: "issue.updated", Status: "backlog",
+		Title: "root", Rank: "U", HandedOver: true})
+	var root *record.Issue
+	seedRecord(t, pool, func(tx pgx.Tx) error {
+		var err error
+		root, err = record.NewStore().Issue(t.Context(), tx, "LEGION-208")
+		return err
+	})
+	if root.Phase != phase.Done || !root.Lingers() || !root.TakenBack {
+		t.Fatalf("the root that left = %#v, want it done, lingering and still marked", *root)
+	}
+	// What re-admission writes of a root taken back — its next generation at admitted, no linger —
+	// leaves the mark as it found it, and the record is exempt by that alone: it carries no run.
+	taken := *root
+	taken.Phase, taken.Generation, taken.LingerUntil = phase.Admitted, root.Generation+1, nil
+	if taken.CarriesRun() || !blockers.Exempt(taken) {
+		t.Fatalf("the root taken back = %#v, want it exempt by its mark alone", taken)
+	}
+	if waits := blockers.WaitsOn(map[string]blockers.Row{"LEGION-208": {Status: "todo", Blockers: []string{"LEGION-300"}}}, taken); len(waits) != 0 {
+		t.Fatalf("the root taken back waits on %v, want nothing: it ran", waits)
 	}
 }
 
