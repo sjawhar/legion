@@ -1149,7 +1149,7 @@ function compositeScoped(command: string): ScopedCommand | undefined {
       if (stage.redirects.some((r) => r.heredoc !== undefined && !r.heredoc.quoted))
         return undefined;
   const vars = new Map<string, string>();
-  const valueOf = (word: CallWord | undefined): string | undefined => {
+  const wordValue = (word: CallWord | undefined): string | undefined => {
     if (word === undefined || word.unknown) return undefined;
     let out = "";
     for (const part of word.parts) {
@@ -1167,13 +1167,13 @@ function compositeScoped(command: string): ScopedCommand | undefined {
   const asWords = (list: readonly CallWord[]): Word[] | undefined => {
     const out: Word[] = [];
     for (const word of list) {
-      const value = valueOf(word);
+      const value = wordValue(word);
       if (value === undefined) return undefined;
       out.push({ raw: word.raw, value });
     }
     return out;
   };
-  const targetOf = (r: CallRedirect) => (isLiteral(r.target) ? valueOf(r.target) : undefined);
+  const targetOf = (r: CallRedirect) => (isLiteral(r.target) ? wordValue(r.target) : undefined);
   const quiet = (r: CallRedirect) => {
     const to = targetOf(r);
     return (
@@ -1191,8 +1191,8 @@ function compositeScoped(command: string): ScopedCommand | undefined {
       if (!isLiteral(stage.words[at])) return undefined;
       at++;
     }
-    if (valueOf(stage.words[at]) === "timeout") {
-      const duration = valueOf(stage.words[at + 1]);
+    if (wordValue(stage.words[at]) === "timeout") {
+      const duration = wordValue(stage.words[at + 1]);
       if (duration === undefined || !DURATION.test(duration)) return undefined;
       at += 2;
     }
@@ -1206,8 +1206,8 @@ function compositeScoped(command: string): ScopedCommand | undefined {
     if (at === undefined) return text.includes("dispatch") ? "unread" : "other";
     const [program, name, ...flags] = stage.words.slice(at);
     if (program === undefined) return "other";
-    const programValue = valueOf(program);
-    const nameValue = valueOf(name);
+    const programValue = wordValue(program);
+    const nameValue = wordValue(name);
     const scoped = (SCOPED_COMMANDS as readonly string[]).includes(nameValue ?? "");
     if (programValue === undefined) return scoped || nameValue === undefined ? "unread" : "other";
     if (programValue.split("/").at(-1) !== "dispatch") return "other";
@@ -1245,9 +1245,9 @@ function compositeScoped(command: string): ScopedCommand | undefined {
     const [only] = statement.stages;
     if (statement.stages.length === 1 && only.redirects.length === 0 && !only.substitution) {
       const words = only.words;
-      const first = isLiteral(words[0]) ? valueOf(words[0]) : undefined;
+      const first = isLiteral(words[0]) ? wordValue(words[0]) : undefined;
       if (first === "cd") {
-        const dir = isLiteral(words[1]) && !words[1].tilde ? valueOf(words[1]) : undefined;
+        const dir = isLiteral(words[1]) && !words[1].tilde ? wordValue(words[1]) : undefined;
         if (words.length !== 2 || dir === undefined || dir === "" || dir.startsWith("-"))
           return undefined;
         setup.push(statement);
@@ -1260,7 +1260,7 @@ function compositeScoped(command: string): ScopedCommand | undefined {
         assignments.every((w) => ASSIGNMENT.test(w.raw) && isLiteral(w))
       ) {
         for (const assignment of assignments) {
-          const text = valueOf(assignment) ?? "";
+          const text = wordValue(assignment) ?? "";
           vars.set(text.slice(0, text.indexOf("=")), text.slice(text.indexOf("=") + 1));
         }
         setup.push(statement);
@@ -1284,11 +1284,10 @@ function compositeScoped(command: string): ScopedCommand | undefined {
   if (write === undefined) return undefined;
   const stage = write.stages[0];
   const at = commandAt(stage) ?? 0;
-  const program = stage.words[at];
   const name = stage.words[at + 1];
   const flagWords = stage.words.slice(at + 2);
   const flags = asWords(flagWords) ?? [];
-  const nameValue = valueOf(name) ?? "";
+  const nameValue = wordValue(name) ?? "";
   // The write's redirects: output ones the dry run drops (its stdout must be the CLI's JSON), one
   // stdin it keeps, and nothing else.
   const dropped: CallRedirect[] = [];
