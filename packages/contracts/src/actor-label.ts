@@ -11,9 +11,10 @@ import { type Actor, serviceSubjectLabel } from "./dispatch-api";
  * when the registry is unavailable.
  */
 
-/** `session:01234567…` — how an untitled session reads everywhere. */
+/** `session:01234567…` — how an untitled session reads everywhere. The Legion daemon's write
+ *  identity, `legion-daemon:<PROJECT>`, reads whole: its first 8 characters name nobody. */
 export function shortSessionId(id: string): string {
-  return `session:${id.slice(0, 8)}…`;
+  return id.startsWith("legion-daemon:") ? id : `session:${id.slice(0, 8)}…`;
 }
 
 /** The one session label: the live registry title, else the title stamped on the write, else

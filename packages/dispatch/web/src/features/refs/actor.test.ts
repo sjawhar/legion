@@ -21,6 +21,11 @@ test("a session is labelled by its live registry title, else its stamped title, 
   expect(actorLabel({ id: "alice", kind: "user" }, titles)).toBe("alice");
 });
 
+test("the Legion daemon's write identity reads whole, not as a short session id", () => {
+  expect(actorLabel({ id: "legion-daemon:INFRA", kind: "session" })).toBe("legion-daemon:INFRA");
+  expect(actorLabel({ id: "legion-daemonic-session", kind: "session" })).toBe("session:legion-d…");
+});
+
 test("a personally attributed session keeps its human owner after the same label", () => {
   expect(
     actorLabel({

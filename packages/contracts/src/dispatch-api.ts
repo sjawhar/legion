@@ -964,7 +964,9 @@ export interface AskAnswer {
 }
 
 export interface AskResolution {
-  readonly kind: "retracted" | "resolved";
+  /** `withdrawn` is written by the server alone, when the ask's issue is closed; no caller can
+   *  resolve an ask with it, and reopening the issue opens the ask again. */
+  readonly kind: "retracted" | "resolved" | "withdrawn";
   readonly reason: string;
   readonly actor: Actor;
   readonly at: string;
@@ -2517,7 +2519,7 @@ const askEventPayloadFields = {
     .optional(),
   resolution: z
     .object({
-      kind: z.enum(["retracted", "resolved"]).optional(),
+      kind: z.enum(["retracted", "resolved", "withdrawn"]).optional(),
       reason: z.string().optional(),
       actor: z
         .object({ kind: z.string().optional(), id: z.string().optional() })

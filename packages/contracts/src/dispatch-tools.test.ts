@@ -965,6 +965,16 @@ describe("dispatchToolSpecs", () => {
     ).toBe(false);
   });
 
+  test("refuses a withdrawal, which only the close of the issue writes", () => {
+    expect(
+      schemaFor("dispatch_resolve_ask").safeParse({
+        ask: "ask-1",
+        kind: "withdrawn",
+        reason: "The issue is done.",
+      }).success
+    ).toBe(false);
+  });
+
   test("dispatch_resolve_comment takes only the comment reference", () => {
     const schema = schemaFor("dispatch_resolve_comment");
 
