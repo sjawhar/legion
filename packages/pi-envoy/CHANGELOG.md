@@ -4,6 +4,10 @@
 
 ### Added
 
+- The `dispatch-brainstorming` skill this plugin ships asks, once the clarifying questions are
+  answered and the approaches are known, whether building them is quicker than choosing between
+  them on paper; where it is, fresh agents build each from the brief alone, and the decision block
+  shows what was built and how each did, side by side (INFRA-248).
 - The `dispatch` skill this plugin ships teaches the board move as a command: a card moves with
   `dispatch issue-update --issue <KEY> --before <OTHER>`, which puts it above that issue,
   `--after <OTHER>`, which puts it below, or both together, which land it between them, where the

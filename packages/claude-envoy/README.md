@@ -209,7 +209,7 @@ on every `SessionStart` (startup, resume, clear, compact, fork) and `SubagentSta
 
 `envoy`, `dispatch`, `dispatch-first` and `dispatch-brainstorming` are the four a standalone Claude Code session uses. The other root skills
 stay out of this plugin: they belong to Legion's roles (the architect, controller, oracle and retro
-skills, and the phase workers' `legion-worker` and `ce-simplify-code`) and to the reviewer's
+skills, and the phase workers' `legion-worker`, `ce-simplify-code` and `ce-dogfood`) and to the reviewer's
 `thermonuclear-*` pair (`skills/AGENTS.md`). A phase worker on Claude Code gets them from the
 generated `legion/` plugin (below). Link another root skill here only when a standalone Claude
 Code session needs it.

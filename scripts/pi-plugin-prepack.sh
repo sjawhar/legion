@@ -41,7 +41,7 @@ plugin() {
     entry=legion
     skills=(
       legion-architect legion-controller legion-oracle legion-retro legion-worker
-      ce-simplify-code thermonuclear-code-quality thermonuclear-deep-review
+      ce-dogfood ce-simplify-code thermonuclear-code-quality thermonuclear-deep-review
     )
     ;;
   *)

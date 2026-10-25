@@ -13,6 +13,7 @@ This skill replaces superpowers' `brainstorming` and `writing-plans`, even when 
 - Each design question is a decision block in the spec, never a chat question. A small change gets a short spec.
 - Send every ready question at once. Request approval once, at the end.
 - Ask in stages: clarifying questions, two or three approaches with a recommendation, the design by section. A question that depends on no open answer goes out at once.
+- Once the clarifying questions are answered and the approaches are known, weigh one question yourself before they go into a decision block. Ask whether trying the approaches is quicker than choosing between them: each can be built or prototyped in hours, and what decides between them is how they work, not how they read. If so, have fresh agents build each from the brief alone (ce-bakeoff without its judge; ce-prototype for a page or a flow) and run each through the same check. Show the person what was built and how each did, side by side, in the decision block. Recommend one only where the check settles it; otherwise the person picks. A session without ce-bakeoff or ce-prototype has fresh `task` agents do the same build.
 - Copy the spec, plan or spec code into the repository only when the person, the issue, its spec or the repository asks.
 
 Before the first version, read the code and documents the design touches. Before the first version, also read the `skill://dispatch` sections "Writing a spec", "Decision blocks", "Writing for the human" and "Approval of a spec".

@@ -7,6 +7,12 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- The plugin ships `ce-dogfood`, Legion's copy of the MIT-licensed Compound Engineering skill (from
+  `skills/ce-dogfood` at `8a776c13` of sjawhar/compound-engineering-plugin, `LICENSE` beside it).
+  The `legion-worker` skill's tester drives a slice's browser page with it, as its new
+  `references/dogfood.md` says: it reports what it finds to the implementer as `failures` with red
+  tests, fixes nothing itself, and posts the report on the slice's Dispatch issue rather than
+  committing it (INFRA-248).
 - Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
   `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
   is refused while an issue beneath it is still in the workflow and a merged root's close waits

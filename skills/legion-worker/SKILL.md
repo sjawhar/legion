@@ -22,6 +22,7 @@ with the `read` tool: a read by filesystem path stops at 300 lines.
 | When | Read |
 | --- | --- |
 | You write or edit the PR body, record a proof (an `E2E` line or a handoff `proof` array), verify another phase's proof, or run the simplify pass | `skill://legion-worker/references/pr-body.md` |
+| You test a slice with a browser page | `skill://legion-worker/references/dogfood.md` |
 | Before a push, to check your commits' App identity against your issue's default branch | `skill://legion-worker/references/default-branch-check.md` |
 | You reply on or resolve a review thread, list a pull request's threads, or adjudicate a bot's finding | `skill://legion-worker/references/review-threads.md` |
 | GitHub reports a conflict, the pull request is retargeted, you compare heads after a conflict merge, or you would rewrite a pushed commit | `skill://legion-worker/references/conflicts-and-rewrites.md` |
@@ -289,7 +290,9 @@ what the tester verifies, and the simplify pass.
 - **The tester runs the application, not CI again.** It drives the changed surface for real and
   tries to break it, judges whether the implementer's tests would catch what it broke, records what
   it ran and saw, and must read CI on GitHub for everything static — lint, types and the unit
-  suites are CI's work, rerun by no tester: `skill://legion-worker/references/pr-body.md`.
+  suites are CI's work, rerun by no tester: `skill://legion-worker/references/pr-body.md`. For a
+  slice with a browser page it also drives the page with `skill://ce-dogfood`, as
+  `skill://legion-worker/references/dogfood.md` says.
 - **Review threads** are answered and resolved one by one, never in bulk, and never one you have
   not read: one disposition reply per thread, then that thread's own resolution by the
   implementer, the pull request's author — its `gh api graphql` mutation after every push that
