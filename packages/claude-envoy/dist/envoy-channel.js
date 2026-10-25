@@ -44251,12 +44251,19 @@ var legionCapabilityReportView = exports_external.strictObject({
   ok: exports_external.array(nonEmptyString),
   open: exports_external.array(exports_external.strictObject({ name: nonEmptyString, detail: nonEmptyString }))
 });
+var legionWatchdogView = exports_external.strictObject({
+  step: exports_external.enum(["probed", "interrupted", "relaunched", "reported"]),
+  at: timestamp,
+  silenceSeconds: exports_external.number().int().nonnegative(),
+  steps: exports_external.array(nonEmptyString)
+});
 var legionClaimView = exports_external.strictObject({
   session: exports_external.string(),
   state: exports_external.enum(LEGION_CLAIM_STATES),
   locator: legionLocator.optional(),
   capabilities: legionCapabilityReportView.optional(),
-  pluginContract: exports_external.number().int().nonnegative()
+  pluginContract: exports_external.number().int().nonnegative(),
+  watchdog: legionWatchdogView.optional()
 });
 var legionPhaseView = exports_external.strictObject({
   claim: legionClaimView,
@@ -47163,7 +47170,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 36
+  daemonApiVersion: 37
 };
 
 // src/channel-forwarder.ts
