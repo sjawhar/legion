@@ -43,28 +43,44 @@ func (s *Service) IndexDocumentReferences(ctx context.Context, artifactID string
 }
 
 // indexDocument indexes one document version, written at versionAt, in its writer's transaction,
-// which holds the document's owner row: its references, the excerpt of each mention, and its
-// blocks with the mentions each holds (refs.IndexBlocks), all from one extraction of markdown.
-// The blocks are rendered.offsets, the render the version's markdown came from; GET …/blocks
-// lists one block per offset of the same renderer (renderedBlocks), so both list one set of
-// blocks. A version with no rendering - an upload whose replacement changed nothing, which
-// writes no tree - indexes no blocks: migration 0118's trigger left the document owed when the
-// version's row was inserted, for the reconciliation, which reads the document itself. The event
-// the caller appends names the counted targets both the document's references and its blocks'
-// mentions moved, since a node is counted once for each block citing it.
+// which holds the document's owner row, from the render the version's markdown came from:
+// indexVersion with rendered's blocks. The blocks are rendered.offsets; GET …/blocks lists one
+// block per offset of the same renderer (renderedBlocks), so both list one set of blocks. A
+// version with no rendering - an upload whose replacement changed nothing, which writes no tree -
+// indexes no blocks: migration 0118's trigger left the document owed when the version's row was
+// inserted, for the block-index reconciliation, which reads the document itself.
 func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, rendered renderedTree) (model.ReferenceChanges, error) {
+	if rendered.tree == nil {
+		return s.indexVersion(ctx, tx, artifactID, version, versionAt, markdown, nil, false)
+	}
+	blocks := make([]model.ArtifactBlock, len(rendered.offsets))
+	for index, offset := range rendered.offsets {
+		blocks[index] = model.ArtifactBlock{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
+	}
+	return s.indexVersion(ctx, tx, artifactID, version, versionAt, markdown, blocks, true)
+}
+
+// indexVersion indexes one document version, written at versionAt, in a transaction holding the
+// document's owner row: its references, the excerpt of each mention, and its blocks with the
+// mentions each holds (refs.IndexBlocks), all from one extraction of markdown. blocks index into
+// markdown, the render they came from. rendered false is a version with no rendering: it indexes
+// no blocks and marks its mentions owed an excerpt (refs.ClearExcerpts) for the excerpt
+// reconciliation, which reads the document itself. The event the caller appends names the counted
+// targets both the document's references and its blocks' mentions moved, since a node is counted
+// once for each block citing it.
+func (s *Service) indexVersion(ctx context.Context, tx pgx.Tx, artifactID string, version int, versionAt time.Time, markdown string, blocks []model.ArtifactBlock, rendered bool) (model.ReferenceChanges, error) {
 	located := text.ExtractAt(markdown, s.serverURL)
 	var moved []refs.Target
-	if rendered.tree != nil {
-		blocks := make([]refs.Block, len(rendered.offsets))
-		for i, offset := range rendered.offsets {
-			blocks[i] = refs.Block{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
+	if rendered {
+		nodes := make([]refs.Block, len(blocks))
+		for i, block := range blocks {
+			nodes[i] = refs.Block{ID: block.ID, Type: block.Type, From: block.From, To: block.To}
 		}
 		// The blocks are indexed before the document's own references are reconciled: a first
 		// indexing dates a block's mention from the document's refs row for its target, which a
 		// surviving target already holds and a new one gets with this same time.
 		var err error
-		if moved, err = refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, rendered.markdown, blocks, located); err != nil {
+		if moved, err = refs.IndexBlocks(ctx, tx, artifactID, version, versionAt, markdown, nodes, located); err != nil {
 			return model.ReferenceChanges{}, err
 		}
 	}
@@ -76,23 +92,10 @@ func (s *Service) indexDocument(ctx context.Context, tx pgx.Tx, artifactID strin
 	if err != nil {
 		return model.ReferenceChanges{}, err
 	}
-	return changes, s.recordTreeExcerpts(ctx, tx, artifactID, version, rendered, located)
-}
-
-// recordTreeExcerpts stores the excerpt of every mention the document's version writes, cut from
-// rendered, the render the version's markdown came from, so the block ids are the ones the
-// document carries. located is the version's one extraction (indexDocument). A version with no
-// rendering - an upload whose replacement changed nothing, which writes no tree - marks its
-// mentions owed (refs.ClearExcerpts) for the reconciliation, which reads the document itself.
-func (s *Service) recordTreeExcerpts(ctx context.Context, tx pgx.Tx, artifactID string, version int, rendered renderedTree, located []text.Located) error {
-	if rendered.tree == nil {
-		return refs.ClearExcerpts(ctx, tx, artifactID)
+	if !rendered {
+		return changes, refs.ClearExcerpts(ctx, tx, artifactID)
 	}
-	blocks := make([]model.ArtifactBlock, len(rendered.offsets))
-	for index, offset := range rendered.offsets {
-		blocks[index] = model.ArtifactBlock{ID: offset.ID, Type: offset.Type, From: offset.From, To: offset.To}
-	}
-	return refs.RecordExcerpts(ctx, tx, artifactID, version, refs.MentionExcerpts(rendered.markdown, blocks, located))
+	return changes, refs.RecordExcerpts(ctx, tx, artifactID, version, refs.MentionExcerpts(markdown, blocks, located))
 }
 
 // referenceExcerptBatch is how many documents one reconciliation tick reads; referenceExcerptStep

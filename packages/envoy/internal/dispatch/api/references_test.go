@@ -633,9 +633,20 @@ func TestRebuildRefsConvergesOnTheLiveIndex(t *testing.T) {
 		t.Fatalf("rebuild refs: %v", err)
 	}
 	// Every document has a version (three, counting the two specs); the planted row from a message
-	// that does not exist is the one orphan.
-	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6}) {
+	// that does not exist is the one orphan. Each of the three is marked owed a block index.
+	if report != (refs.Rebuild{Documents: 3, Asks: 1, Comments: 1, Messages: 1, Orphans: 1, Edges: 6, BlocksOwed: 3}) {
 		t.Fatalf("rebuild report = %#v", report)
+	}
+	var documents, owed int
+	if err := database.Pool.QueryRow(context.Background(), `
+		select count(*), count(*) filter (where b.artifact_id is not null and b.version is null)
+		from artifacts a left join document_block_versions b on b.artifact_id = a.id
+		where a.kind = 'doc'
+	`).Scan(&documents, &owed); err != nil {
+		t.Fatalf("read the block index of every document: %v", err)
+	}
+	if documents != 3 || owed != documents {
+		t.Fatalf("after rebuild-refs %d of %d documents are owed a block index, want every one", owed, documents)
 	}
 	rebuilt := readRefRows(t, database)
 	if len(rebuilt) != len(live) {
