@@ -2,66 +2,74 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T18:05:00Z",
-  "round": "10 — review round 9's Important (a sentence this change wrote, in an agent-read skill) and its Minors",
+  "completed": "2026-10-25T18:45:00Z",
+  "round": "11 — review round 10's three Important and its Minor, with the path each rewritten sentence describes cited by file:line",
+  "citations": [
+    "packages/daemon/internal/workflow/linger.go:78-101 — read before the architect skill's sentence: `if merged { except = claim.RoleImplementer }`, and `record.IssueSuspend` enqueued only `if !merged`. A merged close queues no suspension.",
+    "packages/daemon/internal/workflow/check.go:215-231, :250-260, :285-296 — read before the same sentence's condition: `closeCheck` enqueues the implementer's `issue_close` AND an `IssueSuspend` together (:289-294), so a `pass` or `fail` deletes the Sandbox; `endLook` ends an unreported look as a `pending` would (:220-231); and a `pending` whose wake is already queued calls `startLook` instead of suspending (:254-256).",
+    "packages/daemon/internal/runtime/sandbox/sandbox.go:763-781 — read before the issueClose comment: `Release` validates, suspends the locator, forgets the claim and calls `releaseControllerSandbox`; its own doc says an issue's Sandbox, Secrets and disk are the tree cleanup's alone.",
+    "packages/daemon/internal/runtime/sandbox/podkind.go:308-336 — read before the podsafety sentence: `controllerPod.claimTemplates` returns its one `issue` template and `diskSource` mounts that claim, so the controller's pod does mount a disk that outlives it; `issuePod` returns nil and renders a generic ephemeral volume.",
+    "packages/daemon/internal/runtime/sandbox/relaunch.go:537 — why the inert fixture still matters: `supersededDisk` is true for any issue Sandbox carrying a template.",
+    "packages/daemon/internal/runtime/sandbox/repocache.go:115 — why two `with its volume` survivors are correct: the repository cache's Sandbox does own its claim."
+  ],
   "proof": [
     {
-      "criterion": "The architect skill states the lifecycle a merged close actually has, so an architect reading `child-closed` learns what happens to the implementer's pod.",
-      "surface": "The daemon's own source, read before the sentence was rewritten rather than after.",
-      "command": "read packages/daemon/internal/workflow/linger.go:78-101",
-      "observed": "`if merged { except = claim.RoleImplementer }` and the `record.IssueSuspend` enqueued only `if !merged`. So a merged close queues no suspension at all: the implementer keeps its pod for the production check's first look, and the Sandbox goes only when a look reports `pending`. `skills/legion-architect/SKILL.md:417-421` now says that; the generated copy at `packages/claude-envoy/legion/skills/legion-architect/SKILL.md:418` carries it after `bun run build`, with `bun run check-dist` reporting `dist/ and legion/ match a fresh build`.",
-      "headSha": "0d503c1f1b7b4f0966754dd8262990f815f45257",
-      "negativeControl": "`grep -rn \"Sandbox deleted with its pod, since it still\" packages/ skills/` is empty: the sentence this change wrote survives nowhere, the generated mirror included. Before the rebuild it appeared twice."
+      "criterion": "The boundary rig models a pod-owned disk rather than one that outlives the pod, and the plant vectors prove fresh-disk isolation rather than inheritance.",
+      "surface": "The package's own init rig, which runs the real init containers against real git and jj over host directories.",
+      "command": "cd packages/daemon && CGO_ENABLED=0 go test ./internal/runtime/sandbox -run TestWhatAnIssuePlants -v",
+      "observed": "All nine vectors PASS. A generic ephemeral volume now maps to the pod's own directory; a Sandbox-owned claim still maps to the shared one. Each vector plants on pod 1, restarts pod 1 so the plant meets the disk it was left on, runs its live control there, then starts pod 2 of the same issue, which finds an empty disk, adds no sink line and reaches no named host.",
+      "headSha": "569486518494405a45b10d889e35e283ab9a471f",
+      "negativeControl": "Run by me, not taken from the worker: restoring `dir = rig.tree` for the ephemeral case with no production change fails **9 of 9** vectors. So the rig can tell the two worlds apart, which is what the aliasing had cost it."
     },
     {
-      "criterion": "The Stage 4b checkpoint that watches the suspension happen describes what the daemon deletes.",
-      "surface": "The harness's own comment at the point where a `pending` look ends the pod.",
-      "command": "read scripts/e2e/stage4b-sandbox-tree.sh:6027-6030; bash -n scripts/e2e/stage4b-sandbox-tree.sh",
-      "observed": "The clause said the daemon suspends the implementer's claim and the issue's Sandbox 'with its volume'. That Sandbox owns none: the disk is the pod's own ephemeral volume, so the deletion takes the pod and the disk with it. The comment says that now, and the harness parses.",
-      "headSha": "0d503c1f1b7b4f0966754dd8262990f815f45257",
-      "negativeControl": "Not applicable: a comment with no executable behaviour. Its control is the code it describes — `issuePod.claimTemplates` returns nil and `diskSource` renders a generic ephemeral volume, both pinned by the sandbox suite, which is green at this head."
+      "criterion": "Each sentence rewritten in the last two rounds says what its path does.",
+      "surface": "The daemon's own source, read before each sentence was written — the citations above are the lines read.",
+      "command": "read linger.go:78-101, check.go:215-296, sandbox.go:763-781, podkind.go:308-336",
+      "observed": "`issueClose`'s comment no longer claims the release deletes an issue Sandbox; it says the release ends this role's process and forgets the claim, that only the controller's Sandbox goes that way, and that an issue's pod goes with the separately fenced `IssueSuspend` or the tree cleanup — which is why a merged close leaves the implementer's pod standing. The architect skill no longer says the Sandbox goes `only when a look reports pending`: it goes whenever the check pauses between looks or closes, and only a `pending` whose next wake is already queued starts another look on the same pod. `podsafety.go` no longer says no disk a pod mounts outlives it; the controller's does, by design.",
+      "headSha": "569486518494405a45b10d889e35e283ab9a471f",
+      "negativeControl": "The citations are the control: a reviewer reads them and finds the sentence either supported or not. The three sentences replaced this round were each wrong in a way their vaguer predecessors never risked, which is why the discipline is the citation rather than more care."
     },
     {
-      "criterion": "The unknown-name refusal does not offer an operator a value the next branch refuses.",
-      "surface": "The config loader's own table test.",
-      "command": "cd packages/daemon && CGO_ENABLED=0 go test ./internal/config",
-      "observed": "Green. A `session_store` this runtime does not take now answers `must be 'postgres' or 'cloudsql-iam'`; `pvc` keeps its own refusal two lines above, which names the mechanism. The round-5 census kept main's wording on purpose and the reviewer argued it back; I took the argument — a list of accepted values naming a refused one sends an operator who mistyped to a value that is refused again.",
-      "headSha": "0d503c1f1b7b4f0966754dd8262990f815f45257",
-      "negativeControl": "The table row that pinned the old text failed first — `LoadForValidation error = \"…must be 'postgres' or 'cloudsql-iam'\" want \"…must be 'pvc', 'postgres' or 'cloudsql-iam'\"` — which is what showed the message had exactly one pin and no other reader."
+      "criterion": "`internal/daemon`'s fixture builds the disk shape this release makes, and its vocabulary follows.",
+      "surface": "The package's compile check, since its tests need Docker and this pod has none.",
+      "command": "cd packages/daemon && go build ./... && go vet ./... && go vet -tags e2e ./...; grep -n volumeClaimTemplates internal/daemon/*.go",
+      "observed": "All green, and the grep prints nothing. `issueSandbox` builds no claim template; `launchedChildSandbox`'s opt-out `delete` is gone; `pvcs`/`pvc()` became `disks`/`disk()` with doc comments naming the claim the **pod** owns, and every assertion's wording moved. `pvcRequests` kept its name: it counts real requests to `/persistentvolumeclaims`. `controller_sweep_live_test.go`'s `pvc()` is untouched, since the controller's Sandbox does own its claim.",
+      "headSha": "569486518494405a45b10d889e35e283ab9a471f",
+      "negativeControl": "Not a run: `./internal/daemon`'s tests start NATS and Postgres through testcontainers and cannot execute in this pod. `go vet` compiles the `_test.go` files, which is the whole of what was checked, and I say so rather than claim a run. The reading that stands in for it is in the citations: the fake never reads `spec.volumeClaimTemplates` — `disks` is set from a Sandbox's existence (`:93-97`, `:197`) and cleared only by a foreground delete (`:256-259`) — so the template was inert to every assertion."
     },
     {
-      "criterion": "The five remaining texts this change made false are corrected, and the class is swept rather than the five line numbers.",
-      "surface": "The repository's text, searched after the edits.",
-      "command": "grep -rniE \"both its containers|transcript on the volume|controller's init container\" and grep -rn \"carried over from an earlier release\" over docs/, packages/ and scripts/, excluding node_modules and dist; plus grep -rn \"must be 'pvc'\"",
-      "observed": "No hit remains in tracked text. The controller's pod has one container since its init container went (`controllerPod.initContainers` returns nil), its session is a row rather than a transcript on a volume, `supervise/table.go`'s own close entry no longer describes a retire-wait, a volume release or a file session, `podsafety.go` no longer offers files on the issue's volume as a place Legion puts a session, and `names.go` no longer describes a volume carried over from an earlier release. The one surviving match for the old refusal text is `docs/site/.bin/legion`, a compiled binary that `docs/site/.gitignore` excludes and `scripts/build-binaries.sh` rebuilds.",
-      "headSha": "0d503c1f1b7b4f0966754dd8262990f815f45257",
-      "negativeControl": "The same searches before the edits return exactly the five sites the review named and nothing else, which is how the sweep was bounded; the narrow scope rule of round 8 — 'do not flag unchanged code' — would have excluded all five, since the diff touched none of their lines."
+      "criterion": "No opt-in helper was added, and the reason is recorded rather than left to inference.",
+      "surface": "The seven `issueSandbox` call sites and the adjudication already on this pull request.",
+      "command": "grep -rn 'issueSandbox(' packages/daemon/internal/daemon/*.go",
+      "observed": "Seven calls, none of which means the superseded shape: no call leads to a relaunch into the fixture object, so `supersededDisk` is never reached, and the boot census runs only from `kubernetes.go`'s boot check and never against this fake. An opt-in with no caller is the dead fixture the reviewer struck `issue_pvcs` from this change for; adding one while that adjudication sits on the pull request would make the record contradict itself. If a migration test ever needs the shape, that test and its helper arrive together, as `supersededIssue` did in the sibling package.",
+      "headSha": "569486518494405a45b10d889e35e283ab9a471f",
+      "negativeControl": "The sibling package is the control: `withSupersededDisk` exists there because three tests need it, and `TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape` fails without it."
     }
   ],
   "filesChanged": [
-    "skills/legion-architect/SKILL.md and the generated packages/claude-envoy/legion/skills/legion-architect/SKILL.md: what a merged close does to the implementer's claim and pod.",
-    "scripts/e2e/stage4b-sandbox-tree.sh: the suspension clause at the production check's first look.",
-    "docs/kubernetes.md: the controller's one container, and its session read from the database rather than a transcript on a volume.",
-    "packages/daemon/internal/supervise/table.go: issueClose's doc comment.",
-    "packages/daemon/internal/podsafety/podsafety.go: placesSessions' reason.",
-    "packages/daemon/internal/runtime/sandbox/names.go: the feed's provenance, with no volume carried over.",
-    "packages/daemon/internal/config/kubernetes.go and its test: the unknown-name refusal names the two accepted kinds."
+    "packages/daemon/internal/runtime/sandbox/boundary_test.go: the volume mapping, the rig's per-pod accessors, start/restart/delete in place of run, and the nine vectors' meaning.",
+    "packages/daemon/internal/supervise/table.go: issueClose's comment, and the stop comment's owned volume.",
+    "packages/daemon/internal/runtime/sandbox/sandbox.go: Release's own doc comment.",
+    "packages/daemon/internal/podsafety/podsafety.go: the baseline's `file` sentence.",
+    "skills/legion-architect/SKILL.md and its generated claude-envoy mirror: when the Sandbox goes after a merged close.",
+    "packages/daemon/internal/daemon/{outbox_issue_suspend_test.go,carried_child_cleanup_test.go}: the fixture, the opt-out and the vocabulary.",
+    "packages/daemon/internal/workflow/{close_test.go,merge_close_test.go}: the two `with its volume` comments.",
+    "docs/kubernetes.md: the carried-over feed."
   ],
   "trickyParts": [
-    "The Important is the first finding in ten rounds against a sentence this change wrote rather than one it left. The old text was wrong in its second half and the new text in its first, which is the failure mode of correcting prose from the shape of a change rather than from the code: I knew the disk now dies with the pod and wrote that into a sentence whose subject was a close that queues no suspension at all."
+    "The rig fix is not a one-line mapping change: with the aliasing gone, the rig's own accessors looked where the pod no longer writes and the vectors' live controls ran against a pod that never saw the plant. The test now plants and controls on one pod across a restart of that pod, and uses a second pod as the isolation assertion — which is the stronger claim, and the one this change actually establishes."
   ],
   "deviations": [
-    "Correcting my own round-9 handoff: it said the retired section is 'marked retired at its heading'. It is not. The heading is `### Anatomy of a pod` and says nothing; the marker is the first sentence under it, which is the scope INFRA-212's learning requires — 'a reader reads upward only to the nearest ###'. The claim was right in substance and wrong in its words, and the tester's question is what surfaced it.",
-    "The reviewer's own rejection is recorded rather than re-litigated: `scripts/e2e/lib/namespace-rig.sh`'s `issue_pvcs` is callerless on `main@origin` too, so it is pre-existing dead code and not text this change made false. Same adjudication as `production_audit`.",
-    "The reviewer's correction of the round-9 control count is taken: of the eight cases that failed against the previous head, one is a behaviour difference and seven moved with the refusal's wording. The right sentence is 'one behavioural control, and seven cases whose messages moved with it'."
+    "The boundary test is renamed `TestWhatAnIssuePlantsNeitherReadsTheProvisioningTokenNorOutlivesItsPod`, because its old name describes a property it no longer only proves. A `-run` of the old name now matches nothing and prints `ok` without running anything, which is worth knowing for anyone with that invocation in a note.",
+    "Two `with its volume` survivors in the daemon are deliberately kept: `repocache_test.go:613` and `config/kubernetes.go:99` are the repository cache's Sandbox, which does own its claim (`repocache.go:115`)."
   ],
   "openQuestions": [
     "Stage 4b is repaired and has run at no head at all.",
     "Stage 4a's inverted checks are still unrun; the runner's revised list is a comment on the pull request.",
-    "envoy-go's earlier red settled `success` at code head 00516adc, which makes it intermittent rather than persistent. It stays dispatch://INFRA-49/ask/bbdfb54a-c2c3-4bc4-8afc-a3b42f957a74, answered 'So fix it' and carried to the controller; this change files nothing for it."
+    "`./internal/daemon` cannot run in this pod at all, so the inverted fixture has compile evidence and reading evidence and no run. A tester with Docker should run that package."
   ],
   "discoveredComplexity": [
-    "A change can make a sentence false by correcting it. The edit that put 'the Sandbox deleted with its pod' into the architect skill was written from this change's own subject and not from the close it describes, and it replaced a half-wrong sentence with a differently-wrong one stated more confidently.",
-    "A scope rule that says 'do not flag unchanged code' excludes the whole class of text a change makes false without touching, which is the class this tree has filed on in nine of ten rounds. The replacement — text a change makes false in a file it owns — is what found all five of this round's."
+    "Each replacement states the mechanism more precisely than its author had read it. 'Only when a look reports pending' is a sharper claim than the vague sentence it replaced and wrong for a reason the vague one never risked; the remedy is not more care in the same direction but reading the path the sentence describes, and citing the lines read where a reviewer can check them.",
+    "A fixture that aliases two worlds cannot tell them apart, and the cost is invisible while the tests pass: this rig passed nine vectors against a model in which a pod's own disk outlives the pod, and failed all nine the moment the aliasing was restored against the corrected test."
   ]
 }
