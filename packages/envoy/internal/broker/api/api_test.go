@@ -12,9 +12,11 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"net/url"
 	"slices"
 	"strings"
 	"testing"
@@ -23,8 +25,10 @@ import (
 	"github.com/google/uuid"
 
 	"github.com/sjawhar/envoy/internal/broker/api"
+	"github.com/sjawhar/envoy/internal/broker/brokertest"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
 	"github.com/sjawhar/envoy/internal/broker/machine"
+	"github.com/sjawhar/envoy/internal/broker/oauthwire"
 	"github.com/sjawhar/envoy/internal/broker/policy"
 	"github.com/sjawhar/envoy/internal/broker/policy/policytest"
 	"github.com/sjawhar/envoy/internal/broker/proof"
@@ -117,15 +121,17 @@ func newTestServerWith(t *testing.T, adjust func(*api.Deps)) *testServer {
 		Audience:   srv.URL, Skew: time.Minute, Replay: enr.Replay,
 	}
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
+	provider := brokertest.NewOAuthProvider(t, st)
 	mach := &machine.Service{
 		Store: st, Enroll: enr, Policy: cur,
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
-		Replay: enr.Replay,
+		OAuth: provider, Replay: enr.Replay,
 	}
 
 	deps := api.Deps{
 		PublicURL: srv.URL, UIToken: testUIToken,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
+		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	}
@@ -413,37 +419,62 @@ func TestEnrollmentRouteWithOldBearerHeaderIsLauncherInvalid(t *testing.T) {
 	}
 }
 
-// mintLauncherCredential drives a full typed-code machine-login round trip through the HTTP API
-// and returns the resulting launcher credential's id and the machine's own signing key — the same
-// setup TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment exercises route by
-// route, factored out here for tests that just need a live launcher credential to sign proofs
-// with.
+// deviceLogin asks POST /v1/oauth/device_authorization for a machine login signed by key, naming
+// loginHint, host and service, with dpop_jkt key's thumbprint, as the helper does. It answers the
+// status and the decoded body: the device code and user code, or OAuth's error.
+func (ts *testServer) deviceLogin(t *testing.T, key *ecdsa.PrivateKey, loginHint, host, service string) (int, map[string]any) {
+	t.Helper()
+	jkt, err := proof.Thumbprint(&key.PublicKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{
+		"client_id": {oauthwire.ClientID}, "scope": {"machine"}, "dpop_jkt": {jkt},
+		"request": {signMachineLoginRequest(t, key, ts.URL, loginHint, host, service)},
+	}
+	resp, err := http.Post(ts.URL+"/v1/oauth/device_authorization", "application/x-www-form-urlencoded", strings.NewReader(form.Encode()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var body map[string]any
+	if err := json.NewDecoder(resp.Body).Decode(&body); err != nil {
+		t.Fatalf("decode the device authorization's answer (%d): %v", resp.StatusCode, err)
+	}
+	return resp.StatusCode, body
+}
+
+// openMachineLogin opens a person's machine login for key on host through the device grant and
+// answers its user code, the confirmation code the person types into Dispatch.
+func (ts *testServer) openMachineLogin(t *testing.T, key *ecdsa.PrivateKey, loginHint, host string) string {
+	t.Helper()
+	status, body := ts.deviceLogin(t, key, loginHint, host, "")
+	code, _ := body["user_code"].(string)
+	if status != http.StatusOK || code == "" {
+		t.Fatalf("POST /v1/oauth/device_authorization = %d %v, want 200 and a user code", status, body)
+	}
+	return code
+}
+
+// mintLauncherCredential drives a full typed-code machine login through the HTTP API — the device
+// authorization, Dispatch's lookup by code and the approver's approval — and returns the resulting
+// launcher credential's id and the machine's own signing key, for tests that just need a live
+// launcher credential to sign proofs with.
 func (ts *testServer) mintLauncherCredential(t *testing.T, loginHint, host string) (credentialID string, key *ecdsa.PrivateKey) {
 	t.Helper()
 	key = newSigningKey(t)
-	return ts.approveMachineLogin(t, signMachineLoginRequest(t, key, ts.URL, loginHint, host, ""), loginHint), key
-}
-
-// approveMachineLogin posts a signed machine-login request object, looks its record up by the
-// typed code as the UI does, approves it as approver, and returns the minted launcher credential's
-// id.
-func (ts *testServer) approveMachineLogin(t *testing.T, compact, approver string) string {
-	t.Helper()
-	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
-	login := decode[struct {
-		Code string `json:"code"`
-	}](t, body)
-	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
+	code := ts.openMachineLogin(t, key, loginHint, host)
+	_, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
 	looked := decode[wireRecord](t, body)
 	_, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
-		map[string]any{"approver": approver, "code": login.Code})
+		map[string]any{"approver": loginHint, "code": code})
 	approved := decode[struct {
 		CredentialID *string `json:"credential_id"`
 	}](t, body)
 	if approved.CredentialID == nil || *approved.CredentialID == "" {
 		t.Fatalf("approve machine login: answered %s, want a credential_id", body)
 	}
-	return *approved.CredentialID
+	return *approved.CredentialID, key
 }
 
 // TestSessionProofRejectedOnLauncherAuthRoute pins authenticate()'s authLauncher guard: a VALID
@@ -488,39 +519,15 @@ func TestLauncherProofRejectedOnSessionAuthRoute(t *testing.T) {
 
 // TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment drives the whole typed-code
 // machine-login flow through the HTTP API end to end, then uses the resulting launcher credential
-// to exercise both launcher-proof enrollment routes: machineLogin, readMachineLogin (pending and
-// issued states), lookupMachineLogin, approveRecord dispatching to the machine kind (refusing any
-// login but the record's approver), createEnrollment, and deleteEnrollment.
+// to exercise both launcher-proof enrollment routes: deviceAuthorization, lookupMachineLogin,
+// approveRecord dispatching to the machine kind (refusing any login but the record's approver),
+// createEnrollment, and deleteEnrollment.
 func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *testing.T) {
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox", "")
+	login := struct{ Code string }{ts.openMachineLogin(t, machineKey, testApprover, "example-host-devbox")}
 
-	status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
-	if status != http.StatusAccepted {
-		t.Fatalf("POST /v1/launcher-credentials = %d, want 202: %s", status, body)
-	}
-	login := decode[struct {
-		PendingID string `json:"pending_id"`
-		Code      string `json:"code"`
-	}](t, body)
-	if login.PendingID == "" || login.Code == "" {
-		t.Fatalf("machine login response = %+v, want both fields set", login)
-	}
-
-	status, body = ts.req(t, http.MethodGet, "/v1/launcher-credentials/"+login.PendingID, nil, nil)
-	if status != http.StatusOK {
-		t.Fatalf("GET /v1/launcher-credentials/{pending} (pending) = %d: %s", status, body)
-	}
-	pendingRead := decode[struct {
-		State     string     `json:"state"`
-		ExpiresAt *time.Time `json:"expires_at"`
-	}](t, body)
-	if pendingRead.State != "pending" || pendingRead.ExpiresAt != nil {
-		t.Fatalf("pending read = %+v, want state pending and no expires_at", pendingRead)
-	}
-
-	status, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
+	status, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
 	if status != http.StatusOK {
 		t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
 	}
@@ -563,26 +570,12 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 	}
 	credentialID := *approved.CredentialID
 
-	status, body = ts.req(t, http.MethodGet, "/v1/launcher-credentials/"+login.PendingID, nil, nil)
-	if status != http.StatusOK {
-		t.Fatalf("GET /v1/launcher-credentials/{pending} (issued) = %d: %s", status, body)
-	}
-	issuedRead := decode[struct {
-		State        string     `json:"state"`
-		CredentialID string     `json:"credential_id"`
-		ExpiresAt    *time.Time `json:"expires_at"`
-	}](t, body)
-	if issuedRead.State != "issued" || issuedRead.CredentialID != credentialID {
-		t.Fatalf("issued read = %+v, want state=issued credential_id=%s", issuedRead, credentialID)
-	}
-	// The machine learns when its credential expires: there is no renewal, so it must log in again
-	// before then.
 	var minted time.Time
 	if err := ts.Store.Pool.QueryRow(context.Background(), `select expires_at from launcher_credentials where id=$1`, credentialID).Scan(&minted); err != nil {
 		t.Fatalf("read the minted credential's expiry: %v", err)
 	}
-	if issuedRead.ExpiresAt == nil || !issuedRead.ExpiresAt.Equal(minted) {
-		t.Fatalf("issued read expires_at = %v, want the minted credential's %s", issuedRead.ExpiresAt, minted)
+	if want := time.Now().Add(7 * 24 * time.Hour); minted.Before(want.Add(-time.Minute)) || minted.After(want) {
+		t.Fatalf("minted credential expires %s, want CredentialLifetime from the approval, about %s", minted, want)
 	}
 	_, body = ts.ui(t, http.MethodGet, "/v1/credential-requests/"+looked.RecordID, nil)
 	if decided := decode[wireRecord](t, body).Decided; decided == nil || decided.CredentialID == nil || *decided.CredentialID != credentialID {
@@ -615,6 +608,36 @@ func TestMachineLoginApprovalMintsAKeyBoundLauncherCredentialForEnrollment(t *te
 	}
 }
 
+// TestTheHandBuiltMachineLoginRoutesAreGone pins the removal of the login helpers before the
+// device grant used: POST /v1/launcher-credentials answers the router's 405 (Dispatch's GET on the
+// same path remains) and GET /v1/launcher-credentials/{pending} its 404, neither opening a record,
+// while the routes Dispatch and the Legion daemon call under the same prefix still answer as they
+// did.
+func TestTheHandBuiltMachineLoginRoutesAreGone(t *testing.T) {
+	ts := newTestServer(t)
+	request := signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox", "")
+	if status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": request}); status != http.StatusMethodNotAllowed {
+		t.Fatalf("POST /v1/launcher-credentials = %d %s, want 405", status, body)
+	}
+	for _, pending := range []string{"some-pending-id", uuid.NewString()} {
+		if status, body := ts.req(t, http.MethodGet, "/v1/launcher-credentials/"+pending, nil, nil); status != http.StatusNotFound {
+			t.Fatalf("GET /v1/launcher-credentials/%s = %d %s, want 404", pending, status, body)
+		}
+	}
+	if got := ts.column(t, `select count(*)::text from credential_requests`); !slices.Equal(got, []string{"0"}) {
+		t.Fatalf("credential-request records after the removed routes = %v, want none", got)
+	}
+	if status, body := ts.ui(t, http.MethodGet, "/v1/launcher-credentials?approver="+testApprover, nil); status != http.StatusOK {
+		t.Fatalf("Dispatch's GET /v1/launcher-credentials = %d %s, want 200", status, body)
+	}
+	if status, body := ts.ui(t, http.MethodPost, "/v1/launcher-credentials/"+uuid.NewString()+"/revoke-by-approver", map[string]any{"approver": testApprover}); status != http.StatusNotFound || decode[wireError](t, body).Code != "NOT_FOUND" {
+		t.Fatalf("Dispatch's revoke of an unknown login = %d %s, want its own 404 NOT_FOUND", status, body)
+	}
+	if status, body := ts.tokenLogin(t, "not-a-token", ts.daemonRequest(t, newSigningKey(t))); status != http.StatusUnauthorized {
+		t.Fatalf("the daemon's POST /v1/launcher-credentials/token = %d %s, want its own 401", status, body)
+	}
+}
+
 // TestMachineLoginLookupUnknownCodeIsNoSuchCode pins the 404 NO_SUCH_CODE contract for a code that
 // names no pending machine login.
 func TestMachineLoginLookupUnknownCodeIsNoSuchCode(t *testing.T) {
@@ -633,15 +656,9 @@ func TestMachineLoginLookupUnknownCodeIsNoSuchCode(t *testing.T) {
 // record cannot be decided without the confirmation code, even by its own approver.
 func TestApproveMachineRecordWithoutCodeIsCodeRequired(t *testing.T) {
 	ts := newTestServer(t)
-	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox", "")
-	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
-	login := decode[struct {
-		PendingID string `json:"pending_id"`
-		Code      string `json:"code"`
-	}](t, body)
+	login := struct{ Code string }{ts.openMachineLogin(t, newSigningKey(t), testApprover, "example-host-devbox")}
 
-	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
+	_, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
 	looked := decode[wireRecord](t, body)
 
 	status, body := ts.ui(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/approve",
@@ -863,6 +880,72 @@ func TestCreateRequestWithUnknownSecretNameIs400UnknownSecret(t *testing.T) {
 	}
 }
 
+func TestCreateRequestWithMaxGrantNeedsLifetime(t *testing.T) {
+	ts := newTestServer(t)
+	limited := policytest.KindSecret("LIMITED_KEY", testApprover, policy.TierAgent, policy.KindGoogleLogin, "value")
+	limited.Tags[policy.TagMaxGrant] = "1h"
+	ts.Secrets.Put(limited)
+	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/LIMITED_KEY/reread", nil, nil); status != http.StatusOK {
+		t.Fatalf("reread LIMITED_KEY = %d %s", status, body)
+	}
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
+	compact := signAgentSecretRequest(t, sessionKey, ts.URL, "need limited login", "LIMITED_KEY")
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": compact, "session_id": nil})
+	if status != http.StatusBadRequest {
+		t.Fatalf("POST /v1/requests = %d, want 400: %s", status, body)
+	}
+	reply := decode[wireError](t, body)
+	if reply.Code != "GRANT_REQUIRES_LIFETIME" || !strings.Contains(reply.Error, "LIMITED_KEY") || !strings.Contains(reply.Error, "1h") {
+		t.Fatalf("POST /v1/requests = %+v, want GRANT_REQUIRES_LIFETIME naming LIMITED_KEY and 1h", reply)
+	}
+}
+
+// TestAFailedMintIs502MintFailed: a kind secret whose minter fails, such as a Google login that
+// needs a new sign-in, answers the session 502 MINT_FAILED with the minter's words, so it can tell
+// its person what to fix, rather than an opaque 500; and the broker logs it at ERROR for its
+// operator, naming the secret and the error's class, never the stored value.
+func TestAFailedMintIs502MintFailed(t *testing.T) {
+	logged := policytest.CaptureLog(t)
+	ts := newTestServerWith(t, func(d *api.Deps) {
+		d.Machine.Minters = map[string]requests.Minter{
+			policy.KindGoogleLogin: func(context.Context, secrets.MintRequest) (string, error) {
+				return "", fmt.Errorf("%w: Google login needs a new sign-in: invalid_grant (invalid_rapt)", secrets.ErrMintRefused)
+			},
+		}
+	})
+	ts.Secrets.Put(policytest.KindSecret("LAPSED_LOGIN", testApprover, policy.TierAgent, policy.KindGoogleLogin, "stored-login"))
+	if status, body := ts.req(t, http.MethodPost, "/v1/secrets/LAPSED_LOGIN/reread", nil, nil); status != http.StatusOK {
+		t.Fatalf("reread LAPSED_LOGIN = %d %s", status, body)
+	}
+	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), testApprover)
+	_, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/requests",
+		map[string]any{"request": signAgentSecretRequest(t, sessionKey, ts.URL, "read login", "LAPSED_LOGIN"), "session_id": nil})
+	created := decode[wireCreateRequestResponse](t, body)
+	if created.GrantID == nil {
+		t.Fatalf("POST /v1/requests = %s, want an automatic grant", body)
+	}
+	status, body := ts.session(t, sessionKey, enrollmentID, http.MethodPost, "/v1/grants/"+*created.GrantID+"/values", nil)
+	reply := decode[wireError](t, body)
+	if status != http.StatusBadGateway || reply.Code != "MINT_FAILED" || !strings.Contains(reply.Error, "invalid_rapt") || strings.Contains(reply.Error, "stored-login") {
+		t.Fatalf("POST values = %d %+v, want 502 MINT_FAILED naming invalid_rapt and not the stored value", status, reply)
+	}
+	line := ""
+	for l := range strings.Lines(logged.String()) {
+		if strings.Contains(l, requests.MintFailedMessage) {
+			line = l
+		}
+	}
+	for _, want := range []string{"ERROR " + requests.MintFailedMessage, "name=LAPSED_LOGIN", "kind=google-login", "class=refused", "invalid_rapt"} {
+		if !strings.Contains(line, want) {
+			t.Fatalf("mint failure log line %q does not hold %q (log: %q)", line, want, logged.String())
+		}
+	}
+	if strings.Contains(logged.String(), "stored-login") {
+		t.Fatalf("the broker's log holds the stored value: %q", logged.String())
+	}
+}
+
 // TestCreateRequestNeedingTwoApproversIs400MixedApprovers pins, over real HTTP, that a request for
 // testApprover's human-tier secret beside a shared human-tier one, whose approver is anyone, is
 // refused 400 MIXED_APPROVERS rather than recorded as one decision.
@@ -1011,12 +1094,8 @@ func TestRecordCancelledWithNoEventLeavesThePendingList(t *testing.T) {
 	pending := create("still waiting")
 	machineLogin := func(host string) (recordID, code string) {
 		t.Helper()
-		_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
-			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, host, "")})
-		code = decode[struct {
-			Code string `json:"code"`
-		}](t, body).Code
-		_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+		code = ts.openMachineLogin(t, newSigningKey(t), testApprover, host)
+		_, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
 		return decode[wireRecord](t, body).RecordID, code
 	}
 	login, _ := machineLogin("example-host-devbox")
@@ -1168,39 +1247,8 @@ func TestPathValidation(t *testing.T) {
 	}
 }
 
-// TestALauncherCredentialRefusalRoundsRetryAfterUp pins that the machine-login route names its
-// Retry-After by the rule the reread route does: whole seconds rounded up, so a caller told to
-// wait does not come back before a token has returned.
-func TestALauncherCredentialRefusalRoundsRetryAfterUp(t *testing.T) {
-	ts := newTestServerWith(t, func(d *api.Deps) {
-		d.LauncherLimits = &api.LauncherLimits{
-			PerAddress: ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
-			PerLogin:   ratelimit.Limit{Every: 1500 * time.Millisecond, Burst: 1},
-		}
-	})
-	login := func() (int, string) {
-		t.Helper()
-		body, err := json.Marshal(map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, testApprover, "example-host-devbox", "")})
-		if err != nil {
-			t.Fatal(err)
-		}
-		resp, err := http.Post(ts.URL+"/v1/launcher-credentials", "application/json", bytes.NewReader(body))
-		if err != nil {
-			t.Fatal(err)
-		}
-		defer resp.Body.Close()
-		return resp.StatusCode, resp.Header.Get("Retry-After")
-	}
-	if status, _ := login(); status != http.StatusAccepted {
-		t.Fatalf("first machine login = %d, want 202", status)
-	}
-	if status, retryAfter := login(); status != http.StatusTooManyRequests || retryAfter != "2" {
-		t.Fatalf("second machine login = %d Retry-After=%q, want 429 with Retry-After 2 (1.5 s rounded up)", status, retryAfter)
-	}
-}
-
 // TestEachPersonsMachineLoginSpendsTheirOwnBucket pins the per-login bucket's key space: a
-// person's machine login spends that person's bucket, even one whose login_hint is a word or a
+// person's device login spends that person's bucket, even one whose login_hint is a word or a
 // service's name, and a service's device-code login is refused 400 before it spends any bucket.
 // With one login per bucket, each person's first login is accepted and only a second login naming
 // the same person is refused.
@@ -1213,8 +1261,7 @@ func TestEachPersonsMachineLoginSpendsTheirOwnBucket(t *testing.T) {
 	})
 	login := func(loginHint, service string) int {
 		t.Helper()
-		status, _ := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
-			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, loginHint, "example-host-cluster", service)})
+		status, _ := ts.deviceLogin(t, newSigningKey(t), loginHint, "example-host-cluster", service)
 		return status
 	}
 	for _, c := range []struct {
@@ -1222,9 +1269,9 @@ func TestEachPersonsMachineLoginSpendsTheirOwnBucket(t *testing.T) {
 		want                     int
 	}{
 		{"a service's device-code login naming a person", testApprover, "legion-daemon", http.StatusBadRequest},
-		{"a person's machine login naming the word service", "service", "", http.StatusAccepted},
-		{"a person's machine login naming a service's bare name", "other-service", "", http.StatusAccepted},
-		{"the person the service's login named", testApprover, "", http.StatusAccepted},
+		{"a person's machine login naming the word service", "service", "", http.StatusOK},
+		{"a person's machine login naming a service's bare name", "other-service", "", http.StatusOK},
+		{"the person the service's login named", testApprover, "", http.StatusOK},
 		{"a second login naming that person", testApprover, "", http.StatusTooManyRequests},
 	} {
 		if got := login(c.loginHint, c.service); got != c.want {
@@ -1235,14 +1282,16 @@ func TestEachPersonsMachineLoginSpendsTheirOwnBucket(t *testing.T) {
 
 // TestAPersonsMachineLoginNamingNoOneIsRefused pins that a person's machine login must name the
 // person who decides it: one with no login_hint, or one naming the sentinel, is refused 400
-// REQUEST_INVALID before any record opens, while a service's login needs none.
+// invalid_request REQUEST_INVALID before any record opens.
 func TestAPersonsMachineLoginNamingNoOneIsRefused(t *testing.T) {
 	ts := newTestServer(t)
 	for _, hint := range []string{"", record.AnyoneApprover} {
-		status, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil,
-			map[string]any{"request": signMachineLoginRequest(t, newSigningKey(t), ts.URL, hint, "example-host-devbox", "")})
-		if status != http.StatusBadRequest || decode[wireError](t, body).Code != "REQUEST_INVALID" {
-			t.Fatalf("a person's machine login with login_hint %q = %d %s, want 400 REQUEST_INVALID", hint, status, body)
+		status, body := ts.deviceLogin(t, newSigningKey(t), hint, "example-host-devbox", "")
+		if desc, _ := body["error_description"].(string); status != http.StatusBadRequest || body["error"] != "invalid_request" || !strings.HasPrefix(desc, "REQUEST_INVALID: ") {
+			t.Fatalf("a person's machine login with login_hint %q = %d %v, want 400 invalid_request REQUEST_INVALID", hint, status, body)
 		}
+	}
+	if got := ts.column(t, `select count(*)::text from credential_requests`); !slices.Equal(got, []string{"0"}) {
+		t.Fatalf("credential-request records = %v, want none", got)
 	}
 }

@@ -6,15 +6,16 @@
 # handful of pinned actions, with no cache restored and the deploy key in the env of the one or two
 # steps that push. This check pins that shape, so a later edit cannot undo it quietly:
 #
-# 1. A credentialed job — one whose `permissions` grants contents, id-token or attestations: write
-#    (the workflow's `permissions` when the job declares none, as GitHub gives it), or whose text
-#    anywhere, the workflow's `env:` included, names the deploy key, `secrets.DEPLOY_KEY` or by
-#    index `secrets['DEPLOY_KEY']`, in any casing (GitHub resolves `secrets.deploy_key` too) —
+# 1. A credentialed job — one whose `permissions` grants contents, id-token, attestations or
+#    actions: write (the workflow's `permissions` when the job declares none, as GitHub gives it;
+#    actions: write can start, re-run and cancel runs), or whose text anywhere, the workflow's
+#    `env:` included, names the deploy key, `secrets.DEPLOY_KEY` or by index
+#    `secrets['DEPLOY_KEY']`, in any casing (GitHub resolves `secrets.deploy_key` too) —
 #    (a) runs no dependency code, (b) uses only the actions on CREDENTIALED_USES below, (c) sets
 #    `cache-mode: none`, and (d) names the deploy key only as `DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}`
 #    (the dot form) in the step-level `env:` of a step whose `run:` calls `release-push.sh push-tag`
 #    or `push-main`; the workflow's `env:` reaches every job, so the key there is never allowed.
-# 2. A build job — one that runs dependency code — holds none of those three write scopes and no
+# 2. A build job — one that runs dependency code — holds none of those four write scopes and no
 #    `secrets` reference but `secrets.GITHUB_TOKEN`, in its own text or the workflow's `env:` (so
 #    no deploy key, by dot or by index, no other secret and no `toJSON(secrets)`), declares
 #    `permissions` of its own when the workflow declares none (a job with neither runs under
@@ -32,7 +33,8 @@
 # 4. release.yaml's pi_legion_publish needs pi_envoy_publish: both end in `release-push.sh
 #    push-main`, whose rebase repair handles one package's bump at a time.
 # 5. release-envoy-listener.yaml's release_publish runs in the concurrency group
-#    `release-envoy-listener` with `cancel-in-progress: false`.
+#    `release-envoy-listener` with `cancel-in-progress: false` and `queue: max`: a pending job that
+#    GitHub cancelled for the next one would leave its commit in no release.
 # 6. A job's `if:` that calls `always()` tests `needs.<X>.result` for every X whose
 #    `needs.<X>.outputs` it reads; one that calls no `always()` belongs to a job with no skippable
 #    ancestor — no job upstream of it through `needs`, at any distance, carrying an `if:` of its
@@ -139,7 +141,7 @@ WORKFLOWS = [RELEASE, LISTENER, INFRA]
 # dot or by index (`secrets.DEPLOY_KEY`, `secrets['DEPLOY_KEY']`, `secrets["DEPLOY_KEY"]`), in any
 # casing, as GitHub resolves it. The env key `DEPLOY_KEY` the allowed site carries stays exact:
 # release-push.sh reads `$DEPLOY_KEY`.
-WRITE_SCOPES = ("contents", "id-token", "attestations")
+WRITE_SCOPES = ("contents", "id-token", "attestations", "actions")
 DEPLOY_KEY_REF = re.compile(
     r"secrets\s*(\.\s*DEPLOY_KEY\b|\[\s*['\"]DEPLOY_KEY['\"]\s*\])", re.IGNORECASE
 )
@@ -797,14 +799,15 @@ if LISTENER in loaded:
     path = LISTENER
     must = (
         "must run in concurrency group 'release-envoy-listener' with 'cancel-in-progress: false', "
-        "the boolean"
+        "the boolean, and 'queue: max'"
     )
     if found := required_job(path, "release_publish", must):
         job, job_line = found
         concurrency = job.get("concurrency")
         group = concurrency.get("group") if isinstance(concurrency, Mapping) else None
         cancel = concurrency.get("cancel-in-progress") if isinstance(concurrency, Mapping) else None
-        if group != "release-envoy-listener" or cancel is not False:
+        queue = concurrency.get("queue") if isinstance(concurrency, Mapping) else None
+        if group != "release-envoy-listener" or cancel is not False or queue != "max":
             problem(
                 path, job.lines.get("concurrency", job_line),
                 f"job 'release_publish' {must} (found concurrency: {json.dumps(concurrency)})",

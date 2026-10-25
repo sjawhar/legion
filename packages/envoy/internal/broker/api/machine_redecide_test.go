@@ -18,14 +18,8 @@ import (
 // after the first approval lands.
 func TestApprovingADecidedMachineLoginAgainIsRecordTerminal(t *testing.T) {
 	ts := newTestServer(t)
-	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox", "")
-	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
-	login := decode[struct {
-		PendingID string `json:"pending_id"`
-		Code      string `json:"code"`
-	}](t, body)
-	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
+	login := struct{ Code string }{ts.openMachineLogin(t, newSigningKey(t), testApprover, "example-host-devbox")}
+	_, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
 	looked := decode[wireRecord](t, body)
 	decision := map[string]any{"approver": testApprover, "code": login.Code}
 
@@ -57,13 +51,8 @@ func TestApprovingADecidedMachineLoginAgainIsRecordTerminal(t *testing.T) {
 // live-key unique index with a 500.
 func TestConcurrentApprovesOfAMachineLoginDecideItOnce(t *testing.T) {
 	ts := newTestServer(t)
-	machineKey := newSigningKey(t)
-	compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox", "")
-	_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
-	login := decode[struct {
-		Code string `json:"code"`
-	}](t, body)
-	_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
+	login := struct{ Code string }{ts.openMachineLogin(t, newSigningKey(t), testApprover, "example-host-devbox")}
+	_, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
 	looked := decode[wireRecord](t, body)
 	decision, err := json.Marshal(map[string]any{"approver": testApprover, "code": login.Code})
 	if err != nil {
@@ -134,13 +123,9 @@ func TestApprovingASecondLoginOnAKeyWithALiveCredentialIsKeyHoldsLiveCredential(
 	ts := newTestServer(t)
 	machineKey := newSigningKey(t)
 	lookUp := func() (recordID, code string) {
-		compact := signMachineLoginRequest(t, machineKey, ts.URL, testApprover, "example-host-devbox", "")
-		_, body := ts.req(t, http.MethodPost, "/v1/launcher-credentials", nil, map[string]any{"request": compact})
-		login := decode[struct {
-			Code string `json:"code"`
-		}](t, body)
-		_, body = ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": login.Code})
-		return decode[wireRecord](t, body).RecordID, login.Code
+		code = ts.openMachineLogin(t, machineKey, testApprover, "example-host-devbox")
+		_, body := ts.ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+		return decode[wireRecord](t, body).RecordID, code
 	}
 	firstID, firstCode := lookUp()
 	secondID, secondCode := lookUp()
