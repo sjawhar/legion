@@ -47,6 +47,7 @@ import (
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
@@ -82,7 +83,7 @@ type Runtime struct {
 	providerKeys                   map[string]string
 	providersSecrets               []string
 	natsUser                       string
-	sessionDSNKey                  string
+	sessionStore                   ompsessions.Store
 	agentSecrets                   *AgentSecrets
 	controllerSlackChannels        []string
 	agent                          []string
@@ -270,7 +271,7 @@ func configureProber(opts Options) (*Runtime, error) {
 			return refuse("agent secrets: token expiry %s is not between %s and %s (the API server's floor and the cluster's admission cap)", a.TokenExpiry, 10*time.Minute, time.Hour)
 		}
 	}
-	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets, opts.SessionDSNKey); err != nil {
+	if err := CheckPod(opts.Pod, opts.ProviderKeys, opts.Tools, opts.LaunchSecrets, opts.ProvidersSecrets, opts.SessionStore); err != nil {
 		return refuse("%v", err)
 	}
 	for _, name := range opts.ProvidersSecrets {
@@ -284,7 +285,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		streamURL: opts.StreamURL, daemonURL: opts.DaemonURL, envoyURL: opts.EnvoyURL, dispatchURL: opts.DispatchURL,
 		dispatchToken: opts.DispatchToken, natsURLs: opts.NATSURLs, tools: opts.Tools, agentSecrets: opts.AgentSecrets,
 		pod: opts.Pod, providerKeys: opts.ProviderKeys, providersSecrets: slices.Sorted(slices.Values(opts.ProvidersSecrets)), natsUser: opts.NATSUser,
-		sessionDSNKey: opts.SessionDSNKey, controllerSlackChannels: slices.Clone(opts.ControllerSlackChannels),
+		sessionStore: opts.SessionStore, controllerSlackChannels: slices.Clone(opts.ControllerSlackChannels),
 		bootTimeout: opts.BootTimeout, registrationIntervals: opts.RegistrationIntervals,
 		busyBackoff: opts.BusyBackoff, provisionBound: provisionBound, terminationGrace: opts.TerminationGrace,
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
