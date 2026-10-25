@@ -1031,16 +1031,20 @@
 - An agent woken by a Slack message now reads the words the message carries, wherever it carries
   them. A Slack delivery's `text` is the message's own text and then every display string its
   blocks and then its attachments hold — the strings under `pretext`, `author_name`,
-  `author_subname`, `title`, `text`, `alt_text`, `value`, `footer` and `fallback`, at any depth,
+  `author_subname`, `title`, `text`, `alt_text`, `value` and `footer`, at any depth,
   each object read with those names in that rank and then its remaining keys alphabetically, so a
   section's own text precedes its fields and a button's label its hidden value — joined by line
   feeds, and the summary shows the first line. Blocks come before attachments because Slack
-  renders a block as the message body and an attachment after it. An app that
+  renders a block as the message body and an attachment after it. An attachment's `fallback` is
+  read last of all, after everything else that attachment carries, and only when nothing in that
+  attachment said it already: it is the plain-text copy Slack shows where the attachment itself
+  cannot be shown, so a coloured alert whose `fallback` repeats its own section delivers that line
+  once, and one whose `fallback` says more delivers the attachment's body first. An app that
   posts a formatted message leaves `text` empty and puts the words in `blocks` or `attachments`,
   and such a wake used to carry a summary ending in `: ` and a payload with no words in it at all;
   an image-only post now carries the `alt_text` Slack renders in the image's place. A string an
-  object has already shown under another of its own names is not shown twice, so an attachment
-  whose `fallback` repeats its `title` is one line; two objects saying the same thing are two
+  object has already shown under another of its own names is not shown twice; two objects saying
+  the same thing are two
   things a reader sees, so a message whose fields read `Passed 3`, `Failed 0`, `Skipped 0` keeps
   both counts of `0` and two attachments both reading `ok` keep both. A string equal to the
   message's own text, or to one of its lines, is dropped wherever it sits,
