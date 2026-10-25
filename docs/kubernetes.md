@@ -2773,10 +2773,9 @@ Read the first as starting up and the second as the label.
 
 Speaking the protocol is a client library onto the issue's own disk, the way every other tool
 that works from the checkout arrives (below), run from the checkout against that same address —
-never a binary installed into the pod. The last line asks for Jobs and pods and not Services, and
-it runs: as published it exits 0 here. Add Services to it and it is refused — `kubectl get
-jobs,pods,svc` exits 1 with `services is forbidden: … cannot list resource "services"` — because
-this identity may no more list a Service than create one.
+never a binary installed into the pod. The last line asks for Jobs and pods, the two kinds the
+sequence submits; the Service goes with its Job, and `kubectl get svc <workload>` answering
+`NotFound` after the delete is how a role sees that it did.
 
 **What of this has been run, and where.** This section is written partly from commands executed
 in the deployment it describes and partly from the declarations dispatch://INFRA-206 carries,
@@ -2797,21 +2796,25 @@ and a reader is owed the boundary rather than a uniform voice:
   the lines as they now stand: the single `wait` this section published before exited 1 at once
   with `error: no matching resources found`, because the Job's pod does not exist the instant
   the apply returns, which is why there are two waits above.
-- *Submitted deliberately against the gate's own rule*, and said rather than left to be noticed:
-  two of this deployment's three gate answers are `no`, so a role following this section submits
-  nothing — the run above was made anyway, to measure the half that does not depend on a
-  Service. What made it safe is what a reader can check: a fifteen-minute deadline and a
-  five-minute cleanup window rather than the twelve and twenty-four hours admission allows, a
-  name of its own, a `kubectl delete job` by hand at the end, and `kubectl get jobs,pods`
-  showing nothing of it left. Read the bolded rule as what it says for the sequence as a whole;
-  this was a bounded measurement of one half of it, not an exception anyone inherits.
-- *Not executed*: the Service steps, and they are refused rather than untried — `kubectl apply`
-  of the Service ends `Forbidden` on the read of the live object, before any create is
-  attempted. So nothing has yet given a workload of this namespace a name on the network, which
-  is why the one step that depends on it — the reachability check against a workload reachable
-  **by its Service name** — is written from the declarations rather than from a run. Read that
-  pair as a design until a role has run it end to end and said so; everything above is a
-  transcript of the lines as published here.
+- *Submitted deliberately against the gate's own rule*, at the time of the run above: two of this
+  deployment's three gate answers were then `no`, so the run was made anyway, to measure the half
+  that does not depend on a Service, with a fifteen-minute deadline and a five-minute cleanup
+  window, a name of its own, a `kubectl delete job` by hand at the end, and `kubectl get
+  jobs,pods` showing nothing of it left. It was a bounded measurement, not an exception anyone
+  inherits.
+- *The whole sequence, end to end, from a role container here on 2026-10-25*
+  (dispatch://INFRA-354, a Postgres for the secrets broker's real-process tests): the three gate
+  commands answered `yes`, as did `list`/`delete services`, while `patch jobs`, `create pods` and
+  `get endpoints` still answered `no`. The Job was applied and its uid read; the Service as this
+  section first published it, selecting `job-name`, was refused at admission naming the
+  controller-uid rule quoted above, and the corrected manifest above was created. The pod existed
+  and was Ready about sixty seconds after the apply, the reachability check against the Service
+  name answered on its first try, and the log showed `database system is ready to accept
+  connections`. The broker's tests ran against
+  `postgres://postgres:<password>@<workload>.<namespace>.svc.cluster.local:5432/postgres?sslmode=disable`
+  for about forty minutes. `kubectl delete job` then took the pod and the Service with it:
+  `kubectl get jobs,pods` held nothing of the workload and `kubectl get svc <workload>` answered
+  `NotFound`. Every line above is a transcript of what ran here.
 
 What a workload there cannot do, so nobody plans around it: it cannot mount the issue's volume,
 which belongs to another namespace and to one node at a time, and a role may not run a command
