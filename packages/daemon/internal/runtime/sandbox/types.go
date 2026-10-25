@@ -144,13 +144,15 @@ type Options struct {
 	// or other seed refuses boot instead of every agent's connection.
 	NATSUser string
 	// SessionDSNKey is the providers Secret's key that holds the postgres:// URL of the database
-	// every role's Oh My Pi keeps its session in (runtime.kubernetes.session_store postgres); ""
-	// keeps each session a file in the issue's volume's sessions directory. With one, every pod and the
-	// image probe mount that key at ProvidersDir/OMP_SESSION_SQL_DSN, and every generation is
-	// started with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming that file
-	// (mainEnvironment), which the shim, seeing the pointer, never exports; a resume is held to the
-	// session table rather than the volume (the role launcher's check, internal/launcher), and no
-	// launch expects the issue's volume to hold a session.
+	// every role's Oh My Pi keeps its session in (runtime.kubernetes.session_store postgres). It is
+	// required: an issue pod's disk is the pod's own ephemeral volume and is deleted with the pod,
+	// so a session kept as a file on it would not survive to be resumed, and configure refuses an
+	// empty key as it refuses an unpinned image. Every pod and the image probe mount that key at
+	// ProvidersDir/OMP_SESSION_SQL_DSN, and every generation is started with
+	// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming that file (mainEnvironment),
+	// which the shim, seeing the pointer, never exports; a resume is held to the session table
+	// (the role launcher's check, internal/launcher), and no launch expects any disk to hold a
+	// session.
 	SessionDSNKey string
 	// Agent is the command the shim wraps, before the Oh My Pi arguments the runtime appends
 	// (`--extension <envoy plugin> --extension <legion plugin>`, `--resume`, `--mode rpc`,

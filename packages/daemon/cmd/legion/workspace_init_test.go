@@ -428,8 +428,9 @@ func TestWorkspaceInitRefusesBeforeTouchingTheVolume(t *testing.T) {
 // A fresh issue volume, provisioned from the feed `fetch` filled: the issue's clone, its origin
 // still GitHub's, and the issue's jj workspace on its bookmark, the clone's credential helper the
 // one named, no gh shim and no tmux pane's `legion` launcher on the volume (a pod's PATH names the
-// image's gh and legion, and its credential is the gh files its role Secret projects), the
-// sessions directory the main container mounts, one log line naming the workspace. The permanent
+// image's gh and legion, and its credential is the gh files its role Secret projects), one log
+// line naming the workspace, and no sessions directory: no role container mounts one, every
+// session being a row in the database the deployment names (INFRA-80). The permanent
 // guard on the pod path: a recording `codegraph` stub is first on PATH throughout, and this
 // container must never call it (#1647) — only a synchronous warm-up regressing back onto the init
 // container's launch path would.
@@ -464,8 +465,8 @@ func TestWorkspaceInitProvisionsTheIssueWorkspace(t *testing.T) {
 			t.Fatalf("the issue volume holds %s (%v), want no shim, launcher or gh directory of the daemon's", dir, err)
 		}
 	}
-	if info, err := os.Stat(filepath.Join(v.root, "sessions")); err != nil || !info.IsDir() {
-		t.Fatalf("sessions: %v (%v), want a directory", info, err)
+	if _, err := os.Stat(filepath.Join(v.root, "sessions")); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the issue volume holds a sessions directory (%v), want none: nothing mounts or reads one", err)
 	}
 	if calls := v.codegraphCalls(t); calls != nil {
 		t.Fatalf("workspace-init called codegraph %q, want it to build no index on the pod's registration path", calls)

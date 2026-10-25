@@ -134,9 +134,10 @@ func workspaceInitExit(flags *flag.FlagSet, err error, stderr io.Writer) int {
 
 // workspaceInit validates everything before it touches the disk, --repo first, and refuses to
 // run where the provisioning token is pointed at: this is the process that runs git and jj against
-// what every agent of the issue can write. Then it creates the directories the main container
-// mounts, removes the git locks an interrupted git or jj left, and provisions from the feed, an
-// issue with no branch at defaultBranch. No lock guards the clone: it is the issue's own, on the
+// what every agent of the issue can write. Then it removes the git locks an interrupted git or jj
+// left and provisions from the feed, an issue with no branch at defaultBranch. It makes no other
+// directory: the disk is the pod's own and starts empty, and the workspace this provisions is the
+// only thing on it a role container reads. No lock guards the clone: it is the issue's own, on the
 // pod's own disk, and no other pod mounts it. For the same reason, and because no role container
 // of the pod has started, no process holds a git lock on the disk while this runs, so every one
 // there is stale and would fail each later write of what it locks (LEGION-731) — the kubelet
@@ -172,10 +173,6 @@ func workspaceInit(ctx context.Context, issue, repo, defaultBranch, root, creden
 	located, err := workspace.Location(root, repository, issue)
 	if err != nil {
 		return err
-	}
-
-	if err := os.MkdirAll(filepath.Join(root, "sessions"), 0o700); err != nil {
-		return fmt.Errorf("create %s: %w", filepath.Join(root, "sessions"), err)
 	}
 
 	log := func(line string) { fmt.Fprintln(stdout, "workspace-init: "+line) }

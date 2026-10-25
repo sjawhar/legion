@@ -144,6 +144,13 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 		now := metav1.NewTime(rigNow)
 		p.DeletionTimestamp, p.Finalizers = &now, []string{"test/hold"}
 	}
+	// killedInit is a pod still inside its init containers whose running workspace-init the kubelet
+	// terminated non-zero: what the daemon's own delete of a pod it is replacing leaves behind, and
+	// what an init container failing on its own leaves too. The pod's DeletionTimestamp is the only
+	// thing that tells them apart (verdict).
+	killedInit := corev1.PodStatus{Phase: corev1.PodPending, InitContainerStatuses: []corev1.ContainerStatus{{
+		Name: initContainer, State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "Error"}},
+	}}}
 	exited := &shimwire.LauncherState{LastExit: &shimwire.LauncherExit{Generation: 1, Code: 143, Signal: "terminated"}}
 	pending := corev1.PodStatus{Phase: corev1.PodPending}
 	for _, tc := range []struct {
@@ -224,8 +231,15 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			},
 		},
 		{
-			row:        "5 a failed init is never the daemon's replacement, though its pod is named and deleting",
-			objects:    displacing(withPod(modeSuspended, nil, recorded, sandboxUID, failed(terminated(initContainer, 1, "Error")), deleting), recorded),
+			row:       "5 an init container the daemon's own delete killed is no failed init, so its roles are displaced",
+			objects:   displacing(withPod(modeSuspended, nil, recorded, sandboxUID, killedInit, deleting), recorded),
+			want:      runtime.Gone,
+			displaced: true,
+			detail:    []string{"init container workspace-init terminated (Error, exit code 137)", "the daemon replaced pod " + recorded},
+		},
+		{
+			row:        "5 the same init container terminating non-zero in a pod nothing is deleting is a failed init",
+			objects:    displacing(withPod(modeSuspended, nil, recorded, sandboxUID, killedInit), recorded),
 			want:       runtime.Gone,
 			initFailed: true,
 			absent:     []string{"the daemon replaced"},
@@ -448,8 +462,8 @@ func TestTheMappingRowByRowInPrecedence(t *testing.T) {
 			if obs.Locator != loc {
 				t.Fatalf("observation carries %+v, want the recorded locator", obs.Locator)
 			}
-			if obs.InitFailed != tc.initFailed {
-				t.Errorf("InitFailed = %t, want %t (detail: %s)", obs.InitFailed, tc.initFailed, obs.Detail)
+			if got := g.initFailed(loc); got != tc.initFailed {
+				t.Errorf("initFailed = %t, want %t (detail: %s)", got, tc.initFailed, obs.Detail)
 			}
 			if obs.Displaced != tc.displaced {
 				t.Errorf("Displaced = %t, want %t (detail: %s)", obs.Displaced, tc.displaced, obs.Detail)

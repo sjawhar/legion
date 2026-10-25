@@ -47,6 +47,9 @@ const (
 	testProject   = "legion"
 	testImage     = "ghcr.io/sjawhar/legion-worker@sha256:1d10089a0000000000000000000000000000000000000000000000000000beef"
 	testTree      = "LEGION-208"
+	// testSessionDSNKey is the providers Secret's key holding the session database's URL
+	// (Options.SessionDSNKey), which every runtime a test configures carries as production's does.
+	testSessionDSNKey = "SESSION_DSN"
 )
 
 var (
@@ -57,22 +60,24 @@ var (
 	childToken = claim.Token("legion-legion-legion-209-implementer")
 )
 
-// testOptions are the options every test starts from: production's shape, every role's reservation
+// testOptions are the options every test starts from: production's shape — the session database's
+// URL key included, which every deployment names and configure requires — every role's reservation
 // at the daemon's defaults (reservations), with budgets short enough that a wait the test expects
 // to end never slows the suite.
 func testOptions() Options {
 	return Options{
-		Namespace:    testNamespace,
-		Project:      testProject,
-		Store:        newFakeStore(),
-		Image:        testImage,
-		StorageClass: "gp2",
-		IssueVolume:  resource.MustParse("20Gi"),
-		Resources:    reservations(),
-		StreamURL:    "tcp://192.0.2.250:13371",
-		DaemonURL:    "http://192.0.2.250:13370",
-		EnvoyURL:     "http://192.0.2.250:9020",
-		NATSURLs:     []string{"nats://192.0.2.250:4222"},
+		Namespace:     testNamespace,
+		Project:       testProject,
+		Store:         newFakeStore(),
+		Image:         testImage,
+		StorageClass:  "gp2",
+		IssueVolume:   resource.MustParse("20Gi"),
+		Resources:     reservations(),
+		SessionDSNKey: testSessionDSNKey,
+		StreamURL:     "tcp://192.0.2.250:13371",
+		DaemonURL:     "http://192.0.2.250:13370",
+		EnvoyURL:      "http://192.0.2.250:9020",
+		NATSURLs:      []string{"nats://192.0.2.250:4222"},
 		Tools: Tools{
 			GH: "/usr/local/bin/gh", Git: "/usr/bin/git", JJ: "/usr/local/bin/jj", Legion: "/opt/legion/bin/legion",
 			AgentSecrets: "/opt/legion/bin/agent-secrets",
@@ -744,6 +749,19 @@ func (g *rig) sandbox(name string) *sandbox {
 	return s
 }
 
+// initFailed is the classification of loc's verdict that only this package reads: whether a failed
+// init container of its pod is what ended the process there (observation.initFailed). No
+// runtime.Observation carries it, so a test reads it from the mapping itself, over the same stores
+// a Probe reads.
+func (g *rig) initFailed(loc runtime.Locator) bool {
+	g.t.Helper()
+	v, err := g.r.view(loc.Sandbox.Name)
+	if err != nil {
+		g.t.Fatal(err)
+	}
+	return g.r.verdict(g.ctx, loc, v).initFailed
+}
+
 // secret is the Secret named name in the tracker, or nil.
 func (g *rig) secret(name string) *corev1.Secret {
 	object, err := g.kube.Tracker().Get(corev1.SchemeGroupVersion.WithResource("secrets"), testNamespace, name)
@@ -910,11 +928,21 @@ func withoutVolume(u *unstructured.Unstructured) *unstructured.Unstructured {
 	return u
 }
 
-// podObject is a pod the Sandbox with ownerUID owns ("" for none), as the API would hold it.
+// podObject is a pod the Sandbox with ownerUID owns ("" for none), as the API would hold it. Its
+// spec carries the one piece every pod the runtime creates has and the mapping compares, the
+// providers volume projecting the session database's URL key (providers, movedSessionStore): a
+// stand-in without it holds a moved address, and every observation of it would be StaleAddress.
 func podObject(name, uid, ownerUID string, labels map[string]string, status corev1.PodStatus) *corev1.Pod {
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace, UID: types.UID(uid), Labels: labels},
-		Status:     status,
+		Spec: corev1.PodSpec{Volumes: []corev1.Volume{{
+			Name: providersVolume,
+			VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
+				SecretName: ProvidersSecretName(testProject),
+				Items:      []corev1.KeyToPath{{Key: testSessionDSNKey, Path: sessionDSNFile}},
+			}},
+		}}},
+		Status: status,
 	}
 	if ownerUID != "" {
 		pod.OwnerReferences = []metav1.OwnerReference{{

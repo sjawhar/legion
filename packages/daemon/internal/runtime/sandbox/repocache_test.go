@@ -67,11 +67,12 @@ func cacheObject(t *testing.T, repo ghrepo.Repository, uid, mode, annotated stri
 	return u
 }
 
-// cachePod is the pod of the cache Sandbox with ownerUID, running image, in phase.
+// cachePod is the pod of the cache Sandbox with ownerUID, running image, in phase. A cache pod
+// mounts no providers Secret, so its spec holds the cache container alone.
 func cachePod(repo ghrepo.Repository, uid, ownerUID, image string, phase corev1.PodPhase) *corev1.Pod {
 	name := CacheSandboxName(testProject, repo)
 	pod := podObject(name, uid, ownerUID, map[string]string{labelProject: testProject, labelCache: cacheMarker}, corev1.PodStatus{Phase: phase})
-	pod.Spec.Containers = []corev1.Container{{Name: cacheContainer, Image: image}}
+	pod.Spec = corev1.PodSpec{Containers: []corev1.Container{{Name: cacheContainer, Image: image}}}
 	return pod
 }
 

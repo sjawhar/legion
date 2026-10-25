@@ -111,6 +111,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
@@ -199,6 +204,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
@@ -287,6 +297,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
@@ -375,6 +390,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
@@ -463,6 +483,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
@@ -551,6 +576,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion/workspaces/sjawhar/legion-smoke/legion-208"
@@ -1085,6 +1115,19 @@
                 }
               ],
               "secretName": "legion-legion-legion-208-merger-boot"
+            }
+          },
+          {
+            "name": "providers",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "SESSION_DSN",
+                  "path": "OMP_SESSION_SQL_DSN"
+                }
+              ],
+              "secretName": "legion-legion-providers"
             }
           }
         ]

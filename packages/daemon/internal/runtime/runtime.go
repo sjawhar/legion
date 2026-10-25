@@ -252,20 +252,14 @@ type Observation struct {
 	Kind    ObservationKind
 	At      time.Time
 	Detail  string
-	// InitFailed is a Gone whose process never started because an init container of its pod ended
-	// non-zero: the pod provisioned nothing a launcher could run in. Only the Sandbox runtime
-	// reports it. No replacement the daemon made can account for such an end, so it is never read
-	// as Displaced (sandbox's ends), which is what makes a relaunch replace a pod whose init keeps
-	// failing instead of resuming into it. It is a field rather than a shape of Detail, which is
-	// prose for an operator and nothing else.
-	InitFailed bool
 	// Displaced is a Gone or NotRecordedProcess of a process the daemon itself ended: it replaced
 	// the process's pod while the process ran, to launch another role there. Only the Sandbox
 	// runtime reports it, for a replacement of a live issue or controller pod — one on another
 	// image, one holding a worker stream, secrets broker enrollment or session database URL key a
 	// pod created now is not handed, or one whose role launcher Secret no longer binds it. The
 	// process did nothing wrong, so the supervisor resumes its session at once, charging nothing,
-	// rather than count a death. A field, as InitFailed is, and never set beside it.
+	// rather than count a death. It is a field rather than a shape of Detail, which is prose for an
+	// operator and nothing else.
 	Displaced bool
 }
 

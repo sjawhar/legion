@@ -317,6 +317,11 @@ func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 // proves. The delete comes before the create, and both before the Secrets this launch writes: the
 // provisioning Secret and every role Secret are the Sandbox's own, so ones written first would be
 // reaped with the old Sandbox and the new pod's launchers would come up on nothing.
+//
+// The pod it replaces is live, with the issue's five other roles running in it, as every pod of
+// this cutover is: the suspension names it on the Sandbox, and the Sandbox the replacement creates
+// must carry that name, or each of those roles reads as having died on its own and is charged a
+// death for the daemon's own replacement.
 func TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape(t *testing.T) {
 	name := SandboxName(workerToken)
 	labels := claimLabels(claim.RoleTester)
@@ -363,6 +368,18 @@ func TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape(t *testing.T) {
 		t.Fatalf("pod %+v, locator %+v; want the pod of the Sandbox this launch created", pod, loc)
 	}
 	podDisk(t, pod.Spec)
+	if named := s.Annotations[displacedAnnotation]; named != "uid-pod-old" {
+		t.Fatalf("the Sandbox this launch created names %q as the pod the daemon replaced, want uid-pod-old, as the suspension named it on its predecessor", named)
+	}
+	sibling := sandboxLocator(otherToken, "uid-pod-old")
+	obs, err := g.r.Probe(g.ctx, sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !obs.Displaced {
+		t.Fatalf("the reviewer recorded in the replaced pod: %s, Displaced %t (%s); want the end read as the daemon's own, which the supervisor resumes uncharged",
+			obs.Kind, obs.Displaced, obs.Detail)
+	}
 }
 
 // The death path's Resume over a Failed issue pod, which the controller keeps under Running:

@@ -163,9 +163,16 @@ func rejectLegacyIssueSandboxes(ctx context.Context, sandboxes dynamic.ResourceI
 // the controller's working root is on it (controllerPod.claimTemplates). The tree-volume layout
 // before per-issue volumes gave only the tree root's Sandbox a template, named
 // `tree`, which every child of the tree mounted, and its controller's Sandbox a `tree` template of
-// its own; a controller owning no volume comes from that layout too. Such a Sandbox is never
-// adopted: a root's volume holds every clone and workspace of its tree, which only the drained
-// cutover docs/kubernetes.md describes may take apart.
+// its own; a controller owning no volume comes from that layout too. A root's volume holds every
+// clone and workspace of its tree, which only the drained cutover docs/kubernetes.md describes may
+// take apart, so a Sandbox owning a `tree` template is never adopted.
+//
+// What the fence no longer catches is a **child** of that layout: it owned no template either, so
+// it is the new shape by this test, and it is adopted. That costs nothing — the Running patch
+// replaces the pod template wholesale, so its pod gets an ephemeral disk of its own and reads
+// nothing of the tree volume — but the refusal that forced the drained cutover now rests on the
+// root's `tree` template and the old controller alone. There is no narrower test: a child of that
+// layout and a Sandbox this runtime makes now are the same object.
 func treeVolumeLayout(object unstructured.Unstructured, kind podKind) (reason string, superseded bool) {
 	const upgrade = "; it is of the tree-volume layout before per-issue volumes, so drain and remove it as docs/kubernetes.md's \"Upgrading a deployment with running trees\" says"
 	_, issue := kind.(issuePod)

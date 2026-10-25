@@ -104,7 +104,7 @@ func (r *Runtime) evaluate(ctx context.Context, loc runtime.Locator) runtime.Obs
 		obs.Displaced = true
 		obs.Detail += fmt.Sprintf("; the daemon replaced pod %s to launch another role there", loc.Sandbox.PodUID)
 	}
-	return obs
+	return obs.Observation
 }
 
 // readSandbox is the Sandbox named name as the API server holds it now, or nil when it holds none.
@@ -119,12 +119,27 @@ func (r *Runtime) readSandbox(ctx context.Context, name string) (*sandbox, error
 	return decodeSandbox(u)
 }
 
+// observation is one verdict of the mapping: the runtime.Observation the caller receives, beside
+// the one classification only this package acts on. No runtime consumer reads it — the supervisor
+// reads Kind and Displaced alone — so it stays here rather than on the cross-runtime contract.
+type observation struct {
+	runtime.Observation
+	// initFailed is a Gone whose process never started because an init container of its pod ended
+	// non-zero: the pod provisioned nothing a launcher could run in. No replacement the daemon made
+	// can account for such an end, which is what has a relaunch replace a pod whose init keeps
+	// failing rather than read its roles as displaced into it (ends). A pod the daemon is itself
+	// deleting is never one of these, however its init container ended: a pod still inside its init
+	// containers is live to a relaunch (relaunch's live), so the daemon displaces it for image
+	// drift, a moved address or the disk migration, and the kubelet then kills the init container it
+	// was running — a non-zero termination of the daemon's own making, which read as a failed init
+	// would charge every role of that pod a death.
+	initFailed bool
+}
+
 // ends reports whether obs is a final verdict the daemon's own replacement of a pod can account
-// for: a Gone or NotRecordedProcess, never one a failed init container made, which no replacement
-// causes — that is what has a relaunch replace a pod whose init keeps failing rather than read its
-// roles as displaced into it.
-func ends(obs runtime.Observation) bool {
-	return (obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess) && !obs.InitFailed
+// for: a Gone or NotRecordedProcess, never one a failed init container made.
+func ends(obs observation) bool {
+	return (obs.Kind == runtime.Gone || obs.Kind == runtime.NotRecordedProcess) && !obs.initFailed
 }
 
 // names reports whether s names loc's recorded pod as the live pod a relaunch replaced
@@ -143,7 +158,7 @@ func names(s *sandbox, loc runtime.Locator) bool {
 // still runs undeleted ended on its own, and so did one whose pod the Sandbox does not name: the
 // name is written in the patch that suspends the pod, so a suspension that never applied names
 // nothing.
-func displaced(v view, loc runtime.Locator, obs runtime.Observation) bool {
+func displaced(v view, loc runtime.Locator, obs observation) bool {
 	if !ends(obs) || !names(v.sandbox, loc) {
 		return false
 	}
@@ -165,9 +180,9 @@ func displaced(v view, loc runtime.Locator, obs runtime.Observation) bool {
 // A role running its recorded generation whose Sandbox records it was started with other addresses
 // than a generation started now is handed (movedEnvironment) is StaleAddress too. Either names each
 // moved address, never its credentials.
-func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) runtime.Observation {
-	observe := func(kind runtime.ObservationKind, format string, args ...any) runtime.Observation {
-		return runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}
+func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) observation {
+	observe := func(kind runtime.ObservationKind, format string, args ...any) observation {
+		return observation{Observation: runtime.Observation{Locator: loc, Kind: kind, At: r.now(), Detail: fmt.Sprintf(format, args...)}}
 	}
 	name := loc.Sandbox.Name
 	switch {
@@ -182,7 +197,7 @@ func (r *Runtime) verdict(ctx context.Context, loc runtime.Locator, v view) runt
 	initName, initExit := failedInit(pod)
 	if terminal(pod) || initExit != nil {
 		ended := observe(runtime.Gone, "%s", r.ended(ctx, v, loc.Sandbox.Container, initName, initExit))
-		ended.InitFailed = initExit != nil
+		ended.initFailed = initExit != nil && pod.DeletionTimestamp == nil
 		return ended
 	}
 	if scheduled := podCondition(pod, corev1.PodScheduled); pod.Status.Phase == corev1.PodPending && scheduled != nil &&

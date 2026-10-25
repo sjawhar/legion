@@ -12,8 +12,10 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
-// The pod's own paths. The issue's volume is mounted whole at TreeRoot in workspace-init and each
-// role launcher, and sessions stay on it. The pod's feed is the volume's feedSubPath directory,
+// The pod's own paths. The issue's disk is the pod's own generic ephemeral volume, created with the
+// pod and deleted with it; it is mounted whole at TreeRoot in workspace-init and each role
+// launcher, and no session is on it — every session is a row in the session database the
+// deployment names (Options.SessionDSNKey). The pod's feed is the volume's feedSubPath directory,
 // mounted at FeedDir: read-write in workspace-fetch, which mounts nothing else of the volume, and
 // read-only over the whole volume's mount in every other container. The clone owns its object-store
 // entries, and no agent writes what the token-holding container reads. On a volume carried over from
@@ -42,10 +44,13 @@ import (
 // blocking its siblings'. The go command's two caches are the issue's too, one pair every role of
 // it is told, `/legion/go/build` and `/legion/go/mod` (goBuildCache, goModCache) under
 // `/legion/go`, a top-level directory of the volume beside the workspaces, the repositories,
-// SessionsSubPath, feedSubPath and uv's own (uvPythonRoot, uvCacheDir). The gigabyte of ephemeral
-// storage the container is admitted with bounds none of them.
+// feedSubPath and uv's own (uvPythonRoot, uvCacheDir). The gigabyte of ephemeral storage the
+// container is admitted with bounds none of them.
 const (
-	TreeRoot           = "/legion"
+	TreeRoot = "/legion"
+	// SessionsSubPath is the sessions directory of a legion-v10.0.0 tree volume, which no pod
+	// mounts any more: its one reader is `legion sessions import --tree-volume`, the copy of such
+	// a deployment's session files into the session table (SessionOnVolume).
 	SessionsSubPath    = "sessions"
 	FeedDir            = TreeRoot + "/" + feedSubPath
 	CacheRoot          = "/legion/cache"

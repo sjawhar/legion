@@ -113,6 +113,11 @@
                 "subPath": "feed"
               },
               {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -208,6 +213,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -307,6 +317,11 @@
                 "subPath": "feed"
               },
               {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -402,6 +417,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -501,6 +521,11 @@
                 "subPath": "feed"
               },
               {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
+              },
+              {
                 "mountPath": "/var/run/legion/agent-secrets-token",
                 "name": "agent-secrets-token",
                 "readOnly": true
@@ -596,6 +621,11 @@
                 "name": "issue",
                 "readOnly": true,
                 "subPath": "feed"
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               },
               {
                 "mountPath": "/var/run/legion/agent-secrets-token",
@@ -1197,6 +1227,19 @@
               "sizeLimit": "1Mi"
             },
             "name": "agent-secrets-key-merger"
+          },
+          {
+            "name": "providers",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "SESSION_DSN",
+                  "path": "OMP_SESSION_SQL_DSN"
+                }
+              ],
+              "secretName": "legion-legion-providers"
+            }
           }
         ]
       }

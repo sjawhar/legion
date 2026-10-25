@@ -14,7 +14,8 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/shim"
 )
 
-// providersItems are the keys pod's providers volume projects, nil when it mounts none.
+// providersItems are the keys pod's providers volume projects; every pod Legion runs mounts that
+// volume, since the session database's URL key is required.
 func providersItems(pod corev1.PodSpec) []corev1.KeyToPath {
 	for _, volume := range pod.Volumes {
 		if volume.Name == providersVolume && volume.Secret != nil {
@@ -24,77 +25,58 @@ func providersItems(pod corev1.PodSpec) []corev1.KeyToPath {
 	return nil
 }
 
-// Under a session database (Options.SessionDSNKey, runtime.kubernetes.session_store postgres) every
-// role's Oh My Pi keeps its session in it: each generation of a workflow role and of the controller
-// starts with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the providers Secret's
-// key, mounted read-only at a file named for that pointer, and the shim reads the providers
-// directory and, seeing the pointer, never exports the URL into Oh My Pi's environment. The image
-// probe mounts the key too, so a Secret that lacks it refuses boot, and tells its Oh My Pi nothing
-// of the store. Without a key no pod carries either variable or the projection.
+// Every role's Oh My Pi keeps its session in the database Options.SessionDSNKey names
+// (runtime.kubernetes.session_store postgres), the only store this runtime has: each generation of
+// a workflow role and of the controller starts with OMP_SESSION_STORAGE=sql and
+// OMP_SESSION_SQL_DSN_FILE naming the providers Secret's key, mounted read-only at a file named
+// for that pointer, and the shim reads the providers directory and, seeing the pointer, never
+// exports the URL into Oh My Pi's environment. The image probe mounts the key too, so a Secret
+// that lacks it refuses boot, and tells its Oh My Pi nothing of the store.
 func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 	dsnFile := ProvidersDir + "/OMP_SESSION_SQL_DSN"
-	projection := corev1.KeyToPath{Key: "SESSION_DSN", Path: "OMP_SESSION_SQL_DSN"}
-	for _, store := range []string{"postgres", "pvc"} {
-		t.Run(store, func(t *testing.T) {
-			opts := testOptions()
-			if store == "postgres" {
-				opts.SessionDSNKey = "SESSION_DSN"
+	projection := corev1.KeyToPath{Key: testSessionDSNKey, Path: "OMP_SESSION_SQL_DSN"}
+	r, err := configure(testOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	for name, spec := range map[string]runtime.SpawnSpec{"a workflow role": workerSpec(t), "the controller": controllerSpec(t)} {
+		t.Run(name, func(t *testing.T) {
+			worker := workerOf(t, r, spec)
+			env := envOf(worker)
+			items := providersItems(podOf(t, r, spec))
+			if env["OMP_SESSION_STORAGE"] != "sql" || env["OMP_SESSION_SQL_DSN_FILE"] != dsnFile {
+				t.Errorf("OMP_SESSION_STORAGE = %q, OMP_SESSION_SQL_DSN_FILE = %q; want sql and %s",
+					env["OMP_SESSION_STORAGE"], env["OMP_SESSION_SQL_DSN_FILE"], dsnFile)
 			}
-			r, err := configure(opts)
-			if err != nil {
-				t.Fatal(err)
+			if !slices.Contains(items, projection) {
+				t.Errorf("the providers volume projects %v, want %v among them", items, projection)
 			}
-			for name, spec := range map[string]runtime.SpawnSpec{"a workflow role": workerSpec(t), "the controller": controllerSpec(t)} {
-				t.Run(name, func(t *testing.T) {
-					worker := workerOf(t, r, spec)
-					env := envOf(worker)
-					items := providersItems(podOf(t, r, spec))
-					if store == "pvc" {
-						if _, set := env["OMP_SESSION_STORAGE"]; set {
-							t.Errorf("OMP_SESSION_STORAGE = %q under pvc, want it left to the pod baseline", env["OMP_SESSION_STORAGE"])
-						}
-						if _, set := env["OMP_SESSION_SQL_DSN_FILE"]; set || slices.Contains(items, projection) {
-							t.Errorf("a pvc pod points at or mounts a session database: %v, %v", env, items)
-						}
-						return
-					}
-					if env["OMP_SESSION_STORAGE"] != "sql" || env["OMP_SESSION_SQL_DSN_FILE"] != dsnFile {
-						t.Errorf("OMP_SESSION_STORAGE = %q, OMP_SESSION_SQL_DSN_FILE = %q; want sql and %s",
-							env["OMP_SESSION_STORAGE"], env["OMP_SESSION_SQL_DSN_FILE"], dsnFile)
-					}
-					if !slices.Contains(items, projection) {
-						t.Errorf("the providers volume projects %v, want %v among them", items, projection)
-					}
-					if mount := mountHolding(worker, dsnFile); mount == nil || mount.Name != providersVolume || !mount.ReadOnly {
-						t.Errorf("%s is held by %+v, want the providers volume read-only", dsnFile, mount)
-					}
-					if !slices.Contains(worker.Command, "--provider-env-dir") {
-						t.Errorf("the shim is not told the providers directory: %q", worker.Command)
-					}
-				})
+			if mount := mountHolding(worker, dsnFile); mount == nil || mount.Name != providersVolume || !mount.ReadOnly {
+				t.Errorf("%s is held by %+v, want the providers volume read-only", dsnFile, mount)
 			}
-			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
-			if got := slices.Contains(providersItems(probe), projection); got != (store == "postgres") {
-				t.Errorf("the probe pod mounts the session database's key: %t, want %t", got, store == "postgres")
-			}
-			probeEnv := envOf(containerNamed(t, probe, probeContainer))
-			if probeEnv["OMP_SESSION_STORAGE"] != "" {
-				t.Errorf("the probe pod's Oh My Pi is told a session store: %v", probeEnv)
-			}
-			if store == "postgres" {
-				// The probe's and every worker's `legion` read the mounted directory as the shim does
-				// (shim.ReadProviderEnv, through each container's own environment): the URL file is
-				// skipped because its pointer is there.
-				for container, env := range map[string]map[string]string{"the probe": probeEnv, "a worker": envOf(workerOf(t, r, workerSpec(t)))} {
-					exported := providersExported(t, env)
-					for _, pair := range exported {
-						if strings.Contains(pair, "secret@") {
-							t.Errorf("%s exports the session database's URL into Oh My Pi's environment: %q", container, exported)
-						}
-					}
-				}
+			if !slices.Contains(worker.Command, "--provider-env-dir") {
+				t.Errorf("the shim is not told the providers directory: %q", worker.Command)
 			}
 		})
+	}
+	probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
+	if !slices.Contains(providersItems(probe), projection) {
+		t.Errorf("the probe pod projects %v, want the session database's key %v among them", providersItems(probe), projection)
+	}
+	probeEnv := envOf(containerNamed(t, probe, probeContainer))
+	if probeEnv["OMP_SESSION_STORAGE"] != "" {
+		t.Errorf("the probe pod's Oh My Pi is told a session store: %v", probeEnv)
+	}
+	// The probe's and every worker's `legion` read the mounted directory as the shim does
+	// (shim.ReadProviderEnv, through each container's own environment): the URL file is
+	// skipped because its pointer is there.
+	for container, env := range map[string]map[string]string{"the probe": probeEnv, "a worker": envOf(workerOf(t, r, workerSpec(t)))} {
+		exported := providersExported(t, env)
+		for _, pair := range exported {
+			if strings.Contains(pair, "secret@") {
+				t.Errorf("%s exports the session database's URL into Oh My Pi's environment: %q", container, exported)
+			}
+		}
 	}
 }
 
@@ -116,34 +98,46 @@ func providersExported(t *testing.T, env map[string]string) []string {
 	return exported
 }
 
+// withSessionKey is pod with its providers volume projecting key as the session database's URL
+// file, or, with key "", projecting none at all — the shape of a pod created before the database
+// was configured, which no runtime builds any more now that the key is required.
+func withSessionKey(pod *corev1.Pod, key string) *corev1.Pod {
+	out := pod.DeepCopy()
+	for i, volume := range out.Spec.Volumes {
+		if volume.Name != providersVolume || volume.Secret == nil {
+			continue
+		}
+		items := slices.DeleteFunc(slices.Clone(volume.Secret.Items), func(item corev1.KeyToPath) bool {
+			return item.Path == sessionDSNFile
+		})
+		if key != "" {
+			items = append(items, corev1.KeyToPath{Key: key, Path: sessionDSNFile})
+		}
+		out.Spec.Volumes[i].Secret.Items = items
+	}
+	return out
+}
+
 // A pod whose providers volume projects another session store than a pod created now would, the
 // one created before the session database was configured above all, holds a move: its next
 // generation would name a URL file the pod does not mount, so the relaunch replaces the pod.
 func TestAPodWithoutTheSessionStoresProjectionHoldsAMove(t *testing.T) {
-	before, err := configure(testOptions())
+	r, err := configure(testOptions())
 	if err != nil {
 		t.Fatal(err)
 	}
-	opts := testOptions()
-	opts.SessionDSNKey = "SESSION_DSN"
-	after, err := configure(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	pod := func(r *Runtime) *corev1.Pod { return &corev1.Pod{Spec: podOf(t, r, workerSpec(t))} }
+	now := &corev1.Pod{Spec: podOf(t, r, workerSpec(t))}
 	for _, tc := range []struct {
 		name  string
-		r     *Runtime
 		pod   *corev1.Pod
 		moved bool
 	}{
-		{"a file-store pod under a session database", after, pod(before), true},
-		{"a session-database pod under the file store", before, pod(after), true},
-		{"a session-database pod under the same database", after, pod(after), false},
-		{"a file-store pod under the file store", before, pod(before), false},
+		{"a pod created before the session database was configured", withSessionKey(now, ""), true},
+		{"a pod projecting another key", withSessionKey(now, "OTHER_SESSION_DSN"), true},
+		{"a pod projecting the key a pod created now does", now, false},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			moved := tc.r.movedInPod(tc.pod, workerSpec(t).Role)
+			moved := r.movedInPod(tc.pod, workerSpec(t).Role)
 			if got := slices.ContainsFunc(moved, func(m movedAddress) bool { return m.where == "the session database URL key" }); got != tc.moved {
 				t.Errorf("movedInPod = %v, want the session store moved %t", moved, tc.moved)
 			}

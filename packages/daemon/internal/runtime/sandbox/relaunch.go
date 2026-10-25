@@ -93,7 +93,9 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // whose issue Sandbox is still of the release before the pod-owned disk — owning the `issue`
 // volume claim template that pod mounts — is replaced too, and its Sandbox with it: that field is
 // immutable in the CRD, so deleting the Sandbox at the issue's next launch and creating one of the
-// current shape is the only way to the pod-owned disk (replaceSupersededSandbox).
+// current shape is the only way to the pod-owned disk (replaceSupersededSandbox), which carries
+// the name the suspension wrote onto the Sandbox it creates, so the roles that replacement ended
+// are still read as displaced rather than dead.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	ctx = launching(ctx)
 	l, err := r.prepare(spec)
@@ -138,9 +140,14 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	if replace {
 		switch {
 		case live:
-			if err := r.suspendDisplacing(bounded, s, pod.UID); err != nil {
+			suspended, err := r.suspendDisplacing(bounded, s, pod.UID)
+			if err != nil {
 				return fail("suspend its sandbox", err)
 			}
+			// The patch's own copy, which carries the annotation naming the replaced pod: a
+			// migrating launch reads it from here onto the Sandbox it creates
+			// (replaceSupersededSandbox).
+			s = suspended
 		case s.mode() != modeSuspended:
 			if err := r.setMode(bounded, s, modeSuspended); err != nil {
 				return fail("suspend its sandbox", err)
@@ -188,9 +195,10 @@ func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runt
 	starting, cancel := context.WithDeadline(bounded, deadline.Add(r.terminationGrace))
 	defer cancel()
 	if ended {
-		// A real failed init proves no role could start. Return its recorded pod so supervision
-		// observes that pod's Gone, which carries InitFailed, rather than charging an unrelated
-		// launcher timeout.
+		// The pod this launch waited on has ended — gone, replaced, terminal, or its init container
+		// failed — so no role could start in it. Return its recorded pod: the supervisor's next
+		// probe reads that pod's own end, which says what happened, rather than this launch being
+		// charged a launcher timeout that end explains.
 		r.join(loc)
 		return loc, nil
 	}
@@ -543,13 +551,24 @@ func supersededDisk(s *sandbox, l launch) bool {
 // the Sandbox is gone. That is why this runs before provision and writeLauncherSecrets rather than
 // after: the provisioning Secret and every role Secret of this launch are written against the new
 // Sandbox and owned by it, where ones written first would be reaped with the old one.
+//
+// The one piece of the predecessor's metadata that travels is the pod it names as displaced
+// (displacedAnnotation): the five roles of the pod this launch just replaced are read as ended by
+// the daemon rather than dead only while their Sandbox names that pod (observe's names), and
+// migrate is true for every issue Sandbox of the previous release, so the cutover launch of every
+// running issue comes through here. sandboxManifest carries no annotations of its own, so the
+// replacement sets that one key on the object it creates rather than the manifest threading it.
 func (r *Runtime) replaceSupersededSandbox(ctx context.Context, l launch, s *sandbox) (*sandbox, error) {
 	r.log.Info("sandbox runtime: replacing the issue's sandbox of the disk shape before the pod-owned disk, reaping the volume claim it owns",
 		"sandbox", l.name, "uid", s.UID, "claim", IssueClaimName(l.spec.Claim), "issue", l.spec.Issue)
 	if err := r.deleteStoredSandbox(ctx, l.name); err != nil {
 		return nil, err
 	}
-	manifest, err := encodeSandbox(r.sandboxManifest(l))
+	replacement := r.sandboxManifest(l)
+	if named, ok := s.Annotations[displacedAnnotation]; ok {
+		replacement.Annotations = map[string]string{displacedAnnotation: named}
+	}
+	manifest, err := encodeSandbox(replacement)
 	if err != nil {
 		return nil, err
 	}
@@ -851,17 +870,22 @@ const displacedAnnotation = "legion.dev/displaced-pod"
 // or neither, so a refused suspension names no pod, and a merge patch sets the one annotation key
 // whatever other annotations the Sandbox carries, or none. It carries s's uid, which the API server
 // refuses to change on a live object, so a Sandbox deleted and recreated in between is never
-// written: the fence recordAddresses keeps.
-func (r *Runtime) suspendDisplacing(ctx context.Context, s *sandbox, uid types.UID) error {
+// written: the fence recordAddresses keeps. It returns the Sandbox as the patch left it, the one
+// copy that carries the name: a migrating launch reads it from there onto the Sandbox it creates
+// in its place (replaceSupersededSandbox).
+func (r *Runtime) suspendDisplacing(ctx context.Context, s *sandbox, uid types.UID) (*sandbox, error) {
 	body, err := json.Marshal(map[string]any{
 		"metadata": map[string]any{"uid": string(s.UID), "annotations": map[string]string{displacedAnnotation: string(uid)}},
 		"spec":     map[string]any{"operatingMode": modeSuspended},
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
-	_, err = r.sandboxClient().Patch(ctx, s.Name, types.MergePatchType, body, metav1.PatchOptions{})
-	return err
+	patched, err := r.sandboxClient().Patch(ctx, s.Name, types.MergePatchType, body, metav1.PatchOptions{})
+	if err != nil {
+		return nil, err
+	}
+	return decodeSandbox(patched)
 }
 
 // patch applies ops to the Sandbox read as s, as one JSON patch whose first operation tests s's

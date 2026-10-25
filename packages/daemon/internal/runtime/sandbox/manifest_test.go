@@ -717,8 +717,8 @@ func roleSpec(t *testing.T, role claim.Role) runtime.SpawnSpec {
 // directory per role is what this replaces, by the human's decision of 2026-10-20: disk is cheap,
 // an issue gets the space it needs, and the roles within a pod are not kept from sharing a cache.
 // Splitting them bought no isolation the pod has anyway — the roles of an issue share the pod,
-// the volume whole, the one checkout they all work in (workspace.Location names the repository
-// and the issue, never a role), the sessions directory and uv's Pythons and cache, and each can
+// the disk whole, the one checkout they all work in (workspace.Location names the repository
+// and the issue, never a role) and uv's Pythons and cache, and each can
 // read and write what the others write — while costing a copy of every cache per role. Bun
 // hardlinks out of its install cache into whatever it installs for (LEGION-198, where that
 // hardlinking was first met), so a file edited in place in node_modules is already in the
@@ -1135,7 +1135,6 @@ func TestRuntimeOwnedIsWhatTheWorkerContainerIsToldByTheRuntime(t *testing.T) {
 	opts := testOptions()
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
-	opts.SessionDSNKey = "SESSION_DSN"
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)
@@ -1510,16 +1509,19 @@ func TestTheOperatorsPodReachesEveryPodLegionRuns(t *testing.T) {
 // pod Legion runs, a worker's and the image probe's alike, as exactly its configured keys, read-only
 // at ProvidersDir in the agent's container alone: each provider key as a file named for the variable
 // Oh My Pi reads, which the worker's shim exports into Oh My Pi's environment (--provider-env-dir),
-// and each providers secret (the NATS nkey seed) as a file of its own name that the container's
-// `<NAME>_FILE` names, so the shim exports it to no one. The pointer is the runtime's, not the
-// spec's: a spec that carries no seed still gets it, and the claim's Secret never holds a copy. With
-// neither, no pod mounts the Secret, no shim is told a directory, and there is no pointer.
+// each providers secret (the NATS nkey seed) as a file of its own name that the container's
+// `<NAME>_FILE` names, so the shim exports it to no one, and the session database's URL key last.
+// The pointer is the runtime's, not the spec's: a spec that carries no seed still gets it, and the
+// claim's Secret never holds a copy. With neither a provider key nor a providers secret the Secret
+// is still mounted, holding the session database's URL alone: that key is required, so no pod runs
+// without the volume and no shim without the directory.
 func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 	const providersSecret = "legion-" + testProject + "-providers"
 	const seed = "SUAIBDPBAUTWCWBKIO6XHQNINK5FWJW4OHLXC3HQ2KFE4PEJUA44CNHTC4"
 	nats := []string{"NATS_NKEY_SEED"}
 	natsItem := corev1.KeyToPath{Key: "NATS_NKEY_SEED", Path: "NATS_NKEY_SEED"}
 	anthropic := corev1.KeyToPath{Key: "anthropic", Path: "ANTHROPIC_API_KEY"}
+	sessionItem := corev1.KeyToPath{Key: testSessionDSNKey, Path: sessionDSNFile}
 	for _, tc := range []struct {
 		name      string
 		keys      map[string]string
@@ -1528,11 +1530,11 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 		items     []corev1.KeyToPath
 	}{
 		{"provider keys", map[string]string{"GEMINI_API_KEY": "gemini", "ANTHROPIC_API_KEY": "anthropic"}, nil, false,
-			[]corev1.KeyToPath{anthropic, {Key: "gemini", Path: "GEMINI_API_KEY"}}},
-		{"neither", nil, nil, false, nil},
-		{"the seed with provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, nats, true, []corev1.KeyToPath{anthropic, natsItem}},
-		{"the seed alone", nil, nats, true, []corev1.KeyToPath{natsItem}},
-		{"the seed, on a spec that carries none", nil, nats, false, []corev1.KeyToPath{natsItem}},
+			[]corev1.KeyToPath{anthropic, {Key: "gemini", Path: "GEMINI_API_KEY"}, sessionItem}},
+		{"the session database's URL alone", nil, nil, false, []corev1.KeyToPath{sessionItem}},
+		{"the seed with provider keys", map[string]string{"ANTHROPIC_API_KEY": "anthropic"}, nats, true, []corev1.KeyToPath{anthropic, natsItem, sessionItem}},
+		{"the seed alone", nil, nats, true, []corev1.KeyToPath{natsItem, sessionItem}},
+		{"the seed, on a spec that carries none", nil, nats, false, []corev1.KeyToPath{natsItem, sessionItem}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			opts := testOptions()
@@ -1590,18 +1592,12 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 						t.Errorf("%s mounts the providers Secret: %+v", init.Name, got)
 					}
 				}
-				if tc.items == nil {
-					if len(volumes) != 0 || len(mounted(agent)) != 0 {
-						t.Errorf("%s: with neither the pod has %+v and mounts %+v", pod.container, volumes, mounted(agent))
-					}
-				} else {
-					want := &corev1.SecretVolumeSource{SecretName: providersSecret, Items: tc.items, DefaultMode: new(int32(0o440))}
-					if len(volumes) != 1 || !reflect.DeepEqual(volumes[0].Secret, want) {
-						t.Errorf("%s's pod holds the providers Secret as %+v, want once as %+v", pod.container, volumes, *want)
-					}
-					if got := mounted(agent); len(got) != 1 || got[0].MountPath != ProvidersDir || !got[0].ReadOnly || got[0].SubPath != "" {
-						t.Errorf("%s mounts the providers Secret as %+v, want once, read-only, at %s", pod.container, got, ProvidersDir)
-					}
+				want := &corev1.SecretVolumeSource{SecretName: providersSecret, Items: tc.items, DefaultMode: new(int32(0o440))}
+				if len(volumes) != 1 || !reflect.DeepEqual(volumes[0].Secret, want) {
+					t.Errorf("%s's pod holds the providers Secret as %+v, want once as %+v", pod.container, volumes, *want)
+				}
+				if got := mounted(agent); len(got) != 1 || got[0].MountPath != ProvidersDir || !got[0].ReadOnly || got[0].SubPath != "" {
+					t.Errorf("%s mounts the providers Secret as %+v, want once, read-only, at %s", pod.container, got, ProvidersDir)
 				}
 				env := envOf(agent)
 				pointer, pointed := env["NATS_NKEY_SEED_FILE"]
@@ -1620,10 +1616,7 @@ func TestTheProvidersSecretReachesEveryPodAsItsOwnFiles(t *testing.T) {
 			main := workerProcess
 			shim := main.Command[:slices.Index(main.Command, "--")]
 			at := slices.Index(shim, "--provider-env-dir")
-			switch {
-			case tc.items == nil && at >= 0:
-				t.Errorf("with neither the shim is told %v", shim)
-			case tc.items != nil && (at < 0 || at+1 == len(shim) || shim[at+1] != ProvidersDir):
+			if at < 0 || at+1 == len(shim) || shim[at+1] != ProvidersDir {
 				t.Errorf("the shim runs as %v, want --provider-env-dir %s", shim, ProvidersDir)
 			}
 		})
@@ -1652,7 +1645,6 @@ func TestLegionsOwnNamesAreWhatItsPodsCarry(t *testing.T) {
 	opts.DispatchURL, opts.DispatchToken = "https://dispatch.internal", "dispatch-bearer"
 	opts.ProviderKeys = map[string]string{"ANTHROPIC_API_KEY": "anthropic"}
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
-	opts.SessionDSNKey = "SESSION_DSN"
 	r, err := configure(opts)
 	if err != nil {
 		t.Fatal(err)

@@ -17,9 +17,10 @@ import (
 // imageEnv are the variables the worker image's final stage sets (packages/daemon/docker/
 // worker.Dockerfile, ENV), which every container inherits: COREPACK_DEFAULT_TO_LATEST=0 keeps the
 // corepack shims on the pnpm and yarn their corepack ships; HOME and OMP_PROFILE place Oh My Pi's
-// profile, whose sessions directory a pod mounts from the tree volume; LEGION_OMP_PATH is the Oh
-// My Pi the image probe proves the workers run; DO_NOT_TRACK=1 is CodeGraph's telemetry and
-// update-check opt-out; and PATH, which the runtime sets as well.
+// profile, whose models and settings the image carries and whose sessions a pod never writes, every
+// session being a row in the session database; LEGION_OMP_PATH is the Oh My Pi the image probe
+// proves the workers run; DO_NOT_TRACK=1 is CodeGraph's telemetry and update-check opt-out; and
+// PATH, which the runtime sets as well.
 // TestImageEnvIsWhatTheWorkerImageSets holds the list to the Dockerfile.
 var imageEnv = []string{"COREPACK_DEFAULT_TO_LATEST", "DO_NOT_TRACK", "HOME", "LEGION_OMP_PATH", "OMP_PROFILE", "PATH"}
 
@@ -96,7 +97,7 @@ func podVariables(pod Pod, launchSecrets []string) map[string]setter {
 // and would replace one Oh My
 // Pi's environment gains after (the pod baseline), and skips one whose `<NAME>_FILE` pointer the
 // pod sets (shim.ReadProviderEnv); and it must read neither a providers secret's key nor the
-// session database's URL key (sessionDSNKey, "" when sessions are files), which the shim would
+// session database's URL key (sessionDSNKey, which every deployment names), which the shim would
 // export into Oh My Pi's environment under the provider key's name. launchSecrets are the
 // secrets every launch's spec carries, by name, and providersSecrets those of them the providers
 // Secret carries, none of which may be the session database's URL key. configure runs it, and
@@ -166,7 +167,7 @@ func CheckPod(pod Pod, providerKeys map[string]string, tools Tools, launchSecret
 		if key := providerKeys[name]; slices.Contains(providersSecrets, key) {
 			return fmt.Errorf("provider_keys names %s from the providers Secret's key %s, which the pod mounts as the launch secret %s: the shim would export that secret into Oh My Pi's environment as %s", name, key, key, name)
 		}
-		if key := providerKeys[name]; sessionDSNKey != "" && key == sessionDSNKey {
+		if key := providerKeys[name]; key == sessionDSNKey {
 			return fmt.Errorf("provider_keys names %s from the providers Secret's key %s, which holds the session database's URL (runtime.kubernetes.session_dsn_secret): the shim would export that URL into Oh My Pi's environment as %s", name, key, name)
 		}
 	}

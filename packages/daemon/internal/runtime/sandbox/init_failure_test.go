@@ -10,8 +10,8 @@ import (
 )
 
 // A pod whose init container ended non-zero is Gone for every role, and says so: no launcher could
-// have started in it. The verdict carries InitFailed, whatever the exit code, which is what keeps
-// it out of ends() and so out of the displaced reading.
+// have started in it. The mapping classifies it a failed init, whatever the exit code, which is
+// what keeps it out of ends() and so out of the displaced reading.
 func TestRestartingInitFailureIsGoneForEveryRole(t *testing.T) {
 	for _, waiting := range []bool{false, true} {
 		t.Run(map[bool]string{false: "terminated", true: "backoff"}[waiting], func(t *testing.T) {
@@ -34,8 +34,11 @@ func TestRestartingInitFailureIsGoneForEveryRole(t *testing.T) {
 				return p != nil && p.Status.Phase == corev1.PodPending
 			})
 			observation, err := g.r.Probe(g.ctx, loc)
-			if err != nil || observation.Kind != runtime.Gone || !observation.InitFailed || !strings.Contains(observation.Detail, initContainer) {
+			if err != nil || observation.Kind != runtime.Gone || !strings.Contains(observation.Detail, initContainer) {
 				t.Fatalf("restarting init = %+v, %v; want Gone with the failed init and its detail", observation, err)
+			}
+			if !g.initFailed(loc) {
+				t.Fatalf("restarting init = %+v; want it classified a failed init", observation)
 			}
 		})
 	}
@@ -86,7 +89,7 @@ func TestColdInitFailureReachesSupervisionWithoutWaitingForLauncher(t *testing.T
 		t.Fatalf("init failure was hidden as a launcher timeout: %v", launched.err)
 	}
 	obs, err := g.r.Probe(g.ctx, launched.loc)
-	if err != nil || obs.Kind != runtime.Gone || !obs.InitFailed {
+	if err != nil || obs.Kind != runtime.Gone || !g.initFailed(launched.loc) {
 		t.Fatalf("supervisor cannot observe the confirmed init failure: %+v, %v", obs, err)
 	}
 }

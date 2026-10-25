@@ -103,6 +103,11 @@
                 "mountPath": "/var/run/legion/gh",
                 "name": "gh-controller",
                 "readOnly": true
+              },
+              {
+                "mountPath": "/var/run/legion/providers",
+                "name": "providers",
+                "readOnly": true
               }
             ],
             "workingDir": "/legion"
@@ -240,6 +245,19 @@
                 }
               ],
               "secretName": "legion-legion-controller-controller-boot"
+            }
+          },
+          {
+            "name": "providers",
+            "secret": {
+              "defaultMode": 288,
+              "items": [
+                {
+                  "key": "SESSION_DSN",
+                  "path": "OMP_SESSION_SQL_DSN"
+                }
+              ],
+              "secretName": "legion-legion-providers"
             }
           }
         ]

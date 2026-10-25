@@ -591,13 +591,13 @@ func (r *Runtime) stuck(ctx context.Context, pod *corev1.Pod, name, digest strin
 			r.image, name, phaseOf(pod), probeContainer, w.Reason, w.Message)
 		return &missing
 	}
-	if r.mountsProviders() {
-		secret := ProvidersSecretName(r.project)
-		if failure := providersMountFailure(events, secret); failure != "" {
-			refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, whose keys every pod mounts (%s): %s",
-				name, secret, strings.Join(r.providersKeys(), ", "), failure)}
-			return &refused
-		}
+	// Every pod mounts the providers Secret, the probe's included: the session database's URL key
+	// is required, so a Secret the kubelet cannot mount refuses the boot here.
+	secret := ProvidersSecretName(r.project)
+	if failure := providersMountFailure(events, secret); failure != "" {
+		refused := bootprobe.Outcome{Refusal: fmt.Errorf("the probe pod %s cannot mount the providers Secret %s, whose keys every pod mounts (%s): %s",
+			name, secret, strings.Join(r.providersKeys(), ", "), failure)}
+		return &refused
 	}
 	if volume, message := missingVolume(events); message != "" {
 		return r.blockVolumeRefusal(pod, name, volume, message)
@@ -1186,11 +1186,10 @@ type probeSpec struct {
 func (r *Runtime) probeManifest(name string, p ImageProbe, shutdown time.Time) probeSandbox {
 	labels := map[string]string{labelProject: r.project, labelProbe: "image"}
 	providers, providersMounts := r.providers()
-	command := []string{r.tools.Legion, "probe-image", "--daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety"}
-	if len(providersMounts) > 0 {
-		command = append(command, "--provider-env-dir", ProvidersDir)
-	}
-	command = append(command, "--role-references", p.RoleReferences.Encode())
+	// The probe reads the providers directory as a worker's shim does, and every pod mounts it:
+	// the session database's URL key is required, so the Secret is never absent (providers).
+	command := []string{r.tools.Legion, "probe-image", "--daemon-api-version", strconv.Itoa(p.Contract), "--plugin-root", legionPlugin, "--envoy-plugin-root", envoyPlugin, "--pod-safety",
+		"--provider-env-dir", ProvidersDir, "--role-references", p.RoleReferences.Encode()}
 	container := corev1.Container{
 		Name:            probeContainer,
 		Image:           r.image,

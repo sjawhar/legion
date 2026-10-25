@@ -347,7 +347,9 @@ func (r *Runtime) diskSpec() corev1.PersistentVolumeClaimSpec {
 // an issue survives the pod that did it. The controller's Sandbox still owns its one `issue`
 // template, so the working root its launcher runs in outlives the pod that left it. Its pod
 // template never runs: the relaunch's Running patch replaces it with the template the launch
-// computes before the controller creates a pod.
+// computes before the controller creates a pod. Its metadata is a name, a namespace and the
+// launch's labels, and no annotation: the one a Sandbox is ever created carrying — the pod a
+// migrating launch displaced — is set on the object by that launch (replaceSupersededSandbox).
 func (r *Runtime) sandboxManifest(l launch) sandbox {
 	return sandbox{
 		TypeMeta:   metav1.TypeMeta{APIVersion: sandboxGVR.GroupVersion().String(), Kind: "Sandbox"},
@@ -559,12 +561,9 @@ func agentSecretsMounts(broker *AgentSecrets, role claim.Role) []corev1.VolumeMo
 // secret (Options.ProvidersSecrets), a file of its own name that the shim skips, since the
 // container's `<NAME>_FILE` points at it (providersPointers); and the session database's URL key
 // (Options.SessionDSNKey) as sessionDSNFile, which the shim skips for the same reason
-// (mainEnvironment's OMP_SESSION_SQL_DSN_FILE). None of them without any of the three, so a
-// deployment with none needs no such Secret.
+// (mainEnvironment's OMP_SESSION_SQL_DSN_FILE). Every pod mounts it: the URL key is required, so
+// the Secret and its mount are too, whatever else the deployment configures.
 func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
-	if !r.mountsProviders() {
-		return nil, nil
-	}
 	var items []corev1.KeyToPath
 	for _, variable := range sortedKeys(r.providerKeys) {
 		items = append(items, corev1.KeyToPath{Key: r.providerKeys[variable], Path: variable})
@@ -572,39 +571,26 @@ func (r *Runtime) providers() ([]corev1.Volume, []corev1.VolumeMount) {
 	for _, name := range r.providersSecrets {
 		items = append(items, corev1.KeyToPath{Key: name, Path: name})
 	}
-	if r.sessionDSNKey != "" {
-		items = append(items, corev1.KeyToPath{Key: r.sessionDSNKey, Path: sessionDSNFile})
-	}
+	items = append(items, corev1.KeyToPath{Key: r.sessionDSNKey, Path: sessionDSNFile})
 	return []corev1.Volume{{Name: providersVolume, VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{
 			SecretName: ProvidersSecretName(r.project), Items: items, DefaultMode: new(int32(0o440)),
 		}}}},
 		[]corev1.VolumeMount{{Name: providersVolume, MountPath: ProvidersDir, ReadOnly: true}}
 }
 
-// mountsProviders reports whether every pod mounts the providers Secret: some provider key,
-// providers secret, or session database URL key is configured.
-func (r *Runtime) mountsProviders() bool {
-	return len(r.providerKeys) > 0 || len(r.providersSecrets) > 0 || r.sessionDSNKey != ""
-}
-
 // providersKeys are the providers Secret's keys every pod mounts, sorted: what the image probe
 // names when the kubelet cannot mount one.
 func (r *Runtime) providersKeys() []string {
 	keys := slices.Concat(slices.Collect(maps.Values(r.providerKeys)), r.providersSecrets)
-	if r.sessionDSNKey != "" {
-		keys = append(keys, r.sessionDSNKey)
-	}
+	keys = append(keys, r.sessionDSNKey)
 	slices.Sort(keys)
 	return keys
 }
 
-// sessionDSNPointer is OMP_SESSION_SQL_DSN_FILE naming the mounted session database URL, none
-// without one: in the image probe's container it is what keeps `legion probe-image`, which reads
-// the providers directory as the shim does, from exporting the URL into Oh My Pi's environment.
+// sessionDSNPointer is OMP_SESSION_SQL_DSN_FILE naming the mounted session database URL: in the
+// image probe's container it is what keeps `legion probe-image`, which reads the providers
+// directory as the shim does, from exporting the URL into Oh My Pi's environment.
 func (r *Runtime) sessionDSNPointer() []corev1.EnvVar {
-	if r.sessionDSNKey == "" {
-		return nil
-	}
 	return []corev1.EnvVar{{Name: ompsessions.DSNFileVariable, Value: ProvidersDir + "/" + sessionDSNFile}}
 }
 
@@ -674,21 +660,22 @@ const scratchRoot = TreeRoot + "/scratch"
 // same: the temporary directory, the cache and data homes and bun's install cache directly under
 // scratchRoot, and the two Go caches (goBuildCache, goModCache), as uv's cache already was
 // (uvCacheDir). A directory per role is what this replaces, by the human's decision of
-// 2026-10-20: the roles of an issue already share the pod, the issue's volume whole, the one
-// workspace they all work in, the sessions directory, uv's Pythons and cache and the two Go
-// caches, and each can read and write what the others write, so a cache per role bought an
-// isolation the pod does not have and cost a copy of every cache per role. Bun hardlinks out of
-// its install cache into whatever it installs for (LEGION-198, where that hardlinking was first
-// met), and the issue's roles share one checkout — workspace.Location names the repository and
-// the issue, never a role — so a file edited in place inside node_modules is already in the
-// packages every role runs from, whatever we do about caches. XDG_STATE_HOME alone stays the
-// role's own (roleStateHome), and for a mechanism rather than caution: Oh My Pi names its browser
-// broker's lock from the state root, the name is an abstract unix socket, and an abstract socket
-// name is one name across every container of the pod, so one state home would block every role's
-// broker but the first. Only the config home is neither the issue's scratch nor the role's: it
-// stays the pod's shared in-memory volume (xdgConfigHome), where workspace-init writes the jj
-// configuration the agents' jj reads. Every directory here outlives the pod, so a later pod of
-// the issue reuses what an earlier one downloaded and built.
+// 2026-10-20: the roles of an issue already share the pod, the issue's disk whole, the one
+// workspace they all work in, uv's Pythons and cache and the two Go caches, and each can read and
+// write what the others write, so a cache per role bought an isolation the pod does not have and
+// cost a copy of every cache per role. Bun hardlinks out of its install cache into whatever it
+// installs for (LEGION-198, where that hardlinking was first met), and the issue's roles share one
+// checkout — workspace.Location names the repository and the issue, never a role — so a file
+// edited in place inside node_modules is already in the packages every role runs from, whatever we
+// do about caches. XDG_STATE_HOME alone stays the role's own (roleStateHome), and for a mechanism
+// rather than caution: Oh My Pi names its browser broker's lock from the state root, the name is
+// an abstract unix socket, and an abstract socket name is one name across every container of the
+// pod, so one state home would block every role's broker but the first. Only the config home is
+// neither the issue's scratch nor the role's: it stays the pod's shared in-memory volume
+// (xdgConfigHome), where workspace-init writes the jj configuration the agents' jj reads. None of
+// these directories outlives the pod: the issue's disk is the pod's own generic ephemeral volume,
+// so a later pod of the issue downloads and builds again, and the sharing here is between the
+// roles of one pod, not between pods.
 func roleEnvironment(role claim.Role) []corev1.EnvVar {
 	return []corev1.EnvVar{
 		{Name: "XDG_CONFIG_HOME", Value: xdgConfigHome},
@@ -836,19 +823,20 @@ func (r *Runtime) LaunchBound() time.Duration {
 // every tmux pane is told (runtime/tmux/spawn.go, panePairs), then the operator's
 // (runtime.kubernetes.pod), then the spec's own, then one `<NAME>_FILE` pointer per secret into
 // the generation's private launcher directory, then one per providers secret into the providers
-// mount, then, under a session database (Options.SessionDSNKey), OMP_SESSION_STORAGE=sql and
-// OMP_SESSION_SQL_DSN_FILE naming its mounted URL, which a pod created before the store was set
-// does not mount: Oh My Pi refuses to start on an unreadable URL file, so that generation fails
-// rather than keeping files. None of them repeats another: the runtime refuses a spec naming one
-// of its own (runtimeOwned), and the daemon an operator's variable naming one of the runtime's or
-// a spec's. The temporary directory, XDG homes and tool caches are the issue volume's
-// (roleEnvironment) — the issue's scratch and its Go caches, which every role of it is told the
-// same of, but the state home, which is the role's own — carried to the role's shim by the start
-// command (launcherCommand's Env). POD_UID is the pod's own incarnation, from the downward
-// API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX puts
-// the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of the
-// issue's volume leads PATH. The GIT_CONFIG pairs are the GitHub credential of every git the role
-// runs, in the issue's clone or outside it (gitCredentialEnv).
+// mount, then OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the mounted URL of the
+// session database every session is a row in (Options.SessionDSNKey), which a pod created before
+// the store was configured does not mount: Oh My Pi refuses to start on an unreadable URL file, so
+// such a generation fails rather than writing a session onto a disk that dies with its pod (the
+// relaunch replaces that pod first, movedSessionStore). None of them repeats another: the runtime
+// refuses a spec naming one of its own (runtimeOwned), and the daemon an operator's variable
+// naming one of the runtime's or a spec's. The temporary directory, XDG homes and tool caches are
+// the issue pod's disk's (roleEnvironment) — the issue's scratch and its Go caches, which every
+// role of it is told the same of, but the state home, which is the role's own — carried to the
+// role's shim by the start command (launcherCommand's Env). POD_UID is the pod's own incarnation,
+// from the downward API. The secrets broker is told when the runtime enrolls pods. PI_SHELL_PREFIX
+// puts the `legion` directory first on PATH alone: a pod's gh is the image's, so no directory of
+// the issue's disk leads PATH. The GIT_CONFIG pairs are the GitHub credential of every git the
+// role runs, in the issue's clone or outside it (gitCredentialEnv).
 func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	spec := l.spec
 	env := l.kind.agentEnv(l)
@@ -897,11 +885,11 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	}
 	env = append(env, r.providersPointers()...)
 	// Oh My Pi's own two variables, which place the session in the database whose URL the mounted
-	// key holds (providers); with none, the pod baseline keeps it a file (internal/podsafety).
-	if r.sessionDSNKey != "" {
-		add(ompsessions.StorageVariable, ompsessions.SQLStorage)
-		add(ompsessions.DSNFileVariable, ProvidersDir+"/"+sessionDSNFile)
-	}
+	// key holds (providers): every pod gets them, since the key is required and nothing in a pod
+	// may keep a session as a file (internal/podsafety's baseline covers only a container the
+	// runtime tells neither, the image probe's).
+	add(ompsessions.StorageVariable, ompsessions.SQLStorage)
+	add(ompsessions.DSNFileVariable, ProvidersDir+"/"+sessionDSNFile)
 	return env
 }
 

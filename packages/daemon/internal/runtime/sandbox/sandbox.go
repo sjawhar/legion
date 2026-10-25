@@ -6,11 +6,14 @@
 // both, and each kind builds the facets of its pod the other does not.
 //
 // Process Suspend leaves the shared Sandbox running, and so does Release of a claim on an issue.
-// The durable issue close first stops every stored role, then sets its Sandbox Suspended and waits
-// for the pod to disappear, retaining the volume and sessions until linger cleanup. Re-admission
-// resumes the Sandbox, while an individual role's recovery in a healthy pod does not replace that
-// pod. The controller's Sandbox is the controller's claim's, and goes with its Release or, once
-// the claim is retired, with the orphan sweep.
+// The durable issue close first stops every stored role, then sets its Sandbox Suspended, waits
+// for the pod to disappear, and deletes the Sandbox with the role Secrets it owns (SuspendIssue):
+// the issue's disk was its pod's own generic ephemeral volume and went with the pod, and no
+// session was ever on it, so the close leaves the issue nothing and its next launch makes
+// Sandbox, pod and disk afresh. Re-admission finds no Sandbox and creates one, while an
+// individual role's recovery in a healthy pod does not replace that pod. The controller's Sandbox
+// is the controller's claim's, and goes with its Release or, once the claim is retired, with the
+// orphan sweep.
 //
 // The Sandbox structs are Legion's own (types.go): importing sigs.k8s.io/agent-sandbox would move
 // grpc, otel, and controller-runtime for every module under go.work.
@@ -228,6 +231,13 @@ func configureProber(opts Options) (*Runtime, error) {
 		return refuse("no storage class for the issue volume (the cluster has no default class to fall back on)")
 	case opts.IssueVolume.Sign() <= 0:
 		return refuse("no issue volume size: %s is not a positive quantity", opts.IssueVolume.String())
+	// An issue pod's disk is the pod's own ephemeral volume, created with the pod and deleted with
+	// it, so a session kept as a file on it dies with the pod and the next launch's resume fails on
+	// the missing file. Every session is a row in the database this key names, which makes the key
+	// as necessary to a launch as the image (config's readSessionStore refuses the file store for
+	// the same reason, and the two keep an Options built by hand from reaching a launch at all).
+	case opts.SessionDSNKey == "":
+		return refuse("no session database URL key: the providers Secret's key holding the postgres:// URL every role's Oh My Pi keeps its session in is required (runtime.kubernetes.session_store postgres, session_dsn_secret), since an issue pod's disk is deleted with the pod and no session can live on it")
 	case opts.BootTimeout <= 0 || opts.TerminationGrace <= 0 || opts.ProbeInterval <= 0 || opts.AdoptTimeout <= 0:
 		return refuse("the boot timeout, termination grace, probe interval, and adoption timeout must be positive")
 	case opts.RegistrationIntervals <= 0:
@@ -813,30 +823,31 @@ func (r *Runtime) AdoptWorkingCopy(ctx context.Context, loc runtime.Locator, id 
 // before it creates a Sandbox, so what this runtime launches is never swept. The project
 // controller's Sandbox is owned by the controller's claim: it is an orphan once that claim is
 // retired or gone. known is every claim the daemon has not retired, a suspended one included
-// (knownClaims), so a retired controller's Sandbox goes and a suspended one's, which holds its
-// session, stays; known was read before this listing, so a controller launched in between is
-// missing from it, and a Sandbox known does not name is kept while the store holds its claim
-// unretired, read again under the pod's launch turn (controllerOwned). Every delete runs under the
-// pod's launch turn, so a launch that begins meanwhile waits for the delete and then creates the
-// Sandbox afresh, and is fenced to the Sandbox as the decision read it, its uid and resourceVersion
-// (deleteFenced): an issue Sandbox's tree is read again under the turn, and a Sandbox written since
-// the informer's snapshot — relabelled for a new tree by a re-admitted issue's launch
-// (ensureSandbox), which keeps its uid, volume and sessions, or set Running — is kept as a conflict
-// for the next sweep to judge on what it holds then. Every start writes the Sandbox its
-// generation's address record (recordAddresses), so a controller relaunched into it since makes the
-// delete a conflict, and the next sweep judges it again. The image probe's Sandbox (labelled
-// legion.dev/probe) is no claim's and never an orphan: the probe deletes it, and its shutdown time
-// has the controller delete it otherwise (probe.go). A repository cache's Sandbox (labelled
-// legion.dev/cache) is no claim's either: the claim path passes over it, and sweepCaches keeps,
-// repairs or retires it after the claim path. known's located claims join the watch, unless
-// it already holds a newer incarnation of the claim, and are evaluated at once. Nothing here lists
-// Secrets: each goes with its Sandbox. Each Sandbox whose pod runs an image other than the
-// runtime's (imageDrift) is warned of, named with both images, at the boot reconciliation and at
-// every sweep until a relaunch of one of its roles replaces the pod (warnImageDrift): a release
-// whose daemon stops serving a route, or stops setting a variable, that the previous image's agents
-// call or read leaves such a pod's agents calling this daemon as the older release, so it is pinned
-// only once every tree is drained or every pod relaunched, and the boot log is where an operator
-// reads which pods are still to go. Only a warning: refusing the pod would stop it being observed.
+// (knownClaims), so a retired controller's Sandbox goes and a suspended one's, which owns the
+// volume its working root is on, stays; known was read before this listing, so a controller
+// launched in between is missing from it, and a Sandbox known does not name is kept while the
+// store holds its claim unretired, read again under the pod's launch turn (controllerOwned). Every
+// delete runs under the pod's launch turn, so a launch that begins meanwhile waits for the delete
+// and then creates the Sandbox afresh, and is fenced to the Sandbox as the decision read it, its
+// uid and resourceVersion (deleteFenced): an issue Sandbox's tree is read again under the turn,
+// and a Sandbox written since the informer's snapshot — relabelled for a new tree by a re-admitted
+// issue's launch (ensureSandbox), which keeps its uid and owns no volume at all, its pod's disk
+// being the pod's own, or set Running — is kept as a conflict for the next sweep to judge on what
+// it holds then. Every start writes the Sandbox its generation's address record
+// (recordAddresses), so a controller relaunched into it since makes the delete a conflict, and the
+// next sweep judges it again. The image probe's Sandbox (labelled legion.dev/probe) is no claim's
+// and never an orphan: the probe deletes it, and its shutdown time has the controller delete it
+// otherwise (probe.go). A repository cache's Sandbox (labelled legion.dev/cache) is no claim's
+// either: the claim path passes over it, and sweepCaches keeps, repairs or retires it after the
+// claim path. known's located claims join the watch, unless it already holds a newer incarnation
+// of the claim, and are evaluated at once. Nothing here lists Secrets: each goes with its Sandbox.
+// Each Sandbox whose pod runs an image other than the runtime's (imageDrift) is warned of, named
+// with both images, at the boot reconciliation and at every sweep until a relaunch of one of its
+// roles replaces the pod (warnImageDrift): a release whose daemon stops serving a route, or stops
+// setting a variable, that the previous image's agents call or read leaves such a pod's agents
+// calling this daemon as the older release, so it is pinned only once every tree is drained or
+// every pod relaunched, and the boot log is where an operator reads which pods are still to go.
+// Only a warning: refusing the pod would stop it being observed.
 func (r *Runtime) ReconcileOrphans(ctx context.Context, known []runtime.Known, grace time.Duration) error {
 	var errs []error
 	// controllers are the Sandboxes of the known controller claims, which the sweep keeps.

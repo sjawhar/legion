@@ -8,11 +8,13 @@
 // The baseline variables: the two that decide where a pod's Oh My Pi keeps its sessions
 // (baseline), set on the agent where the pod leaves them unset — when Oh My Pi would otherwise fill
 // them from the working directory's .env — and never on the shim; the Sandbox runtime refuses them,
-// and OMP_SESSION_SQL_DSN_FILE, in the operator's pod (sandbox.CheckPod): a pod keeps its sessions
-// as files on the issue's volume, where a resume reads them, unless the runtime keeps them in a
-// database (runtime.kubernetes.session_store postgres), where it starts every generation with
-// OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. The
-// state-home directory: the one Oh My Pi's state root resolves to under the role's XDG_STATE_HOME
+// and OMP_SESSION_SQL_DSN_FILE, in the operator's pod (sandbox.CheckPod). Every session of a
+// workflow role is a row in the database the deployment must name (runtime.kubernetes.session_store
+// postgres): the runtime starts every such generation with OMP_SESSION_STORAGE=sql and
+// OMP_SESSION_SQL_DSN_FILE itself, and Apply keeps both. The baseline's `file` is left for the one
+// container the runtime tells neither, the image probe's, whose session nothing resumes — no disk
+// a pod mounts outlives it, the issue pod's being the pod's own ephemeral volume. The state-home
+// directory: the one Oh My Pi's state root resolves to under the role's XDG_STATE_HOME
 // (EnsureStateHome), made before Oh My Pi starts, since Oh My Pi reads the variable only where
 // that directory exists. And the scratch directories: each directory the runtime tells a role to
 // write what it writes without being told where — the temporary directory, the cache and data

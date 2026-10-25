@@ -282,8 +282,8 @@ func (r *Runtime) movedInPod(pod *corev1.Pod, role claim.Role) []movedAddress {
 // (sessionDSNFile, from the Secret key Options.SessionDSNKey) with the one a pod created now
 // projects; ok is whether they differ. A generation started under a session database names that
 // file in OMP_SESSION_SQL_DSN_FILE, so a pod created before the database was configured, or under
-// another key, cannot run one; and a pod still projecting it after the runtime went back to files
-// mounts a credential nothing reads.
+// another key, cannot run one: its relaunch replaces it rather than start a generation whose Oh My
+// Pi would refuse the URL file it cannot read.
 func (r *Runtime) movedSessionStore(pod *corev1.Pod) (movedAddress, bool) {
 	held := ""
 	for _, volume := range pod.Spec.Volumes {
