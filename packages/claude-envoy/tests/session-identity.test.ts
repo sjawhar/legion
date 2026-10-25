@@ -90,22 +90,30 @@ test("pruning drops title files older than the age, keeps fresh ones, and tolera
 
 // Only one path removes a role file by hand (a soft setRole that comes back unclaimed), and the
 // handoff prune cannot reach one: it walks `sessions/<pid>/` and asks about a pid, while a role
-// file is keyed by session id.
-test("pruning drops role files older than the age, keeps fresh ones, and tolerates no directory", async () => {
+// file is keyed by session id. The record of the session running the sweep is never dropped,
+// whatever its age: at startup, before any heartbeat has touched it, age alone would expire the
+// record of the very session that is running.
+test("pruning drops role files older than the age, keeps fresh ones and the sweeper's own, and tolerates no directory", async () => {
   const stateDirectory = await mkdtemp(join(tmpdir(), "claude-envoy-roles-"))
   try {
-    await pruneStaleSessionRoles(stateDirectory)
+    await pruneStaleSessionRoles(stateDirectory, "ses_running")
 
     const fresh = roleStateFile(stateDirectory, "ses_fresh")
     const old = roleStateFile(stateDirectory, "ses_old")
+    const own = roleStateFile(stateDirectory, "ses_running")
     await writePersistedRole(fresh, { session_id: "ses_fresh", role: "implementer" })
     await writePersistedRole(old, { session_id: "ses_old", role: "reviewer" })
+    await writePersistedRole(own, { session_id: "ses_running", role: "tester" })
     const past = new Date(Date.now() - STATE_FILE_MAX_AGE_MS - 60_000)
     await utimes(old, past, past)
+    await utimes(own, past, past)
 
-    await pruneStaleSessionRoles(stateDirectory)
+    await pruneStaleSessionRoles(stateDirectory, "ses_running")
 
-    expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_fresh.json"])
+    expect((await readdir(join(stateDirectory, "roles"))).sort()).toEqual([
+      "ses_fresh.json",
+      "ses_running.json",
+    ])
   } finally {
     await rm(stateDirectory, { recursive: true, force: true })
   }

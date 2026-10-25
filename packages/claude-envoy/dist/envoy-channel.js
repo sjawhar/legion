@@ -47798,8 +47798,9 @@ async function pruneStaleSessionHandoffs(stateDirectory) {
     return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
 }
-async function pruneStaleSessionRoles(stateDirectory) {
-  await pruneStateDirectory(join5(stateDirectory, ROLES_DIRECTORY), writtenLongAgo);
+async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
+  const own = roleStateFile(stateDirectory, currentSessionId);
+  await pruneStateDirectory(join5(stateDirectory, ROLES_DIRECTORY), async (file2) => file2 !== own && await writtenLongAgo(file2));
 }
 
 // src/envoy-off.ts
@@ -48736,11 +48737,11 @@ async function startChannelSession(options) {
     });
   });
   for (const prune of [
-    pruneStaleSessionHandoffs,
-    pruneStaleSessionTitles,
-    pruneStaleSessionRoles
+    () => pruneStaleSessionHandoffs(options.stateDirectory),
+    () => pruneStaleSessionTitles(options.stateDirectory),
+    () => pruneStaleSessionRoles(options.stateDirectory, identity.id)
   ]) {
-    await prune(options.stateDirectory).catch((error48) => {
+    await prune().catch((error48) => {
       process.stderr.write(`envoy-channel: could not prune stale session state (${messageFor(error48)})
 `);
     });

@@ -19607,8 +19607,9 @@ async function pruneStaleSessionHandoffs(stateDirectory) {
     return /^\d+$/.test(pid) && !processExists(Number(pid));
   });
 }
-async function pruneStaleSessionRoles(stateDirectory) {
-  await pruneStateDirectory(join4(stateDirectory, ROLES_DIRECTORY), writtenLongAgo);
+async function pruneStaleSessionRoles(stateDirectory, currentSessionId) {
+  const own = roleStateFile(stateDirectory, currentSessionId);
+  await pruneStateDirectory(join4(stateDirectory, ROLES_DIRECTORY), async (file2) => file2 !== own && await writtenLongAgo(file2));
 }
 
 // hooks/session-hook.ts

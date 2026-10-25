@@ -644,8 +644,49 @@ test("a heartbeat that confirms this session as holder refreshes the role record
       `a heartbeat rewriting ${roleFile}`,
     )
     await session.shutdown()
-    await pruneStaleSessionRoles(stateDirectory)
+    // Swept as the next session that starts, not as this one: the sweep never drops its own
+    // record, so sweeping as `ses_claude` would pass however stale the record was left.
+    await pruneStaleSessionRoles(stateDirectory, "ses_other")
 
+    expect(await readPersistedRole(roleFile)).toEqual({
+      session_id: "ses_claude",
+      role: "reviewer",
+    })
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a record already past the sweep's age survives a startup whose claim was refused, and the heartbeat restores it", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_claude", role: "reviewer" }))
+  // Thirty days unconfirmed, as a long-held role's record is the moment before its session starts
+  // again: the startup sweep runs straight after the refused claim, before any heartbeat has
+  // touched it.
+  const past = new Date(Date.now() - STATE_FILE_MAX_AGE_MS - 60_000)
+  await utimes(roleFile, past, past)
+  let holder = ""
+  let claims = 0
+  const client = recordingClient([], {
+    setRole: async (input) => {
+      claims += 1
+      if (claims === 1) throw new Error("listener unavailable")
+      holder = input.sessionID
+      return { claimed: true, interest: noInterest() }
+    },
+    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+  })
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+  )
+
+  try {
+    // Both the record and the role have to survive that startup.
+    await waitFor(async () => holder === "ses_claude", "the heartbeat reclaiming the role")
     expect(await readPersistedRole(roleFile)).toEqual({
       session_id: "ses_claude",
       role: "reviewer",

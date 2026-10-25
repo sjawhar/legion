@@ -110,17 +110,31 @@ export async function pruneStaleSessionHandoffs(stateDirectory: string): Promise
 
 /**
  * Drop `roles/` records nothing has touched in `STATE_FILE_MAX_AGE_MS`, by the age rule the
- * title records follow.
+ * title records follow, except the record of `currentSessionId` — the session running the sweep.
  *
  * A record's mtime is when its session was last seen holding the role: every heartbeat on which
- * the listener still names the session as holder rewrites the record (`refreshRoleRecord` in the
+ * the listener still names the session as holder touches the record (`refreshRoleRecord` in the
  * channel server), so this age reaches only a record whose session has not confirmed its role for
  * that long — in practice one that stopped running. Only one path removes a role file by hand — a
  * soft `setRole` that comes back unclaimed — so a session that holds its role to the end leaves
  * its file behind, and the handoff sweep cannot reach it: that one walks `sessions/<pid>/` and asks
  * the operating system about a pid, while a role file is keyed by session id and has no process
  * left to ask about.
+ *
+ * The sweep runs at startup, before any heartbeat has touched anything, and a session whose claim
+ * the listener refused there has not touched its own record either: age alone would expire the
+ * record of the very session that is running, and the retry queued for its next heartbeat would
+ * find nothing left to restore. Expiring an abandoned record is this sweep's whole point, and the
+ * running session's own record is by construction not abandoned, so it is the one record age does
+ * not decide.
  */
-export async function pruneStaleSessionRoles(stateDirectory: string): Promise<void> {
-  await pruneStateDirectory(join(stateDirectory, ROLES_DIRECTORY), writtenLongAgo)
+export async function pruneStaleSessionRoles(
+  stateDirectory: string,
+  currentSessionId: string,
+): Promise<void> {
+  const own = roleStateFile(stateDirectory, currentSessionId)
+  await pruneStateDirectory(
+    join(stateDirectory, ROLES_DIRECTORY),
+    async (file) => file !== own && (await writtenLongAgo(file)),
+  )
 }

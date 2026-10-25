@@ -864,11 +864,12 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
   // way — the reader swallows a failed read, the hook always exits 0 — and a directory this run
   // could not sweep is swept by the next session that starts.
   for (const prune of [
-    pruneStaleSessionHandoffs,
-    pruneStaleSessionTitles,
-    pruneStaleSessionRoles,
+    () => pruneStaleSessionHandoffs(options.stateDirectory),
+    () => pruneStaleSessionTitles(options.stateDirectory),
+    // The role sweep is told whose session this is: see `pruneStaleSessionRoles`.
+    () => pruneStaleSessionRoles(options.stateDirectory, identity.id),
   ]) {
-    await prune(options.stateDirectory).catch((error: unknown) => {
+    await prune().catch((error: unknown) => {
       process.stderr.write(
         `envoy-channel: could not prune stale session state (${messageFor(error)})\n`,
       )
