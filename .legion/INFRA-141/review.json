@@ -2,91 +2,73 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-141",
-  "completed": "2026-10-25T07:48:00Z",
+  "completed": "2026-10-25T10:20:00Z",
   "decision": "changes_requested",
   "critical": 0,
   "important": 2,
-  "minor": 4,
-  "round": 2,
-  "roundOneFindingsClosed": [
-    "scripts/e2e-local.sh:60-64 + .github/workflows/envoy-and-contracts.yaml:1196-1197 + scripts/e2e-local.test.sh:83-97 (72b0bca47af1): the image is one declaration at column 0, docker run uses $nats_image, the workflow reads that declaration, and the new test case fails if the image is inlined back or the declaration deleted. Verified by running the step's sed at this head: it prints mirror.gcr.io/library/nats:2.10-alpine where the old anchored expression printed nothing. Forge confirmation still outstanding (see ciRead).",
-    "delivery.go:742-757 (6c550318df5a): the window is counted as whole deferrals from metadata.NumDelivered against windowDeferrals, not from md.Timestamp; TestUnplaceableAgentDeliveryRetriesThenGivesUp gained a subtest driving a message older than the window, and the arithmetic test was updated to deferrals+1.",
-    "api.go:648, :904-911, :435-440 (6c550318df5a): errRoleHolderChanged is a sentinel, publishHandler recognises it ahead of the read failures, and refuseRoleHolderChanged keeps the 503 and Retry-After while naming the race and recording outcome=role_holder_changed.",
-    "api.go:284-287, :423-424 (6c550318df5a, 7e0a3d53a245): bus.ErrPublishDenied is answered 403 with publishDeniedPrefix, no Retry-After, outcome=publish_denied, and the AGENTS.md sentence blessing the 503 is reverted. The tester measured the real client making one attempt for 403/413/400 and two for 503, which is what justifies moving it below 500, and drove the denial against a nats-server with a real publish deny rule.",
-    "handler.go:27-36, session.go:30-36 (6c550318df5a, 7e0a3d53a245): the ReasonNoPushTarget contract now says what delivery.go does and what both documents say; TestGiveUpCounterSeparatesItsThreeCauses runs at a real window instead of the harness's zero one.",
-    "delivery.go (6c550318df5a): the false interest-path justification is gone and a push that failed on the wire is session.ReasonPushFailed, reason=push_failed, unplaceable_push_failed, retried in the same window."
+  "minor": 1,
+  "round": 3,
+  "roundTwoFindingsClosed": [
+    "delivery.go:607-661, :694-695, :839 and main.go:766 (68c86a562e43): the deferral budget is one keyed unplaceableDeferrals made once in deliveryConfig and shared by the role lane's handler, the durable's and the self-health rebind's; take does lookup, capacity check and insert under one mutex; release deletes only the given stream sequence, so a redelivery this listener never deferred returns nothing; listenerDeliveryHandler panics on a nil set. The margin argument is deleted, not rewritten, and replaced by a stated invariant.",
+    "delivery.go:818-819 (68c86a562e43): pushFailedDeferrals = 1 applied as min(windowDeferrals, pushFailedDeferrals), with TestAPushFailureIsDeferredOnceWhereOtherCausesAreDeferredFurther pinning the difference. Closed for the ordinary deferral branch only - see keyFindings[0].",
+    "api.go:361-369 (b60f4684894f): the outcomePublishDenied comment now traces the boundary - ErrPublishDenied is made only in confirmPublished, only core publishes reach it, a publish takes the core path only when usesCoreTransport finds the topic outside streamSubjects, and notifications.agent.> is captured - rather than asserting which routes can record it. Each step re-walked in the code.",
+    "handler.go:17-22, :41-45, delivery.go:783-789 and docs/architecture.md (b60f4684894f): ErrWrongMachine is now stated as produced by no production code, its one producer named as the test transport in internal/integration/e2e_test.go:355, the ReasonNone arm called defensive, and the metric row no longer claims it as a production cause."
   ],
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/listener/delivery.go:626",
-      "description": "The deferral cap does not bound what its comment claims, by two independent mechanisms. (a) listenerDeliveryHandler draws a fresh *atomic.Int64 whenever its caller set none (delivery.go:296-299), and main.go builds a handler three times - coreNATSDeliveryHandler at :767, jetStreamDeliveryHandler at :804, and again at :890 on the self-health rebind - so a durable rebound after a NATS flap, the event this whole change is about, opens a second 64-slot budget while the previous handler's deferrals still hold their slots. (b) releaseDeferredUnplaceable fires on every agent-lane redelivery with NumDelivered > 1 (delivery.go:626-631), including redeliveries this handler never deferred: an interest-path ShouldNAK's 30 s NAK (handler.go:90 -> delivery.go:808-810), publishNoHolderExceptionOrNak's NAK (delivery.go:282), and an expired AckWait (durable.go:29). Those correlate with deferrals, since a session whose server is down produces both, so the count can sit at zero while the handler holds its full cap and more. delivery.go:588-595 states (b) and argues the 192-slot distance to consumerMaxAckPending absorbs it; the over-release is unbounded, so that argument does not carry. Remedy: one counter set once in main.go's deliveryConfig with the nil default removed, and a deferred set keyed on metadata.Sequence.Stream (or dedupe key plus session) so only slots this handler took are released."
+      "file": "packages/envoy/cmd/listener/delivery.go:870",
+      "description": "The new push bound is bypassed when the give-up's exception publish fails. publishNoHolderExceptionOrNak (delivery.go:276-287) clears the attempt-cache entry, NAKs for 30 s and returns false; the caller at :870-871 returns before any give-up record, counter or line is written. The next delivery therefore has neither a dedupe entry nor an attempt entry and reaches session.HandleAgentMessage at :742-744, pushing again, before either delivery-count limit is read - unplaceableMaxDeliveries guards only the deferral branch. The cycle can run to the durable's consumerMaxDeliver of 20 with no unplaceable_push_failed counter and no give-up line ever written. So 'delivered at most twice' (delivery.go:593-604, internal/session/handler.go:33-40, docs/architecture.md) is false on a reachable path, and the path is correlated with the fault: a bus that cannot take the exception is the same bus whose trouble produced the unplaceable delivery. A permanent refusal reaches it too, since the exception embeds the original payload (delivery.go:151-175), so an accepted envelope near the payload limit yields an exception the bus refuses as too large. Both thermonuclear passes found this independently; verified in the code by the reviewer. Remedy constraint: once the push allowance is spent, retrying the notice must not restore the state that permits another push, and the terminal accounting must survive the retry."
     },
     {
       "severity": "important",
-      "file": "packages/envoy/cmd/listener/api.go:360",
-      "description": "outcomePublishDenied's comment says 'Both message routes can record it'. The send route publishes to contracts.AgentSubject(target), notifications.agent.<id>, which internal/bus/stream.go:77 lists in streamSubjects, so usesCoreTransport is false and the publish goes through publishJetStream; bus.ErrPublishDenied is produced only at internal/bus/confirm.go:106, reached only from publishCoreTo. The send route therefore cannot record it. publish_refusal_answers_test.go drives both routes through refuseBusUnavailable with a constructed error and says in its own doc that it pins the answer rather than the detection, so nothing contradicts this - only the comment does. Same class as round one's finding at delivery.go:681."
+      "file": "packages/envoy/internal/bus/confirm.go:31",
+      "description": "A core publish is emitted before its deadline is checked, so an already-expired context sends the message and then reports failure. publishCoreTo (nats.go:870-886) takes deadline from the caller's context, ensureConnWithContext (nats.go:599-607) returns nil at once on a healthy connection without consulting ctx, and publishConfirmed calls publish(msg) at confirm.go:31 before computing remaining at :34, which is then <= 0 and returns 'window elapsed before the publish was flushed'. Before this pull request PublishCoreTo always built a fresh publishBound context, so the deadline could not already be spent at entry; PublishWithin introduces the path. It is reachable from publishHandler: the route's 3.5 s context starts at api.go:849 but resolveLiveRoleHolder (api.go:910) does not take it - roleHolderSession starts from context.Background() at roleHolderReadTimeout, up to roleHolderResolutionAttempts times, plus ReleaseExpiredRoleClaim's own wait - so a slow but live bus can spend the budget before the publish. The result is a role-lane message put on the wire while the caller is answered 503 bus_unavailable; the role lane is core NATS with no JetStream dedupe, and packages/envoy-client/src/transport.ts:281 retries every status at or past 500, so the holder can receive it twice. Found by the security pass; verified in the code by the reviewer. Remedy: refuse an expired or cancelled context before emitting, and correct api.go's comment if the role read is to stay outside the budget."
     },
     {
       "severity": "minor",
-      "file": "packages/envoy/cmd/listener/delivery.go:718",
-      "description": "The replacement for round one's unreachable-path comment cites another unreachable path: session.ReasonNone is said to be reached by ErrWrongMachine, and docs/architecture.md:116 carries the same row, but no production code returns ErrWrongMachine - the sole producer is internal/integration/e2e_test.go:355. So placementMayChange is always true in production and the no_push_target label-sharing describes nothing that happens."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/delivery.go:786",
-      "description": "A push_failed delivery is retried with its attempt-cache entry cleared and no dedupe entry recorded, and session.prompt (internal/session/session.go:154-184) returns the same error for a refusal and for an answer lost after the session server took the prompt, so a push that landed can be repeated up to thirteen times. The interest path already behaved this way (clearAttempt: result.ShouldNAK, delivery.go:689), so this round widens an existing gap rather than opening one - but it follows from the branch round one asked for and belongs on the record as a decision, not a side effect."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/api.go:1144",
-      "description": "GET /v1/roles/<role> still answers a lost role-claim CAS race 500 with the old text, now that errRoleHolderChanged exists to tell it apart from a read that did not answer. Pre-existing route, outside this diff's behaviour change; named as a fast-follow rather than a finding."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/listener/api.go",
-      "description": "File growth: api.go 1127 -> 1408 and delivery.go 727 -> 947 across the pull request. The record machinery (api.go:312-440) and the unplaceable policy inside agentSubjectDelivery (delivery.go:706-800) are each self-contained units that belong beside delivery.go and apiauth.go. Named as the one fast-follow."
+      "file": "packages/envoy/cmd/listener/delivery.go:619",
+      "description": "An unplaceableDeferrals entry whose message never reaches this listener again is never released, and unplaceableDeferralCap of them turn the retry off until the process restarts. The type's comment states this. Not reachable today and not counted as a defect by either thermonuclear pass: the stream's MaxAge is contracts.DeliveryDuplicateWindow, 72 hours, with no MaxMsgs or MaxBytes (internal/bus/stream.go:111-119), against a 60 s window, so an orphan needs a message first delivered within five seconds of a 72-hour expiry. Recorded in the body's Not proven / risk because a change shortening MaxAge toward the retry window makes it real and nothing pins the two against each other."
     }
   ],
-  "settledNotFindings": [
-    "internal/testnats/local.go's bind: -a 127.0.0.1 was declined and the decline is sound - internal/bus/remote_nats_test.go:254-266 dials the server by a non-loopback address from net.InterfaceAddrs() and skips when there is none, so loopback binding would make that guard skip for ever rather than fail. The exposure is closed instead by a 128-bit crypto/rand password drawn once per test binary (internal/testnats/nats.go accountSecret, accountsConfig), replacing the guessable tN:tN account name. Verified in the code and by the tester's control run.",
-    "packages/envoy/internal/testnats/local.go and the e2e-local.sh local-server path remain temporary and cited to dispatch://INFRA-250, as the architect ruled before round one."
-  ],
-  "threads": {
-    "openedByReviewer": 8,
-    "answeredThisRound": [
-      "PRRT_kwDORFy7ds6v-r5a",
-      "PRRT_kwDORFy7ds6v-r5c",
-      "PRRT_kwDORFy7ds6v-r5d",
-      "PRRT_kwDORFy7ds6v-r5e",
-      "PRRT_kwDORFy7ds6v-r5f",
-      "PRRT_kwDORFy7ds6v-r5h",
-      "PRRT_kwDORFy7ds6v-r5i",
-      "PRRT_kwDORFy7ds6v-r5j"
-    ],
-    "unresolvedByReviewer": [
-      "PRRT_kwDORFy7ds6v-r5i"
-    ],
-    "botThreadsAccepted": [],
-    "note": "Every thread on this pull request is the reviewer's own; no bot opened one. Each carries one disposition reply this round. PRRT_kwDORFy7ds6v-r5i (the MaxAckPending cap) was resolved by the implementer but its finding still stands, so it was replied to and unresolved."
+  "bodyFindingAnswered": {
+    "finding": "The tester's bodyFindings entry: the risk line 'The budget's behaviour is proven by a live two-handler test' named a test that does not exist.",
+    "action": "Corrected by the reviewer in the live body, whose section it is. The line now names the tests that do exist - TestUnplaceableDeferralsStopAtTheirCap and TestARedeliveryThisListenerNeverDeferredGivesNoSlotBack, which pass a preloaded set through the config and which a per-handler set fails - and says the sharing across handlers is read, not executed.",
+    "refinement": "The tester's premise that no Test function in cmd/listener builds two delivery handlers is imprecise: newListenerDeliveryHarness (main_test.go:3516-3524) builds jetStreamDeliveryHandler and coreNATSDeliveryHandler from one config, sharing the set. The conclusion still holds, because a core delivery carries no JetStream metadata, so that second handler can never take or release a slot. The corrected body line says this rather than the tester's wording.",
+    "agreement": "The tester's choice to record it rather than fail the phase was right: the fail path routes the issue to the implementer, which does not own this section, and nothing shipped carried the claim. The merger quotes this section into the READY packet, which lands on the Dispatch issue permanently, so it could not have merged as it stood."
   },
   "ciRead": {
-    "codeHead": "ee29eaf5a7cb630d451fd4c866e45541781cb1e9",
+    "codeHead": "b60f4684894fa2d593e680d79dcd9aa2672648df",
+    "prHead": "c8536b8a25d6b8fa57af170a47b80e2fe6228d5e",
+    "compare": "ahead; only .legion/INFRA-141/implement.json and .legion/INFRA-141/test.json changed since the code head, so the code head's runs stand for this code.",
     "requiredChecks": [
       "lint",
       "typecheck",
       "test",
       "pr-title"
     ],
-    "observed": "At ee29eaf5 (which is both the pull request head and the CI head, since the tester's push carried a test file): typecheck success; lint and test in progress; pr-title queued. envoy-e2e-local was still queued and has not been observed green on this branch since round one broke it; at the previous code head 7e0a3d53a245 its job 121099896974 was cancelled 21 s in at setup-go when the tester's push took the concurrency group. It is outside the required set, so nothing but this review guards it. A request for changes does not wait on CI, so the round ends here; the next round must see envoy-e2e-local green with its Local end-to-end acceptance step executed rather than skipped."
+    "observed": "At b60f4684: typecheck success, test success, pr-title success, lint still in progress. envoy-e2e-local is success (job 121135391918) with step 6 and step 7, Local end-to-end acceptance, both completed/success - read as a step list, since a skipped acceptance step is the failure mode round one left. envoy-infra-go and changes success; the remaining lanes queued or running. A request for changes does not wait on lint."
   },
   "thermonuclear": {
-    "head": "ee29eaf5a7cb630d451fd4c866e45541781cb1e9",
+    "head": "c8536b8a25d6b8fa57af170a47b80e2fe6228d5e",
     "ran": "both passes at the reviewed head",
-    "result": "Both returned CHANGES and agree on the deferral cap's accounting; the code-quality pass additionally found the per-handler-construction counter. Every finding recorded here was re-verified against the code by the reviewer: main.go's three handler constructions, the release gated only on NumDelivered > 1, streamSubjects' notifications.agent.>, confirm.go as the sole ErrPublishDenied producer, and e2e_test.go:355 as the sole ErrWrongMachine producer."
+    "result": "Both CHANGES. They agree on the exception-publish bypass of the push bound; the security pass alone found the core publish emitted after its context had expired. Both confirm the four round-two requests closed, and both decline to count the unplaceableDeferrals orphan case as a defect since the implementation chooses and describes it. The code-quality pass additionally asks for the unplaceable policy to be lifted out of agentSubjectDelivery, which dispatch://INFRA-49/ask/8262a4d5-bf39-44d9-8bc0-f1b8dbe03437 already owns. Every finding recorded here was traced in the code by the reviewer before it was recorded."
   },
-  "bodyNotes": [
-    "The reviewer rewrote Look at first, Not proven / risk, Thermo and CI in the live body.",
-    "Two round-one paragraphs under E2E (implementer) are stale and are the implementer's to correct: one names TestGiveUpCounterSeparatesItsTwoCauses, renamed to ...ThreeCauses this round, and one says 'bash scripts/e2e-local.test.sh -> 3 PASS' where it is now 4. The Size line is stamped at 7e0a3d53a245 rather than the current head."
-  ]
+  "threads": {
+    "openedByReviewer": 13,
+    "answeredThisRound": [
+      "PRRT_kwDORFy7ds6v-r5i",
+      "PRRT_kwDORFy7ds6v_SL9",
+      "PRRT_kwDORFy7ds6v_SL_",
+      "PRRT_kwDORFy7ds6v_SMA",
+      "PRRT_kwDORFy7ds6v_SMB",
+      "PRRT_kwDORFy7ds6v_SMC"
+    ],
+    "unresolvedByReviewer": [
+      "PRRT_kwDORFy7ds6v_SMC"
+    ],
+    "botThreadsAccepted": [],
+    "note": "Every thread on this pull request is the reviewer's own; no bot opened one. The six the implementer answered since the round-two review each carry one reply this round; the other seven already carry the reviewer's settled answer as their last comment and nothing on them changed. PRRT_kwDORFy7ds6v_SMC (the push_failed bound) was resolved by the implementer but is only half closed, so it was replied to and unresolved."
+  },
+  "fastFollow": "dispatch://INFRA-49/ask/8262a4d5-bf39-44d9-8bc0-f1b8dbe03437 owns the file growth: api.go 1127 -> 1408 and delivery.go 727 -> 1022, with the record machinery, the unplaceable policy inside agentSubjectDelivery, and GET /v1/roles/<role>'s 500 for the role-claim race as the units. Not a line this body carries to the merge."
 }
