@@ -310,15 +310,24 @@ func resolveAskTargets(ctx context.Context, q Queryer, ids []string) (map[string
 	return found, rows.Err()
 }
 
-// ReferencedBy lists Dispatch items and artifacts that mention an artifact reference key, in
-// the shape the document surfaces read (kind, id order).
+// ReferencedBy lists Dispatch items and artifacts that mention an artifact reference key or one
+// of its current blocks, once per source, in the shape the document surfaces read (kind, id
+// order). A citing document is listed itself, not by the block holding its link.
 func ReferencedBy(ctx context.Context, q Queryer, refKey string) ([]model.ReferencedBy, error) {
-	edges, err := resolveEdges(ctx, q, Query{Direction: "in", Kind: "artifact", ID: refKey, Kinds: []string{"mentions"}})
+	edges, err := resolveEdges(ctx, q, Query{Direction: "in", Kind: "artifact", ID: refKey, Kinds: []string{"mentions"}, WholeDocuments: true})
 	if err != nil {
 		return nil, err
 	}
 	references := make([]model.ReferencedBy, 0, len(edges))
+	// Every edge of one source carries that source's node and excerpt, so the entry kept is
+	// the same whichever of its edges comes first.
+	seen := make(map[[2]string]struct{}, len(edges))
 	for _, edge := range edges {
+		source := [2]string{edge.Node.Kind, edge.Node.ID}
+		if _, listed := seen[source]; listed {
+			continue
+		}
+		seen[source] = struct{}{}
 		reference := model.ReferencedBy{
 			Kind:     edge.Node.Kind,
 			ID:       edge.Node.ID,
@@ -340,8 +349,10 @@ func ReferencedBy(ctx context.Context, q Queryer, refKey string) ([]model.Refere
 	return references, nil
 }
 
-// Outgoing lists Dispatch mentions written by an artifact, resolving artifact targets. A target
-// of a node kind this build does not know is skipped; any other unresolved target is listed.
+// Outgoing lists Dispatch mentions written by an artifact, resolving artifact targets. A block
+// target keeps its own kind and id and carries its document as the artifact, while a current
+// version holds the block; a block none holds is omitted, as is a target of a node kind this
+// build does not know. Any other unresolved target is listed.
 func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.OutgoingReference, error) {
 	rows, err := q.Query(ctx, `
 		select e.to_kind, e.to_id,
@@ -349,9 +360,11 @@ func Outgoing(ctx context.Context, q Queryer, artifactID string) ([]model.Outgoi
 		       coalesce(a.created_by, '{}'::jsonb), coalesce(a.created_at, timestamptz 'epoch'),
 		       coalesce(v.number, 0), coalesce(v.named, false), v.summary, coalesce(v.authors, '[]'::jsonb), coalesce(v.created_at, timestamptz 'epoch'), `+model.VersionSize+`, v.mime, v.sha256
 		from graph_edges e
-		left join artifacts a on e.to_kind = 'artifact' and a.ref_key = e.to_id
+		left join document_blocks d on e.to_kind = 'block' and d.node_id = e.to_id
+		left join artifacts a on a.ref_key = case e.to_kind when 'artifact' then e.to_id when 'block' then split_part(d.node_id, '#', 1) end
 		left join artifact_versions v on v.artifact_id = a.id
 		where e.from_kind = 'artifact' and e.from_id = $1 and e.kind = 'mentions' and e.to_kind = any($2)
+		  and (e.to_kind <> 'block' or d.node_id is not null)
 		order by e.to_kind, e.to_id, v.number
 	`, artifactID, nodeKinds)
 	if err != nil {

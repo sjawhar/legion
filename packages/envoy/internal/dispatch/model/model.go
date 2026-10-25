@@ -1305,12 +1305,35 @@ type ArtifactReferences struct {
 // agent's conversation owns has neither and is located by Ref alone
 // (`dispatch://agent/<session id>/artifact/<slug>`). Ref is its dispatch:// address and is empty
 // for session nodes, which have none.
+//
+// A block node (kind `block`, id `<document ref_key>#<block id>`) also carries BlockID, its
+// document's reference as Document, and ChangedVersion and ChangedAt, the document version in
+// which its text last changed. Text and Pin are set only on the node a reference read names:
+// Text is the block's whole current text, and Pin answers a reference pinned to a version.
 type GraphNode struct {
-	Kind     string  `json:"kind"`
-	ID       string  `json:"id"`
-	IssueKey *string `json:"issue_key,omitempty"`
-	Project  string  `json:"project,omitempty"`
-	Ref      string  `json:"ref,omitempty"`
+	Kind           string     `json:"kind"`
+	ID             string     `json:"id"`
+	BlockID        string     `json:"block_id,omitempty"`
+	IssueKey       *string    `json:"issue_key,omitempty"`
+	Project        string     `json:"project,omitempty"`
+	Ref            string     `json:"ref,omitempty"`
+	Document       string     `json:"document,omitempty"`
+	ChangedVersion int        `json:"changed_version,omitempty"`
+	ChangedAt      *time.Time `json:"changed_at,omitempty"`
+	Text           string     `json:"text,omitempty"`
+	Pin            *BlockPin  `json:"pin,omitempty"`
+}
+
+// BlockPin is a block reference pinned to a version of its document (`#b-<id>@v<N>`): the
+// pinned reference, the block's whole text at that version, and how the block stands now. State
+// is "unchanged" when its current text equals Text, "changed" when it differs, and "removed"
+// when no current version holds the block; RemovedVersion is then the version that deleted it.
+type BlockPin struct {
+	Version        int    `json:"version"`
+	Ref            string `json:"ref"`
+	Text           string `json:"text"`
+	State          string `json:"state"`
+	RemovedVersion int    `json:"removed_version,omitempty"`
 }
 
 // GraphExcerpt is the text shown for an edge: the block containing a document mention (with its
@@ -1323,10 +1346,13 @@ type GraphExcerpt struct {
 // GraphEdge is one typed, timestamped edge of graph_edges seen from the queried node: Node is
 // the other end, Direction is "in" for edges pointing at the queried node and "out" for edges
 // it writes. SourceSeq is the events.id that introduced a mention; nil for structural edges.
+// Block, on a document's read, names the document's block at the queried end: the block an
+// inbound edge points at, or the block that holds an outbound link.
 type GraphEdge struct {
 	Kind      string        `json:"kind"`
 	Direction string        `json:"direction"`
 	Node      GraphNode     `json:"node"`
+	Block     *GraphNode    `json:"block,omitempty"`
 	Excerpt   *GraphExcerpt `json:"excerpt,omitempty"`
 	CreatedAt time.Time     `json:"created_at"`
 	SourceSeq *int64        `json:"source_seq"`

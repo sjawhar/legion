@@ -18,11 +18,11 @@ type Execer interface {
 	Exec(ctx context.Context, sql string, args ...any) (pgconn.CommandTag, error)
 }
 
-// MentionExcerpts is, for each target the mentions located in markdown name, the block holding its
-// first mention that lies inside a block - blocks index markdown by byte, in document order - as
-// the references route shows it: the block's id and its markdown cut to BlockExcerptRunes. A
-// target none of whose mentions lies inside a block has none. located is text.ExtractAt(markdown,
-// …), the one extraction a version's index reads.
+// MentionExcerpts is, for each target the mentions located in markdown name, the innermost block
+// holding its first mention that lies inside a block - the block with the tightest byte range,
+// the one IndexBlocks writes the mention from - as the references route shows it: the block's id
+// and its markdown cut to BlockExcerptRunes. A target none of whose mentions lies inside a block
+// has none. located is text.ExtractAt(markdown, …), the one extraction a version's index reads.
 func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []text.Located) map[Target]model.GraphExcerpt {
 	excerpts := make(map[Target]model.GraphExcerpt)
 	for _, mention := range located {
@@ -33,13 +33,20 @@ func MentionExcerpts(markdown string, blocks []model.ArtifactBlock, located []te
 		if _, found := excerpts[target]; found {
 			continue
 		}
-		for _, block := range blocks {
-			if block.From <= mention.Offset && mention.Offset < block.To {
-				excerpts[target] = model.GraphExcerpt{
-					BlockID: block.ID,
-					Text:    text.HeadRunes(markdown[block.From:block.To], BlockExcerptRunes),
-				}
-				break
+		holder := -1
+		for index, block := range blocks {
+			// Blocks come in document order, each parent before its children, so a child
+			// spanning its parent's whole range is the inner one.
+			if block.From <= mention.Offset && mention.Offset < block.To &&
+				(holder < 0 || block.To-block.From <= blocks[holder].To-blocks[holder].From) {
+				holder = index
+			}
+		}
+		if holder >= 0 {
+			block := blocks[holder]
+			excerpts[target] = model.GraphExcerpt{
+				BlockID: block.ID,
+				Text:    text.HeadRunes(markdown[block.From:block.To], BlockExcerptRunes),
 			}
 		}
 	}

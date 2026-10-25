@@ -14,6 +14,7 @@ import (
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/refs"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 func createReferenceAPIProject(t *testing.T, handler http.Handler, key string) {
@@ -306,9 +307,10 @@ func TestReferencesReadBacklinksAcrossProjectsWithProvenance(t *testing.T) {
 }
 
 // An issue's backlinks are its mentions and its structure in one list: the child issue
-// (child_of), its own documents (attached_to), and a document elsewhere that cites it, whose
-// excerpt is the block containing the mention. Read from the citing document the same mention
-// points out at the issue; read from the issue's spec the structural edge points out at it.
+// (child_of), its own documents (attached_to), and a document elsewhere that cites it, listed
+// from the block holding the mention, whose excerpt is that block. Read from the citing document
+// the same mention points out at the issue; read from the issue's spec the structural edge points
+// out at it.
 func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -337,8 +339,8 @@ func TestReferencesIncludeStructuralEdgesAndDocumentBlockExcerpts(t *testing.T) 
 		}
 	}
 	mention := byKind["mentions"]
-	if mention.Node.Kind != "artifact" || mention.Node.ID != design.ID || mention.Node.Project != "OPS" || mention.Node.Ref != "dispatch://OPS/artifact/design-notes" {
-		t.Fatalf("mention node = %#v; want the OPS design document", mention.Node)
+	if mention.Node.Kind != "block" || mention.Node.Document != "dispatch://OPS/artifact/design-notes" || mention.Node.Project != "OPS" {
+		t.Fatalf("mention node = %#v; want a block of the OPS design document", mention.Node)
 	}
 	if mention.Excerpt == nil || mention.Excerpt.BlockID == "" || mention.Excerpt.Text != "The plan lives in dispatch://"+parent.Key+" and nowhere else." {
 		t.Fatalf("mention excerpt = %#v; want the containing paragraph block with its id", mention.Excerpt)
@@ -473,7 +475,8 @@ func TestArtifactReferencesSkipANodeKindThisBuildCannotAddress(t *testing.T) {
 // A spec seeded at issue creation that cites an issue in bold, another project's issue in a code
 // span and a third project's issue as an autolink, which the spec stores as a link whose text is
 // its target, mentions all three. The source of each mention is the spec document, not the issue
-// that owns it: the issue node writes no mention, and each target's backlink names the spec.
+// that owns it: the issue node writes no mention, and each target's backlink names the spec's
+// block holding it.
 func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T) {
 	handler := newTestHandler(t)
 	createReferenceAPIProject(t, handler, "LEGION")
@@ -510,8 +513,8 @@ func TestSeededSpecCitationsInMarkdownDelimitersAreDocumentMentions(t *testing.T
 	}
 	for _, target := range targets {
 		backlinks := graphEdges(t, handler, url.Values{"to": {"dispatch://" + target.Key}, "kind": {"mentions"}}).Edges
-		if len(backlinks) != 1 || backlinks[0].Node.Kind != "artifact" || backlinks[0].Node.ID != citing.PrimaryArtifactID || backlinks[0].Node.Ref != specRef {
-			t.Fatalf("%s backlinks = %#v; want one mention from %s", target.Key, backlinks, specRef)
+		if len(backlinks) != 1 || backlinks[0].Node.Kind != "block" || backlinks[0].Node.Document != specRef {
+			t.Fatalf("%s backlinks = %#v; want one mention from a block of %s", target.Key, backlinks, specRef)
 		}
 	}
 }
@@ -967,7 +970,8 @@ func TestABlocksChangedVersionMovesOnlyWithItsText(t *testing.T) {
 
 // A node one document cites from two blocks is cited twice, so a version that moves a citation
 // from one citing block to two, or back, moves the node's count even though the document cites it
-// throughout: each such version's event names it.
+// throughout: each such version's event names it, and the count reads one per citing block plus
+// the target's own spec, attached_to it: 2, 3, 2.
 func TestAVersionWriteNamesATargetWhoseBlockCountChanged(t *testing.T) {
 	handler, database := blockIndexHandler(t)
 	createReferenceAPIProject(t, handler, "CORE")
@@ -977,7 +981,7 @@ func TestAVersionWriteNamesATargetWhoseBlockCountChanged(t *testing.T) {
 	source := createSpecIssue(t, handler, "OPS", "First cites "+cite+".\n\nSecond paragraph.\n")
 	events := "/api/v1/issues/" + source.Key + "/events"
 	named := []model.ChangedReference{{Kind: "issue", ID: target.Key}}
-	requireBlockCitations := func(stage string, want int) {
+	requireCitations := func(stage string, blocks, count int) {
 		t.Helper()
 		var got int
 		if err := database.Pool.QueryRow(context.Background(), `
@@ -985,19 +989,20 @@ func TestAVersionWriteNamesATargetWhoseBlockCountChanged(t *testing.T) {
 		`, target.Key).Scan(&got); err != nil {
 			t.Fatalf("count block citations: %v", err)
 		}
-		if got != want {
-			t.Fatalf("%s: blocks citing %s = %d, want %d", stage, target.Key, got, want)
+		if got != blocks {
+			t.Fatalf("%s: blocks citing %s = %d, want %d", stage, target.Key, got, blocks)
 		}
+		requireIssueBacklinkCount(t, handler, target.Key, count)
 	}
-	requireBlockCitations("one citing block", 1)
+	requireCitations("one citing block", 1, 2)
 
 	editSpec(t, handler, source.Key, []map[string]any{{"op": "replace", "find": "Second paragraph.", "with": "Second cites " + cite + "."}})
 	requireArtifactEventNames(t, handler, events, source.PrimaryArtifactID, named)
-	requireBlockCitations("two citing blocks", 2)
+	requireCitations("two citing blocks", 2, 3)
 
 	editSpec(t, handler, source.Key, []map[string]any{{"op": "replace", "find": "Second cites " + cite + ".", "with": "Second paragraph."}})
 	requireArtifactEventNames(t, handler, events, source.PrimaryArtifactID, named)
-	requireBlockCitations("one citing block again", 1)
+	requireCitations("one citing block again", 1, 2)
 }
 
 // Migration 0118's trigger marks a document owed on every version insert; each path a block-aware
@@ -1052,4 +1057,456 @@ func TestEveryVersionWriteLeavesItsDocumentIndexed(t *testing.T) {
 		t.Fatalf("accept the suggestion: status=%d body=%s", response.Code, response.Body.String())
 	}
 	requireWritten("accepted suggestion", spec, "Suggested paragraph.")
+}
+
+// shipIt is a callout written with its id, ship_it, whose `_` a block reference encodes.
+func shipIt(body string) string {
+	return ":::callout{#ship_it kind=\"note\" title=\"\"}\n" + body + "\n:::"
+}
+
+// createShipItSpec creates an issue in project whose spec is the callout ship_it holding "Ship it."
+// and a paragraph after it, and returns the issue with the reference to the callout.
+func createShipItSpec(t *testing.T, handler http.Handler, project string) (model.Issue, string) {
+	t.Helper()
+	issue := createSpecIssue(t, handler, project, shipIt("Ship it.")+"\n\nOther paragraph.\n")
+	return issue, "dispatch://" + issue.Key + "/spec#b-ship%5Fit"
+}
+
+// requireReferenceNotFound fails unless the references read of query answers 404 NOT_FOUND
+// saying message.
+func requireReferenceNotFound(t *testing.T, handler http.Handler, query url.Values, message string) {
+	t.Helper()
+	response := graphRequest(t, handler, query)
+	if response.Code != http.StatusNotFound {
+		t.Fatalf("GET /api/v1/references?%s: status=%d body=%s, want 404", query.Encode(), response.Code, response.Body.String())
+	}
+	if body := decodeBody[apiErrorBody](t, response); body.Code != "NOT_FOUND" || body.Error != message {
+		t.Fatalf("GET /api/v1/references?%s = %#v, want NOT_FOUND %q", query.Encode(), body, message)
+	}
+}
+
+// A1: a comment that cites a block is listed on the block alone, and on its document as a link
+// at that block; read from the comment, its one link is the block. The document's blocks are
+// part_of it, an edge its read lists only when asked for.
+func TestReferencesToABlockListOnlyLinksNamingIt(t *testing.T) {
+	handler, database := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue, blockRef := createShipItSpec(t, handler, "CORE")
+	specRef := "dispatch://" + issue.Key + "/spec"
+	nodeID := issue.Key + "/spec#ship_it"
+	citesBlock := createReferenceAPIComment(t, handler, issue.Key, "Decided in "+blockRef+".")
+	citesSpec := createReferenceAPIComment(t, handler, issue.Key, "See "+specRef+".")
+
+	toBlock := graphEdges(t, handler, url.Values{"to": {blockRef}})
+	issueKey := issue.Key
+	changedAt := latestVersion(t, database, issue.PrimaryArtifactID).CreatedAt
+	wantNode := model.GraphNode{
+		Kind: "block", ID: nodeID, BlockID: "ship_it", IssueKey: &issueKey, Project: "CORE", Ref: blockRef,
+		Document: specRef, ChangedVersion: 1, ChangedAt: &changedAt, Text: shipIt("Ship it."),
+	}
+	if toBlock.Node.ChangedAt == nil || !toBlock.Node.ChangedAt.Equal(changedAt) {
+		t.Fatalf("block node changed_at = %v, want version 1's %s", toBlock.Node.ChangedAt, changedAt)
+	}
+	toBlock.Node.ChangedAt = &changedAt
+	if !reflect.DeepEqual(toBlock.Node, wantNode) {
+		t.Fatalf("block node = %#v, want %#v", toBlock.Node, wantNode)
+	}
+	if len(toBlock.Edges) != 1 || toBlock.Edges[0].Kind != "mentions" || toBlock.Edges[0].Node.Kind != "comment" || toBlock.Edges[0].Node.ID != citesBlock.ID {
+		t.Fatalf("links to the block = %#v, want comment %s's mention alone", toBlock.Edges, citesBlock.ID)
+	}
+
+	toSpec := graphEdges(t, handler, url.Values{"to": {specRef}})
+	atBlock := map[string]string{}
+	for _, edge := range toSpec.Edges {
+		if edge.Kind != "mentions" || edge.Node.Kind != "comment" {
+			t.Fatalf("links to the spec = %#v, want the two comments' mentions alone, no part_of", toSpec.Edges)
+		}
+		atBlock[edge.Node.ID] = ""
+		if edge.Block != nil {
+			atBlock[edge.Node.ID] = edge.Block.BlockID
+		}
+	}
+	if want := map[string]string{citesBlock.ID: "ship_it", citesSpec.ID: ""}; len(toSpec.Edges) != 2 || !reflect.DeepEqual(atBlock, want) {
+		t.Fatalf("links to the spec by the block each names = %#v, want %#v", atBlock, want)
+	}
+
+	partOf := graphEdges(t, handler, url.Values{"to": {specRef}, "kind": {"part_of"}})
+	if len(partOf.Edges) != len(blockIDsByText(t, handler, issue.PrimaryArtifactID)) {
+		t.Fatalf("part_of edges of the spec = %#v, want one per spec block", partOf.Edges)
+	}
+
+	fromComment := graphEdges(t, handler, url.Values{"from": {"dispatch://" + issue.Key + "/comment/" + citesBlock.ID}})
+	if len(fromComment.Edges) != 1 || fromComment.Edges[0].Kind != "mentions" || fromComment.Edges[0].Node.Kind != "block" || fromComment.Edges[0].Node.ID != nodeID {
+		t.Fatalf("links of the comment citing the block = %#v, want one mention of the block and none of the spec", fromComment.Edges)
+	}
+	if excerpt := fromComment.Edges[0].Excerpt; excerpt == nil || *excerpt != (model.GraphExcerpt{BlockID: "ship_it", Text: shipIt("Ship it.")}) {
+		t.Fatalf("excerpt of the cited block = %#v, want the callout's text", excerpt)
+	}
+}
+
+// A2: deleting a block takes it out of the graph, so its reference answers 404 naming it; a
+// version that holds its id again brings back every link written to it.
+func TestReferencesToADeletedBlockAnswer404AndReturnWithTheBlock(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue, blockRef := createShipItSpec(t, handler, "CORE")
+	comment := createReferenceAPIComment(t, handler, issue.Key, "Decided in "+blockRef+".")
+
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "delete", "block": "ship_it"}})
+	requireReferenceNotFound(t, handler, url.Values{"to": {blockRef}}, `no block "ship_it" in dispatch://`+issue.Key+`/spec`)
+	requireReferenceNotFound(t, handler, url.Values{"from": {blockRef}}, `no block "ship_it" in dispatch://`+issue.Key+`/spec`)
+
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "insert", "markdown": shipIt("Ship it."), "before": "Other paragraph."}})
+	edges := graphEdges(t, handler, url.Values{"to": {blockRef}}).Edges
+	if len(edges) != 1 || edges[0].Node.Kind != "comment" || edges[0].Node.ID != comment.ID {
+		t.Fatalf("links to the restored block = %#v, want comment %s's mention again", edges, comment.ID)
+	}
+}
+
+// R7: a document's own links are listed once each, from the block holding it.
+func TestReferencesFromADocumentNameTheBlockHoldingEachLink(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	paragraph := "The plan cites dispatch://" + target.Key + " here."
+	issue := createSpecIssue(t, handler, "CORE", "Intro paragraph.\n\n"+paragraph+"\n")
+	paragraphID := blockIDsByText(t, handler, issue.PrimaryArtifactID)[paragraph]
+
+	edges := graphEdges(t, handler, url.Values{"from": {"dispatch://" + issue.Key + "/spec"}, "kind": {"mentions"}}).Edges
+	if len(edges) != 1 || edges[0].Node.Kind != "issue" || edges[0].Node.ID != target.Key {
+		t.Fatalf("links of the spec = %#v, want its one mention of %s", edges, target.Key)
+	}
+	if block := edges[0].Block; paragraphID == "" || block == nil || block.Kind != "block" || block.BlockID != paragraphID || block.ID != issue.Key+"/spec#"+paragraphID {
+		t.Fatalf("block holding the link = %#v, want the paragraph %q", block, paragraphID)
+	}
+}
+
+// R7: a mention a document's block holds is listed from that block, with the block's text as its
+// excerpt: the excerpt the document's own row showed before.
+func TestAMentionABlockHoldsIsListedFromTheBlock(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	paragraph := "The plan cites dispatch://" + target.Key + " here."
+	issue := createSpecIssue(t, handler, "CORE", "Intro paragraph.\n\n"+paragraph+"\n")
+	paragraphID := blockIDsByText(t, handler, issue.PrimaryArtifactID)[paragraph]
+
+	edges := graphEdges(t, handler, url.Values{"to": {"dispatch://" + target.Key}, "kind": {"mentions"}}).Edges
+	if len(edges) != 1 || edges[0].Node.Kind != "block" || edges[0].Node.Document != "dispatch://"+issue.Key+"/spec" || edges[0].Node.BlockID != paragraphID {
+		t.Fatalf("mentions of %s = %#v, want one from the spec's paragraph %q", target.Key, edges, paragraphID)
+	}
+	if excerpt := edges[0].Excerpt; excerpt == nil || *excerpt != (model.GraphExcerpt{BlockID: paragraphID, Text: paragraph}) {
+		t.Fatalf("excerpt = %#v, want the paragraph %q", excerpt, paragraph)
+	}
+}
+
+// A node one document cites from two blocks is cited twice: its count and its list each hold
+// both blocks' mentions, beside the target's own spec, attached_to it.
+func TestBacklinkCountsCountEachCitingBlock(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	target := createReferenceAPIIssue(t, handler, "CORE")
+	cite := "dispatch://" + target.Key
+	issue := createSpecIssue(t, handler, "CORE", "First cites "+cite+".\n\nSecond cites "+cite+".\n")
+
+	requireIssueBacklinkCount(t, handler, target.Key, 3)
+	edges := graphEdges(t, handler, url.Values{"to": {cite}}).Edges
+	citing := map[string]bool{}
+	for _, edge := range edges {
+		if edge.Kind == "mentions" && edge.Node.Kind == "block" && edge.Node.Document == "dispatch://"+issue.Key+"/spec" {
+			citing[edge.Node.ID] = true
+		}
+	}
+	if len(edges) != 3 || len(citing) != 2 {
+		t.Fatalf("links to %s = %#v, want two citing blocks and the attached spec", target.Key, edges)
+	}
+}
+
+// Contract item 11: the older references route loses no source. A document that cites only a
+// block of the spec, and a comment that cites the block and the spec, each reference the spec
+// once; the citing document's outgoing link is the block, carrying the spec as its document.
+func TestArtifactReferencesKeepADocumentThatCitesOnlyABlock(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue, blockRef := createShipItSpec(t, handler, "CORE")
+	notes := createProjectDocument(t, handler, "CORE", "Notes", "Decision: "+blockRef+"\n")
+	comment := createReferenceAPIComment(t, handler, issue.Key, "See "+blockRef+" in dispatch://"+issue.Key+"/spec.")
+
+	spec := decodeBody[model.ArtifactReferences](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/references", nil, "alice"))
+	sources := make([][2]string, len(spec.ReferencedBy))
+	for index, reference := range spec.ReferencedBy {
+		sources[index] = [2]string{reference.Kind, reference.ID}
+	}
+	if want := [][2]string{{"artifact", notes.ID}, {"comment", comment.ID}}; !reflect.DeepEqual(sources, want) {
+		t.Fatalf("spec referenced_by = %v, want %v", sources, want)
+	}
+
+	outgoing := decodeBody[model.ArtifactReferences](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+notes.ID+"/references", nil, "alice")).Outgoing
+	if len(outgoing) != 1 || outgoing[0].Kind != "block" || outgoing[0].ToID != issue.Key+"/spec#ship_it" || outgoing[0].Artifact == nil || outgoing[0].Artifact.ID != issue.PrimaryArtifactID {
+		t.Fatalf("notes outgoing = %#v, want the block ship_it carrying the spec", outgoing)
+	}
+}
+
+// R6, A10: every block GET …/blocks lists is a node part_of its document, and no other is.
+func TestEveryBlockIsPartOfItsDocument(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", "# Plan\n\n"+shipIt("Ship it.")+"\n\n- First item\n- Second item\n\nClosing paragraph.\n")
+	specRef := "dispatch://" + issue.Key + "/spec"
+
+	want := map[string]bool{}
+	for _, id := range blockIDsByText(t, handler, issue.PrimaryArtifactID) {
+		want[issue.Key+"/spec#"+id] = true
+	}
+	got := map[string]bool{}
+	for _, edge := range graphEdges(t, handler, url.Values{"to": {specRef}, "kind": {"part_of"}}).Edges {
+		if edge.Kind != "part_of" || edge.Node.Kind != "block" || edge.Node.Document != specRef {
+			t.Fatalf("part_of edge = %#v, want a block of %s", edge, specRef)
+		}
+		got[edge.Node.ID] = true
+	}
+	if len(want) < 6 || !reflect.DeepEqual(got, want) {
+		t.Fatalf("blocks part_of the spec = %v, want each block GET /blocks lists: %v", got, want)
+	}
+}
+
+// R7, contract item 2: list items and table cells are not nodes, so a link in a list item starts
+// at the item's paragraph and one in a table cell starts at the table.
+func TestALinkInAListItemStartsAtTheItemsParagraph(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	inItem := createReferenceAPIIssue(t, handler, "CORE")
+	inCell := createReferenceAPIIssue(t, handler, "OPS")
+	item := "Track dispatch://" + inItem.Key + " first"
+	issue := createSpecIssue(t, handler, "CORE", "- "+item+"\n- Then the rest\n\n| Name | Link |\n| --- | --- |\n| row | dispatch://"+inCell.Key+" |\n")
+	blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice"))
+	tableID := ""
+	for _, block := range blocks {
+		if block.Type == "table" {
+			tableID = block.ID
+		}
+	}
+	itemID := blockIDsByText(t, handler, issue.PrimaryArtifactID)[item]
+	if itemID == "" || tableID == "" {
+		t.Fatalf("GET /blocks = %#v, want the item's paragraph and the table", blocks)
+	}
+
+	for target, holder := range map[string]string{inItem.Key: itemID, inCell.Key: tableID} {
+		edges := graphEdges(t, handler, url.Values{"to": {"dispatch://" + target}, "kind": {"mentions"}}).Edges
+		if len(edges) != 1 || edges[0].Node.Kind != "block" || edges[0].Node.BlockID != holder {
+			t.Fatalf("mentions of %s = %#v, want one from block %q", target, edges, holder)
+		}
+	}
+}
+
+// A2, design 4: a link to a block counts only while a current version holds the block. Deleting it
+// takes the link out of the document's list, the block's own read, the citing document's links
+// and outgoing list, and the citing issue's closure; restoring the block with its id brings every
+// one back.
+func TestADeletedBlockLeavesEveryListAndReturnsWithItsID(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	createReferenceAPIProject(t, handler, "OPS")
+	core, blockRef := createShipItSpec(t, handler, "CORE")
+	specRef := "dispatch://" + core.Key + "/spec"
+	nodeID := core.Key + "/spec#ship_it"
+	ops := createReferenceAPIIssue(t, handler, "OPS")
+	uploaded := multipartRequest(t, handler, "/api/v1/issues/"+ops.Key+"/artifacts", map[string]string{"name": "notes.md"}, "notes.md", "text/markdown", []byte("Decision: "+blockRef+"\n"), "alice")
+	if uploaded.Code != http.StatusCreated {
+		t.Fatalf("upload the citing document: status=%d body=%s", uploaded.Code, uploaded.Body.String())
+	}
+	notes := decodeBody[struct {
+		Artifact model.Artifact `json:"artifact"`
+	}](t, uploaded).Artifact
+	notesRef := "dispatch://" + ops.Key + "/artifact/" + notes.Slug
+
+	requireListed := func(stage string, listed bool) {
+		t.Helper()
+		want := 0
+		if listed {
+			want = 1
+		}
+		atBlock := 0
+		for _, edge := range graphEdges(t, handler, url.Values{"to": {specRef}}).Edges {
+			if edge.Block != nil && edge.Block.ID == nodeID && edge.Node.Kind == "block" && edge.Node.Document == notesRef {
+				atBlock++
+			}
+		}
+		if atBlock != want {
+			t.Fatalf("%s: links to %s at ship_it = %d, want %d", stage, specRef, atBlock, want)
+		}
+		if listed {
+			if edges := graphEdges(t, handler, url.Values{"to": {blockRef}}).Edges; len(edges) != 1 || edges[0].Node.Document != notesRef {
+				t.Fatalf("%s: links to the block = %#v, want the notes' block", stage, edges)
+			}
+		} else {
+			requireReferenceNotFound(t, handler, url.Values{"to": {blockRef}}, `no block "ship_it" in `+specRef)
+		}
+		toBlock := 0
+		for _, edge := range graphEdges(t, handler, url.Values{"from": {notesRef}}).Edges {
+			if edge.Node.ID == nodeID {
+				toBlock++
+			}
+		}
+		if toBlock != want {
+			t.Fatalf("%s: links of the notes to the block = %d, want %d", stage, toBlock, want)
+		}
+		outgoing := decodeBody[model.ArtifactReferences](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+notes.ID+"/references", nil, "alice")).Outgoing
+		if len(outgoing) != want || listed && (outgoing[0].ToID != nodeID || outgoing[0].Artifact == nil || outgoing[0].Artifact.ID != core.PrimaryArtifactID) {
+			t.Fatalf("%s: notes outgoing = %#v, want %d entries for the block", stage, outgoing, want)
+		}
+		response := issueReferencesRequest(t, handler, ops.Key, "")
+		if response.Code != http.StatusOK {
+			t.Fatalf("%s: closure of %s: status=%d body=%s", stage, ops.Key, response.Code, response.Body.String())
+		}
+		reached := 0
+		for _, member := range decodeBody[model.IssueReferences](t, response).Members {
+			if member.Artifact.ID == core.PrimaryArtifactID {
+				reached++
+			}
+		}
+		if reached != want {
+			t.Fatalf("%s: closure of %s reaches %s %d times, want %d", stage, ops.Key, specRef, reached, want)
+		}
+	}
+	requireListed("cited", true)
+
+	editSpec(t, handler, core.Key, []map[string]any{{"op": "delete", "block": "ship_it"}})
+	requireListed("block deleted", false)
+
+	editSpec(t, handler, core.Key, []map[string]any{{"op": "insert", "after": "end", "markdown": shipIt("Ship it.")}})
+	requireListed("block restored", true)
+}
+
+// pinnedParagraph is a 600-rune paragraph whose runes 500-520 are middle, so a version that
+// rewrites only those runes changes the paragraph past the 480 runes an excerpt shows.
+func pinnedParagraph(middle string) string {
+	return strings.Repeat("abcé ", 100) + middle + strings.Repeat(" tail", 16)
+}
+
+// A15: a reference pinned to a version shows the block's whole text at that version and says it
+// changed since; the unpinned reference shows the whole current text. An edge's end at the block
+// carries only the excerpt.
+func TestAPinnedReferenceShowsItsVersionsText(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	original, changed := pinnedParagraph("ORIGINALMIDDLETEXT20"), pinnedParagraph("REPLACEDMIDDLETEXT20")
+	if runes := len([]rune(original)); runes != 600 {
+		t.Fatalf("paragraph is %d runes, want 600", runes)
+	}
+	issue := createSpecIssue(t, handler, "CORE", "Intro paragraph.\n\n"+original+"\n")
+	paragraphID := blockIDsByText(t, handler, issue.PrimaryArtifactID)[original]
+	if paragraphID == "" {
+		t.Fatalf("GET /blocks lists no block of text %q", original)
+	}
+	paragraphRef := "dispatch://" + issue.Key + "/spec#b-" + text.EncodeBlockID(paragraphID)
+	comment := createReferenceAPIComment(t, handler, issue.Key, "Read "+paragraphRef+" as "+paragraphRef+"@v1.")
+	version := editSpec(t, handler, issue.Key, []map[string]any{{"op": "replace", "find": "ORIGINALMIDDLETEXT20", "with": "REPLACEDMIDDLETEXT20"}})
+
+	unpinned := graphEdges(t, handler, url.Values{"to": {paragraphRef}})
+	if unpinned.Node.Text != changed || unpinned.Node.Pin != nil || unpinned.Node.ChangedVersion != version.Number {
+		t.Fatalf("unpinned node = %#v, want version %d's whole text and no pin", unpinned.Node, version.Number)
+	}
+	pinned := graphEdges(t, handler, url.Values{"to": {paragraphRef + "@v1"}})
+	if want := (model.BlockPin{Version: 1, Ref: paragraphRef + "@v1", Text: original, State: "changed"}); pinned.Node.Pin == nil || *pinned.Node.Pin != want {
+		t.Fatalf("pin = %#v, want %#v", pinned.Node.Pin, want)
+	}
+	if pinned.Node.ChangedVersion != version.Number || pinned.Node.Text != changed {
+		t.Fatalf("pinned node = %#v, want changed in version %d with its current text", pinned.Node, version.Number)
+	}
+	for _, read := range []model.GraphReferences{unpinned, pinned} {
+		if len(read.Edges) != 1 || read.Edges[0].Node.ID != comment.ID {
+			t.Fatalf("links to %s = %#v, want the comment's one mention", read.Node.Ref, read.Edges)
+		}
+	}
+
+	cited := graphEdges(t, handler, url.Values{"from": {"dispatch://" + issue.Key + "/comment/" + comment.ID}}).Edges
+	if len(cited) != 1 || cited[0].Node.Text != "" || cited[0].Excerpt == nil || *cited[0].Excerpt != (model.GraphExcerpt{BlockID: paragraphID, Text: text.HeadRunes(changed, refs.BlockExcerptRunes)}) {
+		t.Fatalf("the comment's link = %#v, want the block with its 480-rune excerpt", cited)
+	}
+}
+
+// "Changed" compares the current text with the pinned version's, not the history between: a text
+// that changed and went back reads unchanged.
+func TestAPinnedReferenceWhoseTextReturnedIsUnchanged(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", "Intro paragraph.\n\nP says one thing.\n")
+	paragraphRef := "dispatch://" + issue.Key + "/spec#b-" + text.EncodeBlockID(blockIDsByText(t, handler, issue.PrimaryArtifactID)["P says one thing."])
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "replace", "find": "P says one thing.", "with": "P says another thing."}})
+	back := editSpec(t, handler, issue.Key, []map[string]any{{"op": "replace", "find": "P says another thing.", "with": "P says one thing."}})
+
+	for version, want := range map[int]model.BlockPin{
+		1: {Version: 1, Text: "P says one thing.", State: "unchanged"},
+		2: {Version: 2, Text: "P says another thing.", State: "changed"},
+	} {
+		want.Ref = paragraphRef + "@v" + strconv.Itoa(version)
+		node := graphEdges(t, handler, url.Values{"to": {want.Ref}}).Node
+		if node.Pin == nil || *node.Pin != want || node.ChangedVersion != back.Number || node.Text != "P says one thing." {
+			t.Fatalf("node pinned to version %d = %#v (pin %#v), want pin %#v and changed in version %d", version, node, node.Pin, want, back.Number)
+		}
+	}
+}
+
+// A2, pinned: a reference pinned to a version that held a block deleted since still shows that
+// version's text and says which version removed it, with no link, since the graph lists none to a
+// deleted block; the unpinned reference answers 404. Restored with its id, the block reads as its
+// text compares again.
+func TestAPinnedReferenceToADeletedBlockSaysItWasRemoved(t *testing.T) {
+	handler, _ := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue, blockRef := createShipItSpec(t, handler, "CORE")
+	specRef := "dispatch://" + issue.Key + "/spec"
+	createReferenceAPIComment(t, handler, issue.Key, "Decided in "+blockRef+"@v2.")
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "replace", "find": "Ship it.", "with": "Ship it now."}})
+	deleted := editSpec(t, handler, issue.Key, []map[string]any{{"op": "delete", "block": "ship_it"}})
+
+	response := graphRequest(t, handler, url.Values{"to": {blockRef + "@v2"}})
+	if response.Code != http.StatusOK || !strings.Contains(response.Body.String(), `"edges":[]`) {
+		t.Fatalf("pinned read of the deleted block: status=%d body=%s, want 200 with no edges", response.Code, response.Body.String())
+	}
+	issueKey := issue.Key
+	want := model.GraphNode{
+		Kind: "block", ID: issue.Key + "/spec#ship_it", BlockID: "ship_it", IssueKey: &issueKey, Project: "CORE", Ref: blockRef, Document: specRef,
+		Pin: &model.BlockPin{Version: 2, Ref: blockRef + "@v2", Text: shipIt("Ship it now."), State: "removed", RemovedVersion: deleted.Number},
+	}
+	if got := decodeBody[model.GraphReferences](t, response).Node; !reflect.DeepEqual(got, want) {
+		t.Fatalf("pinned node of the deleted block = %#v (pin %#v), want %#v (pin %#v)", got, got.Pin, want, want.Pin)
+	}
+	requireReferenceNotFound(t, handler, url.Values{"to": {blockRef}}, `no block "ship_it" in `+specRef)
+
+	editSpec(t, handler, issue.Key, []map[string]any{{"op": "insert", "after": "end", "markdown": shipIt("Ship it now.")}})
+	for version, state := range map[int]string{1: "changed", 2: "unchanged"} {
+		read := graphEdges(t, handler, url.Values{"to": {blockRef + "@v" + strconv.Itoa(version)}})
+		if read.Node.Pin == nil || read.Node.Pin.State != state || len(read.Edges) != 1 {
+			t.Fatalf("restored block pinned to version %d = %#v (pin %#v), want %s with the comment's link", version, read.Node, read.Node.Pin, state)
+		}
+	}
+}
+
+// A pin the index cannot read answers 404 saying why: a version the document lacks, a version an
+// older build wrote and no block-aware build indexed, and a version that did not hold the block.
+func TestAPinnedReferenceAnswers404ForAVersionItCannotRead(t *testing.T) {
+	handler, database := blockIndexHandler(t)
+	createReferenceAPIProject(t, handler, "CORE")
+	issue := createSpecIssue(t, handler, "CORE", "Intro paragraph.\n")
+	specRef := "dispatch://" + issue.Key + "/spec"
+	blockRef := specRef + "#b-ship%5Fit"
+	added := editSpec(t, handler, issue.Key, []map[string]any{{"op": "insert", "after": "end", "markdown": shipIt("Ship it.")}})
+	if pin := graphEdges(t, handler, url.Values{"to": {blockRef + "@v" + strconv.Itoa(added.Number)}}).Node.Pin; pin == nil || pin.State != "unchanged" {
+		t.Fatalf("pin to the version that added the block = %#v, want unchanged", pin)
+	}
+	unindexed := added.Number + 1
+	if _, err := database.Pool.Exec(context.Background(), `
+		insert into artifact_versions (artifact_id, number, markdown, authors)
+		select artifact_id, $2, markdown, authors from artifact_versions where artifact_id = $1 and number = $3
+	`, issue.PrimaryArtifactID, unindexed, added.Number); err != nil {
+		t.Fatalf("write a version as an older build would: %v", err)
+	}
+
+	requireReferenceNotFound(t, handler, url.Values{"to": {blockRef + "@v9"}}, "no version 9 of "+specRef)
+	requireReferenceNotFound(t, handler, url.Values{"to": {blockRef + "@v" + strconv.Itoa(unindexed)}},
+		"version "+strconv.Itoa(unindexed)+" of "+specRef+" has no record of its blocks; the earliest is version 1")
+	requireReferenceNotFound(t, handler, url.Values{"to": {blockRef + "@v1"}}, `no block "ship_it" in `+specRef+` at version 1`)
 }
