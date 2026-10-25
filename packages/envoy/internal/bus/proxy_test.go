@@ -40,16 +40,25 @@ type relayLink struct {
 	swallow        atomic.Bool
 }
 
-// startRelayProxy relays to the server uri names. Its url is uri pointed at the proxy.
+// startRelayProxy relays to the server uri names, from loopback. Its url is uri pointed at the
+// proxy.
 func startRelayProxy(t *testing.T, uri string) *relayProxy {
+	t.Helper()
+	return startRelayProxyFrom(t, "127.0.0.1", uri)
+}
+
+// startRelayProxyFrom relays to the server uri names from a port it holds on host, so a test that
+// needs the server reached by an address of this machine other than loopback names that address.
+// Its url is uri pointed at the proxy, userinfo and all.
+func startRelayProxyFrom(t *testing.T, host, uri string) *relayProxy {
 	t.Helper()
 	server, err := url.Parse(uri)
 	if err != nil {
 		t.Fatalf("parse %q: %v", uri, err)
 	}
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	listener, err := net.Listen("tcp", net.JoinHostPort(host, "0"))
 	if err != nil {
-		t.Fatalf("proxy listen: %v", err)
+		t.Fatalf("proxy listen on %s: %v", host, err)
 	}
 	relayed := *server
 	relayed.Host = listener.Addr().String()

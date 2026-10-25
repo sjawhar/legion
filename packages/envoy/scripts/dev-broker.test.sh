@@ -2,9 +2,9 @@
 # packages/envoy/scripts/dev-broker.test.sh
 #
 # Proves dev-broker.sh's per-instance database and port isolation without a real Postgres, real
-# network binds, or a real broker binary: fakes `docker`, `go`, and `curl` on PATH the same way
-# e2e-local.test.sh fakes `docker` — recording every docker/curl invocation to a call-log file and
-# answering it without touching anything real — plus a fake `go build -o <path> ...` that installs
+# network binds, or a real broker binary: fakes `docker`, `go`, and `curl` on PATH — recording
+# every docker/curl invocation to a call-log file and answering it without touching anything real
+# — plus a fake `go build -o <path> ...` that installs
 # a tiny stub script at <path> instead of compiling (dev-broker.sh's own isolation logic lives
 # entirely in the shell driver, never in the Go binaries it starts, so a stub proves the driver's
 # behavior without depending on cmd/agent-secrets-devrelay or cmd/broker compiling or running for
