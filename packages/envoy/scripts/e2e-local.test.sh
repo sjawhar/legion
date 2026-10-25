@@ -9,9 +9,14 @@ readonly temporary_dir
 readonly docker_call_file="${temporary_dir}/docker-calls"
 readonly output_file="${temporary_dir}/output"
 readonly fake_docker="${temporary_dir}/docker"
+# A PATH holding every command the driver needs except a NATS backend: neither docker nor
+# nats-server is linked into it, which is the only way to reach the driver's refusal on a host
+# that has no container runtime to hide behind.
+readonly backendless_path_dir="${temporary_dir}/no-nats-backend"
 
 cleanup() {
   rm -f "$docker_call_file" "$output_file" "$fake_docker"
+  rm -rf "$backendless_path_dir"
   rmdir "$temporary_dir"
 }
 trap cleanup EXIT
@@ -49,3 +54,28 @@ fi
   exit 1
 }
 printf 'PASS: rejects unsupported arguments without starting Docker\n'
+
+mkdir "$backendless_path_dir"
+# bash, dirname, rm and cat are what the driver needs before and during its own exit trap; the
+# rest are the commands its required-command loop asks for.
+for command in bash bun cat curl dirname go jq openssl rm; do
+  command_path="$(command -v "$command")" || {
+    printf 'ERR: required command is unavailable: %s\n' "$command" >&2
+    exit 3
+  }
+  ln -s "$command_path" "${backendless_path_dir}/${command}"
+done
+
+backendless_status=0
+PATH="$backendless_path_dir" E2E_NATS_SERVER="" "$(command -v bash)" "$driver" \
+  >"$output_file" 2>&1 || backendless_status=$?
+[[ "$backendless_status" == 3 ]] || {
+  printf 'ERR: the driver exited %s without a NATS backend, want 3\n' "$backendless_status" >&2
+  cat "$output_file" >&2
+  exit 1
+}
+[[ "$(<"$output_file")" == *"required command is unavailable: docker"*"nats-server"* ]] || {
+  cat "$output_file" >&2
+  exit 1
+}
+printf 'PASS: refuses to run with neither docker nor nats-server, naming both\n'

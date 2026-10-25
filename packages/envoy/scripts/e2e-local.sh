@@ -9,6 +9,7 @@
 #
 # Optional ports: E2E_NATS_PORT (14222), E2E_PORT (19020), E2E_SESSION_PORT (19021).
 # Optional NATS container name: E2E_NATS_CONTAINER (envoy-e2e-nats).
+# Optional nats-server binary: E2E_NATS_SERVER (the one on PATH), used when Docker is absent.
 set -euo pipefail
 # This rig's NATS is a throwaway server with no users. nats.go refuses an nkey when the server sends
 # no nonce ("nats: nkeys not supported by the server"), so no process here inherits an operator's
@@ -20,8 +21,10 @@ usage() {
 Usage: e2e-local.sh [--help]
 
 Boot a throwaway NATS and the local Envoy listener, submit signed public GitHub
-fixtures plus one direct message, and write raw and rendered acceptance evidence
-to packages/envoy/out/e2e/.
+fixtures plus one direct message, prove how a send to an unknown session and a
+send whose bus is gone are refused, and write raw and rendered acceptance
+evidence to packages/envoy/out/e2e/. NATS runs in Docker, or as a local
+nats-server process on a host that has no container runtime.
 EOF
 }
 
@@ -62,6 +65,10 @@ webhook_secret="e2e-local"
 readonly webhook_secret
 session_id="ses_e2e_local"
 readonly session_id
+# The destination of the refused send: an id nothing registers in this run, so the store cannot
+# hold it however late the assertion runs.
+absent_session_id="ses_e2e_local_absent"
+readonly absent_session_id
 
 readonly envelopes_file="${out_dir}/envelopes.jsonl"
 readonly session_prompts_file="${out_dir}/session-prompts.jsonl"
@@ -78,10 +85,18 @@ readonly subscriber_log_file="${out_dir}/subscriber.log"
 readonly listener_binary="${out_dir}/listener"
 readonly session_ready_fifo="${out_dir}/session-ready.fifo"
 readonly subscriber_ready_fifo="${out_dir}/subscriber-ready.fifo"
+readonly absent_session_response_file="${out_dir}/absent-session-response.json"
+readonly bus_down_response_file="${out_dir}/bus-down-send-response.json"
+readonly bus_down_headers_file="${out_dir}/bus-down-send-headers.txt"
+readonly bus_down_result_file="${out_dir}/bus-down-send-result.txt"
+readonly bus_down_client_file="${out_dir}/bus-down-client-error.json"
+readonly nats_log_file="${out_dir}/nats.log"
+readonly nats_store_dir="${out_dir}/nats-store"
 
 listener_pid=""
 session_pid=""
 subscriber_pid=""
+nats_pid=""
 nats_started=0
 
 cleanup() {
@@ -95,37 +110,111 @@ cleanup() {
     fi
   done
   rm -f "$session_ready_fifo" "$subscriber_ready_fifo"
+  # stop_nats guards on nats_started itself; the guard is repeated here because this trap is armed
+  # before that function is defined, and a run that exits on a missing command must not die in its
+  # own cleanup.
   if [[ "$nats_started" -eq 1 ]]; then
-    docker stop "$nats_container" >/dev/null 2>&1 || true
-    docker rm "$nats_container" >/dev/null 2>&1 || true
+    stop_nats
   fi
   exit "$rc"
 }
 trap cleanup EXIT INT TERM
 
-for command in bun curl docker go jq openssl; do
+for command in bun curl go jq openssl; do
   command -v "$command" >/dev/null || {
     printf 'ERR: required command is unavailable: %s\n' "$command" >&2
     exit 3
   }
 done
 
-if docker container inspect "$nats_container" >/dev/null 2>&1; then
+# Which backend gives this run its NATS. Docker is the first choice and behaves exactly as it
+# always has: the same image, the same single container this script owns, and the same refusal to
+# touch a container that is already there. The nats-server fallback exists because a Legion worker
+# pod has no container runtime at all -- no docker, no podman, no socket to reach one -- so a
+# container is not something the script can fall back to there, and without the fallback this
+# acceptance run cannot be executed where this repository's agents actually run.
+# dispatch://INFRA-250 removes the fallback by starting nats-server in process.
+nats_backend=docker
+nats_server_bin="${E2E_NATS_SERVER:-}"
+if ! command -v docker >/dev/null; then
+  nats_backend=process
+  if [[ -z "$nats_server_bin" ]]; then
+    nats_server_bin="$(command -v nats-server || true)"
+  fi
+  if [[ -z "$nats_server_bin" ]]; then
+    printf 'ERR: required command is unavailable: docker (runs the throwaway NATS container) or nats-server (runs the same NATS as a child process; name one with E2E_NATS_SERVER)\n' >&2
+    exit 3
+  fi
+fi
+readonly nats_backend nats_server_bin
+
+if [[ "$nats_backend" == docker ]] && docker container inspect "$nats_container" >/dev/null 2>&1; then
   printf 'ERR: %s already exists; leave it untouched and set E2E_NATS_CONTAINER to a free name.\n' "$nats_container" >&2
   exit 3
 fi
 
+# wait_for_nats makes both backends ready in one way: the port answers, whoever opened it. Docker
+# returns from `run -d` before the server inside has bound, and nats-server returns from the fork
+# the same way, so neither start is proof on its own.
+wait_for_nats() {
+  local deadline=$((SECONDS + 30))
+  while ((SECONDS < deadline)); do
+    if (exec 3<>"/dev/tcp/127.0.0.1/${nats_port}") 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  printf 'ERR: NATS did not accept connections on 127.0.0.1:%s within 30 seconds.\n' "$nats_port" >&2
+  if [[ "$nats_backend" == process ]] && [[ -s "$nats_log_file" ]]; then
+    cat "$nats_log_file" >&2
+  fi
+  return 1
+}
+
+start_nats() {
+  if [[ "$nats_backend" == docker ]]; then
+    printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_container" "$nats_port"
+    docker run --name "$nats_container" -d -p "${nats_port}:4222" mirror.gcr.io/library/nats:2.10-alpine -js >/dev/null
+    nats_started=1
+  else
+    printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_server_bin" "$nats_port"
+    "$nats_server_bin" -js -a 127.0.0.1 -p "$nats_port" -sd "$nats_store_dir" >"$nats_log_file" 2>&1 &
+    nats_pid=$!
+    nats_started=1
+  fi
+  wait_for_nats
+}
+
+# stop_nats ends this run's NATS whichever backend started it, and is the one way it is ended: the
+# cleanup trap and the bus-down step below both call it, so a half-stopped rig is not expressible.
+stop_nats() {
+  if [[ "$nats_started" -ne 1 ]]; then
+    return 0
+  fi
+  nats_started=0
+  if [[ "$nats_backend" == docker ]]; then
+    docker stop "$nats_container" >/dev/null 2>&1 || true
+    docker rm "$nats_container" >/dev/null 2>&1 || true
+    return 0
+  fi
+  if [[ -n "$nats_pid" ]] && kill -0 "$nats_pid" 2>/dev/null; then
+    kill "$nats_pid" 2>/dev/null || true
+    wait "$nats_pid" 2>/dev/null || true
+  fi
+  nats_pid=""
+}
+
 mkdir -p "$out_dir"
+rm -rf "$nats_store_dir"
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
   "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
-  "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$listener_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
+  "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
+  "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" "$listener_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
 : >"$envelopes_file"
 : >"$session_prompts_file"
 mkfifo "$session_ready_fifo" "$subscriber_ready_fifo"
 
-printf 'starting NATS: %s on 127.0.0.1:%s\n' "$nats_container" "$nats_port"
-docker run --name "$nats_container" -d -p "${nats_port}:4222" mirror.gcr.io/library/nats:2.10-alpine -js >/dev/null
-nats_started=1
+start_nats
 
 printf 'building listener\n'
 (
@@ -308,6 +397,74 @@ jq -e --arg recipient "$session_id" --arg message "$direct_message" \
   printf 'ERR: direct send response did not retain the three-paragraph message contract.\n' >&2
   exit 1
 }
+
+# A send to a session id nothing registered. The store holds no key for it, so the listener refuses
+# the send by name instead of publishing into a topic no one reads: the sender is told which
+# session is gone, and can route around that pane. `curl -fsS` cannot assert a refusal (it prints
+# no body and exits non-zero), so this takes the status from -w as the unheld-role publish above does.
+printf 'posting a direct message to an unregistered session\n'
+absent_summary="Absent session acceptance summary."
+absent_body="$(jq -nc \
+  --arg session_id "$absent_session_id" \
+  --arg message "$absent_summary" \
+  '{source:"agent",source_session:"octocat",target_session:$session_id,message:$message}')"
+absent_status="$(curl -sS -o "$absent_session_response_file" -w '%{http_code}' \
+  -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/send" -d "$absent_body")"
+if [[ "$absent_status" != 404 ]] || ! jq -e --arg session_id "$absent_session_id" \
+  '.error == ("no live session " + $session_id)' "$absent_session_response_file" >/dev/null; then
+  printf 'ERR: a send to the unregistered session %s answered HTTP %s, not a 404 naming it.\n' \
+    "$absent_session_id" "$absent_status" >&2
+  cat "$absent_session_response_file" >&2
+  exit 1
+fi
+
+# Why this step reads the listener's own log, which nothing in this script read before: a refused
+# send publishes nothing at all, so no envelope, no stream entry and no "listener received" line
+# will ever name it, and this record is the only server-side trace it leaves. The issue exists
+# because that trace did not: a send never attempted, one lost on the way and one refused by name
+# all left the same silence in the log.
+count_listener_records() {
+  local selector=$1
+  # The records are JSON lines, but the log also carries the Go standard logger's plain lines
+  # ("2026/10/25 03:19:15 github sender login=..."), and jq's fromjson reads the leading 2026 of
+  # one of those as a number rather than refusing it. Keeping only the objects drops both shapes
+  # of non-record line instead of failing the whole read over them.
+  jq -R 'fromjson? // empty | select(type == "object")' "$listener_log_file" \
+    | jq -s --arg session_id "$session_id" --arg absent_session_id "$absent_session_id" \
+      "[.[] | select(${selector})] | length"
+}
+
+# Each record is written after its response is sent, so the assertion can reach the log a moment
+# before the line lands: wait for the first match rather than racing it, and fail on anything but
+# exactly one, a second line being as wrong as none.
+wait_for_listener_record() {
+  local description=$1
+  local selector=$2
+  local deadline=$((SECONDS + 10))
+  local count=0
+  while ((SECONDS < deadline)); do
+    count="$(count_listener_records "$selector")"
+    if ((count != 0)); then
+      break
+    fi
+    sleep 0.25
+  done
+  if ((count != 1)); then
+    printf 'ERR: expected exactly one %s record in the listener log; found %s.\n' "$description" "$count" >&2
+    return 1
+  fi
+}
+
+printf 'asserting the listener request records\n'
+wait_for_listener_record 'accepted send' \
+  '.msg == "listener send" and .level == "INFO" and .outcome == "accepted" and .status == 200
+   and .target_session == $session_id and .source == "agent" and .source_session == "octocat"
+   and .payload_summary == "Direct acceptance summary." and (.event_id | length) > 0'
+wait_for_listener_record 'refused send' \
+  '.msg == "listener send" and .level == "WARN" and .outcome == "no_live_session" and .status == 404
+   and .target_session == $absent_session_id and .source == "agent" and .source_session == "octocat"
+   and .payload_summary == "Absent session acceptance summary." and (.event_id | length) > 0'
 
 role="e2e-reviewer"
 unheld_status="$(curl -sS -o "$unheld_role_response_file" -w '%{http_code}' \
@@ -527,3 +684,88 @@ E2E_ENVELOPES_FILE="$envelopes_file" E2E_RENDERED_TS_FILE="$rendered_ts_file" \
 
     console.log("PASS: topic set, structured payloads, checks settlement, and both renderers match the local acceptance contract");
   '
+
+# Last of all, because it ends this rig's NATS and every step above needs the bus. A send the bus
+# cannot serve has to be refused by name inside the sender's own attempt, rather than left to the
+# sender's timeout: a timeout says nothing about whether the message was taken.
+printf 'stopping NATS for the bus-down answers\n'
+stop_nats
+
+# --max-time 5 is the sending client's own per-attempt deadline (DEFAULT_TIMEOUT_MS in
+# packages/envoy-client/src/transport.ts): an answer that arrives after it is, to that caller, no
+# answer at all. The listener's own budget (sendRequestBudget, 3.5 s) is what keeps it inside.
+printf 'posting a direct message with the bus down\n'
+curl --max-time 5 -sS -o "$bus_down_response_file" -D "$bus_down_headers_file" \
+  -w '%{http_code}\n%{time_total}\n' \
+  -X POST -H 'Content-Type: application/json' \
+  "${listener_url}/v1/messages/send" -d "$direct_body" >"$bus_down_result_file"
+{ IFS= read -r bus_down_status; IFS= read -r bus_down_seconds; } <"$bus_down_result_file"
+if [[ "$bus_down_status" != 503 ]]; then
+  printf 'ERR: a send with the bus down answered HTTP %s, not 503.\n' "$bus_down_status" >&2
+  cat "$bus_down_response_file" >&2
+  exit 1
+fi
+jq -e '.error | startswith("envoy: the message bus did not answer")' "$bus_down_response_file" >/dev/null || {
+  printf 'ERR: the bus-down body does not name the bus as the reason.\n' >&2
+  cat "$bus_down_response_file" >&2
+  exit 1
+}
+# Retry-After is what separates a bus that did not answer from bytes or a subject NATS refuses
+# however often they are sent: only the first is worth sending down this same route again.
+grep -qiE '^retry-after:[[:space:]]*1[[:space:]]*$' "$bus_down_headers_file" || {
+  printf 'ERR: the bus-down answer carries no Retry-After: 1 header.\n' >&2
+  cat "$bus_down_headers_file" >&2
+  exit 1
+}
+# Whole seconds only: curl prints time_total with a fraction (behind whichever separator the
+# locale asks for), and all that is asserted is that the answer beat the client deadline.
+if ((${bus_down_seconds%%[.,]*} >= 5)); then
+  printf 'ERR: the bus-down answer took %s seconds, past the sending client deadline.\n' "$bus_down_seconds" >&2
+  exit 1
+fi
+printf 'bus-down send: HTTP %s in %s seconds\n' "$bus_down_status" "$bus_down_seconds"
+
+# The same refusal through the client a session actually sends with. It retries a >= 500 answer
+# once, after 250 ms (packages/envoy-client/src/transport.ts), so two refusals and one wait are
+# expected here; what has to hold is that the send ends in a named EnvoyApiError rather than in a
+# timeout, which is why this asserts what was thrown and never how long it took.
+printf 'sending through the real client with the bus down\n'
+(
+  cd "$repo_root/packages/envoy-client"
+  E2E_LISTENER_URL="$listener_url" E2E_SESSION_ID="$session_id" \
+    E2E_BUS_DOWN_CLIENT_FILE="$bus_down_client_file" bun -e '
+      import { writeFileSync } from "node:fs";
+      import { createEnvoyClient, EnvoyApiError } from "@legion/envoy-client/transport";
+
+      const baseUrl = process.env.E2E_LISTENER_URL;
+      const sessionID = process.env.E2E_SESSION_ID;
+      const output = process.env.E2E_BUS_DOWN_CLIENT_FILE;
+      if ([baseUrl, sessionID, output].some((value) => value === undefined)) {
+        throw new Error("bus-down client configuration is invalid");
+      }
+      const client = createEnvoyClient({ baseUrl, fetch });
+      let thrown;
+      try {
+        await client.send({
+          sourceSessionID: "octocat",
+          targetSessionID: sessionID,
+          message: "Direct send while the message bus is down.",
+        });
+      } catch (error) {
+        thrown = error;
+      }
+      if (!(thrown instanceof EnvoyApiError)) {
+        const what = thrown === undefined ? "nothing: the send was accepted" : String(thrown);
+        throw new Error(`the client threw ${what}, want an EnvoyApiError`);
+      }
+      const prefix = "envoy: the message bus did not answer";
+      if (thrown.details.status !== 503 || !thrown.message.startsWith(prefix)) {
+        throw new Error(`the client threw ${thrown.details.status}: ${thrown.message}, want 503 opening with ${JSON.stringify(prefix)}`);
+      }
+      const record = { name: thrown.name, status: thrown.details.status, message: thrown.message };
+      writeFileSync(output, `${JSON.stringify(record, null, 2)}\n`);
+      console.log(`client refusal: ${record.name} ${record.status} ${record.message}`);
+    '
+)
+
+printf 'PASS: an absent destination, the listener request records and a bus that did not answer are each refused by name\n'

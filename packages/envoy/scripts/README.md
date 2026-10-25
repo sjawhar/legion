@@ -69,16 +69,32 @@ guarantees no real subscriber will ever match the probe traffic.
 
 ## e2e-local.sh
 
-Runs the local listener against a throwaway `nats:2.10-alpine` container. It
-posts signed public GitHub fixtures and a three-paragraph direct message,
-checks the one-warning response for a never-seen GitHub repository, rejects an
-unheld role publish before claiming it for the fake session, captures the raw
-notification envelopes, and proves both the Go prompt text and the shared
-TypeScript renderer print the full direct message once, with no separate
-summary line repeating its first line.
+Runs the local listener against a throwaway NATS. It posts signed public GitHub
+fixtures and a three-paragraph direct message, checks the one-warning response
+for a never-seen GitHub repository, rejects an unheld role publish before
+claiming it for the fake session, captures the raw notification envelopes, and
+proves both the Go prompt text and the shared TypeScript renderer print the full
+direct message once, with no separate summary line repeating its first line.
 
-Docker downloads it from `mirror.gcr.io/library/nats:2.10-alpine`, Google's
-Docker Hub mirror, on the first run when it is not already cached.
+It also proves the three answers a sender gets when a send cannot be delivered:
+a send to a session the store does not hold is refused `404 {"error":"no live
+session <id>"}`; each send leaves exactly one `listener send` record in
+`listener.log`, INFO when accepted and WARN when refused, carrying
+`target_session`, `event_id`, `source`, `source_session`, `payload_summary`,
+`outcome` and `status`; and a send whose bus is gone is refused `503` with
+`{"error":"envoy: the message bus did not answer: …"}` and `Retry-After: 1`
+inside the sending client's five-second deadline, both over curl and through
+`createEnvoyClient`, which raises an `EnvoyApiError` rather than timing out. The
+bus-down step runs last, because it ends the run's NATS.
+
+NATS comes from whichever backend the host has. With `docker` on PATH it runs
+`mirror.gcr.io/library/nats:2.10-alpine`, downloaded from Google's Docker Hub
+mirror on the first run when it is not already cached. With no Docker it runs a
+local `nats-server -js` child process instead (`E2E_NATS_SERVER` names one that
+is not on PATH), which is how the script runs on a Legion worker pod, where
+there is no container runtime at all. With neither it refuses to start and names
+both. dispatch://INFRA-250 removes the fallback by starting nats-server in
+process.
 
 ```bash
 packages/envoy/scripts/e2e-local.sh
@@ -90,6 +106,12 @@ The run writes its reusable evidence to `packages/envoy/out/e2e/`:
 - `session-prompts.jsonl` — raw fake-session `prompt_async` requests
 - `rendered-ts.txt` — `renderInbound` output for every envelope
 - `rendered-go.txt` — the corresponding Go `Deliverer.Text` output
+- `listener.log` — the listener's own log, including one record per send and publish
+- `absent-session-response.json` — the 404 body naming the session nothing registered
+- `bus-down-send-response.json`, `bus-down-send-headers.txt`,
+  `bus-down-send-result.txt` — the bus-down 503 body, its headers, and its
+  status and `time_total`
+- `bus-down-client-error.json` — the `EnvoyApiError` the real client raised for it
 
 Use `E2E_NATS_PORT`, `E2E_PORT`, or `E2E_SESSION_PORT` to avoid local port
 collisions, and `E2E_NATS_CONTAINER` to name the NATS container something other
@@ -99,6 +121,18 @@ start when the name is taken and removes it on exit. Unlike
 validates local branch behavior only. CI runs it as the `envoy-e2e-local` job of
 `.github/workflows/envoy-and-contracts.yaml` on every change to
 `packages/envoy`, `packages/envoy-client` or `packages/contracts`.
+
+The Go tests have the same container problem and the same escape hatch. Where
+there is no container runtime, run them against a local nats-server binary:
+
+```bash
+ENVOY_TEST_NATS_BIN=/path/to/nats-server go test ./cmd/listener
+```
+
+That covers `testnats.URL`, the shared account server, and nothing else:
+`testnats.Start`, `StartRestartable` and `StartImageConfig` still run
+containers, so a test that stops, restarts or reconfigures its own server needs
+a runtime anyway. dispatch://INFRA-250 removes the need for the variable.
 
 ## listener-deploy-probe.sh
 
