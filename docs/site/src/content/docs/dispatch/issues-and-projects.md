@@ -146,6 +146,22 @@ still clamps a title shows the whole of it on hover.
 - **Components** appears when the project has an architecture source. It shows which parts of the
   architecture the issue belongs to, and lets you change them.
 
+### Changes Dispatch has not confirmed
+
+Every change you make — a status, a priority, an assignee, labels, an answer to an ask, a comment,
+a comment resolved — is sent under a name of its own, and Dispatch makes it once under that name
+however many times the page asks. So a change tried again after a lost answer, a timeout or an
+outage lands exactly once, and the page keeps asking while your connection is down.
+
+A corner of the screen accounts for the ones still out: **Saving 2 changes…**, and once one has
+gone 30 seconds unconfirmed, **Dispatch has not confirmed 2 changes — still trying**, with **Stop
+trying** beside each. A change Dispatch refuses is listed there as **Not saved: …** with why, and
+with **Retry** and **Discard**; the control you used puts itself back as it was. While any change
+is unconfirmed the browser asks you to confirm before you leave or reload the page, and a change
+a reload interrupted is picked up again when the page comes back, for the person who made it and
+for nobody else. One interrupted more than five minutes ago is not sent on its own: it comes back
+as **Not sent**, for you to retry or discard.
+
 ### The tabs
 
 - **Spec** is the issue's main document. [Documents](/legion/dispatch/documents/) covers it.
