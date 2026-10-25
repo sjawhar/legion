@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-372",
-  "completed": "2026-10-25T09:27:30Z",
-  "headSha": "a79a58fcabb71b04df048bde28e2c9cc1ad07659",
+  "completed": "2026-10-25T09:36:30Z",
+  "headSha": "8c6719324dce483cf5f552b637fac2e71b9f2f41",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 2: re-ran the implementer's six-way kubectl auth can-i matrix from this tester's own role container (no kubeconfig, KUBECONFIG and POD_NAMESPACE unset, account legion:legion-worker) at 2026-10-25T09:24:57Z and got its answers: bare yes x3, -n <workload ns> yes x3, -n <Legion's pod ns> no x3, POD_NAMESPACE=<Legion's pod ns> bare no x3, the same with -n <workload ns> yes x3; read client-go v0.35.0 tools/clientcmd/client_config.go:646-661 (POD_NAMESPACE, else the serviceaccount namespace file, else \"default\"); re-ran its widened check_clauses.py and both name checks at a79a58fcabb71b04df048bde28e2c9cc1ad07659 (OK / exit 0). Round 1's image proof re-verified earlier at 22113966 still stands; the main-built image is still MANIFEST_UNKNOWN."
+    "how": "Round 3: re-ran the implementer's widened check_clauses.py and both name checks at 8c6719324dce483cf5f552b637fac2e71b9f2f41 (OK / exit 0), ran my own negative copy against it (refused), and drove the row's command form from this tester's own role container at 2026-10-25T09:33:58Z (-n <workload ns> yes x3, -n <Legion's pod ns> no x3). Rounds 1-2 verdicts stand: those regions are unchanged."
   },
   "failed": 0,
   "failures": [],
@@ -58,14 +58,21 @@
       "observed": "the three kubectl -n <namespace> lines and the namespace paragraph render as written, in the register the page uses at `kubectl -n <namespace> get sandboxes`; #worker-image and #pin-by-digest-never-by-tag each still resolve to one heading id; check prints 'OK: three authorized edits (reason, gate -n, namespace clause) and the AGENTS.md row, nothing else moved, both rows point at each other', exit 0; both name checks exit 0; the workload namespace appears in the diff only as an ordinary English word in the round-1 sentence, never as a namespace",
       "headSha": "a79a58fcabb71b04df048bde28e2c9cc1ad07659",
       "negativeControl": "the implementer's HEAD_DIR copies (round-1 page, one command without -n, old 'no command here passes -n' claim kept, literal namespace, edited ns=$(cat ...) line) each refused, exit 1; this tester's round-1 copies (service row pointer removed, second reason reworded) refused, exit 1"
+    },
+    {
+      "criterion": "The AGENTS.md 'Run a database' row names the gate as `kubectl -n <namespace> auth can-i create jobs`, `create services` and `get services`, nothing else in the row changes, and no bare copy of the gate remains",
+      "surface": "AGENTS.md as GitHub renders it at the head; the row's commands from this tester's role container against the deployment's API server; both files against the merge base 158654c89e8b",
+      "command": "gh api 'repos/sjawhar/legion/contents/AGENTS.md?ref=8c6719324dce483cf5f552b637fac2e71b9f2f41' -H 'Accept: application/vnd.github.html'; grep -rE 'auth can-i (create jobs|create services|get services)' over the workspace; W=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace); for v in 'create jobs' 'create services' 'get services'; do kubectl auth can-i $v; kubectl -n \"$W\" auth can-i $v; kubectl -n legion auth can-i $v; done; cd -- \"$LEGION_WORKSPACE\" && python3 /legion/scratch/tmp/infra372/check_clauses.py; bash .github/scripts/check-private-names.sh; bash .github/scripts/check-plugin-names.sh",
+      "observed": "the rendered row reads 'kubectl -n <namespace> auth can-i create jobs, create services and get services are the gate', rest of the row unchanged; the only gate copies are AGENTS.md:128 and docs/kubernetes.md:2671-2673, all with -n <namespace>; -n <workload ns> yes x3, bare yes x3 (this pod's projected file names the workload's namespace), -n <Legion's pod ns> no x3 (09:33:58Z); check 'OK: three authorized edits (reason, gate -n, namespace clause) and the AGENTS.md row (gate -n, back pointer), nothing else moved', exit 0; name checks exit 0; thread PRRT_kwDORFy7ds6wAEbc resolved; PR MERGEABLE",
+      "headSha": "8c6719324dce483cf5f552b637fac2e71b9f2f41",
+      "negativeControl": "-n <Legion's own pod namespace> -> no x3; the check on a copy whose row drops `get services` -> FAIL: the 'Run a database' row is not the merged row with only its gate's -n and last sentence changed, exit 1; the placeholder pasted as written -> sh: cannot open namespace: No such file"
     }
   ],
-  "ci": "At code head ce9ec359dbc7: Tests 40180408514 queued, PR Title 40180446127 queued (40180408501 cancelled), Legion Envoy and Contracts 40180408498 queued; a79a58fc is handoff-only with skip-checks: true. Not waited on.",
+  "ci": "At code head 0cc10cbf3057: Tests 40181033336 queued, PR Title 40181040465/40181041025 queued and 40181067681 pending (40181033333 cancelled), Legion Envoy and Contracts 40181033335 queued; 8c671932 is handoff-only with skip-checks: true. Not waited on.",
   "notes": [
-    "Docs-only change: no implementer test exists or is warranted; the acceptance check is the plan's throwaway script, widened for round 2, which caught each break tried.",
+    "Docs-only change: no implementer test exists or is warranted; the acceptance check is the plan's throwaway script, widened each round, which caught each break tried.",
     "The main-built worker image of 6ede52ccb376 is still not published; round 1's image proof rests on #2149's head image plus a Dockerfile identical to main's in every non-comment line.",
-    "Not a failure, for the architect and reviewer: AGENTS.md's 'Run a database' row still names the gate as bare `kubectl auth can-i create jobs`, `create services` and `get services` (the implementer's open question); the ruling added nothing else, and the clause check pins that row to its last sentence only.",
-    "Not a failure, for the reviewer: the ruling asked for one clause saying why; the paragraph runs to five sentences, which the implementer attributes to the architect's later ruling (envoy f4a5138e) to write the measured mechanism."
+    "For the reviewer: the PR body's 'Look at first' line (the reviewer's) still says AGENTS.md:128's middle sentence names the gate without -n; that is no longer true at 8c6719324dce483cf5f552b637fac2e71b9f2f41."
   ],
-  "round": 2
+  "round": 3
 }
