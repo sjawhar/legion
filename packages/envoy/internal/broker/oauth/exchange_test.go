@@ -400,6 +400,42 @@ func TestIntrospectingATokenTheBrokerCannotStandBehind(t *testing.T) {
 	}
 }
 
+// TestIntrospectionAnswersOnlyAnAccessToken: the introspection route is how Dispatch reads one
+// of the broker's access tokens back, and its answer carries no token type, so a resource server
+// cannot tell a refresh token from an access token by reading it. A machine login's refresh token
+// outlives the access token issued beside it; answered live, it would pass for a credential after
+// that access token has expired. It is answered as simply not live — both while the access token
+// issued beside it is live and once that access token has expired.
+func TestIntrospectionAnswersOnlyAnAccessToken(t *testing.T) {
+	f := newExchangeFixture(t, func(c *oauth.Config) { c.AccessLifetime = time.Second })
+	ctx := context.Background()
+	key := newKey(t)
+	deviceCode, userCode := f.authorize(t, key)
+	if err := f.provider.ApproveDevice(ctx, userCode, true,
+		map[string]any{"operator": person, "credential_id": f.newCredential(t)}); err != nil {
+		t.Fatalf("ApproveDevice: %v", err)
+	}
+	status, body := f.poll(t, deviceCode, key)
+	accessTokenOf(t, status, body)
+	refreshToken, _ := body["refresh_token"].(string)
+	if refreshToken == "" {
+		t.Fatalf("the machine login's poll answered %v, which carries no refresh token", body)
+	}
+	check := func(t *testing.T) {
+		t.Helper()
+		answer, err := f.provider.Introspect(ctx, refreshToken)
+		if err != nil {
+			t.Fatalf("Introspect = %v, want no error", err)
+		}
+		if answer != (oauth.Introspection{}) {
+			t.Fatalf("Introspect of a refresh token = %+v, want not live and nothing else", answer)
+		}
+	}
+	t.Run("while the access token issued beside it is live", check)
+	time.Sleep(time.Second + 100*time.Millisecond)
+	t.Run("once that access token has expired", check)
+}
+
 // TestTheExchangeClientAuthenticatesWithNoCredentialAndOnlyThere: the broker answers the exchange
 // client as authenticated when it presents nothing at the token-exchange grant, because the
 // subject token is the credential and shipping a secret to every pod is what this removes. Every
