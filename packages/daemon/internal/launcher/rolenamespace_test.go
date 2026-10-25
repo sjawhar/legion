@@ -1,12 +1,15 @@
 package launcher
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -120,9 +123,11 @@ func TestRoleInitHelper(t *testing.T) {
 		os.Exit(2)
 	}
 	cfg.Stdout, cfg.Stderr = os.Stdout, os.Stderr
-	if err := RoleInit(cfg); err != nil {
+	stop, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
+	defer cancel()
+	if err := RoleInit(stop, cfg); err != nil {
 		fmt.Fprintln(os.Stderr, "role-init:", err)
-		os.Exit(1)
+		os.Exit(RoleInitSetupFailedExit)
 	}
 	os.Exit(0)
 }

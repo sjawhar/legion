@@ -4,6 +4,7 @@ package launcher
 
 import (
 	"bufio"
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -42,20 +43,18 @@ func roleNamespaceAttr() (*syscall.SysProcAttr, error) {
 
 // roleInit is `legion launcher role-init`'s body: the namespaces' setup, then the shim as this
 // process's child until it ends.
-func roleInit(cfg RoleInitConfig) error {
+func roleInit(stop context.Context, cfg RoleInitConfig) error {
 	if os.Getpid() != 1 {
 		return errors.New("role-init: not the init of a PID namespace of its own")
 	}
 	// The kernel delivers a signal from outside to a PID namespace's init only once it handles
-	// it, so role-init takes the launcher's stop from its first instruction: a stop that arrives
-	// while the namespace is still being set up reaches the shim the moment it starts, rather
-	// than waiting out the launcher's grace for a kill. Stops and child exits arrive on channels
-	// of their own: Go drops a signal whose channel is full, and a burst of the role's orphans
-	// exiting must never crowd out the stop. A dropped SIGCHLD costs nothing, since one reap
-	// pass takes every exited orphan.
-	stops := make(chan os.Signal, 2)
-	signal.Notify(stops, syscall.SIGTERM, syscall.SIGINT)
-	defer signal.Stop(stops)
+	// it. `legion`'s main registers for the launcher's stop (SIGTERM, and SIGINT) before it runs
+	// any subcommand, and ends stop on it, so a stop that arrives while the namespace is still
+	// being set up reaches the shim the moment it starts, rather than waiting out the launcher's
+	// grace for a kill. Only a stop during the Go runtime's own start, before main runs, misses
+	// it: Go's default handling ends role-init then, with exit status 2, which the launcher
+	// reports as that exit rather than as a setup failure. Child exits arrive on a channel of
+	// their own; a dropped SIGCHLD costs nothing, since one reap pass takes every exited orphan.
 	exits := make(chan os.Signal, 1)
 	signal.Notify(exits, syscall.SIGCHLD)
 	defer signal.Stop(exits)
@@ -64,7 +63,7 @@ func roleInit(cfg RoleInitConfig) error {
 	if err := prepareRoleNamespace(cfg); err != nil {
 		return fmt.Errorf("role-init: %w", err)
 	}
-	return runRoleShim(cfg, stops, exits)
+	return runRoleShim(stop, cfg, exits)
 }
 
 // prepareRoleNamespace is everything the role's mount namespace holds that the container's does
@@ -278,10 +277,11 @@ func carryOver(dir, stage string, place func() error) error {
 
 // runRoleShim runs the generation's shim as this init's own child, in a nested user namespace as
 // the image's unprivileged user with no capability outside it. role-init stays the role's PID 1:
-// it forwards the launcher's stop (signals, held since role-init began) to every process of the
-// role, reaps the orphans the role leaves behind, reports the shim's own wait status, and ends
-// the namespace with its own exit.
-func runRoleShim(cfg RoleInitConfig, stops, exits <-chan os.Signal) error {
+// it forwards the launcher's stop (stop's end, held since role-init began) to every process of
+// the role as SIGTERM, once, reaps the orphans the role leaves behind, reports the shim's own wait
+// status, and ends the namespace with its own exit. The launcher's only other signal is SIGKILL,
+// which ends role-init, and the namespace with it, without asking.
+func runRoleShim(stop context.Context, cfg RoleInitConfig, exits <-chan os.Signal) error {
 	cmd := exec.Command(cfg.Argv[0], cfg.Argv[1:]...)
 	cmd.Env = os.Environ()
 	cmd.Stdout, cmd.Stderr = cfg.Stdout, cfg.Stderr
@@ -297,6 +297,7 @@ func runRoleShim(cfg RoleInitConfig, stops, exits <-chan os.Signal) error {
 	}
 	ended := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(ended) }()
+	stopped := stop.Done()
 	for running := true; running; {
 		select {
 		case <-ended:
@@ -305,12 +306,11 @@ func runRoleShim(cfg RoleInitConfig, stops, exits <-chan os.Signal) error {
 			if _, err := reapNamespace(cmd.Process.Pid); err != nil {
 				roleLogf(cfg, "role-init: %v", err)
 			}
-		case received := <-stops:
+		case <-stopped:
 			// Every process of the role, a detached one included: this is its PID 1.
-			if sig, ok := received.(syscall.Signal); ok {
-				if err := signalGeneration(cmd.Process.Pid, sig); err != nil {
-					roleLogf(cfg, "role-init: %v", err)
-				}
+			stopped = nil
+			if err := signalGeneration(cmd.Process.Pid, syscall.SIGTERM); err != nil {
+				roleLogf(cfg, "role-init: %v", err)
 			}
 		}
 	}

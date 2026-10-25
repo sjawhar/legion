@@ -878,26 +878,30 @@ func TestTheContainersLogKeepsEveryLineWholeAcrossGenerations(t *testing.T) {
 	}
 }
 
-// An issue pod role's generation whose role-init exits without reporting a shim status failed
-// before its shim ran, and is reported as shimwire.LauncherExitSetupFailed, never as a code the
-// shim itself could have exited with; one whose role-init reported the shim's status is reported
-// with that status, its exit code 1 included. Either way the last line the generation left
-// unfinished reaches the log once it is gone.
+// An issue pod role's generation whose role-init exits RoleInitSetupFailedExit without reporting a
+// shim status failed before its shim ran, and is reported as shimwire.LauncherExitSetupFailed,
+// never as a code the shim itself could have exited with. A role-init that exits any other way
+// with no report — a panic's 2 after its shim started, say — is reported as that exit, never as a
+// setup failure it was not. One whose role-init reported the shim's status is reported with that
+// status, its exit code 1 included. Either way the last line the generation left unfinished
+// reaches the log once it is gone.
 func TestARoleInitThatFailsBeforeItsShimIsReportedAsASetupFailure(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
+		exit   int
 		report string
 		want   shimwire.LauncherExit
 	}{
-		{"role-init failed setting up", "", shimwire.LauncherExit{Generation: 4, Code: shimwire.LauncherExitSetupFailed}},
-		{"the shim exited 1", strconv.Itoa(1 << 8), shimwire.LauncherExit{Generation: 4, Code: 1}},
+		{"role-init failed setting up", RoleInitSetupFailedExit, "", shimwire.LauncherExit{Generation: 4, Code: shimwire.LauncherExitSetupFailed}},
+		{"role-init panicked after its shim started", 2, "", shimwire.LauncherExit{Generation: 4, Code: 2}},
+		{"the shim exited 1", 0, strconv.Itoa(1 << 8), shimwire.LauncherExit{Generation: 4, Code: 1}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			out := &lockedBuffer{}
 			m := &manager{role: "tester", namespaced: true, log: &roleLog{stdout: out, stderr: out}, requests: map[string]request{}}
 			_, m.stderr = m.log.writers("tester")
 			stdout, stderr := m.log.writers("tester")
-			cmd := exec.Command("/bin/sh", "-c", "printf 'role-init: the role'\"'\"'s gh directory: no such file'; exit 1")
+			cmd := exec.Command("/bin/sh", "-c", fmt.Sprintf("printf 'role-init: the role'\"'\"'s gh directory: no such file'; exit %d", tc.exit))
 			cmd.Stdout, cmd.Stderr = stdout, stderr
 			read, write, err := os.Pipe()
 			if err != nil {
@@ -910,7 +914,7 @@ func TestARoleInitThatFailsBeforeItsShimIsReportedAsASetupFailure(t *testing.T) 
 				_, _ = write.WriteString(tc.report)
 			}
 			_ = write.Close()
-			active := &child{generation: 4, pid: cmd.Process.Pid, dir: t.TempDir(), status: read, output: []io.Writer{stdout, stderr}, done: make(chan struct{})}
+			active := &child{generation: 4, pid: cmd.Process.Pid, process: cmd.Process, dir: t.TempDir(), status: read, output: []io.Writer{stdout, stderr}, done: make(chan struct{})}
 			m.child = active
 			m.wait(cmd, active)
 			if m.lastExit == nil || *m.lastExit != tc.want {
@@ -919,7 +923,46 @@ func TestARoleInitThatFailsBeforeItsShimIsReportedAsASetupFailure(t *testing.T) 
 			if !strings.Contains(out.String(), "tester: role-init: the role's gh directory: no such file\n") {
 				t.Fatalf("the generation's unfinished last line never reached the log whole: %q", out.String())
 			}
+			if setup := strings.Contains(out.String(), "failed before it started the shim"); setup != (tc.want.Code == shimwire.LauncherExitSetupFailed) {
+				t.Fatalf("the launcher's line naming a setup failure is there: %v, want %v; the log: %s", setup, !setup, out.String())
+			}
 		})
+	}
+}
+
+// A stop that reaches a generation its wait has already reaped signals nothing: the launcher
+// signals the role-init it started through that process's own handle, never by a number the
+// kernel may have handed to another role's role-init since.
+func TestAStopOfAReapedGenerationSignalsNothing(t *testing.T) {
+	cmd := exec.Command("/bin/true")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Wait(); err != nil {
+		t.Fatal(err)
+	}
+	m := &manager{role: "tester", namespaced: true}
+	if err := m.signalChild(&child{pid: cmd.Process.Pid, process: cmd.Process}, syscall.SIGTERM); err != nil {
+		t.Fatalf("signal a reaped generation = %v, want nothing to signal and no error", err)
+	}
+}
+
+// A start that reaches a role once the container is stopping is refused, and no generation runs:
+// it would otherwise begin after the container's SIGTERM, be given the whole stop grace from then,
+// and outlast the pod's own.
+func TestAStartAfterTheContainersStopIsRefused(t *testing.T) {
+	m := &manager{role: "controller", private: t.TempDir(), requests: map[string]request{}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	got := m.start(ctx, shimwire.LauncherStart{ID: "start-1", Generation: 1, Argv: []string{"/bin/sh", "-c", "exit 0"}})
+	if got.OK || !strings.Contains(got.Error, "stopping") {
+		t.Fatalf("start after the container's stop = %#v, want a refusal", got)
+	}
+	if m.child != nil {
+		t.Fatalf("a generation runs after the container's stop: %+v", m.child)
+	}
+	if entries, err := os.ReadDir(m.private); err != nil || len(entries) != 0 {
+		t.Fatalf("the refused start left credentials behind: %v, %v", entries, err)
 	}
 }
 

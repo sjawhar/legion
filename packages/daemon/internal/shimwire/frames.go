@@ -167,7 +167,8 @@ type LauncherExit struct {
 }
 
 // LauncherExitSetupFailed is the Code of an issue pod role's generation whose role-init failed
-// before it started the shim: setting up the role's namespaces, or starting the shim itself. Its
+// before it started the shim: setting up the role's namespaces, or starting the shim itself, which
+// role-init alone tells the launcher by its exit status (launcher.RoleInitSetupFailedExit). Its
 // reason is role-init's own line in the role's log. It is apart from every code a shim exits
 // with, so the daemon never reads a setup failure as the agent's own exit.
 const LauncherExitSetupFailed = -2

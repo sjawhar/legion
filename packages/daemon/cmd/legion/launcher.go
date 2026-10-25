@@ -30,7 +30,7 @@ func (l *roleList) Set(value string) error {
 // role's namespaces; nothing else ever runs it.
 func runLauncher(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	if len(args) > 0 && args[0] == launcher.RoleInitSubcommand {
-		return runRoleInit(args[1:], stdout, stderr)
+		return runRoleInit(ctx, args[1:], stdout, stderr)
 	}
 	flags := newFlags("launcher", launcherUsage, stderr)
 	connect := flags.String("connect", "", "the daemon launcher stream: tcp://host:port")
@@ -87,8 +87,10 @@ const roleInitUsage = "usage: legion launcher role-init --roles-dir <dir> --role
 // one role generation's user, mount, PID and IPC namespaces, which the launcher clones into them
 // with the generation's environment. It is never run by hand, and `legion launcher --help` does
 // not offer it: run outside those namespaces it refuses, since it would otherwise mount a role's
-// private view over the container's own.
-func runRoleInit(args []string, stdout, stderr io.Writer) int {
+// private view over the container's own. ctx ends at the launcher's stop (main's SIGTERM), which
+// it forwards to the role. A failure before the shim started exits
+// launcher.RoleInitSetupFailedExit, the one status the launcher reports as a setup failure.
+func runRoleInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
 	flags := newFlags("launcher role-init", roleInitUsage, stderr)
 	rolesDir := flags.String("roles-dir", "", "the container-level per-role root")
 	role := flags.String("role", "", "the role whose namespaces this process is the init of")
@@ -97,19 +99,24 @@ func runRoleInit(args []string, stdout, stderr io.Writer) int {
 	homeMounts := flags.String("home-mounts", launcher.RoleHomeMounts(), "where the container mounts every volume that belongs under the home, at the same relative path")
 	fixedRoot := flags.String("fixed-root", launcher.RoleFixedRoot(), "the root the role's own directories are bound back under")
 	statusFD := flags.Int("status-fd", 0, "the descriptor to report the shim's own wait status on")
+	// A role-init the launcher started with flags it cannot read failed before its shim as much as
+	// one whose mounts failed, so it exits the same status; only --help, which nothing runs, exits 0.
 	if code, ok := parseFlags(flags, args); !ok {
-		return code
+		if code == 0 {
+			return 0
+		}
+		return launcher.RoleInitSetupFailedExit
 	}
 	if len(flags.Args()) == 0 {
 		fmt.Fprintln(stderr, roleInitUsage)
-		return 2
+		return launcher.RoleInitSetupFailedExit
 	}
-	if err := launcher.RoleInit(launcher.RoleInitConfig{
+	if err := launcher.RoleInit(ctx, launcher.RoleInitConfig{
 		RolesDir: *rolesDir, Role: *role, Generation: *generation, Home: *home, HomeMounts: *homeMounts, FixedRoot: *fixedRoot, StatusFD: *statusFD,
 		Argv: flags.Args(), Stdout: stdout, Stderr: stderr,
 	}); err != nil {
 		fmt.Fprintln(stderr, err)
-		return 1
+		return launcher.RoleInitSetupFailedExit
 	}
 	return 0
 }

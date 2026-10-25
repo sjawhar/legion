@@ -1,6 +1,7 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -56,6 +57,13 @@ type RoleInitConfig struct {
 // extra file, so the first descriptor after the standard three.
 const roleStatusFD = 3
 
+// RoleInitSetupFailedExit is the exit status `legion launcher role-init` uses for one thing alone:
+// it failed before it started the shim, setting up the role's namespaces or starting the shim
+// itself. Every other end of role-init is told apart from it: once the shim started, role-init
+// reports the shim's own wait status and exits 0, and a role-init that panics or is ended by Go's
+// runtime exits 2. sysexits' EX_OSERR, an operating-system error, which is what such a failure is.
+const RoleInitSetupFailedExit = 71
+
 func (c RoleInitConfig) validate() error {
 	switch {
 	case !filepath.IsAbs(c.RolesDir):
@@ -83,13 +91,16 @@ func (c RoleInitConfig) validate() error {
 // other role's credentials and its own launcher token, binds the role's own directories back at
 // the fixed paths, gives the role a private home overlay and private temporary directories,
 // starts the shim as its child in a nested user namespace as the image's unprivileged user,
-// forwards stop signals to it, reaps the orphans the role leaves, and reports the shim's own
-// wait status. Every failure it can hit is this role's exit and never the launcher's.
-func RoleInit(cfg RoleInitConfig) error {
+// forwards the launcher's stop to it, reaps the orphans the role leaves, and reports the shim's
+// own wait status. Every failure it can hit is this role's exit and never the launcher's. stop
+// ends at the launcher's stop: the context `legion`'s main ends on SIGTERM or SIGINT, the
+// signals it registers for at its first instruction. Every error it returns is a failure before
+// the shim started, which `legion launcher role-init` exits RoleInitSetupFailedExit for.
+func RoleInit(stop context.Context, cfg RoleInitConfig) error {
 	if err := cfg.validate(); err != nil {
 		return err
 	}
-	return roleInit(cfg)
+	return roleInit(stop, cfg)
 }
 
 // roleInitLaunch is the command line and the extra environment that run one generation's

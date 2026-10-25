@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/launcher"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 )
 
@@ -149,19 +150,25 @@ func TestTheLauncherCommandRefusesAMixOfItsTwoForms(t *testing.T) {
 
 // `legion launcher role-init` is the launcher's own, hidden from its usage, and refuses to run
 // anywhere but as the init of a role's new namespaces: run by hand it would otherwise mount a
-// role's private view over the caller's own.
+// role's private view over the caller's own. Every refusal, its usage's included, is a failure
+// before the shim started, so it exits launcher.RoleInitSetupFailedExit, the one status the
+// launcher reports as a setup failure, never the 2 a panic exits with.
 func TestRoleInitIsHiddenAndRefusesToRunOutsideARolesNamespaces(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	if code := run(context.Background(), []string{"legion", "launcher", "--help"}, &stdout, &stderr); code != 0 || strings.Contains(stderr.String(), "role-init") {
 		t.Fatalf("launcher --help: exit %d, %q; want its usage without the hidden role-init", code, stderr.String())
 	}
 	stderr.Reset()
-	if code := run(context.Background(), []string{"legion", "launcher", "role-init", "--roles-dir", "/r", "--role", "a", "--status-fd", "3"}, &stdout, &stderr); code != 2 {
-		t.Fatalf("role-init with no shim argv: exit %d, %q; want its usage", code, stderr.String())
+	if code := run(context.Background(), []string{"legion", "launcher", "role-init", "--roles-dir", "/r", "--role", "a", "--status-fd", "3"}, &stdout, &stderr); code != launcher.RoleInitSetupFailedExit {
+		t.Fatalf("role-init with no shim argv: exit %d, %q; want its usage and exit %d", code, stderr.String(), launcher.RoleInitSetupFailedExit)
+	}
+	stderr.Reset()
+	if code := run(context.Background(), []string{"legion", "launcher", "role-init", "--no-such-flag"}, &stdout, &stderr); code != launcher.RoleInitSetupFailedExit {
+		t.Fatalf("role-init with a flag it does not know: exit %d, %q; want %d", code, stderr.String(), launcher.RoleInitSetupFailedExit)
 	}
 	stderr.Reset()
 	code := run(context.Background(), []string{"legion", "launcher", "role-init", "--roles-dir", t.TempDir(), "--role", "a", "--generation", "1", "--status-fd", "3", "--", "/bin/true"}, &stdout, &stderr)
-	if code != 1 || !strings.Contains(stderr.String(), "role-init: not the init of a PID namespace of its own") {
-		t.Fatalf("role-init outside a role's namespaces: exit %d, %q; want a refusal", code, stderr.String())
+	if code != launcher.RoleInitSetupFailedExit || !strings.Contains(stderr.String(), "role-init: not the init of a PID namespace of its own") {
+		t.Fatalf("role-init outside a role's namespaces: exit %d, %q; want a refusal with exit %d", code, stderr.String(), launcher.RoleInitSetupFailedExit)
 	}
 }

@@ -3,6 +3,7 @@
 package launcher
 
 import (
+	"context"
 	"errors"
 	"syscall"
 )
@@ -14,4 +15,4 @@ var errRoleNamespacesNeedLinux = errors.New("launcher: a role's own namespaces n
 
 func roleNamespaceAttr() (*syscall.SysProcAttr, error) { return nil, errRoleNamespacesNeedLinux }
 
-func roleInit(RoleInitConfig) error { return errRoleNamespacesNeedLinux }
+func roleInit(context.Context, RoleInitConfig) error { return errRoleNamespacesNeedLinux }

@@ -58,8 +58,11 @@ func reapNamespace(skip ...int) (bool, error) {
 // manager's lock is held across the pass, and a manager records its generation's pid under its
 // lock as it starts it, so the reaper never waits on a generation it has not seen yet. In the
 // controller's pod a pass that fails leaves the role's namespace unobservable, so the launcher
-// fails its container loudly; in an issue pod's container no role's processes are this
-// namespace's, so a failure is logged and the next pass tries again.
+// fails its container loudly. In an issue pod's container the container's /proc still lists every
+// role's processes, since a role's PID namespace is nested in it, but none is the launcher's child
+// except each role's role-init, which the pass skips: the rest are their role-init's to reap, and
+// Wait4 on them answers ECHILD. So a failed pass costs no role anything, and it is logged and the
+// next pass tries again.
 func reapOrphans(ctx context.Context, signals <-chan os.Signal, managers []*manager) {
 	for {
 		select {
@@ -121,13 +124,15 @@ func (m *manager) cleanExitedGeneration() {
 
 // signalChild reaches one generation. In the controller's pod the generation is a process group
 // of the container's own namespace, so the signal goes to the group. In an issue pod the
-// generation is the init of the role's own namespaces: the signal goes to it alone, which
-// forwards a stop to every process of the role and, killed, takes the whole namespace with it.
+// generation is the init of the role's own namespaces: the signal goes to it alone, through its
+// own process handle, which forwards a stop to every process of the role and, killed, takes the
+// whole namespace with it. A generation its wait has already reaped is done: the handle reaches
+// nothing then, where its pid could name another role's role-init by now.
 func (m *manager) signalChild(active *child, sig syscall.Signal) error {
 	if !m.namespaced {
 		return signalGeneration(active.pid, sig)
 	}
-	if err := syscall.Kill(active.pid, sig); err != nil && !errors.Is(err, syscall.ESRCH) {
+	if err := active.process.Signal(sig); err != nil && !errors.Is(err, os.ErrProcessDone) && !errors.Is(err, syscall.ESRCH) {
 		return fmt.Errorf("signal role %s: %w", m.role, err)
 	}
 	return nil

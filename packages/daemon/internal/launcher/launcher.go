@@ -214,7 +214,7 @@ func (m *manager) serve(ctx context.Context, address string) error {
 		var answer shimwire.Frame
 		switch command := frame.(type) {
 		case shimwire.LauncherStart:
-			answer = m.start(command)
+			answer = m.start(ctx, command)
 		case shimwire.LauncherStop:
 			answer = m.stop(command)
 		default:
@@ -306,8 +306,12 @@ type request struct {
 type child struct {
 	generation uint64
 	pid        int
-	dir        string
-	status     *os.File
+	// process is the generation's own handle, through which the launcher signals it: once its
+	// wait has reaped it, a signal through the handle reaches nothing (Go holds the process's
+	// pidfd), where one by pid could reach whatever process the kernel gave that number since.
+	process *os.Process
+	dir     string
+	status  *os.File
 	// output is the generation's own prefixed stdout and stderr in an issue pod's container,
 	// whose unfinished last lines wait flushes once the generation's process is gone.
 	output []io.Writer
@@ -355,7 +359,10 @@ func (m *manager) state() error {
 	return nil
 }
 
-func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartResult {
+// start runs command's generation. ctx is the container's: once it has ended (the container's
+// SIGTERM) no generation starts, since one started then would be given the whole stop grace from
+// that moment and outlast the pod's own; the session lookup a resume waits on ends with it too.
+func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shimwire.LauncherStartResult {
 	if err := command.Validate(); err != nil {
 		return shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 	}
@@ -388,7 +395,7 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 			onDisk = containerPath(onDisk)
 		}
 		var err error
-		if recreated, err = resumable(env, command.ResumeFile, onDisk, m.stderr); err != nil {
+		if recreated, err = resumable(ctx, env, command.ResumeFile, onDisk, m.stderr); err != nil {
 			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 			m.remember(command.ID, body, result)
 			return result
@@ -408,8 +415,21 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 		m.remember(command.ID, body, result)
 		return result
 	}
-	// The orphan reaper must see this PID as the direct child before it can observe its exit.
+	// The orphan reaper must see this PID as the direct child before it can observe its exit, and
+	// stopActive, which takes the lock, either sees this generation or finds the container
+	// stopping here and nothing started.
 	m.mu.Lock()
+	if ctx.Err() != nil {
+		m.mu.Unlock()
+		_ = os.RemoveAll(dir)
+		if process.status != nil {
+			_ = process.status.Close()
+			_ = process.write.Close()
+		}
+		result := shimwire.LauncherStartResult{ID: command.ID, Error: "the launcher's container is stopping; no generation starts"}
+		m.remember(command.ID, body, result)
+		return result
+	}
 	if err := process.start(); err != nil {
 		m.mu.Unlock()
 		_ = os.RemoveAll(dir)
@@ -417,7 +437,7 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 		m.remember(command.ID, body, result)
 		return result
 	}
-	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, dir: dir, status: process.status, output: process.output, done: make(chan struct{})}
+	active := &child{generation: command.Generation, pid: process.cmd.Process.Pid, process: process.cmd.Process, dir: dir, status: process.status, output: process.output, done: make(chan struct{})}
 	m.child = active
 	result := shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation}
 	m.requests[command.ID] = request{body: body, result: result}
@@ -459,11 +479,13 @@ func (m *manager) command(start shimwire.LauncherStart, env []string) (*roleProc
 
 // wait reports the generation's exit once its process is gone. A role's exit is the shim's own:
 // its namespace init reports the status it waited on, and only an init killed before the shim
-// ended — or one that never started it — reports its own. An init that exited on its own having
-// reported nothing failed before it started the shim (setting up the role's namespaces), which is
-// reported as shimwire.LauncherExitSetupFailed rather than as an exit code a shim could have
-// exited with. Once the process and its output copies are done, the last line the generation left
-// unfinished is written out, so it is neither lost nor joined to the next generation's first.
+// ended — or one that never started it — reports its own. An init that exited with
+// RoleInitSetupFailedExit having reported nothing failed before it started the shim (setting up
+// the role's namespaces, or starting the shim), which is reported as
+// shimwire.LauncherExitSetupFailed rather than as an exit code a shim could have exited with; any
+// other exit of an init that reported nothing (a panic's 2, say) is reported as that exit. Once
+// the process and its output copies are done, the last line the generation left unfinished is
+// written out, so it is neither lost nor joined to the next generation's first.
 func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	var reported *syscall.WaitStatus
 	if active.status != nil {
@@ -486,10 +508,10 @@ func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	switch {
 	case reported != nil:
 		exit = exitOfStatus(*reported, active.generation)
-	case m.namespaced && cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() != 0:
+	case m.namespaced && cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() == RoleInitSetupFailedExit:
 		exit = shimwire.LauncherExit{Generation: active.generation, Code: shimwire.LauncherExitSetupFailed}
-		m.logf("launcher: generation %d of role %s: role-init exited %d before it started the shim; its own lines above say why",
-			active.generation, m.role, cmd.ProcessState.ExitCode())
+		m.logf("launcher: generation %d of role %s: role-init failed before it started the shim; its own lines above say why",
+			active.generation, m.role)
 	}
 	m.mu.Lock()
 	if m.child == active {
@@ -715,8 +737,8 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 // only what was pushed. A workspace with no record, or a child with no workspace (the controller),
 // was not. A record that cannot be read, which an init container killed mid-write can leave, only
 // decides that notice: it is written to log and taken as no record, and the resume goes ahead.
-func resumable(env []string, file, onDisk string, log io.Writer) (recreated bool, err error) {
-	written, err := sessionWritten(env, file, onDisk)
+func resumable(ctx context.Context, env []string, file, onDisk string, log io.Writer) (recreated bool, err error) {
+	written, err := sessionWritten(ctx, env, file, onDisk)
 	if err != nil {
 		return false, err
 	}
@@ -741,8 +763,9 @@ func resumable(env []string, file, onDisk string, log io.Writer) (recreated bool
 // (containerPath). A session table it cannot reach is asked again after each of
 // resumeLookupBackoff's waits until resumeLookupTimeout, the URL file read afresh each time, as a
 // database that is briefly unreachable must not fail the launch; a session the table answers it does
-// not hold, or a URL file that is missing or empty, is refused at once.
-func sessionWritten(env []string, file, onDisk string) (time.Time, error) {
+// not hold, or a URL file that is missing or empty, is refused at once. parent's end (the
+// container's stop) ends the wait as the timeout does.
+func sessionWritten(parent context.Context, env []string, file, onDisk string) (time.Time, error) {
 	if strings.TrimSpace(envValue(env, ompsessions.StorageVariable)) != ompsessions.SQLStorage {
 		info, err := os.Stat(onDisk)
 		if err != nil {
@@ -759,7 +782,7 @@ func sessionWritten(env []string, file, onDisk string) (time.Time, error) {
 	if dsnFile == "" {
 		return time.Time{}, fmt.Errorf("resume session %s: %s is %s and %s names no file", file, ompsessions.StorageVariable, ompsessions.SQLStorage, ompsessions.DSNFileVariable)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), resumeLookupTimeout)
+	ctx, cancel := context.WithTimeout(parent, resumeLookupTimeout)
 	defer cancel()
 	for attempt := 0; ; attempt++ {
 		dsn, err := ompsessions.ReadDSN(dsnFile)
