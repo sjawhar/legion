@@ -2,60 +2,66 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T17:40:00Z",
-  "round": "9 — review round 8's two Minors: an option-shaped stem, and two texts this change made false in files it rewrote",
+  "completed": "2026-10-25T18:05:00Z",
+  "round": "10 — review round 9's Important (a sentence this change wrote, in an agent-read skill) and its Minors",
   "proof": [
     {
-      "criterion": "A directory name that looks like a command option is refused, so no later consumer of these paths has to be trusted to quote it.",
-      "surface": "The real session_copy taken from scripts/e2e/stage4b-sandbox-tree.sh by name, driven with a stem of `-rf`.",
-      "command": "bun test scripts/e2e/lib/stage4b-session-text.test.ts",
-      "observed": "51 pass. The destination table now has a seventh case, `-rf`: refused by name before any key is listed, with no SQL run, nothing written anywhere and the destination left empty, exactly as `..`, `.`, empty, a `/` and a byte outside the class are.",
-      "headSha": "afba47fdc3c9fb9c67349f1ee3b3ef0cef4eea08",
-      "negativeControl": "Against the pushed script in a scratch copy, that one case fails with `Expected: 1, Received: 0` — the stem was accepted and the copy ran. The other fifty pass there, which is the control's own control: this round changed one character of the class and nothing else about the rule."
+      "criterion": "The architect skill states the lifecycle a merged close actually has, so an architect reading `child-closed` learns what happens to the implementer's pod.",
+      "surface": "The daemon's own source, read before the sentence was rewritten rather than after.",
+      "command": "read packages/daemon/internal/workflow/linger.go:78-101",
+      "observed": "`if merged { except = claim.RoleImplementer }` and the `record.IssueSuspend` enqueued only `if !merged`. So a merged close queues no suspension at all: the implementer keeps its pod for the production check's first look, and the Sandbox goes only when a look reports `pending`. `skills/legion-architect/SKILL.md:417-421` now says that; the generated copy at `packages/claude-envoy/legion/skills/legion-architect/SKILL.md:418` carries it after `bun run build`, with `bun run check-dist` reporting `dist/ and legion/ match a fresh build`.",
+      "headSha": "0d503c1f1b7b4f0966754dd8262990f815f45257",
+      "negativeControl": "`grep -rn \"Sandbox deleted with its pod, since it still\" packages/ skills/` is empty: the sentence this change wrote survives nowhere, the generated mirror included. Before the rebuild it appeared twice."
     },
     {
-      "criterion": "The manual no longer tells an operator that a relaunched issue pod waits for its volume to detach.",
-      "surface": "docs/kubernetes.md's node-packing paragraph, read against the code that renders an issue pod's disk.",
-      "command": "read docs/kubernetes.md:3713-3722 beside internal/runtime/sandbox/podkind.go's issuePod.diskSource and claimTemplates",
-      "observed": "The paragraph now separates the two pods it had merged. The controller's Sandbox owns its claim, so its pod is the one whose ReadWriteOnce volume must detach from the old node, with the FailedAttachVolume and Multi-Attach events that produces. An issue pod takes no predecessor's claim — its disk is the pod's own generic ephemeral volume — so nothing detaches, and what it may wait on instead is the predecessor's claim being reaped, which the manual's own 'The disk dies with its pod' covers and this pull request's risk line already recorded.",
-      "headSha": "afba47fdc3c9fb9c67349f1ee3b3ef0cef4eea08",
-      "negativeControl": "The class search over the text: `grep -rniE 'FailedAttachVolume|Multi-Attach|ReadWriteOnce|claim template put|selected by the issue label'` over every md, sh, go and ts file outside node_modules, dist and docs/solutions. Every remaining hit is correct — the operator-share paragraph at `:4734` (a ReadWriteMany share, unrelated), `:3867-3868`, which already states that an issue's disk produces no such events, the retired TypeScript section at `:4853`, which is marked retired at its heading, and the Go code's own ReadWriteOnce access modes and ReadWriteOncePod probe refusal."
+      "criterion": "The Stage 4b checkpoint that watches the suspension happen describes what the daemon deletes.",
+      "surface": "The harness's own comment at the point where a `pending` look ends the pod.",
+      "command": "read scripts/e2e/stage4b-sandbox-tree.sh:6027-6030; bash -n scripts/e2e/stage4b-sandbox-tree.sh",
+      "observed": "The clause said the daemon suspends the implementer's claim and the issue's Sandbox 'with its volume'. That Sandbox owns none: the disk is the pod's own ephemeral volume, so the deletion takes the pod and the disk with it. The comment says that now, and the harness parses.",
+      "headSha": "0d503c1f1b7b4f0966754dd8262990f815f45257",
+      "negativeControl": "Not applicable: a comment with no executable behaviour. Its control is the code it describes — `issuePod.claimTemplates` returns nil and `diskSource` renders a generic ephemeral volume, both pinned by the sandbox suite, which is green at this head."
     },
     {
-      "criterion": "The e2e check's comment matches the code under it.",
-      "surface": "scripts/e2e/stage4b-sandbox-tree.sh's issue-independence checkpoint and its own pod_disk helper.",
-      "command": "read scripts/e2e/stage4b-sandbox-tree.sh:3566-3570 beside pod_disk at :831-836",
-      "observed": "The comment said the three PVCs are each selected by the issue label the Sandbox's claim template put on it. This change leaves that template no labels at all — the API server prunes a label set there, which TestManifestMatchesTheSandboxCRD pins — and `pod_disk` reads `<pod>-issue` by name and asserts the pod owns it. The comment now says that, and why.",
-      "headSha": "afba47fdc3c9fb9c67349f1ee3b3ef0cef4eea08",
-      "negativeControl": "The same class search above: no other text in the tree claims a label selects an issue's disk."
+      "criterion": "The unknown-name refusal does not offer an operator a value the next branch refuses.",
+      "surface": "The config loader's own table test.",
+      "command": "cd packages/daemon && CGO_ENABLED=0 go test ./internal/config",
+      "observed": "Green. A `session_store` this runtime does not take now answers `must be 'postgres' or 'cloudsql-iam'`; `pvc` keeps its own refusal two lines above, which names the mechanism. The round-5 census kept main's wording on purpose and the reviewer argued it back; I took the argument — a list of accepted values naming a refused one sends an operator who mistyped to a value that is refused again.",
+      "headSha": "0d503c1f1b7b4f0966754dd8262990f815f45257",
+      "negativeControl": "The table row that pinned the old text failed first — `LoadForValidation error = \"…must be 'postgres' or 'cloudsql-iam'\" want \"…must be 'pvc', 'postgres' or 'cloudsql-iam'\"` — which is what showed the message had exactly one pin and no other reader."
     },
     {
-      "criterion": "The harness and the repository's lanes are unchanged by the round.",
-      "surface": "The repository's checks.",
-      "command": "bash -n scripts/e2e/stage4b-sandbox-tree.sh; bun test scripts/e2e/lib; bunx biome check .; bash .github/scripts/check-private-names.sh",
-      "observed": "541 pass in the e2e-lib suite with the two Docker-only nats-stream failures, Biome reports no error, the private-names check reads 5,002 files, and the harness parses. No Go file changed this round.",
-      "headSha": "afba47fdc3c9fb9c67349f1ee3b3ef0cef4eea08",
-      "negativeControl": "The two nats-stream failures are the suite's own control: they are the known Docker-only pair and no other test joins them."
+      "criterion": "The five remaining texts this change made false are corrected, and the class is swept rather than the five line numbers.",
+      "surface": "The repository's text, searched after the edits.",
+      "command": "grep -rniE \"both its containers|transcript on the volume|controller's init container\" and grep -rn \"carried over from an earlier release\" over docs/, packages/ and scripts/, excluding node_modules and dist; plus grep -rn \"must be 'pvc'\"",
+      "observed": "No hit remains in tracked text. The controller's pod has one container since its init container went (`controllerPod.initContainers` returns nil), its session is a row rather than a transcript on a volume, `supervise/table.go`'s own close entry no longer describes a retire-wait, a volume release or a file session, `podsafety.go` no longer offers files on the issue's volume as a place Legion puts a session, and `names.go` no longer describes a volume carried over from an earlier release. The one surviving match for the old refusal text is `docs/site/.bin/legion`, a compiled binary that `docs/site/.gitignore` excludes and `scripts/build-binaries.sh` rebuilds.",
+      "headSha": "0d503c1f1b7b4f0966754dd8262990f815f45257",
+      "negativeControl": "The same searches before the edits return exactly the five sites the review named and nothing else, which is how the sweep was bounded; the narrow scope rule of round 8 — 'do not flag unchanged code' — would have excluded all five, since the diff touched none of their lines."
     }
   ],
   "filesChanged": [
-    "scripts/e2e/stage4b-sandbox-tree.sh: session_copy refuses a stem beginning with `-`, with the reason in its comment; the issue-independence checkpoint's comment says the PVCs are read by name and owned by their pods.",
-    "scripts/e2e/lib/stage4b-session-text.test.ts: the `-rf` case and the refusal message in both places that pin it.",
-    "docs/kubernetes.md: the node-packing paragraph separates the controller's pod, which waits on a detach, from an issue pod, which does not."
+    "skills/legion-architect/SKILL.md and the generated packages/claude-envoy/legion/skills/legion-architect/SKILL.md: what a merged close does to the implementer's claim and pod.",
+    "scripts/e2e/stage4b-sandbox-tree.sh: the suspension clause at the production check's first look.",
+    "docs/kubernetes.md: the controller's one container, and its session read from the database rather than a transcript on a volume.",
+    "packages/daemon/internal/supervise/table.go: issueClose's doc comment.",
+    "packages/daemon/internal/podsafety/podsafety.go: placesSessions' reason.",
+    "packages/daemon/internal/runtime/sandbox/names.go: the feed's provenance, with no volume carried over.",
+    "packages/daemon/internal/config/kubernetes.go and its test: the unknown-name refusal names the two accepted kinds."
   ],
   "trickyParts": [
-    "The reviewer judged the `-rf` stem not worth a round of its own and said so; it rode this one because the round was open. The reason to take it is not today's reachability — every use quotes the name, `mkdir -p --` and `realpath -m --` end their options, and the three stems in use are two literals and a DNS-1123 pod name — but that the anchor's whole point is not to depend on what a caller or a later consumer happens to do."
+    "The Important is the first finding in ten rounds against a sentence this change wrote rather than one it left. The old text was wrong in its second half and the new text in its first, which is the failure mode of correcting prose from the shape of a change rather than from the code: I knew the disk now dies with the pod and wrote that into a sentence whose subject was a close that queues no suspension at all."
   ],
   "deviations": [
-    "The reviewer's own quality pass found both texts and excluded them on a scope rule it was given, 'do not flag unchanged code'. The reviewer reported that the rule was its own and too narrow, and filed what the pass had correctly excluded. Worth recording as the round's provenance rather than as a finding against the pass."
+    "Correcting my own round-9 handoff: it said the retired section is 'marked retired at its heading'. It is not. The heading is `### Anatomy of a pod` and says nothing; the marker is the first sentence under it, which is the scope INFRA-212's learning requires — 'a reader reads upward only to the nearest ###'. The claim was right in substance and wrong in its words, and the tester's question is what surfaced it.",
+    "The reviewer's own rejection is recorded rather than re-litigated: `scripts/e2e/lib/namespace-rig.sh`'s `issue_pvcs` is callerless on `main@origin` too, so it is pre-existing dead code and not text this change made false. Same adjudication as `production_audit`.",
+    "The reviewer's correction of the round-9 control count is taken: of the eight cases that failed against the previous head, one is a behaviour difference and seven moved with the refusal's wording. The right sentence is 'one behavioural control, and seven cases whose messages moved with it'."
   ],
   "openQuestions": [
-    "Stage 4b is repaired and has run at no head at all. Eight readings of that harness have found eight defects in it, and nothing of it has been executed.",
-    "Stage 4a's inverted checks are still unrun; the runner's revised list, marking each of 65 rows changed or unchanged, is a comment on the pull request.",
-    "envoy-go's red is not this change's: a ten-minute hang in the Dispatch suggestion-outcome sweep's lease test, in code this branch does not touch. It is dispatch://INFRA-49/ask/bbdfb54a-c2c3-4bc4-8afc-a3b42f957a74, answered 'So fix it' and carried to the controller; this change files nothing for it."
+    "Stage 4b is repaired and has run at no head at all.",
+    "Stage 4a's inverted checks are still unrun; the runner's revised list is a comment on the pull request.",
+    "envoy-go's earlier red settled `success` at code head 00516adc, which makes it intermittent rather than persistent. It stays dispatch://INFRA-49/ask/bbdfb54a-c2c3-4bc4-8afc-a3b42f957a74, answered 'So fix it' and carried to the controller; this change files nothing for it."
   ],
   "discoveredComplexity": [
-    "A scope rule can exclude the very class it was written for. 'Do not flag unchanged code' and 'text a change makes false in a file it owns' look the same until a change rewrites a file without touching the two lines that its behaviour has falsified — and then the first rule hides exactly what the second exists to catch.",
-    "The class search is what turns a two-line fix into a closed class: the same search that found these two also proved the four remaining hits correct, one of them only because its section is marked retired at its heading."
+    "A change can make a sentence false by correcting it. The edit that put 'the Sandbox deleted with its pod' into the architect skill was written from this change's own subject and not from the close it describes, and it replaced a half-wrong sentence with a differently-wrong one stated more confidently.",
+    "A scope rule that says 'do not flag unchanged code' excludes the whole class of text a change makes false without touching, which is the class this tree has filed on in nine of ten rounds. The replacement — text a change makes false in a file it owns — is what found all five of this round's."
   ]
 }
