@@ -2,61 +2,56 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-92",
-  "completed": "2026-10-25T10:20:00Z",
+  "completed": "2026-10-25T11:55:00Z",
   "decision": "changes_requested",
-  "round": 2,
+  "round": 3,
   "critical": 0,
   "important": 2,
-  "minor": 1,
-  "reviewedHead": "4cae8b167a866244821645112a8d13f03a26294f",
-  "codeHead": "6d42d4911eaf",
+  "minor": 0,
+  "reviewedHead": "4943aaa535316f7e60efea4657c30d254e9ce12f",
+  "codeHead": "d4de531733a9",
+  "ciHead": "0a8530169857",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/claude-envoy/src/envoy-channel-server.ts:808-815",
-      "description": "The new catch wraps the whole of restoreRole(), the listener's setRole included, and nothing retries it. restoreRole assigns heldRole only after that request succeeds (:565), reassertRole returns at once while heldRole is undefined (:587-588), and startup sets no roleTransferFrom, so a transient setRole failure costs the session its role for the life of the process. The comment the change adds says the opposite — 'which its next soft setRole off the heartbeat re-claims' — so the code states a recovery it does not perform. Before the catch this threw and the session did not start: loud rather than quiet, but not silent loss. The mechanism to retry already exists: set roleTransferFrom in the catch and the heartbeat's transferRole() (:662, :762) re-runs restoreRole on the next tick."
+      "file": "packages/claude-envoy/src/envoy-channel-server.ts:852-854",
+      "description": "The SyntaxError/z.ZodError test is applied around the whole of restoreRole(), which is not only a file read: restoreRole calls client.setRole (:558-563), and the real client parses the listener's answer — InterestWireSchema.parse(JSON.parse(raw)) at packages/envoy-client/src/transport.ts:395, and an unguarded JSON.parse(error.details.responseBody) at :390 on a 409. A listener answering with something that is not JSON (a proxy's HTML 502, a truncated body) throws SyntaxError, and one whose JSON misses the schema throws ZodError; both are classified as a permanently unparseable role file, so nothing is queued, heldRole stays unset, no heartbeat retries, and the stderr line says 'the session starts without one' about a role file that was good. That is round two's finding still open for the most ordinary transient listener failure there is. Remedy: decide 'these bytes will never parse' inside readPersistedRole (session-identity.ts:61-69), the only place that knows the error came from the file, and return it as an outcome rather than letting the exception type stand in for its origin."
     },
     {
       "severity": "important",
-      "file": "packages/claude-envoy/src/session-identity.ts:113-121, packages/claude-envoy/src/session-state.ts:54-71",
-      "description": "pruneStaleSessionRoles equates a role file's mtime with the session's last activity, but a healthy holder never rewrites it: the heartbeat's reassertRole returns without writing when the listener still names it holder (:587-595), and only restoreRole (:567) and rememberRole (:876) write. A session that has held its role for thirty days therefore has its only local recovery record deleted by the next session that starts, and loses its role on its own next resume or channel restart. Expiring an abandoned record is the point; expiring a live holder's is not. Either refresh the record when the heartbeat confirms the holder, or establish the session is gone before deleting."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/web/src/features/shell/useDialog.ts:10-14",
-      "description": "MD_VIEWPORT_QUERY is (min-width: 768px) while Tailwind's md is 48rem (packages/dispatch/node_modules/tailwindcss/theme.css:328, reached through @import \"tailwindcss\"). They agree only at a 16px root font size; with a 20px browser default the md: classes switch at 960px and the query at 768px, so between them the row takes the shortened directory in the layout meant to keep the whole path — the divergence the constant's own doc comment promises cannot happen. (min-width: 48rem) makes the promise true."
+      "file": "packages/claude-envoy/src/envoy-channel-server.ts:852-854 with :795-797",
+      "description": "The inverse, and new in this delta: a role file failing with EACCES, EISDIR or ENOTDIR is now queued, and restoreRole throws on it every tick. transferRole sits before syncRegisteredInterests() in the heartbeat's serialized block, so that reconciliation never runs again — what a resumed session whose startup interests read failed depends on to adopt its subscriptions (tests/envoy-channel-registry.test.ts:328-365), and what clears a registry-side unsubscribe that failed (envoy-channel-server.ts:473-480, registry test :215-277). Before this delta those errors were logged and not queued, so the heartbeat still reached the reconciliation. The heartbeat does not hot-loop and recovers if the file is repaired or removed. One remedy serves both findings: classify at the parsing boundary, queue every other failure, and keep a queued role retry from skipping syncRegisteredInterests."
     }
   ],
-  "roundOneFindingsClosed": [
-    "The ten broken browser rows: c5b6759bd7f1 points keyboard-agents-pin.e2e.ts and keyboard-agents-picker.e2e.ts at [data-agent-dir]; the dispatch job of run 40171411249 is success at 6d42d4911eaf, where it was failure at b790a592c539.",
-    "The per-prompt bundle cost: 1e510bb95874 gives the hook dist/session-title-hook.js (5,369 bytes against 811,441). Re-measured in this pod at the code head, interleaved against a bare bun script with CLAUDE_PLUGIN_DATA set: 86/86/75 ms against 80/70/66 ms, and titles/s-1.txt written — about 10 ms over bare Bun against the ~115 ms of round one.",
-    "The unguarded startup sweep: envoy-channel-server.ts:823-833 runs all three sweeps best-effort with a stderr line, and the fast-follow is closed — one pruneStateDirectory in src/session-state.ts serves all three state directories, the role files included.",
-    "The README claim: README.md:382-383 now says a multi-line name is put on one line rather than refused.",
-    "The dotted session id: sessionTitleFile takes .txt and roleStateFile keeps .json, pinned for both in tests/session-identity.test.ts.",
-    "The duplicated breakpoint: one MD_VIEWPORT_QUERY replaces PHONE_VIEWPORT_QUERY here — see the minor finding above for what is left of it."
+  "fixesVerified": [
+    "Fix 1, the queued retry itself: a failed or refused listener request is queued as a transfer from the session's own id, transferRole clears the queue only once restoreRole resolves, so a repeated failure stays queued. Correct as far as it goes — the two findings above are its classification, not its retry.",
+    "Fix 2, refreshRoleRecord: the touch sits at the confirmed-holder return of reassertRole (:628), where 'still holding' is known, and touchStateFile is an utimes rather than a rewrite, so roles/ gains no temporary file every heartbeat. The failure latch reports once per failure run and retries every tick.",
+    "Fix 3, MD_VIEWPORT_QUERY is (min-width: 48rem) against Tailwind's --breakpoint-md: 48rem; COMPACT_ and PHONE_ left alone as asked.",
+    "Fix 4, the sweep's self-exclusion: roleStateFile(stateDirectory, currentSessionId) and pruneStateDirectory's join(directory, entry) build the same string, so the comparison holds; a record keyed by the running session survives its own startup sweep and is swept by the next session once that one is gone.",
+    "z.ZodError discrimination does work where the error really is the role file: zod 4.3.6 is pinned, classic .parse throws ZodRealError but both constructors carry the ZodError trait and zod's Symbol.hasInstance checks the trait, so instanceof holds. The defect is the origin of the exception, not the test itself.",
+    "The rewrite d4de531733a9 of 39175757c326: same parent 898037479328, byte-identical message, empty diff between the two, and the author corrected from the review App to the implement App. Every commit above main now carries its own role's App in both columns, checked with the default-branch read."
   ],
   "threads": {
-    "answered": 6,
-    "acceptedForResolution": [
-      "PRRT_kwDORFy7ds6v9duJ",
-      "PRRT_kwDORFy7ds6v9duO",
-      "PRRT_kwDORFy7ds6v9duR",
-      "PRRT_kwDORFy7ds6v9duW",
-      "PRRT_kwDORFy7ds6v9dua"
+    "answered": 4,
+    "acceptedAndResolved": [
+      "PRRT_kwDORFy7ds6v9duc",
+      "PRRT_kwDORFy7ds6wAVT6",
+      "PRRT_kwDORFy7ds6wAVT8"
     ],
-    "stillOpen": ["PRRT_kwDORFy7ds6v9duc"],
-    "botThreads": 0
+    "unresolvedByReviewer": ["PRRT_kwDORFy7ds6wAVT4"],
+    "botThreads": 0,
+    "note": "Round one's five accepted threads stay resolved; PRRT_kwDORFy7ds6wAVT4 was resolved by the implementer and the reviewer unresolved it, since half of it stands."
   },
   "ciRead": {
-    "codeHead": "6d42d4911eaf",
-    "readAt": "2026-10-25T10:05:00Z",
+    "ciHead": "0a8530169857",
+    "readAt": "2026-10-25T11:50:00Z",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
-    "requiredResult": "all four completed success at 6d42d4911eaf (Tests 40171411290, PR Title 40171411323). The compare 6d42d4911eaf...4cae8b167a86 lists only .legion/ paths.",
-    "nonRequired": "Legion Envoy and Contracts run 40171411249 success, the dispatch browser job included; Docs 40171411278 success. Nothing red at the code head."
+    "requiredResult": "all four completed success at 0a8530169857; the compare 0a8530169857...4943aaa53531 lists only .legion/INFRA-92/test.json.",
+    "nonRequired": "claude-envoy, envoy-smoke, changes, build success at the same commit; the dispatch browser job was still in_progress when this round was decided, which a request for changes does not wait on."
   },
   "thermo": {
-    "head": "4cae8b167a866244821645112a8d13f03a26294f",
-    "deepReview": "CHANGES — two Medium (the swallowed role restore, the role sweep against a live holder), one Minor (the px/rem breakpoint). Round-two delta otherwise clean: the hand-written payload check accepts exactly what the zod schema did, and the hook's import graph reaches no zod, Dispatch client or session-settings.",
-    "codeQuality": "CHANGES — one P2, its standing recommendation to let CSS rather than JS choose the directory's text; everything else of the delta judged structurally sound."
+    "head": "4943aaa535316f7e60efea4657c30d254e9ce12f",
+    "deepReview": "CHANGES — one Medium, the filesystem-error starvation of syncRegisteredInterests, plus the observation that the exception type does not identify its origin.",
+    "codeQuality": "CHANGES — one P2, the same boundary error, marked by the pass itself as a correctness fix for the next head and not Fast-follow; everything else of the delta judged structurally sound, with no cleanup finding raised."
   }
 }
