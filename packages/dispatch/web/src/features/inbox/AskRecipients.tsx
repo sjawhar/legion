@@ -1,7 +1,7 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useState } from "react";
 
-import { api } from "../../api/client";
+import { api, type WriteBounds } from "../../api/client";
 import type { Ask, AskFollower, Subscriber } from "../../api/types";
 import { DisclosureToggle } from "../../components/DisclosureToggle";
 import { QueryError } from "../../components/QueryError";
@@ -11,9 +11,10 @@ import { useAgents } from "../conversation/useAgents";
 import { UnsubscribeDialog } from "../issue/UnsubscribeDialog";
 import { sessionLabel } from "../refs/actor";
 import { LiveDot, sessionChipClassName, sessionRemoveButtonClassName } from "../refs/SessionChip";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
-const removeAskFollower = (askId: string, sessionId: string): Promise<void> =>
-  api.removeAskFollower(askId, sessionId);
+const removeAskFollower = (askId: string, sessionId: string, bounds: WriteBounds): Promise<void> =>
+  api.removeAskFollower(askId, sessionId, bounds);
 
 const EMPTY_SUBSCRIBERS: readonly Subscriber[] = [];
 
@@ -31,7 +32,7 @@ function ownerSubscription(owner: AskOwner):
       label: string;
       list: () => Promise<Subscriber[]>;
       noun: "issue" | "document";
-      remove: (sessionId: string) => Promise<void>;
+      remove: (sessionId: string, bounds: WriteBounds) => Promise<void>;
     }
   | undefined {
   if (owner.issue_key !== null) {
@@ -41,7 +42,7 @@ function ownerSubscription(owner: AskOwner):
       label: key,
       list: () => api.getIssueSubscribers(key),
       noun: "issue",
-      remove: (sessionId) => api.unsubscribeIssueSession(key, sessionId),
+      remove: (sessionId, bounds) => api.unsubscribeIssueSession(key, sessionId, bounds),
     };
   }
   if (owner.artifact_id !== undefined && owner.artifact_id !== null) {
@@ -51,7 +52,7 @@ function ownerSubscription(owner: AskOwner):
       label: "this document",
       list: () => api.getArtifactSubscribers(id),
       noun: "document",
-      remove: (sessionId) => api.unsubscribeArtifactSession(id, sessionId),
+      remove: (sessionId, bounds) => api.unsubscribeArtifactSession(id, sessionId, bounds),
     };
   }
   return undefined;
@@ -63,7 +64,7 @@ export interface AskRecipientsProps {
   followers: readonly AskFollower[];
   owner: AskOwner;
   /** Write seam for tests; defaults to the real API. */
-  removeFollower?: (askId: string, sessionId: string) => Promise<void>;
+  removeFollower?: (askId: string, sessionId: string, bounds: WriteBounds) => Promise<void>;
 }
 
 type Confirming =
@@ -116,17 +117,19 @@ export function AskRecipients({
   const { agents } = useAgents(followers.length > 0);
   const [confirming, setConfirming] = useState<Confirming | undefined>(undefined);
   const [open, setOpen] = useState(false);
-  const unfollow = useMutation({
-    mutationFn: (sessionId: string) => removeFollower(askId, sessionId),
+  const unfollow = useKeyedWrite({
+    write: (sessionId: string, bounds) => removeFollower(askId, sessionId, bounds),
+    label: (sessionId) => `${sessionId} taken off this ask`,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["ask-thread", askId] }),
   });
-  const unsubscribe = useMutation({
-    mutationFn: (sessionId: string) => {
+  const unsubscribe = useKeyedWrite({
+    write: (sessionId: string, bounds) => {
       if (subscription === undefined) {
         throw new Error("Ask recipients unsubscribe requires an owner.");
       }
-      return subscription.remove(sessionId);
+      return subscription.remove(sessionId, bounds);
     },
+    label: (sessionId) => `${sessionId} unsubscribed from ${subscription?.label ?? "this ask"}`,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["subscribers", subscription?.id] }),
   });
 

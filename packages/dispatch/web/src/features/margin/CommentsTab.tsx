@@ -1,5 +1,6 @@
 import { type ReactNode, useMemo } from "react";
 
+import type { WriteBounds } from "../../api/client";
 import type { Ask } from "../../api/types";
 import { EmptyState } from "../../components/EmptyState";
 import { QueryError } from "../../components/QueryError";
@@ -52,7 +53,7 @@ interface CommentsTabProps {
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   needsYou: Ask[];
   onAction: (id: string, action: MarginItemAction) => void;
-  onEdit: (id: string, body: string) => Promise<unknown>;
+  onEdit: (id: string, body: string, bounds: WriteBounds) => Promise<unknown>;
   onRetryAction: () => void;
   onRetryAnsweredAsk: (() => void) | undefined;
   onRetryComments: () => void;

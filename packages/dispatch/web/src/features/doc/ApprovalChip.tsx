@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useId, useRef, useState } from "react";
 
 import { api, type CreateArtifactReviewInput } from "../../api/client";
@@ -26,6 +26,7 @@ import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import { useDialog } from "../shell/useDialog";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 function approvalLabel(approval: ArtifactApproval): string {
   switch (approval.state) {
@@ -215,9 +216,11 @@ export function ApprovalChip({
   const queryClient = useQueryClient();
   const submitGuard = useSubmitGuard();
 
-  const review = useMutation({
-    mutationFn: (input: CreateArtifactReviewInput) => api.createArtifactReview(artifact.id, input),
+  const review = useKeyedWrite({
+    label: (input: CreateArtifactReviewInput) =>
+      `${input.state === "approved" ? "Approval" : "Change request"} on ${artifact.name}`,
     onSettled: () => submitGuard.release(),
+    write: (input, bounds) => api.createArtifactReview(artifact.id, input, bounds),
     onSuccess: () => {
       setRequestChangesOpen(false);
       void queryClient.invalidateQueries({ queryKey: ["artifact-reviews", artifact.id] });

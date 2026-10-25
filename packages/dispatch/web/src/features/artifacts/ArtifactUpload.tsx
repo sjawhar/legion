@@ -1,5 +1,5 @@
 import { isPictureType, pictureCaption } from "@legion/contracts";
-import { type QueryClient, useMutation, useQueryClient } from "@tanstack/react-query";
+import { type QueryClient, useQueryClient } from "@tanstack/react-query";
 import {
   type ChangeEvent,
   type ClipboardEvent,
@@ -10,7 +10,7 @@ import {
   useState,
 } from "react";
 
-import { ApiError, type ArtifactOwner, api } from "../../api/client";
+import { ApiError, type ArtifactOwner, api, type WriteBounds } from "../../api/client";
 import type { Artifact, Version } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { useSubmitGuard } from "../../hooks/useSubmitGuard";
@@ -28,22 +28,29 @@ import {
   textMutedOnSurfaceMuted,
 } from "../../theme/classes";
 import { buildDispatchReference, type DispatchReferenceRoute } from "../refs/routes";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 export interface UploadResult {
   artifact: Artifact;
   version: Version;
 }
 
-export async function uploadFile(
+/** One attempt of `file`'s upload to `owner`, under the write's key (`bounds`). */
+export function uploadFile(
   owner: ArtifactOwner,
   file: File,
-  options: { name?: string; summary?: string } = {}
+  options: { name?: string; summary?: string },
+  bounds: WriteBounds
 ): Promise<UploadResult> {
-  return api.uploadArtifact(owner, {
-    file,
-    name: options.name ?? (file.name || "artifact"),
-    summary: options.summary,
-  });
+  return api.uploadArtifact(
+    owner,
+    {
+      file,
+      name: options.name ?? (file.name || "artifact"),
+      summary: options.summary,
+    },
+    bounds
+  );
 }
 
 // A refused upload is described by the server, which names the bound it hit: a markdown document
@@ -128,12 +135,16 @@ export function useDraftUpload(insert: (text: string) => void): DraftUpload {
   const queryClient = useQueryClient();
   const [pending, setPending] = useState(0);
   const retryGuard = useSubmitGuard();
-  const upload = useMutation({
-    mutationFn: async ({ file, owner }: { file: File; owner: ArtifactOwner }) => ({
+  // Each file is one write under a key of its own, its refusal shown here beside the draft.
+  const upload = useKeyedWrite({
+    // `write` comes first: the answer and the variables of every callback below are read from it.
+    write: async ({ file, owner }: { file: File; owner: ArtifactOwner }, bounds) => ({
       file,
       owner,
-      result: await uploadFile(owner, file),
+      result: await uploadFile(owner, file, {}, bounds),
     }),
+    inline: true,
+    label: ({ file }) => `Upload of ${file.name || "a file"}`,
     onMutate: () => setPending((count) => count + 1),
     onSuccess: ({ file, owner, result }) => {
       insert(uploadedFileText(owner, file, result));
@@ -224,12 +235,16 @@ export function useArtifactUpload(
   const [pendingFile, setPendingFile] = useState<File | null>(null);
   const [summary, setSummary] = useState("");
   const [isDragging, setIsDragging] = useState(false);
-  const upload = useMutation({
-    mutationFn: (file: File) =>
-      uploadFile(owner, file, {
-        name,
-        summary: summary.trim() === "" ? undefined : summary.trim(),
-      }),
+  const upload = useKeyedWrite({
+    write: (file: File, bounds) =>
+      uploadFile(
+        owner,
+        file,
+        { name, summary: summary.trim() === "" ? undefined : summary.trim() },
+        bounds
+      ),
+    inline: true,
+    label: (file) => `Upload of ${file.name || "a file"}`,
     onSuccess: (result) => {
       setPendingFile(null);
       setSummary("");

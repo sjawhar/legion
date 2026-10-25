@@ -1,5 +1,5 @@
 import { canonicalRepo } from "@legion/contracts/repo";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
@@ -21,6 +21,7 @@ import { GrantsSection } from "../credentials/GrantsSection";
 import { credentialPendingQuery } from "../credentials/pending";
 import { DeliverySettingsForm } from "../delivery/DeliverySettingsForm";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AgentTokensSection } from "./AgentTokensSection";
 import { ArchitectureSourcesSection } from "./ArchitectureSourcesSection";
 import {
@@ -73,13 +74,15 @@ export function SettingsPage(): ReactNode {
   const projects = useQuery(projectsQuery());
   // `null` is a Dispatch with no secrets broker, where Live grants has nothing to list.
   const credentialsAvailable = useQuery(credentialPendingQuery());
-  const putMapping = useMutation<
+  // Both mapping writes show their refusal on the row they changed.
+  const putMapping = useKeyedWrite<
     RepoProject,
-    Error,
     MappingInput,
     { previous: RepoProject[] | undefined }
   >({
-    mutationFn: ({ repo, ...input }) => api.putRepoProject(repo, input),
+    write: ({ repo, ...input }, bounds) => api.putRepoProject(repo, input, bounds),
+    inline: true,
+    label: ({ repo, project: mapped }) => `${repo} mapped to ${mapped}`,
     onError: (error, variables, context) => {
       queryClient.setQueryData(["repo-projects"], context?.previous);
       setFailedAction({
@@ -123,8 +126,10 @@ export function SettingsPage(): ReactNode {
     // write settles leaves the page on the server's state, as useIssueFieldWrite does an issue's.
     onSettled: () => queryClient.invalidateQueries({ queryKey: ["repo-projects"] }),
   });
-  const deleteMapping = useMutation<void, Error, string, { previous: RepoProject[] | undefined }>({
-    mutationFn: (repo: string) => api.deleteRepoProject(repo),
+  const deleteMapping = useKeyedWrite<void, string, { previous: RepoProject[] | undefined }>({
+    write: (repo: string, bounds) => api.deleteRepoProject(repo, bounds),
+    inline: true,
+    label: (repo) => `${repo}'s mapping removed`,
     onError: (error, repo, context) => {
       queryClient.setQueryData(["repo-projects"], context?.previous);
       setFailedAction({

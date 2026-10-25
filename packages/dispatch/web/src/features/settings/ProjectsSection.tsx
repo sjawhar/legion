@@ -1,5 +1,5 @@
 import { PROJECT_NAME_MAX } from "@legion/contracts";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
@@ -18,6 +18,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import {
   settingsFieldLabel,
   settingsMonoInput,
@@ -36,8 +37,11 @@ export function ProjectsSection(): ReactNode {
   const [projectName, setProjectName] = useState("");
   const projectSubmitGuard = useSubmitGuard();
   const projects = useQuery(projectsQuery());
-  const createProject = useMutation({
-    mutationFn: (input: CreateProjectInput) => api.createProject(input),
+  // The form shows a refused create beside the key it was refused over.
+  const createProject = useKeyedWrite({
+    inline: true,
+    label: (input: CreateProjectInput) => `New project ${input.key}`,
+    write: (input, bounds) => api.createProject(input, bounds),
     onSettled: () => projectSubmitGuard.release(),
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: projectsQuery().queryKey });

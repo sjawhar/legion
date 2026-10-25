@@ -60,7 +60,6 @@ export interface IssueLabelsProps {
   readonly labels: readonly string[];
   readonly onSave: (labels: string[]) => Promise<unknown>;
   readonly project: string;
-  readonly saveError: boolean;
   readonly saving: boolean;
   readonly variant?: "default" | "rail";
 }
@@ -72,7 +71,6 @@ export function IssueLabels({
   labels,
   onSave,
   project,
-  saveError,
   saving,
   variant = "default",
 }: IssueLabelsProps): ReactNode {
@@ -174,7 +172,8 @@ export function IssueLabels({
           {saving ? "Saving labels…" : displayLabels.length === 0 ? "Labels" : "+"}
         </MultiSelect>
       </div>
-      {saveError ? <p className={`mt-2 text-sm ${dangerText}`}>Could not save labels.</p> : null}
+      {/* A refused save shows in the shell's pending-writes indicator, with every other write's
+          (`PendingWritesIndicator`), and the popover's draft is gone with its close. */}
     </>
   );
 }

@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useState } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 
@@ -19,6 +19,7 @@ import {
 } from "../refs/routes";
 import { firstHighlightTerm } from "../search/search-model";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { useProjectArtifact } from "./useProjectArtifact";
 
 export function DocumentPage(): ReactNode {
@@ -46,8 +47,9 @@ export function DocumentPage(): ReactNode {
       return api.getArtifactSubscribers(artifact.data.id);
     },
   });
-  const unsubscribe = useMutation({
-    mutationFn: (sessionId: string) => {
+  const unsubscribe = useKeyedWrite({
+    label: (sessionId: string) => `${sessionId} unsubscribed from this document`,
+    write: (sessionId: string, bounds) => {
       if (artifact.data === undefined) {
         throw new Error("Document unsubscribe requires an artifact.");
       }

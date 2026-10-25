@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api } from "../../api/client";
@@ -23,6 +23,7 @@ import {
   textSecondaryOnSurface,
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import {
   settingsSubmitButton,
   settingsTableHead,
@@ -38,8 +39,11 @@ export function AgentTokensSection(): ReactNode {
   const [shownToken, setShownToken] = useState<CreatedAgentToken>();
   const { copy, reset: resetCopyStatus, status: copyStatus } = useCopyFeedback();
   const tokens = useQuery({ queryKey: agentTokensQueryKey, queryFn: () => api.listAgentTokens() });
-  const createToken = useMutation({
-    mutationFn: (input: { name: string }) => api.createAgentToken(input),
+  // The form shows a refused mint beside the name it was refused over.
+  const createToken = useKeyedWrite({
+    inline: true,
+    label: (input: { name: string }) => `New agent token ${input.name}`,
+    write: (input, bounds) => api.createAgentToken(input, bounds),
     onSuccess: (created) => {
       const { token, ...safeToken } = created;
       queryClient.setQueryData<AgentToken[]>(agentTokensQueryKey, (current = []) => [
@@ -51,8 +55,9 @@ export function AgentTokensSection(): ReactNode {
       setName("");
     },
   });
-  const revokeToken = useMutation({
-    mutationFn: (id: string) => api.revokeAgentToken(id),
+  const revokeToken = useKeyedWrite({
+    label: (id: string) => `Agent token ${id} revoked`,
+    write: (id: string, bounds) => api.revokeAgentToken(id, bounds),
     onSuccess: (_result, id) => {
       queryClient.setQueryData<AgentToken[]>(agentTokensQueryKey, (current = []) =>
         current.map((token) =>

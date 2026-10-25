@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef } from "react";
 import { Link, useSearchParams } from "react-router-dom";
 
@@ -34,6 +34,7 @@ import {
 import { Timestamp } from "../refs/Timestamp";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { closestMatching, roveFocus } from "../shell/roving";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AttachmentLists, type AttachmentView } from "./AttachmentLists";
 import {
   type ComponentIndex,
@@ -110,16 +111,17 @@ export function ArchitecturePage({ project }: { project: string }): ReactNode {
     queryFn: () => api.getArchitecture(project),
     staleTime: 15_000,
   });
-  // A rejected model comes back 200 with the reason in last_error; either way the tree's
-  // source line settles from the refetch. A failure of the request itself (transport, 5xx) has
-  // nowhere to land on the source row, so it renders beside the button until the next attempt.
-  const refresh = useMutation({
-    mutationFn: () => api.syncArchitectureSource(project),
+  // A rejected model comes back 200 with the reason in last_error; either way the tree's source
+  // line settles from the refetch. A refusal of the request itself is the shell's to show, with
+  // every other write's (`PendingWritesIndicator`).
+  const refresh = useKeyedWrite({
+    label: () => `Refresh of ${project}'s architecture`,
     onSettled: () => {
       void queryClient.invalidateQueries({ queryKey: ["architecture", project] });
       void queryClient.invalidateQueries({ queryKey: ["architecture-source", project] });
       void queryClient.invalidateQueries({ queryKey: architectureSourcesQuery().queryKey });
     },
+    write: (_: void, bounds) => api.syncArchitectureSource(project, bounds),
   });
   const { component: selectedId, update, view } = usePaneState();
 
@@ -139,7 +141,6 @@ export function ArchitecturePage({ project }: { project: string }): ReactNode {
     <ArchitectureTreeView
       onRefresh={() => refresh.mutate()}
       project={project}
-      refreshError={refresh.error === null ? null : refresh.error.message}
       refreshing={refresh.isPending}
       selectedId={selectedId}
       tree={tree.data}
@@ -152,7 +153,6 @@ export function ArchitecturePage({ project }: { project: string }): ReactNode {
 function ArchitectureTreeView({
   onRefresh,
   project,
-  refreshError,
   refreshing,
   selectedId,
   tree,
@@ -161,7 +161,6 @@ function ArchitectureTreeView({
 }: {
   onRefresh: () => void;
   project: string;
-  refreshError: string | null;
   refreshing: boolean;
   selectedId: string | null;
   tree: ArchitectureTree;
@@ -348,11 +347,6 @@ function ArchitectureTreeView({
           >
             {refreshing ? "Refreshing…" : "Refresh"}
           </button>
-          {refreshError === null ? null : (
-            <span className={`text-xs ${dangerText}`} role="alert">
-              {refreshError}
-            </span>
-          )}
         </p>
         <p className="flex flex-wrap items-center gap-x-2 gap-y-1" data-testid="architecture-scope">
           <span>

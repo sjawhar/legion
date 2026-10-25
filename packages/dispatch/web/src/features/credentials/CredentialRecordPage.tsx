@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link, useParams } from "react-router-dom";
 
@@ -15,6 +15,7 @@ import {
 } from "../../theme/classes";
 import { Timestamp } from "../refs/Timestamp";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { CredentialDecisionButtons } from "./CredentialDecisionButtons";
 import { CredentialRecordFacts } from "./CredentialRecordFacts";
 import { credentialRecordQuery } from "./record";
@@ -51,15 +52,20 @@ export function CredentialRecordPage(): ReactNode {
     void queryClient.invalidateQueries({ queryKey: ["credential-pending"] });
   };
 
-  const approve = useMutation({
-    mutationFn: () => api.approveCredentialRecord(recordId ?? ""),
+  // The decision's own buttons show a refusal, beside the facts it was refused over.
+  const approve = useKeyedWrite({
+    inline: true,
+    label: () => "Approval of the credential request",
     onSettled: () => submitGuard.release(),
     onSuccess: invalidateAfterDecision,
+    write: (_: void, bounds) => api.approveCredentialRecord(recordId ?? "", {}, bounds),
   });
-  const deny = useMutation({
-    mutationFn: () => api.denyCredentialRecord(recordId ?? ""),
+  const deny = useKeyedWrite({
+    inline: true,
+    label: () => "Denial of the credential request",
     onSettled: () => submitGuard.release(),
     onSuccess: invalidateAfterDecision,
+    write: (_: void, bounds) => api.denyCredentialRecord(recordId ?? "", {}, bounds),
   });
 
   useDocumentTitle("Credential request · Dispatch");

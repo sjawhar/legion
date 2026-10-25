@@ -1,8 +1,8 @@
 import type { UseQueryResult } from "@tanstack/react-query";
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useId, useState } from "react";
 
-import { type ArtifactOwner, api } from "../../api/client";
+import { type ArtifactOwner, api, type WriteBounds } from "../../api/client";
 import type { Ask, AskRead, Comment, CreateCommentInput } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
 import { submitOnModifiedEnter } from "../../hooks/submitOnModifiedEnter";
@@ -25,11 +25,17 @@ import { actorLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
 import type { DwellRef } from "../shell/useDwell";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { clearReplyDraft, useReplyDraft } from "./reply-drafts";
 
-export type CreateReply = (issueKey: string, input: CreateCommentInput) => Promise<Comment>;
+export type CreateReply = (
+  issueKey: string,
+  input: CreateCommentInput,
+  bounds: WriteBounds
+) => Promise<Comment>;
 
-const createReply: CreateReply = (issueKey, input) => api.createComment(issueKey, input);
+const createReply: CreateReply = (issueKey, input, bounds) =>
+  api.createComment(issueKey, input, bounds);
 
 function AskReply({
   comment,
@@ -90,17 +96,20 @@ export function AskReplyComposer({
   const { sending } = useSending(mutationKey);
   const upload = useDraftUpload((text) => setBody((current) => appendToDraft(current, text)));
   const uploading = upload.pending > 0;
-  const submit = useMutation({
-    mutationKey,
-    mutationFn: (text: string) => {
+  // The form shows a refused reply itself, with Retry, under the draft it kept.
+  const submit = useKeyedWrite({
+    write: (text: string, bounds) => {
       if (ask.issue_key === null) {
         if (ask.artifact_id === null || ask.artifact_id === undefined) {
           throw new Error("document ask is missing its artifact id");
         }
-        return api.createArtifactComment(ask.artifact_id, { ask_id: ask.id, body: text });
+        return api.createArtifactComment(ask.artifact_id, { ask_id: ask.id, body: text }, bounds);
       }
-      return reply(ask.issue_key, { ask_id: ask.id, body: text });
+      return reply(ask.issue_key, { ask_id: ask.id, body: text }, bounds);
     },
+    inline: true,
+    label: () => `Reply on “${ask.question}”`,
+    mutationKey,
     onSuccess: (_comment, text) => {
       clearReplyDraft(ask.id, text);
       void queryClient.invalidateQueries({ queryKey: ["ask-thread", ask.id] });

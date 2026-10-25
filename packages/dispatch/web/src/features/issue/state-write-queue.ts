@@ -14,6 +14,8 @@
  */
 import { ApiError, api } from "../../api/client";
 import type { UserIssueState } from "../../api/types";
+import { newSendKey } from "../../lib/send-key";
+import { writeUnderKey } from "../writes/keyed-write";
 import { pinnedItemMarker, stateForIssue } from "./pins";
 
 export type PinStateOperation = { id: string; op: "pin" | "unpin" };
@@ -35,17 +37,19 @@ export interface IssueStateWriteWorker {
 
 /**
  * How a pin write reaches the server, which is the same for every surface that makes one: read
- * the viewer's state, put it back, and recognise the server's `STATE_STALE` answer as the row to
- * resume from. What differs between callers is what they do with the outcome - the Conversation
- * keeps a failed batch and offers a retry, the margin's unpin invalidates and moves on - so
- * `onDrained` and `onError` stay theirs.
+ * the viewer's state, put it back under the one write path - each attempt bounded, a transport
+ * failure, a timeout, a 5xx, a 429 or a `409 KEY_IN_FLIGHT` tried again (`writeUnderKey`) - and
+ * recognise the server's `STATE_STALE` answer as the row to resume from. What differs between
+ * callers is what they do with the outcome - the Conversation keeps a failed batch and offers a
+ * retry, the margin's unpin invalidates and moves on - so `onDrained` and `onError` stay theirs.
  */
 export const issueStateTransport: Pick<
   IssueStateWriteWorker,
   "fetchState" | "putState" | "staleState"
 > = {
   fetchState: async (issueKey) => stateForIssue(await api.getMyState(), issueKey),
-  putState: (issueKey, state) => api.putIssueState(issueKey, state),
+  putState: (issueKey, state) =>
+    writeUnderKey((bounds) => api.putIssueState(issueKey, state, bounds), newSendKey()),
   staleState: (error) =>
     error instanceof ApiError && error.code === "STATE_STALE" ? error.state : undefined,
 };

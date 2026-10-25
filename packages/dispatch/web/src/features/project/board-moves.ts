@@ -1,9 +1,10 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { useCallback, useState } from "react";
 
 import { ApiError, api } from "../../api/client";
 import { boardMoveMutationKey } from "../../api/queries";
 import type { IssueSummary, UpdateIssueInput } from "../../api/types";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { type IssueStatus, moveIssue, moveIssueToLane, type PriorityLane } from "./board-model";
 import { projectIssuesQueryKey } from "./issue-filters";
 
@@ -48,9 +49,11 @@ export function useBoardMoves(
 } {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
-  const patch = useMutation({
-    mutationFn: ({ input, key }: { input: UpdateIssueInput; key: string }) =>
-      api.patchIssue(key, input),
+  // The board says why a move was refused, over the card it rolled back.
+  const patch = useKeyedWrite({
+    inline: true,
+    label: ({ key }: { input: UpdateIssueInput; key: string }) => `${key} moved on the board`,
+    write: ({ input, key }, bounds) => api.patchIssue(key, input, bounds),
     mutationKey: boardMoveMutationKey(project),
     scope: { id: `board:${project}` },
   });

@@ -1,4 +1,4 @@
-import { queryOptions, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { queryOptions, useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type ReactNode,
   useCallback,
@@ -44,6 +44,7 @@ import {
 } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import type { ConnectionState, DocumentConnection } from "./connection";
@@ -253,8 +254,13 @@ export function ProofDocument({
   const blocksReadOnly = isClosed || schemaReadOnly;
   const [askBlockHosts, setAskBlockHosts] = useState<readonly AskBlockHost[]>([]);
   const [isNameDialogOpen, setIsNameDialogOpen] = useState(false);
-  const nameVersion = useMutation({
-    mutationFn: (summary: string) => api.createArtifactVersion(artifact.id, { summary }),
+  // Naming a version is the name dialog's form, which shows a refusal itself; a rebuild shows
+  // its own beside its button.
+  const nameVersion = useKeyedWrite({
+    // `write` comes first: `onSuccess` reads its answer.
+    write: (summary: string, bounds) => api.createArtifactVersion(artifact.id, { summary }, bounds),
+    inline: true,
+    label: () => `New version of ${artifact.name}`,
     onSuccess: (created) => {
       queryClient.setQueryData<Artifact>(["artifact", artifact.id], (current) => {
         const source = current ?? artifact;
@@ -267,11 +273,13 @@ export function ProofDocument({
       setIsNameDialogOpen(false);
     },
   });
-  const rebuild = useMutation({
-    mutationFn: () => api.rebuildArtifact(artifact.id),
+  const rebuild = useKeyedWrite({
+    inline: true,
+    label: () => `Rebuild of ${artifact.name}`,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["artifact", artifact.id] });
     },
+    write: (_: void, bounds) => api.rebuildArtifact(artifact.id, undefined, bounds),
   });
   const liveMarkdown = liveTextQuery.data?.markdown ?? "";
   const versionMarkdown =

@@ -1,5 +1,5 @@
 import { ISSUE_TITLE_MAX } from "@legion/contracts";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import {
   type FormEvent,
   type KeyboardEvent,
@@ -59,6 +59,7 @@ import { CopyRefButton } from "../refs/CopyRefButton";
 import { ReferencedBy, ReferencedByToggle } from "../refs/ReferencedBy";
 import { buildDispatchReference, buildIssuePath } from "../refs/routes";
 import { useKeymap } from "../shell/keymap";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { AssigneeControl } from "./AssigneeControl";
 import { ClaimChip } from "./ClaimChip";
 import { GitHubLink } from "./GitHubLink";
@@ -77,6 +78,19 @@ const routeHint =
   "New asks, comments, and messages on this issue wake this agent or role; replies inside a thread reach their participants directly. It is where messages go, not who is working the issue — that is the claim.";
 
 const titleRefusals = new Set(["CAP_EXCEEDED", "ISSUE_CLOSED"]);
+
+/** Whether `input` is the Status pill's pick alone: that control shows its write in the shell's
+ *  indicator and rolls back on a refusal, where every other header field holds its draft and
+ *  says why itself. */
+function statusPickOnly(input: IssueUpdateInput | undefined): boolean {
+  return input !== undefined && Object.keys(input).length === 1 && input.status !== undefined;
+}
+
+/** What the shell's indicator names one header write of `key`. */
+function issueUpdateLabel(key: string, input: IssueUpdateInput): string {
+  const field = Object.keys(input)[0] ?? "field";
+  return input.status === undefined ? `${key}: ${field} saved` : `${key} set to ${input.status}`;
+}
 
 export function IssueHeader({
   documentArtifact,
@@ -158,21 +172,32 @@ export function IssueHeader({
     queryFn: () => api.getIssueSubscribers(issue.key),
   });
   const subscriberList = subscribers.isError ? [] : (subscribers.data ?? []);
-  const unsubscribe = useMutation({
-    mutationFn: (sessionId: string) => api.unsubscribeIssueSession(issue.key, sessionId),
+  // Every write here names `write` first: its answer and its variables are what the callbacks
+  // below read.
+  const unsubscribe = useKeyedWrite({
+    write: (sessionId: string, bounds) => api.unsubscribeIssueSession(issue.key, sessionId, bounds),
+    inline: true,
+    label: (sessionId) => `${sessionId} unsubscribed from ${issue.key}`,
     onSuccess: () => {
       void queryClient.invalidateQueries({ queryKey: ["subscribers", issue.key] });
     },
   });
-  const releaseClaim = useMutation({
-    mutationFn: () => api.releaseIssueClaim(issue.key),
+  const releaseClaim = useKeyedWrite({
+    write: (_: void, bounds) => api.releaseIssueClaim(issue.key, bounds),
+    inline: true,
+    label: () => `Claim on ${issue.key} released`,
     onSuccess: (next) => {
       mergeIssue(queryClient, next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
-  const updateIssue = useMutation({
-    mutationFn: (input: IssueUpdateInput) => api.patchIssue(issue.key, input),
+  // A title, route, parent or close the header shows refused itself, beside its draft; a status
+  // pick is a control, so its refusal is the shell's (`PendingWritesIndicator`), and the pick
+  // rolls back.
+  const updateIssue = useKeyedWrite({
+    write: (input: IssueUpdateInput, bounds) => api.patchIssue(issue.key, input, bounds),
+    inline: (input) => !statusPickOnly(input),
+    label: (input) => issueUpdateLabel(issue.key, input),
     onSettled: (_data, error) => {
       drafts.onIssueSettled(error);
     },
@@ -182,8 +207,9 @@ export function IssueHeader({
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
     },
   });
-  const labelsMutation = useMutation({
-    mutationFn: (labels: string[]) => api.patchIssue(issue.key, { labels }),
+  const labelsMutation = useKeyedWrite({
+    write: (labels: string[], bounds) => api.patchIssue(issue.key, { labels }, bounds),
+    label: () => `Labels of ${issue.key}`,
     onSuccess: (next) => {
       mergeIssue(queryClient, next);
       void queryClient.invalidateQueries({ queryKey: ["issues"] });
@@ -239,8 +265,9 @@ export function IssueHeader({
     documentArtifact?.approval !== undefined &&
     (documentArtifact.approval.state !== "draft" || approvalRequestOpen);
   const pinGuard = useSubmitGuard();
-  const updateState = useMutation({
-    mutationFn: (pinned: boolean) => api.putIssueState(issue.key, { pinned }),
+  const updateState = useKeyedWrite({
+    label: (pinned: boolean) => `${issue.key} ${pinned ? "pinned" : "unpinned"}`,
+    write: (pinned: boolean, bounds) => api.putIssueState(issue.key, { pinned }, bounds),
     onSettled: () => {
       pinGuard.release();
       void queryClient.invalidateQueries({ queryKey: userStateQuery().queryKey });
@@ -540,7 +567,6 @@ export function IssueHeader({
               labels={issue.labels}
               onSave={(labels) => labelsMutation.mutateAsync(labels)}
               project={issue.project}
-              saveError={labelsMutation.isError}
               saving={labelsMutation.isPending}
               variant="rail"
             />
@@ -775,7 +801,7 @@ export function IssueHeader({
           retrying={releaseClaim.isPending}
         />
       ) : null}
-      {updateIssue.isError ? (
+      {updateIssue.isError && !statusPickOnly(updateIssue.variables) ? (
         parentSaveFailed ? (
           <p className={`mt-1 text-sm ${dangerText}`} id="issue-parent-error">
             {parentError}

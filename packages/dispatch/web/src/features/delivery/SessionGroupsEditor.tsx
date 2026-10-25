@@ -1,7 +1,7 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useId, useRef, useState } from "react";
 
-import { api, apiErrorMessage } from "../../api/client";
+import { api, apiErrorMessage, type WriteBounds } from "../../api/client";
 import { isLiveQuery } from "../../api/query-refresh";
 import type { DeliverySessionGroup } from "../../api/types";
 import { QueryError } from "../../components/QueryError";
@@ -17,6 +17,14 @@ import {
   textPrimaryOnSurface,
 } from "../../theme/classes";
 import { useDialog } from "../shell/useDialog";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
+
+/** One change to the groups: what it is, in the reader's words, and one attempt of it. A delete
+ *  is idempotent and goes without the key. */
+interface GroupChange {
+  readonly label: string;
+  readonly run: (bounds: WriteBounds) => Promise<unknown>;
+}
 
 const sectionLabel = `text-xs tracking-wide uppercase ${textMutedOnSurface}`;
 const fieldClass = `h-8 min-w-0 flex-1 rounded border px-2 text-sm ${inputClasses(true)} ${textPrimaryOnSurface}`;
@@ -35,7 +43,7 @@ function GroupCard({
   label: (session: string) => string;
   selected: readonly string[];
   pending: boolean;
-  write: (change: () => Promise<unknown>) => void;
+  write: (change: GroupChange) => void;
 }): ReactNode {
   const id = useId();
   const [name, setName] = useState(group.name);
@@ -56,7 +64,11 @@ function GroupCard({
           className={secondaryButtonCompact}
           disabled={pending || name.trim() === "" || name.trim() === group.name}
           onClick={() =>
-            write(() => api.updateDeliverySessionGroup(group.id, { name: name.trim() }))
+            write({
+              label: `Rename of the group ${group.name}`,
+              run: (bounds) =>
+                api.updateDeliverySessionGroup(group.id, { name: name.trim() }, bounds),
+            })
           }
           type="button"
         >
@@ -77,7 +89,11 @@ function GroupCard({
               className={dismissButtonText}
               disabled={pending}
               onClick={() =>
-                write(() => api.updateDeliverySessionGroup(group.id, { remove: [session] }))
+                write({
+                  label: `Removal of ${label(session)} from ${group.name}`,
+                  run: (bounds) =>
+                    api.updateDeliverySessionGroup(group.id, { remove: [session] }, bounds),
+                })
               }
               type="button"
             >
@@ -90,7 +106,12 @@ function GroupCard({
         <button
           className={secondaryButtonCompact}
           disabled={pending || addable.length === 0}
-          onClick={() => write(() => api.updateDeliverySessionGroup(group.id, { add: addable }))}
+          onClick={() =>
+            write({
+              label: `Sessions added to ${group.name}`,
+              run: (bounds) => api.updateDeliverySessionGroup(group.id, { add: addable }, bounds),
+            })
+          }
           type="button"
         >
           Add selected
@@ -98,7 +119,12 @@ function GroupCard({
         <button
           className={`${secondaryButtonCompact} ${dangerText}`}
           disabled={pending}
-          onClick={() => write(() => api.deleteDeliverySessionGroup(group.id))}
+          onClick={() =>
+            write({
+              label: `Deletion of the group ${group.name}`,
+              run: (bounds) => api.deleteDeliverySessionGroup(group.id, bounds),
+            })
+          }
           type="button"
         >
           Delete group
@@ -132,8 +158,10 @@ export function SessionGroupsEditor({
   const dialog = useDialog<HTMLElement>({ initialFocusRef: closeButtonRef, onClose, open: true });
   const [selected, setSelected] = useState<string[]>([]);
   const [name, setName] = useState("");
-  const save = useMutation({
-    mutationFn: (change: () => Promise<unknown>) => change(),
+  // The editor shows a refusal itself, as the server wrote it.
+  const save = useKeyedWrite({
+    inline: true,
+    label: (change: GroupChange) => change.label,
     onSuccess: () => {
       setSelected([]);
       void queryClient.invalidateQueries({
@@ -141,6 +169,7 @@ export function SessionGroupsEditor({
         predicate: (query) => !isLiveQuery(query),
       });
     },
+    write: (change, bounds) => change.run(bounds),
   });
 
   const sessionLabel = (session: string) => {
@@ -159,9 +188,14 @@ export function SessionGroupsEditor({
       current.includes(session) ? current.filter((s) => s !== session) : [...current, session]
     );
   const create = () =>
-    save.mutate(() => api.createDeliverySessionGroup({ name: name.trim(), sessions: selected }), {
-      onSuccess: () => setName(""),
-    });
+    save.mutate(
+      {
+        label: `New group ${name.trim()}`,
+        run: (bounds) =>
+          api.createDeliverySessionGroup({ name: name.trim(), sessions: selected }, bounds),
+      },
+      { onSuccess: () => setName("") }
+    );
 
   return (
     <aside

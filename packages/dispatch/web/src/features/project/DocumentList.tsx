@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { type FormEvent, type ReactNode, useState } from "react";
 import { Link, useNavigate } from "react-router-dom";
 
@@ -36,6 +36,7 @@ import { ApprovalChip } from "../doc/ApprovalChip";
 import { CopyRefButton } from "../refs/CopyRefButton";
 import { buildIssuePath, buildProjectPath, documentRoute } from "../refs/routes";
 import { Timestamp } from "../refs/Timestamp";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 function documentUpdatedAt(document: Artifact): string {
   return document.versions.at(-1)?.created_at ?? document.created_at;
@@ -114,8 +115,12 @@ export function DocumentList({ project }: { project: string }): ReactNode {
     queryKey: ["project", project, "artifacts"],
     queryFn: () => api.listProjectArtifacts(project, true),
   });
-  const create = useMutation({
-    mutationFn: (name: string) => api.uploadArtifact({ project }, { content: `# ${name}\n`, name }),
+  // The form shows its own refusal under the name it was refused over.
+  const create = useKeyedWrite({
+    inline: true,
+    label: (name: string) => `New document ${name}`,
+    write: (name: string, bounds) =>
+      api.uploadArtifact({ project }, { content: `# ${name}\n`, name }, bounds),
     onSettled: () => submitGuard.release(),
     onSuccess: ({ artifact }) => {
       setCreating(false);

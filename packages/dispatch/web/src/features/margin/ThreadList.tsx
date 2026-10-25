@@ -1,5 +1,6 @@
 import { type ReactNode, useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 
+import type { WriteBounds } from "../../api/client";
 import { marginReplySendKey } from "./margin-context";
 import { ThreadCard } from "./ThreadCard";
 import type { CommentActionFailure } from "./useCommentActionQueue";
@@ -25,7 +26,7 @@ interface ThreadListProps {
   blockPlacements: ReadonlyMap<string, MarkPlacement>;
   markPlacements: ReadonlyMap<string, MarkPlacement>;
   onAction(id: string, action: MarginItemAction): void;
-  onEdit(id: string, body: string): Promise<unknown>;
+  onEdit(id: string, body: string, bounds: WriteBounds): Promise<unknown>;
   onRetryAction(): void;
   onSelect(id: string, blockID: string | undefined): void;
   onToggle(key: string): void;

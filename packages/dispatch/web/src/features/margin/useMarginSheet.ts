@@ -3,7 +3,7 @@ import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useLocation } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { api, type WriteBounds } from "../../api/client";
 import { primarySpec } from "../../api/issue-cache";
 import { whoAmIQuery } from "../../api/queries";
 import type { Ask, UserState } from "../../api/types";
@@ -225,10 +225,10 @@ export function useMarginSheet(): MarginSheetModel {
     held: heldReplyKeys,
   });
   const onEdit = useCallback(
-    async (id: string, body: string) => {
+    async (id: string, body: string, bounds: WriteBounds) => {
       setSavingCommentEditId(id);
       try {
-        return await editComment(id, body);
+        return await editComment(id, body, bounds);
       } finally {
         setSavingCommentEditId(undefined);
       }

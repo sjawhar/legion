@@ -1,8 +1,9 @@
-import { useMutation, useQueryClient } from "@tanstack/react-query";
+import { useQueryClient } from "@tanstack/react-query";
 
 import { api } from "../../api/client";
 import { inboxQuery } from "../../api/queries";
 import type { InboxRow } from "../../api/types";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 export interface AskSnoozeWrite {
   /** The server's reason after a refused save, until the next attempt. */
@@ -30,9 +31,14 @@ export interface AskSnoozeWrite {
 export function useAskSnooze(askId: string): AskSnoozeWrite {
   const queryClient = useQueryClient();
   const inboxKey = inboxQuery().queryKey;
-  const mutation = useMutation({
-    mutationFn: (until: string | null) =>
-      until === null ? api.unsnoozeAsk(askId) : api.snoozeAsk(askId, until).then(() => undefined),
+  // The row says why its snooze was refused, where the reader pressed it.
+  const mutation = useKeyedWrite({
+    write: (until: string | null, bounds) =>
+      until === null
+        ? api.unsnoozeAsk(askId, bounds)
+        : api.snoozeAsk(askId, until, bounds).then(() => undefined),
+    inline: true,
+    label: (until) => (until === null ? "Ask brought back now" : "Ask snoozed"),
     onMutate: async (until) => {
       await queryClient.cancelQueries({ queryKey: inboxKey });
       const previous = queryClient.getQueriesData<InboxRow[]>({ queryKey: inboxKey });
@@ -89,9 +95,12 @@ export interface AskSnoozeManyWrite {
 export function useAskSnoozeMany(): AskSnoozeManyWrite {
   const queryClient = useQueryClient();
   const inboxKey = inboxQuery().queryKey;
-  const mutation = useMutation({
-    mutationFn: async ({ ids, until }: { ids: readonly string[]; until: string }) => {
-      const results = await Promise.allSettled(ids.map((id) => api.snoozeAsk(id, until)));
+  const mutation = useKeyedWrite({
+    inline: true,
+    label: ({ ids }: { ids: readonly string[]; until: string }) =>
+      `${ids.length} ${ids.length === 1 ? "ask" : "asks"} snoozed`,
+    write: async ({ ids, until }, bounds) => {
+      const results = await Promise.allSettled(ids.map((id) => api.snoozeAsk(id, until, bounds)));
       return ids.flatMap((askId, index) => {
         const result = results[index];
         if (result === undefined || result.status !== "rejected") return [];
