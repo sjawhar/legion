@@ -245,30 +245,31 @@ type observed struct {
 	credential string
 }
 
-// publishedAll waits for the child's marker and reports the whole of it.
-func publishedAll(t *testing.T, marker string) observed {
+// published waits for a marker of the form `<pid> <rest>` and returns the pid and the rest,
+// verbatim. The stand-in child and the namespace tests' shell scripts both write such markers.
+func published(t *testing.T, marker string) (int, string) {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if body, err := os.ReadFile(marker); err == nil {
 			pid, rest, _ := strings.Cut(string(body), " ")
-			socket, credential, _ := strings.Cut(rest, " ")
 			if n, err := strconv.Atoi(pid); err == nil {
-				return observed{descendant: n, socket: socket, credential: credential}
+				return n, rest
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("the child never published its marker")
-	return observed{}
+	return 0, ""
 }
 
-// published is the child's descendant pid and what its credential read, which is all most tests
-// ask of its marker.
-func published(t *testing.T, marker string) (int, string) {
+// publishedAll waits for the stand-in child's `<pid> <socket> <credential>` marker and reports
+// the whole of it.
+func publishedAll(t *testing.T, marker string) observed {
 	t.Helper()
-	seen := publishedAll(t, marker)
-	return seen.descendant, seen.credential
+	descendant, rest := published(t, marker)
+	socket, credential, _ := strings.Cut(rest, " ")
+	return observed{descendant: descendant, socket: socket, credential: credential}
 }
 
 func gone(pid int) bool {
@@ -292,9 +293,10 @@ func TestAGenerationsCredentialsLiveExactlyAsLongAsItsChild(t *testing.T) {
 	if got := g.start(g.childStart(7, marker, files)); !got.OK || got.RunningGeneration != 7 {
 		t.Fatalf("start result = %#v", got)
 	}
-	descendant, seen := published(t, marker)
-	if seen != "envoy-7" {
-		t.Fatalf("the child read %q through ENVOY_TOKEN_FILE, want its generation's credential", seen)
+	child := publishedAll(t, marker)
+	descendant := child.descendant
+	if child.credential != "envoy-7" {
+		t.Fatalf("the child read %q through ENVOY_TOKEN_FILE, want its generation's credential", child.credential)
 	}
 	dir := filepath.Join(g.private, "g7")
 	if info, err := os.Lstat(dir); err != nil || !info.IsDir() || info.Mode().Perm() != 0o700 {
@@ -523,6 +525,9 @@ func newWorkspace(t *testing.T) string {
 // decides the notice: the resume starts, told "false", and the launcher logs the record.
 func TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten(t *testing.T) {
 	t.Setenv(WorkspaceRecreatedVariable, "true")
+	// The "no workspace" case below must not inherit the LEGION_WORKSPACE of the process running
+	// the tests (a Legion pod sets one), which the launcher merges into the child's environment.
+	t.Setenv("LEGION_WORKSPACE", "")
 	g := newRig(t)
 	session := filepath.Join(t.TempDir(), "session.jsonl")
 	if err := os.WriteFile(session, []byte("{}\n"), 0o600); err != nil {
