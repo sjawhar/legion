@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
+	"github.com/sjawhar/legion/daemon/internal/sessionproxy"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -23,7 +26,8 @@ import (
 const launcherChildEnv = "LEGION_LAUNCHER_TEST_CHILD"
 
 // TestLauncherChild is the worker-shim stand-in the launcher starts: it records what its
-// credential pointer reads, starts a descendant in its process group, and waits.
+// credential pointer reads and whether its generation's session socket was already bound when it
+// ran, starts a descendant in its process group, and waits.
 func TestLauncherChild(t *testing.T) {
 	if os.Getenv(launcherChildEnv) != "1" {
 		return
@@ -36,11 +40,15 @@ func TestLauncherChild(t *testing.T) {
 	if body, err := os.ReadFile(os.Getenv("ENVOY_TOKEN_FILE")); err == nil {
 		seen = string(body)
 	}
+	socket := "unbound"
+	if _, err := os.Stat(os.Getenv("LEGION_LAUNCHER_SOCKET")); err == nil {
+		socket = "bound"
+	}
 	child := exec.Command("/bin/sh", "-c", "exec sleep 600")
 	if err := child.Start(); err != nil {
 		os.Exit(3)
 	}
-	if err := os.WriteFile(marker, []byte(strconv.Itoa(child.Process.Pid)+" "+seen), 0o600); err != nil {
+	if err := os.WriteFile(marker, []byte(strconv.Itoa(child.Process.Pid)+" "+socket+" "+seen), 0o600); err != nil {
 		os.Exit(4)
 	}
 	// Wait on the descendant rather than block in select{}: a goroutine parked forever with nothing
@@ -85,18 +93,32 @@ func (b *lockedBuffer) String() string {
 
 func newRig(t *testing.T) *rig {
 	t.Helper()
+	return newSessionRig(t, Config{})
+}
+
+// newSessionRig runs a launcher that carries cfg's session database and dialer, the fake standing
+// in for the Cloud SQL connector, besides the fields every rig's launcher is given.
+func newSessionRig(t *testing.T, cfg Config) *rig {
+	t.Helper()
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = listener.Close() })
+	// The private directory's path is kept short deliberately: a generation's session socket is
+	// bound under it, and a unix socket's path has barely a hundred bytes, where t.TempDir()'s
+	// carries the whole of the test's name.
+	private, err := os.MkdirTemp("", "lch")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(private) })
 	ctx, cancel := context.WithCancel(context.Background())
-	g := &rig{t: t, listener: listener, private: t.TempDir(), cancel: cancel, result: make(chan error, 1), stderr: &lockedBuffer{}}
+	g := &rig{t: t, listener: listener, private: private, cancel: cancel, result: make(chan error, 1), stderr: &lockedBuffer{}}
+	cfg.Connect, cfg.Token, cfg.Sandbox = "tcp://"+listener.Addr().String(), "launcher-token", "legion-legion-legion-208"
+	cfg.Role, cfg.PodUID, cfg.PrivateDir, cfg.Stderr = "tester", "pod-1", g.private, g.stderr
 	go func() {
-		g.result <- Run(ctx, Config{
-			Connect: "tcp://" + listener.Addr().String(), Token: "launcher-token", Sandbox: "legion-legion-legion-208",
-			Role: "tester", PodUID: "pod-1", PrivateDir: g.private, Stderr: g.stderr,
-		})
+		g.result <- Run(ctx, cfg)
 	}()
 	t.Cleanup(func() {
 		cancel()
@@ -190,38 +212,63 @@ func (g *rig) stop(generation uint64) {
 	}
 }
 
+// generationDir is where the launcher keeps generation's credentials and binds its session socket.
+func (g *rig) generationDir(generation uint64) string {
+	return filepath.Join(g.private, "g"+strconv.FormatUint(generation, 10))
+}
+
 // childStart is a start of the stand-in child for generation, reading its Envoy credential
-// through the pointer the daemon names, and publishing its descendant's pid to marker.
+// through the pointer the daemon names, looking for its generation's session socket where the
+// launcher binds it, and publishing both to marker.
 func (g *rig) childStart(generation uint64, marker string, files map[string]string) shimwire.LauncherStart {
 	g.t.Helper()
 	self, err := os.Executable()
 	if err != nil {
 		g.t.Fatal(err)
 	}
-	dir := filepath.Join(g.private, "g"+strconv.FormatUint(generation, 10))
+	dir := g.generationDir(generation)
 	return shimwire.LauncherStart{
 		ID: "start-" + strconv.FormatUint(generation, 10), Generation: generation,
-		Argv:  []string{self, "-test.run=^TestLauncherChild$"},
-		Env:   []string{launcherChildEnv + "=1", "LEGION_LAUNCHER_MARKER=" + marker, "ENVOY_TOKEN_FILE=" + filepath.Join(dir, "ENVOY_TOKEN")},
+		Argv: []string{self, "-test.run=^TestLauncherChild$"},
+		Env: []string{launcherChildEnv + "=1", "LEGION_LAUNCHER_MARKER=" + marker,
+			"ENVOY_TOKEN_FILE=" + filepath.Join(dir, "ENVOY_TOKEN"),
+			"LEGION_LAUNCHER_SOCKET=" + filepath.Join(dir, ompsessions.SocketName)},
 		Files: files,
 	}
 }
 
-// published waits for the child's marker: its descendant's pid and what its credential read.
-func published(t *testing.T, marker string) (int, string) {
+// observed is what the stand-in child saw when it ran: the pid of the descendant it started,
+// whether its generation's session socket was already bound, and what its credential pointer read.
+type observed struct {
+	descendant int
+	socket     string
+	credential string
+}
+
+// publishedAll waits for the child's marker and reports the whole of it.
+func publishedAll(t *testing.T, marker string) observed {
 	t.Helper()
 	deadline := time.Now().Add(10 * time.Second)
 	for time.Now().Before(deadline) {
 		if body, err := os.ReadFile(marker); err == nil {
-			pid, seen, _ := strings.Cut(string(body), " ")
+			pid, rest, _ := strings.Cut(string(body), " ")
+			socket, credential, _ := strings.Cut(rest, " ")
 			if n, err := strconv.Atoi(pid); err == nil {
-				return n, seen
+				return observed{descendant: n, socket: socket, credential: credential}
 			}
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
 	t.Fatal("the child never published its marker")
-	return 0, ""
+	return observed{}
+}
+
+// published is the child's descendant pid and what its credential read, which is all most tests
+// ask of its marker.
+func published(t *testing.T, marker string) (int, string) {
+	t.Helper()
+	seen := publishedAll(t, marker)
+	return seen.descendant, seen.credential
 }
 
 func gone(pid int) bool {
@@ -522,4 +569,213 @@ func TestAResumeIsToldWhetherItsWorkspaceWasRecreatedSinceItsSessionWasWritten(t
 		!strings.Contains(logged, "the workspace is taken as not recreated") {
 		t.Errorf("the launcher logged %q, want the unreadable creation record named", logged)
 	}
+}
+
+// testInstance is the Cloud SQL instance a test's session database sits in. This repository is
+// public, so it is a placeholder, as is every login and database name beside it.
+const testInstance = "example-project:us-central1:example-instance"
+
+// testDatabase is the session database a launcher under test proxies its generations to.
+var testDatabase = ompsessions.Database{Instance: testInstance, Name: "legion_sessions", User: "legion-sessions@example-project.iam"}
+
+// sessionDialer stands in for the Cloud SQL connector: every connection is a fresh dial of addr,
+// which the test owns, and check is the credential work the connector does before each of them, so
+// a test can refuse one dial and allow the next.
+type sessionDialer struct {
+	addr  string
+	check func() error
+
+	mu    sync.Mutex
+	dials []string
+}
+
+func (d *sessionDialer) Dial(ctx context.Context, instance string) (net.Conn, error) {
+	d.mu.Lock()
+	d.dials = append(d.dials, instance)
+	d.mu.Unlock()
+	if d.check != nil {
+		if err := d.check(); err != nil {
+			return nil, err
+		}
+	}
+	var dialer net.Dialer
+	return dialer.DialContext(ctx, "tcp", d.addr)
+}
+
+func (d *sessionDialer) Close() error { return nil }
+
+// build is the Config.SessionDialer a test passes: every generation of its launcher dials through
+// this very fake.
+func (d *sessionDialer) build(context.Context) (sessionproxy.Dialer, error) { return d, nil }
+
+// idleUpstream is a listener that accepts a connection and closes it, which is all a proof dial
+// and a bound-socket check need: no Postgres speaks over it.
+func idleUpstream(t *testing.T) string {
+	t.Helper()
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = listener.Close() })
+	go func() {
+		for {
+			conn, err := listener.Accept()
+			if err != nil {
+				return
+			}
+			_ = conn.Close()
+		}
+	}()
+	return listener.Addr().String()
+}
+
+// A session database named only in part is refused before the launcher does anything at all, and
+// the refusal names each flag that is missing: all three open the database, and a pod that proxied
+// to half of one would run an agent against nothing.
+func TestAPartlyNamedSessionDatabaseIsRefusedBeforeTheLauncherStarts(t *testing.T) {
+	for name, tc := range map[string]struct {
+		database ompsessions.Database
+		want     string
+	}{
+		"the instance alone": {ompsessions.Database{Instance: testInstance},
+			"launcher: the session database is named in part: no --session-database, no --session-user"},
+		"no login": {ompsessions.Database{Instance: testInstance, Name: testDatabase.Name},
+			"launcher: the session database is named in part: no --session-user"},
+		"no instance": {ompsessions.Database{Name: testDatabase.Name, User: testDatabase.User},
+			"launcher: the session database is named in part: no --session-instance"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			// The connect address is one nothing listens on: a refused configuration must answer
+			// before the launcher dials anything.
+			err := Run(context.Background(), Config{
+				Connect: "tcp://127.0.0.1:1", Token: "launcher-token", Sandbox: "legion-legion-legion-208",
+				Role: "tester", PodUID: "pod-1", PrivateDir: t.TempDir(), SessionDatabase: tc.database,
+			})
+			if err == nil || err.Error() != tc.want {
+				t.Fatalf("Run = %v, want %q", err, tc.want)
+			}
+		})
+	}
+}
+
+// The child of a generation with a session database finds its socket already bound: the proxy is
+// up, and has proven one connection to the instance, before anything the agent runs can ask Oh My
+// Pi for its session (INFRA-271).
+func TestAChildFindsItsGenerationsSessionSocketAlreadyBound(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build})
+	marker := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(4, marker, nil)); !got.OK {
+		t.Fatalf("start result = %#v", got)
+	}
+	if seen := publishedAll(t, marker); seen.socket != "bound" {
+		t.Fatalf("the child found its session socket %s, want it already bound", seen.socket)
+	}
+	g.stop(4)
+}
+
+// A generation whose session database cannot be reached fails loudly rather than running an agent
+// against something else: the refusal names the generation and the instance, no child runs, the
+// generation's directory is gone, and nothing is left listening where its socket would have been.
+func TestAGenerationWhoseSessionDatabaseRefusesIsNotStarted(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t), check: func() error { return errors.New("the instance refused the login") }}
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build})
+	marker := filepath.Join(t.TempDir(), "marker")
+	got := g.start(g.childStart(5, marker, nil))
+	if got.OK || !strings.Contains(got.Error, "generation 5") || !strings.Contains(got.Error, testInstance) {
+		t.Fatalf("start result = %#v, want a refusal naming generation 5 and %s", got, testInstance)
+	}
+	if _, err := os.Stat(marker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatal("a generation whose session database refused it started its child")
+	}
+	dir := g.generationDir(5)
+	if _, err := os.Lstat(dir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("the refused generation's directory survived: %v", err)
+	}
+	if conn, err := net.Dial("unix", filepath.Join(dir, ompsessions.SocketName)); err == nil {
+		_ = conn.Close()
+		t.Fatal("something is still listening at the refused generation's session socket")
+	}
+}
+
+// A session database is held for exactly one generation and nothing between: while the generation
+// runs its socket is served and its connection file sits owner-only in its own directory, and once
+// its child is gone both are too and that address is dead. The generation after it gets a
+// directory, a socket and a file of its own.
+func TestASessionDatabaseIsHeldForItsGenerationAndNothingBetween(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build})
+	running := func(generation uint64) (socket, file string) {
+		t.Helper()
+		marker := filepath.Join(t.TempDir(), "marker")
+		if got := g.start(g.childStart(generation, marker, nil)); !got.OK {
+			t.Fatalf("start of generation %d = %#v", generation, got)
+		}
+		publishedAll(t, marker)
+		dir := g.generationDir(generation)
+		socket, file = filepath.Join(dir, ompsessions.SocketName), filepath.Join(dir, ompsessions.DSNFileName)
+		conn, err := net.Dial("unix", socket)
+		if err != nil {
+			t.Fatalf("dial generation %d's session socket: %v", generation, err)
+		}
+		_ = conn.Close()
+		info, err := os.Lstat(file)
+		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+			t.Fatalf("generation %d's connection file: %v, %v; want an owner-only regular file", generation, info, err)
+		}
+		return socket, file
+	}
+	ended := func(generation uint64, socket, file string) {
+		t.Helper()
+		if conn, err := net.Dial("unix", socket); err == nil {
+			_ = conn.Close()
+			t.Fatalf("generation %d's session socket is still served after it ended", generation)
+		}
+		if _, err := os.Lstat(file); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("generation %d's connection file outlived it: %v", generation, err)
+		}
+	}
+
+	first, firstFile := running(6)
+	g.stop(6)
+	ended(6, first, firstFile)
+	second, secondFile := running(7)
+	if second == first || secondFile == firstFile {
+		t.Fatalf("generation 7 took generation 6's socket (%s) and file (%s)", first, firstFile)
+	}
+	g.stop(7)
+	ended(7, second, secondFile)
+}
+
+// The connection file a generation's agent reads is the agent's own spelling of that generation's
+// endpoint — the socket as the URL's path, where the launcher's own client names its directory —
+// and carries no password at all: the login travels in the proxy's certificate exchange.
+func TestTheSessionConnectionFileIsTheAgentsSpellingAndCarriesNoPassword(t *testing.T) {
+	dialer := &sessionDialer{addr: idleUpstream(t)}
+	g := newSessionRig(t, Config{SessionDatabase: testDatabase, SessionDialer: dialer.build})
+	marker := filepath.Join(t.TempDir(), "marker")
+	if got := g.start(g.childStart(3, marker, nil)); !got.OK {
+		t.Fatalf("start result = %#v", got)
+	}
+	publishedAll(t, marker)
+	dir := g.generationDir(3)
+	body, err := os.ReadFile(filepath.Join(dir, ompsessions.DSNFileName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := ompsessions.Endpoint{SocketDir: dir, Database: testDatabase.Name, User: testDatabase.User}.AgentURL()
+	if string(body) != want {
+		t.Fatalf("the connection file holds %q, want %q", body, want)
+	}
+	parsed, err := url.Parse(string(body))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if password, held := parsed.User.Password(); held {
+		t.Fatalf("the connection file carries a password: %q", password)
+	}
+	if parsed.User.Username() != testDatabase.User {
+		t.Fatalf("the connection file signs in as %q, want %q", parsed.User.Username(), testDatabase.User)
+	}
+	g.stop(3)
 }

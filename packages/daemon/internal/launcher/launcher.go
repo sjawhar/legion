@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/ompsessions"
+	"github.com/sjawhar/legion/daemon/internal/sessionproxy"
 	"github.com/sjawhar/legion/daemon/internal/shimwire"
 	"github.com/sjawhar/legion/daemon/internal/workspace"
 )
@@ -43,6 +44,14 @@ type Config struct {
 	Stdout, Stderr                                    io.Writer
 	// StopGrace is the container shutdown and natural-exit descendant cleanup budget.
 	StopGrace time.Duration
+	// SessionDatabase is the Cloud SQL database every generation keeps its Oh My Pi session in,
+	// which the launcher proxies to over the pod's own cloud identity (internal/sessionproxy). The
+	// zero value is every other session store: no proxy, and the child's session storage is
+	// whatever its environment names.
+	SessionDatabase ompsessions.Database
+	// SessionDialer builds that proxy's upstream dialer. Nil is the Cloud SQL connector's, which
+	// is the only one a pod uses; a test passes a fake.
+	SessionDialer func(ctx context.Context) (sessionproxy.Dialer, error)
 }
 
 // reconnectDelay is the pause between daemon connections. A lost connection never stops the
@@ -142,7 +151,7 @@ func (m *manager) serve(ctx context.Context, address, launcherID string) error {
 		var answer shimwire.Frame
 		switch command := frame.(type) {
 		case shimwire.LauncherStart:
-			answer = m.start(command)
+			answer = m.start(ctx, command)
 		case shimwire.LauncherStop:
 			answer = m.stop(command)
 		default:
@@ -169,7 +178,27 @@ func (c Config) validate() error {
 	case !filepath.IsAbs(c.PrivateDir):
 		return fmt.Errorf("launcher: private directory %q is not absolute", c.PrivateDir)
 	}
-	return nil
+	return c.validateSessionDatabase()
+}
+
+// validateSessionDatabase refuses a session database named only in part: the instance, the database
+// in it and the login together are what opens it, so a generation started without one of them would
+// proxy to nothing. Naming none of them is the other stores, which need no proxy.
+func (c Config) validateSessionDatabase() error {
+	var missing []string
+	for _, named := range []struct{ flag, value string }{
+		{"--session-instance", c.SessionDatabase.Instance},
+		{"--session-database", c.SessionDatabase.Name},
+		{"--session-user", c.SessionDatabase.User},
+	} {
+		if named.value == "" {
+			missing = append(missing, named.flag)
+		}
+	}
+	if len(missing) == 0 || len(missing) == 3 {
+		return nil
+	}
+	return fmt.Errorf("launcher: the session database is named in part: no %s", strings.Join(missing, ", no "))
 }
 
 func tcpAddress(addr string) (string, error) {
@@ -204,7 +233,10 @@ type child struct {
 	generation uint64
 	pid        int
 	dir        string
-	done       chan struct{}
+	// proxy is the generation's session database proxy, nil when no session database is
+	// configured. It belongs to the generation and stops with it.
+	proxy *sessionproxy.Proxy
+	done  chan struct{}
 }
 
 type manager struct {
@@ -235,7 +267,7 @@ func (m *manager) state() error {
 	return nil
 }
 
-func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartResult {
+func (m *manager) start(ctx context.Context, command shimwire.LauncherStart) shimwire.LauncherStartResult {
 	if err := command.Validate(); err != nil {
 		return shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 	}
@@ -259,22 +291,32 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 	}
 	m.mu.Unlock()
 	env := mergeEnv(os.Environ(), command.Env)
-	recreated := false
-	if command.ResumeFile != "" {
-		var err error
-		if recreated, err = resumable(env, command.ResumeFile, m.cfg.Stderr); err != nil {
-			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
-			m.remember(command.ID, body, result)
-			return result
-		}
-	}
-	env = mergeEnv(env, []string{WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
+	// The generation's own directory comes first, since everything else of the generation lives in
+	// it: the session database's connection file and the socket its proxy binds, which the resume
+	// lookup reaches the table through and which the child must find already bound.
 	dir, err := m.writeFiles(command)
 	if err != nil {
 		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
 		m.remember(command.ID, body, result)
 		return result
 	}
+	proxy, clientURL, err := m.startSession(ctx, command.Generation, dir)
+	if err != nil {
+		endSession(proxy, dir)
+		result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
+		m.remember(command.ID, body, result)
+		return result
+	}
+	recreated := false
+	if command.ResumeFile != "" {
+		if recreated, err = resumable(env, command.ResumeFile, clientURL, m.cfg.Stderr); err != nil {
+			endSession(proxy, dir)
+			result := shimwire.LauncherStartResult{ID: command.ID, Error: err.Error()}
+			m.remember(command.ID, body, result)
+			return result
+		}
+	}
+	env = mergeEnv(env, []string{WorkspaceRecreatedVariable + "=" + strconv.FormatBool(recreated)})
 	cmd := exec.Command(command.Argv[0], command.Argv[1:]...)
 	cmd.Env = env
 	cmd.Stdout, cmd.Stderr = m.cfg.Stdout, m.cfg.Stderr
@@ -283,12 +325,12 @@ func (m *manager) start(command shimwire.LauncherStart) shimwire.LauncherStartRe
 	m.mu.Lock()
 	if err := cmd.Start(); err != nil {
 		m.mu.Unlock()
-		_ = os.RemoveAll(dir)
+		endSession(proxy, dir)
 		result := shimwire.LauncherStartResult{ID: command.ID, Error: fmt.Sprintf("start child: %v", err)}
 		m.remember(command.ID, body, result)
 		return result
 	}
-	active := &child{generation: command.Generation, pid: cmd.Process.Pid, dir: dir, done: make(chan struct{})}
+	active := &child{generation: command.Generation, pid: cmd.Process.Pid, dir: dir, proxy: proxy, done: make(chan struct{})}
 	m.child = active
 	result := shimwire.LauncherStartResult{ID: command.ID, OK: true, RunningGeneration: command.Generation}
 	m.requests[command.ID] = request{body: body, result: result}
@@ -308,6 +350,11 @@ func (m *manager) wait(cmd *exec.Cmd, active *child) {
 	err := cmd.Wait()
 	m.cleanExitedGeneration()
 	exit := exitOf(err, active.generation)
+	// The generation's proxy stops before its directory goes, so nothing is left listening over a
+	// socket that has been removed, and between generations nothing is bound at all.
+	if active.proxy != nil {
+		_ = active.proxy.Close()
+	}
 	m.mu.Lock()
 	if m.child == active {
 		m.child = nil
@@ -410,6 +457,48 @@ func (m *manager) writeFiles(command shimwire.LauncherStart) (string, error) {
 	return dir, nil
 }
 
+// startSession gives a generation its session database, when one is configured: the connection URL
+// the child's Oh My Pi reads, written into the generation's own directory the way writeFiles writes
+// a credential, and the proxy bound on the socket beside it, which has proven one upstream
+// connection before Start returns. The URL it answers with is that same endpoint for the launcher's
+// own pgx client, which spells a unix socket differently from the client the agent runs
+// (ompsessions.Endpoint); with no session database it is "", and the launcher looks a resume up
+// through the pointer the child's environment carries instead. A failure leaves nothing bound and
+// names the generation; its caller removes the directory.
+func (m *manager) startSession(ctx context.Context, generation uint64, dir string) (*sessionproxy.Proxy, string, error) {
+	if m.cfg.SessionDatabase == (ompsessions.Database{}) {
+		return nil, "", nil
+	}
+	endpoint := ompsessions.Endpoint{SocketDir: dir, Database: m.cfg.SessionDatabase.Name, User: m.cfg.SessionDatabase.User}
+	file, err := os.OpenFile(filepath.Join(dir, ompsessions.DSNFileName), os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o600)
+	if err == nil {
+		_, err = file.WriteString(endpoint.AgentURL())
+		if closeErr := file.Close(); err == nil {
+			err = closeErr
+		}
+	}
+	if err != nil {
+		return nil, "", fmt.Errorf("write the session database URL for generation %d: %v", generation, err)
+	}
+	proxy, err := sessionproxy.Start(ctx, sessionproxy.Config{
+		Socket: endpoint.Socket(), Instance: m.cfg.SessionDatabase.Instance, NewDialer: m.cfg.SessionDialer, Log: m.cfg.Stderr,
+	})
+	if err != nil {
+		return nil, "", fmt.Errorf("the session database proxy for generation %d: %v", generation, err)
+	}
+	return proxy, endpoint.ClientURL(), nil
+}
+
+// endSession ends a generation that will not run after all: its proxy stops and its directory goes,
+// so no child ever starts against a half-made generation and nothing of it is left bound or on
+// disk. wait does the same for a generation that ran.
+func endSession(proxy *sessionproxy.Proxy, dir string) {
+	if proxy != nil {
+		_ = proxy.Close()
+	}
+	_ = os.RemoveAll(dir)
+}
+
 // resumeLookupTimeout bounds the session table lookup a resume's start waits on, retries included;
 // a test shortens it. It sits well inside the daemon's wait on a launcher's start, its boot timeout
 // plus its stop grace (130 s by default: runtime/sandbox's relaunch), so a lookup that gives up
@@ -423,8 +512,10 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 // resumable refuses a resume of a session nothing holds, so it is a launch failure and never a fresh
 // agent: Oh My Pi starts a new session at a --resume path it finds empty. It looks where the child's
 // Oh My Pi will, by the storage the child's environment names: the session table when
-// OMP_SESSION_STORAGE is sql (the runtime's runtime.kubernetes.session_store postgres), through the
-// URL file OMP_SESSION_SQL_DSN_FILE names, and otherwise the session file on the issue's volume.
+// OMP_SESSION_STORAGE is sql (the runtime's runtime.kubernetes.session_store postgres and
+// cloudsql-iam), through clientURL when the generation has a session database of its own and
+// otherwise the URL file OMP_SESSION_SQL_DSN_FILE names, and otherwise the session file on the
+// issue's volume.
 //
 // It also reports whether the workspace the child works in, LEGION_WORKSPACE, was recreated since the
 // session was last written: provisioning recorded its creation later than that write
@@ -432,8 +523,8 @@ var resumeLookupBackoff = []time.Duration{500 * time.Millisecond, time.Second, 2
 // only what was pushed. A workspace with no record, or a child with no workspace (the controller),
 // was not. A record that cannot be read, which an init container killed mid-write can leave, only
 // decides that notice: it is written to log and taken as no record, and the resume goes ahead.
-func resumable(env []string, file string, log io.Writer) (recreated bool, err error) {
-	written, err := sessionWritten(env, file)
+func resumable(env []string, file, clientURL string, log io.Writer) (recreated bool, err error) {
+	written, err := sessionWritten(env, file, clientURL)
 	if err != nil {
 		return false, err
 	}
@@ -452,11 +543,14 @@ func resumable(env []string, file string, log io.Writer) (recreated bool, err er
 }
 
 // sessionWritten is when the session a resume names was last written, from where the child's Oh My
-// Pi keeps it (resumable), refusing a session nothing holds. A session table it cannot reach is
-// asked again after each of resumeLookupBackoff's waits until resumeLookupTimeout, the URL file read
-// afresh each time, as a database that is briefly unreachable must not fail the launch; a session
-// the table answers it does not hold, or a URL file that is missing or empty, is refused at once.
-func sessionWritten(env []string, file string) (time.Time, error) {
+// Pi keeps it (resumable), refusing a session nothing holds. clientURL is the generation's own
+// session database through the socket its proxy has already bound; with none it is "" and the table
+// is reached through the URL file the child's environment points at, read afresh at each attempt,
+// since that file is a projection something else may replace. A session table it cannot reach is
+// asked again after each of resumeLookupBackoff's waits until resumeLookupTimeout, as a database
+// that is briefly unreachable must not fail the launch; a session the table answers it does not
+// hold, or a URL file that is missing or empty, is refused at once.
+func sessionWritten(env []string, file, clientURL string) (time.Time, error) {
 	if strings.TrimSpace(envValue(env, ompsessions.StorageVariable)) != ompsessions.SQLStorage {
 		info, err := os.Stat(file)
 		if err != nil {
@@ -464,16 +558,21 @@ func sessionWritten(env []string, file string) (time.Time, error) {
 		}
 		return info.ModTime(), nil
 	}
-	dsnFile := strings.TrimSpace(envValue(env, ompsessions.DSNFileVariable))
-	if dsnFile == "" {
-		return time.Time{}, fmt.Errorf("resume session %s: %s is %s and %s names no file", file, ompsessions.StorageVariable, ompsessions.SQLStorage, ompsessions.DSNFileVariable)
+	dsnFile := ""
+	if clientURL == "" {
+		if dsnFile = strings.TrimSpace(envValue(env, ompsessions.DSNFileVariable)); dsnFile == "" {
+			return time.Time{}, fmt.Errorf("resume session %s: %s is %s and %s names no file", file, ompsessions.StorageVariable, ompsessions.SQLStorage, ompsessions.DSNFileVariable)
+		}
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), resumeLookupTimeout)
 	defer cancel()
 	for attempt := 0; ; attempt++ {
-		dsn, err := ompsessions.ReadDSN(dsnFile)
-		if err != nil {
-			return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
+		dsn := clientURL
+		if dsnFile != "" {
+			var err error
+			if dsn, err = ompsessions.ReadDSN(dsnFile); err != nil {
+				return time.Time{}, fmt.Errorf("resume session %s: %v", file, err)
+			}
 		}
 		written, found, err := lookupWritten(ctx, dsn, file)
 		switch {
