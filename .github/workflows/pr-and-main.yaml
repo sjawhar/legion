@@ -53,6 +53,9 @@ jobs:
       - name: Check the comment and message body limit fits what the embedder reads whole
         run: .github/scripts/check-body-embed-limit.sh
 
+      - name: Check the registration heartbeat leaves a margin inside the session record lifetime
+        run: .github/scripts/check-heartbeat-margin.sh
+
       - name: Check the saved gh help is the worker image's gh
         run: .github/scripts/check-gh-version.sh
 
@@ -246,6 +249,9 @@ jobs:
 
       - name: Test the body embed limit check
         run: .github/scripts/check-body-embed-limit.test.sh
+
+      - name: Test the heartbeat margin check
+        run: .github/scripts/check-heartbeat-margin.test.sh
 
       - name: Test the gh version check
         run: .github/scripts/check-gh-version.test.sh
