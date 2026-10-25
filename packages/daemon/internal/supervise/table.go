@@ -194,11 +194,11 @@ type RequestStop struct{ Claim claim.Token }
 type RequestTreeClose struct{ Claim claim.Token }
 
 // RequestIssueClose is the workflow closing a child issue as done (workflow's leave): the claim
-// ends as a tree close ends it, and drops the session it recorded, since the issue's volume that
-// session lived on is released with the close (record.IssueSuspend's Release). It is not a lost
+// ends as a tree close ends it, and drops the session it recorded, since the issue is finished
+// and the pod that session lived on goes with the close (record.IssueSuspend). It is not a lost
 // workspace: nothing is recovered, and the issue's next run, should a person set it todo again,
-// starts fresh on a volume of its own. Like the tree's close it is the workflow's own decision and
-// is not put to TreeClosable.
+// starts fresh on a pod and a disk of its own. Like the tree's close it is the workflow's own
+// decision and is not put to TreeClosable.
 type RequestIssueClose struct{ Claim claim.Token }
 
 // RequestOperatorClose is the operator closing a tree through the API, through its root claim; the

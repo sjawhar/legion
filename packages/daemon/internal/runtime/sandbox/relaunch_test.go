@@ -218,17 +218,19 @@ func TestSpawnOverAnExistingSandbox(t *testing.T) {
 }
 
 // A child of a closed tree re-admitted as a root of its own keeps its key, so its Sandbox's name,
-// and finds the Sandbox its old tree left, still labelled with that tree. The orphan root's launch
-// keeps that Sandbox, relabelled for its own tree, rather than deleting and remaking it, and
-// patches its labels, mode and pod template alone, leaving the rest of its spec as it found it:
-// the Sandbox it finds owns no volume claim template, the shape this runtime makes for an issue,
-// and the relabel adds none. Its disk it does not keep: an issue pod's disk is the pod's own
-// ephemeral volume, so the old tree's pod took it, and the orphan's pod brings one of its own and
-// provisions its workspace afresh. One its old tree left Running, none of whose roles runs any
-// more, is suspended in the relabel's patch and kept the same way. One a claim of the old tree
-// still runs in is refused and left as it is. An orphan root whose Sandbox still owned the `issue`
-// claim template of the release before the pod-owned disk would be relabelled here and then
-// replaced by the same launch, Sandbox and claim together
+// and may find the Sandbox its old tree left, still labelled with that tree: a close deletes the
+// issue's Sandbox, so one is left only where that close never ran on it — the issue had already
+// moved, or a later start superseded the close — and its old tree's cleanup has not reached it
+// either. The orphan root's launch keeps that Sandbox, relabelled for its own tree, rather than
+// deleting and remaking it, and patches its labels, mode and pod template alone, leaving the rest
+// of its spec as it found it: the Sandbox it finds owns no volume claim template, the shape this
+// runtime makes for an issue, and the relabel adds none. Its disk it does not keep: an issue
+// pod's disk is the pod's own ephemeral volume, so the old tree's pod took it, and the orphan's
+// pod brings one of its own and provisions its workspace afresh. One its old tree left Running,
+// none of whose roles runs any more, is suspended in the relabel's patch and kept the same way.
+// One a claim of the old tree still runs in is refused and left as it is. An orphan root whose
+// Sandbox still owned the `issue` claim template of the release before the pod-owned disk would
+// be relabelled here and then replaced by the same launch, Sandbox and claim together
 // (TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape).
 func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 	orphan := claim.Token("legion-legion-legion-209-architect")

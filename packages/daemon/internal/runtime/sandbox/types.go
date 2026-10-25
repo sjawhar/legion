@@ -67,8 +67,8 @@ type Store interface {
 	// IssueSandboxHome is the tree issue's Sandbox belongs to now, or "" when none: the issue's own
 	// key while a live hand-over of it is pending, else its record's tree while that tree's lifecycle
 	// is open or releasing, or, for a tree never opened, while the issue waits for admission or
-	// lingers after its own close. The tree cleanup hands a Sandbox whose home is another tree over
-	// to it (CleanupTree), and the orphan sweep keeps one whose home is its label's tree (sweep).
+	// lingers after its own close. The orphan sweep keeps a Sandbox whose home is the tree it is
+	// labelled with (sweep); the tree cleanup deletes every Sandbox of the tree it cleans.
 	IssueSandboxHome(ctx context.Context, project, issue string) (string, error)
 	// ClaimUnretired is whether the store holds token's claim in any state but retired: a claim the
 	// daemon's orphan sweep still knows, suspended and failed ones included. The sweep reads it under

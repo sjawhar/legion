@@ -895,17 +895,17 @@ func (r *Runtime) warnImageDrift(u *unstructured.Unstructured) {
 // controllers, the Sandboxes of the known controller claims, or while the store holds its claim
 // unretired, read before the turn and again under it (controllerOwned); an issue pod while its
 // tree's lifecycle is live, or while its issue's Sandbox belongs to the tree it is labelled with
-// (Store.IssueSandboxHome): a carried child's Sandbox the old tree's cleanup handed over
-// (handOverSandbox), while the child waits for the admission that opens its tree or lingers after
-// its own close. One whose child left the line, or whose linger expired, belongs nowhere and is
-// deleted, as every other orphan is, with the line that names it. A live tree is checked before any
-// turn is taken, so a Sandbox a concurrent launch of the same issue is still creating or waiting on
-// is never serialized behind that launch: the common case, where the tree stays live, costs no turn
-// at all. Only once the tree looks closed does the pod's launch turn apply, held from a second,
-// authoritative read through the delete (lockPod), so a launch that begins meanwhile still waits for
-// the delete and then creates the Sandbox afresh. A Sandbox whose labels name no kind, or whose
-// issue and tree labels are no keys, is kept and reported: what cannot be told apart from a live
-// tree's is never deleted.
+// (Store.IssueSandboxHome): a carried child's Sandbox its own tree's launch has created, which
+// may already run a pod, while the child waits for the admission that opens its tree or lingers
+// after its own close. One whose child left the line, or whose linger expired, belongs nowhere
+// and is deleted, as every other orphan is, with the line that names it. A live tree is checked
+// before any turn is taken, so a Sandbox a concurrent launch of the same issue is still creating
+// or waiting on is never serialized behind that launch: the common case, where the tree stays
+// live, costs no turn at all. Only once the tree looks closed does the pod's launch turn apply,
+// held from a second, authoritative read through the delete (lockPod), so a launch that begins
+// meanwhile still waits for the delete and then creates the Sandbox afresh. A Sandbox whose
+// labels name no kind, or whose issue and tree labels are no keys, is kept and reported: what
+// cannot be told apart from a live tree's is never deleted.
 func (r *Runtime) sweep(ctx context.Context, u *unstructured.Unstructured, controllers map[string]bool) error {
 	kind, err := podKindOf(u.GetLabels())
 	if err != nil {

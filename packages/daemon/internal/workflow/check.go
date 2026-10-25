@@ -235,10 +235,10 @@ func (e *Engine) endLook(ctx context.Context, tx pgx.Tx, check *record.Productio
 // whose implementer now works the new run — starts no look and suspends nobody: the check waits
 // with whatever cause it holds, and closes with the run's next merge (openCheck) or at its bound
 // (checkBound). A cause that arrived during the look starts the next look with it at once.
-// Otherwise the implementer's claim is suspended, session kept, and the issue's Sandbox with it,
-// volume kept (record.IssueSuspend, keeping): both rows follow the look's start row, so the
-// suspension's fences find no later start and wait for the suspend (store.IssueSuspension), and the
-// pod goes until the next wake.
+// Otherwise the implementer's claim is suspended, its session kept, and the issue's Sandbox is
+// deleted with the pod it ran in (record.IssueSuspend): both rows follow the look's start row, so
+// the suspension's fences find no later start and wait for the suspend (store.IssueSuspension),
+// and the pod goes until the next wake, whose launch makes the Sandbox again.
 func (e *Engine) endLookPending(ctx context.Context, tx pgx.Tx, check *record.ProductionCheck) error {
 	if check.Last {
 		return e.closeCheck(ctx, tx, check, record.CheckNotRun)
@@ -267,14 +267,12 @@ func (e *Engine) endLookPending(ctx context.Context, tx pgx.Tx, check *record.Pr
 
 // closeCheck closes the check with outcome (markCheckClosed) and ends the implementer's part in it:
 // its claim is closed (issue_close: retired, its session dropped), and the issue's Sandbox is
-// suspended — released with its volume for a child whose tree runs on, since its five other claims
-// retired at the close and this row retires the sixth, so the release's wait ends; kept for a root,
-// or a child of a lingering tree, whose Sandbox and volume the tree's close deletes, where a
-// releasing row would wait on the suspended claims forever. A tree lingering past its deadline
-// waited for this check (lingerExpired): once no check of the tree is open its close is re-armed
-// with a LingerClose row due now, a duplicate of the waiting row's event, so applying both is
-// harmless. An issue back in the workflow — a root reopened inside its linger — retires nobody and
-// suspends nothing: its implementer and its pod are the new run's.
+// suspended and deleted with the pod it ran in, whether the issue is a child whose tree runs on or
+// a root, or a child, of a lingering tree whose close would delete it anyway. A tree lingering past
+// its deadline waited for this check (lingerExpired): once no check of the tree is open its close
+// is re-armed with a LingerClose row due now, a duplicate of the waiting row's event, so applying
+// both is harmless. An issue back in the workflow — a root reopened inside its linger — retires
+// nobody and suspends nothing: its implementer and its pod are the new run's.
 func (e *Engine) closeCheck(ctx context.Context, tx pgx.Tx, check *record.ProductionCheck, outcome record.CheckOutcome) error {
 	if err := e.markCheckClosed(ctx, tx, check, outcome); err != nil {
 		return err
@@ -292,8 +290,7 @@ func (e *Engine) closeCheck(ctx context.Context, tx pgx.Tx, check *record.Produc
 		Generation: issue.Generation, Reason: fmt.Sprintf("%s's production check closed as %s", issue.Key, outcome)}); err != nil {
 		return err
 	}
-	release := !claim.IsTreeRoot(issue.Key, issue.Tree) && !root.Lingers()
-	if err := e.enqueue(ctx, tx, issue.Key, record.IssueSuspend{Tree: issue.Tree, Generation: issue.Generation, TreeGeneration: root.Generation, Release: release}); err != nil {
+	if err := e.enqueue(ctx, tx, issue.Key, record.IssueSuspend{Tree: issue.Tree, Generation: issue.Generation, TreeGeneration: root.Generation}); err != nil {
 		return err
 	}
 	if root.LingerUntil == nil || e.now().Before(*root.LingerUntil) {

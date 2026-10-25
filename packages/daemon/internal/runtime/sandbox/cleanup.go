@@ -10,21 +10,20 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 )
 
-// CleanupTree deletes every issue Sandbox of tree, and with each its role Secrets and the issue's
-// volume (deleteSandbox says how its foreground delete takes them), except a Sandbox whose home is
-// another tree (Store.IssueSandboxHome: a child whose hand-over is pending, or one carried into a
-// tree of its own that is in it or can still be admitted into it): that one is handed over to its
-// home, relabelled and left Suspended with its volume, its role Secrets and the sessions on it
-// (handOverSandbox), so the new tree's first launch finds it its own whenever that launch comes. The
-// tree's cleanup reservation calls it (store.CleanupReservedTree) once every stored claim of the tree
-// has retired, or runs nothing and belongs to an issue that moved, so no launch creates a Sandbox of
-// the tree meanwhile. The API's own listing by the tree's label is the census: each Sandbox it names
-// is deleted or handed over, in any order, and awaited, and the listing is read again until none is
-// left. Each write is fenced to the listed object's UID and resourceVersion, and one the object
-// changed since lists again after a recheck interval: a delete's precondition the API refuses with
-// 409, and the hand-over's failed patch `test` with 409 or 422 (a status write, or the new tree's
-// launch relabelling it first), so a controller writing status through a foreground delete does not
-// spin the census; a Sandbox already gone is gone, so a retry after a failure finishes the rest.
+// CleanupTree deletes every issue Sandbox of tree, and with each the role Secrets it owns
+// (deleteSandbox says how its foreground delete takes them). It keeps nothing for a child the
+// tree carried into a tree of its own: an issue pod's disk is the pod's own, which went with that
+// pod, so there is no disk to hand over and the child's next launch creates a Sandbox of its own
+// (ensureSandbox). The tree's cleanup reservation calls it (store.CleanupReservedTree) once every
+// stored claim of the tree has retired, or runs nothing and belongs to an issue that moved, so no
+// launch creates a Sandbox of the tree meanwhile. The API's own listing by the tree's label is the
+// census: each Sandbox it names is deleted, in any order, and awaited, and the listing is read
+// again until none is left. Each delete is fenced to the listed object's UID and resourceVersion,
+// and one the object changed since — the precondition the API refuses with 409, as a controller
+// writing status through a foreground delete does — lists again after a recheck interval rather
+// than spinning the census; a Sandbox the new tree's launch relabelled meanwhile fails the same
+// fence and the next listing no longer names it, so it is left to that tree. A Sandbox already
+// gone is gone, so a retry after a failure finishes the rest.
 func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 	for {
 		sandboxes, err := r.treeSandboxes(ctx, tree)
@@ -35,19 +34,8 @@ func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 			return nil
 		}
 		for _, object := range sandboxes {
-			home, err := r.store.IssueSandboxHome(ctx, r.project, object.GetLabels()[labelIssue])
-			if err != nil {
-				return fmt.Errorf("cleanup tree %s: %w", tree, err)
-			}
-			var changed bool
-			if home != "" && home != tree {
-				err = r.handOverSandbox(ctx, object, tree, home)
-				changed = apierrors.IsConflict(err) || apierrors.IsInvalid(err)
-			} else {
-				err = r.deleteSandbox(ctx, object)
-				changed = apierrors.IsConflict(err)
-			}
-			if changed {
+			err := r.deleteSandbox(ctx, object)
+			if apierrors.IsConflict(err) {
 				select {
 				case <-ctx.Done():
 					return ctx.Err()
@@ -60,46 +48,6 @@ func (r *Runtime) CleanupTree(ctx context.Context, tree string) error {
 			}
 		}
 	}
-}
-
-// handOverSandbox gives object, a Sandbox of tree whose issue now belongs to home, to home instead of
-// deleting it: under the pod's launch turn, so a launch of the issue's new tree is never cut in on, it
-// relabels the Sandbox for home and suspends it in one patch fenced to the uid and resourceVersion the
-// census listed, as the new tree's launch itself would (ensureSandbox). A Sandbox no longer of tree
-// once the turn is taken (the new tree's launch relabelled it first) is left as it is. A fence the
-// Sandbox changed since is the API's refusal (a failed test operation), which the census answers by
-// listing again. The volume, the role Secrets and the sessions on the volume are kept.
-func (r *Runtime) handOverSandbox(ctx context.Context, object *unstructured.Unstructured, tree, home string) error {
-	name := object.GetName()
-	release, err := r.lockPod(ctx, name)
-	if err != nil {
-		return err
-	}
-	defer release()
-	current, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
-	if apierrors.IsNotFound(err) || err == nil && (current.GetUID() != object.GetUID() || current.GetLabels()[labelTree] != labelValue(tree)) {
-		return nil
-	}
-	if err != nil {
-		return fmt.Errorf("cleanup tree %s: read Sandbox %s: %w", tree, name, err)
-	}
-	s, err := decodeSandbox(object)
-	if err != nil {
-		return err
-	}
-	if _, err := r.patch(ctx, s,
-		jsonPatchOp{Op: "test", Path: "/metadata/resourceVersion", Value: object.GetResourceVersion()},
-		jsonPatchOp{Op: "add", Path: labelPatchPath(labelTree), Value: labelValue(home)},
-		jsonPatchOp{Op: "add", Path: "/spec/operatingMode", Value: modeSuspended},
-	); err != nil {
-		if apierrors.IsConflict(err) || apierrors.IsInvalid(err) {
-			return err
-		}
-		return fmt.Errorf("cleanup tree %s: hand Sandbox %s over to tree %s: %w", tree, name, home, err)
-	}
-	r.log.Info("sandbox runtime: handed a carried issue's sandbox over to its new tree, keeping its volume",
-		"sandbox", name, "uid", object.GetUID(), "tree", tree, "to", home)
-	return nil
 }
 
 // treeSandboxes lists tree's issue Sandboxes from the API, the image probe's left out.
@@ -141,6 +89,34 @@ func (r *Runtime) deleteSandbox(ctx context.Context, object *unstructured.Unstru
 	}
 	r.forgetLauncherCredentials(name)
 	return r.awaitSandboxDeleted(ctx, name)
+}
+
+// deleteStoredSandbox deletes the Sandbox name as the API holds it now, in the foreground, and
+// returns once the API no longer has it; one already gone is gone. Each delete is fenced to the
+// object as read (deleteSandbox), so one the Sandbox controller wrote in between — a status write —
+// is refused as a conflict, read again and deleted again after a recheck interval. Both callers
+// hold the pod's launch turn, so nothing of this daemon recreates the Sandbox under the loop: a
+// closed issue's suspension (SuspendIssue) and a launch replacing an issue Sandbox of the disk
+// shape before the pod-owned disk (replaceSupersededSandbox). Each logs the delete it wanted at
+// its own call site.
+func (r *Runtime) deleteStoredSandbox(ctx context.Context, name string) error {
+	for {
+		object, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if err != nil {
+			return fmt.Errorf("read sandbox %s: %w", name, err)
+		}
+		if err := r.deleteSandbox(ctx, object); !apierrors.IsConflict(err) {
+			return err
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(recheckInterval):
+		}
+	}
 }
 
 // awaitSandboxDeleted waits, up to the boot timeout, until the API no longer has the Sandbox name.

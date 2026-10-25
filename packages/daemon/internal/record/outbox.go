@@ -275,8 +275,8 @@ const (
 // SuperviseOp identifies a worker-session operation: "start" starts, resumes, or retries the role's
 // claim; "suspend" stops its process and keeps its session; "tree_close" is the tree's close —
 // the request that ends the claim, the tree's root claim included; "issue_close" is a child issue's
-// close as done, which ends the claim as a tree close does and drops its session, since the
-// issue's volume the session lived on is released with the close (IssueSuspend's Release). There
+// close as done, which ends the claim as a tree close does and drops its session, since the issue
+// is finished and its next run, should a person set it todo again, starts fresh. There
 // is no plain stop: only a close ends a claim from the workflow, so the op states which.
 type SuperviseOp string
 
@@ -348,16 +348,15 @@ type LingerClose struct {
 
 func (LingerClose) OutboxKind() OutboxKind { return OutboxKindLingerClose }
 
-// IssueSuspend retains an issue's shared resources after its close stops every role. Both
-// workflow generations and this row's ID fence a later re-admission or start. Release is a child's
-// close as done: once every claim of the issue has retired, the issue's Sandbox and the volume it
-// owns are deleted rather than kept, so a later todo re-enters the child fresh. An absent field
-// reads false, the close that keeps.
+// IssueSuspend stops an issue's pod after its close has stopped every role, and deletes the
+// Sandbox the roles ran in (runtime.IssueSuspender). Both workflow generations and this row's ID
+// fence a later re-admission or start. The issue keeps nothing: its disk is its pod's own and
+// goes with the pod, so a later todo re-enters the issue fresh on a Sandbox its next launch
+// makes.
 type IssueSuspend struct {
 	Tree           string `json:"tree"`
 	Generation     uint64 `json:"generation"`
 	TreeGeneration uint64 `json:"treeGeneration"`
-	Release        bool   `json:"release,omitempty"`
 }
 
 func (IssueSuspend) OutboxKind() OutboxKind { return OutboxKindIssueSuspend }

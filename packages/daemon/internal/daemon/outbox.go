@@ -461,8 +461,8 @@ func (r *outbox) execute(ctx context.Context, row record.OutboxRow) error {
 			return nil
 		}
 		closing := store.IssueClose{Issue: row.Issue, Tree: value.Tree, IssueGeneration: value.Generation,
-			TreeGeneration: value.TreeGeneration, Row: row.ID, Release: value.Release}
-		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, value.Release, func(ctx context.Context) (bool, error) {
+			TreeGeneration: value.TreeGeneration, Row: row.ID}
+		return suspender.SuspendIssue(ctx, row.Issue, value.Tree, func(ctx context.Context) (bool, error) {
 			return r.trees.IssueSuspension(ctx, r.project, closing, record.OutOfWorkflow)
 		})
 	case record.WorkspaceRemove:
@@ -941,10 +941,10 @@ func (r *outbox) supervise(ctx context.Context, row record.OutboxRow, payload re
 		return nil
 	case "issue_close":
 		// A child's close as done: the claim is closed as a tree close closes it, its session dropped
-		// with it, since the issue's volume the session lived on goes with the close's release
-		// (record.IssueSuspend's Release, which waits for every claim of the issue to retire). It is
-		// fenced as a suspend is, not as a tree close: no linger is involved, and a newer start
-		// means a person set the child todo again, whose run the close must not end.
+		// with it, since the issue is finished and its next run, should a person set it todo again,
+		// starts fresh on a pod and a disk of its own. It is fenced as a suspend is, not as a tree
+		// close: no linger is involved, and a newer start means a person set the child todo again,
+		// whose run the close must not end.
 		if !found {
 			return r.stopWithoutMachine(ctx, row, token)
 		}

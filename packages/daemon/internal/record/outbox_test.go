@@ -34,7 +34,7 @@ func TestOutboxPayloadsRoundTripThroughPostgres(t *testing.T) {
 		MergeQueuePublish{Role: "merge-queue", Packet: "READY #42 at head (approved at head) for LEGION-208 (https://github.com/sjawhar/legion/pull/42)"},
 		IssueBranch{Generation: 2},
 		SuperviseRequest{Op: "issue_close", Tree: "LEGION-208", Role: claim.RoleTester, Generation: 3, Reason: "LEGION-209 is done"},
-		IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7, Release: true},
+		IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7},
 		AutoMergeDisable{Number: 42},
 		ReadyMerge{Number: 42, Head: "c0de"},
 		SuperviseRequest{Op: "start", Tree: "LEGION-208", Role: claim.RoleImplementer, Generation: 3, Task: "Production check of LEGION-208", CheckLook: 2, CheckOpenedAt: now},
@@ -180,9 +180,12 @@ func TestDecodeOutboxPayloadRefusesInvalidRows(t *testing.T) {
 	}
 }
 
-// A releasing suspension is the field's own: an issue_suspend row written before the field existed
-// reads as the close that keeps, so no migration rewrites it.
-func TestAnIssueSuspensionWithoutTheReleaseFieldKeepsTheSandbox(t *testing.T) {
+// The release field is gone: an issue's close deletes its Sandbox in every case, so a suspension
+// carries nothing to say which. A row the previous release queued with the field is stripped of
+// it at the upgrade (migration 0051), since the payload decodes strictly and the key would stall
+// its issue's lane; one written without it has always read as this row does, and nothing encodes
+// the key again.
+func TestAnIssueSuspensionCarriesNoReleaseField(t *testing.T) {
 	row := OutboxRow{ID: 40, Kind: OutboxKindIssueSuspend, Payload: json.RawMessage(`{"tree":"LEGION-208","generation":3,"treeGeneration":7}`)}
 	got, err := DecodeOutboxPayload(row)
 	if err != nil {
@@ -190,14 +193,18 @@ func TestAnIssueSuspensionWithoutTheReleaseFieldKeepsTheSandbox(t *testing.T) {
 	}
 	want := IssueSuspend{Tree: "LEGION-208", Generation: 3, TreeGeneration: 7}
 	if got != want {
-		t.Fatalf("payload = %#v, want %#v with Release false", got, want)
+		t.Fatalf("payload = %#v, want %#v", got, want)
 	}
 	encoded, err := json.Marshal(want)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if strings.Contains(string(encoded), "release") {
-		t.Fatalf("a keeping suspension encodes %s, want no release field", encoded)
+		t.Fatalf("a suspension encodes %s, want no release field", encoded)
+	}
+	stale := OutboxRow{ID: 41, Kind: OutboxKindIssueSuspend, Payload: json.RawMessage(`{"tree":"LEGION-208","generation":3,"treeGeneration":7,"release":true}`)}
+	if _, err := DecodeOutboxPayload(stale); err == nil || !strings.Contains(err.Error(), `unknown field "release"`) {
+		t.Fatalf("decoding a row the previous release wrote = %v, want the strict refusal migration 0051 clears", err)
 	}
 }
 

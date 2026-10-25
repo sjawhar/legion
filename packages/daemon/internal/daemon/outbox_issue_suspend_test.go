@@ -364,7 +364,12 @@ func (issueProvisionTokens) Token(context.Context, string) (string, error) {
 	return "fixture-provision-token", nil
 }
 
-func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
+// A close whose role stop is still pending acts on nothing, and the same close, resumed after the
+// daemon and its runtime restart, suspends the issue's Sandbox and deletes it: neither the runtime
+// nor the outbox keeps the pending effect in memory, and the database owns it. The stopped role's
+// session is the store's and outlives the Sandbox, which owned no part of it. The tree stays live
+// until its linger closes, and its cleanup then finds the issue's Sandbox already gone.
+func TestIssueCloseDeletesTheSandboxAfterARestart(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	pool := isolatedOutboxPool(t)
@@ -455,8 +460,11 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 	if err := runner.RunOnce(ctx); err != nil {
 		t.Fatal(err)
 	}
-	if got := api.mode(name); got != "Suspended" {
-		t.Fatalf("Sandbox after issue close = %s, want Suspended", got)
+	if got := api.mode(name); got != "deleted" {
+		t.Fatalf("Sandbox after issue close = %s, want it suspended and then deleted", got)
+	}
+	if options, deleted := api.deleted(name); !deleted || options.PropagationPolicy == nil || *options.PropagationPolicy != metav1.DeletePropagationForeground {
+		t.Fatalf("Sandbox delete = %+v (requested %t), want foreground propagation", options, deleted)
 	}
 	claims, err := st.Claims(ctx)
 	if err != nil || len(claims) != 1 || claims[0].Session != "saved-planner" || claims[0].SessionFile != "/legion/sessions/planner.jsonl" {
@@ -477,7 +485,10 @@ func TestIssueCloseSuspendsSandboxAfterRestartUntilLingerCleanup(t *testing.T) {
 		t.Fatal(err)
 	}
 	if got := api.mode(name); got != "deleted" {
-		t.Fatalf("Sandbox after linger cleanup = %s, want deleted", got)
+		t.Fatalf("Sandbox after linger cleanup = %s, want it still gone", got)
+	}
+	if live, err := st.TreeLive(ctx, "legion", issue.Tree); err != nil || live {
+		t.Fatalf("tree after its linger cleanup is live = %t, %v; want its cleanup confirmed", live, err)
 	}
 }
 
@@ -495,15 +506,15 @@ func (s issueLaunchSpecs) SpawnSpec(context.Context, supervise.Claim) (runtime.S
 	}, nil
 }
 
-// A child closed as done gives its volume back at once while its parent keeps running: the close's
-// issue_close rows retire the child's claims with their sessions dropped, and its issue_suspend row,
-// a releasing one, foreground-deletes the child's Sandbox — taking the PVC it owns with it, with no
-// PVC request from the restricted daemon — once every claim has retired; the root's Sandbox stays
-// Running on its own volume. A child parked in backlog keeps today's path: its claims suspended with
-// their sessions, its Sandbox Suspended and kept. The done child set back to todo launches fresh:
-// a new Sandbox is created, and since the issue records no session, workspace-init is not told to
-// expect a volume, so nothing reports the released volume as lost.
-func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
+// A child closed as done gives its Sandbox back at once while its parent keeps running: the
+// close's issue_close rows retire the child's claims with their sessions dropped, and its
+// issue_suspend row foreground-deletes the child's Sandbox — taking what it owns with it, with no
+// PVC request from the restricted daemon; the root's Sandbox stays Running. A child parked in
+// backlog keeps its claims suspended with their sessions, and its Sandbox goes the same way,
+// since the pod it ran in, and the disk with it, go either way. The done child set back to todo
+// launches fresh: a new Sandbox is created, and since the issue records no session, nothing is
+// expected of the disk its new pod brings.
+func TestAChildClosedDoneDeletesItsSandboxWhileItsParentRuns(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	t.Cleanup(cancel)
 	pool := isolatedOutboxPool(t)
@@ -657,20 +668,21 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 	if live, err := st.TreeLive(ctx, "legion", root.Key); err != nil || !live {
 		t.Fatalf("tree live after the child's close = %t, %v; want the tree still live", live, err)
 	}
-	if !strings.Contains(logs.String(), "released the closed issue's Sandbox") {
-		t.Fatal("the release logged no line naming the issue's Sandbox")
+	if !strings.Contains(logs.String(), "deleted the closed issue's Sandbox") {
+		t.Fatal("the close logged no line naming the issue's Sandbox")
 	}
 
-	// (c) The parked child: today's path, its Sandbox Suspended and kept, its sessions retained.
+	// (c) The parked child: its claims suspended with their sessions, and its Sandbox deleted as
+	// the done child's was, since its pod and the disk under it go either way.
 	if _, err := intake.ApplyFact(ctx, pool, "dispatch", "child-backlog", intake.DispatchIssue{Key: parked.Key, ResolvedRepo: "acme/widgets", Seq: 2, Type: "issue.updated", Status: "backlog", Title: parked.Title, Parent: root.Key, Rank: "W"}, engine, admission); err != nil {
 		t.Fatal(err)
 	}
 	run("the parked child's move to backlog")
-	if got := api.mode(parkedSandbox); got != "Suspended" || !api.pvc(parkedSandbox) || api.uid(parkedSandbox) != "sandbox-uid-parked" {
-		t.Fatalf("parked child's Sandbox = %s (pvc %t, uid %s), want the same Sandbox Suspended with its volume", got, api.pvc(parkedSandbox), api.uid(parkedSandbox))
+	if got := api.mode(parkedSandbox); got != "deleted" {
+		t.Fatalf("parked child's Sandbox = %s, want it suspended and then deleted", got)
 	}
-	if _, touched := api.deleted(parkedSandbox); touched {
-		t.Fatal("the parked child's move deleted its Sandbox")
+	if options, deleted := api.deleted(parkedSandbox); !deleted || options.PropagationPolicy == nil || *options.PropagationPolicy != metav1.DeletePropagationForeground {
+		t.Fatalf("parked child's Sandbox delete = %+v (requested %t), want foreground propagation", options, deleted)
 	}
 	if got := storedClaim(tester.Token); got.State != supervise.StateSuspended || got.Session != "saved-tester" || got.SessionFile != "/legion/sessions/tester.jsonl" {
 		t.Fatalf("parked child's tester = %+v, want it suspended with its session kept", got)
@@ -692,7 +704,7 @@ func TestAChildClosedDoneReleasesItsVolumeWhileItsParentRuns(t *testing.T) {
 		t.Fatalf("the re-entered child's start created %v, want a new Sandbox %s", api.created, doneSandbox)
 	}
 	if uid := api.uid(doneSandbox); uid == "" || uid == "sandbox-uid-done" {
-		t.Fatalf("re-entered child's Sandbox uid = %q, want a Sandbox other than the released one", uid)
+		t.Fatalf("re-entered child's Sandbox uid = %q, want one other than the Sandbox its close deleted", uid)
 	}
 	env := api.initEnv(doneSandbox)
 	if !slices.Contains(env, "PATH") {

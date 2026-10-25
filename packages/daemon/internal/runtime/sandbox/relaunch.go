@@ -557,32 +557,6 @@ func (r *Runtime) replaceSupersededSandbox(ctx context.Context, l launch, s *san
 	return decodeSandbox(created)
 }
 
-// deleteStoredSandbox deletes the Sandbox name as the API holds it now, in the foreground, and
-// returns once the API no longer has it; one already gone is gone. Each delete is fenced to the
-// object as read (deleteSandbox), so one the Sandbox controller wrote in between — a status write —
-// is refused as a conflict, read again and deleted again after a recheck interval, as a closed
-// issue's release does (releaseIssue). The caller holds the pod's launch turn, so nothing of this
-// daemon recreates the Sandbox under the loop.
-func (r *Runtime) deleteStoredSandbox(ctx context.Context, name string) error {
-	for {
-		object, err := r.sandboxClient().Get(ctx, name, metav1.GetOptions{})
-		if apierrors.IsNotFound(err) {
-			return nil
-		}
-		if err != nil {
-			return fmt.Errorf("read sandbox %s: %w", name, err)
-		}
-		if err := r.deleteSandbox(ctx, object); !apierrors.IsConflict(err) {
-			return err
-		}
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		case <-time.After(recheckInterval):
-		}
-	}
-}
-
 // awaitPodGone waits, bounded by the boot timeout, until no pod the Sandbox owns holds its name —
 // the store first, then one GET to confirm, since a store that has not yet seen a pod proves
 // nothing about it (decision 2). It returns every uid it saw holding the name, none of which is
