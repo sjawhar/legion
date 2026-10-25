@@ -2,24 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-225",
-  "completed": "2026-10-25T17:44:00Z",
-  "round": 2,
-  "decision": "approved",
-  "reviewedCodeHead": "286583d0109f4e210a3104f64a6964397eb66b52",
-  "scope": "Narrowed by the architect to round 1's important finding, its six minor fixes and the Contract change census, against spec v13's acceptance lines.",
-  "ci": "Required set (main ruleset): lint, typecheck, test, pr-title. CI head (newest pull_request run) 286583d010: lint, typecheck, test success; pr-title success (one earlier run cancelled, superseded). compare 286583d010...0d670451 changes only .legion/.",
+  "completed": "2026-10-25T19:48:00Z",
+  "round": 3,
+  "decision": "changes_requested",
+  "reviewedCodeHead": "689ec07553c9e0e7975d889e3d91f9b1c33ec098",
+  "scope": "Narrowed by the architect to the forward merge of main 0aa3aa04 and the controller-skill move (e53eaa80), plus whatever the merge disturbs.",
+  "ci": "Every check run on 689ec075, read as conclusions at 19:45Z: all completed success or skipped (pi-legion 18:45:38Z, claude-envoy 18:46:53Z, dispatch 19:45:21Z, last to settle); its five pull_request workflow runs all completed success. Second source: gh pr view at 19:46Z reports mergeable CONFLICTING / mergeStateStatus DIRTY, so those runs judged a merge ref with main 4ceb3aa9 that no longer exists, and GitHub runs no checks on a conflicting head.",
   "critical": 0,
-  "important": 0,
+  "important": 1,
   "minor": 0,
-  "keyFindings": [],
-  "roundOneFindings": {
-    "releaseAnswer": "Fixed in 286583d0: held is judged from the blockers in Dispatch's view the request read (blockers.UnfinishedOf against the mirror), started only for a first phase this request began (startedByRelease over records read before the writes). Tests cover a blocked and a free backlog child, a parked child released again, and the started predicate's table; the driven proof covers both event orderings.",
-    "census": "Present, with an immediate-refusal rollout (boot gate, probe-image, 409 STALE_PLUGIN_CONTRACT). Reviewer re-ran its three searches at 286583d0: every changed hit is listed; unlisted hits are all unaffected (no literal contract number outside version.go, version.json and the two manifests at 37; no other strict parser of the state or release answer) and are recorded in the PR body's census as the reviewer's addendum.",
-    "minors": "Controller free-slot rule and admission.md row, AGENTS.md's two exemptions and slot wording, architect skill's never-started hand-over sentence, intake test adding an absent field, contract-37 CHANGELOG entries, and the Contract 37 comments: all fixed; claude-envoy copies byte-identical."
-  },
-  "acceptedRisks": [
-    "A blocker that closes between the request's Dispatch read and its todo write: the answer names the child held, it starts at once, and the architect hears phase-finished rather than child-status (architect's ruling).",
-    "Same class, found by the thermonuclear pair at 286583d0: a running child a person moved to backlog (with a late unfinished blocker) and the architect released before the daemon consumed that backlog event — the old running record makes the answer omit the child from held, though the todo event then re-enters and holds it. Visible in admission.blocked; requires two Dispatch writes inside event lag. Reported to the architect."
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/daemon/internal/testnats/nats.go",
+      "description": "The pull request conflicts with main@origin decf80f9 (#2203, feat(daemon): wake a production check at each deploy workflow run after the merge, 19:26Z). git merge-tree of 689ec075 with decf80f9: CONFLICT (content) in packages/daemon/internal/testnats/nats.go; auto-merges in files where both sides changed daemon code and contract artifacts: AGENTS.md, claude-envoy CHANGELOG and dist/envoy-channel.js, contracts state.json and legion-api.ts, api/state.go and state_golden_test.go, daemon/workflow.go, intake/decode.go, facts.go, intake_test.go, record/outbox.go, workflow/engine.go, pi-legion/package.json. main still holds DaemonAPIVersion 36 and migrations up to 0050, so no number collides."
+    }
   ],
-  "thermo": "thermonuclear-deep-review and thermonuclear-code-quality on the round delta at 286583d0: both CHANGES on the stale-running-record race above, which the reviewer judged the same event-lag class as the architect's accepted race; cleanup: WaveReleaseResponse's doc comment (architect.go:45-55) still says 'read back from records'."
+  "verifiedThisRound": [
+    "e53eaa80 moves the controller skill's Architect escalation section verbatim into skills/legion-controller/references/architect-escalation.md; the only line differences are three links re-pointed to skill://legion-controller/SKILL.md#findings-and-the-issues-you-file and #new-issue-triage, both anchors present. The SKILL.md pointer keeps the #architect-escalation heading the wake table's links land on and names the held/escalated wake that row 410 routes there.",
+    "SKILL.md is 477 lines and 38671 bytes; bun test packages/pi-legion/src/skills-guard.test.ts passes 11/11 locally at the merged head; claude-envoy/legion copies of SKILL.md and the new reference are byte-identical to their sources.",
+    "Free-slot correction from round 1 intact (SKILL.md line 257-260).",
+    "Forward merge 689ec075 of main 0aa3aa04: the branch's changed lines (git diff --context 0, index and hunk headers dropped) are identical from 56ba79b8 to e53eaa80 and from 0aa3aa04 to 689ec075 — the merge disturbed nothing of the change."
+  ],
+  "acceptedRisks": "The two event-lag windows stay on the PR's Not proven / risk line, as the architect ruled."
 }
