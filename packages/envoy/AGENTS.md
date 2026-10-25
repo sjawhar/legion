@@ -526,7 +526,7 @@ looked up again with `GetDoc` once that Apply returned can have been evicted in 
 
 The replica's lock is the one a room's browsers wait on. The update observer takes it for every peer
 update (`renderedReplica.observe`), and ygo broadcasts the update to the room's other browsers only
-once the observer has returned (sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go`), so a read
+once the observer has returned (sjawhar/ygo v1.51.3-sami.2, `provider/websocket/peer.go`), so a read
 holding the replica for its walk holds every other browser's copy of the keystroke. A read
 therefore only tries the lock, and
 reads a copy when another read holds it or an observer waits for it (`lockForUpdate`), so reads
@@ -602,7 +602,7 @@ A room whose last peer leaves, or that only the service's `Server.Apply` touches
 edit, a read outside any transaction - stays resident until it has been idle for a minute
 (`roomIdleTimeout`), when ygo's idle sweeper evicts it. ygo's default, eager eviction, evicts a room
 the moment its last peer leaves even while a `Server.Apply` is inside its callback on it
-(sjawhar/ygo v1.51.3-sami.1, `provider/websocket/peer.go` checks only the peers): the callback's
+(sjawhar/ygo v1.51.3-sami.2, `provider/websocket/peer.go` checks only the peers): the callback's
 write then lands on the evicted room and reaches the store only through its retiring persistence
 worker, while the next access has already loaded the store without it and serves, and takes, the
 next write on a document

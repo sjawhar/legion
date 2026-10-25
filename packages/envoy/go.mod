@@ -127,16 +127,18 @@ require (
 )
 
 // The sjawhar/ygo fork is upstream ygo v1.51.2 plus fixes Dispatch depends on while each waits in
-// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291; the fork carries
-// #258's fix as its own closed duplicate, #262): an iterative delete cascade and nested reads, so
-// the stack a delete or read needs does not grow with a tree a peer nested; the transactional GC
-// range search; a whole document state resolves its own dependencies before the pending cap,
-// through a dependency worklist rather than a re-scan per step; items merge only when their right
-// origins match, so a re-encoded document keeps its text order; the bundled stores keep a large
-// incremental update, and BroadcastUpdate and the cluster relay check one with the stores' check
-// rather than refusing it past a pending cap; Apply stamps a room with no peer idle when it
-// returns, so the idle sweep evicts a room only the API touched; and a Hocuspocus-framed
+// an upstream pull request (reearth/ygo #258, #260, #263, #266, #268, #269, #291, #304; the fork
+// carries #258's fix as its own closed duplicate, #262): an iterative delete cascade and nested
+// reads, so the stack a delete or read needs does not grow with a tree a peer nested; the
+// transactional GC range search; a whole document state resolves its own dependencies before the
+// pending cap, through a dependency worklist rather than a re-scan per step; items merge only when
+// their right origins match, so a re-encoded document keeps its text order; the bundled stores
+// keep a large incremental update, and BroadcastUpdate and the cluster relay check one with the
+// stores' check rather than refusing it past a pending cap; Apply stamps a room with no peer idle
+// when it returns, so the idle sweep evicts a room only the API touched; a Hocuspocus-framed
 // connection is answered one SyncStatus for each SyncStep2 or Update it sends, so the browser's
-// provider learns which of its edits the room took. A merged update's skip parking the items after
-// it (reearth/ygo#257) is upstream since v1.51.0.
-replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.1
+// provider learns which of its edits the room took; and Server.OnPeerUpdate runs in place of the
+// room's own apply of a read-write peer's SyncStep2 or Update, so the server can refuse one
+// before it reaches the room or any other peer, or hold a lock of its own across the apply. A
+// merged update's skip parking the items after it (reearth/ygo#257) is upstream since v1.51.0.
+replace github.com/reearth/ygo => github.com/sjawhar/ygo v1.51.3-sami.2
