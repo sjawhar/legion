@@ -1091,15 +1091,30 @@ every issue pod is relaunched onto the new image.
 release at contract 36 builds an issue pod with one container, `roles`, whose launcher runs every
 role in multi-role mode, which only an image of that release's `legion` has: pin the worker image
 with the daemon release, since the image probe refuses an image whose `pi-legion` declares another
-contract. At boot, store migration 0051 rewrites every stored claim locator naming a per-role
-container to `roles`, and the boot census passes a pod of either layout and refuses everything
-else as before. A running issue pod whose containers are exactly the six role names is reported
-moved for every role recorded in it, with the detail `the pod's containers architect, planner,
-implementer, tester, reviewer, merger, now roles`, and the supervisor relaunches each uncharged.
-The first relaunch replaces the pod — even an installing (stale-plugin) launch — on the configured
-image, and its siblings resume into the new pod; a turn a role was in is sent again once its
-session resumes, as a moved address's relaunch does. `legion.yaml`'s `resources` takes one
-`issue` entry in place of the per-role entries ([Configuration](#configuration)).
+contract. **Dump the database first** (`pg_dump` with the daemon's `postgres_dsn`), with the
+daemon stopped: it is the only way back (below). At boot, store migration 0051 rewrites every
+stored claim locator naming a per-role container to `roles`, and the boot census passes a pod of
+either layout and refuses everything else as before. A running issue pod whose containers are
+exactly the six role names is reported moved for every role recorded in it, with the detail `the
+pod's containers architect, planner, implementer, tester, reviewer, merger, now roles`, and the
+supervisor relaunches each uncharged. The first relaunch replaces the pod — even an installing
+(stale-plugin) launch — on the configured image, and its siblings resume into the new pod; a turn
+a role was in is sent again once its session resumes, as a moved address's relaunch does.
+`legion.yaml`'s `resources` takes one `issue` entry in place of the per-role entries
+([Configuration](#configuration)).
+
+To roll this release back, stop its daemon, restore that dump, and re-pin the earlier daemon and
+its worker image together; work done under this release since the upgrade is not in the dump.
+Re-pinning without the restore does not boot. Migration 0051 has no down migration, and the
+earlier release cannot read what it wrote:
+
+- it refuses an issue pod's locator naming the container `roles`
+  (`sandbox container "roles" does not match claim role`, `Locator.Validate` in
+  `internal/runtime/locator.go` before contract 36), which it reads as it loads its claims, so
+  its boot fails at the first issue pod's claim;
+- nothing refuses the newer schema first: its `Migrate` applies the migrations it has not recorded
+  and compares nothing against the version the database is at (`internal/store/store.go`), so it
+  reaches that claim before anything names the schema.
 
 ### Contract discipline
 
