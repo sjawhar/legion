@@ -1,9 +1,11 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
+import { installFakeLiveSockets } from "./__tests__/live-socket-harness";
 import { ApiError, api } from "./api/client";
+import { type EventsHandlers, liveSocketFor } from "./api/live-socket";
 import { AuthGate } from "./app";
 
 test("signing out shows the sign-in page without a reload and tears down the event stream", async () => {
@@ -393,5 +395,131 @@ test("desktop shell persists collapsed sidebars and gives the main region the fu
     } else {
       Object.defineProperty(window, "innerWidth", innerWidthDescriptor);
     }
+  }
+});
+
+/** An event feed that holds no cursor and ignores what arrives: it only keeps the socket open. */
+const idleFeed: EventsHandlers = {
+  since: () => null,
+  onStart: () => {},
+  onEvent: () => {},
+  onSubscribed: () => {},
+};
+
+/** The shell at `/`, signed in as alice, with the event stream's fetch held open forever; returns
+ *  the query client and the teardown. */
+async function renderSignedIn(whoAmI: () => Promise<{ kind: "user"; login: string }>) {
+  const originalMatchMedia = window.matchMedia;
+  window.matchMedia = (() =>
+    ({
+      addEventListener: () => {},
+      addListener: () => {},
+      dispatchEvent: () => true,
+      matches: false,
+      media: "",
+      onchange: null,
+      removeEventListener: () => {},
+      removeListener: () => {},
+    }) as MediaQueryList) as typeof window.matchMedia;
+  const spies = [
+    spyOn(api, "whoAmI").mockImplementation(whoAmI),
+    spyOn(api, "listIssues").mockResolvedValue([]),
+    spyOn(api, "getMyState").mockResolvedValue({}),
+    spyOn(api, "getInbox").mockResolvedValue([]),
+  ];
+  function streamFetch(_input: RequestInfo | URL, _init?: RequestInit): Promise<Response> {
+    return new Promise<Response>(() => {});
+  }
+  streamFetch.preconnect = () => {};
+  const fetchSpy = spyOn(globalThis, "fetch").mockImplementation(streamFetch);
+  const queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
+  const view = render(
+    <MemoryRouter initialEntries={["/"]}>
+      <QueryClientProvider client={queryClient}>
+        <AuthGate />
+      </QueryClientProvider>
+    </MemoryRouter>
+  );
+  await screen.findByText("Signed in as alice");
+  return {
+    queryClient,
+    teardown: () => {
+      view.unmount();
+      liveSocketFor(queryClient).close();
+      for (const spy of spies) spy.mockRestore();
+      fetchSpy.mockRestore();
+      window.matchMedia = originalMatchMedia;
+    },
+  };
+}
+
+test("the connection pill follows the live socket: none while it connects, Reconnecting… once lost, and a Reload once two minutes pass", async () => {
+  const sockets = installFakeLiveSockets();
+  const { queryClient, teardown } = await renderSignedIn(async () => ({
+    kind: "user",
+    login: "alice",
+  }));
+  // Every timer the socket sets from here on runs on the test's clock.
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const stop = liveSocketFor(queryClient).subscribeEvents(idleFeed);
+  try {
+    expect(sockets.sockets).toHaveLength(1);
+    expect(screen.queryByTestId("connection-pill")).toBeNull();
+    act(() => sockets.latest().open());
+    expect(screen.queryByTestId("connection-pill")).toBeNull();
+
+    act(() => sockets.latest().drop(1006));
+    expect(screen.getByTestId("connection-pill").textContent).toBe("Reconnecting…");
+
+    // Every reconnect fails for two minutes: the page says so, and keeps trying underneath.
+    act(() => {
+      for (let ran = 0; ran < 120_000; ran += 500) {
+        jest.advanceTimersByTime(500);
+        const socket = sockets.latest();
+        if (socket.readyState === 0) socket.drop(1006);
+      }
+    });
+    const pill = screen.getByTestId("connection-pill");
+    expect(pill.textContent).toContain("Live updates are not reaching this page");
+    expect(within(pill).getByRole("button", { name: "Reload" })).toBeTruthy();
+
+    // The next attempt, at 121 s, opens, and the pill goes.
+    const attempts = sockets.sockets.length;
+    act(() => jest.advanceTimersByTime(1_000));
+    expect(sockets.sockets).toHaveLength(attempts + 1);
+    act(() => sockets.latest().open());
+    expect(screen.queryByTestId("connection-pill")).toBeNull();
+
+    // A rotation (4001) reopens without one.
+    act(() => sockets.latest().drop(4001));
+    expect(screen.queryByTestId("connection-pill")).toBeNull();
+  } finally {
+    stop();
+    random.mockRestore();
+    jest.useRealTimers();
+    teardown();
+    sockets.restore();
+  }
+});
+
+test("a live socket refused once the person is signed out takes the page to sign-in", async () => {
+  const sockets = installFakeLiveSockets();
+  let signedIn = true;
+  const { queryClient, teardown } = await renderSignedIn(async () => {
+    if (!signedIn) throw new ApiError(401, { error: "unauthorized" });
+    return { kind: "user", login: "alice" };
+  });
+  const stop = liveSocketFor(queryClient).subscribeEvents(idleFeed);
+  try {
+    act(() => sockets.latest().open());
+    signedIn = false;
+    // Dispatch ends the socket of a caller that no longer resolves; the next handshake is refused.
+    act(() => sockets.latest().drop(1008));
+    await screen.findByRole("link", { name: "Sign in with Google" });
+  } finally {
+    stop();
+    teardown();
+    sockets.restore();
   }
 });

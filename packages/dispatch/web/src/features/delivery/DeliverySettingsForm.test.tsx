@@ -2,7 +2,7 @@ import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 
-import { seedDeliveryReads } from "../../__tests__/delivery-live-harness";
+import { seedDeliveryReads } from "../../__tests__/live-socket-harness";
 import { ApiError, api } from "../../api/client";
 import type { DeliverySettings } from "../../api/types";
 import { DeliverySettingsForm } from "./DeliverySettingsForm";

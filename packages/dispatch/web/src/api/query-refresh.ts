@@ -88,7 +88,7 @@ function stateFor(queryClient: QueryClient): FirstLoadState {
  * later flush lets the running request land and refreshes the query when it settles instead.
  * Progress is guaranteed and the post-event body still wins. Only active, non-static queries
  * are cancelled, which is a subset of the set `invalidateQueries` refetches. A live-owned query
- * (`meta.live`, the delivery reads `api/delivery-live.ts` keeps current) is never cancelled: its
+ * (`meta.live`, the delivery reads `api/live-socket.ts` keeps current) is never cancelled: its
  * first load is a subscription whose snapshot the live client writes itself, and no event of
  * this stream names it.
  *

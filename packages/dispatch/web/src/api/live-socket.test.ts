@@ -1,13 +1,20 @@
-import { afterEach, beforeEach, expect, jest, test } from "bun:test";
+import { afterEach, beforeEach, expect, jest, spyOn, test } from "bun:test";
+import type { AgentStreamFrame } from "@legion/contracts";
 import { QueryClient, QueryObserver } from "@tanstack/react-query";
 
 import {
-  type FakeDeliverySocket,
-  type FakeDeliverySockets,
-  installFakeDeliverySockets,
-} from "../__tests__/delivery-live-harness";
+  type FakeLiveSocket,
+  type FakeLiveSockets,
+  installFakeLiveSockets,
+} from "../__tests__/live-socket-harness";
 import { ApiError, isDeliveryNotConfigured } from "./client";
-import { createDeliveryLive, type DeliveryLive } from "./delivery-live";
+import {
+  type AgentHandlers,
+  createLiveSocket,
+  type EventsHandlers,
+  type LiveSocket,
+  reconnectDelayMs,
+} from "./live-socket";
 import { refreshQueries } from "./query-refresh";
 import type {
   DeliveryLiveBody,
@@ -17,6 +24,7 @@ import type {
   DeliveryLiveView,
   DeliveryPR,
   DeliveryTimelineResponse,
+  LiveEventFrame,
 } from "./types";
 
 const view: DeliveryLiveView = { kind: "timeline", window: { preset: 28 }, query: "" };
@@ -116,14 +124,17 @@ function merged(sub: string, seq = "41"): DeliveryLiveDelta {
   };
 }
 
-let sockets: FakeDeliverySockets;
+const SESSION_A = "11111111-1111-4111-8111-111111111111";
+const SESSION_B = "22222222-2222-4222-8222-222222222222";
+
+let sockets: FakeLiveSockets;
 let queryClient: QueryClient;
-let live: DeliveryLive;
+let live: LiveSocket;
 
 beforeEach(() => {
-  sockets = installFakeDeliverySockets();
+  sockets = installFakeLiveSockets();
   queryClient = new QueryClient({ defaultOptions: { queries: { retry: false } } });
-  live = createDeliveryLive(queryClient);
+  live = createLiveSocket(queryClient);
 });
 
 afterEach(() => {
@@ -160,7 +171,7 @@ async function settle() {
 }
 
 /** The socket opened and the subscribe frame it sent. */
-async function opened(): Promise<{ socket: FakeDeliverySocket; sub: string }> {
+async function opened(): Promise<{ socket: FakeLiveSocket; sub: string }> {
   await settle();
   const socket = sockets.latest();
   socket.open();
@@ -173,7 +184,7 @@ test("the snapshot is written with setQueryData and resolves the first load", as
   try {
     const { socket, sub } = await opened();
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
-    expect(socket.url).toBe(`${protocol}//${window.location.host}/ws/delivery`);
+    expect(socket.url).toBe(`${protocol}//${window.location.host}/ws/live`);
     expect(socket.subscribed("timeline")).toEqual({ type: "subscribe", sub, view });
 
     socket.receive(snapshot(sub));
@@ -388,7 +399,7 @@ test("the last observer leaving unsubscribes", async () => {
   expect(socket.closedWith).toBe(1000);
 });
 
-test("a socket silent past two heartbeats is replaced when the tab becomes visible", async () => {
+test("a socket silent past three heartbeats is replaced when the tab becomes visible", async () => {
   jest.useFakeTimers();
   const start = Date.now();
   jest.setSystemTime(start);
@@ -397,12 +408,12 @@ test("a socket silent past two heartbeats is replaced when the tab becomes visib
     const { socket, sub } = await opened();
     socket.receive(snapshot(sub));
 
-    jest.setSystemTime(start + 29_000);
+    jest.setSystemTime(start + 44_000);
     document.dispatchEvent(new Event("visibilitychange"));
     expect(sockets.sockets).toHaveLength(1);
     expect(socket.closedWith).toBeUndefined();
 
-    jest.setSystemTime(start + 31_000);
+    jest.setSystemTime(start + 46_000);
     document.dispatchEvent(new Event("visibilitychange"));
     expect(socket.closedWith).toBe(4000);
     jest.advanceTimersByTime(0);
@@ -414,7 +425,7 @@ test("a socket silent past two heartbeats is replaced when the tab becomes visib
   }
 });
 
-test("heartbeats keep a quiet socket from being replaced, and 31 s with no frame replaces it", async () => {
+test("heartbeats keep a quiet socket from being replaced, and 46 s with no frame replaces it", async () => {
   jest.useFakeTimers();
   const start = Date.now();
   jest.setSystemTime(start);
@@ -436,8 +447,8 @@ test("heartbeats keep a quiet socket from being replaced, and 31 s with no frame
     expect(queryClient.getQueryData<DeliveryTimelineResponse>(key)).toEqual(body);
     expect(live.state().changedAt).toBe("2026-10-01T00:00:00Z");
 
-    // Then the heartbeats stop: 31 s after the last one, the tab coming back replaces the socket.
-    jest.setSystemTime(start + 91_000);
+    // Then the heartbeats stop: 46 s after the last one, the tab coming back replaces the socket.
+    jest.setSystemTime(start + 106_000);
     document.dispatchEvent(new Event("visibilitychange"));
     expect(socket.closedWith).toBe(4000);
     jest.advanceTimersByTime(0);
@@ -451,7 +462,13 @@ test("state is open with the last change time, reconnecting since <t>, or closed
   jest.useFakeTimers();
   const start = Date.parse("2026-10-12T10:00:00Z");
   jest.setSystemTime(start);
-  expect(live.state()).toEqual({ state: "closed", since: null, changedAt: null, verdict: null });
+  expect(live.state()).toEqual({
+    state: "closed",
+    since: null,
+    stuck: false,
+    changedAt: null,
+    verdict: null,
+  });
 
   const { unsubscribe } = observe();
   const { socket, sub } = await opened();
@@ -459,6 +476,7 @@ test("state is open with the last change time, reconnecting since <t>, or closed
   expect(live.state()).toEqual({
     state: "open",
     since: null,
+    stuck: false,
     changedAt: "2026-10-12T09:58:00Z",
     verdict: null,
   });
@@ -532,7 +550,7 @@ test("refreshQueries neither cancels nor invalidates a live query on its first l
   live.subscribe = ((queryKey, liveView) => {
     subscribed.push(queryKey);
     return subscribe(queryKey, liveView);
-  }) as DeliveryLive["subscribe"];
+  }) as LiveSocket["subscribe"];
   const { unsubscribe } = observe();
   try {
     await settle();
@@ -559,5 +577,442 @@ test("refreshQueries neither cancels nor invalidates a live query on its first l
   } finally {
     stopOrdinary();
     unsubscribe();
+  }
+});
+
+test("reconnectDelayMs doubles from a 1s base and caps at 30s", () => {
+  expect(reconnectDelayMs(0)).toBe(1_000);
+  expect(reconnectDelayMs(1)).toBe(2_000);
+  expect(reconnectDelayMs(2)).toBe(4_000);
+  expect(reconnectDelayMs(3)).toBe(8_000);
+  expect(reconnectDelayMs(10)).toBe(30_000);
+});
+
+/** An event feed as the page keeps one: it adopts `events_start`'s id while it holds no cursor and
+ *  each event's id after that, and records every call the socket makes. */
+function eventFeed() {
+  let cursor: string | null = null;
+  const starts: string[] = [];
+  const events: { id: string; event: unknown }[] = [];
+  const subscribed: boolean[] = [];
+  const handlers: EventsHandlers = {
+    since: () => cursor,
+    onStart: (since) => {
+      starts.push(since);
+      cursor ??= since;
+    },
+    onEvent: (id, event) => {
+      events.push({ id, event });
+      cursor = id;
+    },
+    onSubscribed: (afterGap) => {
+      subscribed.push(afterGap);
+    },
+  };
+  return { handlers, starts, events, subscribed };
+}
+
+/** An agent live view's handlers, recording every call in order. */
+function agentView() {
+  const seen: [string, unknown][] = [];
+  const handlers: AgentHandlers = {
+    onResponder: (data) => {
+      seen.push(["responder", data]);
+    },
+    onReplay: (data) => {
+      seen.push(["replay", data]);
+    },
+    onFrame: (data) => {
+      seen.push(["frame", data]);
+    },
+    onUnavailable: (code, message) => {
+      seen.push(["unavailable", { code, message }]);
+    },
+  };
+  return { handlers, seen };
+}
+
+/** The subscribe frame `socket` sent last for session `id`'s agent view. */
+function agentSubscription(socket: FakeLiveSocket, id: string) {
+  const frame = socket
+    .subscribes()
+    .filter((sent) => sent.view.kind === "agent" && sent.view.session_id === id)
+    .at(-1);
+  if (frame === undefined) throw new Error(`no agent subscription for ${id} was sent`);
+  return frame;
+}
+
+/** Fails every socket the page opens from here on, as a server that refuses every handshake does,
+ *  while the clock runs `ms` forward. */
+function refuseEveryOpen(ms: number, step = 500) {
+  for (let ran = 0; ran < ms; ran += step) {
+    jest.advanceTimersByTime(step);
+    const socket = sockets.sockets.at(-1);
+    if (socket !== undefined && socket.readyState === 0) socket.drop(1006);
+  }
+}
+
+test("the first open shows no reconnecting state", async () => {
+  const states: string[] = [];
+  const stopStates = live.onState((state) => {
+    states.push(state.state);
+  });
+  const { unsubscribe } = observe();
+  try {
+    await settle();
+    expect(live.state()).toMatchObject({ state: "connecting", since: null, stuck: false });
+    sockets.latest().open();
+    expect(live.state()).toMatchObject({ state: "open", since: null, stuck: false });
+    expect(states).toContain("connecting");
+    expect(states).not.toContain("reconnecting");
+  } finally {
+    stopStates();
+    unsubscribe();
+  }
+});
+
+test("a 4001 reopens at once, keeps state open and resubscribes every kind", async () => {
+  const { unsubscribe } = observe();
+  const feed = eventFeed();
+  const agent = agentView();
+  const stopFeed = live.subscribeEvents(feed.handlers);
+  const stopAgent = live.subscribeAgent(SESSION_A, agent.handlers);
+  const states: string[] = [];
+  const stopStates = live.onState((state) => {
+    states.push(state.state);
+  });
+  try {
+    const { socket, sub } = await opened();
+    socket.receive(snapshot(sub));
+    const events = socket.subscribed("events").sub;
+    const agentSub = agentSubscription(socket, SESSION_A).sub;
+    socket.receive({ type: "events_start", sub: events, since: "7" });
+
+    socket.drop(4001);
+    // No backoff, and nothing for a pill or the freshness row to show.
+    expect(sockets.sockets).toHaveLength(2);
+    expect(live.state()).toMatchObject({ state: "open", since: null, stuck: false });
+    const again = sockets.latest();
+    again.open();
+    expect(again.subscribed("timeline")).toEqual({
+      type: "subscribe",
+      sub,
+      view,
+      resume: { seq: "40", revs },
+    });
+    expect(again.subscribed("events")).toEqual({
+      type: "subscribe",
+      sub: events,
+      view: { kind: "events" },
+      resume: { since: "7" },
+    });
+    expect(again.subscribed("agent")).toEqual({
+      type: "subscribe",
+      sub: agentSub,
+      view: { kind: "agent", session_id: SESSION_A },
+    });
+    expect(again.subscribes()).toHaveLength(3);
+    expect(feed.subscribed).toEqual([false, false]);
+    expect(states.filter((state) => state !== "open")).toEqual([]);
+  } finally {
+    stopStates();
+    stopAgent();
+    stopFeed();
+    unsubscribe();
+  }
+});
+
+test("a 1012 reopens at once and reports a gap to the event feed", () => {
+  const feed = eventFeed();
+  const stop = live.subscribeEvents(feed.handlers);
+  try {
+    sockets.latest().open();
+    expect(feed.subscribed).toEqual([false]);
+
+    sockets.latest().drop(1012);
+    expect(live.state().state).toBe("reconnecting");
+    expect(sockets.sockets).toHaveLength(2);
+    sockets.latest().open();
+    expect(live.state()).toMatchObject({ state: "open", since: null });
+    expect(feed.subscribed).toEqual([false, true]);
+  } finally {
+    stop();
+  }
+});
+
+test("a resubscribe after a rotation sends the since the event feed adopted from events_start", () => {
+  const feed = eventFeed();
+  const stop = live.subscribeEvents(feed.handlers);
+  try {
+    const socket = sockets.latest();
+    socket.open();
+    // A page that has applied no event sends no resume.
+    const { sub } = socket.subscribed("events");
+    expect(socket.subscribed("events")).toEqual({
+      type: "subscribe",
+      sub,
+      view: { kind: "events" },
+    });
+    socket.receive({ type: "events_start", sub, since: "120" });
+    expect(feed.starts).toEqual(["120"]);
+
+    socket.drop(4001);
+    const again = sockets.latest();
+    again.open();
+    expect(again.subscribed("events")).toEqual({
+      type: "subscribe",
+      sub,
+      view: { kind: "events" },
+      resume: { since: "120" },
+    });
+  } finally {
+    stop();
+  }
+});
+
+test("an ended frame resubscribes only its subscription", async () => {
+  const { unsubscribe } = observe();
+  const feed = eventFeed();
+  const agent = agentView();
+  const stopFeed = live.subscribeEvents(feed.handlers);
+  const stopAgent = live.subscribeAgent(SESSION_A, agent.handlers);
+  try {
+    const { socket, sub } = await opened();
+    socket.receive(snapshot(sub));
+    const events = socket.subscribed("events").sub;
+    const agentSub = agentSubscription(socket, SESSION_A).sub;
+    socket.receive({ type: "events_start", sub: events, since: "9" });
+    const before = socket.subscribes().length;
+
+    socket.receive({ type: "ended", sub: events, reason: "behind" });
+    expect(socket.subscribes().slice(before)).toEqual([
+      { type: "subscribe", sub: events, view: { kind: "events" }, resume: { since: "9" } },
+    ]);
+    expect(feed.subscribed).toEqual([false, true]);
+
+    socket.receive({ type: "ended", sub: agentSub, reason: "dropped" });
+    expect(socket.subscribes().slice(before + 1)).toEqual([
+      { type: "subscribe", sub: agentSub, view: { kind: "agent", session_id: SESSION_A } },
+    ]);
+    // The socket itself stays: nothing reconnected, and no other subscription was sent again.
+    expect(sockets.sockets).toHaveLength(1);
+    expect(socket.closedWith).toBeUndefined();
+    expect(live.state().state).toBe("open");
+  } finally {
+    stopAgent();
+    stopFeed();
+    unsubscribe();
+  }
+});
+
+test("a failed handshake invalidates whoami at most every 30 s", () => {
+  jest.useFakeTimers();
+  // No jitter: each retry waits exactly reconnectDelayMs, so the attempts fail at 0, 1, 3, 7, 15,
+  // 31 and 61 s.
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const whoami = ["whoami"];
+  const signedIn = () => queryClient.setQueryData(whoami, { kind: "user", login: "alice" });
+  const invalidated = () => queryClient.getQueryState(whoami)?.isInvalidated === true;
+  signedIn();
+  const stop = live.subscribeEvents(eventFeed().handlers);
+  try {
+    const start = Date.now();
+    const invalidations: number[] = [];
+    sockets.latest().fail();
+    for (let ran = 0; ran < 62_000; ran += 500) {
+      if (invalidated()) {
+        invalidations.push(Date.now() - start);
+        signedIn();
+      }
+      refuseEveryOpen(500);
+    }
+    expect(sockets.sockets).toHaveLength(7);
+    expect(invalidations).toEqual([0, 31_000, 61_000]);
+  } finally {
+    random.mockRestore();
+    stop();
+  }
+});
+
+test("a 1008 invalidates whoami and reconnects with backoff", () => {
+  jest.useFakeTimers();
+  const whoami = ["whoami"];
+  queryClient.setQueryData(whoami, { kind: "user", login: "alice" });
+  const stop = live.subscribeEvents(eventFeed().handlers);
+  try {
+    sockets.latest().open();
+    expect(queryClient.getQueryState(whoami)?.isInvalidated).toBe(false);
+    sockets.latest().drop(1008);
+    expect(queryClient.getQueryState(whoami)?.isInvalidated).toBe(true);
+    expect(live.state().state).toBe("reconnecting");
+    expect(sockets.sockets).toHaveLength(1);
+    jest.advanceTimersByTime(1_250);
+    expect(sockets.sockets).toHaveLength(2);
+  } finally {
+    stop();
+  }
+});
+
+test("a socket silent for 45 s while open is replaced", () => {
+  jest.useFakeTimers();
+  const feed = eventFeed();
+  const stop = live.subscribeEvents(feed.handlers);
+  try {
+    const socket = sockets.latest();
+    socket.open();
+    // The check runs every 15 s, the tab never hidden: at 45 s the socket has been silent exactly
+    // as long as it may be.
+    jest.advanceTimersByTime(45_000);
+    expect(socket.closedWith).toBeUndefined();
+    expect(sockets.sockets).toHaveLength(1);
+    jest.advanceTimersByTime(15_000);
+    expect(socket.closedWith).toBe(4000);
+    expect(sockets.sockets).toHaveLength(2);
+    sockets.latest().open();
+    expect(feed.subscribed).toEqual([false, true]);
+
+    // The server's heartbeat, every 15 s, keeps the new one.
+    for (let beat = 0; beat < 8; beat += 1) {
+      jest.advanceTimersByTime(15_000);
+      sockets.latest().receive({ type: "heartbeat" });
+    }
+    expect(sockets.sockets).toHaveLength(2);
+    expect(sockets.latest().closedWith).toBeUndefined();
+  } finally {
+    stop();
+  }
+});
+
+test("two minutes of failed reconnects read as stuck, and the next open clears it", () => {
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const stop = live.subscribeEvents(eventFeed().handlers);
+  try {
+    sockets.latest().open();
+    const lostAt = Date.now();
+    sockets.latest().drop(1006);
+    expect(live.state()).toMatchObject({ state: "reconnecting", since: lostAt, stuck: false });
+
+    refuseEveryOpen(119_500);
+    expect(live.state()).toMatchObject({ state: "reconnecting", since: lostAt, stuck: false });
+    refuseEveryOpen(500);
+    expect(live.state()).toMatchObject({ state: "reconnecting", since: lostAt, stuck: true });
+
+    // The page keeps trying underneath: the next attempt, at 121 s, opens.
+    const attempts = sockets.sockets.length;
+    jest.advanceTimersByTime(1_000);
+    expect(sockets.sockets).toHaveLength(attempts + 1);
+    sockets.latest().open();
+    expect(live.state()).toMatchObject({ state: "open", since: null, stuck: false });
+  } finally {
+    random.mockRestore();
+    stop();
+  }
+});
+
+test("one socket carries a delivery view, the event feed and two agent views", async () => {
+  const { observer, unsubscribe } = observe();
+  const feed = eventFeed();
+  const first = agentView();
+  const second = agentView();
+  const stopFeed = live.subscribeEvents(feed.handlers);
+  const stopFirst = live.subscribeAgent(SESSION_A, first.handlers);
+  const stopSecond = live.subscribeAgent(SESSION_B, second.handlers);
+  try {
+    const { socket, sub } = await opened();
+    expect(sockets.sockets).toHaveLength(1);
+    const frames = socket.subscribes();
+    expect(frames.map((frame) => frame.view)).toEqual(
+      expect.arrayContaining([
+        view,
+        { kind: "events" },
+        { kind: "agent", session_id: SESSION_A },
+        { kind: "agent", session_id: SESSION_B },
+      ])
+    );
+    expect(new Set(frames.map((frame) => frame.sub)).size).toBe(4);
+
+    const events = socket.subscribed("events").sub;
+    const agentA = agentSubscription(socket, SESSION_A).sub;
+    const agentB = agentSubscription(socket, SESSION_B).sub;
+    const event = { id: 11, type: "issue.updated" } as unknown as LiveEventFrame["event"];
+    const frame = { commands: [], kind: "commands", seq: 1, v: 1 } satisfies AgentStreamFrame;
+    socket.receive(snapshot(sub));
+    socket.receive({ type: "events_start", sub: events, since: "10" });
+    socket.receive({ type: "event", sub: events, id: "11", event });
+    socket.receive({
+      type: "agent",
+      sub: agentA,
+      event: "responder",
+      data: { v: 1, responding: true },
+    });
+    socket.receive({
+      type: "agent",
+      sub: agentB,
+      event: "replay",
+      data: { v: 1, session_id: SESSION_B, frames: [] },
+    });
+    socket.receive({ type: "agent", sub: agentA, event: "frame", data: frame });
+    await settle();
+
+    expect(observer.getCurrentResult().data).toEqual(body);
+    expect(feed.starts).toEqual(["10"]);
+    expect(feed.events).toEqual([{ id: "11", event }]);
+    expect(first.seen).toEqual([
+      ["responder", { v: 1, responding: true }],
+      ["frame", frame],
+    ]);
+    expect(second.seen).toEqual([["replay", { v: 1, session_id: SESSION_B, frames: [] }]]);
+
+    // Leaving one agent view unsubscribes it alone, and the socket stays for the rest.
+    stopFirst();
+    expect(socket.unsubscribes()).toEqual([{ type: "unsubscribe", sub: agentA }]);
+    await settle();
+    expect(socket.closedWith).toBeUndefined();
+  } finally {
+    stopSecond();
+    stopFirst();
+    stopFeed();
+    unsubscribe();
+  }
+});
+
+test("an agent error frame reaches onUnavailable and is not retried", () => {
+  const agent = agentView();
+  const stopFeed = live.subscribeEvents(eventFeed().handlers);
+  const stopAgent = live.subscribeAgent(SESSION_A, agent.handlers);
+  try {
+    const socket = sockets.latest();
+    socket.open();
+    const { sub } = agentSubscription(socket, SESSION_A);
+    socket.receive({
+      type: "error",
+      sub,
+      code: "STREAM_UNAVAILABLE",
+      message: "the session's stream is not reachable",
+    });
+    expect(agent.seen).toEqual([
+      [
+        "unavailable",
+        { code: "STREAM_UNAVAILABLE", message: "the session's stream is not reachable" },
+      ],
+    ]);
+    expect(socket.subscribes()).toHaveLength(2);
+
+    // A reconnect resubscribes the feed and not the refused view, which the page no longer holds.
+    socket.drop(1012);
+    sockets.latest().open();
+    expect(
+      sockets
+        .latest()
+        .subscribes()
+        .map((frame) => frame.view.kind)
+    ).toEqual(["events"]);
+    stopAgent();
+    expect(sockets.latest().unsubscribes()).toEqual([]);
+    expect(agent.seen).toHaveLength(1);
+  } finally {
+    stopAgent();
+    stopFeed();
   }
 });

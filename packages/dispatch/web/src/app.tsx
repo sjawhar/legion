@@ -3,7 +3,7 @@ import { lazy, type ReactNode, type RefObject, Suspense, useEffect, useRef, useS
 import { Link, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 
 import { api, isUnauthorized } from "./api/client";
-import { useConnectionState } from "./api/live";
+import { useLiveSocketState } from "./api/live-socket";
 import { userAgentStateQuery, whoAmIQuery } from "./api/queries";
 import { useEventStream } from "./api/sse";
 import type { AuthenticatedUser } from "./api/types";
@@ -402,7 +402,7 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
   // flex column that hands it the height left below the compact header, capped above an iOS
   // on-screen keyboard while its composer has focus.
   const fillsViewport = routeFillsViewport(location.pathname);
-  const connection = useConnectionState();
+  const connection = useLiveSocketState();
   const needsYouCount = useNeedsYouCount();
   const unreadReplies = totalUnreadReplies(useQuery(userAgentStateQuery()).data);
   const unreadThreads = useRepliesCount();
@@ -561,25 +561,27 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         </a>
         {/* Above the highest composer fixed at the foot of the screen (`--foot-composer-inset`,
             `useFootInset`), so the pill never sits over its controls; otherwise just above the
-            phone's bottom bar. */}
-        {connection === "reconnecting" ? (
+            phone's bottom bar. A socket Dispatch refuses carries no status the page can read, so
+            nothing here is terminal: once reconnecting has gone on for two minutes the pill offers
+            a reload, and the page keeps trying underneath. */}
+        {connection.stuck ? (
+          <p
+            aria-live="polite"
+            className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
+            data-testid="connection-pill"
+          >
+            Live updates are not reaching this page
+            <button className="underline" onClick={() => window.location.reload()} type="button">
+              Reload
+            </button>
+          </p>
+        ) : connection.state === "reconnecting" ? (
           <p
             aria-live="polite"
             className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
             data-testid="connection-pill"
           >
             Reconnecting…
-          </p>
-        ) : connection === "unavailable" ? (
-          <p
-            aria-live="polite"
-            className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
-            data-testid="connection-pill"
-          >
-            Live updates unavailable
-            <button className="underline" onClick={() => window.location.reload()} type="button">
-              Reload
-            </button>
           </p>
         ) : null}
         {isCompactViewport ? (

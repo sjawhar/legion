@@ -5,11 +5,11 @@ import { MemoryRouter } from "react-router-dom";
 
 import {
   errorFrame,
-  type FakeDeliverySocket,
-  type FakeDeliverySockets,
-  installFakeDeliverySockets,
+  type FakeLiveSocket,
+  type FakeLiveSockets,
+  installFakeLiveSockets,
   snapshotFrame,
-} from "../../__tests__/delivery-live-harness";
+} from "../../__tests__/live-socket-harness";
 import type {
   DeliveryLeadTimeTiming,
   DeliveryPipelineResponse,
@@ -19,9 +19,9 @@ import type {
 } from "../../api/types";
 import { PipelinePage, PipelineView } from "./PipelinePage";
 
-let sockets: FakeDeliverySockets;
+let sockets: FakeLiveSockets;
 beforeEach(() => {
-  sockets = installFakeDeliverySockets();
+  sockets = installFakeLiveSockets();
 });
 afterEach(() => {
   cleanup();
@@ -387,8 +387,8 @@ function renderPage(path = "/pipeline") {
   );
 }
 
-/** The page's delivery socket, accepted, and the pipeline subscription it sent on it. */
-async function subscribed(): Promise<{ socket: FakeDeliverySocket; frame: LiveSubscribe }> {
+/** The page's live socket, accepted, and the pipeline subscription it sent on it. */
+async function subscribed(): Promise<{ socket: FakeLiveSocket; frame: LiveSubscribe }> {
   await waitFor(() => expect(sockets.sockets.length).toBeGreaterThan(0));
   const socket = sockets.latest();
   act(() => socket.open());

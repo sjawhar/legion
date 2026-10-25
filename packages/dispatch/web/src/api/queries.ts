@@ -4,7 +4,7 @@ import { beginInboxFetch, finishInboxFetch } from "../features/inbox/ask-thread-
 import { projectIssuesQueryKey } from "../features/project/issue-filters";
 
 import { api } from "./client";
-import { deliveryLiveFor } from "./delivery-live";
+import { liveSocketFor } from "./live-socket";
 import type {
   DeliveryLiveView,
   DeliveryMeasuresResponse,
@@ -160,7 +160,7 @@ function boardMovesSettled(context: QueryFunctionContext, project: string): Prom
 }
 
 /** What every live-owned delivery query shares (LEGION-690): its first load subscribes its view
- *  over the page's one delivery socket (`api/delivery-live.ts`), which writes the snapshot and every
+ *  over the page's one live socket (`api/live-socket.ts`), which writes the snapshot and every
  *  later change into the cache, so nothing here reads again. `meta.live` keeps the event stream's
  *  refresh paths away from it (`api/query-refresh.ts`); `gcTime` 0 drops the subscription with the
  *  last observer; the page keeps the previous answer on screen while a new view's snapshot is out,
@@ -177,7 +177,7 @@ const LIVE = {
 function subscribeLive<B>(context: QueryFunctionContext, view: DeliveryLiveView): Promise<B> {
   // The socket answers each view with its own route's body (packages/contracts DeliveryLiveView),
   // which the kind the caller passes names; the frame carries the union.
-  return deliveryLiveFor(context.client).subscribe(context.queryKey, view) as Promise<B>;
+  return liveSocketFor(context.client).subscribe(context.queryKey, view) as Promise<B>;
 }
 
 /** The delivery timeline, live: the window, the search and every facet, applied by Dispatch

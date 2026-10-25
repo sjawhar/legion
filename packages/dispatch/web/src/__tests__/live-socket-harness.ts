@@ -5,13 +5,14 @@ import type {
   DeliveryLiveBody,
   DeliveryLiveRevs,
   DeliveryLiveSnapshot,
-  DeliveryLiveView,
   DeliveryRunDetail,
   DeliveryTimelineResponse,
   LiveClientFrame,
   LiveError,
   LiveServerFrame,
   LiveSubscribe,
+  LiveUnsubscribe,
+  LiveView,
 } from "../api/types";
 
 type Listener = (event: Event) => void;
@@ -19,7 +20,7 @@ type Listener = (event: Event) => void;
 /** A WebSocket the test drives: `open`, `receive` and `drop` act as the server; `sent` is every
  *  frame the page sent. `close`, called by the page, only records its code, as a browser fires its
  *  close event later and the page has already let the socket go. */
-export class FakeDeliverySocket {
+export class FakeLiveSocket {
   readyState = 0;
   readonly sent: LiveClientFrame[] = [];
   closedWith: number | undefined;
@@ -27,7 +28,7 @@ export class FakeDeliverySocket {
 
   constructor(
     readonly url: string,
-    registry: FakeDeliverySocket[]
+    registry: FakeLiveSocket[]
   ) {
     registry.push(this);
   }
@@ -64,7 +65,7 @@ export class FakeDeliverySocket {
     this.emit("message", new MessageEvent("message", { data: JSON.stringify(frame) }));
   }
 
-  /** The server or the network ends the connection. */
+  /** The server or the network ends the connection; before `open`, the handshake failed. */
   drop(code = 1006): void {
     this.readyState = 3;
     this.emit("close", Object.assign(new Event("close"), { code }));
@@ -80,8 +81,13 @@ export class FakeDeliverySocket {
     return this.sent.filter((frame): frame is LiveSubscribe => frame.type === "subscribe");
   }
 
+  /** The unsubscribe frames sent, in order. */
+  unsubscribes(): LiveUnsubscribe[] {
+    return this.sent.filter((frame): frame is LiveUnsubscribe => frame.type === "unsubscribe");
+  }
+
   /** The subscribe frame sent last for a view of `kind`. */
-  subscribed(kind: DeliveryLiveView["kind"]): LiveSubscribe {
+  subscribed(kind: LiveView["kind"]): LiveSubscribe {
     const frame = this.subscribes()
       .filter((sent) => sent.view.kind === kind)
       .at(-1);
@@ -96,18 +102,18 @@ export class FakeDeliverySocket {
 
 /** The fake sockets a test installed: every one the page opened, in order, the last of them, and
  *  the restore that puts the real WebSocket back. */
-export interface FakeDeliverySockets {
-  readonly sockets: FakeDeliverySocket[];
-  latest(): FakeDeliverySocket;
+export interface FakeLiveSockets {
+  readonly sockets: FakeLiveSocket[];
+  latest(): FakeLiveSocket;
   restore(): void;
 }
 
-/** Replaces `WebSocket` with FakeDeliverySocket until `restore`. `latest` is the socket the page
+/** Replaces `WebSocket` with FakeLiveSocket until `restore`. `latest` is the socket the page
  *  opened last. */
-export function installFakeDeliverySockets(): FakeDeliverySockets {
+export function installFakeLiveSockets(): FakeLiveSockets {
   const original = globalThis.WebSocket;
-  const sockets: FakeDeliverySocket[] = [];
-  globalThis.WebSocket = class extends FakeDeliverySocket {
+  const sockets: FakeLiveSocket[] = [];
+  globalThis.WebSocket = class extends FakeLiveSocket {
     constructor(url: string | URL) {
       super(String(url), sockets);
     }
@@ -116,7 +122,7 @@ export function installFakeDeliverySockets(): FakeDeliverySockets {
     sockets,
     latest: () => {
       const socket = sockets.at(-1);
-      if (socket === undefined) throw new Error("no delivery socket was opened");
+      if (socket === undefined) throw new Error("no live socket was opened");
       return socket;
     },
     restore: () => {

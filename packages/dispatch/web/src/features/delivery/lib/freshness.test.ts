@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import type { DeliveryLiveState } from "../../../api/delivery-live";
+import type { LiveSocketState } from "../../../api/live-socket";
 import { type DeliveryFreshness, sourceFreshness } from "./freshness";
 
 const NOW = Date.parse("2024-06-01T12:00:00Z");
@@ -11,7 +11,13 @@ const healthy: DeliveryFreshness = {
   unfetchable_count: 0,
 };
 
-const CLOSED: DeliveryLiveState = { state: "closed", since: null, changedAt: null, verdict: null };
+const CLOSED: LiveSocketState = {
+  state: "closed",
+  since: null,
+  stuck: false,
+  changedAt: null,
+  verdict: null,
+};
 
 const byName = (freshness: DeliveryFreshness, readAtMs = NOW, live = CLOSED) =>
   Object.fromEntries(sourceFreshness(freshness, NOW, readAtMs, live).map((row) => [row.name, row]));
@@ -78,9 +84,10 @@ test("unfetchable: a positive count adds a red row naming it, zero adds none", (
   );
 });
 
-const open = (changedAt: string | null, stale: readonly string[] = []): DeliveryLiveState => ({
+const open = (changedAt: string | null, stale: readonly string[] = []): LiveSocketState => ({
   state: "open",
   since: null,
+  stuck: false,
   changedAt,
   verdict: stale.length === 0 ? null : { freshness: healthy, stale },
 });
@@ -127,6 +134,7 @@ test("live: while reconnecting each Live row reads Reconnecting and its seconds,
   const rows = byName(healthy, NOW - 600_000, {
     state: "reconnecting",
     since: NOW - 12_000,
+    stuck: false,
     changedAt: "2024-06-01T11:56:00Z",
     verdict: null,
   });
