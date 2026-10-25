@@ -1,8 +1,9 @@
 import { DELIVERY_CAPABILITIES, type MessageDeliveryMode } from "@legion/contracts";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useRef, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 
+import { apiErrorMessage } from "../../api/client";
 import { agentMessagesQuery, whoAmIQuery } from "../../api/queries";
 import { pillClassName } from "../../components/Pill";
 import { RefusableButton } from "../../components/RefusableButton";
@@ -20,6 +21,7 @@ import {
 } from "../../theme/classes";
 import { useMarkRepliesRead } from "../agents/unread";
 import { MODE_LABELS } from "../conversation/delivery";
+import { stoppable } from "../conversation/held-sends";
 import { KEYED_SEND_LATE_TEXT, SendStoppedError } from "../conversation/send-request";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
@@ -101,7 +103,6 @@ export function AgentConversationPage(): ReactNode {
   // call whose arguments hold that command. Without these the thread would show replies to
   // messages the human cannot see, and no replies at all.
   // Seeing them here is reading them.
-  const queryClient = useQueryClient();
   const stored = useQuery(agentMessagesQuery(sessionId));
   useMarkRepliesRead(sessionId, stored.data);
   const viewer = useQuery(whoAmIQuery()).data;
@@ -113,12 +114,10 @@ export function AgentConversationPage(): ReactNode {
 
   // Talking to the agent is Dispatch's existing targeted delivery: the stream itself stays
   // read-only and this adds no write path of its own. The session confirms a Send or Aside with
-  // Dispatch before it takes one as its user's own turn. A press is held, on screen, until
-  // Dispatch decides it, and Send waits for it (`useLiveSend`).
-  const live = useLiveSend(sessionId, () => {
-    setOwnSendCount((previous) => previous + 1);
-    void queryClient.invalidateQueries({ queryKey: agentMessagesQuery(sessionId).queryKey });
-  });
+  // Dispatch before it takes one as its user's own turn. A press is the session's held send, on
+  // screen here and on its Agents row until Dispatch decides it, and Send waits for it
+  // (`useLiveSend`); the store refreshes the stored messages when it lands.
+  const live = useLiveSend(sessionId, () => setOwnSendCount((previous) => previous + 1));
   const sendNow = useRef(live.send);
   sendNow.current = live.send;
   const onNew = useCallback(
@@ -213,7 +212,7 @@ export function AgentConversationPage(): ReactNode {
       {held === undefined ? null : (
         <div className="mt-2 space-y-1" data-testid="agent-send-held">
           <p className={`line-clamp-2 break-words text-sm ${textPrimaryOnCanvas}`}>
-            Your message: “{held.body}”
+            Your message: “{held.request.draft.body}”
           </p>
           <div className="flex flex-wrap items-center gap-3">
             {held.status === "refused" ? (
@@ -221,7 +220,7 @@ export function AgentConversationPage(): ReactNode {
                 <p className={`text-sm ${dangerText}`} data-testid="agent-send-error">
                   {held.refusal instanceof SendStoppedError
                     ? held.refusal.message
-                    : `Could not send: ${held.refusal?.message ?? "could not reach the session"}`}
+                    : `Could not send: ${apiErrorMessage(held.refusal, "could not reach the session")}`}
                 </p>
                 <RefusableButton look="secondary-compact" onPress={live.retry} refusal={null}>
                   Retry
@@ -235,7 +234,7 @@ export function AgentConversationPage(): ReactNode {
                 <p className={`text-sm ${textMutedOnCanvas}`} role="status">
                   {held.status === "late" ? KEYED_SEND_LATE_TEXT : "Sending…"}
                 </p>
-                {held.status === "late" ? (
+                {stoppable(held) || held.stopping ? (
                   <RefusableButton
                     busy={held.stopping ? "Stopping…" : undefined}
                     look="secondary-compact"

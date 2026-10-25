@@ -52,6 +52,10 @@ export interface SentRequest {
   /** The mode a message with no delivery command goes in when it answers no thread
    *  (`plainDelivery`, from the addressed sessions' capabilities as Send found them). */
   readonly plainDelivery: DeliveryCapability;
+  /** A mode the reader picked outright - the live view's `Send as` - in which a message to one
+   *  session goes as written: no `/btw` or `/aside` at its start is read as a command, since the
+   *  live view sends a session its commands verbatim. */
+  readonly pickedDelivery?: DeliveryCapability;
   readonly replyTo: ReplyTarget | null;
   /** The key that names this send to Dispatch where its route takes one - a message to one
    *  session (`idempotency_key`) - so that a repeat of the request is that one message there.
@@ -158,19 +162,19 @@ const KEYED_SEND_MAX_BACKOFF_MS = 30_000;
 type AgentMessage = Omit<CreateAgentMessageInput, "idempotency_key">;
 
 /** The message a send to a session puts on the wire: its body with any delivery command stripped,
- *  the mode it names or the reply's thread or the session takes, and the reply it answers. */
+ *  the mode it names or the reply's thread or the session takes, and the reply it answers - or, in
+ *  a mode the reader picked outright, the body as written in that mode. */
 function agentMessage({
   draft,
+  pickedDelivery,
   plainDelivery,
   replyTo,
-}: Pick<SentRequest, "draft" | "plainDelivery" | "replyTo">): AgentMessage {
+}: Pick<SentRequest, "draft" | "pickedDelivery" | "plainDelivery" | "replyTo">): AgentMessage {
+  const reply = replyTo === null ? {} : { in_reply_to: replyTo.id };
+  if (pickedDelivery !== undefined) return { body: draft.body, delivery: pickedDelivery, ...reply };
   const inheritedDelivery = replyTo?.thread?.delivery ?? plainDelivery;
   const plan = deliveryPlan(draft.body, inheritedDelivery);
-  return {
-    body: plan.body,
-    delivery: plan.delivery ?? inheritedDelivery,
-    ...(replyTo === null ? {} : { in_reply_to: replyTo.id }),
-  };
+  return { body: plan.body, delivery: plan.delivery ?? inheritedDelivery, ...reply };
 }
 
 /** The key `next` goes under. A Retry that sends the refused send's message again - the same

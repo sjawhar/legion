@@ -532,15 +532,13 @@ test("the live view's send retries under one key", async () => {
   expect(later[2]).not.toBe(first);
 });
 
-// A send's retries are the view's: leaving the live view stops them between attempts. The
-// attempt out when the reader leaves may already have reached Dispatch, so it is let finish, and
-// nothing tries again for a view no longer on screen.
-test("leaving the live view stops its send's retries, letting the attempt out finish", async () => {
-  const inFlight = Promise.withResolvers<Message>();
-  const createAgentMessage = spyOn(api, "createAgentMessage")
-    .mockRejectedValueOnce(new TypeError("Failed to fetch"))
-    .mockReturnValueOnce(inFlight.promise)
-    .mockRejectedValue(new TypeError("Failed to fetch"));
+// A send belongs to its session, not to the view: the live view going away - here unmounted with
+// its page - leaves its send being tried under the key it was pressed with, and every attempt is
+// held to its own deadline, nothing cutting it short.
+test("leaving the live view leaves its send being tried, under its key", async () => {
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockRejectedValue(
+    new TypeError("Failed to fetch")
+  );
   spies.push(createAgentMessage);
   renderLiveView({
     agentState: {},
@@ -556,13 +554,23 @@ test("leaving the live view stops its send's retries, letting the attempt out fi
     await sendFromLiveView("try the other branch");
     await tick(1_000);
     expect(createAgentMessage).toHaveBeenCalledTimes(2);
-    expect(createAgentMessage.mock.calls[1]?.[2]).toEqual(keyedAttempt);
 
     cleanup();
-    inFlight.reject(new TypeError("Failed to fetch"));
-    await tick(10 * 60_000);
-    expect(createAgentMessage).toHaveBeenCalledTimes(2);
+    await tick(2_000);
+    await tick(4_000);
+    expect(createAgentMessage).toHaveBeenCalledTimes(4);
+    // Dispatch is back: the send lands, and nothing is tried after it.
+    createAgentMessage.mockResolvedValueOnce(message("sent", "try the other branch"));
+    await tick(8_000);
+    await tick(30 * 60_000);
+    expect(createAgentMessage).toHaveBeenCalledTimes(5);
   });
+  expect(createAgentMessage.mock.calls.map(([, , bounds]) => bounds)).toEqual(
+    Array.from({ length: 5 }, () => keyedAttempt)
+  );
+  expect(
+    new Set(createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).size
+  ).toBe(1);
 });
 
 /** Moves the fake clock `ms` on and lets every promise the move released run. */

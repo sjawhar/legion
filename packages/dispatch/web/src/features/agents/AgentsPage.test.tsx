@@ -1,10 +1,10 @@
-import { expect, spyOn, test } from "bun:test";
+import { expect, jest, spyOn, test } from "bun:test";
 import { RECEIPT_TIMEOUT_CAUSE } from "@legion/contracts";
 import { focusManager, QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { act, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { MemoryRouter, useLocation } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type {
   Agent,
   CreateBroadcastInput,
@@ -2973,6 +2973,176 @@ test("/ falls through to the Dispatch-wide search dialog when no agents are conn
 
     expect(screen.getByRole("dialog", { name: "Search" })).toBeTruthy();
   } finally {
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+/** Moves the fake clock `ms` on and lets every promise the move released run. */
+async function tick(ms: number): Promise<void> {
+  await act(async () => {
+    jest.advanceTimersByTime(ms);
+    for (let turn = 0; turn < 20; turn += 1) await Promise.resolve();
+  });
+}
+
+const keyedLate =
+  "Still sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once.";
+const keyedStopped =
+  "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once.";
+
+/** Opens `name`'s live view from its Agents row, by the row's own link. */
+function openLiveView(name: string): void {
+  const region = screen.getByRole("region", { name: "Agents" });
+  fireEvent.click(within(card(region, name)).getByRole("link", { name: "Open" }));
+}
+
+/** Leaves a live view for the Agents page, by the view's own link. */
+function backToAgents(): void {
+  fireEvent.click(screen.getByRole("link", { name: "← Agents" }));
+}
+
+/** The app with Planner's live view open, both lazy pages loaded once on the real clock, so every
+ *  move between them on the fake clock that follows renders at once. A message to a session is
+ *  answered 503 until a test says otherwise: Dispatch is down. */
+async function renderPlannerLiveView() {
+  const page = renderAgents();
+  page.createAgentMessage.mockRejectedValue(
+    new ApiError(503, { code: "UNAVAILABLE", error: "the server is down" })
+  );
+  await screen.findByRole("region", { name: "Agents" });
+  openLiveView("Planner");
+  await screen.findByPlaceholderText(/delivered as Aside/);
+  return page;
+}
+
+/** Sends `body` from the open live view. */
+async function sendFromLiveView(body: string): Promise<void> {
+  fireEvent.change(screen.getByPlaceholderText(/delivered as Aside/), { target: { value: body } });
+  await act(async () => {
+    fireEvent.click(
+      within(screen.getByTestId("agent-composer")).getByRole("button", { name: "Send" })
+    );
+  });
+}
+
+// A send belongs to its session, not to the view that made it: one the live view made during an
+// outage is still being tried while the reader looks at another session and at the Agents page,
+// under the key it was pressed with, and the view shows it again on return. It ends when the
+// reader stops it.
+test("a live-view send that keeps failing outlives the view, under one key, until Stop trying", async () => {
+  const page = await renderPlannerLiveView();
+  jest.useFakeTimers();
+
+  try {
+    await sendFromLiveView("Status please");
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(1);
+    await tick(1_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
+
+    // Another session's live view holds nothing of Planner's, and its Send is free.
+    await act(async () => backToAgents());
+    await act(async () => openLiveView("Reviewer"));
+    expect(screen.getByPlaceholderText(/^Message Reviewer/)).toBeTruthy();
+    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+    expect(
+      within(screen.getByTestId("agent-composer"))
+        .getByRole("button", { name: "Send" })
+        .getAttribute("aria-disabled")
+    ).toBeNull();
+    await tick(2_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(3);
+
+    // Back on Planner: the same send, still out.
+    await act(async () => backToAgents());
+    await act(async () => openLiveView("Planner"));
+    const held = screen.getByTestId("agent-send-held");
+    expect(within(held).getByText("Your message: “Status please”")).toBeTruthy();
+    expect(within(held).getByRole("status").textContent).toBe("Sending…");
+    await tick(4_000);
+    await tick(8_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
+    await tick(15_000);
+    expect(within(held).getByRole("status").textContent).toBe(keyedLate);
+
+    await act(async () => {
+      fireEvent.click(within(held).getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    expect(screen.getByTestId("agent-send-error").textContent).toBe(keyedStopped);
+    await tick(30 * 60_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
+    expect(
+      new Set(
+        page.createAgentMessage.mock.calls.map(
+          ([session, input]) => `${session} ${input.body} ${input.idempotency_key}`
+        )
+      ).size
+    ).toBe(1);
+    expect(page.createAgentMessage.mock.calls[0]?.[0]).toBe("planner-session");
+
+    fireEvent.click(within(held).getByRole("button", { name: "Discard" }));
+    expect(screen.queryByTestId("agent-send-held")).toBeNull();
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
+    page.view.unmount();
+    page.restore();
+  }
+});
+
+// The live view and the Agents row send to one session under one name: the row shows the send the
+// live view made - its draft held, Send refused while it is out, the keyed late text - and the
+// row's Stop trying ends it, handing the draft back with a Retry under the same key.
+test("the session's Agents row shows a live-view send, refuses its own Send, and can stop it", async () => {
+  const page = await renderPlannerLiveView();
+  jest.useFakeTimers();
+
+  try {
+    await sendFromLiveView("Status please");
+    await tick(1_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
+
+    await act(async () => backToAgents());
+    const region = screen.getByRole("region", { name: "Agents" });
+    const planner = card(region, "Planner");
+    await act(async () => expand(planner, "Planner"));
+    const field = within(planner).getByRole("textbox", { name: "Comment" }) as HTMLTextAreaElement;
+    expect(field.value).toBe("Status please");
+    expect(field.closest("fieldset")?.disabled).toBe(true);
+    const sending = within(planner).getByRole("button", { name: "Sending…" }) as HTMLButtonElement;
+    expect(sending.disabled).toBe(true);
+    fireEvent.submit(within(planner).getByRole("form", { name: "Comment composer" }));
+    await tick(0);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(2);
+
+    for (const wait of [2_000, 4_000, 8_000, 15_000]) await tick(wait);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
+    expect(within(planner).getByText(keyedLate)).toBeTruthy();
+    await act(async () => {
+      fireEvent.click(within(planner).getByRole("button", { name: "Stop trying" }));
+    });
+    await tick(0);
+    expect(within(planner).getByText(keyedStopped)).toBeTruthy();
+    expect(field.value).toBe("Status please");
+    expect(field.closest("fieldset")?.disabled).toBe(false);
+    await tick(30 * 60_000);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(5);
+
+    // Retry from the row is the same message, so it goes under the same key, and lands.
+    page.createAgentMessage.mockResolvedValueOnce(message("Status please"));
+    await act(async () => {
+      fireEvent.click(within(planner).getByRole("button", { name: "Retry" }));
+    });
+    await tick(0);
+    expect(page.createAgentMessage).toHaveBeenCalledTimes(6);
+    expect(
+      new Set(page.createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).size
+    ).toBe(1);
+    expect(field.value).toBe("");
+  } finally {
+    jest.advanceTimersByTime(1);
+    jest.useRealTimers();
     page.view.unmount();
     page.restore();
   }
