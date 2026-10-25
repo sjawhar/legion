@@ -492,6 +492,9 @@ func TestAnAgentViewWhoseRelayFailsEndsAsDropped(t *testing.T) {
 			began := time.Now()
 			running := served.startAgentSubscription(t.Context(), stream, "agent", plannerSessionID)
 			t.Cleanup(running.stop)
+			pollUntil(t, agentStreamRetry/2, "the failed view leaves the session's frames before its end", func() bool {
+				return source.Viewers(plannerSessionID) == 0
+			})
 			ended, ok := stream.next(t, "agent's end").(LiveEnded)
 			if !ok || ended.Sub != "agent" || ended.Reason != "dropped" {
 				t.Fatalf("the first frame of a view whose relay failed = %+v, want its end, dropped", ended)
@@ -499,9 +502,9 @@ func TestAnAgentViewWhoseRelayFailsEndsAsDropped(t *testing.T) {
 			if waited := time.Since(began); waited < agentStreamRetry {
 				t.Fatalf("the view ended %s after it started, before the relay's retry (%s)", waited, agentStreamRetry)
 			}
-			if got := source.Viewers(plannerSessionID); got != 0 {
-				t.Fatalf("the failed view holds %d subscriptions to the session's frames, want 0", got)
-			}
+			pollUntil(t, 5*time.Second, "the failed view leaves the session's frames", func() bool {
+				return source.Viewers(plannerSessionID) == 0
+			})
 		})
 	}
 }

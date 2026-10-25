@@ -100,10 +100,13 @@ func (s *server) relayAgentConversation(ctx context.Context, stream liveStreamer
 		endAgentAfterFailure(ctx, stream, sub, "subscribe to the session's frames", err)
 		return
 	}
-	defer unsubscribe()
+	var stopRelayOnce sync.Once
+	stopRelay := func() { stopRelayOnce.Do(unsubscribe) }
+	defer stopRelay()
 	// The session publishes only while a viewer is attached, so it has to hear from this one
 	// before the first turn, not after it.
 	if err := source.Watch(sessionID); err != nil {
+		stopRelay()
 		endAgentAfterFailure(ctx, stream, sub, "tell the session a viewer is attached", err)
 		return
 	}
@@ -167,6 +170,7 @@ func (s *server) relayAgentConversation(ctx context.Context, stream liveStreamer
 		case frame = <-frames:
 		case <-rearm.C:
 			if err := source.Watch(sessionID); err != nil {
+				stopRelay()
 				endAgentAfterFailure(ctx, stream, sub, "re-arm the session", err)
 				return
 			}
