@@ -2,13 +2,14 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T16:20:00Z",
+  "completed": "2026-10-25T17:10:00Z",
   "evidenceLinks": [
     "Rounds 1-3: https://github.com/sjawhar/legion/pull/2173#issuecomment-6399449475",
     "Round 4: https://github.com/sjawhar/legion/pull/2173#issuecomment-6397391272",
     "Round 5: https://github.com/sjawhar/legion/pull/2173#issuecomment-6398448412",
     "Round 6: https://github.com/sjawhar/legion/pull/2173#issuecomment-6399442439",
-    "Round 7: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400027590"
+    "Round 7: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400027590",
+    "Round 8: https://github.com/sjawhar/legion/pull/2173#issuecomment-6400527686"
   ],
   "rounds": [
     { "round": 1, "codeHead": "a5e26319624da4107d61115c7058270a0dceb383", "verdict": "pass" },
@@ -17,79 +18,61 @@
     { "round": 4, "codeHead": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1", "verdict": "pass" },
     { "round": 5, "codeHead": "ace35f9ce9f3ed96039ab44349c68e94cdc17e37", "verdict": "pass" },
     { "round": 6, "codeHead": "2056d96c3f48", "verdict": "pass" },
-    { "round": 7, "codeHead": "054d4e014cf7", "verdict": "pass", "completed": "2026-10-25T16:20:00Z", "what": "The architect's four items, each driven. No cluster touched: the drain is still running." }
+    { "round": 7, "codeHead": "054d4e014cf7", "verdict": "pass" },
+    { "round": 8, "codeHead": "00516adc6b34", "verdict": "pass", "completed": "2026-10-25T17:10:00Z", "what": "The exporter's interface was rewritten rather than patched, so the round tested the shape — whether any agent-settable value can reach any path the collector owns, by any route — rather than the three forms the fix replaced." }
   ],
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 7: I drove the collector's namespace separation through the real `session_copy` with the collector's own directories present rather than reading the layout; I re-ran both halves of its negative controls and went past its count by mutating one guard at a time, which attributes each control to the guard it pins; I classified its `envoy-go` claim from the run's own log and the branch's envoy footprint rather than accepting the report; and I drove the claim guard at `CheckPod` rather than reading `legionClaim`. Rounds 1 to 6 were each verified as those rounds record."
+    "how": "Round 8: I re-ran both halves of its 50-case suite rather than the passing one — 50 pass at this head, 34 fail against the script as it was at the previous head — and I enumerated the harness's agent-settable inputs myself and drove each against the new interface, which its proof does not do. Its claim that the locator is not an agent's to write I checked in the daemon's own types rather than accepting the comment that states it. Rounds 1 to 7 were each verified as those rounds record."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "round": 7,
-      "criterion": "No name a pod chooses can reach a path the transcript collector owns.",
-      "surface": "The real `session_copy` extracted from `scripts/e2e/stage4b-sandbox-tree.sh` at this head, writing into `transcripts/pods` as `collect_transcripts` now does, with `transcripts/controller` and `transcripts/daemon-controller` already present and the first holding a file.",
-      "command": "Seed keys deriving `controller`, `daemon-controller`, `pods`, a `../escape.jsonl` remainder and a nested `controller/nested.jsonl`; run `session_copy` into `transcripts/pods`; walk the whole `transcripts` tree",
-      "observed": "Every derived name lands inside `transcripts/pods/` — `controller`, `daemon-controller`, `pods`, `.._escape.jsonl`, `controller_nested.jsonl` — and `transcripts/controller/keep.jsonl` is byte-unchanged. The class is closed by the destination rather than by reserved names: the traversal guard requires each written name to resolve as a direct child of the copy's own directory, and that directory is now the collector's sibling, so no name can leave it.",
-      "headSha": "054d4e014cf7",
-      "negativeControl": "The collector's own file, placed before the run and read after it: had any derived name reached a collector path, that file or its directory would have changed. Neither did."
+      "round": 8,
+      "criterion": "No value an agent can set reaches any path the transcript collector owns, by any route.",
+      "surface": "The real `session_copy` at this head, driven with the collector's own `review-pair/reviewer.jsonl` present, after enumerating from the script which of the harness's inputs an agent can set.",
+      "command": "Enumerate the reads: the claim's `.sessionFile` (both callers), the claim's `.locator.sandbox.name`, `pair_agents`, the area keyword. Then drive the function with stems `../../escape`, `..`, `.`, empty, `a/b`, `x$(id)` and one holding a newline; an area of `../../etc`; and a prefix of `../../etc/`. Walk the evidence tree afterwards.",
+      "observed": "The agent-settable `.sessionFile` reaches only the SQL key prefix in both callers — `${pair_session%.jsonl}/` and `dirname \"$launched_file\"` — and names no directory at all. Every non-plain stem is refused by name with nothing written; an unknown area is refused; a prefix that looks like a traversal writes only inside the area root, because a prefix selects rows and feeds a derivation whose output is mapped to `[A-Za-z0-9._-]` and then anchored. `pair_agents` is a literal at `:1095`. Everything written landed inside the area root and the collector's own file is byte-unchanged. No route exists.",
+      "headSha": "00516adc6b34",
+      "negativeControl": "The plain stem `podname` in the same runs copies its keys normally, so each refusal is the guard firing on that value and not the function failing; and the collector's file, placed before the runs and read after them, is what would have moved had any route existed."
     },
     {
-      "round": 7,
-      "criterion": "The unchecked-write class in the collector, and the sensitivity of the controls that pin it.",
-      "surface": "The script at this head, read for the class, and `bun test scripts/e2e/lib/stage4b-session-text.test.ts` run against copies of the script with one guard disabled at a time.",
-      "command": "Read `record_pair` whole; then run the control suite unmodified, and again with the collision arm, the empty/dot name arm and the traversal arm each disabled in turn in a copy",
-      "observed": "Every write in `record_pair` is guarded — `mkdir -p`, `printf > reviewer.jsonl`, `pair_dispatch > $agent.json`, `printf > session-stem`, each `|| return 1`, with `session_copy` already returning non-zero — and there is no fifth write in the function. The suite is 33 pass / 0 fail unmodified. Disabling the collision arm fails 6 controls, the name arm 1, the traversal arm 1: the author's 8 against 25, now attributed guard-by-guard, so every control pins a guard and every guard has at least one control.",
-      "headSha": "054d4e014cf7",
-      "negativeControl": "The mutations are the control: a suite that passed under all three would pin nothing. One of them nearly escaped me — my first attempt at the traversal mutation used an anchor that did not match, so it changed nothing and the suite passed, which reads exactly like a guard no test cares about. I verified the mutation had landed before trusting the result.",
-      "doesNotSettle": "The class is closed in `record_pair` and not in the file: `production_audit`'s `printf … >\"$evidence/run-sessions.json\"` (`:2669`) is the same shape — an unguarded write inside a function whose failure is checked, with errexit off inside it — so the write failing leaves the audit passing with its evidence missing. Pre-existing and outside this change's diff; named rather than folded into a clean report."
+      "round": 8,
+      "criterion": "The suite that pins the rewritten interface is sensitive to it, not merely compatible with it.",
+      "surface": "`bun test scripts/e2e/lib/stage4b-session-text.test.ts`, run at this head and against the script as it was at the previous head.",
+      "command": "Run the suite here; then copy the e2e directory, replace `stage4b-sandbox-tree.sh` with `jj file show -r 054d4e014cf7`'s version, and run the same suite",
+      "observed": "50 pass / 0 fail at this head; 16 pass / 34 fail against the previous head's script. The 34 are the half that matters: a suite passing at this head and never run against the old one would prove only that the shape compiles.",
+      "headSha": "00516adc6b34",
+      "negativeControl": "The 16 that still pass against the old script are the control on the comparison: had the whole suite failed, the difference would have been the harness rather than the interface."
     },
     {
-      "round": 7,
-      "criterion": "The `envoy-go` red, classified rather than dismissed.",
-      "surface": "The lane's own log at the head where it concluded, and the branch's diff.",
-      "command": "Read the failed job's log at `2056d96c3f48`; locate the named test; compute the branch's footprint under `packages/envoy`; read `broker-multiprocess` and `envoy-go-race` at that head",
-      "observed": "`panic: test timed out after 10m0s` with `running tests: TestTwoSweepRunnersRunThePassOnceAndSkipOnce`, which is `packages/envoy/internal/dispatch/api/suggestion_outcomes_lease_test.go:47`. The branch touches no file under `packages/envoy` and nothing of its diff is in that package. At the same head `broker-multiprocess=success` and `envoy-go-race=success`, so the rounds 5-6 compile break is cured and this is a different failure: a ten-minute hang in a leased sweep the branch does not touch. Not ours.",
-      "headSha": "2056d96c3f48",
-      "negativeControl": "The two sibling lanes at the same head: both green, and both would have failed on the compile break that caused the earlier red, so the red that remains is not that one."
-    },
-    {
-      "round": 7,
-      "criterion": "The claim guard keeps the contract its comment states, for the claim name this change introduces.",
-      "surface": "`sandbox.CheckPod`, the exported entry the operator's pod is checked at, driven with an operator volume naming each claim shape in turn.",
-      "command": "A program calling `CheckPod` with `legion-infra-infra-80-issue`, `issue-legion-infra-controller`, `cache-legion-infra-sjawhar-legion`, `tree-legion-infra-infra-80`, `team-share` and `legion-notes`",
-      "observed": "All four Legion-shaped names are refused, the pod-owned disk's `legion-…-issue` among them, each naming the volume kind and telling the operator to name a claim of their own. `team-share` and `legion-notes` are accepted.",
-      "headSha": "054d4e014cf7",
-      "negativeControl": "`legion-notes`, which starts `legion-` and is not a disk, is accepted: the suffix half of the rule is doing work, and the guard is not refusing every name that begins with the project's prefix."
-    },
-    {
-      "round": 7,
-      "criterion": "The standing acceptance surfaces, re-run at this head.",
-      "surface": "The real `workspace-init` and `legion start --check-config` CLIs built from this head, and the sandbox package's rig.",
-      "command": "provision with the branch deleted from the feed; the configuration rule over four files; the five gap tests",
-      "observed": "Provision exit 0 with `a.txt` alone and the root holding `repos` and `workspaces` and nothing else; the example 0, `pvc` 1, the key omitted 1, `cloudsql-iam` 0; all five gap tests pass, the round-3 lock among them.",
-      "headSha": "054d4e014cf7",
-      "negativeControl": "Round 5's run of the same configuration files against a `legion` built from `main@origin`, which answers `Config OK` to all three, establishes that the refusal is this change's own."
+      "round": 8,
+      "criterion": "The input that now names a directory is not one an agent writes.",
+      "surface": "The daemon's own types and write paths, read rather than inferred from the script's comment.",
+      "command": "Read `supervise.RequestRegister`; find every writer of a claim's locator; check the API's mentions of it",
+      "observed": "`RequestRegister` — the registration an agent makes — carries `Claim`, `Generation`, `Session`, `SessionFile`, `CapabilityHash` and `PluginContract`, and **no locator** (`internal/supervise/table.go:131-140`). The locator is written by the daemon from its own launch (`internal/supervise/machine.go:917`, `:1321`); the API's only other mention is a read of the stored value for a capability report (`internal/api/claims.go:180-186`). So the stem's input is the daemon's, and the plain-name refusal driven above is a second fence rather than the only one.",
+      "headSha": "00516adc6b34",
+      "negativeControl": "`SessionFile` is in that same request type and is the value that bit twice: the asymmetry between the two fields in one struct is what makes the claim checkable rather than asserted."
     }
   ],
   "ciAtCodeHead": {
-    "head": "054d4e014cf7",
-    "read": "2026-10-25T16:14:00Z",
-    "success": "broker-multiprocess, build, changes, claude-envoy, contracts, dispatch-multiprocess, envoy-client, envoy-e2e-local, envoy-infra-go, envoy-plugin, envoy-smoke, pi-envoy, pi-legion, pi-shared, pr-title, typecheck",
-    "running": "lint, test, dispatch, dispatch-memory, envoy-go, envoy-go-race — cited as running and not as green",
-    "skipped": "attest, deploy",
-    "note": "Read, not re-run; no lane waited for. `broker-multiprocess` is success here as it was at the previous head, so the inherited compile break stays cured. `envoy-go` had not concluded at my read; whoever reads next should read it at the head they review rather than inherit a verdict, since its last conclusion was the unrelated ten-minute hang classified above."
+    "head": "00516adc6b34",
+    "read": "2026-10-25T17:01:00Z",
+    "success": "typecheck, pr-title, changes, claude-envoy, contracts, envoy-e2e-local, envoy-plugin",
+    "running": "lint, test, build, dispatch, dispatch-memory, envoy-go — cited as running and not as green; the rest queued",
+    "correction": "The required four have been green at a single head three times, which the tree had taken as never seen: at 054d4e014cf7, 2056d96c3f48 and ace35f9ce9f3, lint, typecheck, test and pr-title all read success. What nobody had seen was a read taken while they were green — every read of ours was taken while they still ran, and they settled afterwards. The remedy is not a longer wait but a later read: the lane's conclusion is durable and can be read at any time after it settles.",
+    "note": "Read, not re-run; no lane waited for."
   },
   "observations": [
-    "Three times today a step of my own silently did nothing and its result read like a finding: `od` collapsing repeated lines to `*` (an odd-length hex that looked like corruption), a string replacement whose anchor did not match (a mutation that changed nothing and read as a guard no test pins), and an out-of-tree copy one head stale (a guard that looked unimplemented and was not). Each was caught before it was reported, by checking that the step had landed rather than that its output looked plausible. The remedy is the same in all three and is worth a line in the retro note beside `skipped` is a third answer: verify the instrument changed what it claims to change, then read what it says."
+    "`-rf` passes the stem rule, being plain by the character test, so a directory of that name can be created. Harmless inside `session_copy` — every use of the path is quoted and `mkdir -p --` and `realpath -m --` end their options — and the stems in use are two literals and a pod name, which DNS-1123 forbids from starting with `-`. Named because a leading dash is the classic shape that bites a later consumer, not because anything here is wrong."
   ],
   "notReachedHere": [
-    "The seven inverted Stage 4a per-check assertions are unrun, not passing, and Stage 4b has run at no head. Unchanged and unchangeable from here.",
-    "Nothing this round touched the cluster: the drain of nineteen trees was still running."
+    "The seven inverted Stage 4a per-check assertions are unrun, not passing, and Stage 4b has run at no head.",
+    "Nothing this round ran against the cluster namespace: the window is scheduled and nothing is parked."
   ],
   "residualRisks": [
-    "Unchanged from round 5: the single generation counter behind the gap record; a daemon restarting inside the replacement's gap; and the stable claim name meaning a replacement pod waits on its predecessor's claim being reaped.",
-    "The transcript collector copies what it can and fails the run. A run that failed with most evidence kept and a run that passed with evidence missing look alike in the directory and differ in the verdict line; the verdict line is now the one that moves."
+    "Unchanged from round 5: the single generation counter behind the gap record; a daemon restarting inside the replacement's gap; the stable claim name meaning a replacement pod waits on its predecessor's claim being reaped.",
+    "Unchanged from round 7: `production_audit`'s unguarded evidence write at `:2669`, pre-existing and left to the reviewer to rule in or out of this change."
   ]
 }
