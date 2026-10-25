@@ -3274,7 +3274,9 @@ export interface DeliveryLiveDelta {
   >;
   readonly revs: DeliveryLiveRevChanges;
 }
-/** Sent to every subscriber when the freshness row's verdict changes, and never otherwise. */
+/** Sent to every subscriber when the freshness row's verdict changes, and to a subscription right
+ *  after its first answer, so a page that was not subscribed at a change still learns it; never
+ *  otherwise. */
 export interface DeliveryLiveFreshness {
   readonly type: "freshness";
   readonly freshness: DeliveryTimelineResponse["freshness"];

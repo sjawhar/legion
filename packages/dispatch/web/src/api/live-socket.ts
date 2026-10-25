@@ -68,8 +68,9 @@ const ERROR_STATUS: Readonly<Partial<Record<string, number>>> = {
 
 export type LiveSocketConnection = "connecting" | "open" | "reconnecting" | "closed";
 
-/** The freshness row's verdict as Dispatch last sent it in a `freshness` frame, which it sends only
- *  when the verdict changes: the freshness object and the sources past their threshold. */
+/** The freshness row's verdict as Dispatch last sent it in a `freshness` frame, which it sends to
+ *  every subscriber when the verdict changes and to a subscription right after its first answer:
+ *  the freshness object and the sources past their threshold. */
 export interface DeliveryLiveVerdict {
   readonly freshness: DeliveryFreshness;
   readonly stale: readonly string[];
