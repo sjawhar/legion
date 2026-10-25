@@ -2,9 +2,9 @@ package identity
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
-	"strings"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
@@ -20,24 +20,26 @@ var _ SignInRule = DomainRule{}
 
 // Person names the person by the ID token's `email` claim, which Google writes, and checks the
 // account is of the domain by `hd`, the account's Workspace domain, never by the email's own
-// domain. A token with no subject is ErrNoPerson, one with no email of an address's shape
-// ErrNoEmail, one of another domain or none ErrNotInDomain, and one whose email Google has not
-// verified ErrEmailNotVerified.
+// domain: the Workspace rule the secrets broker's sign-in applies too (oidc.WorkspaceLogin), each
+// of its refusals worded as Dispatch's own. A token with no subject is ErrNoPerson, one with no
+// email of an address's shape ErrNoEmail, one of another domain or none ErrNotInDomain, and one
+// whose email Google has not verified ErrEmailNotVerified.
 func (r DomainRule) Person(claims oidc.Claims) (string, error) {
-	if claims.Subject == "" {
+	email, err := oidc.WorkspaceLogin(claims, r.Domain)
+	switch {
+	case err == nil:
+		return email, nil
+	case errors.Is(err, oidc.ErrNoSubject):
 		return "", fmt.Errorf("%w: the Google ID token carries no subject", ErrNoPerson)
-	}
-	if !emailShape.MatchString(claims.Email) {
+	case errors.Is(err, oidc.ErrNoEmail):
 		return "", ErrNoEmail
-	}
-	email := strings.ToLower(claims.Email)
-	if claims.HostedDomain != r.Domain {
+	case errors.Is(err, oidc.ErrNotInDomain):
 		return email, fmt.Errorf("%s (hd %q): %w", email, claims.HostedDomain, ErrNotInDomain)
-	}
-	if !claims.EmailVerified {
+	case errors.Is(err, oidc.ErrEmailNotVerified):
 		return email, fmt.Errorf("%s: %w", email, ErrEmailNotVerified)
+	default:
+		return email, err
 	}
-	return email, nil
 }
 
 // RefusalLogFields names the email and hd Google's token carried.

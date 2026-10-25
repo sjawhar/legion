@@ -96,7 +96,7 @@ func providerEmail(claims oidc.Claims) (string, bool) {
 		if provider == "" {
 			continue
 		}
-		if rest, ok := strings.CutPrefix(claims.Username, provider+"_"); ok && emailShape.MatchString(rest) {
+		if rest, ok := strings.CutPrefix(claims.Username, provider+"_"); ok && oidc.EmailShape.MatchString(rest) {
 			return strings.ToLower(rest), true
 		}
 	}

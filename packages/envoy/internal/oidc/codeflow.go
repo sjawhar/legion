@@ -31,8 +31,11 @@ type Session struct {
 }
 
 // CodeFlow signs a person in with OpenID Connect's authorization code flow as one confidential
-// client of one issuer, renews the sign-in with its refresh token, and revokes a refresh token at
-// the issuer's revocation endpoint. Every ID token it returns has been verified against the
+// client of one issuer, in one of two modes the caller picks by the methods it calls. Offline mode
+// (AuthURL, Exchange) keeps the sign-in's refresh token, renews the sign-in with it (Refresh) and
+// revokes it at the issuer's revocation endpoint (Revoke): Dispatch's sign-in. Online mode
+// (OnlineAuthURL, OnlineExchange) signs a person in once with PKCE and keeps no refresh token: the
+// secrets broker's approval sign-in. Every ID token it returns has been verified against the
 // issuer's keys, the client as audience, and its expiry.
 type CodeFlow struct {
 	verifier *Verifier
@@ -49,9 +52,9 @@ type CodeFlow struct {
 // NewCodeFlow reads the issuer's discovery document now and returns the code flow for the client.
 // An issuer whose discovery names no authorization_endpoint or token_endpoint offers no sign-in,
 // and is refused. One that names no revocation_endpoint is accepted, and Revoke fails against it.
-// hostedDomain is the Google Workspace domain of a domain-mode flow (Google's issuer), which asks
-// for offline access and reads the Workspace claims; empty, the flow is a Cognito sign-in pool's
-// and does neither.
+// hostedDomain is the Google Workspace domain of a domain-mode flow (Google's issuer), which reads
+// the Workspace claims and, in offline mode, asks for offline access; empty, the flow is a Cognito
+// sign-in pool's and does neither.
 func NewCodeFlow(ctx context.Context, issuer, clientID, clientSecret, hostedDomain string) (*CodeFlow, error) {
 	provider, err := gooidc.NewProvider(ctx, issuer)
 	if err != nil {
@@ -86,18 +89,21 @@ func NewCodeFlow(ctx context.Context, issuer, clientID, clientSecret, hostedDoma
 }
 
 // DiscoverCodeFlow is NewCodeFlow under a deadline on the discovery read, as Discover is for the
-// pod-token verifier.
+// pod-token verifier. A caller that builds the flow at its first sign-in rather than at boot (the
+// secrets broker, whose machines must not wait on a person's issuer) calls it then, and signs in
+// with OnlineAuthURL and OnlineExchange.
 func DiscoverCodeFlow(ctx context.Context, issuer, clientID, clientSecret, hostedDomain string, timeout time.Duration) (*CodeFlow, error) {
 	discovery, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	return NewCodeFlow(discovery, issuer, clientID, clientSecret, hostedDomain)
 }
 
-// AuthURL is where a browser starts the sign-in: the issuer's authorization endpoint asking for a
-// code to be sent to redirectURL with state, and an ID token carrying nonce. A domain-mode flow
-// also asks Google for offline access with consent, since Google returns a refresh token only for
-// access_type=offline and, after the first exchange, only with prompt=consent; and it names the
-// domain as hd, a hint for Google's account chooser that the callback does not rely on.
+// AuthURL is where a browser starts an offline-mode sign-in: the issuer's authorization endpoint
+// asking for a code to be sent to redirectURL with state, and an ID token carrying nonce. A
+// domain-mode flow also asks Google for offline access with consent, since Google returns a
+// refresh token only for access_type=offline and, after the first exchange, only with
+// prompt=consent; and it names the domain as hd, a hint for Google's account chooser that the
+// callback does not rely on.
 func (f *CodeFlow) AuthURL(redirectURL, state, nonce string) string {
 	config := f.config
 	config.RedirectURL = redirectURL
@@ -109,8 +115,8 @@ func (f *CodeFlow) AuthURL(redirectURL, state, nonce string) string {
 }
 
 // Exchange trades the code the issuer redirected to redirectURL for the signed-in person's ID
-// token and refresh token. The ID token must carry nonce, the value the sign-in that sent the
-// browser to AuthURL bound it to.
+// token and refresh token, in offline mode; an answer with no refresh token is refused. The ID
+// token must carry nonce, the value the sign-in that sent the browser to AuthURL bound it to.
 func (f *CodeFlow) Exchange(ctx context.Context, redirectURL, code, nonce string) (Session, error) {
 	config := f.config
 	config.RedirectURL = redirectURL
@@ -129,6 +135,70 @@ func (f *CodeFlow) Exchange(ctx context.Context, redirectURL, code, nonce string
 		return Session{}, errors.New("oidc: the issuer returned no refresh token")
 	}
 	return session, nil
+}
+
+// OnlineSignIn is one sign-in in online mode, the values the caller generated for it and keeps
+// until the callback: the same value goes to OnlineAuthURL and then to OnlineExchange.
+type OnlineSignIn struct {
+	// State is the value the issuer hands back to the callback, which the caller compares.
+	State string
+	// Nonce is the value the ID token must carry, binding it to this sign-in.
+	Nonce string
+	// Verifier is the PKCE code verifier (RFC 7636, oauth2.GenerateVerifier): the authorization
+	// request carries its S256 challenge and the exchange the verifier, so a code is worth nothing
+	// to whoever intercepts it without the verifier.
+	Verifier string
+	// LoginHint, when set, names the account the issuer's chooser should offer.
+	LoginHint string
+	// SelectAccount asks the issuer to show its account chooser (prompt=select_account), for a
+	// person switching to another account.
+	SelectAccount bool
+}
+
+// OnlineAuthURL is where a browser starts an online-mode sign-in: the issuer's authorization
+// endpoint asking for a code to be sent to redirectURL with signIn's state, an ID token carrying
+// its nonce, and PKCE with its verifier's S256 challenge. It asks for no offline access and no
+// consent, since an online sign-in keeps no refresh token: the person is signed in once, and signs
+// in again when the caller's own session ends. It names the hosted domain as hd, as AuthURL does,
+// when the flow has one.
+func (f *CodeFlow) OnlineAuthURL(redirectURL string, signIn OnlineSignIn) string {
+	config := f.config
+	config.RedirectURL = redirectURL
+	options := []oauth2.AuthCodeOption{gooidc.Nonce(signIn.Nonce), oauth2.S256ChallengeOption(signIn.Verifier)}
+	if f.hostedDomain != "" {
+		options = append(options, oauth2.SetAuthURLParam("hd", f.hostedDomain))
+	}
+	if signIn.LoginHint != "" {
+		options = append(options, oauth2.SetAuthURLParam("login_hint", signIn.LoginHint))
+	}
+	if signIn.SelectAccount {
+		options = append(options, oauth2.SetAuthURLParam("prompt", "select_account"))
+	}
+	return config.AuthCodeURL(signIn.State, options...)
+}
+
+// OnlineExchange trades the code the issuer redirected to redirectURL, with signIn's PKCE
+// verifier, for the signed-in person's verified ID token claims (the Workspace claims too, when
+// the flow has a hosted domain). The ID token must carry signIn's nonce. A refresh token the issuer
+// returns anyway is dropped, never returned: an online sign-in keeps none.
+func (f *CodeFlow) OnlineExchange(ctx context.Context, redirectURL, code string, signIn OnlineSignIn) (Claims, error) {
+	if signIn.Nonce == "" || signIn.Verifier == "" {
+		return Claims{}, errors.New("oidc: an online sign-in needs its nonce and PKCE verifier")
+	}
+	config := f.config
+	config.RedirectURL = redirectURL
+	token, err := config.Exchange(f.tokenContext(ctx), code, oauth2.VerifierOption(signIn.Verifier))
+	if err != nil {
+		return Claims{}, fmt.Errorf("oidc: exchange code: %w", err)
+	}
+	session, err := f.session(ctx, token)
+	if err != nil {
+		return Claims{}, err
+	}
+	if session.Claims.Nonce != signIn.Nonce {
+		return Claims{}, errors.New("oidc: the ID token's nonce is not the sign-in's")
+	}
+	return session.Claims, nil
 }
 
 // Refresh renews a sign-in with its refresh token, returning the person's claims as the issuer

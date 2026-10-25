@@ -3,7 +3,8 @@
 // test controls, the minting side a Kubernetes pod's projected service-account
 // token would come from, and, once EnableCodeFlow arms it, the authorization,
 // token and revocation endpoints a person's sign-in goes through
-// (authorization code, refresh token, RFC 7009 revocation). It is an ordinary
+// (authorization code with optional PKCE S256, refresh token, RFC 7009
+// revocation). It is an ordinary
 // package rather than a _test.go file so the packages that need it —
 // internal/oidc, internal/dispatch/api, internal/dispatch/routes,
 // internal/dispatch/store, cmd/dispatch and cmd/listener — can all import it;
@@ -14,6 +15,7 @@ package oidctest
 import (
 	"crypto/rand"
 	"crypto/rsa"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -84,6 +86,12 @@ type codeFlow struct {
 	grants       map[string]*refreshGrant
 	refreshes    int
 	revocation   revocation
+	// omitRefresh makes a code exchange answer with no refresh token
+	// (OmitRefreshTokens).
+	omitRefresh bool
+	// spoil changes the claims of every ID token the token endpoint mints,
+	// after the issuer has filled them in (SpoilIDTokens).
+	spoil func(claims map[string]any)
 }
 
 // revocation is the state of the revocation endpoint: every token the client
@@ -99,10 +107,14 @@ type revocation struct {
 	delay    time.Duration
 }
 
+// codeGrant is one authorization code: the person it signs in, the nonce and
+// redirect URI of the authorization request that issued it, and the PKCE S256
+// code_challenge that request carried, empty when it carried none.
 type codeGrant struct {
 	claims      map[string]any
 	nonce       string
 	redirectURI string
+	challenge   string
 }
 
 // refreshGrant is one refresh token: the claims each refresh's ID token
@@ -254,6 +266,25 @@ func (i *Issuer) RevocationRequests() []string {
 	return append([]string(nil), i.codeFlow.revocation.requests...)
 }
 
+// OmitRefreshTokens makes every code exchange from now on answer with no
+// refresh token, as Google does for a sign-in that did not ask for offline
+// access.
+func (i *Issuer) OmitRefreshTokens() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.omitRefresh = true
+}
+
+// SpoilIDTokens makes change rewrite the claims of every ID token the token
+// endpoint mints from now on, after the issuer has set iss, aud, iat, exp and
+// the nonce, so a test can spoil one of them in a token the code flow
+// otherwise issues as usual. A nil change mints them unspoiled again.
+func (i *Issuer) SpoilIDTokens(change func(claims map[string]any)) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.codeFlow.spoil = change
+}
+
 // SignInAs queues the claims the next authorization request signs in with: the
 // person who completes the sign-in at the identity provider. The issuer adds
 // iss, aud, iat, exp and the request's nonce when it mints the ID token.
@@ -378,6 +409,11 @@ func (i *Issuer) handleDiscovery(w http.ResponseWriter, _ *http.Request) {
 	_ = json.NewEncoder(w).Encode(document)
 }
 
+// handleAuthorize issues a code for the next queued sign-in and redirects to
+// the request's redirect_uri with it and the request's state. It records the
+// request's nonce, for the ID token, and its PKCE code_challenge, which only
+// the S256 method may carry: a challenge by any other method, plain included,
+// is a bad request, so a client that sends one never gets a code to exchange.
 func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query()
 	i.mu.Lock()
@@ -390,6 +426,9 @@ func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	case query.Get("client_id") != flow.clientID || query.Get("response_type") != "code" || query.Get("redirect_uri") == "":
 		http.Error(w, "bad authorization request", http.StatusBadRequest)
 		return
+	case query.Has("code_challenge") && (query.Get("code_challenge") == "" || query.Get("code_challenge_method") != "S256"):
+		http.Error(w, "bad authorization request: code_challenge must be S256", http.StatusBadRequest)
+		return
 	case len(flow.queued) == 0:
 		http.Error(w, "no sign-in queued (SignInAs)", http.StatusBadRequest)
 		return
@@ -397,7 +436,7 @@ func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	claims := flow.queued[0]
 	flow.queued = flow.queued[1:]
 	code := randomValue()
-	flow.codes[code] = codeGrant{claims: claims, nonce: query.Get("nonce"), redirectURI: query.Get("redirect_uri")}
+	flow.codes[code] = codeGrant{claims: claims, nonce: query.Get("nonce"), redirectURI: query.Get("redirect_uri"), challenge: query.Get("code_challenge")}
 	target, err := url.Parse(query.Get("redirect_uri"))
 	if err != nil {
 		http.Error(w, "bad redirect_uri", http.StatusBadRequest)
@@ -412,8 +451,11 @@ func (i *Issuer) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 
 // handleToken answers the two grants a confidential client makes, as Cognito's
 // token endpoint does: a code exchange returns an ID token, an access token and
-// a refresh token; a refresh returns a fresh ID token and access token and no
-// new refresh token.
+// a refresh token (none once OmitRefreshTokens is set); a refresh returns a
+// fresh ID token and access token and no new refresh token. A code whose
+// authorization request carried a PKCE challenge is exchanged only with the
+// code_verifier whose S256 is that challenge (RFC 7636 section 4.6); a missing
+// or wrong verifier is invalid_grant, and spends the code like any refusal.
 func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		tokenError(w, http.StatusBadRequest, "invalid_request")
@@ -446,12 +488,18 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 			tokenError(w, http.StatusBadRequest, "invalid_grant")
 			return
 		}
+		if grant.challenge != "" && s256Challenge(r.PostForm.Get("code_verifier")) != grant.challenge {
+			tokenError(w, http.StatusBadRequest, "invalid_grant")
+			return
+		}
 		claims = maps.Clone(grant.claims)
 		if grant.nonce != "" {
 			claims["nonce"] = grant.nonce
 		}
-		refresh = randomValue()
-		flow.grants[refresh] = &refreshGrant{claims: maps.Clone(grant.claims)}
+		if !flow.omitRefresh {
+			refresh = randomValue()
+			flow.grants[refresh] = &refreshGrant{claims: maps.Clone(grant.claims)}
+		}
 	case "refresh_token":
 		flow.refreshes++
 		grant, ok := flow.grants[r.PostForm.Get("refresh_token")]
@@ -469,6 +517,9 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	claims["aud"] = flow.clientID
 	claims["iat"] = now.Add(-time.Minute).Unix()
 	claims["exp"] = now.Add(time.Hour).Unix()
+	if flow.spoil != nil {
+		flow.spoil(claims)
+	}
 	idToken, err := sign(flow.key, claims)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -485,6 +536,16 @@ func (i *Issuer) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(body)
+}
+
+// s256Challenge is the PKCE S256 code_challenge of verifier, and empty for no
+// verifier, which matches no recorded challenge.
+func s256Challenge(verifier string) string {
+	if verifier == "" {
+		return ""
+	}
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 // handleRevoke answers a revocation as Cognito's /oauth2/revoke does for a
