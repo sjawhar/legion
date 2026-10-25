@@ -27,7 +27,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -48,27 +47,10 @@ import (
 	"github.com/sjawhar/envoy/internal/testnats"
 )
 
-// multiprocessNATSEnv names a NATS server already running beside the tests, the one the INFRA-66
-// pod harness starts. See multiprocessNATS.
-const multiprocessNATSEnv = "DISPATCH_TEST_NATS_URL"
-
-// multiprocessNATS is the NATS server this file's processes share: the one
-// DISPATCH_TEST_NATS_URL names when it is set, and otherwise a container of this test's own.
-//
-// Both paths exist because the two places these tests run differ. CI has Docker, so
-// testnats.Start gives each run a server nothing else has touched - the testcontainers NATS
-// module's default command is `-DV -js` (modules/nats's Run), so JetStream, which Dispatch's
-// outbox needs for its stream, is on without this passing anything. A development pod has no
-// Docker at all, so testnats.Start cannot run there; the harness runs one `nats-server -js` for
-// the pod instead and names it in the environment.
-//
-// A server named in the environment outlives the run, so a row that reads the notification
-// stream reads it from where it stood when that row began (streamHead), never from empty.
+// multiprocessNATS is the NATS server this file's processes share: one of this test's own, with
+// JetStream for Dispatch's outbox stream, running in this test process and ending with the test.
 func multiprocessNATS(t *testing.T) string {
 	t.Helper()
-	if url := strings.TrimSpace(os.Getenv(multiprocessNATSEnv)); url != "" {
-		return url
-	}
 	_, url := testnats.Start(t)
 	return url
 }
@@ -350,8 +332,7 @@ func TestTheOutboxPublishesEachEventOnceAcrossBothProcesses(t *testing.T) {
 	if err != nil {
 		t.Fatalf("JetStream context: %v", err)
 	}
-	// The stream outlives a run against the harness's own NATS, so this row reads only what it
-	// publishes itself.
+	// This row counts only what it publishes itself: readStreamFrom starts past this head.
 	head := streamHead(t, js)
 
 	lane := make(chan contracts.Envelope, 256)
@@ -442,9 +423,10 @@ func waitForEveryEventPublished(t *testing.T, database *store.Store, within time
 	}
 }
 
-// streamHead is the last sequence the notification stream holds, read before a row publishes
-// anything: readStreamFrom reads past it, so an earlier run's messages on a long-lived server are
-// never counted as this row's.
+// streamHead is the last sequence the notification stream holds when a row begins, read before
+// that row publishes anything: readStreamFrom reads past it, so nothing already on the stream is
+// counted as the row's. A row starts a NATS server of its own, whose stream begins empty, so the
+// head it reads is zero; reading it is what keeps that an assumption the row does not make.
 func streamHead(t *testing.T, js natsgo.JetStreamContext) uint64 {
 	t.Helper()
 	info, err := js.StreamInfo(bus.Stream)

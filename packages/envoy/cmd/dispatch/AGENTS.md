@@ -540,7 +540,7 @@ job (`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), b
 and their NATS take minutes rather than seconds:
 
 ```sh
-env DISPATCH_TEST_DATABASE_URL=… DISPATCH_TEST_NATS_URL=… go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch
+env DISPATCH_TEST_DATABASE_URL=… go test -tags multiprocess -count=1 -timeout 30m ./cmd/dispatch
 ```
 
 A developer who runs only the block above runs neither tagged suite, which is why both are named

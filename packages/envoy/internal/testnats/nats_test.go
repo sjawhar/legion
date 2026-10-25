@@ -487,7 +487,6 @@ var dockerDrivers = []string{"exec.Command(" + `"docker"`, "NewDockerClient" + "
 // they are empty.
 var (
 	packagesAwaitingMigration = []string{
-		"github.com/sjawhar/envoy/cmd/natstail",
 		// internal/smoke is not here: its container-backed tests are behind the smoke build tag,
 		// which this walk does not see, as it does not see image.go either.
 	}
