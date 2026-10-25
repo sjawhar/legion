@@ -2776,6 +2776,27 @@ parse ends that watch. On 410 Gone it lists the Secrets again, so a value a Secr
 the last version seen and that list is not seen; every value a list or a watch event shows is. It
 exits 2 when it cannot start.
 
+## lib/h2-settings.ts
+
+Whether a front proxy in front of Dispatch advertises HTTP/2 extended CONNECT
+(`SETTINGS_ENABLE_CONNECT_PROTOCOL`, RFC 8441). Dispatch's live updates ride one WebSocket per tab
+on a connection of its own; a proxy that advertises it lets a browser open that socket as a stream
+of the page's shared HTTP/2 connection instead, where the never-ending request
+dispatch://INFRA-258 fixed can come back. Run it against a deployment's front proxy:
+
+```sh
+bun scripts/e2e/lib/h2-settings.ts https://<dispatch host>/     # exit 0: not advertised
+```
+
+It offers `h2` and `http/1.1` over TLS as a browser does and prints one JSON line: `url`, `alpn`
+(the protocol the server chose, `false` for none) and `settings` (the server's SETTINGS as Node's
+HTTP/2 client reads them, `null` without HTTP/2). It exits 1 when `settings.enableConnectProtocol`
+is true, naming the origin on stderr; 0 when it is false or the server speaks no HTTP/2; 2 on a
+usage error, or when it has no answer: a TLS or certificate failure, or no SETTINGS within 10 s.
+Certificates are verified, so a proxy behind a private CA needs `NODE_EXTRA_CA_CERTS`.
+`h2-settings.test.ts` (`bun test scripts/e2e/lib`) runs it against a local
+`http2.createSecureServer` with and without `settings.enableConnectProtocol`.
+
 ## lib/stage4b-tools.jq
 
 What a tool returned in a role's Oh My Pi session, for a Stage 4b checkpoint to prove a tool ran
