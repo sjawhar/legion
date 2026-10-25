@@ -1073,6 +1073,49 @@ func TestDispatchPodWithBrokerAndAppMatchesGolden(t *testing.T) {
 	requirePodGolden(t, m, "example-dispatch", "dispatch-pod-with-broker-and-app.golden")
 }
 
+// With a broker configured, the app's container carries what Dispatch boots on: Dispatch requires
+// DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE whenever DISPATCH_AGENT_SECRETS_URL is set, refuses to
+// start while either removed shared-bearer setting (DISPATCH_AGENT_SECRETS_TOKEN or its _FILE) is
+// set, and presents the file's contents to the broker as its own Kubernetes ServiceAccount token.
+// So the file it names lies on a projected serviceAccountToken volume mounted into envoy-dispatch,
+// which the kubelet rotates, never on a volume holding a secret every reader shares.
+func TestDispatchWithABrokerPresentsItsOwnServiceAccountToken(t *testing.T) {
+	m, err := runDispatch(t, dispatchBrokerAndAppArgs(t), true)
+	require.NoError(t, err)
+	template := deploymentPodTemplate(t, m, "example-dispatch")
+	container := podContainer(t, template, "envoy-dispatch")
+	env := containerEnv(t, container)
+	require.Contains(t, env, "DISPATCH_AGENT_SECRETS_URL")
+	for _, removed := range []string{"DISPATCH_AGENT_SECRETS_TOKEN", "DISPATCH_AGENT_SECRETS_TOKEN_FILE"} {
+		require.NotContains(t, env, removed, "Dispatch refuses to start while %s is set", removed)
+	}
+	path, ok := env["DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE"].(string)
+	require.True(t, ok, "Dispatch refuses to start with DISPATCH_AGENT_SECRETS_URL set and no DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE")
+	var volumeName string
+	for _, item := range container["volumeMounts"].([]any) {
+		mount := item.(map[string]any)
+		mountPath := strings.TrimSuffix(mount["mountPath"].(string), "/") + "/"
+		if strings.HasPrefix(path, mountPath) {
+			volumeName = mount["name"].(string)
+		}
+	}
+	require.NotEmpty(t, volumeName, "no volume mounted into envoy-dispatch holds %s", path)
+	var projected bool
+	for _, item := range template["spec"].(map[string]any)["volumes"].([]any) {
+		volume := item.(map[string]any)
+		if volume["name"] != volumeName {
+			continue
+		}
+		sources, _ := volume["projected"].(map[string]any)["sources"].([]any)
+		for _, source := range sources {
+			if _, ok := source.(map[string]any)["serviceAccountToken"]; ok {
+				projected = true
+			}
+		}
+	}
+	require.True(t, projected, "%s lies on volume %s, which projects no ServiceAccount token", path, volumeName)
+}
+
 // The token's SecretProviderClass is the second of the component: provider gke, the secret's
 // path with /versions/latest, written to the file agent-secrets-token.
 func TestDispatchRegistersTheBrokerTokenSecretProviderClass(t *testing.T) {
