@@ -1,0 +1,129 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-391",
+  "completed": "2026-10-25T15:43:36Z",
+  "plan": "dispatch://INFRA-391/artifact/plan-md",
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the push procedure, the PR body template, the proof and negative-control rules and the simplify pass (references/pr-body.md), and the scratch-branch cleanup the plan assigns the implementer",
+      "ce-simplify-code: the simplify pass over the settled diff before the implementer's proof at the head that merges",
+      "dispatch: the change edits skills/dispatch/SKILL.md 'Architecture components' and references/issues.md, and the A2 proof drives the dispatch CLI (architecture-sync, issue-update --components-json, read)"
+    ],
+    "test": [
+      "legion-worker: the tester's proof rules (references/pr-body.md): drive the changed surface, one negative control per proof, read CI rather than re-running it",
+      "dispatch: the A2 proof drives dispatch architecture-sync, issue-update --components-json and read against the branch's server"
+    ],
+    "review": [
+      "legion-worker: the review and merge-gate rules (references/merge-gate.md, references/review-threads.md), including the stop-the-world migration exception the PR must name",
+      "dispatch: reviewing the skills/dispatch text and the dispatch_architecture_sync tool spec against the skill's own rules"
+    ]
+  },
+  "summary": "Sources become per repository: migration 0117 gives architecture_sources an id (existing rows 0) with primary key (project_key, id) and unique (project_key, repo), and components a source_id (existing rows 0) with a cascading foreign key; a stop-the-world exception named in the PR and a cmd/dispatch/README.md section. Component ids stay bare and project-wide; an import holding another source's id fails for that source only. The importer syncs per source and replaces only its own components under all of the project's source-row locks; the API moves to /projects/{key}/architecture-sources[/{owner}/{repo}][/sync] with GET /architecture carrying sources[] and a per-component source; the CLI, contracts, web pages, browser suite and docs follow.",
+  "tasks": [
+    "1. Migration 0117 + census + upgrade/census store tests; every direct component seeder seeds its source",
+    "2. Importer per source (D4) with per-repository fakeSource and the collision, race, isolation, revival and legacy-shortcut tests",
+    "3. API (D5) with per-repository fakeGitHubApp; routes_table.go; issue component, references and delivery-facet tests",
+    "4. Contracts and envoy-client CLI (D6); claude-envoy dist rebuild and generated skill copy",
+    "5. Web (D7) and unit tests",
+    "6. Browser spec e2e/architecture-sources.e2e.ts (D8) and the moved specs",
+    "7. Documentation and CHANGELOGs (D9)",
+    "8. Proofs (A2 real GitHub via the gh-forwarding shim, A2 fake GitHub, A6 head and base runs, upgrade test), then the simplify pass"
+  ],
+  "trickyParts": [
+    "Census rule: no UPDATE of existing rows (a non-zero census refuses the deploy, cmd/dispatch/README.md:779-783). Existing rows get id 0 / source_id 0 from constant defaults; the identity is attached after the default is dropped, so existing rows keep 0.",
+    "project() must lock every source row of the project in id order before the collision check, so two processes raced on one id give a named failure, never a primary-key error.",
+    "The base-build A6 control copies only the new spec into a tarball export of the base commit and drives Settings through the UI; a startup, compile or seed failure does not count.",
+    "Bearer source saves need \"actor\":{\"kind\":\"session\",...} in the body (api/server.go:679-681).",
+    "A re-save (PUT) resets the source row's bookkeeping but leaves its components until the next import, as today.",
+    "INFRA-390 changes githubapp.Client.Ref; whichever merges second adapts the fakes (importer_test.go, architecture_source_test.go, e2e/fake-github.ts).",
+    "Take the next free migration number on main at merge time."
+  ],
+  "gapAnalysis": {
+    "findings": [
+      {
+        "finding": "The stop-the-world migration needs an operational contract (stop old servers, never restart an older image, recover forward) and evidence of Theorem's deploy strategy.",
+        "answer": "D2: a cmd/dispatch/README.md section beside 0113's saying deploy with no earlier-release server running, never start an older release over 0117, recover forward, and what an earlier release does over the new schema; the PR names the exception; the implementer saves the agent-infra dispatch/main.go replicas/strategy read (none set, so gcp:Dispatch recreates at one replica, infra/gcp/dispatch.go:205-213); task 1's upgrade test seeds at schema 0116 and verifies the preserved model plus a second source."
+      },
+      {
+        "finding": "The census predicate and legacy ownership were unstated; components with no source are legal today; direct component seeders in other tests break under a new FK.",
+        "answer": "D2: existing sources read id 0 and components source_id 0 by constant defaults (no rewrite); the census, written on the 0116 schema, counts components whose project has no source (the FK's violators), and the README names the repair if it is non-zero; task 1 adds a census test with one orphan and updates delivery_test.go, delivery_live_hub_test.go, graph_edges_test.go, settings_test.go and importer_test.go seeders."
+      },
+      {
+        "finding": "Removing the singular routes is a client cutover; stale CLIs and the root spec's singular PUT instruction are affected.",
+        "answer": "D5: 'unchanged' promises stored data and behaviour, not old clients; stale clients fail visibly (architecture-sync gets a 404 error, post-create guidance prints its existing 'Could not check' line); the new CLI ships in the same PR with the claude-envoy rebuild; the root's singular-PUT instruction is recorded as departure 1."
+      },
+      {
+        "finding": "Bare ids leave durable ownership (rebinding a retired id to another source) and cross-process collision serialization unresolved.",
+        "answer": "D3: the project-wide id is the durable identity, whichever source supplies it (today's behaviour when one source re-adds an id); D4: project() locks every source row of the project in id order before the collision check; task 2 tests live collision, a two-Importer race (one success, one named failure), and delete-A-then-import-from-B revival."
+      },
+      {
+        "finding": "The all-source sync route and CLI had no mixed-result contract.",
+        "answer": "D5/D6: every source is attempted in id order; 200 with every row, each carrying its own last_error (access failures included); 404 SOURCE_NOT_FOUND with no source; 500 only when a failure could not be recorded; the one-source route keeps today's 200/409/404; CLI prints one line per source, details {project, sources[]}, a recorded failure stays text, a 409 on --repo stays an error exit; task 3 tests success+model error and success+SOURCE_ACCESS in both orders."
+      },
+      {
+        "finding": "A6's four pages: Settings literally shows source rows, and the project page and architecture page are not independent presentations.",
+        "answer": "D7: each Settings row shows its commit and 'N components' (new components field on the source row); D8 names distinct assertions: two Settings rows with commits and counts, the bare /projects/CORE route landing on Architecture with each source's root, per-source header lines and a component's repository in its details, and both ids chosen and shown on the issue's Components line."
+      },
+      {
+        "finding": "Partial failure and staleness need a per-source health mapping on the architecture page.",
+        "answer": "D7: one header line per source with its own freshness, error and still-shown commit; a row is hatched only when its own source failed or is stale; never-synced is per source and the empty state shows only while no source has imported; task 5 tests A healthy + B failed and B never synced while A shows its model."
+      },
+      {
+        "finding": "'Proven against a real Dispatch with a GitHub App' needs a pre-merge proof definition distinct from the mocked browser suite; root A2's named repositories are root scope.",
+        "answer": "Acceptance table: A2 runs on the branch's real Dispatch reading real GitHub through a throwaway shim that answers only the two App-key calls and forwards reads through the pane's gh, with sjawhar/legion@main and scratch branches of sjawhar/legion-smoke; again on the fake GitHub for re-runs; the legion-envoy key mint and INFRA's repositories stay root A2 (departure 3); controls are the base build and a wrong id, not the root's pre-key 409."
+      },
+      {
+        "finding": "The baseline browser run must be a behavioural failure on an actual old application, not a missing route or helper.",
+        "answer": "D8 and the A6 row: the new spec uses only helpers and fake-GitHub routes present at the base and drives Settings through the UI; the base run is a tarball export of the pinned base SHA with only the new spec copied in, its own database and ports; the expected failure is the two-row Settings assertion; startup, compile or seed failures do not count."
+      },
+      {
+        "finding": "The Go fakes serve one model for every repository, and INFRA-390 may change Ref's wire contract.",
+        "answer": "Tasks 2-3 make fakeSource and fakeGitHubApp hold heads, files and failures per repository; the INFRA-390 risk bullet assigns fake updates to whichever PR merges second; the base control uses the base's own fake."
+      },
+      {
+        "finding": "Event cutover: activity text, cache keys and old retained payloads without repo/branch.",
+        "answer": "D4/D6/D7: synced and sync_failed gain optional repo and branch; new events read 'synced the architecture model from <repo> at <sha>'; events without repo keep today's wording; sse.ts invalidates the new ['architecture-sources', p] key; per-source state-change dedup and non-waking unchanged; task 5 tests old and new payloads."
+      },
+      {
+        "finding": "Bare ids reach delivery facets, graph references and retirement; the issue check must not gain a repo restriction.",
+        "answer": "D3: issue validation and addressing stay as they are (departure 2); task 3 tests mixed-source attachment, external-id refusal, inheritance, GET /references for a component of each source, delivery facets for both, and source deletion leaving the other's nodes and turning its ids into retired attachments."
+      },
+      {
+        "finding": "Shipped and generated surfaces: claude-envoy dist, the generated Legion skill copy, generated vs handwritten route docs.",
+        "answer": "D6/D9: rebuild claude-envoy dist on the pinned Bun and run check-dist; regenerate its skill copy with scripts/build.ts; hand-edit cmd/dispatch/AGENTS.md routes (fixing its stale 'human only') and the listed docs and skills; the API reference, tools page and skills pages are generated."
+      }
+    ]
+  },
+  "planReview": {
+    "verdict": "approved",
+    "rounds": 3
+  },
+  "specDepartures": [
+    {
+      "spec": "Root spec (dispatch://INFRA-191/spec) Components section: the root sets INFRA's two sources with PUT /api/v1/projects/INFRA/architecture-source.",
+      "plan": "The singular source routes are removed; a source is saved with PUT /api/v1/projects/{key}/architecture-sources/{owner}/{repo} and body {branch, actor}.",
+      "evidence": "Deleting or syncing one of several sources needs the source in the address; repository mappings already use /api/v1/settings/repo-projects/{owner}/{repo} (packages/envoy/internal/dispatch/api/routes_table.go:59-60).",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "INFRA-391 spec: change the issue component check (api/issue_components.go).",
+      "plan": "No code change there; tests only. The check already validates ids against every component of the project, which is every source's under bare project-wide ids.",
+      "evidence": "packages/envoy/internal/dispatch/api/issue_components.go:84-119 queries components where project_key = $1 and id = any($2).",
+      "outcome": {
+        "kind": "unchanged"
+      }
+    },
+    {
+      "spec": "INFRA-391 acceptance: root A2 proven against a real Dispatch with a GitHub App (a local or test Dispatch is fine before the merge).",
+      "plan": "Before the merge, the branch's real Dispatch reads real GitHub through a real App installation (the role's App) behind a throwaway shim that answers only Dispatch's two App-key calls, with sjawhar/legion and scratch branches of sjawhar/legion-smoke as the sources, plus the same steps on the harness's fake GitHub; Dispatch minting a token from legion-envoy's own key, with INFRA's two repositories, is proven by root A2.",
+      "evidence": "No Dispatch the roles reach holds legion-envoy's key before INFRA-390 and the root's apply (dispatch://INFRA-191/spec, Problem); agent-infra has no .dispatch/architecture files (gh api repos/theorem-labs/agent-infra/contents/.dispatch answered 404 on 2026-10-25) and writing them is the root's scope.",
+      "outcome": {
+        "kind": "changed",
+        "acceptance": "Root A2, proven against a real Dispatch with a GitHub App: before the merge the GitHub App is a real installation read through the pane's gh behind a shim for the two App-key calls, not legion-envoy's key."
+      }
+    }
+  ]
+}
