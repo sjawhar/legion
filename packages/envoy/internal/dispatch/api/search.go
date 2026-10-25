@@ -194,10 +194,12 @@ totals as (
 // only vectors whose embeddings.model is $11, the query embedder's own identity
 // (embed.Embedder.Identity, INFRA-393): a vector another model or place made lives in a different
 // space, and its cosine distance to this query means nothing. The coverage pass (embedqueue.Cover)
-// drops such vectors, so the filter only has to catch what a differently configured process
-// writes during a roll. Each candidate set is then floor-filtered (searchMeaningFloor) before
-// kinds ever sees it: a candidate below the floor is noise, not a weak match, and reaching legs at
-// all would rank it by position exactly as the strongest real match in an empty kind.
+// drops such vectors once the configured embedder has answered, so the filter has to catch what a
+// differently configured process writes during a roll, and every vector of the identity before
+// it while a newly configured embedder has not embedded anything yet. Each candidate set is then
+// floor-filtered (searchMeaningFloor) before kinds ever sees it: a candidate below the floor is
+// noise, not a weak match, and reaching legs at all would rank it by position exactly as the
+// strongest real match in an empty kind.
 //
 // kinds unions searchKeywordLegsSQL - the same five-arm keyword text searchQuery's own kinds CTE
 // uses verbatim, each arm already carrying 'keyword' as list - with the five meaning_* CTEs

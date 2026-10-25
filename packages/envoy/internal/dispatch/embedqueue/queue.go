@@ -7,8 +7,8 @@
 // service is never called inside the enqueueing transaction. A text with nothing to embed
 // (nothingToEmbed) is settled with no vector and no model call instead. The coverage pass
 // (coverage.go) adds what no trigger saw - items written before the triggers existed or with them
-// off - and drops vectors another model or place made, so the server keeps meaning search's
-// coverage itself.
+// off - and, once the configured embedder has answered, drops vectors another model or place
+// made, so the server keeps meaning search's coverage itself.
 package embedqueue
 
 import (
@@ -18,6 +18,7 @@ import (
 	"math"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/envoy/internal/dispatch/embed"
@@ -59,6 +60,28 @@ var renewClaimInterval = claimWindow / 2
 type Deps struct {
 	Store    *store.Store
 	Embedder embed.Embedder
+	// proven records that an Embed call this process's queue made has succeeded (embedDocuments
+	// sets it), which is what lets Cover act on rows another identity left with no canary of its
+	// own. Run gives its two loops one between them, since each holds a copy of Deps; it is nil
+	// for a caller that builds Deps itself (a test calling ProcessBatch or Cover directly), which
+	// then records nothing, so each such Cover proves the embedder with its own canary.
+	proven *atomic.Bool
+}
+
+// embedDocuments embeds texts as documents with the configured embedder and, when the call
+// succeeds, records that the embedder works (Deps.proven). Every Embed call this package makes
+// goes through it, the canaries' included.
+func (d Deps) embedDocuments(ctx context.Context, texts []string) ([][]float32, error) {
+	vectors, err := d.Embedder.Embed(ctx, texts, embed.InputDocument)
+	if err == nil && d.proven != nil {
+		d.proven.Store(true)
+	}
+	return vectors, err
+}
+
+// embedderProven reports whether an Embed call this process's queue made has succeeded.
+func (d Deps) embedderProven() bool {
+	return d.proven != nil && d.proven.Load()
 }
 
 // Run drains pending embeddings at startup and periodically, so a dropped in-process
@@ -69,13 +92,16 @@ type Deps struct {
 // connection mark of its own (store.ForConcurrentRead): the pool refuses a caller a second
 // connection while its mark says it holds one, so loops sharing one mark would refuse each
 // other whenever the other had a cursor open. It returns once ctx is cancelled and both loops
-// have stopped. Run does nothing when deps.Embedder is nil: Dispatch with no place configured,
-// or one that could not be built at boot, never starts either loop, and the next boot with an
-// embedder covers everything left behind.
+// have stopped. Both loops share one record of whether the embedder has answered yet
+// (Deps.proven): a batch the scan loop embeds proves it for the pass. Run does nothing when
+// deps.Embedder is nil: Dispatch with no place configured, or one that could not be built at
+// boot, never starts either loop, and the next boot with an embedder covers everything left
+// behind.
 func Run(ctx context.Context, deps Deps) {
 	if deps.Embedder == nil {
 		return
 	}
+	deps.proven = new(atomic.Bool)
 	coverageCtx, err := store.ForConcurrentRead(ctx)
 	if err != nil {
 		slog.Error("dispatch embedqueue: not started: the caller holds a pooled connection", "error", err)
@@ -260,7 +286,7 @@ func embedRows(ctx context.Context, deps Deps, rows []pendingRow, renewal *claim
 		}
 		renewal.renew(ctx)
 		reserveTokens(ctx, deps, group.tokens, ceiling, renewal)
-		vectors, err := deps.Embedder.Embed(ctx, texts, embed.InputDocument)
+		vectors, err := deps.embedDocuments(ctx, texts)
 		if err != nil {
 			groupResult := handleGroupFailure(ctx, deps, group.rows, err, renewal)
 			if groupResult.err != nil {
@@ -475,11 +501,11 @@ func excludingRows(rows, exclude []pendingRow) []pendingRow {
 // (reserveTokens), waiting out whatever debt that reservation leaves - renewing renewal's claim
 // during a wait longer than renewClaimInterval, not only before or after it. embedRows' own
 // per-group reservations call reserveTokens directly with chunkForBudget's already-computed token
-// total instead of this helper, so confirmSoloFailure's one-off embedCanary probe is its only
-// caller. Best-effort: a reservation that fails to read or write (a transient database error) is
-// logged and never blocks or fails the batch - embed.RateLimitedEmbedder's own in-process,
-// reactive AIMD backoff is the backstop if this proactive ceiling is ever skipped or
-// under-estimates a call.
+// total instead of this helper, so the one-off embedCanary probes (confirmSoloFailure's, and the
+// coverage pass's proveEmbedder) are its only callers. Best-effort: a reservation that fails to
+// read or write (a transient database error) is logged and never blocks or fails the call -
+// embed.RateLimitedEmbedder's own in-process, reactive AIMD backoff is the backstop if this
+// proactive ceiling is ever skipped or under-estimates a call.
 func reserveBackgroundTokens(ctx context.Context, deps Deps, texts []string, renewal *claimRenewal) {
 	reserveTokens(ctx, deps, embed.EstimateTokens(texts), deps.Embedder.Limits().BackgroundTokensPerMinute, renewal)
 }
@@ -699,7 +725,8 @@ func commitEmbeddings(ctx context.Context, deps Deps, rows []pendingRow, vectors
 // none of them can push it toward dead on their own; only a cycle that genuinely confirms this
 // row's own content is at fault ever can. A row that dies records the embedder's Identity as
 // dead_model: the failure was confirmed against that model and place, so the coverage pass
-// (Cover) leaves it dead while that identity is configured and re-admits it once when another is.
+// (Cover) leaves it dead while that identity is configured and re-admits it once when another is
+// and has answered.
 // A dead row is still visible (`select * from embeddings where dead`) and still recoverable: a
 // future write to the same content (embeddings_enqueue clears both counters, dead and dead_model
 // the moment content_hash changes) or a manual `update embeddings set dead = false,

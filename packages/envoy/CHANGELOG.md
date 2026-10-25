@@ -18,6 +18,10 @@
   minutes embeds items written before the embedding triggers existed or with them off, repairs a
   row whose text changed with the triggers off, drops every vector another embedder made and
   re-admits a row that died under another embedder, with no lease, so every process may run it.
+  It drops and re-admits only once the configured embedder has answered (an embedding by this
+  process has succeeded, or a short canary text it embeds does); until then it leaves those rows in
+  place and logs one WARN naming the identity, the canary's error and how many it left, so a
+  misnamed Azure deployment or a refused credential drops no vector.
   `GET /api/v1/search/coverage` reports the configured embedder's identity, place and model, and
   in total and per kind the searchable items with a current vector, lacking one or failed, and the
   oldest lacking item's wait (INFRA-393).

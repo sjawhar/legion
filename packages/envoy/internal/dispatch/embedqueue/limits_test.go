@@ -16,10 +16,12 @@ import (
 )
 
 // azureFake stands in for an Azure AI Foundry deployment's embeddings route: it answers 429 while
-// throttling is set, and vectors otherwise, recording each request's inputs.
+// throttling is set, 404 DeploymentNotFound while missing is set (the deployment name is not one
+// the resource has), and vectors otherwise, recording each request's inputs.
 type azureFake struct {
 	mu         sync.Mutex
 	throttling bool
+	missing    bool
 	requests   [][]string
 }
 
@@ -33,12 +35,17 @@ func (f *azureFake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.mu.Lock()
 	f.requests = append(f.requests, request.Input)
-	throttling := f.throttling
+	throttling, missing := f.throttling, f.missing
 	f.mu.Unlock()
 	w.Header().Set("Content-Type", "application/json")
 	if throttling {
 		w.WriteHeader(http.StatusTooManyRequests)
 		_, _ = w.Write([]byte(`{"error":{"code":"RateLimitReached","message":"Rate limit is exceeded."}}`))
+		return
+	}
+	if missing {
+		w.WriteHeader(http.StatusNotFound)
+		_, _ = w.Write([]byte(`{"error":{"code":"DeploymentNotFound","message":"The API deployment for this resource does not exist."}}`))
 		return
 	}
 	type item struct {

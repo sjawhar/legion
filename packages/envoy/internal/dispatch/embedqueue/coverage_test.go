@@ -6,9 +6,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -481,6 +483,128 @@ func TestCoverReadmitsARowDeadUnderAnotherIdentityOnce(t *testing.T) {
 	cover(t, deps)
 	if dead, deadModel, _, _ := read("DEDA-1"); !dead || deadModel == nil || *deadModel != configuredIdentity {
 		t.Errorf("DEDA-1 after dying again here: dead %t dead_model %v, want it to stay dead", dead, deadModel)
+	}
+}
+
+// seedForeignRows gives the database one issue embedded by another identity and one dead under
+// another identity, the two rows the pass's identity steps change, and nothing pending.
+func seedForeignRows(t *testing.T, database *store.Store, project string) {
+	t.Helper()
+	seedIssue(t, database, project, project+"-1", "Embedded elsewhere")
+	seedIssue(t, database, project, project+"-2", "Died elsewhere")
+	drain(t, Deps{Store: database, Embedder: newPlaceEmbedder(foreignIdentity)})
+	mustExec(t, database.Pool, `
+		update embeddings set embedding = null, model = null, embedded_hash = null, embedded_at = null,
+		       dead = true, confirmed_failures = 10, attempt_count = 12, dead_model = $1
+		where kind = 'issue' and id = $2`, foreignIdentity, project+"-2")
+}
+
+// A misnamed Azure deployment answers every call 404 DeploymentNotFound, through the real
+// AzureClient. Until the configured embedder has answered, the pass leaves another identity's
+// vector and dead row exactly as they were, after one canary per pass and after Run for a while,
+// and the coverage report counts them lacking and failed as before; a throttled canary proves
+// nothing either. Once the deployment answers, a fresh process's first pass drops the vector and
+// re-admits the dead row, with one canary call.
+func TestCoverLeavesAnotherIdentitysRowsUntilTheEmbedderAnswers(t *testing.T) {
+	database := storetest.Open(t)
+	seedForeignRows(t, database, "MISN")
+	fake := &azureFake{missing: true}
+	server := httptest.NewServer(fake)
+	defer server.Close()
+	client, err := embed.NewAzure(embed.AzureConfig{
+		Endpoint:        server.URL + "/models",
+		Deployment:      "embed-v-4-o",
+		TokensPerMinute: 300_000,
+		APIKey:          "test-key",
+		HTTPClient:      server.Client(),
+	})
+	if err != nil {
+		t.Fatalf("NewAzure: %v", err)
+	}
+	deps := Deps{Store: database, Embedder: client}
+	identity := client.Identity()
+	before := snapshotRows(t, database)
+	if items, current, lacking, failed, _ := coverage(t, database, identity); items != 2 || current != 0 || lacking != 1 || failed != 1 {
+		t.Fatalf("coverage before the pass: items %d current %d lacking %d failed %d, want 2, 0, 1 lacking, 1 failed", items, current, lacking, failed)
+	}
+	requireUnchanged := func(when string) {
+		t.Helper()
+		if after := snapshotRows(t, database); fmt.Sprint(after) != fmt.Sprint(before) {
+			t.Errorf("%s changed rows:\n before %v\n after  %v", when, before, after)
+		}
+		if items, current, lacking, failed, _ := coverage(t, database, identity); items != 2 || current != 0 || lacking != 1 || failed != 1 {
+			t.Errorf("coverage %s: items %d current %d lacking %d failed %d, want it as before: 2, 0, 1 lacking, 1 failed", when, items, current, lacking, failed)
+		}
+	}
+	requireOneCanary := func(when string) {
+		t.Helper()
+		if requests := fake.take(); len(requests) != 1 || len(requests[0]) != 1 || requests[0][0] != embedCanary {
+			t.Errorf("%s: Azure saw %v, want one request carrying only the canary", when, requests)
+		}
+	}
+
+	cover(t, deps)
+	requireUnchanged("a pass while the deployment is missing")
+	requireOneCanary("a pass while the deployment is missing")
+
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	Run(ctx, deps)
+	cancel()
+	requireUnchanged("Run while the deployment is missing")
+	requireOneCanary("Run while the deployment is missing")
+
+	fake.mu.Lock()
+	fake.missing, fake.throttling = false, true
+	fake.mu.Unlock()
+	cover(t, deps)
+	requireUnchanged("a pass whose canary is throttled")
+	requireOneCanary("a pass whose canary is throttled")
+
+	fake.mu.Lock()
+	fake.throttling = false
+	fake.mu.Unlock()
+	cover(t, deps)
+	requireOneCanary("the first pass once the deployment answers")
+	var hasVector, dead bool
+	if err := database.Pool.QueryRow(context.Background(), `
+		select (select embedding is not null from embeddings where kind = 'issue' and id = 'MISN-1'),
+		       (select dead from embeddings where kind = 'issue' and id = 'MISN-2')`).Scan(&hasVector, &dead); err != nil {
+		t.Fatalf("read the rows: %v", err)
+	}
+	if hasVector || dead {
+		t.Errorf("once the deployment answers: MISN-1 vector %t, MISN-2 dead %t; want the vector dropped and the row re-admitted", hasVector, dead)
+	}
+	if items, current, lacking, failed, _ := coverage(t, database, identity); items != 2 || current != 0 || lacking != 2 || failed != 0 {
+		t.Errorf("coverage once the deployment answers: items %d current %d lacking %d failed %d, want 2, 0, 2 lacking, 0 failed", items, current, lacking, failed)
+	}
+}
+
+// An Embed this process's queue made that succeeded proves the configured embedder: the pass
+// then drops another identity's vector and re-admits its dead row with no canary call.
+func TestASuccessfulEmbedProvesTheEmbedderForThePass(t *testing.T) {
+	database := storetest.Open(t)
+	seedForeignRows(t, database, "PRVN")
+	seedIssue(t, database, "PRVN", "PRVN-3", "Pending here")
+	embedder := newPlaceEmbedder(configuredIdentity)
+	deps := Deps{Store: database, Embedder: embedder, proven: new(atomic.Bool)}
+	drain(t, deps)
+	if !deps.embedderProven() {
+		t.Fatal("a drain that embedded PRVN-3 did not record the embedder as proven")
+	}
+	calls := len(embedder.calls)
+
+	cover(t, deps)
+	if len(embedder.calls) != calls {
+		t.Errorf("the pass called the embedder %d more times, want 0: %v", len(embedder.calls)-calls, embedder.calls[calls:])
+	}
+	var hasVector, dead bool
+	if err := database.Pool.QueryRow(context.Background(), `
+		select (select embedding is not null from embeddings where kind = 'issue' and id = 'PRVN-1'),
+		       (select dead from embeddings where kind = 'issue' and id = 'PRVN-2')`).Scan(&hasVector, &dead); err != nil {
+		t.Fatalf("read the rows: %v", err)
+	}
+	if hasVector || dead {
+		t.Errorf("PRVN-1 vector %t, PRVN-2 dead %t; want the vector dropped and the row re-admitted", hasVector, dead)
 	}
 }
 

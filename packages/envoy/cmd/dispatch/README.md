@@ -932,20 +932,28 @@ with them off, as a restore or a replication writes), points a row whose item's 
 the triggers off at the current text, takes every vector another identity made out of the index and
 queues its item again, gives a row that died under another identity this identity's attempts once,
 and settles a dead row whose text has nothing to embed (empty or only white space) with no vector,
-as the queue settles a pending one. Each step is a statement of at most 500 rows in its own short
-transaction, repeated until it changes nothing, and is safe beside a live write and beside another
-process's pass, so the pass takes no lease. `GET /api/v1/search/coverage` reports what that leaves:
-the identity, its place and model (all three null with no embedder), and in total and per kind the
-searchable items, how many carry a current vector of that identity, how many lack one, how many
-failed for good, and how long the oldest lacking item has waited. The `backfill-embeddings`
-subcommand, which did the pass's first job by hand, is gone, with its checkpoint table (0118).
+as the queue settles a pending one. The two steps that act on another identity's rows wait until
+the configured embedder has answered: an embedding this process's queue made has succeeded, or,
+when none has yet and such rows exist, the pass embeds a short fixed canary text and it succeeds.
+Until then the pass leaves those vectors and dead rows as they are and logs one WARN naming the
+identity, the canary's error and how many of each it left, so a misnamed Azure deployment (which
+answers `404 DeploymentNotFound`) or a refused credential drops nothing; a throttled canary waits
+for the next pass too, and a pass with no such rows calls the embedder not at all. Each step is a
+statement of at most 500 rows in its own short transaction, repeated until it changes nothing, and
+is safe beside a live write and beside another process's pass, so the pass takes no lease.
+`GET /api/v1/search/coverage` reports what that leaves: the identity, its place and model (all
+three null with no embedder), and in total and per kind the searchable items, how many carry a
+current vector of that identity, how many lack one, how many failed for good, and how long the
+oldest lacking item has waited. The `backfill-embeddings` subcommand, which did the pass's first
+job by hand, is gone, with its checkpoint table (0118).
 
 Every process of one deployment runs the same embedder configuration, since each one's pass drops
 the vectors any other identity made. Moving a deployment to another place or Azure deployment makes
 every stored vector another identity's: search finds by meaning only what the new identity has
 embedded, and the coverage route counts the rest as lacking, until the pass and the queue have
-re-embedded it at the place's background pace. A model change on Azure takes a new deployment
-name, since the identity names the deployment, not the model behind it.
+re-embedded it at the place's background pace; a new place that cannot embed leaves the old
+vectors in the database, unused by search, until it can. A model change on Azure takes a new
+deployment name, since the identity names the deployment, not the model behind it.
 
 Each kind of content is ranked on a list of its own, by `ts_rank_cd`, then recency, then id, and
 the five lists are merged by reciprocal rank fusion: a hit at position p of its list scores

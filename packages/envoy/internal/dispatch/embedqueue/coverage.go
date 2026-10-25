@@ -134,7 +134,9 @@ func (s coverageSource) repairStale() string {
 // vector survives anywhere. A row embedded at its current text (embedded_hash = content_hash) has
 // no claim on it, so it becomes pending now with fresh attempts; a row already pending keeps its
 // claim, backoff and pending_since. SKIP LOCKED leaves a row a worker is committing to the next
-// pass. Once done the row matches no longer, so a second pass changes nothing.
+// pass. Once done the row matches no longer, so a second pass changes nothing. Cover runs it only
+// once the configured embedder has answered (identityStepsProven): a vector dropped for an
+// embedder that cannot embed leaves its item with no vector at all.
 const dropForeignVectors = `
 	with picked as (
 		select kind, id from embeddings
@@ -154,7 +156,9 @@ const dropForeignVectors = `
 // readmitForeignDead gives up to $3 of the kind's rows confirmed dead under another identity ($2
 // is the configured one; a row dead before 0117 recorded none) this identity's attempts, once:
 // the content failed against another model or place, which says nothing about this one. A row
-// that dies again records the configured identity (retryRows) and is not re-admitted again.
+// that dies again records the configured identity (retryRows) and is not re-admitted again. Like
+// dropForeignVectors, Cover runs it only once the configured embedder has answered: attempts
+// against an embedder that cannot embed would only fail.
 const readmitForeignDead = `
 	with picked as (
 		select kind, id from embeddings
@@ -186,6 +190,34 @@ var settleDeadNothingToEmbed = `
 	from picked
 	where e.kind = picked.kind and e.id = picked.id`
 
+// foreignRows tells whether any row of coverageSources' kinds ($1) holds what dropForeignVectors
+// or readmitForeignDead would change for the configured identity ($2): a vector another identity
+// made, or a row dead under another identity. Each exists stops at the first such row, so a
+// database that holds some answers quickly; one that holds none reads every row once.
+const foreignRows = `
+	select exists (
+		select 1 from embeddings where kind = any($1) and embedding is not null and model is distinct from $2
+	) or exists (
+		select 1 from embeddings where kind = any($1) and dead and dead_model is distinct from $2
+	)`
+
+// foreignRowsLeft counts the rows foreignRows looks for, the vectors and the dead rows apart, for
+// the warning Cover logs when it leaves them in place.
+const foreignRowsLeft = `
+	select count(*) filter (where embedding is not null and model is distinct from $2),
+	       count(*) filter (where dead and dead_model is distinct from $2)
+	from embeddings where kind = any($1)`
+
+// coverageKinds is every kind coverageSources lists, the argument foreignRows and
+// foreignRowsLeft take.
+var coverageKinds = func() []string {
+	kinds := make([]string, len(coverageSources))
+	for i, source := range coverageSources {
+		kinds[i] = source.kind
+	}
+	return kinds
+}()
+
 // coverStep is one statement of the coverage pass, run until it changes nothing.
 type coverStep struct {
 	changed *int64
@@ -193,15 +225,67 @@ type coverStep struct {
 	args    []any
 }
 
+// run executes step until a statement changes nothing, adding what each changed to its counter.
+func (step coverStep) run(ctx context.Context, deps Deps, kind string) error {
+	for {
+		tag, err := deps.Store.Pool.Exec(ctx, step.sql, step.args...)
+		if err != nil {
+			return fmt.Errorf("coverage pass: %s: %w", kind, err)
+		}
+		*step.changed += tag.RowsAffected()
+		if tag.RowsAffected() == 0 {
+			return nil
+		}
+	}
+}
+
+// decideIdentitySteps decides whether this pass runs its identity steps (dropForeignVectors,
+// readmitForeignDead): only once the configured embedder has answered, since a misconfigured one
+// (a misnamed Azure deployment answers 404 DeploymentNotFound) would otherwise drop, at its first
+// pass, every vector the identity before it made, with nothing able to embed those items again.
+// With no row those steps would change (foreignRows) it runs neither and calls the embedder zero
+// times; skipped is false, as there is nothing to skip. With such rows it runs them, with no call,
+// when an Embed this process's queue made has already succeeded (Deps.proven), and otherwise
+// embeds embedCanary (proveEmbedder): a success is proof; a failure, a throttle included, skips
+// them until a later pass, logged once at WARN with the identity, the canary's error, and how many
+// vectors and dead rows stay in place.
+func decideIdentitySteps(ctx context.Context, deps Deps, identity string) (run, skipped bool, err error) {
+	var foreign bool
+	if err := deps.Store.Pool.QueryRow(ctx, foreignRows, coverageKinds, identity).Scan(&foreign); err != nil {
+		return false, false, fmt.Errorf("coverage pass: find other identities' rows: %w", err)
+	}
+	if !foreign {
+		return false, false, nil
+	}
+	if deps.embedderProven() {
+		return true, false, nil
+	}
+	canaryErr := proveEmbedder(ctx, deps)
+	if canaryErr == nil {
+		return true, false, nil
+	}
+	if ctx.Err() != nil {
+		return false, true, fmt.Errorf("coverage pass: %w", ctx.Err())
+	}
+	var vectors, dead int64
+	if err := deps.Store.Pool.QueryRow(ctx, foreignRowsLeft, coverageKinds, identity).Scan(&vectors, &dead); err != nil {
+		return false, true, fmt.Errorf("coverage pass: count other identities' rows: %w", err)
+	}
+	slog.Warn("dispatch embedqueue: coverage pass left other identities' vectors and dead rows in place: the configured embedder has not embedded anything yet and a canary failed; the next pass tries again",
+		"identity", identity, "canaryError", canaryErr, "foreignVectorsLeft", vectors, "foreignDeadLeft", dead)
+	return false, true, nil
+}
+
 // Cover is the coverage pass: for every kind in coverageSources it adds a row for each item that
-// has none, repairs each row whose text is stale, drops each vector another identity made, settles
-// each dead row whose text has nothing to embed and re-admits each other row dead under another
-// identity, then logs one line with what it changed and the coverage that leaves (Coverage). Every
-// step is a statement of at most coverageStatementRows rows in its own short transaction, repeated
-// until one changes nothing, and each is safe beside a live write and beside another process's
-// pass, so it takes no lease: two envoy-dispatch processes may run it at once. One deployment
-// configures one identity; two processes configured differently would each drop the other's
-// vectors, which is why every replica gets the same settings.
+// has none, repairs each row whose text is stale and settles each dead row whose text has nothing
+// to embed; then, once the configured embedder has answered (decideIdentitySteps), it drops each
+// vector another identity made and re-admits each other row dead under another identity; and it
+// logs one line with what it changed, whether it skipped those two steps, and the coverage that
+// leaves (Coverage). Every step is a statement of at most coverageStatementRows rows in its own
+// short transaction, repeated until one changes nothing, and each is safe beside a live write and
+// beside another process's pass, so it takes no lease: two envoy-dispatch processes may run it at
+// once. One deployment configures one identity; two processes configured differently would each
+// drop the other's vectors, which is why every replica gets the same settings.
 func Cover(ctx context.Context, deps Deps) error {
 	identity := deps.Embedder.Identity()
 	var added, repaired, dropped, settled, readmitted int64
@@ -209,18 +293,27 @@ func Cover(ctx context.Context, deps Deps) error {
 		for _, step := range []coverStep{
 			{&added, source.insertMissing(), []any{source.kind, coverageStatementRows}},
 			{&repaired, source.repairStale(), []any{source.kind, coverageStatementRows}},
-			{&dropped, dropForeignVectors, []any{source.kind, identity, coverageStatementRows}},
 			{&settled, settleDeadNothingToEmbed, []any{source.kind, identity, coverageStatementRows}},
-			{&readmitted, readmitForeignDead, []any{source.kind, identity, coverageStatementRows}},
 		} {
-			for {
-				tag, err := deps.Store.Pool.Exec(ctx, step.sql, step.args...)
-				if err != nil {
-					return fmt.Errorf("coverage pass: %s: %w", source.kind, err)
-				}
-				*step.changed += tag.RowsAffected()
-				if tag.RowsAffected() == 0 {
-					break
+			if err := step.run(ctx, deps, source.kind); err != nil {
+				return err
+			}
+		}
+	}
+	// Settling runs first, so a dead row with nothing to embed is never what makes the pass
+	// send a canary.
+	run, skipped, err := decideIdentitySteps(ctx, deps, identity)
+	if err != nil {
+		return err
+	}
+	if run {
+		for _, source := range coverageSources {
+			for _, step := range []coverStep{
+				{&dropped, dropForeignVectors, []any{source.kind, identity, coverageStatementRows}},
+				{&readmitted, readmitForeignDead, []any{source.kind, identity, coverageStatementRows}},
+			} {
+				if err := step.run(ctx, deps, source.kind); err != nil {
+					return err
 				}
 			}
 		}
@@ -236,6 +329,7 @@ func Cover(ctx context.Context, deps Deps) error {
 	slog.Info("dispatch embedqueue: coverage pass",
 		"identity", identity, "added", added, "repaired", repaired,
 		"foreignVectorsDropped", dropped, "deadNothingToEmbedSettled", settled, "foreignDeadReadmitted", readmitted,
+		"identityStepsSkipped", skipped,
 		"items", report.Total.Items, "current", report.Total.Current, "lacking", report.Total.Lacking,
 		"failed", report.Total.Failed, "oldestLackingSeconds", oldest)
 	return nil
