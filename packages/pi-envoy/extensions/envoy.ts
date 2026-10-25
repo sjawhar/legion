@@ -179,14 +179,15 @@ function serialQueue(deadlineMs: () => number) {
         () =>
           new Promise<T>((resolve, reject) => {
             let abandoned = false;
+            const taskDeadlineMs = deadlineMs();
             const timer = setTimeout(() => {
               abandoned = true;
               reject(
                 new AbandonedTaskError(
-                  `a queued task did not settle within ${deadlineMs()}ms and was abandoned; the queue moved on`
+                  `a queued task did not settle within ${taskDeadlineMs}ms and was abandoned; the queue moved on`
                 )
               );
-            }, deadlineMs());
+            }, taskDeadlineMs);
             // The task runs inside this promise so a synchronous throw is its rejection too.
             void (async () => task(() => !abandoned))().then(
               (value) => {
@@ -1727,13 +1728,16 @@ export default function envoyExtension(pi: PiApi): void {
       if (context.sessionManager.getSessionId() === "") return;
       if (healing) {
         // A pass that has not settled holds the queue, and with it the registration refresh that
-        // is its last step. Once two whole refresh intervals have passed with nothing accepted
-        // (a session that never had one accepted counts as older), the record is close enough to
-        // lapsing that the refresh goes out on its own, outside the queues, exactly as
-        // `envoy_subscribe` posts it. A failure is ignored: the next tick tries again.
+        // is its last step. The age is measured from the last accepted registration (a session
+        // that never had one accepted counts as older), and a pass still running a whole refresh
+        // interval after it has already cost the record a third of its life, so the refresh goes
+        // out on its own, outside the queues, exactly as `envoy_subscribe` posts it. A failure is
+        // ignored: the next tick tries again.
         const refreshMs = requireEnvoy().settings.heartbeatMs;
-        if (Date.now() - registeredAt < 2 * refreshMs) return;
-        noteStall("a pass has not settled over two refresh intervals");
+        if (Date.now() - registeredAt < refreshMs) return;
+        noteStall(
+          "a pass has not settled a whole refresh interval after the last accepted registration"
+        );
         void registerSession().catch(() => undefined);
         return;
       }
@@ -1778,7 +1782,7 @@ export default function envoyExtension(pi: PiApi): void {
     heartbeatRegistered = true;
   };
 
-  const recoverRegisteredInterests = async (live: Fence = UNFENCED): Promise<void> => {
+  const recoverRegisteredInterests = async (live: Fence): Promise<void> => {
     // Registered interests deliver only through this session's own NATS
     // subscriptions — the listener skips push delivery for self-subscribed
     // sessions — so a resumed process must rebuild them or stay deaf to
@@ -1864,8 +1868,8 @@ export default function envoyExtension(pi: PiApi): void {
   const setEnvoyRole = async (
     role: string,
     forSession: string,
-    options: { soft?: boolean; previousSessionID?: string } = {},
-    live: Fence = UNFENCED
+    live: Fence,
+    options: { soft?: boolean; previousSessionID?: string } = {}
   ): Promise<boolean> => {
     if (!sessionOpen(forSession)) {
       throw new SessionLeftError(
@@ -2310,12 +2314,10 @@ export default function envoyExtension(pi: PiApi): void {
       if (!live() || !sessionOpen(host)) return false;
     }
     try {
-      const claimed = await setEnvoyRole(
-        desired,
-        host,
-        { soft: true, previousSessionID: supersedes },
-        live
-      );
+      const claimed = await setEnvoyRole(desired, host, live, {
+        soft: true,
+        previousSessionID: supersedes,
+      });
       if (claimed && unheard) warnNoticesClosed(context, desired);
     } catch (error) {
       // Both say the same thing: this move decided nothing, and the move or pass that replaced
@@ -2389,7 +2391,7 @@ export default function envoyExtension(pi: PiApi): void {
     // The listener rejects a claim from a session it does not currently know
     // (its registration may have expired), so register before claiming.
     await registerSession();
-    await roleMoves.run((live) => setEnvoyRole(role, targetSessionID, {}, live));
+    await roleMoves.run((live) => setEnvoyRole(role, targetSessionID, live));
   };
 
   const subscribeNotice: LegionNoticeSubscription = async (
@@ -3137,7 +3139,7 @@ export default function envoyExtension(pi: PiApi): void {
                 `This session holds role ${held}, and ${[...roleNoticeSubjects].join(", ")} lasts only while it does; envoy_role_set does not move it to ${role}`
               );
             }
-            await setEnvoyRole(role, sessionID, {}, live);
+            await setEnvoyRole(role, sessionID, live);
             return moving ? held : undefined;
           });
           return toolSuccess(

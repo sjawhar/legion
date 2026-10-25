@@ -155,13 +155,6 @@ func OpenSessionRegistry(conn *nats.Conn, options ...SessionRegistryOption) (*Se
 	return r, nil
 }
 
-// RecordTTL is the session record lifetime in force: the live bucket's MaxAge where the bucket
-// reported one, else the configured default. A session record is dropped that long after its last
-// write.
-func (r *SessionRegistry) RecordTTL() time.Duration {
-	return r.ttl
-}
-
 // Ping verifies the session KV bucket is reachable AND the cache watcher is
 // still alive. It uses kv.Status() (one round-trip) so /healthz and the
 // self-health monitor stay fast — they must never iterate keys. It also prunes

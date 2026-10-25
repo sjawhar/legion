@@ -670,7 +670,7 @@ func main() {
 	// against the defaults in the source, while the live value is whatever MaxAge the existing
 	// bucket was created with. Say it at boot so an operator can read the value in force.
 	logger.Info("session record lifetime resolved; a session record is dropped this long after its last write",
-		slog.String("ttl", sessions.RecordTTL().String()))
+		slog.String("ttl", sessions.TTL().String()))
 
 	// Wait for the session cache to finish its initial scan before we accept
 	// traffic, mirroring the interest-cache gate above. Bounded at 30s: a healthy

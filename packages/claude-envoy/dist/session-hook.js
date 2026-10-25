@@ -19368,16 +19368,18 @@ function envoySettings(env, config2, options = {}) {
       inbound = { off: messageFor(error48) };
     }
   }
-  const rawHeartbeatMs = Number(env.ENVOY_HEARTBEAT_MS);
-  const heartbeatMs = Number.isFinite(rawHeartbeatMs) && rawHeartbeatMs > 0 ? Math.max(rawHeartbeatMs, MIN_INTERVAL_MS) : DEFAULT_HEARTBEAT_MS;
-  const rawPassDeadlineMs = Number(env.ENVOY_PASS_DEADLINE_MS);
+  const intervalMs = (raw, fallback) => {
+    const parsed = Number(raw);
+    return Number.isFinite(parsed) && parsed > 0 ? Math.max(parsed, MIN_INTERVAL_MS) : fallback;
+  };
+  const heartbeatMs = intervalMs(env.ENVOY_HEARTBEAT_MS, DEFAULT_HEARTBEAT_MS);
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url2),
     token,
     inbound,
     heartbeatMs,
-    passDeadlineMs: Number.isFinite(rawPassDeadlineMs) && rawPassDeadlineMs > 0 ? Math.max(rawPassDeadlineMs, MIN_INTERVAL_MS) : Math.max(heartbeatMs, DEFAULT_PASS_DEADLINE_MS)
+    passDeadlineMs: intervalMs(env.ENVOY_PASS_DEADLINE_MS, Math.max(heartbeatMs, DEFAULT_PASS_DEADLINE_MS))
   };
 }
 function normalizeEnvoyUrl(value) {

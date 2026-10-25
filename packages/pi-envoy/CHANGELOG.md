@@ -8,8 +8,8 @@
   queues (`passes`, `roleMoves`) give each task a deadline: past it the caller's call rejects, the
   queue starts the next task, and the abandoned task is fenced, so its late continuation writes
   nothing over what ran after it. The heartbeat tick also re-posts the registration itself, outside
-  the queues, while a pass is still running and nothing has been accepted for two refresh
-  intervals, so a pane whose pass is wedged keeps its `envoy ps` row and stays resolvable for its
+  the queues, while a pass is still running and the last accepted registration is a whole refresh
+  interval old, so a pane whose pass is wedged keeps its `envoy ps` row and stays resolvable for its
   role instead of being dropped five minutes in. A stall counts as a failed registration: the next
   healthy tick re-asserts the role and fires the regain hook (`"reregistered"`), which re-runs a
   Legion claim's readiness. The pane is told once per episode — one notification and one warning
