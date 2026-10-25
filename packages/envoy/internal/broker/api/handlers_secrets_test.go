@@ -94,12 +94,12 @@ func TestSettingsAnswersTheGCPStore(t *testing.T) {
 }
 
 // rereadsFreely is the broker-wide bucket a row about what a reread *answers* mounts, so that
-// row never meets the production sizing of a bucket it is not about. The production figure is
-// the fleet's whole store budget divided by the replica count squared
-// (api.DefaultRereadOverallLimit), which is a burst of two: small enough that a row driving
-// three or four rereads back to back would be refused by a limiter rather than answered by the
-// handler it is testing. The rows that *are* about the limiter inject a bucket of their own in
-// the same way, with no tokens left in it.
+// row never meets the production sizing of a bucket it is not about. The production figure
+// (api.DefaultRereadOverallLimit) is a burst of five refilled one a second, sized for the fleet
+// rather than for a test: a row driving several rereads back to back, and any row that later
+// drives one more, would be answered by a limiter rather than by the handler it is testing, and
+// would go red on a sizing change that was correct. The rows that *are* about the limiter inject
+// a bucket of their own in the same way, with no tokens left in it.
 var rereadsFreely = ratelimit.Limit{Every: time.Millisecond, Burst: 100}
 
 func TestRereadServesANewSecretAndDropsADeletedOne(t *testing.T) {

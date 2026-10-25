@@ -3074,22 +3074,36 @@ cannot answer while authenticating is a 503 naming it. Every 500 is logged with 
 non-UUID path ids are 400 naming the kind (`pathUUID`), a content-addressed record id is checked
 against its own lowercase-hex-sha256 shape rather than a UUID's (`pathRecordID`), the
 unauthenticated `POST /v1/secrets/{name}/reread` is rate limited both per source address and over
-every caller at once (`DefaultRereadLimit`, burst 30 and one back every 2 s, and
-`DefaultRereadOverallLimit`, burst 5 and one back every 500 ms — under the GCP store
-`GCPRereadOverallLimit`, burst 5 and one back every 2 s, which `cmd/broker` passes as
+every caller at once (`DefaultRereadLimit`, burst 30 and one back every 8 s, and
+`DefaultRereadOverallLimit`, burst 5 and one back every second — under the GCP store
+`GCPRereadOverallLimit`, burst 5 and one back every 4 s, which `cmd/broker` passes as
 `Deps.RereadOverallLimit` — since each reread holds
 the policy's writer lock for one `DescribeSecret`, so a flood spread over addresses cannot hold up a
 reload; a reread spends a token from either bucket only when both allow it
 (`ratelimit.Keyed.AllowBothAt`), so one address flooding past its own limit spends none of the
 shared one and a reread the shared one refuses spends none of its address's; `429 RATE_LIMITED`
-with the refusing limit's `Retry-After`: 1 s for the shared bucket, 4 s for the GCP one and 2 s for
-an address's own). Both shared figures are the fleet's whole store budget divided by the replica
-count **squared**, in rate and in burst alike, because one accepted reread costs the store one read
+with the refusing limit's `Retry-After`: 1 s for the shared bucket, 4 s for the GCP one and 8 s for
+an address's own). The two shared buckets' **rate** is the fleet's whole store budget divided by
+the replica count **squared**, because one accepted reread costs the store one read
 per pod — the pod that served it and every peer the fan-out tells — so the fleet spends
 replicas × rate × replicas (default: 2 pods × 1 reread/s × 2 store reads = the 4 store reads a
-second one pod alone was allowed; GCP: 2 pods × 0.25 reread/s × 2 store reads × 2 metadata reads =
-the same 120 reads a minute) — read them as that arithmetic, never as the number two, since a
-third replica divides by nine rather than by four. A reread `reread.Listener` drives spends no
+second one pod alone was allowed, which is the policy writer lock's budget and not a provider's,
+since AWS serves `DescribeSecret` at 40,000 a second; GCP: 2 pods × 0.25 reread/s × 2 store reads
+× 2 metadata reads = the same 120 reads a minute, a fifth of the 600 a minute per project Secret
+Manager serves, the rest being every pod's reload, its miss-path rereads and its releases) — read
+them as that arithmetic, never as the number two, since a
+third replica divides by nine rather than by four. Their **burst** divides by the replica count
+alone, not by its square: a burst is a depth and what it admits is one person's write burst, which
+the replica count does not change, while what grows is each pod's own transient (its own burst
+plus every peer's, N × B), so B = 10 / N = 5 puts that back where one pod's was — a burst of 2
+refused a person's third consecutive write, which
+`cmd/agent-secrets/secret_e2e_test.go`'s `TestSecretDeleteAndRestoreAreServedByTheBrokerAtOnce`
+holds this floor to. `DefaultRereadLimit`'s rate is derived from the shared pair rather than
+chosen: half the tighter of the two (`2 × GCPRereadOverallLimit.Every`), so it always takes at
+least two addresses to hold the fleet's budget at zero — the route takes no credential, and
+`AllowBothAt` charges a refusal to neither bucket, so a caller that merely keeps succeeding at the
+shared refill starves the fan-out for everyone. All three are re-derived together when the replica
+count changes (at four pods: 4 s and 16 s shared, 32 s per address). A reread `reread.Listener` drives spends no
 token at all, since the pod that served the original call already paid for it. Every other limiter
 is one process's and unchanged, so a fleet of N pods allows N times each: the per-address reread
 bucket, both `LauncherLimits` buckets, `DefaultTokenLimit` and `DefaultMissRereads`. The

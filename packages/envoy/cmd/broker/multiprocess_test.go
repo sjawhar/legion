@@ -638,11 +638,12 @@ func TestTwoBrokers(t *testing.T) {
 
 	// The fan-out spends no rate-limit token on the pod it reaches. Every reread takes the
 	// policy's writer lock for one store read, so the public route is capped broker-wide as well
-	// as per address (api.DefaultRereadOverallLimit: a burst of five, one back every 500 ms),
-	// and that cap is sized as the fleet's whole budget divided by the replica count. That
-	// arithmetic holds only if a reread another pod's notification drives takes nothing from the
-	// receiving pod's bucket: otherwise one caller hammering one pod would refuse every other
-	// pod's callers too, and the fleet would spend twice what the figure says.
+	// as per address (api.DefaultRereadOverallLimit: a burst of five, one back every second),
+	// and that cap's rate is sized as the fleet's whole store budget divided by the replica count
+	// squared, since one accepted reread costs a store read on every pod — the sizing row 7
+	// below measures. That arithmetic holds only if a reread another pod's notification drives
+	// takes nothing from the receiving pod's bucket: otherwise one caller hammering one pod would
+	// refuse every other pod's callers too, and the fleet would spend twice what the figure says.
 	//
 	// So the row empties A's broker-wide bucket with a burst — which is also a burst of
 	// notifications at B — and then asks B for a reread of its own, which must be answered 200
@@ -867,15 +868,23 @@ func TestTwoBrokers(t *testing.T) {
 				multiprocessSecret, fleet.Clients[0].Addr, status, body)
 		}
 		rereadAt := time.Now()
-		for storeReads(fleet.Processes[0]) == before[0] || storeReads(fleet.Processes[1]) == before[1] {
+		// The counts this row does its arithmetic on are the ones the loop exits on, read once
+		// each and not again: re-reading them afterwards lets a read that straggled in between
+		// count too, and a fleet cost of three rather than two would fail the assertion below
+		// and say the sizing was wrong when it was right.
+		var after [2]int
+		for {
+			after = [2]int{storeReads(fleet.Processes[0]), storeReads(fleet.Processes[1])}
+			if after[0] > before[0] && after[1] > before[1] {
+				break
+			}
 			if time.Since(rereadAt) > countWithin {
 				t.Fatalf("%s after one accepted reread at %s, the two processes had read the store %d and %d more times; want each of them to have read it — the fan-out is what makes a reread cost the fleet more than one read",
-					countWithin, fleet.Clients[0].Addr,
-					storeReads(fleet.Processes[0])-before[0], storeReads(fleet.Processes[1])-before[1])
+					countWithin, fleet.Clients[0].Addr, after[0]-before[0], after[1]-before[1])
 			}
 			time.Sleep(20 * time.Millisecond)
 		}
-		reads := storeReads(fleet.Processes[0]) - before[0] + storeReads(fleet.Processes[1]) - before[1]
+		reads := after[0] - before[0] + after[1] - before[1]
 		replicas := len(fleet.Processes)
 		t.Logf("one accepted reread at %s cost the %d-pod fleet %d reads of the secret store", fleet.Clients[0].Addr, replicas, reads)
 

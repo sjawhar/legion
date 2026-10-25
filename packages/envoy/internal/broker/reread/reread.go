@@ -116,10 +116,15 @@ type Listener struct {
 	// caller of the HTTP reread sends, and a notification's reread sends nothing - so no
 	// notification can come back round, and nothing here needs to recognize or break a cycle.
 	Refresh func(ctx context.Context, name string) error
-	// connected, when set, runs on each successful LISTEN, beside the line onConnected logs.
-	// Only this package's own test sets it: it is how a test knows its listener's session is
-	// listening before it sends the notification that session must not miss.
-	connected func()
+	// OnConnected, when set, runs on the listener's own goroutine after every successful LISTEN,
+	// the first one included, beside the line onConnected logs. It is how a caller learns that
+	// this process is listening on Channel rather than merely about to be, which a hook on the
+	// dial could not say: pglisten.Listener runs its LISTEN statement after Dial has returned.
+	// cmd/broker waits on it before it binds, so that a pod the load balancer can reach is one
+	// a peer's reread can reach, and this package's own test uses it to know its listener's
+	// session is listening before it sends the notification that session must not miss. Slow
+	// work in it delays the notifications behind it, as slow work in OnNotify does.
+	OnConnected func()
 }
 
 // Run listens until ctx ends, redialing on every failure (pglisten.Listener).
@@ -144,8 +149,8 @@ func (l *Listener) Run(ctx context.Context) {
 // backstop".
 func (l *Listener) onConnected() {
 	slog.Info("broker: listening for the other pods' secret rereads", "channel", Channel)
-	if l.connected != nil {
-		l.connected()
+	if l.OnConnected != nil {
+		l.OnConnected()
 	}
 }
 
@@ -168,6 +173,6 @@ func (l *Listener) notified(ctx context.Context, payload string) {
 	refresh, cancel := context.WithTimeout(ctx, refreshTimeout)
 	defer cancel()
 	if err := l.Refresh(refresh, note.Name); err != nil {
-		slog.Warn("broker: a secret reread another pod sent failed", "secret", note.Name, "sender", note.Sender, "error", err)
+		slog.Warn("broker: a notification's reread of a secret did not run", "secret", note.Name, "sender", note.Sender, "error", err)
 	}
 }

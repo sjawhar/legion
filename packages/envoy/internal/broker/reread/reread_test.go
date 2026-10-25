@@ -43,7 +43,7 @@ func listener(t *testing.T, sender string) (*store.Store, <-chan string) {
 			refreshed <- name
 			return nil
 		},
-		connected: sync.OnceFunc(func() { close(listening) }),
+		OnConnected: sync.OnceFunc(func() { close(listening) }),
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	stopped := make(chan struct{})
