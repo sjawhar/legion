@@ -939,6 +939,34 @@ sees for a list of queries from any build, and `search-latency-compare.sh` runs
 `TestSearchLatencyOnCorpus` from a base checkout and this one alternately and gates on the
 difference (`packages/envoy/scripts/README.md`, "Measuring search on a copy of the corpus").
 
+## Access log
+
+Dispatch writes one line per served request, always, with no setting to turn it off. It is
+written at INFO when the request ends, through the process's own logger:
+
+```
+time=2026-10-25T05:55:15.446Z level=INFO msg="dispatch: request" method=GET route=/api/v1/issues path=/api/v1/issues caller_kind=user caller=alice status=200 elapsed_ms=10 bytes=3
+```
+
+| Field | What it holds |
+| --- | --- |
+| `method` | The request's HTTP method. |
+| `route` | The route's own pattern (`/api/v1/issues/{key}`), so one route's requests group together whatever ids their paths carry. |
+| `path` | The request path, without its query string, cut to 256 bytes. |
+| `caller_kind` | How the caller authenticated: `user` (a signed-in person), `session` (the session a bearer named in its `actor`), `token` (a personal agent token with no session named), `service` (a verified service-account token), `shared-token` (`DISPATCH_AGENT_TOKEN` with no session named), or `anonymous` (a public route, or one refused before its handler ran). |
+| `caller` | Who that is: the person's lowercase email, the session id, the personal token's owner, or the service-account subject. `shared-token` and `anonymous` name nobody. |
+| `status` | The response status. |
+| `elapsed_ms` | How long the request took, in milliseconds. A websocket's line is written when its connection ends, so it carries the connection's whole life. |
+| `bytes` | The response body the handler wrote. A websocket upgrade is `101` with `0` bytes: its frames are written on the connection it took. |
+
+The line never carries a token, a cookie, a request body or a response body, and the only
+caller-written text in it is `path`.
+
+Every route the server answers writes one: every `/api/v1` route, the document and delivery
+websockets, `/auth/*` and the GitHub proxy `/api/github/rest/`. The dashboard's own pages and
+assets write none, so a browser's page loads do not bury the callers. `/healthz`, which a load
+balancer calls every few seconds, writes none either.
+
 ## Routes
 
 `GET /api/v1` (no credential) is the authoritative list: every mounted `/api/v1` route with its

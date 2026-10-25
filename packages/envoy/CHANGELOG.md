@@ -4,6 +4,16 @@
 
 ### Added
 
+- Dispatch writes one access-log line per served request, so the callers behind a load spike can
+  be named: `dispatch: request` at INFO when the request ends, with the method, the route's own
+  pattern, the request path, the caller (a person's email, a bearer's session, a personal token's
+  owner, a verified service-account subject, or the shared token with no owner to name), the
+  status, the milliseconds it took and the response bytes. It covers every `/api/v1` route, the
+  document and delivery websockets, `/auth/*` and the GitHub proxy, and never carries a token, a
+  cookie, a request body or a response body. It is always on: it costs about 2.5 µs and 10
+  allocations per request and makes no database call (`internal/dispatch/api/access_log_bench_test.go`),
+  and the question it answers is asked when a deployment is already in trouble
+  (`cmd/dispatch/README.md`, "Access log").
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
   releases nothing and ends the grant for good, as a kind change found before the read does, so a

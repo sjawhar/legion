@@ -22,6 +22,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/agentsecrets"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -330,17 +331,17 @@ func register(mux *http.ServeMux, deps Deps) *server {
 	routes := s.routes()
 	s.routeIndex = routeIndexEntries(routes)
 	for _, route := range routes {
-		mux.HandleFunc(route.Method+" "+route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler)))
+		mux.HandleFunc(route.Method+" "+route.Pattern, accesslog.HandlerFunc(route.Pattern, trackTransactions(s.refuseUnstorableParameters(route.Pattern, route.Handler))))
 	}
 	if websocket, ok := deps.Docs.(interface {
 		ServeHTTP(http.ResponseWriter, *http.Request)
 	}); ok {
 		const pattern = "/ws/doc/{room}"
-		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP)))))
+		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.refuseUnstorableActor(websocket.ServeHTTP))))))
 	}
 	if s.deliveryHub != nil {
 		const pattern = "/ws/delivery"
-		mux.Handle("GET "+pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveDeliverySocket))))
+		mux.Handle("GET "+pattern, accesslog.Handler(pattern, s.whileCallerResolves(trackTransactions(s.refuseUnstorableParameters(pattern, s.serveDeliverySocket)))))
 	}
 	return s
 }
@@ -607,12 +608,16 @@ func writeAmbiguousTarget(w http.ResponseWriter, message string, candidates []pm
 	})
 }
 
+// optionalActor resolves the request's caller. Each branch names that caller on the request's
+// access-log line (accesslog.Note), which costs the line what the authentication already
+// resolved and never a lookup of its own.
 func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 	if token, present := auth.BearerToken(r); present {
 		if token == "" {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
 		if auth.MatchesSharedAgentToken(r, token, s.deps.AgentTokens) {
+			accesslog.Note(r.Context(), accesslog.KindSharedToken, "")
 			return model.Actor{}, false, nil
 		}
 		if s.deps.OIDC != nil && oidc.LooksLikeJWT(token) {
@@ -625,6 +630,7 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 		if actor.Owner == nil {
 			return model.Actor{}, false, errorf(http.StatusUnauthorized, "UNAUTHORIZED", "invalid bearer token")
 		}
+		accesslog.Note(r.Context(), accesslog.KindToken, *actor.Owner)
 		return actor, false, nil
 	}
 	if s.deps.Identity == nil {
@@ -634,6 +640,7 @@ func (s *server) optionalActor(r *http.Request) (model.Actor, bool, error) {
 	if err != nil {
 		return model.Actor{}, false, err
 	}
+	accesslog.Note(r.Context(), accesslog.KindUser, login)
 	return model.Actor{Kind: "user", ID: login}, true, nil
 }
 
@@ -653,6 +660,7 @@ func (s *server) serviceTokenActor(r *http.Request, token string) (model.Actor, 
 		return model.Actor{}, false, errorf(http.StatusUnauthorized, "OIDC_TOKEN_INVALID",
 			"service-account token rejected (%s)", reason)
 	}
+	accesslog.Note(r.Context(), accesslog.KindService, claims.Subject)
 	return model.Actor{Service: &claims.Subject}, false, nil
 }
 
@@ -664,17 +672,19 @@ func (s *server) actorFrom(r *http.Request, supplied *model.Actor) (model.Actor,
 	if present {
 		return actor, nil
 	}
-	return bearerSessionActor(actor, supplied)
+	return bearerSessionActor(r, actor, supplied)
 }
 
 // bearerSessionActor resolves the acting session for a bearer caller: the caller names its own
 // session in the request body, and what the token itself proved — a personal token's owner, a
 // service token's verified subject — stays attached for attribution. Neither is ever taken from
-// the body, which a caller controls.
-func bearerSessionActor(authenticated model.Actor, supplied *model.Actor) (model.Actor, error) {
+// the body, which a caller controls. The session is the caller the access-log line names, since
+// it is the one a reader of the log is looking for; the token's own proof is already noted.
+func bearerSessionActor(r *http.Request, authenticated model.Actor, supplied *model.Actor) (model.Actor, error) {
 	if supplied == nil || supplied.Kind != "session" || strings.TrimSpace(supplied.ID) == "" {
 		return model.Actor{}, errorf(http.StatusBadRequest, "ACTOR_KIND", "bearer callers require actor.kind session")
 	}
+	accesslog.Note(r.Context(), accesslog.KindSession, supplied.ID)
 	return model.Actor{
 		Kind:    "session",
 		ID:      supplied.ID,

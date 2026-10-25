@@ -30,6 +30,7 @@ import (
 
 	"golang.org/x/sync/semaphore"
 
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/agentstream"
 	"github.com/sjawhar/envoy/internal/dispatch/api"
 	"github.com/sjawhar/envoy/internal/dispatch/architecture"
@@ -227,17 +228,19 @@ type pendingState struct {
 func New(ctx *AppContext) (http.Handler, func()) {
 	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState), retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
 	mux := http.NewServeMux()
-	mux.HandleFunc("GET /auth/start", r.authStart)
-	mux.HandleFunc("GET /auth/callback", r.authCallback)
-	mux.HandleFunc("POST /auth/logout", r.authLogout)
-	mux.HandleFunc("GET /auth/whoami", r.authWhoami)
-	mux.HandleFunc(githubapi.Prefix, r.apiGithubRest)
+	// Every route the server itself answers writes one access-log line (accesslog.Handler); the
+	// dashboard's own files, served by staticHandler, write none.
+	mux.HandleFunc("GET /auth/start", accesslog.HandlerFunc("/auth/start", r.authStart))
+	mux.HandleFunc("GET /auth/callback", accesslog.HandlerFunc("/auth/callback", r.authCallback))
+	mux.HandleFunc("POST /auth/logout", accesslog.HandlerFunc("/auth/logout", r.authLogout))
+	mux.HandleFunc("GET /auth/whoami", accesslog.HandlerFunc("/auth/whoami", r.authWhoami))
+	mux.HandleFunc(githubapi.Prefix, accesslog.HandlerFunc(githubapi.Prefix, r.apiGithubRest))
 	waitDelivery := api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
 	if ctx.devSignInHost == "" {
 		return r.enforceCookieOrigin(mux), waitDelivery
 	}
-	mux.HandleFunc("GET /auth/_dev/signin", r.authDevSignIn)
+	mux.HandleFunc("GET /auth/_dev/signin", accesslog.HandlerFunc("/auth/_dev/signin", r.authDevSignIn))
 	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux)), waitDelivery
 }
 
@@ -391,12 +394,15 @@ func (r *router) apiGithubRest(w http.ResponseWriter, req *http.Request) {
 	githubapi.ProxyREST(w, req, r.ctx.apiDeps.GitHub)
 }
 
+// login is the signed-in person the request's cookie names, and the caller its access-log line
+// names: the /auth routes and the GitHub proxy resolve their caller here and nowhere else.
 func (r *router) login(w http.ResponseWriter, req *http.Request) (string, bool) {
 	login, err := r.ctx.Identity.Login(req)
 	if err != nil {
 		identity.WriteError(w, err)
 		return "", false
 	}
+	accesslog.Note(req.Context(), accesslog.KindUser, login)
 	return login, true
 }
 

@@ -18,6 +18,7 @@ import (
 	"github.com/reearth/ygo/provider/websocket"
 
 	"github.com/sjawhar/envoy/internal/contracts"
+	"github.com/sjawhar/envoy/internal/dispatch/accesslog"
 	"github.com/sjawhar/envoy/internal/dispatch/auth"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/pmdoc"
@@ -321,6 +322,7 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 		// set. Service means "the server verified this Kubernetes subject", so a
 		// shared-token holder copying one into the header would forge a verified
 		// identity onto every document version it writes.
+		accesslog.Note(r.Context(), accesslog.KindSession, supplied.ID)
 		return model.Actor{Kind: "session", ID: supplied.ID, Origin: supplied.Origin}, nil
 	}
 	if s.identity == nil {
@@ -330,6 +332,7 @@ func (s *Service) requestActor(r *http.Request) (model.Actor, error) {
 	if err != nil {
 		return model.Actor{}, err
 	}
+	accesslog.Note(r.Context(), accesslog.KindUser, login)
 	return model.Actor{Kind: "user", ID: login}, nil
 }
 
