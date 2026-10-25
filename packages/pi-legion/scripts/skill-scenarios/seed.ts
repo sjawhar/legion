@@ -36,7 +36,14 @@
 //                                          JSON array, to seeded.json beside <file>
 //   seed.ts spec-rewrite <file> <source dir>
 //                                          spec-writing on an issue whose spec is the source's
-//                                          old-spec.md; refuses a source without one, naming it
+//                                          old-spec.md; refuses a source without one, naming it.
+//                                          Dispatch opens each ask block of the old spec as an open
+//                                          ask, whatever state it held; alice answers each, in time
+//                                          order, with the source's answer to that question
+//                                          (asks.json, matched by question text), that source ask is
+//                                          not opened again, and its id goes to seeded.json. A block
+//                                          the source holds no answer to fails the seeding, naming
+//                                          the block and the source
 //   seed.ts state <file> <turn> <run dir>  the open questions on the issue, no seeded ask among
 //                                          them, and the spec's open approval request; writes them
 //                                          to <run dir>/state-<turn>.json and prints the same JSON
@@ -51,15 +58,23 @@
 //                                          plan.md (the run directory table of judge.ts and score.ts)
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
-import { type Actor, ASK_QUESTION_MAX, type Ask, type AskOption } from "@legion/contracts";
+import {
+  type Actor,
+  type ArtifactBlock,
+  ASK_QUESTION_MAX,
+  type Ask,
+  type AskOption,
+} from "@legion/contracts";
 import { z } from "zod";
 import {
   answerAsk,
+  baseUrl,
   createAsk,
   createIssue,
   createIssueArtifact,
   createMessage,
   createProject,
+  e2eAgentToken,
   getArtifact,
   getArtifactText,
   getArtifactVersion,
@@ -88,6 +103,10 @@ export const SEED_ASKER = { kind: "session", id: "spec-source-agent" } as const;
 const PERSON = "alice";
 /** Dispatch's approval answer (packages/envoy/internal/dispatch/docs/approval_review.go). */
 const APPROVE = "Approve";
+/** How long spec-rewrite waits for Dispatch's settlement to open the old spec's ask blocks as asks
+ * (it settles a seeded document 2 s after the issue is created), and how often it looks. */
+const BLOCK_ASKS_WAIT_MS = 30_000;
+const BLOCK_ASKS_POLL_MS = 250;
 
 /** Every entry header of a source's messages.md: fetch-spec-sources.ts's ENTRY_HEADER, every match. */
 const ENTRY = new RegExp(ENTRY_HEADER.source, "gm");
@@ -163,8 +182,43 @@ function sourceEntries(file: string): { kind: string; at: bigint; body: string }
   });
 }
 
+/** The asks Dispatch opened for the ask blocks of the spec `spec` of `issue`, once its settlement
+ * opened one for every block: the spec's blocks of type `ask` (`GET …/blocks`, as the agent bearer),
+ * then the issue's asks, read again until each such block has its ask. */
+async function specBlockAsks(issue: string, spec: string): Promise<Ask[]> {
+  const response = await fetch(
+    new URL(`/api/v1/artifacts/${encodeURIComponent(spec)}/blocks`, baseUrl),
+    {
+      headers: { Authorization: `Bearer ${e2eAgentToken}` },
+    }
+  );
+  if (!response.ok)
+    throw new Error(
+      `GET the blocks of ${spec} failed: ${response.status} ${await response.text()}`
+    );
+  const blocks = ((await response.json()) as ArtifactBlock[]).filter(
+    (block) => block.type === "ask"
+  );
+  if (blocks.length === 0) return [];
+  const deadline = Date.now() + BLOCK_ASKS_WAIT_MS;
+  for (;;) {
+    const asks = await listIssueAsks(issue, { as: "agent" });
+    const opened = blocks.map((block) => asks.find((ask) => ask.block_id === block.id));
+    if (opened.every((ask) => ask !== undefined)) return opened as Ask[];
+    if (Date.now() > deadline) {
+      const missing = blocks.filter((_, index) => opened[index] === undefined);
+      throw new Error(
+        `${issue}'s spec holds ask blocks ${missing.map((block) => block.id).join(", ")} that Dispatch opened no ask for within ${BLOCK_ASKS_WAIT_MS / 1000} s`
+      );
+    }
+    await Bun.sleep(BLOCK_ASKS_POLL_MS);
+  }
+}
+
 /** Creates the run's issue as the person, posts the source's input in time order, and writes the
- * fixture and seeded.json. `spec` is the issue's first spec; an empty spec when it is absent. */
+ * fixture and seeded.json. `spec` is the issue's first spec; an empty spec when it is absent. Each
+ * ask block of `spec` is an ask Dispatch opens (an upload resets the block to open), answered here
+ * as the source answered its question. */
 async function seedSpecIssue(file: string, source: string, spec?: string): Promise<void> {
   const title = readFileSync(path.join(source, "title.txt"), "utf8").trim();
   if (title === "") throw new Error(`${path.join(source, "title.txt")} holds no title`);
@@ -184,11 +238,44 @@ async function seedSpecIssue(file: string, source: string, spec?: string): Promi
   }));
   const seeded: string[] = [];
   const answers: Step[] = [];
+  const answeredInSource = asks.filter(
+    (ask) => ask.kind === "question" && ask.state === "answered" && ask.answer !== null
+  );
+  // The source asks an old-spec block holds: each is on the issue as its block's ask, so it is not
+  // opened a second time below.
+  const inSpec = new Set<string>();
+  const blockAsks =
+    spec === undefined ? [] : await specBlockAsks(issue.key, issue.primary_artifact_id);
+  for (const opened of blockAsks) {
+    const source = answeredInSource.find((ask) => ask.question.trim() === opened.question.trim());
+    const answer = source?.answer;
+    if (source === undefined || answer == null)
+      throw new Error(
+        `${asksFile} holds no answer to ${JSON.stringify(opened.question)}, the question of the old spec's ask block ${opened.block_id} (ask ${opened.id} on ${issue.key}); spec-rewrite does not make one up`
+      );
+    inSpec.add(source.id);
+    seeded.push(opened.id);
+    answers.push({
+      at: time(answer.at, asksFile),
+      write: async () => {
+        await answerAsk(
+          opened.id,
+          {
+            selected: answer.selected,
+            ...(answer.text === null ? {} : { text: answer.text }),
+            expected_edited_at: opened.edited_at,
+          },
+          { login: PERSON }
+        );
+      },
+    });
+  }
   // Only an answered question is the person's input: an open ask holds none, and an approval is a
   // review of an old document version, which the run's issue does not hold.
   for (const ask of asks) {
     const answer = ask.answer;
     if (ask.kind !== "question" || ask.state !== "answered" || answer === null) continue;
+    if (inSpec.has(ask.id)) continue;
     let opened: Ask | undefined;
     if (seededQuestion(ask.question) !== ask.question)
       console.log(

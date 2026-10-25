@@ -589,6 +589,8 @@ jobs:
       # is read from .omp-pin, the repository's one copy of it, installed through the mise
       # install-jj leaves at ~/.local/bin/mise (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
+      # scripts/skill-scenarios/rig.test.ts runs rig.sh judge-omp's container with the runner's own
+      # Docker, pulling its pinned ubuntu image from mirror.gcr.io.
       # scripts/skill-scenarios/daemon-pane.test.ts runs daemon-pane.go with `go run` inside packages/daemon.
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:

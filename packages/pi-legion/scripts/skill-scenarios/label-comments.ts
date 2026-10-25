@@ -27,12 +27,14 @@
  * program that prints the gateway key, run again for each call, and the call goes to
  * <gateway>/v1/messages. A 429 or 5xx answer is tried again after a wait.
  *
- * It writes <out>/labels.jsonl: one row for each comment that got its label, oldest first. Stdout
- * gets the counts. Stdout names no person and quotes no comment, so a pull request can carry it as
- * printed. A comment that gets no label fails the run (exit 1) and stderr names it. Exit 2 is a
- * refusal before any read: a bad argument, an --out inside a git or jj checkout, or no Dispatch.
+ * It writes <out>/labels.jsonl: one row for each comment, oldest first. Stdout gets the counts.
+ * Stdout names no person and quotes no comment, so a pull request can carry it as printed. The
+ * file is written only when every comment has a label: the rows go to a temporary file in <out>,
+ * which is renamed to labels.jsonl, so a failed run leaves an earlier labels.jsonl as it was. A
+ * comment that gets no label fails the run (exit 1) and stderr names it. Exit 2 is a refusal
+ * before any read: a bad argument, an --out inside a git or jj checkout, or no Dispatch.
  */
-import { mkdirSync, statSync, writeFileSync } from "node:fs";
+import { mkdirSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import type { Comment } from "@legion/contracts";
 import { messageFor } from "@legion/envoy-client/errors";
@@ -500,8 +502,13 @@ export async function main(argv: readonly string[], io: CliIo): Promise<number> 
     return refuse(messageFor(error));
   }
 
-  const file = path.join(path.resolve(args.out), "labels.jsonl");
+  const out = path.resolve(args.out);
+  const file = path.join(out, "labels.jsonl");
+  // In the same directory as labels.jsonl, so the rename replaces it in one step.
+  const partial = path.join(out, `.labels.jsonl.${process.pid}.tmp`);
   try {
+    // Made before any read, so a directory that cannot be made stops the run before the model calls.
+    mkdirSync(out, { recursive: true });
     const issues = await dispatch.issues();
     const perIssue = await mapLimit(issues, CONCURRENCY, async ({ key }) =>
       (await dispatch.comments(key)).map((comment) => ({ issue: key, comment }))
@@ -538,20 +545,23 @@ export async function main(argv: readonly string[], io: CliIo): Promise<number> 
         yes,
       });
     }
-    mkdirSync(path.dirname(file), { recursive: true });
-    writeFileSync(file, rows.map((row) => `${JSON.stringify(row)}\n`).join(""));
     if (failures.length > 0) {
       for (const failure of failures) io.err(`label-comments: ${failure}`);
       io.err(
-        `label-comments: ${failures.length} of ${set.length} comments got no label. ${file} holds the ${rows.length} labels that completed.`
+        `label-comments: ${failures.length} of ${set.length} comments got no label. The run did not write ${file}.`
       );
       return 1;
     }
+    writeFileSync(partial, rows.map((row) => `${JSON.stringify(row)}\n`).join(""));
+    renameSync(partial, file);
     for (const line of summary(rows)) io.out(line);
     return 0;
   } catch (error) {
     io.err(`label-comments: ${messageFor(error)}`);
     return 1;
+  } finally {
+    // Gone after a rename. Left only by a write or rename that failed.
+    rmSync(partial, { force: true });
   }
 }
 

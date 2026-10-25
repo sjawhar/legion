@@ -138,7 +138,7 @@ const transcript = [
     tasks: [{ name: "CodeCheck", task: "Check it against the code." }],
   }),
   answered("2026-10-24T10:00:30.000Z", "c0", "task", "<task-result>The code agrees.</task-result>"),
-  // A spec-only check that answers in its own result.
+  // A spec-only check that answers in its own result, as a blocking task does.
   call("2026-10-24T10:01:00.000Z", "c1", "task", {
     context: `Read this spec alone.\n\n${v1}`,
     tasks: [{ name: "SpecCheck1", task: "List each gap." }],
@@ -147,7 +147,7 @@ const transcript = [
     "2026-10-24T10:01:30.000Z",
     "c1",
     "task",
-    '<task-result id="SpecCheck1">R2 names no source.</task-result>'
+    '<task-result id="SpecCheck1" agent="task" status="completed" duration="30s">\n<output>\nR2 names no source.\n</output>\n</task-result>'
   ),
   ...docEdit("2026-10-24T10:02:00.000Z", "w1", 2),
   // A spec-only check that runs in the background: its report arrives as a message of its own.
@@ -173,7 +173,7 @@ const transcript = [
 
 /** A spec-writing run directory as rig.sh and seed.ts write one; `seeded-1` is a seeded ask that
  * capture-spec failed to leave out, so judge.ts must leave it out itself. */
-function runDir(name: string, extra: Record<string, string> = {}): string {
+function runDir(name: string, extra: Record<string, string> = {}, entries = transcript): string {
   const dir = path.join(work, "runs", name);
   for (const sub of ["sessions", "source", "documents", "spec-versions"])
     mkdirSync(path.join(dir, sub), { recursive: true });
@@ -248,7 +248,7 @@ function runDir(name: string, extra: Record<string, string> = {}): string {
   for (const [file, text] of Object.entries(files)) writeFileSync(path.join(dir, file), text);
   writeFileSync(
     path.join(dir, "sessions", "2026-10-24T10-00-00-000Z_01a16640.jsonl"),
-    transcript.map((entry) => `${JSON.stringify(entry)}\n`).join("")
+    entries.map((entry) => `${JSON.stringify(entry)}\n`).join("")
   );
   return dir;
 }
@@ -268,6 +268,7 @@ const textUnder = (dir: string) =>
 interface Seen {
   profile: string;
   dir: string;
+  output: string;
   files: string[];
   prompt: string;
   text: string;
@@ -330,9 +331,9 @@ function answerFor(dir: string): [string, unknown] {
   return found();
 }
 function fakeRunner(seen: Seen[], answer: (dir: string) => [string, unknown] = answerFor) {
-  return async (profile: "ste" | "bare", dir: string) => {
+  return async (profile: "ste" | "bare", dir: string, output: string) => {
     const prompt = readFileSync(path.join(dir, "prompt.txt"), "utf8");
-    seen.push({ profile, dir, files: filesUnder(dir), prompt, text: textUnder(dir) });
+    seen.push({ profile, dir, output, files: filesUnder(dir), prompt, text: textUnder(dir) });
     const [file, body] = answer(dir);
     writeFileSync(path.join(dir, file), JSON.stringify(body));
     return 0;
@@ -388,6 +389,47 @@ test("each prompt names the one file the judge writes its answer to", () => {
     const [file] = answerFor(judge.dir);
     expect(judge.prompt).toContain(path.join(judge.dir, file));
   }
+});
+
+// rig.sh judge-omp mounts only the output file and sessions/ writable, so the runner gets the file.
+test("the runner is told the one file the judge may write", async () => {
+  for (const judge of seen) expect(judge.output).toBe(answerFor(judge.dir)[0]);
+  const asked: Seen[] = [];
+  await answerTurn(runDir("spec-writing-head-6"), 1, { runner: fakeRunner(asked) });
+  expect(asked.map((judge) => judge.output)).toEqual(["answer.json", "answer.json"]);
+});
+
+// Dispatch writes `created_at` as Go does, with no trailing zeros: `…:00.5Z` is earlier than
+// `…:00.51Z`, though it sorts after it as text.
+test("questions gets the asks in time order at full precision", async () => {
+  const dir = runDir("spec-writing-head-7", {
+    "agent-asks.json": JSON.stringify([
+      ask("ask-late", "Which second name?", "2026-10-24T10:07:00.51Z"),
+      ask("ask-early", "Which name?", "2026-10-24T10:07:00.5Z"),
+    ]),
+  });
+  const seenHere: Seen[] = [];
+  await judgeRun(dir, {
+    runner: fakeRunner(seenHere, (judge) =>
+      path.basename(judge) === "questions"
+        ? [
+            "questions.json",
+            {
+              rows: ["ask-early", "ask-late"].map((id) => ({
+                id,
+                dominated: false,
+                settled: false,
+                kind: "taste",
+                reason: "Taste.",
+              })),
+            },
+          ]
+        : answerFor(judge)
+    ),
+  });
+  const questions = seenHere.find((judge) => path.basename(judge.dir) === "questions");
+  const asks = JSON.parse(readFileSync(path.join(questions?.dir ?? "", "agent-asks.json"), "utf8"));
+  expect(asks.map((a: { id: string }) => a.id)).toEqual(["ask-early", "ask-late"]);
 });
 
 test("the inputs of questions, numbers and preamble hold no seeded ask", () => {
@@ -478,6 +520,74 @@ test("a judge that writes no answer, or one that does not parse, fails the run n
   await expect(judgeRun(dir, { runner: wrong })).rejects.toThrow(
     `${path.join(work, "judging", "spec-writing-head-2", "numbers", "numbers.json")} does not parse`
   );
+});
+
+// Each judge's answer must cover exactly what judge.ts gave it: a judge that leaves out, repeats or
+// invents an id fails the run, naming its file, as a judge that writes no answer does.
+test("a judge whose answer does not cover its input fails the run naming the file", async () => {
+  const dir = runDir("spec-writing-head-8");
+  const faulty: Record<string, [string, unknown]> = {
+    // The approved spec, v3, holds R1 and R2.
+    checkable: [
+      "checkable.json",
+      { rows: [{ requirement: "R1", check: "Run greet.", uncheckable: false }] },
+    ],
+    questions: [
+      "questions.json",
+      {
+        rows: ["ask-1", "ask-1", "ask-2", "ask-9"].map((id) => ({
+          id,
+          dominated: false,
+          settled: false,
+          kind: "taste",
+          reason: "Taste.",
+        })),
+      },
+    ],
+    numbers: ["numbers.json", { rows: [{ id: "seeded-1", names_number: false, quote: null }] }],
+    proposal: ["proposal.json", { rows: [{ item: "a name", verdict: "asked", ask: "seeded-1" }] }],
+    preamble: [
+      "preamble.json",
+      { rows: [{ source: "documents/other.md", passage: "You said.", kind: "retold" }] },
+    ],
+    findings: ["findings.json", { rows: [{ check: 3, finding: "No owner.", verdict: "fixed" }] }],
+  };
+  const expected: Record<string, string[]> = {
+    checkable: ["no row for requirement R2"],
+    questions: ["two or more rows for ask ask-1", "rows for ask it was not given: ask-9"],
+    numbers: ["no row for text msg-1", "rows for text it was not given: seeded-1"],
+    proposal: ["rows for ask it was not given: seeded-1"],
+    preamble: ["rows for source it was not given: documents/other.md"],
+    findings: ["rows for check it was not given: 3"],
+  };
+  for (const [name, answer] of Object.entries(faulty)) {
+    const runner = fakeRunner([], (judge) =>
+      path.basename(judge) === name ? answer : answerFor(judge)
+    );
+    const file = path.join(work, "judging", "spec-writing-head-8", name, answer[0]);
+    const failed = await judgeRun(dir, { runner }).then(
+      () => "",
+      (error: Error) => error.message
+    );
+    expect(failed).toContain(`${file} does not cover what judge.ts gave its judge: `);
+    for (const problem of expected[name] ?? []) expect(failed).toContain(problem);
+  }
+});
+
+// A run whose transcript holds no spec-only check gives the findings judge nothing to read: no
+// findings judge runs, and findings.json has no row.
+test("a run with no spec-only check runs no findings judge and writes findings.json with no row", async () => {
+  const unchecked = transcript.filter(
+    (entry) =>
+      !JSON.stringify(entry).includes('"c1"') &&
+      !JSON.stringify(entry).includes('"c2"') &&
+      entry.type !== "custom_message"
+  );
+  const dir = runDir("spec-writing-head-9", {}, unchecked);
+  const ran: Seen[] = [];
+  await judgeRun(dir, { runner: fakeRunner(ran) });
+  expect(ran.map((judge) => path.basename(judge.dir))).not.toContain("findings");
+  expect(JSON.parse(readFileSync(path.join(dir, "findings.json"), "utf8"))).toEqual({ rows: [] });
 });
 
 test("answer runs the stand-in once for each open ask and writes its answers", async () => {

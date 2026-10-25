@@ -27,6 +27,7 @@ import {
   checkablePrompt,
   decisionsPrompt,
   FAULTS_MD,
+  FindingsOutput,
   faultsPrompt,
   findingsPrompt,
   type JudgeProfile,
@@ -40,10 +41,10 @@ import {
   sharedRunPrompt,
 } from "./judge-prompts";
 import {
-  AgentAsks,
-  AgentTexts,
   approval,
   checkouts,
+  coverage,
+  judgeInputs,
   SpecFixture,
   SpecVersions,
   State,
@@ -53,8 +54,9 @@ import {
 } from "./score";
 import { session, sessionId } from "./transcript";
 
-/** Starts one judge in `dir` under `profile` and resolves to its exit status. */
-export type JudgeRunner = (profile: JudgeProfile, dir: string) => Promise<number>;
+/** Starts one judge in `dir` under `profile` and resolves to its exit status. `output` is the name
+ * of the one file in `dir` the judge writes its answer to, the only file of `dir` it may write. */
+export type JudgeRunner = (profile: JudgeProfile, dir: string, output: string) => Promise<number>;
 export interface JudgeOptions {
   runner?: JudgeRunner;
   /** How many judges of a run run at once. */
@@ -62,10 +64,10 @@ export interface JudgeOptions {
 }
 
 const here = import.meta.dir;
-/** The production runner: `bash rig.sh judge-omp <profile> <dir>`, with this process's
+/** The production runner: `bash rig.sh judge-omp <profile> <dir> <output>`, with this process's
  * environment, so the rig's work directory and the operator's model route reach it. */
-const rigRunner: JudgeRunner = async (profile, dir) => {
-  const child = Bun.spawn(["bash", path.join(here, "rig.sh"), "judge-omp", profile, dir], {
+const rigRunner: JudgeRunner = async (profile, dir, output) => {
+  const child = Bun.spawn(["bash", path.join(here, "rig.sh"), "judge-omp", profile, dir, output], {
     stdout: "inherit",
     stderr: "inherit",
   });
@@ -83,15 +85,18 @@ function read<T>(file: string, schema: z.ZodType<T>): T {
   return schema.parse(JSON.parse(readFileSync(file, "utf8")));
 }
 
-/** One judge to run: its directory's name, its prompt and its input files (relative path to
- * content). */
+/** One judge to run: its directory's name, its prompt, its input files (relative path to content),
+ * and what its answer must cover besides its shape (score.ts `coverage`: the problems, empty when
+ * it covers its input). */
 interface Job<T> {
   dir: string;
   prompt: JudgePrompt<T>;
   inputs: Record<string, string>;
+  covers?: (answer: T) => string[];
 }
 /** Builds the job's directory afresh with only its inputs and prompt.txt, runs the judge in it, and
- * returns its validated answer. */
+ * returns its validated answer. An answer that does not parse, or does not cover what the judge was
+ * given, fails the run, naming the answer's file. */
 async function runJob<T>(job: Job<T>, runner: JudgeRunner): Promise<T> {
   rmSync(job.dir, { recursive: true, force: true });
   mkdirSync(job.dir, { recursive: true });
@@ -100,7 +105,7 @@ async function runJob<T>(job: Job<T>, runner: JudgeRunner): Promise<T> {
     writeFileSync(path.join(job.dir, file), text);
   }
   writeFileSync(path.join(job.dir, "prompt.txt"), job.prompt.text(job.dir));
-  const status = await runner(job.prompt.profile, job.dir);
+  const status = await runner(job.prompt.profile, job.dir, job.prompt.file);
   const answer = path.join(job.dir, job.prompt.file);
   if (!existsSync(answer))
     throw new Error(`${answer} is missing: the judge wrote no answer (exit ${status})`);
@@ -113,6 +118,11 @@ async function runJob<T>(job: Job<T>, runner: JudgeRunner): Promise<T> {
   const result = job.prompt.schema.safeParse(parsed);
   if (!result.success)
     throw new Error(`${answer} does not parse: ${z.prettifyError(result.error)}`);
+  const problems = job.covers?.(result.data) ?? [];
+  if (problems.length > 0)
+    throw new Error(
+      `${answer} does not cover what judge.ts gave its judge: ${problems.join("; ")}`
+    );
   return result.data;
 }
 /** Runs every job, at most `parallel` at once, and resolves to their answers in job order. */
@@ -209,32 +219,16 @@ export async function judgeRun(runDir: string, options: JudgeOptions = {}) {
   const work = workOf(runDir);
   const run = path.basename(path.resolve(runDir));
   const judging = path.join(work, "judging", run);
-  const seeded = seededIds(runDir);
   const file = (name: string) => readFileSync(path.join(runDir, name), "utf8");
   const spec = file("spec.md");
   const entries = session(runDir);
   const own = sessionId(entries);
   if (own === undefined) throw new Error(`${runDir}: the transcript has no session header`);
   const fixture = read(path.join(runDir, "fixture.json"), SpecFixture);
-  const asks = read(path.join(runDir, "agent-asks.json"), AgentAsks)
-    .filter((ask) => ask.kind !== "approval" && !seeded.has(ask.id))
-    .map((ask, index) => ({ ask, index }))
-    .sort(
-      (a, b) => (a.ask.created_at ?? "").localeCompare(b.ask.created_at ?? "") || a.index - b.index
-    )
-    .map(({ ask }) => ask);
-  const texts = read(path.join(runDir, "agent-texts.json"), AgentTexts).filter(
-    (text) => !seeded.has(text.id)
-  );
-  const documents = path.join(runDir, "documents");
-  const documentFiles = existsSync(documents)
-    ? Object.fromEntries(
-        (await Array.fromAsync(new Bun.Glob("*").scan({ cwd: documents })))
-          .sort()
-          .map((name) => [`documents/${name}`, readFileSync(path.join(documents, name), "utf8")])
-      )
-    : {};
-  const { checks, writes } = specWork(entries, checkouts(work), fixture);
+  const specWorkDone = specWork(entries, checkouts(work), fixture);
+  const given = judgeInputs(runDir, specWorkDone);
+  const documentFiles = Object.fromEntries(given.documents.map((name) => [name, file(name)]));
+  const { checks, writes } = specWorkDone;
   const findingsInputs = Object.fromEntries(
     checks.flatMap((check, index) => [
       [`check-${index + 1}/assignment.md`, `${check.assignment}\n`],
@@ -246,25 +240,29 @@ export async function judgeRun(runDir: string, options: JudgeOptions = {}) {
   const approvedSpec =
     approved && version !== null ? file(path.join("spec-versions", `${version}.md`)) : undefined;
 
+  // A judge with nothing to judge runs no session: no check, no findings judge; no approval, no
+  // checkable judge. Its file is written with no row.
   const single: Job<unknown>[] = [
     { dir: "faults", prompt: faultsPrompt, inputs: { "spec.md": spec, "faults.md": FAULTS_MD } },
     { dir: "decisions", prompt: decisionsPrompt, inputs: { "spec.md": spec } },
-    { dir: "findings", prompt: findingsPrompt, inputs: findingsInputs },
+    ...(checks.length === 0
+      ? []
+      : [{ dir: "findings", prompt: findingsPrompt, inputs: findingsInputs }]),
     ...(approvedSpec === undefined
       ? []
       : [{ dir: "checkable", prompt: checkablePrompt, inputs: { "spec.md": approvedSpec } }]),
     {
       dir: "questions",
       prompt: questionsPrompt,
-      inputs: { "agent-asks.json": pretty(asks), ...sourceInputs(runDir) },
+      inputs: { "agent-asks.json": pretty(given.asks), ...sourceInputs(runDir) },
     },
-    { dir: "numbers", prompt: numbersPrompt, inputs: { "agent-texts.json": pretty(texts) } },
+    { dir: "numbers", prompt: numbersPrompt, inputs: { "agent-texts.json": pretty(given.texts) } },
     {
       dir: "preamble",
       prompt: preamblePrompt,
       inputs: {
         "spec.md": spec,
-        "agent-texts.json": pretty(texts),
+        "agent-texts.json": pretty(given.texts),
         ...documentFiles,
         "messages.md": file(path.join("source", "messages.md")),
       },
@@ -272,9 +270,16 @@ export async function judgeRun(runDir: string, options: JudgeOptions = {}) {
     {
       dir: "proposal",
       prompt: proposalPrompt,
-      inputs: { "spec.md": spec, "agent-asks.json": pretty(asks) },
+      inputs: { "spec.md": spec, "agent-asks.json": pretty(given.asks) },
     },
-  ].map((job) => ({ ...job, dir: path.join(judging, job.dir) }) as Job<unknown>);
+  ].map(
+    (job) =>
+      ({
+        ...job,
+        dir: path.join(judging, job.dir),
+        covers: (answer: unknown) => coverage(job.prompt.file, answer, given),
+      }) as Job<unknown>
+  );
   const runs = sharedRuns(runDir);
   const shared = runs.map((found, index) => ({
     dir: path.join(judging, `shared-runs-${index + 1}`),
@@ -296,6 +301,11 @@ export async function judgeRun(runDir: string, options: JudgeOptions = {}) {
       writeFileSync(out, pretty(CheckableFile.parse({ ...(answer as object), version })));
     else cpSync(path.join(job.dir, job.prompt.file), out);
   }
+  if (checks.length === 0)
+    writeFileSync(
+      path.join(runDir, findingsPrompt.file),
+      pretty(FindingsOutput.parse({ rows: [] }))
+    );
   if (approvedSpec === undefined)
     writeFileSync(
       path.join(runDir, checkablePrompt.file),

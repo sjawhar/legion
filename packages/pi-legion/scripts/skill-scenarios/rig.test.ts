@@ -675,53 +675,86 @@ echo done
   });
 });
 
-// rig.sh judge-omp, the whole script, with a stand-in mise that records omp's argv, its cwd and its
-// environment, and the real key-file route. The checkout's own skills/asd-ste100 is the ste skill.
+// rig.sh judge-omp, the whole script, in its Docker container (Docker is on the devbox and on CI's
+// ubuntu-24.04 runners), with the real key-file route and a stand-in omp that records its argv and
+// environment. SKILL_SCENARIOS_JUDGE_OMP puts the stand-in where the pinned omp's binary is
+// mounted, so no test needs a model. The checkout's own skills/asd-ste100 is the ste skill.
 describe("judge-omp", () => {
-  const bin = freshDir("judge-bin");
+  const work = freshDir("judge-work");
+  const outside = path.join(work, "outside.txt");
+  writeFileSync(outside, "a file beside the judge's directory\n");
+  mkdirSync(path.join(work, "runs"), { recursive: true });
+  const omp = path.join(freshDir("judge-omp-bin"), "omp");
+  // The stand-in writes everything through the one file the judge may write, answer.json: argv
+  // (one word a line), then `env` lines, then one line per probe (`<name> allowed|denied`).
   writeFileSync(
-    path.join(bin, "mise"),
-    `#!/usr/bin/env bash
-shift 3
-{ printf '%s\\n' "$@"; } >"$PWD/argv.txt"
-env >"$PWD/env.txt"
-echo "judged"
+    omp,
+    `#!/bin/bash
+probe() { if "\${@:2}" >/dev/null 2>&1; then echo "probe $1 allowed"; else echo "probe $1 denied"; fi; }
+{
+  printf 'argv %s\\n' "$0" "$@"
+  printf 'env %s\\n' "PWD=$PWD" "HOME=$HOME" "OMP_PROFILE=$OMP_PROFILE"
+  env | grep -q LEGION_E2E && echo "env LEGION_E2E set"
+  probe read-outside cat "$OUTSIDE"
+  probe read-home-ssh ls "$OPERATOR_HOME/.ssh"
+  probe list-work ls "$WORK/runs"
+  probe read-own cat "$PWD/prompt.txt"
+  probe write-own-dir touch "$PWD/new.txt"
+  probe write-sessions touch "$PWD/sessions/s.jsonl"
+  probe read-skill cat "$HOME/.omp/profiles/$OMP_PROFILE/agent/skills/asd-ste100/SKILL.md"
+  probe read-models cat "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml"
+  probe key-command test -x "$(sed -n 's/.*!exec \\(.*\\)"$/\\1/p' "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml" | head -1)"
+} >"$PWD/answer.json"
+echo judged
 exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
 `,
     { mode: 0o755 }
   );
-  const work = freshDir("judge-work");
-  const judge = (kind: string, dir: string, env: Record<string, string> = {}) =>
-    Bun.spawnSync(["bash", path.join(import.meta.dir, "rig.sh"), "judge-omp", kind, dir], {
+  const judge = (
+    kind: string,
+    dir: string,
+    output = "answer.json",
+    env: Record<string, string> = {}
+  ) =>
+    Bun.spawnSync(["bash", path.join(import.meta.dir, "rig.sh"), "judge-omp", kind, dir, output], {
       env: {
         ...childEnv,
-        PATH: `${bin}:${childEnv.PATH}`,
         USER: "rig",
         SKILL_SCENARIOS_WORK: work,
+        SKILL_SCENARIOS_JUDGE_OMP: omp,
+        SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${work}`,
         LEGION_E2E_MODEL_ROUTE: "key-file",
         LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o600),
         ...env,
       },
     });
-  function promptDir(): string {
-    const dir = freshDir("judging");
-    writeFileSync(path.join(dir, "prompt.txt"), "Write faults.json.\n");
+  let jobs = 0;
+  function judgeDir(): string {
+    const dir = path.join(work, "judging", `job-${++jobs}`);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(path.join(dir, "prompt.txt"), "Write answer.json.\n");
     return dir;
   }
+  /** The stand-in's record of one kind (`argv`, `env`, `probe`), from the judge's answer file. */
+  const recorded = (dir: string, kind: string) =>
+    readFileSync(path.join(dir, "answer.json"), "utf8")
+      .split("\n")
+      .filter((line) => line.startsWith(`${kind} `))
+      .map((line) => line.slice(kind.length + 1));
 
   // Catches: a judge session with the label's plugins, the operator's skills or the default model,
   // run outside its own directory, or with no record of its model.
   test("ste runs omp in the directory on its prompt, no plugins, asd-ste100 alone, the pinned model", () => {
-    const dir = promptDir();
+    const dir = judgeDir();
     const result = judge("ste", dir);
     expect({ code: result.exitCode, stderr: result.stderr.toString() }).toEqual({
       code: 0,
       stderr: "",
     });
-    expect(readFileSync(path.join(dir, "argv.txt"), "utf8").split("\n")).toEqual([
-      "omp",
+    expect(recorded(dir, "argv")).toEqual([
+      "/opt/omp/omp",
       "-p",
-      "Write faults.json.",
+      "Write answer.json.",
       "--no-extensions",
       "--skills",
       "asd-ste100",
@@ -731,13 +764,12 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
       "high",
       "--session-dir",
       `${dir}/sessions`,
-      "",
     ]);
-    const env = readFileSync(path.join(dir, "env.txt"), "utf8");
-    expect(env).toContain(`PWD=${dir}\n`);
-    expect(env).toContain("OMP_PROFILE=judge-ste\n");
-    expect(env).toContain(`HOME=${work}/judge-profiles/ste/home\n`);
-    expect(env).not.toContain("LEGION_E2E_ANTHROPIC_KEY_FILE");
+    expect(recorded(dir, "env")).toEqual([
+      `PWD=${dir}`,
+      "HOME=/home/judge",
+      "OMP_PROFILE=judge-ste",
+    ]);
     expect(readFileSync(path.join(dir, "out.txt"), "utf8")).toBe("judged\nexit=0\n");
     expect(readFileSync(path.join(dir, "judge-model.txt"), "utf8")).toBe(
       "model anthropic/claude-opus-4-8\nthinking high\n"
@@ -754,27 +786,58 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
     ).toContain("https://api.anthropic.com");
   });
 
+  // Catches: a judge that reads the run's transcript, other runs or the operator's files beside its
+  // own directory (as a findings judge did, given no check), or that writes anything but its one
+  // answer file and its sessions.
+  test("a judge sees only its own directory, read-only, with its answer file and sessions writable", () => {
+    const dir = judgeDir();
+    expect(judge("ste", dir).exitCode).toBe(0);
+    expect(Object.fromEntries(recorded(dir, "probe").map((line) => line.split(" ")))).toEqual({
+      "read-outside": "denied",
+      "read-home-ssh": "denied",
+      "list-work": "denied",
+      "read-own": "allowed",
+      "write-own-dir": "denied",
+      "write-sessions": "allowed",
+      "read-skill": "allowed",
+      "read-models": "allowed",
+      "key-command": "allowed",
+    });
+    expect(existsSync(path.join(dir, "new.txt"))).toBe(false);
+  });
+
   // Catches: a bare judge that still loads skills, or a judge-omp that hides omp's failure.
   test("bare loads no skill, and judge-omp exits with omp's status", () => {
-    const dir = promptDir();
+    const dir = judgeDir();
     writeFileSync(path.join(dir, "exit-status"), "3\n");
     const result = judge("bare", dir);
     expect(result.exitCode).toBe(3);
-    expect(readFileSync(path.join(dir, "argv.txt"), "utf8")).toContain("--no-skills\n");
-    expect(readFileSync(path.join(dir, "argv.txt"), "utf8")).not.toContain("--skills\n");
-    expect(readFileSync(path.join(dir, "env.txt"), "utf8")).toContain("OMP_PROFILE=judge-bare\n");
+    expect(recorded(dir, "argv")).toContain("--no-skills");
+    expect(recorded(dir, "argv")).not.toContain("--skills");
+    expect(recorded(dir, "env")).toContain("OMP_PROFILE=judge-bare");
+    expect(recorded(dir, "probe")).toContain("read-skill denied");
     expect(readFileSync(path.join(dir, "out.txt"), "utf8")).toBe("judged\nexit=3\n");
     expect(
       existsSync(path.join(work, "judge-profiles/bare/home/.omp/profiles/judge-bare/agent/skills"))
     ).toBe(false);
   });
 
-  // Catches: a judge kind the rig has no profile for, or a directory with no prompt.
-  test("refuses another kind and a directory with no prompt.txt", () => {
-    expect(judge("plugins", promptDir()).stderr.toString()).toContain("is ste or bare");
+  // Catches: a judge kind the rig has no profile for, a directory with no prompt, an answer file
+  // name that escapes the judge's directory or names another of its files, and the gateway route,
+  // whose key command needs the operator's home and session bus.
+  test("refuses another kind, a directory with no prompt.txt, a bad answer name and the gateway route", () => {
+    expect(judge("plugins", judgeDir()).stderr.toString()).toContain("is ste or bare");
     expect(judge("ste", freshDir("judging-empty")).stderr.toString()).toContain(
       "has no prompt.txt"
     );
+    for (const output of ["../answer.json", "sessions", "prompt.txt", "a/b.json", ""]) {
+      const result = judge("ste", judgeDir(), output);
+      expect(result.exitCode).not.toBe(0);
+      expect(result.stderr.toString()).toContain("is not the name of an answer file");
+    }
+    const gateway = judge("ste", judgeDir(), "answer.json", { LEGION_E2E_MODEL_ROUTE: "gateway" });
+    expect(gateway.exitCode).toBe(1);
+    expect(gateway.stderr.toString()).toContain("takes the key-file model route");
   });
 
   // Catches: a judge profile whose built-from records an empty commit line when the rig's root is
@@ -794,13 +857,13 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
     });
     const rootWork = freshDir("judge-root-work");
     const result = Bun.spawnSync(
-      ["bash", path.join(scripts, "rig.sh"), "judge-omp", "ste", promptDir()],
+      ["bash", path.join(scripts, "rig.sh"), "judge-omp", "ste", judgeDir(), "answer.json"],
       {
         env: {
           ...childEnv,
-          PATH: `${bin}:${childEnv.PATH}`,
           USER: "rig",
           SKILL_SCENARIOS_WORK: rootWork,
+          SKILL_SCENARIOS_JUDGE_OMP: omp,
           LEGION_E2E_MODEL_ROUTE: "key-file",
           LEGION_E2E_ANTHROPIC_KEY_FILE: keyFile(0o600),
           GIT_CEILING_DIRECTORIES: path.dirname(top),
@@ -812,6 +875,7 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
     expect(existsSync(path.join(rootWork, "judge-profiles/ready"))).toBe(false);
   });
 });
+
 // A spec run's plan row reads skill://writing-plans, which only a label built with
 // SKILL_SCENARIOS_SUPERPOWERS holds (cmd_profile marks it with a `superpowers` file).
 describe("require_superpowers", () => {

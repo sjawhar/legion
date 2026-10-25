@@ -102,22 +102,13 @@ export const answerPrompt: JudgePrompt<z.infer<typeof AnswerOutput>> = {
     ].join("\n"),
 };
 
-export const FaultsOutput = z
-  .object({
-    faults: z.record(z.enum(FAULT_ROWS), count),
-    ste_breaks: count,
-    items: z.array(z.object({ row: z.enum(FAULT_ROWS), quote: words })),
-  })
-  .superRefine((value, ctx) => {
-    for (const row of FAULT_ROWS) {
-      const items = value.items.filter((item) => item.row === row).length;
-      if (items !== value.faults[row])
-        ctx.addIssue({
-          code: "custom",
-          message: `faults["${row}"] is ${value.faults[row]}, but ${items} items name that row`,
-        });
-    }
-  });
+/** faults.json. Each row's count equals the items that name the row: score.ts `coverage` holds
+ * both judge.ts and the score to that. */
+export const FaultsOutput = z.object({
+  faults: z.record(z.enum(FAULT_ROWS), count),
+  ste_breaks: count,
+  items: z.array(z.object({ row: z.enum(FAULT_ROWS), quote: words })),
+});
 export const faultsPrompt: JudgePrompt<z.infer<typeof FaultsOutput>> = {
   name: "faults",
   file: "faults.json",

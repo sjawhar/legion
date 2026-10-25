@@ -16,11 +16,14 @@
 import { existsSync, readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
+import { sessionDirectory } from "@legion/envoy-client/dispatch-session-state";
 import { z } from "zod";
 import { ENTRY_HEADER } from "./fetch-spec-sources";
 import {
   CheckableFile,
+  CheckableOutput,
   DecisionsOutput,
+  FAULT_ROWS,
   FaultsOutput,
   FindingsOutput,
   NumbersOutput,
@@ -30,6 +33,7 @@ import {
   QuestionsOutput,
   SharedRunsFile,
 } from "./judge-prompts";
+import { byCreatedAt } from "./production-dispatch";
 import { CREATED, type SessionEntry, session, sessionId, toolResults } from "./transcript";
 
 /** `GET /api/v1/issues/{key}/asks`: every ask on the issue, whatever its state. */
@@ -828,7 +832,7 @@ function refusalAt(
 /** One thing a tool call did, in the order it did them: a read of a skill file, or one `dispatch`
  * command, with what the call's result shows of it. `answer` is the line of Dispatch's answer to a
  * write (ANSWER), or "". `refusal` is the refusal the result shows for the command, or undefined.
- * `succeeded` is true when the command ran and was not refused. */
+ * Whether Dispatch took the command is the CLI's ledger's to say (refusalBlocks). */
 type Operation =
   | { kind: "read"; step: Step; target: string }
   | {
@@ -837,7 +841,6 @@ type Operation =
       call: DispatchCall;
       answer: string;
       refusal: string | undefined;
-      succeeded: boolean;
     };
 /** A shell command of a call, in order, as operationsOf reads it. */
 type ShellCommand =
@@ -869,13 +872,14 @@ type ShellCommand =
  * command ends the call, except one after `&&` that follows a shown refusal: the shell never ran
  * it.
  *
- * What cannot be attributed:
- * - a refusal after the output of another command (`cat`, `sed`, a `dispatch` command that
- *   succeeded), whose end the output does not show: it could be that output's text;
- * - output a `$(…)` or a redirect to a file takes, which is not in the result where the command
- *   runs;
- * - a command in a loop, which runs more than once and is one command here;
- * - text another command prints that holds a line of Dispatch's answer before a write's own;
+ * The refusals score does not rest on this attribution: the CLI logs each call it ran, refused or
+ * not, in its ledger (refusalBlocks), and the attribution only says which command of a call a
+ * ledger line belongs to. The output does not show:
+ * - the end of another command's output (`cat`, `sed`, a `dispatch` command that succeeded), so a
+ *   refusal after it could be that output's text;
+ * - output a `$(…)` or a redirect to a file takes;
+ * - how often a command in a loop ran: it is one command here;
+ * - a write's answer, when another command prints a line of that answer before the write's own;
  * - which command of a failed call set its exit, when the call does not end with a `dispatch`
  *   command.
  */
@@ -897,8 +901,7 @@ function operationsOf(step: Step, outcome: Outcome | undefined): Operation[] {
     const call = nativeCall(step, native);
     const answer = lines.find((line) => ANSWER[call.command]?.test(line)) ?? "";
     const refusal = failed ? output : undefined;
-    const succeeded = outcome !== undefined && !outcome.failed;
-    return [{ kind: "dispatch", step, call, answer, refusal, succeeded }];
+    return [{ kind: "dispatch", step, call, answer, refusal }];
   }
   if (step.tool !== "bash" && step.tool !== "eval") {
     const target = new RegExp(SKILL_PATH.source).exec(strings(step.args).join("\n"))?.[0];
@@ -986,7 +989,6 @@ function operationsOf(step: Step, outcome: Outcome | undefined): Operation[] {
         call: command.call,
         answer,
         refusal: shown?.text,
-        succeeded: false,
       };
       invocations.push(invocation);
       operations.push({ at: command.at, operation: invocation });
@@ -1016,11 +1018,6 @@ function operationsOf(step: Step, outcome: Outcome | undefined): Operation[] {
       ending.sep === "&&" && invocations.slice(0, -1).some((other) => other.refusal !== undefined);
     if (!skipped) last.refusal ??= output;
   }
-  for (const invocation of invocations)
-    invocation.succeeded =
-      outcome !== undefined &&
-      invocation.refusal === undefined &&
-      !(outcome.failed && invocation === last);
   return operations.sort((a, b) => a.at - b.at).map(({ operation }) => operation);
 }
 /** A reference to an issue or to one of its documents, as `--ref` takes it: `dispatch://<issue>`
@@ -1075,83 +1072,321 @@ function operations(entries: SessionEntry[]): Operation[] {
   const results = outcomes(entries);
   return steps(entries).flatMap((step) => operationsOf(step, results.get(step.id)));
 }
+/** One line of the dispatch CLI's ledger (dispatch-session-state.ts `ResultEntry`): when the CLI
+ * ended a call, the call's tool, and the refusal (`error`) when Dispatch or the call's own check
+ * refused it. A line with no `error` is a call Dispatch took. */
+const LedgerLine = z.looseObject({
+  at: z.string(),
+  tool: z.string(),
+  error: z.string().optional(),
+});
+type LedgerLine = z.infer<typeof LedgerLine>;
+/** The run's dispatch CLI ledger: `results.jsonl` in the CLI's state directory for the session the
+ * transcript's header names, under the run's HOME (rig.sh base_env sets no other state directory).
+ * The CLI logs every call it ran, refused or not, whatever the shell did with its output: a pipe,
+ * `$(…)`, a loop or another program (Python's subprocess.run) hides nothing from it. It logs no
+ * refusal of a command's own arguments (`dispatch <command> was not called`, exit 1, when the
+ * parse refuses it), no usage refusal (`dispatch: …`, exit 2), and no `--help` or `--dry-run`
+ * call. A run with no ledger is the rig's fault: its CLI kept no record where the rig reads it. */
+function ledgerOf(runDir: string, session: string): LedgerLine[] {
+  const state = { XDG_STATE_HOME: path.join(runDir, "home", ".local", "state") };
+  const file = path.join(sessionDirectory(state, session), "results.jsonl");
+  if (!existsSync(file))
+    throw new Error(
+      `${file} is missing: the run's dispatch CLI logged no call where the rig reads`
+    );
+  return parsed(file, LedgerLine);
+}
+/** The ledger's name of a `dispatch` command's tool. */
+const toolOf = (call: DispatchCall) => `dispatch_${call.command.replace(/-/g, "_")}`;
+/** refusals: one block per refused call that no later call fixed from its refusal alone.
+ * - The refusals: each ledger line with an `error`, and each refusal a call's output shows
+ *   (operationsOf) that no ledger line belongs to, which is a refusal the CLI printed and did not
+ *   log.
+ * - A ledger line belongs to the tool call whose call time is at or before the line's time and
+ *   whose result time is at or after it; of two such calls (one message's parallel calls), to the
+ *   one whose result came first. Within that call it belongs to the next `dispatch` command of its
+ *   tool, in the call's order, that the CLI logs. A line that no command takes (a command in a
+ *   loop, one Python ran) belongs to the call alone, and one outside every call's time to no call.
+ * - A refusal is fixed by the first ledger line with no `error` whose tool call the agent made after
+ *   the refused call's result came back (after the line's time, for a line of no call): a call
+ *   made before then cannot show that the agent fixed the refusal from its text.
+ * - Each skill file read between the two breaks the fix: a read of the refused call that
+ *   operationsOf does not order before the refused command, a read of the fixing call that it does
+ *   not order after the fixing command, and every read of a call between them, or of another call
+ *   in the message of either.
+ * Each block names the call, the ledger's tool and time when the ledger holds it, its refusal text,
+ * and the read or the missing fix. */
+function refusalBlocks(
+  runDir: string,
+  entries: SessionEntry[],
+  ops: Operation[],
+  session: string
+): string[] {
+  const ledger = ledgerOf(runDir, session);
+  const results = outcomes(entries);
+  const calls = steps(entries).map((step) => {
+    const result = results.get(step.id);
+    return {
+      step,
+      start: Date.parse(step.at),
+      end: Date.parse(result?.at ?? ""),
+      seen: result?.index ?? Number.POSITIVE_INFINITY,
+    };
+  });
+  type Call = (typeof calls)[number];
+  const owner = (line: LedgerLine): Call | undefined => {
+    const at = Date.parse(line.at);
+    return calls
+      .filter((call) => call.start <= at && at <= call.end)
+      .sort((a, b) => a.end - b.end)[0];
+  };
+  // Each ledger line's call and, when a command of that call takes it, the command's place in ops.
+  const lines = ledger.map((line) => ({
+    line,
+    call: owner(line),
+    op: undefined as number | undefined,
+  }));
+  const logged = new Set<number>();
+  for (const call of calls) {
+    // The commands of the call the CLI can have logged: no `--help`, no `--dry-run`, and no command
+    // whose output shows a usage refusal (`dispatch: …`), which the CLI never logs.
+    const candidates = ops.flatMap((op, place) =>
+      op.kind === "dispatch" &&
+      op.step.id === call.step.id &&
+      op.call.flag("help") === undefined &&
+      op.call.flag("dry-run") === undefined &&
+      cliRefusals(op.refusal ?? "")[0]?.command !== null
+        ? [{ place, tool: toolOf(op.call), refused: op.refusal !== undefined }]
+        : []
+    );
+    let next = 0;
+    for (const entry of lines.filter((one) => one.call === call)) {
+      // A line the CLI logged as a success is no command whose output shows a refusal.
+      const found = candidates.findIndex(
+        (candidate, index) =>
+          index >= next &&
+          candidate.tool === entry.line.tool &&
+          (entry.line.error !== undefined || !candidate.refused)
+      );
+      const candidate = candidates[found];
+      if (candidate === undefined) continue;
+      entry.op = candidate.place;
+      logged.add(candidate.place);
+      next = found + 1;
+    }
+  }
+  const callOf = (step: Step) => calls.find((call) => call.step.id === step.id);
+  const refusals = [
+    ...lines.flatMap((entry) => {
+      if (entry.line.error === undefined) return [];
+      const op = entry.op === undefined ? undefined : ops[entry.op];
+      const where =
+        op?.kind === "dispatch"
+          ? `${op.call.text} (${entry.line.tool}, logged at ${entry.line.at})`
+          : `${entry.line.tool}, logged at ${entry.line.at}, ${entry.call ? `in tool call ${entry.call.step.id}` : "in no tool call's time"}`;
+      return [
+        {
+          where,
+          text: entry.line.error.trim(),
+          call: entry.call,
+          op: entry.op,
+          at: Date.parse(entry.line.at),
+        },
+      ];
+    }),
+    ...ops.flatMap((op, place) => {
+      if (op.kind !== "dispatch" || op.refusal === undefined || logged.has(place)) return [];
+      const call = callOf(op.step);
+      return [{ where: op.call.text, text: op.refusal, call, op: place, at: call?.start ?? 0 }];
+    }),
+  ].sort((a, b) => a.at - b.at || (a.op ?? 0) - (b.op ?? 0));
+
+  const blocks: string[] = [];
+  for (const refusal of refusals) {
+    const after = (call: Call) =>
+      refusal.call === undefined ? call.start > refusal.at : call.step.index > refusal.call.seen;
+    const fix = lines.find(
+      (entry) => entry.line.error === undefined && entry.call !== undefined && after(entry.call)
+    );
+    type Read = Extract<Operation, { kind: "read" }>;
+    const between = (op: Operation, place: number): op is Read => {
+      if (op.kind !== "read" || fix?.call === undefined) return false;
+      const call = callOf(op.step);
+      if (call === undefined) return false;
+      if (call === refusal.call) return refusal.op === undefined || place > refusal.op;
+      if (call === fix.call) return fix.op === undefined || place < fix.op;
+      const from =
+        refusal.call === undefined
+          ? call.start >= refusal.at
+          : call.step.index >= refusal.call.step.index;
+      return from && call.step.index <= fix.call.step.index;
+    };
+    const read = ops.find(between);
+    if (fix !== undefined && read === undefined) continue;
+    blocks.push(
+      [
+        `refused call: ${refusal.where}`,
+        indented(refusal.text, 4),
+        fix === undefined || read === undefined
+          ? "    no later dispatch call succeeded"
+          : `    then read ${read.target} before the next dispatch call succeeded`,
+      ].join("\n")
+    );
+  }
+  return blocks;
+}
 /** Whether a skill file read is skill `name` itself. */
 const readsSkill = (target: string, name: string) =>
   new RegExp(`^skill://${escaped(name)}(/SKILL\\.md)?$|/skills/${escaped(name)}/SKILL\\.md$`).test(
     target
   );
 
-/** A spec-only check: a `task` call made before a spec write, its assignment (every string of its
- * arguments), its report and when the last part of the report arrived. `write` is the place of
- * the spec write that follows it, in SpecWork.writes. */
+/** A spec-only check that counts for a spec write: a `task` call whose every task completed with a
+ * report that came back before the write (checkOutcome). `assignment` is every string of its
+ * arguments, `report` each task's report, and `write` the place of the write in SpecWork.writes. */
 export interface SpecCheck {
   assignment: string;
   report: string;
-  reportAt: string;
   write: number;
 }
+/** A spec-only check that counts for no spec write: its tasks, its call's id, the place of the
+ * write after it, and why. */
+export interface RejectedCheck {
+  tasks: string;
+  call: string;
+  write: number;
+  problem: string;
+}
 export interface SpecWork {
-  /** Each spec write the tool accepted, in order, and whether a spec-only check came after the
-   * write before it (or the session's start) and before it. */
+  /** Each spec write the tool accepted, in order, and whether a spec-only check that counts came
+   * after the write before it (or the session's start) and before it. */
   writes: { index: number; at: string; text: string; checked: boolean }[];
   checks: SpecCheck[];
+  rejected: RejectedCheck[];
 }
-/** A task result's report: the `<task-result id="…">` blocks in the call's own result and, for a
- * task that runs in the background, in each later message that delivers one of its tasks; else the
- * outputs the result's `details` keep; else the result's text. */
-function checkReport(
-  entries: SessionEntry[],
-  step: Step,
-  own: Outcome | undefined
-): { report: string; reportAt: string } {
-  const block = /<task-result\b[^>]*?\bid="([^"]+)"[^>]*>([\s\S]*?)<\/task-result>/g;
-  const tasks = Array.isArray(step.args.tasks) ? step.args.tasks : [];
-  const names = new Set<string>(
-    tasks.flatMap((task) =>
-      typeof task === "object" && task !== null && "name" in task && typeof task.name === "string"
-        ? [task.name]
-        : []
-    )
-  );
+/** Oh My Pi's envelope of one task's end (prompts/tools/task-summary.md): its id, its status
+ * (`completed`, `failed (exit <n>)`, `cancelled` or `merge failed`) and its body. */
+const TASK_RESULT = /<task-result\b([^>]*)>([\s\S]*?)<\/task-result>/g;
+const attribute = (attributes: string, name: string) =>
+  new RegExp(`\\b${name}="([^"]*)"`).exec(attributes)?.[1];
+/** A task's report in its envelope's body: the `<output>` or `<preview>` part, else the body less
+ * its `<meta>` and `<abort-reason>` lines. Oh My Pi's `(no output)` placeholder is no report. */
+function reportOf(body: string): string {
+  const inner =
+    /<(output|preview)\b[^>]*>([\s\S]*?)<\/\1>/.exec(body)?.[2] ??
+    body.replace(/<meta\b[^>]*\/>|<abort-reason>[\s\S]*?<\/abort-reason>/g, "");
+  const report = inner.trim();
+  return /^\(no output\)/.test(report) ? "" : report;
+}
+/** A record's field, when the record is an object. */
+const field = (value: unknown, name: string): unknown =>
+  typeof value === "object" && value !== null
+    ? (value as Record<string, unknown>)[name]
+    : undefined;
+/** The status Oh My Pi's envelope gives a task from its `details.results` entry
+ * (task/result-summary.ts). */
+function statusOf(result: unknown): string {
+  const exit = field(result, "exitCode");
+  if (field(result, "aborted") === true) return "cancelled";
+  if (exit === 0) return field(result, "error") ? "merge failed" : "completed";
+  return `failed (exit ${typeof exit === "number" ? exit : "?"})`;
+}
+/** The names of a `task` call's tasks: each one its arguments name, each a background spawn's
+ * result names (`` `<name>` (job ``), and each a blocking result's envelope names. */
+function taskNames(step: Step, own: Outcome | undefined): string[] {
+  const names = new Set<string>();
+  const tasks = Array.isArray(step.args.tasks) ? step.args.tasks : [step.args];
+  for (const task of tasks) {
+    const name = field(task, "name");
+    if (typeof name === "string" && name !== "") names.add(name);
+  }
   const text = own?.text ?? "";
   for (const [, name] of text.matchAll(/`([^`\s]+)` \(job/g)) if (name) names.add(name);
-  const parts: string[] = [];
-  let reportAt = own?.at || step.at;
-  for (const [, name, body] of text.matchAll(block)) {
-    if (name) names.add(name);
-    parts.push((body ?? "").trim());
+  for (const [, attributes = ""] of text.matchAll(TASK_RESULT)) {
+    const id = attribute(attributes, "id");
+    if (id) names.add(id);
   }
-  const details = own?.details;
-  if (parts.length === 0 && typeof details === "object" && details !== null && "results" in details)
-    for (const result of Array.isArray(details.results) ? details.results : [])
-      if (typeof result === "object" && result !== null && "output" in result)
-        if (typeof result.output === "string") parts.push(result.output.trim());
+  return [...names];
+}
+/** What a spec-only check came to before the spec write whose assistant message is entry `before`:
+ * its tasks' reports, or why it does not count. Every task the call started must have ended
+ * `completed` with a report that is not empty, in an entry before the write: the call's own result
+ * (an envelope, or else a blocking result's `details.results` entry, as Oh My Pi records one), or a
+ * later entry that delivers a background task's envelope (a `wait` result, an `async-result`
+ * message). A report that arrives after the write is no report for it. A task call the tool failed
+ * (`isError`) checked nothing. */
+function checkOutcome(
+  entries: SessionEntry[],
+  step: Step,
+  own: Outcome | undefined,
+  before: number
+): { report: string } | { problem: string } {
+  if (own === undefined) return { problem: "the task call has no result" };
+  if (own.index > before) return { problem: "the task call's result arrived after the spec write" };
+  if (own.failed)
+    return { problem: `the task call failed: ${own.text.trim().split("\n")[0] ?? ""}` };
+  const ended: { name: string; status: string; report: string; index: number }[] = [];
   for (const [index, entry] of entries.entries()) {
-    if (index <= step.index || index === own?.index) continue;
-    const delivered =
-      entry.type === "custom_message"
-        ? strings(entry.content).join("")
-        : entry.message?.role === "toolResult"
-          ? (entry.message.content ?? []).map((part) => part.text ?? "").join("")
-          : "";
-    for (const [, name, body] of delivered.matchAll(block)) {
-      const report = (body ?? "").trim();
-      if (!names.has(name ?? "") || parts.includes(report)) continue;
-      parts.push(report);
-      reportAt = entry.timestamp ?? reportAt;
-    }
+    if (index <= step.index) continue;
+    const text =
+      index === own.index
+        ? own.text
+        : entry.type === "custom_message"
+          ? strings(entry.content).join("")
+          : entry.message?.role === "toolResult"
+            ? (entry.message.content ?? []).map((part) => part.text ?? "").join("")
+            : "";
+    for (const [, attributes = "", body = ""] of text.matchAll(TASK_RESULT))
+      ended.push({
+        name: attribute(attributes, "id") ?? "",
+        status: attribute(attributes, "status") ?? "no status",
+        report: reportOf(body),
+        index,
+      });
   }
-  return { report: parts.length > 0 ? parts.join("\n\n") : text, reportAt };
+  const results = field(own.details, "results");
+  if (!ended.some((end) => end.index === own.index) && Array.isArray(results))
+    for (const result of results) {
+      const output = field(result, "output");
+      ended.push({
+        name: String(field(result, "id") ?? ""),
+        status: statusOf(result),
+        report: typeof output === "string" ? output.trim() : "",
+        index: own.index,
+      });
+    }
+  const names = taskNames(step, own);
+  if (names.length === 0)
+    return { problem: "the call names no task, and no task's report arrived" };
+  const problems: string[] = [];
+  const reports: string[] = [];
+  for (const name of names) {
+    const end = ended.find((one) => one.name === name && one.index < before);
+    if (end === undefined)
+      problems.push(
+        ended.some((one) => one.name === name)
+          ? `the report of task ${name} arrived after the spec write`
+          : `no report of task ${name} arrived`
+      );
+    else if (end.status !== "completed") problems.push(`task ${name} ended ${end.status}`);
+    else if (end.report === "") problems.push(`the report of task ${name} is empty`);
+    else reports.push(end.report);
+  }
+  return problems.length > 0 ? { problem: problems.join("; ") } : { report: reports.join("\n\n") };
 }
 /** The spec writes of a transcript (writesSpec, against the run's fixture.json) and the spec-only
- * checks before them. A check is a `task` call whose assignment holds the seven outline headings as
- * `##` lines and names no path under a checkout in `reach`; a check counts for the first spec write
- * after it. Each `dispatch` command of a call is a write of its own (operationsOf), so two writes
- * in one call with no check between them leave the second unchecked. */
+ * checks before them. A spec-only check is a `task` call whose assignment holds the seven outline
+ * headings as `##` lines and names no path under a checkout in `reach`. It counts for the first
+ * spec write after it when its tasks' reports came back before that write (checkOutcome); either
+ * way it counts for no later write. Each `dispatch` command of a call is a write of its own
+ * (operationsOf), so two writes in one call with no check between them leave the second
+ * unchecked. Places are transcript order, never timestamps. */
 export function specWork(entries: SessionEntry[], reach: string[], fixture: SpecFixture): SpecWork {
   const results = outcomes(entries);
   const writes: SpecWork["writes"] = [];
   const checks: SpecCheck[] = [];
+  const rejected: RejectedCheck[] = [];
   let pending: { step: Step; assignment: string }[] = [];
   for (const step of steps(entries)) {
     if (step.tool === "task") {
@@ -1166,22 +1401,31 @@ export function specWork(entries: SessionEntry[], reach: string[], fixture: Spec
     for (const operation of operationsOf(step, results.get(step.id))) {
       if (operation.kind !== "dispatch" || !writesSpec(operation.call, fixture, operation.answer))
         continue;
-      for (const check of pending)
-        checks.push({
-          assignment: check.assignment,
-          ...checkReport(entries, check.step, results.get(check.step.id)),
-          write: writes.length,
-        });
-      writes.push({
-        index: step.index,
-        at: step.at,
-        text: operation.call.text,
-        checked: pending.length > 0,
-      });
+      let checked = false;
+      for (const check of pending) {
+        const own = results.get(check.step.id);
+        const outcome = checkOutcome(entries, check.step, own, step.index);
+        if ("problem" in outcome)
+          rejected.push({
+            tasks: taskNames(check.step, own).join(", ") || "(unnamed)",
+            call: check.step.id,
+            write: writes.length,
+            problem: outcome.problem,
+          });
+        else {
+          checks.push({
+            assignment: check.assignment,
+            report: outcome.report,
+            write: writes.length,
+          });
+          checked = true;
+        }
+      }
+      writes.push({ index: step.index, at: step.at, text: operation.call.text, checked });
       pending = [];
     }
   }
-  return { writes, checks };
+  return { writes, checks, rejected };
 }
 
 /** Each `**R<n>.**` or `**A<n>.**` paragraph of a spec: its mark and its text, up to a blank line,
@@ -1411,14 +1655,143 @@ export function sharedRuns(runDir: string): SharedRun[] {
   return runs;
 }
 
-/** A judge's answer in the run directory, as judge.ts wrote it; a file missing or malformed is a
- * rig error that `rig.sh judge` fixes. */
-function judged<T>(runDir: string, file: string, schema: z.ZodType<T>): T {
+/** What judge.ts gives each judge of a run, and so what each judge's answer must cover:
+ * - `requirements`: the `**R<n>.**` marks of the approved version's spec-versions/<v>.md, or none
+ *   when the person approved none (then no checkable judge runs);
+ * - `asks`: agent-asks.json less the approval request and the seeded asks, oldest first at full
+ *   precision (Dispatch writes `…:00.5Z` before `…:00.51Z`, which text order reverses);
+ * - `texts`: agent-texts.json less the seeded asks;
+ * - `documents`: each file of documents/, as `documents/<file>`;
+ * - `checks`: how many spec-only checks count for a spec write (specWork): with none, no findings
+ *   judge runs and findings.json has no row. */
+export interface JudgeInputs {
+  requirements: string[];
+  asks: z.infer<typeof AgentAsks>;
+  texts: z.infer<typeof AgentTexts>;
+  documents: string[];
+  checks: number;
+}
+export function judgeInputs(runDir: string, work: SpecWork): JudgeInputs {
+  const seeded = seededIds(runDir);
+  const { approved, version } = approval(runDir);
+  const documents = path.join(runDir, "documents");
+  return {
+    requirements:
+      approved && version !== null
+        ? requirements(readFileSync(path.join(runDir, "spec-versions", `${version}.md`), "utf8"))
+        : [],
+    asks: json(path.join(runDir, "agent-asks.json"), AgentAsks)
+      .filter((ask) => ask.kind !== "approval" && !seeded.has(ask.id))
+      .toSorted((a, b) =>
+        byCreatedAt({ created_at: a.created_at ?? "" }, { created_at: b.created_at ?? "" })
+      ),
+    texts: json(path.join(runDir, "agent-texts.json"), AgentTexts).filter(
+      (text) => !seeded.has(text.id)
+    ),
+    documents: (existsSync(documents) ? readdirSync(documents).sort() : []).map(
+      (file) => `documents/${file}`
+    ),
+    checks: work.checks.length,
+  };
+}
+/** What a judge file's ids leave out of, repeat from or add to the ids its judge was given:
+ * `exact` holds the answer to one row per given id, else each id it names must be one given. */
+function covered(what: string, given: string[], named: string[], exact: boolean): string[] {
+  const problems: string[] = [];
+  if (exact) {
+    for (const id of given) {
+      const count = named.filter((one) => one === id).length;
+      if (count === 0) problems.push(`no row for ${what} ${id}`);
+      if (count > 1) problems.push(`two or more rows for ${what} ${id}`);
+    }
+  }
+  const unknown = [...new Set(named.filter((one) => !given.includes(one)))];
+  if (unknown.length > 0) problems.push(`rows for ${what} it was not given: ${unknown.join(", ")}`);
+  return problems;
+}
+/** What a judge's answer to `file` (a judge-prompts.ts output) leaves out of, repeats from or adds
+ * to what judge.ts gave its judge (judgeInputs); empty when it covers its input exactly. Both
+ * judge.ts, after each judge's answer parses, and specRow use it: judge.ts fails the run naming the
+ * answer, and specRow reports the file as a rig error.
+ * - checkable.json: one row for each requirement of the approved version;
+ * - questions.json: one row for each ask given;
+ * - numbers.json: one row for each text given;
+ * - proposal.json: each `ask` a row names is one given;
+ * - preamble.json: each `source` is spec.md, a given document, or agent-texts.json#<given id>;
+ * - faults.json: each row's count is the number of its items;
+ * - findings.json: each `check` is 1 to the number of checks given. */
+export function coverage(file: string, answer: unknown, inputs: JudgeInputs): string[] {
+  const asks = inputs.asks.map((ask) => ask.id);
+  const texts = inputs.texts.map((text) => text.id);
+  switch (file) {
+    case "checkable.json":
+      return covered(
+        "requirement",
+        inputs.requirements,
+        CheckableOutput.parse(answer).rows.map((row) => row.requirement),
+        true
+      );
+    case "questions.json":
+      return covered(
+        "ask",
+        asks,
+        QuestionsOutput.parse(answer).rows.map((row) => row.id),
+        true
+      );
+    case "numbers.json":
+      return covered(
+        "text",
+        texts,
+        NumbersOutput.parse(answer).rows.map((row) => row.id),
+        true
+      );
+    case "proposal.json":
+      return covered(
+        "ask",
+        asks,
+        ProposalOutput.parse(answer).rows.flatMap((row) => (row.ask ? [row.ask] : [])),
+        false
+      );
+    case "preamble.json":
+      return covered(
+        "source",
+        ["spec.md", ...inputs.documents, ...texts.map((id) => `agent-texts.json#${id}`)],
+        PreambleOutput.parse(answer).rows.map((row) => row.source),
+        false
+      );
+    case "faults.json": {
+      const faults = FaultsOutput.parse(answer);
+      return FAULT_ROWS.flatMap((row) => {
+        const items = faults.items.filter((item) => item.row === row).length;
+        return items === faults.faults[row]
+          ? []
+          : [`faults["${row}"] is ${faults.faults[row]}, but ${items} items name that row`];
+      });
+    }
+    case "findings.json":
+      return covered(
+        "check",
+        Array.from({ length: inputs.checks }, (_, index) => String(index + 1)),
+        FindingsOutput.parse(answer).rows.map((row) => String(row.check)),
+        false
+      );
+    default:
+      return [];
+  }
+}
+/** A judge's answer in the run directory, as judge.ts wrote it; a file missing, malformed, or not
+ * covering what judge.ts gave its judge (coverage) is a rig error that `rig.sh judge` fixes. */
+function judged<T>(runDir: string, file: string, schema: z.ZodType<T>, inputs: JudgeInputs): T {
   const full = path.join(runDir, file);
   if (!existsSync(full)) throw new Error(`${file} is missing: run rig.sh judge ${runDir}`);
   const result = schema.safeParse(JSON.parse(readFileSync(full, "utf8")));
   if (!result.success)
     throw new Error(`${file} is not a judge's answer: ${z.prettifyError(result.error)}`);
+  const problems = coverage(file, result.data, inputs);
+  if (problems.length > 0)
+    throw new Error(
+      `${file} does not cover what judge.ts gave its judge: ${problems.join("; ")}: run rig.sh judge ${runDir}`
+    );
   return result.data;
 }
 /** Each count of `values` in `kinds`, as `kind:n,…`. */
@@ -1438,14 +1811,15 @@ const indented = (text: string, depth = 6) =>
  *   - outline: outlineProblems finds nothing.
  *   - checked: the transcript holds at least one spec write (writesSpec: a write Dispatch made of
  *     the run's own primary spec, each `dispatch` command of a call apart), a spec-only check
- *     (specWork) came before every one, the first included, and findings.json has no `neither`
- *     row.
- *   - refusals: each refused `dispatch` command (operationsOf: the refusal at the start of its own
- *     output, or the call's failure with exit 1 or 2 when the command ends the call) is followed
- *     by a `dispatch` command that succeeded in a later tool call, with no skill file read between
- *     them, in the order of each call's commands and reads. A command of the refused one's own call
- *     is no fix: the agent wrote it before it saw the refusal, so it cannot show that the agent
- *     fixed the call from the refusal alone. Each failing pair is printed with its refusal text.
+ *     (specWork) counts for every one, the first included, and findings.json has no `neither`
+ *     row. A check counts for a write when its task call and every task's completed, non-empty
+ *     report came after the write before it and before this write, in transcript order
+ *     (checkOutcome). Each check that counts for no write is printed with why.
+ *   - refusals: every refused `dispatch` call (refusalBlocks: an `error` line of the CLI's ledger,
+ *     or a usage refusal a call's output shows, which the CLI does not log) is followed by a call
+ *     the ledger logs as a success, in a later tool call, with no skill file read between them. A
+ *     call the agent made before the refusal came back is no fix: it cannot show that the agent
+ *     fixed the call from the refusal alone. Each failing refusal is printed with its text.
  *   - plan: the person approved the spec, the issue holds plan.md (capture-spec runs after the
  *     approval), and the transcript read skill://writing-plans.
  *   - routed: the transcript read skill://dispatch-writing-specs before its first spec write, and
@@ -1490,7 +1864,8 @@ function specRow(
   const outline = outlineProblems(spec);
   details.push(...outline.map((problem) => `outline: ${problem}`));
 
-  const findings = judged(runDir, "findings.json", FindingsOutput);
+  const inputs = judgeInputs(runDir, work);
+  const findings = judged(runDir, "findings.json", FindingsOutput, inputs);
   const neither = findings.rows.filter((row) => row.verdict === "neither");
   const unchecked = work.writes.filter((write) => !write.checked);
   const checked = work.writes.length > 0 && unchecked.length === 0 && neither.length === 0;
@@ -1502,30 +1877,14 @@ function specRow(
     );
   for (const row of neither)
     details.push(`finding of check ${row.check} neither fixed nor recorded: ${row.finding}`);
-
-  const refused: string[] = [];
-  for (const [place, op] of ops.entries()) {
-    if (op.kind !== "dispatch" || op.refusal === undefined) continue;
-    let read: string | undefined;
-    let fixed = false;
-    for (const next of ops.slice(place + 1)) {
-      if (next.kind === "read") read ??= next.target;
-      else if (next.succeeded && next.step !== op.step) {
-        fixed = true;
-        break;
-      }
-    }
-    if (fixed && read === undefined) continue;
-    refused.push(
-      [
-        `refused call: ${op.call.text}`,
-        indented(op.refusal, 4),
-        fixed
-          ? `    then read ${read} before the next dispatch call succeeded`
-          : "    no later dispatch call succeeded",
-      ].join("\n")
+  for (const check of work.rejected)
+    details.push(
+      `check ${check.tasks} (call ${check.call}) for spec write ${check.write + 1} does not count: ${check.problem}`
     );
-  }
+
+  const id = sessionId(entries);
+  if (id === undefined) throw new Error("the transcript has no session header");
+  const refused = refusalBlocks(runDir, entries, ops, id);
   details.push(...refused);
 
   const planned = reads.some((read) => readsSkill(read.target, "writing-plans"));
@@ -1555,7 +1914,7 @@ function specRow(
   if (idle.length > 0) details.push(`turns with nothing open for the person: ${idle.join(", ")}`);
 
   const shared = sharedRuns(runDir);
-  const verdicts = judged(runDir, "shared-runs.json", SharedRunsFile).rows;
+  const verdicts = judged(runDir, "shared-runs.json", SharedRunsFile, inputs).rows;
   const key = (row: { source: string; run: string }) => `${row.source}\n${row.run}`;
   if (
     verdicts.length !== shared.length ||
@@ -1576,8 +1935,6 @@ function specRow(
   }
   const quoted = copies === 0;
 
-  const id = sessionId(entries);
-  if (id === undefined) throw new Error("the transcript has no session header");
   const selfTexts = [
     { source: "spec.md", body: spec },
     ...json(path.join(runDir, "agent-texts.json"), AgentTexts)
@@ -1587,29 +1944,21 @@ function specRow(
   const self = selfTexts.length === 0;
   details.push(...selfTexts.map((text) => `self: ${text.source} names the session`));
 
-  const faults = judged(runDir, "faults.json", FaultsOutput);
+  const faults = judged(runDir, "faults.json", FaultsOutput, inputs);
   const faultCount = Object.values(faults.faults).reduce((sum, n) => sum + n, 0);
-  const decisions = judged(runDir, "decisions.json", DecisionsOutput).rows;
-  const checkable = judged(runDir, "checkable.json", CheckableFile);
+  const decisions = judged(runDir, "decisions.json", DecisionsOutput, inputs).rows;
+  const checkable = judged(runDir, "checkable.json", CheckableFile, inputs);
   if (approved && checkable.version !== version)
     throw new Error(
       `checkable.json judged version ${checkable.version}, and the person approved version ${version}: run rig.sh judge ${runDir}`
     );
   const uncheckable = checkable.rows.filter((row) => row.uncheckable);
   for (const row of uncheckable) details.push(`uncheckable ${row.requirement}: ${row.check}`);
-  const asks = judged(runDir, "questions.json", QuestionsOutput).rows.filter(
-    (row) => !seeded.has(row.id)
-  );
-  const texts = judged(runDir, "numbers.json", NumbersOutput).rows.filter(
-    (row) => !seeded.has(row.id)
-  );
-  const passages = judged(runDir, "preamble.json", PreambleOutput).rows.filter(
-    (row) => !seeded.has(/^agent-texts\.json#(.+)$/.exec(row.source)?.[1] ?? "")
-  );
+  const asks = judged(runDir, "questions.json", QuestionsOutput, inputs).rows;
+  const texts = judged(runDir, "numbers.json", NumbersOutput, inputs).rows;
+  const passages = judged(runDir, "preamble.json", PreambleOutput, inputs).rows;
   for (const row of passages) details.push(`preamble ${row.kind} in ${row.source}: ${row.passage}`);
-  const proposals = judged(runDir, "proposal.json", ProposalOutput).rows.filter(
-    (row) => !seeded.has(row.ask ?? "")
-  );
+  const proposals = judged(runDir, "proposal.json", ProposalOutput, inputs).rows;
 
   const scores = {
     outline: outline.length === 0,

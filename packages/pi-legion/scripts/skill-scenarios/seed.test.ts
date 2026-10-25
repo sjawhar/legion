@@ -19,6 +19,27 @@ function freshDir(name: string): string {
   mkdirSync(dir, { recursive: true });
   return dir;
 }
+/** The ask blocks of a spec as Dispatch's settlement indexes them: each `:::ask{#<id> …}` block's
+ * id, its question (the lines before its option list) and its options (`- Label: description`). */
+function askBlocks(spec: string) {
+  return [...spec.matchAll(/^:::ask\{#([^\s}]+)[^}]*\}\n([\s\S]*?)\n:::$/gm)].map(
+    ([, id, body]) => {
+      const lines = (body ?? "").split("\n");
+      const options = lines
+        .filter((line) => line.startsWith("- "))
+        .map((line) => {
+          const [label = "", ...rest] = line.slice(2).split(": ");
+          const description = rest.join(": ");
+          return description === "" ? { label } : { label, description };
+        });
+      const question = lines
+        .filter((line) => !line.startsWith("- "))
+        .join("\n")
+        .trim();
+      return { block_id: id ?? "", question, options };
+    }
+  );
+}
 
 type Actor =
   | { kind: "user"; id: string }
@@ -36,6 +57,7 @@ interface FakeAsk {
   edited_at: string | null;
   created_at: string;
   approval?: { artifact_id: string; name: string; version: number; requested_version: number };
+  block_id?: string | null;
 }
 interface FakeArtifact {
   id: string;
@@ -46,6 +68,8 @@ interface FakeArtifact {
   primary: boolean;
   markdown: string;
   versions: { number: number; created_at: string; authors: Actor[]; markdown: string }[];
+  /** The ids of the document's ask blocks, which `GET …/blocks` lists. */
+  askBlocks?: string[];
 }
 interface Call {
   method: string;
@@ -63,6 +87,11 @@ class FakeDispatch {
   messages: { message: Record<string, unknown>; replies: Record<string, unknown>[] }[] = [];
   comments: Record<string, unknown>[] = [];
   artifacts: FakeArtifact[] = [];
+  /** A seeded spec's ask blocks no settlement has indexed yet, by issue. Dispatch settles a
+   * seeded document a moment after the issue is created; here the issue's second read of its asks
+   * is the first to find them. */
+  unsettled = new Map<string, ReturnType<typeof askBlocks>>();
+  asksReads = new Map<string, number>();
   #ids = 0;
   id(prefix: string): string {
     return `${prefix}-${++this.#ids}`;
@@ -114,8 +143,12 @@ class FakeDispatch {
           const key = `LWEVAL-${this.issues.size + 2}`;
           const spec = this.issue(key, body?.title);
           const artifact = this.artifacts.find((a) => a.id === spec);
-          if (artifact !== undefined && typeof body?.spec === "string")
+          if (artifact !== undefined && typeof body?.spec === "string") {
             artifact.markdown = body.spec;
+            const blocks = askBlocks(body.spec);
+            artifact.askBlocks = blocks.map((block) => block.block_id);
+            if (blocks.length > 0) this.unsettled.set(key, blocks);
+          }
           return json({ key, primary_artifact_id: spec }, 201);
         },
       ],
@@ -171,7 +204,44 @@ class FakeDispatch {
       ],
       [
         /^GET \/api\/v1\/issues\/([^/]+)\/asks$/,
-        (issue) => json(this.asks.filter((a) => a.issue_key === issue)),
+        (issue) => {
+          const reads = (this.asksReads.get(issue) ?? 0) + 1;
+          this.asksReads.set(issue, reads);
+          const pending = this.unsettled.get(issue);
+          if (pending !== undefined && reads >= 2) {
+            this.unsettled.delete(issue);
+            for (const block of pending)
+              this.asks.push({
+                id: this.id("ask"),
+                issue_key: issue,
+                author: { kind: "user", id: "alice@example.invalid" },
+                kind: "question",
+                question: block.question,
+                options: block.options,
+                multiple: false,
+                state: "open",
+                answer: null,
+                edited_at: null,
+                created_at: new Date().toISOString(),
+                block_id: block.block_id,
+              });
+          }
+          return json(this.asks.filter((a) => a.issue_key === issue));
+        },
+      ],
+      [
+        /^GET \/api\/v1\/asks\/([^/]+)$/,
+        (id) => json({ ask: this.asks.find((a) => a.id === id), replies: [] }),
+      ],
+      [
+        /^GET \/api\/v1\/artifacts\/([^/]+)\/blocks$/,
+        (id) => {
+          const artifact = this.artifacts.find((a) => a.id === id);
+          return json([
+            { id: "p-1", type: "paragraph" },
+            ...(artifact?.askBlocks ?? []).map((block) => ({ id: block, type: "ask" })),
+          ]);
+        },
       ],
       [
         /^GET \/api\/v1\/issues\/([^/]+)\/messages$/,
@@ -511,6 +581,63 @@ describe("spec-rewrite", () => {
       path.join(src, "old-spec.md")
     );
     expect(writes()).toEqual([]);
+  });
+
+  /** An old spec whose one ask block the source's src-ask-1 answered: Dispatch reopens it on upload. */
+  const oldSpecWithAsk = (question = "Cache the widget or shorten its wait?") =>
+    [
+      "## Summary",
+      "",
+      "The widget waits 5 s.",
+      "",
+      ':::ask{#wait urgency="med" multiple="false" state="answered" answered_by="person" selected="[&#x22;Shorten&#x22;]" answer="The wait is the cost."}',
+      question,
+      "",
+      "- Cache: Keep the last result.",
+      "- Shorten",
+      ":::",
+      "",
+    ].join("\n");
+
+  // Catches: a rewrite that leaves the old spec's asks open, for the stand-in to answer and the
+  // judges to count as the agent's (an upload resets every ask block to open); one that answers
+  // such an ask as someone other than alice, or otherwise than the source did; and one that seeds
+  // the same question a second time, as an ask of its own.
+  test("answers each ask of the old spec as alice with the source's answer, and seeds it", async () => {
+    const dir = freshDir("seed");
+    const file = path.join(dir, "fixture.json");
+    await seed.specRewrite(file, source(oldSpecWithAsk()));
+    const block = dispatch.asks.find((ask) => ask.block_id === "wait");
+    expect(block).toMatchObject({
+      state: "answered",
+      answer: {
+        user: "alice@example.invalid",
+        selected: ["Shorten"],
+        text: "The wait is the cost.",
+      },
+    });
+    expect(JSON.parse(readFileSync(path.join(dir, "seeded.json"), "utf8"))).toEqual([block?.id]);
+    expect(dispatch.asks).toHaveLength(1);
+    const run = runDir();
+    await seed.state(file, 1, run);
+    expect(JSON.parse(readFileSync(path.join(run, "state-1.json"), "utf8")).open_asks).toEqual([]);
+  });
+
+  // Catches: a rewrite that makes up an answer, or leaves the ask open, when the source answers no
+  // question the old spec's ask asks.
+  test("fails, naming the ask and the source, when the source holds no answer to an old-spec ask", async () => {
+    const dir = freshDir("seed");
+    const src = source(oldSpecWithAsk("Which colour?"));
+    const error = await seed.specRewrite(path.join(dir, "fixture.json"), src).then(
+      () => undefined,
+      (caught: unknown) => caught
+    );
+    expect(error).toBeInstanceOf(Error);
+    const message = (error as Error).message;
+    expect(message).toContain(path.join(src, "asks.json"));
+    expect(message).toContain('"Which colour?"');
+    expect(message).toContain("block wait");
+    expect(writes().filter((write) => write.endsWith("/answer"))).toEqual([]);
   });
 });
 

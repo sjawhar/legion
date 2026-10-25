@@ -3,6 +3,7 @@ import {
   chmodSync,
   mkdirSync,
   mkdtempSync,
+  readdirSync,
   readFileSync,
   realpathSync,
   rmSync,
@@ -377,8 +378,8 @@ test("the gateway route posts to <gateway>/v1/messages with the key the key comm
   }
 });
 
-test("a 429, a 5xx or a reply that skips a question is asked again; a comment with no label fails the run", async () => {
-  const out = path.join(dir("failing"), "labels");
+test("a 429, a 5xx or a reply that skips a question is asked again", async () => {
+  const out = path.join(dir("retried"), "labels");
   const { fetch } = world((comment, attempt) => {
     if (comment === "Too long." && attempt < 3) {
       return new Response("overloaded", { status: attempt === 1 ? 529 : 429 });
@@ -392,9 +393,6 @@ test("a 429, a 5xx or a reply that skips a question is asked again; a comment wi
         ).join("\n")
       );
     }
-    if (comment === "That is wrong.") {
-      return json({ type: "error", error: { type: "invalid_request_error", message: "bad" } }, 400);
-    }
     return answerWith(comment);
   });
   const run = io(fetch);
@@ -402,23 +400,72 @@ test("a 429, a 5xx or a reply that skips a question is asked again; a comment wi
     ["--since", SINCE, "--until", UNTIL, "--out", out, "--key-file", keyFile()],
     run.io
   );
-  expect(code).toBe(1);
-  expect(run.stdout).toEqual([]);
-  expect(run.stderr).toEqual([
-    "label-comments: no label for ACME-2 comment c4: the model answered 400 invalid_request_error: bad",
-    `label-comments: 1 of 4 comments got no label. ${path.join(out, "labels.jsonl")} holds the 3 labels that completed.`,
-  ]);
+  expect(run.stderr).toEqual([]);
+  expect(code).toBe(0);
   const rows = readFileSync(path.join(out, "labels.jsonl"), "utf8")
     .trimEnd()
     .split("\n")
     .map((line) => JSON.parse(line));
-  expect(rows.map((row) => row.comment_id)).toEqual(["c1", "c7", "c6"]);
-  const c6 = rows[2];
+  expect(rows.map((row) => row.comment_id)).toEqual(["c1", "c7", "c4", "c6"]);
+  const c6 = rows[3];
   // Yes in the order of QUESTIONS: jargon comes before needless_ask.
   expect(QUESTIONS.filter(({ key }) => c6.yes[key]).map(({ key }) => key)).toEqual([
     "jargon",
     "needless_ask",
   ]);
+});
+
+test("a comment with no label fails the run, and an earlier labels.jsonl keeps its bytes", async () => {
+  const failing = (answer: () => Response) =>
+    world((comment) => (comment === "That is wrong." ? answer() : answerWith(comment))).fetch;
+  const notWritten = (out: string) =>
+    `label-comments: 1 of 4 comments got no label. The run did not write ${path.join(out, "labels.jsonl")}.`;
+
+  // --out holds the labels.jsonl of an earlier complete run.
+  const out = path.join(dir("rerun"), "labels");
+  const first = io(world().fetch);
+  expect(
+    await main(
+      ["--since", SINCE, "--until", UNTIL, "--out", out, "--key-file", keyFile()],
+      first.io
+    )
+  ).toBe(0);
+  const before = readFileSync(path.join(out, "labels.jsonl"));
+  expect(before.length).toBeGreaterThan(0);
+
+  // A rerun in which one model call never succeeds: every try answers 529.
+  const rerun = io(failing(() => new Response("overloaded", { status: 529 })));
+  const code = await main(
+    ["--since", SINCE, "--until", UNTIL, "--out", out, "--key-file", keyFile()],
+    rerun.io
+  );
+  expect(code).toBe(1);
+  expect(rerun.stdout).toEqual([]);
+  expect(rerun.stderr).toEqual([
+    "label-comments: no label for ACME-2 comment c4: the model answered 529, on each of 8 tries",
+    notWritten(out),
+  ]);
+  expect(readFileSync(path.join(out, "labels.jsonl")).equals(before)).toBe(true);
+  expect(readdirSync(out)).toEqual(["labels.jsonl"]);
+
+  // With no earlier file, a run that fails at once (a 400 is not tried again) leaves no file.
+  const fresh = path.join(dir("fresh-fail"), "labels");
+  const once = io(
+    failing(() =>
+      json({ type: "error", error: { type: "invalid_request_error", message: "bad" } }, 400)
+    )
+  );
+  expect(
+    await main(
+      ["--since", SINCE, "--until", UNTIL, "--out", fresh, "--key-file", keyFile()],
+      once.io
+    )
+  ).toBe(1);
+  expect(once.stderr).toEqual([
+    "label-comments: no label for ACME-2 comment c4: the model answered 400 invalid_request_error: bad",
+    notWritten(fresh),
+  ]);
+  expect(readdirSync(fresh)).toEqual([]);
 });
 
 test("a model answer whose body fails after its headers is asked again", async () => {

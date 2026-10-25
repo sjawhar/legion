@@ -144,7 +144,9 @@ production Dispatch, GitHub, Envoy or NATS: it starts nothing with the caller's 
 `ENVOY_*` or `NATS_*` variables, and `seed.ts` refuses to run while `PLAYWRIGHT_BASE_URL` or
 `E2E_AGENT_TOKEN` is set. That is the environment only: an agent reads the whole filesystem, the
 other label's checkout included, so `score.ts` does not score a run that read outside its own
-label.
+label. A judge is held tighter: `rig.sh judge-omp` runs each one in a Docker container that sees
+only its own directory, read-only but for its one answer file and its transcript, so a judge
+cannot read the run's transcript or another judge's input. It takes the key-file model route only.
 
 Two tools read production Dispatch, with GET requests only, as the calling session does (its
 envoy.json, or `DISPATCH_URL` with a token): `fetch-spec-sources.ts`, which writes a source's input

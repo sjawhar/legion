@@ -2,6 +2,7 @@ import { afterAll, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
+import { cliRefusals } from "@legion/envoy-client/dispatch-cli";
 
 // A run whose agent never got a model turn (Oh My Pi exits before its first request, as when the
 // profile's gateway key command runs past its budget) says nothing about the skill under test: the
@@ -301,11 +302,36 @@ const sourceAsks = [
 /** The words of a text as the `quoted` score compares them: case and punctuation folded. */
 const folded = (text: string) => (text.toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? []).join(" ");
 
-/** A `bash` call and its result, as a real Oh My Pi `bash` result records its exit code. */
-const sh = (id: string, command: string, exit = 0, text = "ok") => [
+/** One line the dispatch CLI logs for a call it ran (dispatch-session-state.ts `ResultEntry`),
+ * before its time: the tool, and the refusal when Dispatch or the call refused it. */
+interface Logged {
+  tool: string;
+  error?: string;
+}
+/** What the CLI logs for a call when the fixture says nothing else: each `dispatch` command the
+ * call ran, as a success, when the call exited 0 and its output shows no refusal line. The CLI
+ * logs no `--help` or `--dry-run` call, and no refusal of its own arguments (dispatch-cli.ts
+ * runDispatchCli). A fixture whose call the CLI logged otherwise names its lines. */
+const loggedRun = (command: string, exit: number, text: string): Logged[] =>
+  exit !== 0 || cliRefusals(text).length > 0
+    ? []
+    : [...command.matchAll(/(?:^|[;&|(\n])\s*dispatch ([a-z][a-z-]*)([^;&|\n]*)/g)]
+        .filter(([, , args]) => !/--help|--dry-run/.test(args ?? ""))
+        .map(([, name]) => ({ tool: `dispatch_${(name ?? "").replace(/-/g, "_")}` }));
+/** A `bash` call and its result, as a real Oh My Pi `bash` result records its exit code, and the
+ * ledger lines the CLI wrote while it ran (`logged`, loggedRun by default), which specRun moves into
+ * the run's ledger. */
+const sh = (
+  id: string,
+  command: string,
+  exit = 0,
+  text = "ok",
+  logged: Logged[] = loggedRun(command, exit, text)
+) => [
   toolCall(id, "bash", { command }),
   {
     type: "message",
+    logged,
     message: {
       role: "toolResult",
       toolName: "bash",
@@ -322,13 +348,17 @@ const readOf = (id: string, target: string) => [
   toolCall(id, "read", { path: target }),
   result(id, "text"),
 ];
-/** A spec-only check: a `task` call whose assignment holds the spec, and its report. */
+/** A spec-only check: a `task` call whose assignment holds the spec, and its report as a blocking
+ * task answers, one completed `<task-result>` block per task. */
 const checkOf = (id: string, assignment = outlined()) => [
   toolCall(id, "task", {
     context: `Read this spec alone and list each gap.\n\n${assignment}`,
     tasks: [{ name: `Check${id}`, task: "List each gap." }],
   }),
-  result(id, "No gaps."),
+  result(
+    id,
+    `<task-result id="Check${id}" agent="task" status="completed" duration="40s">\nNo gaps.\n</task-result>`
+  ),
 ];
 /** A doc-edit of the run's spec, answered as Dispatch answers one that made a version. */
 const specEdit = (id: string, version = 2) =>
@@ -421,12 +451,37 @@ interface SpecFixture {
   turns?: string;
   documents?: Record<string, string>;
   source?: string;
+  /** false: the run has no CLI ledger. */
+  ledger?: boolean;
+  /** agent-asks.json and agent-texts.json, when not the run's one question and one message. */
+  asks?: object[];
+  texts?: object[];
+}
+/** The run's transcript and its dispatch CLI ledger (results.jsonl): each entry gets a time one
+ * second after the one before it, and each line an entry logs (`logged`) is written to the ledger
+ * one millisecond apart, just before that entry's time, so it falls inside its tool call. */
+function timed(transcript: object[]): { entries: object[]; ledger: object[] } {
+  const start = Date.parse("2026-10-24T10:00:00.000Z");
+  const ledger: object[] = [];
+  const entries = transcript.map((entry, index) => {
+    const { logged, ...rest } = entry as { logged?: Logged[]; timestamp?: string };
+    const at = rest.timestamp ?? new Date(start + index * 1000).toISOString();
+    for (const [n, line] of (logged ?? []).entries())
+      ledger.push({
+        at: new Date(Date.parse(at) - (logged?.length ?? 0) + n).toISOString(),
+        tool: line.tool,
+        ...(line.error === undefined ? { details: {} } : { error: line.error }),
+      });
+    return { ...rest, timestamp: at };
+  });
+  return { entries, ledger };
 }
 /** A spec-writing or spec-rewrite run directory, as rig.sh, seed.ts and judge.ts write one. */
 function specRun(name: string, fixture: SpecFixture = {}) {
   const spec = fixture.spec ?? outlined();
   const states = fixture.states ?? approvedStates;
   const judges = { ...cleanJudges, ...fixture.judges };
+  const { entries, ledger } = timed(fixture.transcript ?? followed);
   run(
     name,
     {
@@ -444,13 +499,17 @@ function specRun(name: string, fixture: SpecFixture = {}) {
           authors: [{ kind: "session", id: specSession }],
         }))
       ),
-      "agent-asks.json": JSON.stringify([
-        { kind: "question", ...openAsk("ask-1"), state: "answered" },
-        { id: "appr-1", kind: "approval", question: "Approve spec.md v3?", options: [] },
-      ]),
-      "agent-texts.json": JSON.stringify([
-        { id: "msg-1", kind: "message", body: "The spec is ready to read.", created_at: "" },
-      ]),
+      "agent-asks.json": JSON.stringify(
+        fixture.asks ?? [
+          { kind: "question", ...openAsk("ask-1"), state: "answered" },
+          { id: "appr-1", kind: "approval", question: "Approve spec.md v3?", options: [] },
+        ]
+      ),
+      "agent-texts.json": JSON.stringify(
+        fixture.texts ?? [
+          { id: "msg-1", kind: "message", body: "The spec is ready to read.", created_at: "" },
+        ]
+      ),
       ...Object.fromEntries(
         states.map((state, index) => [`state-${index + 1}.json`, JSON.stringify(state)])
       ),
@@ -458,7 +517,7 @@ function specRun(name: string, fixture: SpecFixture = {}) {
         Object.entries(judges).map(([file, body]) => [file, JSON.stringify(body)])
       ),
     },
-    fixture.transcript ?? followed
+    entries
   );
   const dir = path.join(runs, name);
   for (const sub of ["source", "documents", "spec-versions"])
@@ -470,7 +529,18 @@ function specRun(name: string, fixture: SpecFixture = {}) {
     writeFileSync(path.join(dir, "spec-versions", `${version}.md`), spec);
   for (const [file, text] of Object.entries(fixture.documents ?? {}))
     writeFileSync(path.join(dir, "documents", file), text);
+  if (fixture.ledger === false) return;
+  const state = path.join(ledgerDir(name));
+  mkdirSync(state, { recursive: true });
+  writeFileSync(
+    path.join(state, "results.jsonl"),
+    ledger.map((line) => `${JSON.stringify(line)}\n`).join("")
+  );
 }
+/** Where the dispatch CLI keeps a run's ledger: the run's HOME's state directory, under the
+ * session id the transcript's header names (dispatch-session-state.ts sessionDirectory). */
+const ledgerDir = (name: string) =>
+  path.join(runs, name, "home", ".local", "state", "dispatch", "sessions", specSession);
 const copied = (source: string, words: string, verdict: string) => ({
   "shared-runs.json": { rows: [{ source, run: words, verdict, reason: "The verdict." }] },
 });
@@ -670,7 +740,8 @@ specRun("spec-writing-head-28", {
       "x5",
       "dispatch ask --issue LWEVAL-7; dispatch read --issue LWEVAL-7",
       0,
-      "dispatch ask was not called: 1 problem\n- --question is required\nTitle: Greeting"
+      "dispatch ask was not called: 1 problem\n- --question is required\nTitle: Greeting",
+      [{ tool: "dispatch_read" }]
     ),
     readOf("r3", "skill://dispatch"),
     askStep,
@@ -711,13 +782,15 @@ specRun("spec-writing-head-30", {
       "x8",
       "dispatch read --issue LWEVAL-7",
       0,
-      "Issue description:\n```text\ndispatch: unexpected argument old-flag\ndispatch read was not called: 1 problem\n```"
+      "Issue description:\n```text\ndispatch: unexpected argument old-flag\ndispatch read was not called: 1 problem\n```",
+      [{ tool: "dispatch_read" }]
     ),
     sh(
       "x9",
       "dispatch read --issue LWEVAL-7; cat saved.log",
       0,
-      "Title: Greeting\ndispatch: unexpected argument old-flag"
+      "Title: Greeting\ndispatch: unexpected argument old-flag",
+      [{ tool: "dispatch_read" }]
     ),
     readOf("r3", "skill://dispatch"),
     checkOf("c2"),
@@ -744,6 +817,297 @@ specRun("spec-writing-head-31", {
     specEdit("w2"),
     finish
   ),
+});
+// checked: a check counts for a spec write only when its task call and its completed report both
+// came after the write before it and before this write, in transcript order. Each run below
+// changes the first check of `followed` (c1, before write w1).
+/** A spec-only check's `task` call, with no result yet. */
+const checkCall = (id: string) =>
+  toolCall(id, "task", {
+    context: `Read this spec alone and list each gap.\n\n${outlined()}`,
+    tasks: [{ name: `Check${id}`, task: "List each gap." }],
+  });
+/** A tool's result as Oh My Pi records one: whether the tool failed, and the tool's `details`. */
+const toolResult = (toolCallId: string, text: string, isError = false, details: object = {}) => ({
+  type: "message",
+  message: { role: "toolResult", toolCallId, isError, details, content: [{ type: "text", text }] },
+});
+/** Oh My Pi's `<task-result>` envelope of task `name`, as task-summary.md writes it. */
+const taskEnvelope = (name: string, status: string, report: string) =>
+  `<task-result id="${name}" agent="task" status="${status}" duration="40s">\n<output>\n${report}\n</output>\n</task-result>`;
+/** A background check's spawn result: the task runs on, and its report arrives later. */
+const spawned = (id: string) =>
+  toolResult(
+    id,
+    `Spawned agent \`Check${id}\` (job \`Check${id}\`).\n\nResults auto-deliver; NEVER poll.`
+  );
+/** A background task's report, delivered as a message of its own. */
+const asyncReport = (name: string) => ({
+  type: "custom_message",
+  customType: "async-result",
+  content: `<system-notice>\nBackground job ${name} has completed.\n${taskEnvelope(name, "completed", "No gaps.")}\n</system-notice>`,
+});
+/** A `wait` call whose result delivers a background task's completed report. */
+const waited = (id: string, name: string) => [
+  toolCall(id, "wait", {}),
+  toolResult(
+    id,
+    `## Completed (1)\n\n### ${name} [task] — completed\n\`\`\`\n${taskEnvelope(name, "completed", "No gaps.")}\n\`\`\``
+  ),
+];
+/** `followed`, with its first check replaced by `check`. */
+const firstCheck = (...check: object[][]) =>
+  conversation(
+    routedRead,
+    ...check,
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  );
+// The task call failed: no checker ran.
+specRun("spec-writing-head-32", {
+  transcript: firstCheck([
+    checkCall("c1"),
+    toolResult("c1", "No checker ran: the scout agent is unavailable.", true),
+  ]),
+});
+// A background check whose report arrived after the write: no check for that write, nor for the
+// next one, which has no check of its own.
+specRun("spec-writing-head-33", {
+  transcript: conversation(
+    routedRead,
+    [checkCall("c1"), spawned("c1")],
+    specEdit("w1"),
+    [asyncReport("Checkc1")],
+    askStep,
+    specEdit("w2"),
+    finish
+  ),
+  judges: { "findings.json": { rows: [] } },
+});
+// A task that failed, and one that was cancelled.
+specRun("spec-writing-head-34", {
+  transcript: firstCheck([
+    checkCall("c1"),
+    toolResult("c1", taskEnvelope("Checkc1", "failed (exit 1)", "Error: the model refused.")),
+  ]),
+});
+specRun("spec-writing-head-35", {
+  transcript: firstCheck([
+    checkCall("c1"),
+    toolResult("c1", taskEnvelope("Checkc1", "cancelled", "(no output)")),
+  ]),
+});
+// A background check whose completed report came back in a wait result before the write.
+specRun("spec-writing-head-36", {
+  transcript: firstCheck([checkCall("c1"), spawned("c1")], waited("wt1", "Checkc1")),
+});
+// A blocking check whose result keeps its report in `details.results` alone: completed, and failed.
+specRun("spec-writing-head-37", {
+  transcript: firstCheck([
+    checkCall("c1"),
+    toolResult("c1", "Checkc1 finished.", false, {
+      results: [{ id: "Checkc1", agent: "task", exitCode: 0, output: "No gaps." }],
+    }),
+  ]),
+});
+specRun("spec-writing-head-38", {
+  transcript: firstCheck([
+    checkCall("c1"),
+    toolResult("c1", "Checkc1 finished.", false, {
+      results: [{ id: "Checkc1", agent: "task", exitCode: 1, output: "" }],
+    }),
+  ]),
+});
+// A completed task that reported nothing, and a background check whose report never came.
+specRun("spec-writing-head-39", {
+  transcript: firstCheck([
+    checkCall("c1"),
+    toolResult("c1", taskEnvelope("Checkc1", "completed", "(no output)")),
+  ]),
+});
+specRun("spec-writing-head-40", {
+  transcript: firstCheck([checkCall("c1"), spawned("c1")]),
+});
+// refusals from the dispatch CLI's ledger: a refusal Dispatch sent back, which the CLI logs as an
+// `error` line and prints with no `dispatch` prefix, so a call's output cannot mark it.
+const invalidOp = 'operation 0: invalid document operation field "after or before": ';
+const hiddenEdit = (id: string) =>
+  sh(
+    id,
+    "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json 2>&1 | tail -5",
+    0,
+    invalidOp,
+    [{ tool: "dispatch_doc_edit", error: invalidOp }]
+  );
+// Hidden by `| tail -5`, and no later call succeeds.
+specRun("spec-writing-head-41", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish,
+    hiddenEdit("x11")
+  ),
+});
+// The same refusal, fixed by the next call with no skill read between.
+specRun("spec-writing-head-42", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    hiddenEdit("x11"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// A refusal of a `dispatch` command Python's subprocess.run ran: no command of the call's text.
+specRun("spec-writing-head-43", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish,
+    sh(
+      "x12",
+      "python3 -c \"import subprocess; subprocess.run(['dispatch', 'doc-edit', '--issue', 'LWEVAL-7', '--artifact', 'spec', '--ops-json-file', 'ops.json'])\"",
+      0,
+      invalidOp,
+      [{ tool: "dispatch_doc_edit", error: invalidOp }]
+    )
+  ),
+});
+// A refusal fixed by a later call that reads a skill file after its dispatch command: that read
+// comes after the fix.
+const laterSkill = path.join(
+  runs,
+  "spec-writing-head-44",
+  "home",
+  "skills",
+  "dispatch",
+  "SKILL.md"
+);
+specRun("spec-writing-head-44", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    refused,
+    sh(
+      "x13",
+      `dispatch ask --issue LWEVAL-7 --question 'Which name? Recommendation: Ada.'; cat ${laterSkill}`,
+      0,
+      "Asked ask-1.\n# Dispatch"
+    ),
+    checkOf("c2"),
+    specEdit("w2"),
+    finish
+  ),
+});
+// No ledger: the CLI logged nothing where the rig reads it.
+specRun("spec-writing-head-45", { ledger: false });
+// Two calls of one message: a ledger line inside both calls' time is the call whose result came
+// first. The hidden refusal is the doc-edit's, in the first call.
+const parallel = [
+  {
+    type: "message",
+    message: {
+      role: "assistant",
+      content: [
+        {
+          type: "toolCall",
+          id: "x14",
+          name: "bash",
+          arguments: {
+            command:
+              "dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json 2>&1 | tail -5",
+          },
+        },
+        {
+          type: "toolCall",
+          id: "x15",
+          name: "bash",
+          arguments: { command: "dispatch read --issue LWEVAL-7" },
+        },
+      ],
+    },
+  },
+  { ...(hiddenEdit("x14")[1] ?? {}) },
+  { ...(sh("x15", "dispatch read --issue LWEVAL-7", 0, "Title: Greeting")[1] ?? {}) },
+];
+specRun("spec-writing-head-46", {
+  transcript: conversation(
+    routedRead,
+    checkOf("c1"),
+    specEdit("w1"),
+    askStep,
+    checkOf("c2"),
+    specEdit("w2"),
+    finish,
+    parallel
+  ),
+});
+// Judge coverage: each judge's answer covers exactly what judge.ts gave its judge. Each run below
+// breaks one judge's file.
+const question = (id: string) => ({
+  id,
+  dominated: false,
+  settled: false,
+  kind: "taste",
+  reason: "A name is taste.",
+});
+// The approved spec holds R1 and R2; the judge checked R1 alone (the cross-model review's case).
+specRun("spec-writing-head-47", {
+  spec: outlined().replace(
+    "From: your answer on the greeting.",
+    "From: your answer on the greeting.\n- **R2.** The greeting ends with a full stop. From: your message on the format."
+  ),
+});
+// questions: ask-1 twice, and an ask it was not given.
+specRun("spec-writing-head-48", {
+  judges: { "questions.json": { rows: [question("ask-1"), question("ask-1"), question("ask-9")] } },
+});
+// numbers: no row for the one text it was given, and a row for a seeded ask it was not given.
+specRun("spec-writing-head-49", {
+  seeded: ["seeded-1"],
+  judges: { "numbers.json": { rows: [{ id: "seeded-1", names_number: true, quote: "R1" }] } },
+});
+// proposal: an ask it was not given.
+specRun("spec-writing-head-50", {
+  judges: {
+    "proposal.json": { rows: [{ item: "the greeting word", verdict: "asked", ask: "ask-9" }] },
+  },
+});
+// preamble: a document and a text it was not given.
+specRun("spec-writing-head-51", {
+  judges: {
+    "preamble.json": {
+      rows: [
+        { source: "documents/notes.md", passage: "You said so.", kind: "retold" },
+        { source: "agent-texts.json#msg-9", passage: "On Monday you said.", kind: "dated" },
+      ],
+    },
+  },
+});
+// faults: a count that its items do not hold.
+specRun("spec-writing-head-52", {
+  judges: {
+    "faults.json": { ...faultsFile(), faults: { ...noFaults, "A term that nobody explained": 1 } },
+  },
+});
+// findings: a check it was not given (the run's two checks are 1 and 2).
+specRun("spec-writing-head-53", {
+  judges: { "findings.json": { rows: [{ check: 3, finding: "No owner.", verdict: "fixed" }] } },
 });
 // Spec writes: only a write Dispatch made, of the run's own primary spec, counts. Each call below is
 // something else, and the run's two checked writes still stand. Each result is the one Dispatch
@@ -919,33 +1283,23 @@ specRun("spec-writing-head-14", {
 specRun("spec-writing-head-15", {
   spec: outlined({ summary: ` Session ${specSession.slice(0, 8)} wrote it.` }),
 });
-// A seeded ask: the judges mark it, and state-1.json lists it as the only open ask.
+// A seeded ask: agent-asks.json and agent-texts.json hold it, and state-1.json lists it as the
+// only open ask. judge.ts gave no judge the seeded ask, so the judges' files cover the rest alone.
 specRun("spec-writing-head-16", {
   seeded: ["seeded-1"],
   states: [
     { turn: 1, open_asks: [openAsk("seeded-1")], approval: null },
     ...approvedStates.slice(1),
   ],
-  judges: {
-    "questions.json": {
-      rows: [
-        {
-          id: "ask-1",
-          dominated: false,
-          settled: false,
-          kind: "taste",
-          reason: "A name is taste.",
-        },
-        { id: "seeded-1", dominated: true, settled: true, kind: "answerable", reason: "Settled." },
-      ],
-    },
-    "numbers.json": {
-      rows: [
-        { id: "msg-1", names_number: false, quote: null },
-        { id: "seeded-1", names_number: true, quote: "R1" },
-      ],
-    },
-  },
+  asks: [
+    { kind: "question", ...openAsk("seeded-1"), state: "answered" },
+    { kind: "question", ...openAsk("ask-1"), state: "answered" },
+    { id: "appr-1", kind: "approval", question: "Approve spec.md v3?", options: [] },
+  ],
+  texts: [
+    { id: "seeded-1", kind: "ask", body: "Which name should the example use?", created_at: "" },
+    { id: "msg-1", kind: "message", body: "The spec is ready to read.", created_at: "" },
+  ],
 });
 // A check whose assignment names a path under the label's checkout.
 specRun("spec-writing-head-17", {
@@ -1214,6 +1568,77 @@ test("checked: two spec writes in one call are two writes, the second unchecked"
   );
 });
 
+test("refusals: the CLI's ledger holds each refusal, the ones a call's output hides included", () => {
+  // Hidden by `| tail -5`, and never fixed.
+  expect(scoresOf("spec-writing-head-41")).toEqual({ ...allPass, refusals: "false" });
+  const hidden = rowOf("spec-writing-head-41");
+  expect(hidden).toContain(
+    "refused call: dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json"
+  );
+  expect(hidden).toContain("(dispatch_doc_edit, logged at 2026-10-24T10:");
+  expect(hidden).toContain(`    ${invalidOp.trim()}`);
+  expect(hidden).toContain("no later dispatch call succeeded");
+  // The same refusal, fixed by the next call with no skill read between.
+  expect(scoresOf("spec-writing-head-42")).toEqual(allPass);
+  // A call that ran dispatch from Python's subprocess.run: its text shows no dispatch command.
+  expect(scoresOf("spec-writing-head-43")).toEqual({ ...allPass, refusals: "false" });
+  expect(rowOf("spec-writing-head-43")).toContain("refused call: dispatch_doc_edit, logged at ");
+  expect(rowOf("spec-writing-head-43")).toContain(`    ${invalidOp.trim()}`);
+  // A skill read after the fixing command, in its own call, is no read before the fix.
+  expect(scoresOf("spec-writing-head-44")).toEqual(allPass);
+  // Two calls of one message: the refusal is the first call's, whose result came first, and the
+  // other call was written before the refusal came back, so it fixes nothing.
+  expect(scoresOf("spec-writing-head-46")).toEqual({ ...allPass, refusals: "false" });
+  expect(rowOf("spec-writing-head-46")).toContain(
+    "refused call: dispatch doc-edit --issue LWEVAL-7 --artifact spec --ops-json-file ops.json 2> (dispatch_doc_edit, logged at "
+  );
+  expect(rowOf("spec-writing-head-46")).toContain("no later dispatch call succeeded");
+});
+
+test("refusals: a run whose CLI ledger is missing is a rig error naming the file", () => {
+  expect(out).toContain(
+    `spec-writing-head-45\trig error: ${path.join(ledgerDir("spec-writing-head-45"), "results.jsonl")} is missing`
+  );
+});
+
+test("judged: a judge file that leaves out, repeats or invents what judge.ts gave its judge is a rig error", () => {
+  const uncovered = (run: string, file: string, ...problems: string[]) => {
+    expect(out).toContain(
+      `${run}\trig error: ${file} does not cover what judge.ts gave its judge: `
+    );
+    for (const problem of problems)
+      expect(out).toMatch(
+        new RegExp(`${run}\\trig error: [^\\n]*${problem.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`)
+      );
+    expect(out).toContain(`: run rig.sh judge ${path.join(runs, run)}\n`);
+  };
+  uncovered("spec-writing-head-47", "checkable.json", "no row for requirement R2");
+  uncovered(
+    "spec-writing-head-48",
+    "questions.json",
+    "two or more rows for ask ask-1",
+    "rows for ask it was not given: ask-9"
+  );
+  uncovered(
+    "spec-writing-head-49",
+    "numbers.json",
+    "no row for text msg-1",
+    "rows for text it was not given: seeded-1"
+  );
+  uncovered("spec-writing-head-50", "proposal.json", "rows for ask it was not given: ask-9");
+  uncovered(
+    "spec-writing-head-51",
+    "preamble.json",
+    "rows for source it was not given: documents/notes.md, agent-texts.json#msg-9"
+  );
+  uncovered(
+    "spec-writing-head-52",
+    "faults.json",
+    'faults["A term that nobody explained"] is 1, but 0 items name that row'
+  );
+  uncovered("spec-writing-head-53", "findings.json", "rows for check it was not given: 3");
+});
+
 test("refusals: each dispatch command of a call is scored in order, with the reads between them", () => {
   // The next command of the same call fixes nothing; the later call that succeeds comes after a
   // skill read.
@@ -1231,6 +1656,32 @@ test("refusals: each dispatch command of a call is scored in order, with the rea
 test("refusals: a refusal line a successful command's output quotes, or a cat prints, is no refusal", () => {
   expect(scoresOf("spec-writing-head-30")).toEqual(allPass);
   expect(rowOf("spec-writing-head-30")).not.toContain("refused call:");
+});
+
+test("checked: a check counts only when its completed report came back before the write", () => {
+  const fails = (run: string, line: string) => {
+    expect(scoresOf(run)).toEqual({ ...allPass, checked: "false" });
+    expect(rowOf(run)).toContain(
+      `check Checkc1 (call c1) for spec write 1 does not count: ${line}`
+    );
+  };
+  fails("spec-writing-head-32", "the task call failed: No checker ran");
+  // Late for its write, and no check for the next write either.
+  fails("spec-writing-head-33", "the report of task Checkc1 arrived after the spec write");
+  expect(rowOf("spec-writing-head-33")).toContain("unchecked writes: 2 of 2");
+  fails("spec-writing-head-34", "task Checkc1 ended failed (exit 1)");
+  fails("spec-writing-head-35", "task Checkc1 ended cancelled");
+  fails("spec-writing-head-38", "task Checkc1 ended failed (exit 1)");
+  fails("spec-writing-head-39", "the report of task Checkc1 is empty");
+  fails("spec-writing-head-40", "no report of task Checkc1 arrived");
+});
+
+test("checked: a background check's report in a wait result, and a blocking check's report, count", () => {
+  expect(scoresOf("spec-writing-head-36")).toEqual(allPass);
+  expect(scoresOf("spec-writing-head-37")).toEqual(allPass);
+  // `followed`'s checks are blocking, each with a completed `<task-result>` block.
+  expect(scoresOf("spec-writing-head-1")).toEqual(allPass);
+  expect(rowOf("spec-writing-head-1")).not.toContain("does not count");
 });
 
 test("quoted: a copied 30-word passage is one run, with its context in both texts", () => {
