@@ -80,6 +80,8 @@ readonly session_prompts_file="${out_dir}/session-prompts.jsonl"
 readonly rendered_ts_file="${out_dir}/rendered-ts.txt"
 readonly rendered_go_file="${out_dir}/rendered-go.txt"
 readonly direct_response_file="${out_dir}/direct-send-response.json"
+readonly registry_session_response_file="${out_dir}/registry-session-response.json"
+readonly registry_missing_response_file="${out_dir}/registry-missing-response.json"
 readonly unwired_response_file="${out_dir}/unwired-subscribe-response.json"
 readonly unheld_role_response_file="${out_dir}/unheld-role-response.json"
 readonly role_claim_response_file="${out_dir}/role-claim-response.json"
@@ -214,6 +216,7 @@ rm -rf "$nats_store_dir"
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
   "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
   "$absent_session_response_file" "$bus_down_response_file" "$bus_down_headers_file" "$bus_down_result_file" "$bus_down_client_file" \
+  "$registry_session_response_file" "$registry_missing_response_file" \
   "$listener_log_file" "$session_log_file" "$subscriber_log_file" "$nats_log_file" "$listener_binary" "$session_ready_fifo" "$subscriber_ready_fifo"
 : >"$envelopes_file"
 : >"$session_prompts_file"
@@ -470,6 +473,27 @@ wait_for_listener_record 'refused send' \
   '.msg == "listener send" and .level == "WARN" and .outcome == "no_live_session" and .status == 404
    and .target_session == $absent_session_id and .source == "agent" and .source_session == "octocat"
    and .payload_summary == "Absent session acceptance summary." and (.event_id | length) > 0'
+
+# The one question a caller holding a session id asks before it addresses that session: is this
+# session live? The per-session registry read answers with the row GET /v1/sessions would carry,
+# and an id that never registered is refused with the exact reason Dispatch classifies on.
+registry_status="$(curl -sS -o "$registry_session_response_file" -w '%{http_code}' \
+  "${listener_url}/v1/registry/${session_id}")"
+if [[ "$registry_status" != 200 ]] || ! jq -e --arg session_id "$session_id" \
+  '.session_id == $session_id and (.title | length > 0) and (.capabilities | type == "array")' \
+  "$registry_session_response_file" >/dev/null; then
+  printf 'ERR: the registry read of the live session did not answer its own session row.\n' >&2
+  exit 1
+fi
+
+missing_session_id="ses_e2e_local_never_registered"
+missing_status="$(curl -sS -o "$registry_missing_response_file" -w '%{http_code}' \
+  "${listener_url}/v1/registry/${missing_session_id}")"
+if [[ "$missing_status" != 404 ]] || ! jq -e --arg session_id "$missing_session_id" \
+  '. == {error: ("no live session " + $session_id)}' "$registry_missing_response_file" >/dev/null; then
+  printf 'ERR: an unregistered session id was not refused 404 with "no live session <id>".\n' >&2
+  exit 1
+fi
 
 role="e2e-reviewer"
 unheld_status="$(curl -sS -o "$unheld_role_response_file" -w '%{http_code}' \

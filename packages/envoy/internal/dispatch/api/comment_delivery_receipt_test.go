@@ -17,10 +17,16 @@ import (
 
 func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
 	t.Run("different sessions", func(t *testing.T) {
+		const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]},` +
+			`{"session_id":"s2","title":"reviewer","capabilities":["steer"]}]`
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+				writeSessionRecord(t, w, sessions, "s1")
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s2":
+				writeSessionRecord(t, w, sessions, "s2")
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]},{"session_id":"s2","title":"reviewer","capabilities":["steer"]}]`))
+				_, _ = w.Write([]byte(sessions))
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 				_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 			default:
@@ -47,10 +53,13 @@ func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
 	})
 
 	t.Run("role and direct mention share a session", func(t *testing.T) {
+		const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 		listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			switch {
+			case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+				writeSessionRecord(t, w, sessions, "s1")
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-				_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+				_, _ = w.Write([]byte(sessions))
 			case r.Method == http.MethodGet && r.URL.Path == "/v1/roles/reviewer":
 				_, _ = w.Write([]byte(`{"role":"reviewer","holder":"s1","title":"planner","capabilities":["steer"]}`))
 			case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
@@ -80,10 +89,13 @@ func TestMentionRepliesAddressEachDeliveredTarget(t *testing.T) {
 
 func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing.T) {
 	sent := []map[string]any{}
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var request map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
@@ -152,10 +164,13 @@ func TestInitialMentionDeliveryDoesNotAppendAfterReplyConsumesPending(t *testing
 }
 
 func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPending(t *testing.T) {
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			_, _ = w.Write([]byte(`{"event_id":"mention-envelope","recipient":"s1"}`))
 		default:
@@ -225,10 +240,13 @@ func TestInitialMentionDeliveryReturnsFailedAttemptAfterErrorReplyConsumesPendin
 func TestASenderPastItsLeaseLeavesTheResumedAttemptsReceiptAlone(t *testing.T) {
 	var handler http.Handler
 	answerTheSend := false
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			if answerTheSend {
 				var request struct {
@@ -341,10 +359,13 @@ func TestReplyDuringAMentionRetrySendStillRecordsTheDeliveryReceipt(t *testing.T
 	var handler http.Handler
 	answerTheSend := false
 	replies := []int{}
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			if answerTheSend {
 				var request struct {
@@ -415,10 +436,13 @@ func TestASessionAnswersAnAttemptStrandedBetweenItsSendAndItsSettle(t *testing.T
 		sync.Mutex
 		sends int
 	}
+	const sessions = `[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/s1":
+			writeSessionRecord(t, w, sessions, "s1")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_, _ = w.Write([]byte(`[{"session_id":"s1","title":"planner","capabilities":["steer"]}]`))
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			listenerState.Lock()
 			listenerState.sends++

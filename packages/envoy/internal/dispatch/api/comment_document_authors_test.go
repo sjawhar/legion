@@ -23,13 +23,16 @@ func TestAPersonsCommentOnADocumentReachesTheSessionsThatWroteIt(t *testing.T) {
 
 	var sendsMu sync.Mutex
 	sends := map[string]int{}
+	const sessions = `[{"session_id":"session-writer","title":"writer","capabilities":["btw","steer"]},` +
+		`{"session_id":"session-editor","title":"editor","capabilities":["btw","steer"]}]`
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/session-writer":
+			writeSessionRecord(t, w, sessions, "session-writer")
+		case r.Method == http.MethodGet && r.URL.Path == "/v1/registry/session-editor":
+			writeSessionRecord(t, w, sessions, "session-editor")
 		case r.Method == http.MethodGet && r.URL.Path == "/v1/sessions":
-			_ = json.NewEncoder(w).Encode([]map[string]any{
-				{"session_id": "session-writer", "title": "writer", "capabilities": []string{"btw", "steer"}},
-				{"session_id": "session-editor", "title": "editor", "capabilities": []string{"btw", "steer"}},
-			})
+			_, _ = w.Write([]byte(sessions))
 		case r.Method == http.MethodPost && r.URL.Path == "/v1/messages/send":
 			var input struct {
 				TargetSession string `json:"target_session"`

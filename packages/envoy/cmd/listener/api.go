@@ -633,7 +633,9 @@ func liveSessionEntry(
 // roleHolderSession is liveSessionEntry as the role paths ask it. They carry no request context of
 // their own - the reaper and role delivery answer no caller at all - and they share one bound, so
 // every decision that can take a role from its holder waits the same roleHolderReadTimeout out of
-// one place rather than out of each call site.
+// one place rather than out of each call site. It is also the read behind the per-session route
+// GET /v1/registry/<session_id>, whose caller is likewise about to decide that a session is gone,
+// and which therefore reads through to the bucket for the same reason a send does.
 func roleHolderSession(sessions *session.SessionRegistry, sessionID string, live func(session.SessionEntry) bool) (session.SessionEntry, error) {
 	return liveSessionEntry(context.Background(), sessions, sessionID, roleHolderReadTimeout, live)
 }
@@ -957,6 +959,30 @@ type sessionInfo struct {
 	LastSeen       int64    `json:"last_seen"`
 }
 
+// sessionInfoFor joins one session entry with its interests (its topics, and the roles those topics
+// name), so a row of GET /v1/sessions and the single answer of GET /v1/registry/<session_id> are
+// one shape built one way. A session the interest registry holds nothing for keeps its empty topics
+// and roles: a session that registered and subscribed to nothing is not an error here.
+func sessionInfoFor(registry *store.Registry, sessionID string, entry session.SessionEntry) sessionInfo {
+	info := sessionInfo{
+		SessionID:      sessionID,
+		MachineID:      entry.MachineID,
+		Host:           entry.HostOrMachine(),
+		Dir:            entry.Dir,
+		Port:           entry.Port,
+		Title:          entry.Title,
+		Capabilities:   append([]string{}, entry.Capabilities...),
+		SelfSubscribed: entry.SelfSubscribed,
+		UpdatedAt:      entry.UpdatedAt,
+		LastSeen:       entry.UpdatedAt,
+	}
+	if interest, err := registry.Get(sessionID); err == nil {
+		info.Topics = interest.Topics
+		info.Roles = roleNames(interest.Topics)
+	}
+	return info
+}
+
 // sessionsHandler returns all live sessions by iterating the session registry
 // (envoy_sessions, 5-min TTL — only live sessions) and enriching each with
 // topic data from the interests registry (envoy_interests).
@@ -978,25 +1004,52 @@ func sessionsHandler(registry *store.Registry, sessions *session.SessionRegistry
 			if !strings.Contains(entry.Dir, dirFilter) || !strings.Contains(entry.Title, titleFilter) {
 				continue
 			}
-			info := sessionInfo{
-				SessionID:      entry.SessionID,
-				MachineID:      entry.MachineID,
-				Host:           entry.HostOrMachine(),
-				Dir:            entry.Dir,
-				Port:           entry.Port,
-				Title:          entry.Title,
-				Capabilities:   append([]string{}, entry.Capabilities...),
-				SelfSubscribed: entry.SelfSubscribed,
-				UpdatedAt:      entry.UpdatedAt,
-				LastSeen:       entry.UpdatedAt,
-			}
-			if interest, err := registry.Get(entry.SessionID); err == nil {
-				info.Topics = interest.Topics
-				info.Roles = roleNames(interest.Topics)
-			}
-			result = append(result, info)
+			result = append(result, sessionInfoFor(registry, entry.SessionID, entry.SessionEntry))
 		}
 		writeJSON(w, http.StatusOK, result)
+	}
+}
+
+// sessionEntryHandler answers GET /v1/registry/<session_id>, the one question a caller holding a
+// session id asks before it addresses that session: is this session live, and how is it named? The
+// read goes through roleHolderSession, so a session this listener's cache does not hold yet — the
+// session bucket was recreated and the watcher is still refilling it, or another listener
+// registered the session a moment ago — is read from the bucket itself instead of being reported
+// gone. Only the bucket's word that the key is absent is a 404, and its wording is load-bearing:
+// Dispatch classifies a delivery failure on the "no live session " prefix, as the send route's own
+// 404 writes it. An id NATS refuses as a key is the caller's to fix, and a read that did not answer
+// is a 503 to retry — never a session a caller may take for ended.
+func sessionEntryHandler(d *listenerDeps) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet {
+			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
+		if sessionID == "" {
+			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
+			return
+		}
+		entry, err := roleHolderSession(d.sessions, sessionID, registered)
+		switch {
+		case errors.Is(err, bus.ErrRefused):
+			// Refresh reports a refused key as a missing one too, so this test comes first:
+			// an id NATS will never hold is answered as the bad input it is, not as a 404.
+			// writeBusUnavailable answers bus.ErrTooLarge as the 413 it is and every other
+			// refusal as a 400, and withholds Retry-After from both, since NATS repeats a
+			// refusal however often the same bytes are sent.
+			writeBusUnavailable(w, err)
+		case errors.Is(err, nats.ErrKeyNotFound):
+			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", sessionID))
+		case err != nil:
+			// The 503, its Retry-After: 1 and the busUnansweredPrefix body are written in one
+			// place for every route that answers a bus that did not answer, so the string a
+			// deployed log filter matches has a single copy (INFRA-141). This route's own
+			// literal was that copy's twin until the two changes met here.
+			writeBusUnavailable(w, err)
+		default:
+			writeJSON(w, http.StatusOK, sessionInfoFor(d.registry, sessionID, entry))
+		}
 	}
 }
 
@@ -1387,19 +1440,7 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	})
 	v1.HandleFunc("/v1/roles/set", roleSetHandler(d, machineID))
 	v1.HandleFunc("/v1/roles/", roleGetHandler(d))
-	v1.HandleFunc("/v1/registry/", func(w http.ResponseWriter, r *http.Request) {
-		sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
-		if sessionID == "" {
-			writeJSONError(w, http.StatusBadRequest, "session_id is required", "session_id")
-			return
-		}
-		entry, err := d.sessions.Get(sessionID)
-		if err != nil {
-			writeJSONError(w, http.StatusNotFound, "not found")
-			return
-		}
-		writeJSON(w, http.StatusOK, entry)
-	})
+	v1.HandleFunc("/v1/registry/", sessionEntryHandler(d))
 
 	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))

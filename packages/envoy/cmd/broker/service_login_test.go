@@ -41,16 +41,16 @@ func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(
 	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	addr, _ := startBroker(t,
-		"BROKER_DATABASE_URL="+databaseURL,
+	broker := startBroker(t, brokerOptions{Env: []string{
+		"BROKER_DATABASE_URL=" + databaseURL,
 		"BROKER_LISTEN_ADDR=127.0.0.1:0",
 		"BROKER_PUBLIC_URL=http://127.0.0.1:0",
-		"BROKER_FAKE_SECRETS_FILE="+fakeSecretsFile,
-		"BROKER_K8S_OIDC_ISSUER="+issuer.URL(),
-		"BROKER_K8S_OIDC_AUDIENCE="+podAudience,
-		"BROKER_SERVICE_LOGINS=legion-daemon="+daemonAccount,
-	)
-	base := "http://" + addr
+		"BROKER_FAKE_SECRETS_FILE=" + fakeSecretsFile,
+		"BROKER_K8S_OIDC_ISSUER=" + issuer.URL(),
+		"BROKER_K8S_OIDC_AUDIENCE=" + podAudience,
+		"BROKER_SERVICE_LOGINS=legion-daemon=" + daemonAccount,
+	}})
+	base := "http://" + broker.Addr
 
 	call := func(method, path string, auth map[string]string, body any) (int, []byte) {
 		t.Helper()

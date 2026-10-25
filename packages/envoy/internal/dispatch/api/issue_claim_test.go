@@ -40,23 +40,37 @@ func (r *liveRegistry) snapshot() []map[string]any {
 	return sessions
 }
 
-// claimListener is the Envoy listener every claim test runs against. It answers the roster as
-// it stood when the lookup arrived — a real listener does, so a lookup a test holds open must
-// never serve a list from after it was let go — and hands each lookup's ordinal to gate, which
-// is where a test announces that lookup and blocks it.
+// claimListener is the Envoy listener every claim test runs against. A claim asks about the
+// holder's own session, by id (GET /v1/registry/{session_id}), so that read is the lookup a
+// test gates. The listener decides its answer from the roster as it stood when the lookup
+// arrived — a real listener does, so a lookup a test holds open must never answer from a
+// roster the test set after it was let go — and hands each lookup's ordinal to gate, which is
+// where a test announces that lookup and blocks it. The live list is served too, ungated,
+// since no claim reads it and the reads that do are nobody's lookup here.
 func claimListener(t *testing.T, live *liveRegistry, gate func(lookup int)) *httptest.Server {
 	t.Helper()
 	var lookups atomic.Int32
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/v1/sessions" {
-			http.NotFound(w, r)
-			return
-		}
 		sessions := live.snapshot()
-		if gate != nil {
-			gate(int(lookups.Add(1)))
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/v1/registry/"):
+			sessionID := strings.TrimPrefix(r.URL.Path, "/v1/registry/")
+			if gate != nil {
+				gate(int(lookups.Add(1)))
+			}
+			for _, session := range sessions {
+				if session["session_id"] == sessionID {
+					_ = json.NewEncoder(w).Encode(session)
+					return
+				}
+			}
+			w.WriteHeader(http.StatusNotFound)
+			_ = json.NewEncoder(w).Encode(map[string]string{"error": "no live session " + sessionID})
+		case r.URL.Path == "/v1/sessions":
+			_ = json.NewEncoder(w).Encode(sessions)
+		default:
+			http.NotFound(w, r)
 		}
-		_ = json.NewEncoder(w).Encode(sessions)
 	}))
 	t.Cleanup(listener.Close)
 	return listener
