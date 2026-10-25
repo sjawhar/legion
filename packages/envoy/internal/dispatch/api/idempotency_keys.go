@@ -26,10 +26,13 @@ const maxIdempotencyKey = 128
 
 var idempotencyKeyPattern = regexp.MustCompile(`^[A-Za-z0-9._:-]+$`)
 
-// validateIdempotencyKey holds a key a send carries to that rule: one outside the pattern, the empty
-// key among them, is refused under code, and a longer one is CAP_EXCEEDED. Whether a send may carry
-// none is its route's own rule.
-func validateIdempotencyKey(key, code string) error {
+// validateIdempotencyKey holds a send's key to that rule. A missing key is refused under code with
+// missing, which says what a caller without one does; a key outside the pattern is refused under
+// code too, and a longer one is CAP_EXCEEDED.
+func validateIdempotencyKey(key, code, missing string) error {
+	if key == "" {
+		return errorf(http.StatusBadRequest, code, "%s", missing)
+	}
 	if !idempotencyKeyPattern.MatchString(key) {
 		return errorf(http.StatusBadRequest, code, "idempotency_key may use only letters, digits, '.', '_', ':' and '-'")
 	}

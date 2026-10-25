@@ -2171,16 +2171,14 @@ export interface CreateAgentMessageInput {
   readonly delivery: MessageDeliveryMode;
   readonly in_reply_to?: string;
   /** Names this one send, the same on every retry of it: letters, digits, `.`, `_`, `:` and `-`,
-   *  at most 128 characters; a malformed key is 400 MESSAGE_INPUT and a longer one
+   *  at most 128 characters; a missing or malformed key is 400 MESSAGE_INPUT and a longer one
    *  400 CAP_EXCEEDED. A key belongs to the person who sent it. The server answers a repeat (same
    *  person, same key, and the same session, body, delivery and in_reply_to) with the message the
    *  first request made, its deliveries with it, 200 instead of 201, and sends nothing again; it
    *  refuses a reuse of the key for a different request with 409 MESSAGE_KEY_REUSED, whose body
    *  names the message that already used the key as `message_id`; that request is not sent.
    *  Recognised for as long as the message exists: there is no window (see
-   *  DELIVERY_DUPLICATE_WINDOW_MS). Required here because it types what the dashboard sends, a key
-   *  on every send; the server also accepts a send with none, from a page loaded before keys
-   *  shipped, and delivers it without this guarantee. */
+   *  DELIVERY_DUPLICATE_WINDOW_MS). */
   readonly idempotency_key: string;
 }
 

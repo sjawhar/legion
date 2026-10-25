@@ -16,8 +16,6 @@ import (
 // that timed out, none of which says whether the first one committed; the key is what makes that
 // retry safe. Its agent_message_idempotency_keys row (migration 0116) is written in the message's
 // own transaction (createStoredMessage), so a message and its key commit together or not at all.
-// A send with no key - a tab opened before the deploy - is accepted and delivered as before the
-// key existed, with no guarantee against a second send, and logged at WARN (createAgentMessage).
 //
 // A request whose key is held is answered from the database before anything else, so it never
 // fails because the listener is down: the same request is answered 200 with the message the key
@@ -26,6 +24,12 @@ import (
 // that finds the message's one attempt pending under a live claim is answered with it pending, and
 // the page asks again until it settles: the first repeat after a dead sender's claim lapses
 // resumes it.
+
+// agentMessageKeyRequired is the refusal of a keyless send. The rule comes first, since it is the
+// answer for every keyless caller; the second sentence is for a page loaded before the key was
+// required, whose failed send is the only copy of the message and which a reload drops, so it says
+// what to do, in order.
+const agentMessageKeyRequired = "idempotency_key is required, one per send. On a page loaded before it was required: copy the message, reload the page and send it again"
 
 // errAgentMessageKeyHeld is createStoredMessage's answer when the key row already exists: another
 // request of this person's committed the same key first, its own transaction rolled back, and the

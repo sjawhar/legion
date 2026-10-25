@@ -17,17 +17,16 @@
   /api/v1/agents/{session_id}/stream`, `GET /ws/delivery`, and `POST
   /api/v1/delivery/_test/disconnect` are removed; the agent publish hook remains and its
   `as=drop` result ends agent views as `dropped`.
-- Migration `0116_agent_message_idempotency_keys` adds `idempotency_key` to
-  `POST /api/v1/agents/{session_id}/messages`, which the dashboard sends on every send. The key
-  belongs to its sender, survives for the message's life, and is stored in the message transaction.
-  A matching retry returns `200` with the first message and its deliveries, ensuring an unattempted
-  or stranded delivery resumes without a second message; a conflicting request is
-  `409 MESSAGE_KEY_REUSED` with `message_id`. A send with no key, from a page loaded before this
-  release, is accepted and delivered as before, without that guarantee, and logged at WARN.
+- Migration `0116_agent_message_idempotency_keys` makes `idempotency_key` required on
+  `POST /api/v1/agents/{session_id}/messages`. The key belongs to its sender, survives for the
+  message's life, and is stored in the message transaction. A matching retry returns `200` with
+  the first message and its deliveries, ensuring an unattempted or stranded delivery resumes
+  without a second message; a conflicting request is `409 MESSAGE_KEY_REUSED` with `message_id`.
   The delivery runs after commit on a context detached from the request, so an aborted request
   cannot cancel it, and a deploy lets it finish: shutdown waits for the request, and the listener
   client's receipt timeout bounds it. During a rolling deploy, a page loaded before this release
-  reports `Live updates unavailable` until it reloads.
+  reports `Live updates unavailable`; copy an unsent message and reload. Its one-session sends
+  have no required key and are refused until it reloads.
 
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret

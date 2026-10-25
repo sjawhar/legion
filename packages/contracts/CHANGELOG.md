@@ -14,13 +14,11 @@
   page checks before it renders it. `LIVE_SOCKET_MAX_AGE_CLOSE` (4001) rotates a socket at a
   random age in [`LIVE_SOCKET_MIN_AGE_MS`, `LIVE_SOCKET_MAX_AGE_MS`) (30 to 60 minutes), and
   `LIVE_SOCKET_MAX_SUBSCRIPTIONS` is 64. `fixtures/delivery-live/` is now `fixtures/live/`.
-- `CreateAgentMessageInput.idempotency_key`, required in the type since the dashboard sends it on
-  every send: it names one session-targeted send for its sender. A repeat with the same session,
-  body, delivery, and reply answers the first message and its deliveries with `200` and sends
-  nothing again; a different request under the held key is `409 MESSAGE_KEY_REUSED` with
-  `message_id`. A malformed key is `400 MESSAGE_INPUT`; a key longer than 128 characters is
-  `400 CAP_EXCEEDED`. The server still accepts a send with no key, without the guarantee
-  (INFRA-258).
+- Required `CreateAgentMessageInput.idempotency_key`: it names one session-targeted send for its
+  sender. A repeat with the same session, body, delivery, and reply answers the first message and
+  its deliveries with `200` and sends nothing again; a different request under the held key is
+  `409 MESSAGE_KEY_REUSED` with `message_id`. A missing or malformed key is `400 MESSAGE_INPUT`;
+  a key longer than 128 characters is `400 CAP_EXCEEDED` (INFRA-258).
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`

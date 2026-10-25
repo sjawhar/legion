@@ -1942,13 +1942,11 @@ Any authenticated caller — a browser session or a bearer naming its session in
 create an issue message with `target: "session:<id>"` or `target: "role:<name>"` and
 `delivery: "btw" | "aside" | "steer"`; a bearer-authored targeted message is authored by that
 session, never by a human. A human may also create an issue-less, session-targeted message with
-`POST /api/v1/agents/{session_id}/messages` `{body, delivery, in_reply_to?, idempotency_key?}`.
-The dashboard sends a key on every send; it belongs to the sender and identifies this send for as
-long as its message exists: the same request answers the first message and deliveries with `200`,
-while another request under that key is `409 MESSAGE_KEY_REUSED` with `message_id`. A malformed key
-is `400 MESSAGE_INPUT`; one longer than 128 characters is `400 CAP_EXCEEDED`. A send with no key (a
-tab opened before the deploy that brought keys) is accepted and delivered as before, without the
-guarantee against a second send, and logged at WARN with the caller and the session. `GET
+`POST /api/v1/agents/{session_id}/messages` `{body, delivery, in_reply_to?, idempotency_key}`.
+The key is required, belongs to the sender, and identifies this send for as long as its message
+exists: the same request answers the first message and deliveries with `200`, while another request
+under that key is `409 MESSAGE_KEY_REUSED` with `message_id`. A missing or malformed key is
+`400 MESSAGE_INPUT`; one longer than 128 characters is `400 CAP_EXCEEDED`. `GET
 /api/v1/agents/{session_id}/messages` returns that session's issue-less and issue-anchored
 targeted roots: the 50 whose thread moved last, plus every conversation holding a reply the caller
 has not read, in one activity order (`greatest(root.created_at, newest reply)`), so the window
