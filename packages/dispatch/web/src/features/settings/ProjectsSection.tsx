@@ -201,10 +201,10 @@ export function ProjectsSection(): ReactNode {
   );
 }
 
-/** One project's default-assignee cell: the picker and, under it, the error of this row's own
- *  last save. `stored` is the default the page has read, `null` for none, and `undefined` while
- *  the defaults have not been read: the control then takes no pick and does not read
- *  Unassigned, since nobody knows yet whether a default is set. */
+/** One project's default-assignee cell: the picker and, under it, the error of this project's
+ *  newest save when the server refused it. `stored` is the default the page has read, `null` for
+ *  none, and `undefined` while the defaults have not been read: the control then takes no pick
+ *  and does not read Unassigned, since nobody knows yet whether a default is set. */
 function DefaultAssigneeCell({
   logins,
   onReach,
@@ -243,19 +243,38 @@ function DefaultAssigneeCell({
   );
 }
 
-/** One project's default-assignee saves. Each pick is sent, in pick order and one at a time per
- *  project: the mutation scope queues them in the QueryClient's mutation cache, so a save still
- *  out or waiting when the row unmounts keeps its place, and a pick on a remounted row waits
- *  behind it. The control shows the newest pick still pending, from whichever mount made it, so
- *  a remounted row shows the pick in flight; a failed save drops out of that list, so the control
- *  goes back to the stored value or a newer pending pick. Each answer lands in the defaults
- *  cache, so the control does not flash back to the old value, and the defaults are refetched
- *  after each save settles. The server ends at the reader's last pick. */
+/** One pick of a project's default assignee. Each pick is its own object, so a save can tell
+ *  whether it is still the newest pick by identity. */
+type DefaultAssigneePick = { assignee: string | null };
+
+/** What a pick's save resolves to when a newer pick was waiting behind it: nothing was sent. */
+type DefaultAssigneeSuperseded = { superseded: true };
+
+type DefaultAssigneeSave = Mutation<
+  ProjectDefaultAssignee | DefaultAssigneeSuperseded,
+  Error,
+  DefaultAssigneePick
+>;
+
+/** One project's default-assignee saves. The mutation scope runs a project's saves one at a time
+ *  in pick order in the QueryClient's mutation cache, so a save still out or waiting when the row
+ *  unmounts keeps its place, and a pick on a remounted row waits behind it. When a save's turn
+ *  comes and a newer pick is waiting behind it, it is superseded and sends nothing: while a save
+ *  is out, only the newest pick follows it, from whichever mount made it. The server ends at the
+ *  reader's last pick.
+ *
+ *  The control shows the newest pick still pending, so a remounted row shows the pick in flight;
+ *  once none is pending it shows the stored value. The row's error is read from the cache too:
+ *  when the project's newest save was refused, the row says so with its reason, even on a row
+ *  mounted after it failed, until a newer pick or Retry starts another save. Each answer lands in
+ *  the defaults cache, so the control does not flash back to the old value, and the defaults are
+ *  refetched after each save that reached the server settles. */
 function useDefaultAssigneeWrite(project: string): {
-  /** This row's refused save, until the next attempt starts. */
+  /** The project's newest save when the server refused it, until another save starts. */
   error: Error | null;
+  /** Whether any save of this project is still out or waiting. */
   pending: boolean;
-  /** Resends this row's refused value; a no-op unless its last save failed. */
+  /** Resends the refused value; a no-op unless the project's newest save failed. */
   retry: () => void;
   /** The newest pick still saving or queued; `undefined` shows the stored value. */
   shown: string | null | undefined;
@@ -267,10 +286,29 @@ function useDefaultAssigneeWrite(project: string): {
   const mutation = useMutation({
     mutationKey,
     scope: { id: `project-default-assignee:${project}` },
-    mutationFn: (assignee: string | null) => api.putProjectDefaultAssignee(project, { assignee }),
+    // A refused save stays in the cache, with no row observing it, until a newer save of the
+    // project settles and removes it (see onSettled), so a row mounted later can still say so.
+    gcTime: Number.POSITIVE_INFINITY,
+    mutationFn: async (
+      pick: DefaultAssigneePick,
+      { client }
+    ): Promise<ProjectDefaultAssignee | DefaultAssigneeSuperseded> => {
+      // The cache lists mutations in the order they were made, so the last pending one is the
+      // newest pick. Any other is waiting behind this save, and only it need reach the server.
+      const waiting = client
+        .getMutationCache()
+        .findAll({ exact: true, mutationKey, status: "pending" });
+      if (waiting.at(-1)?.state.variables !== pick) {
+        return { superseded: true };
+      }
+      return api.putProjectDefaultAssignee(project, { assignee: pick.assignee });
+    },
     // A defaults read already out was asked before this save and could land over its answer.
     onMutate: () => queryClient.cancelQueries({ queryKey: defaultsKey }),
     onSuccess: (saved) => {
+      if ("superseded" in saved) {
+        return;
+      }
       queryClient.setQueryData<ProjectDefaultAssignee[]>(defaultsKey, (rows) => {
         if (rows === undefined) {
           return rows;
@@ -279,29 +317,53 @@ function useDefaultAssigneeWrite(project: string): {
         return saved.assignee === null ? others : [...others, saved];
       });
     },
-    // Not awaited: the next pick in the scope need not wait for this refetch.
-    onSettled: () => {
-      void queryClient.invalidateQueries({ queryKey: defaultsKey });
-    },
-  });
-  // The cache lists mutations in the order they were made, so the last is the newest pick.
-  const pendingPicks = useMutationState<
-    string | null | undefined,
-    Mutation<ProjectDefaultAssignee, Error, string | null>
-  >({
-    filters: { mutationKey, status: "pending" },
-    select: (pending) => pending.state.variables,
-  });
-  return {
-    error: mutation.error,
-    pending: mutation.isPending,
-    retry: () => {
-      if (mutation.isError && mutation.variables !== undefined) {
-        mutation.mutate(mutation.variables);
+    onSettled: (saved) => {
+      // With gcTime Infinity nothing else clears this project's saves. A save settles in pick
+      // order and is still pending while this runs, so every settled save left is older than it
+      // and no longer the one a row reports: drop them, keeping at most the newest settled save
+      // and the pending ones.
+      const cache = queryClient.getMutationCache();
+      for (const older of cache.findAll({ exact: true, mutationKey })) {
+        if (older.state.status !== "pending") {
+          cache.remove(older);
+        }
+      }
+      // A superseded save changed nothing on the server. Not awaited: the next pick in the scope
+      // need not wait for this refetch.
+      if (saved === undefined || !("superseded" in saved)) {
+        void queryClient.invalidateQueries({ queryKey: defaultsKey });
       }
     },
-    shown: pendingPicks.at(-1),
-    submit: mutation.mutate,
+  });
+  const saves = useMutationState<
+    {
+      error: Error | null;
+      pick: DefaultAssigneePick | undefined;
+      status: DefaultAssigneeSave["state"]["status"];
+    },
+    DefaultAssigneeSave
+  >({
+    filters: { exact: true, mutationKey },
+    select: (save) => ({
+      error: save.state.error,
+      pick: save.state.variables,
+      status: save.state.status,
+    }),
+  });
+  const pendingPicks = saves.filter((save) => save.status === "pending");
+  // The cache lists mutations in the order they were made, so the last is the newest.
+  const newest = saves.at(-1);
+  const refused = newest?.status === "error" ? newest : undefined;
+  return {
+    error: refused?.error ?? null,
+    pending: pendingPicks.length > 0,
+    retry: () => {
+      if (refused?.pick !== undefined) {
+        mutation.mutate({ assignee: refused.pick.assignee });
+      }
+    },
+    shown: pendingPicks.at(-1)?.pick?.assignee,
+    submit: (assignee) => mutation.mutate({ assignee }),
   };
 }
 

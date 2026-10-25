@@ -587,10 +587,14 @@ function defaultAssigneeServer(initial: ProjectDefaultAssignee[]) {
 }
 
 /** Renders the Settings route with every read but the default assignees and the people list
- *  stubbed, listing `projects`. `remount` unmounts the page and renders it again on the same
- *  QueryClient, as leaving Settings and coming back does; `done` unmounts it and restores the
- *  stubs. */
-function renderSettings(projects: string[]): { done: () => void; remount: () => void } {
+ *  stubbed, listing `projects`. `leave` unmounts the page and `reopen` renders it again on the
+ *  same QueryClient, as leaving Settings and coming back does; `done` unmounts it and restores
+ *  the stubs. */
+function renderSettings(projects: string[]): {
+  done: () => void;
+  leave: () => void;
+  reopen: () => void;
+} {
   const stubs = [
     spyOn(api, "whoAmI").mockResolvedValue({ kind: "user", login: "alice" }),
     spyOn(api, "listIssues").mockResolvedValue([]),
@@ -622,8 +626,8 @@ function renderSettings(projects: string[]): { done: () => void; remount: () => 
         stub.mockRestore();
       }
     },
-    remount: () => {
-      cleanup();
+    leave: cleanup,
+    reopen: () => {
       render(page);
     },
   };
@@ -634,7 +638,7 @@ const defaultAssigneeControl = async (project: string): Promise<HTMLSelectElemen
     name: `Default assignee of ${project}`,
   })) as HTMLSelectElement;
 
-test("default assignee picks made while one is saving show and go one at a time in pick order, the last one kept", async () => {
+test("default assignee picks made while one is saving show, and only the newest follows the held save", async () => {
   const server = defaultAssigneeServer([{ assignee: "alice@example.com", project: "CORE" }]);
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockImplementation(server.list);
   const putDefault = spyOn(api, "putProjectDefaultAssignee").mockImplementation(server.put);
@@ -681,14 +685,12 @@ test("default assignee picks made while one is saving show and go one at a time 
     expect(putDefault).toHaveBeenCalledTimes(1);
 
     await act(async () => release());
-    // Every pick follows the held save, one at a time and in the order it was made.
-    await waitFor(() =>
-      expect(server.sent).toEqual(["bob@example.com", null, "carol@example.com"])
-    );
+    // Only the newest pick follows the held save: Unassigned was superseded before it was sent.
+    await waitFor(() => expect(server.sent).toEqual(["bob@example.com", "carol@example.com"]));
     await waitFor(() =>
       expect(server.rows()).toEqual([{ assignee: "carol@example.com", project: "CORE" }])
     );
-    expect(putDefault).toHaveBeenCalledTimes(3);
+    expect(putDefault).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(control.value).toBe("carol@example.com"));
 
     // Clearing it leaves the project with no default, and the control at Unassigned.
@@ -704,10 +706,10 @@ test("default assignee picks made while one is saving show and go one at a time 
   }
 });
 
-// The saves still out when Settings unmounts belong to the QueryClient, not to the row: they go
-// out in pick order, and a pick on the remounted row waits behind them rather than being
-// overtaken by them.
-test("default assignee picks still saving when Settings unmounts go out in pick order behind the remounted row's pick", async () => {
+// The saves still out when Settings unmounts belong to the QueryClient, not to the row: a pick on
+// the remounted row waits behind the held save and supersedes the pick queued before leaving, so
+// only the newest pick follows the held save.
+test("a default assignee picked after Settings is remounted supersedes the pick queued before, and follows the held save", async () => {
   const server = defaultAssigneeServer([]);
   const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockImplementation(server.list);
   const putDefault = spyOn(api, "putProjectDefaultAssignee").mockImplementation(server.put);
@@ -716,7 +718,7 @@ test("default assignee picks still saving when Settings unmounts go out in pick 
     { login: "carol@example.com" },
     { login: "dave@example.com" },
   ]);
-  const { done, remount } = renderSettings(["CORE"]);
+  const { done, leave, reopen } = renderSettings(["CORE"]);
 
   try {
     let control = await defaultAssigneeControl("CORE");
@@ -732,7 +734,8 @@ test("default assignee picks still saving when Settings unmounts go out in pick 
     fireEvent.change(control, { target: { value: "carol@example.com" } });
     await waitFor(() => expect(control.value).toBe("carol@example.com"));
 
-    remount();
+    leave();
+    reopen();
     control = await defaultAssigneeControl("CORE");
     // The pick still waiting behind bob's held save is what the returning row shows.
     await waitFor(() => expect(control.value).toBe("carol@example.com"));
@@ -748,14 +751,72 @@ test("default assignee picks still saving when Settings unmounts go out in pick 
     expect(server.sent).toEqual(["bob@example.com"]);
 
     await act(async () => release());
-    await waitFor(() =>
-      expect(server.sent).toEqual(["bob@example.com", "carol@example.com", "dave@example.com"])
-    );
+    await waitFor(() => expect(server.sent).toEqual(["bob@example.com", "dave@example.com"]));
     await waitFor(() =>
       expect(server.rows()).toEqual([{ assignee: "dave@example.com", project: "CORE" }])
     );
-    expect(putDefault).toHaveBeenCalledTimes(3);
+    expect(putDefault).toHaveBeenCalledTimes(2);
     await waitFor(() => expect(control.value).toBe("dave@example.com"));
+  } finally {
+    done();
+    listDefaults.mockRestore();
+    putDefault.mockRestore();
+    listUsers.mockRestore();
+  }
+});
+
+// A save refused while Settings is unmounted is still the reader's to hear about: the reopened
+// row says so, beside the stored value it fell back to, and Retry resends it.
+test("a default assignee save refused while Settings is unmounted shows its reason when Settings is reopened", async () => {
+  const server = defaultAssigneeServer([{ assignee: "alice@example.com", project: "CORE" }]);
+  const listDefaults = spyOn(api, "listProjectDefaultAssignees").mockImplementation(server.list);
+  const refusal = Promise.withResolvers<ProjectDefaultAssignee>();
+  const putDefault = spyOn(api, "putProjectDefaultAssignee")
+    .mockReturnValueOnce(refusal.promise)
+    .mockImplementation(server.put);
+  const listUsers = spyOn(api, "listUsers").mockResolvedValue([
+    { login: "alice@example.com" },
+    { login: "bob@example.com" },
+  ]);
+  const { done, leave, reopen } = renderSettings(["CORE"]);
+
+  try {
+    let core = await defaultAssigneeControl("CORE");
+    await waitFor(() => expect(core.value).toBe("alice@example.com"));
+    fireEvent.focus(core);
+    await waitFor(() =>
+      expect(within(core).getByRole("option", { name: "bob@example.com" })).toBeDefined()
+    );
+    fireEvent.change(core, { target: { value: "bob@example.com" } });
+    await waitFor(() => expect(putDefault).toHaveBeenCalledTimes(1));
+
+    leave();
+    await act(async () =>
+      refusal.reject(
+        new ApiError(500, { code: "INTERNAL", error: "the default assignee save was refused" })
+      )
+    );
+    reopen();
+
+    core = await defaultAssigneeControl("CORE");
+    const coreCell = within(core.closest("td") as HTMLElement);
+    await waitFor(() =>
+      expect(coreCell.getByRole("alert").textContent).toContain(
+        "the default assignee save was refused"
+      )
+    );
+    expect(core.value).toBe("alice@example.com");
+
+    fireEvent.click(coreCell.getByRole("button", { name: "Retry" }));
+    await waitFor(() => expect(coreCell.queryByRole("alert")).toBeNull());
+    await waitFor(() =>
+      expect(server.rows()).toEqual([{ assignee: "bob@example.com", project: "CORE" }])
+    );
+    expect(putDefault.mock.calls).toEqual([
+      ["CORE", { assignee: "bob@example.com" }],
+      ["CORE", { assignee: "bob@example.com" }],
+    ]);
+    await waitFor(() => expect(core.value).toBe("bob@example.com"));
   } finally {
     done();
     listDefaults.mockRestore();

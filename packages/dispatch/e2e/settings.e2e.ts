@@ -494,8 +494,9 @@ test("a default assignee picked while the last pick is saving waits its turn, an
 });
 
 // The saves still out when the reader leaves Settings belong to the app, not to the page: on
-// the way back the row's next pick waits behind them, so it is the one the server keeps.
-test("default assignee picks still saving when Settings is left and reopened go out in pick order, and the last pick is the one kept", async ({
+// the way back the row's next pick waits behind the held save and supersedes the pick queued
+// before leaving, so it is the only one sent after the held save and the one the server keeps.
+test("default assignee picks made when Settings is left and reopened supersede the pick queued before leaving, and the newest is the one sent after the held save", async ({
   browser,
 }, testInfo) => {
   test.skip(testInfo.project.name !== "chromium", "one browser proves the queue across a remount");
@@ -547,21 +548,14 @@ test("default assignee picks still saving when Settings is left and reopened go 
     await expect(core).toHaveValue("alice");
 
     held.resolve();
-    await expect.poll(() => wire.filter((entry) => entry.startsWith("answered")).length).toBe(3);
+    await expect.poll(() => wire.includes("answered alice")).toBe(true);
     await expect(core).toHaveValue("alice");
 
     await page.reload();
     await expect(core).toHaveValue("alice");
     const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
     expect(defaults.map((row) => [row.project, row.assignee])).toEqual([["CORE", "alice"]]);
-    expect(wire).toEqual([
-      "sent bob",
-      "answered bob",
-      "sent carol",
-      "answered carol",
-      "sent alice",
-      "answered alice",
-    ]);
+    expect(wire).toEqual(["sent bob", "answered bob", "sent alice", "answered alice"]);
   } finally {
     await context.close();
   }
