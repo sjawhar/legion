@@ -637,8 +637,9 @@ so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ## claude-backend-tmux.sh
 
 ```sh
-LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
-  bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
+LEGION_E2E_MODEL_ROUTE=login LEGION_E2E_ANTHROPIC_PROFILE=<profile> bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
+LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
+  bash scripts/e2e/claude-backend-tmux.sh     # the same, on an API key and the Hawk gateway
 ```
 
 **Devbox only; CI does not run this script.** It proves `worker_backends` on the tmux runtime: a
@@ -664,25 +665,58 @@ pane. The checks:
 - `every-launch-endpoint-checked`: every pane the daemon launched, Oh My Pi or Claude Code, was
   checked by the watcher before it registered.
 
-Inputs. `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
-Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
-the variable, before anything else, and refuses a key Anthropic's `GET /v1/models` does not accept
-(the key goes by a 0600 header file, never an argv). The run copies the key once into its work
-directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
-the daemon creates only when missing) before the claim exists: a `settings.json` whose
-`apiKeyHelper` is a command that prints that copy, and whose `model` is `claude-sonnet-5`. So no
-pane's environment carries `ANTHROPIC_API_KEY`, which the watcher checks for every agent process,
-and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is the Oh My
-Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
-([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)). `CLAUDE_E2E_EVIDENCE_DIR` names
-the evidence directory; by default it is a fresh one under `/tmp`.
+Inputs. `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `login`) picks how both harnesses reach
+their models (in Stage 2 and Stage 3 it picks the Oh My Pi agents' route alone); `prerequisites`
+refuses a run without it, naming the variable, before anything else:
+
+- `gateway`: `LEGION_E2E_CLAUDE_KEY_FILE` (required in this mode) names a file holding the
+  Anthropic API key the Claude Code implementer reaches its model with, refused when Anthropic's
+  `GET /v1/models` does not accept it (the key goes by a 0600 header file, never an argv). The run
+  copies the key once into its work directory, 0600, and the claim's `settings.json` (below) has an
+  `apiKeyHelper` that prints that copy. `LEGION_E2E_MODEL_GATEWAY_URL` (required in this mode) is the
+  Oh My Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
+  ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)), so `hawk-token` and an unlocked
+  keyring are needed too.
+- `login`: the operator's own signed-in logins, for a devbox with no gateway and no API key.
+  `LEGION_E2E_ANTHROPIC_PROFILE` (required in this mode) names the Anthropic profile whose Console
+  login (`claude auth login --console`) the implementer runs on, in the directory Claude Code reads
+  profiles from (`ANTHROPIC_CONFIG_DIR`, else `$XDG_CONFIG_HOME/anthropic`, else
+  `~/.config/anthropic`). The operator names it rather than the run taking whichever profile
+  `active_config` names, since the profile picks the organization the run is billed to. A claude.ai
+  login or a `CLAUDE_CODE_OAUTH_TOKEN` is not handed to a pane. The claim's `settings.json` has an
+  `env` naming that directory and profile (`ANTHROPIC_CONFIG_DIR` and `ANTHROPIC_PROFILE`), so Claude
+  Code reads the login from the profile's own credentials file. Claude Code 2.1.309 refreshes a
+  profile's login only within 30 s of its stored `expires_at`, or when forced, and writes the rotated
+  token back to that same file (read from its bundled code); a refresh the run's teardown killed
+  mid-exchange could lose the rotated token, so `prerequisites` refuses a profile whose login expires
+  within the run's bound (`run_minutes`, 150), and the proof exercises no refresh. It then
+  preflights that very `settings.json` with one `claude -p` from a scratch directory, under a scratch
+  Claude Code directory holding it alone, with an allow-list of its own modelled on the daemon's pane
+  allow-list and `HOME` and `XDG_CONFIG_HOME` empty, refuses a run whose answer did not come from
+  `claude-sonnet-5`, and refuses, keeping the scratch directory, one where Claude Code wrote a
+  credential of its own beside the file, a forked login. The Oh My Pi agents use the operator's Oh My
+  Pi login, through [`lib/install-login-model-route.sh`](#libinstall-login-model-routesh), which holds
+  its login to the same bound and preflights it with one `omp -p` answered by
+  `anthropic/claude-opus-4-8`. `run_minutes` is the script's named waits at their bounds (about 116
+  minutes) with room for its unbounded builds and installs; the script does not enforce it.
+
+Under either route the run writes the implementer's claim directory (`<state>/claude/<claim
+token>`, which the daemon creates only when missing) before the claim exists: a `settings.json`
+holding the route's credential pointer and `model: claude-sonnet-5`. So no pane's environment
+carries `ANTHROPIC_API_KEY`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_OAUTH_TOKEN`,
+`ANTHROPIC_FOUNDRY_API_KEY` or `CLAUDE_CODE_OAUTH_TOKEN`, which the watcher checks for every agent
+process, and no credential is in an argv or a transcript.
+`CLAUDE_E2E_EVIDENCE_DIR` names the evidence directory; by default it is a fresh one under `/tmp`.
 
 The rig is Stage 3's without the GitHub ingress bridge: scratch Postgres, NATS, Envoy listener and
 native Dispatch from [`lib/rig.sh`](#librigsh), the workflow's vocabulary from
 [`lib/workflow.sh`](#libworkflowsh), `admission_cap: 1`, and the design gate off, so the
-architect's gate registration starts planning with no approval. The daemon is started with
-`LEGION_CLAUDE_PATH` and `LEGION_BUN_PATH` set to the `claude` and `bun` on the operator's `PATH`,
-and `LEGION_CLAUDE_PLUGIN_DIR` set to this checkout's `packages/claude-envoy`, whose
+architect's gate registration starts planning with no approval. The daemon is started with the
+real `gh`, `jj`, `tmux` and `bun` that `mise which` names first on its `PATH`, which every pane
+inherits ([`real_bin_path`](#librigsh): the run's own `HOME` hides mise's global config from the
+box's shims, where a pane's `jj` shim hands the call back to itself, exit 127), so all four must be
+pinned in mise, `LEGION_CLAUDE_PATH` set to the `claude` on the operator's `PATH`, `LEGION_BUN_PATH`
+to that real `bun`, and `LEGION_CLAUDE_PLUGIN_DIR` to this checkout's `packages/claude-envoy`, whose
 `dist/envoy-channel.js` and generated `legion/` must be built. Legion's role Apps resolve as Stage
 3's do: the daemon runs `secrets LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 -- …` and `secrets
 GH_REVIEW_APP_PRIVATE_KEY_B64 -- …` as each App's `private_key_command`, and `prerequisites`
@@ -2273,6 +2307,62 @@ other provider a pane could reach without the key file, the same shape
 The script creates the profile's two directories, `<dest>` and `<key-dir>`, and removes neither;
 the caller does, with its work directory, `<key-dir>` unconditionally and `<dest>` only when it
 keeps no evidence.
+
+## lib/install-login-model-route.sh
+
+Routes a named OMP profile's model turns to Anthropic on the operator's own Oh My Pi login: the
+login alternative to [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)'s Hawk route and
+[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)'s key file, for a
+devbox whose Oh My Pi is signed in to Anthropic and that has neither a gateway nor a key to hand the
+run. [`claude-backend-tmux.sh`](#claude-backend-tmuxsh) runs it under `LEGION_E2E_MODEL_ROUTE=login`.
+
+```sh
+scripts/e2e/lib/install-login-model-route.sh --profile <name> --home <dir> --dest <dir> --omp <mise tool spec> --run-minutes <n>
+# → the operator's agent.db the profile now links to
+```
+
+Oh My Pi keeps its logins in its `agent.db`, and a login's refresh token rotates when one process
+refreshes it: a copy of the login in a second database would leave one of the two holding a spent
+refresh token after the first refresh, signing the operator's own sessions out. So the profile's
+`agent/agent.db` is a symbolic link to the operator's own database, found as Oh My Pi finds it (the
+profile `OMP_PROFILE` names when it is set at all, an empty one the default, else `PI_PROFILE`'s,
+else the default one, under `$XDG_DATA_HOME/omp` when that directory exists, else under `~/.omp`;
+`PI_CONFIG_DIR` and `PI_CODING_AGENT_DIR`, which move it, are refused). SQLite resolves the link, so
+the run's agents share that database, its write-ahead log and Oh My Pi's refresh leases with the
+operator's sessions, and write their model usage and caches into it. Run it under the operator's
+own `HOME`, before the caller moves an XDG directory of its own. The profile's `agent/config.yml`
+pins every model role to `anthropic/claude-opus-4-8` and disables Bedrock, Google and the local
+servers, as the other two routes do, and every other provider the shared database holds a live
+login for (an `openai-codex` login among them), since a subagent or a retry chooses from every
+provider it can reach. No `models.yml` is written: Anthropic's own endpoint is Oh My Pi's default.
+
+Sharing one database has three refusals, each before anything is linked or written:
+
+- a database with no live `anthropic` login;
+- an `--omp` newer than the operator's own `omp` (the first on `PATH`), which would migrate the
+  database's schema under the operator's sessions;
+- a live `anthropic` OAuth login with `--run-minutes` or less left. An Oh My Pi older than the
+  operator's (the pinned 18.8.9, against 18.12's fix) can lose a rotated refresh token when its
+  process is killed mid-exchange, as a run's teardown kills it, which signs every session of the
+  operator out. Oh My Pi refreshes a login only within 60 s of its stored expiry or on a 401, so a
+  login that outlasts the run is never refreshed for its expiry by the run's agents. A 401 still
+  forces one; that is a revoked or rotated login, which no route survives.
+
+The preflight is one `omp -p --no-extensions` of `--omp` (`mise x <spec> -- omp`) under the
+profile, from a scratch directory, under an allow-list of its own modelled on the daemon's pane
+allow-list, with the run's `HOME` and profile and nothing else of the caller's session (no overlay
+such as `PI_CONFIG_FILES`, no provider key). Unlike a pane's, its XDG base directories are the
+caller's own, where `mise x` reads which configs it trusts; the run's profile name is fresh, so Oh My
+Pi still finds the profile under `--home`. It passes when the main session it records (not a
+subagent's or an advisor's, a level deeper) holds an answer from `claude-opus-4-8` on the
+`anthropic` provider that is not an error, and it writes its output to
+`<dest>/omp-preflight.log`, which holds the answer and Oh My Pi's warnings and no credential. No
+credential reaches a pane's environment, an argv or the profile's files. A pane runs as the
+operator's own uid, so an agent's own bash can still read the database, as it can read
+`hawk-token`'s cache or the key-file route's key file: the same exposure, not a widening. `<dest>`
+is the caller's evidence: [`claude-backend-tmux.sh`](#claude-backend-tmuxsh) keeps it in its
+evidence directory. The profile and its link go with the caller's work directory; removing the link
+leaves the operator's database as it is.
 
 ## lib/model-gateway-unserved.sh
 
