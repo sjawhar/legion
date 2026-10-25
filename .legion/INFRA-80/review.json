@@ -2,52 +2,65 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T20:05:00Z",
-  "decision": "changes_requested",
-  "round": 12,
+  "completed": "see the commit that carries this file; no clock was read when it was written",
+  "decision": "approved",
+  "round": 13,
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "pull request #2173 head 063ed32343a966589875f4cc6faeec714841464e",
-      "description": "GitHub reports the head `CONFLICTING`/`DIRTY` against main: 10 ahead, 71 behind. A conflicting pull request starts no `on: pull_request` workflow at all, so nothing further can be judged at a head in that state and an approval there would pin something that must move anyway. This is independent of the finding below and would hold the round on its own. The forward merge is the first item of the next round; the compare of the current code head with the branch head still prints only `.legion/` paths, so the lane read below stands for the code that is there now."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:750-752",
-      "description": "Text this change wrote says every launch provisions the workspace afresh, which is false for the ordinary case and in four places. `docs/kubernetes.md:750-752`: 'every launch of a claim — a resume in a pod of its own making, and a resume in a pod created after the last one went — provisions its workspace from the issue's pushed branch … anything it had not pushed went with the pod before it'. The enumeration names two cases, both of which create a pod, and the opener generalises over all launches; the omitted third case is the common one. `internal/runtime/sandbox/podkind.go:85-87` states it flatly with no enumeration at all: 'every launch, a resume included, provisions its workspace afresh'. `docs/kubernetes.md:1214-1215` ('as every launch does now') and `:3876-3877` ('so every launch provisions the workspace afresh') repeat it. The mechanism: `relaunch.go:123-128` keeps a live, undrifted pod whose addresses have not moved, and `l.kind.provision` is called only inside the `if replace` branch (`:166`); a launch into a kept pod goes to `recordAddresses` and `launchers.start` (`:213-218`), and `relaunch_test.go:147-160` pins that a role start does not reinitialise the issue. Five of an issue's six roles start into the pod the first launch created, so the sentence is wrong about the majority of launches and tells a reader that a role start loses unpushed work, which it does not. What is true is that every *new or replacement pod* provisions afresh. Both thermonuclear passes reached this independently; I verified it against `relaunch.go` before filing.",
-      "structuralNote": "The quality pass's observation is worth carrying into the fix rather than fixing four sentences four times: this is one contract — pod lifetime versus role lifetime — expanded in four places, and the sites disagree only because each expansion was written separately. Stating it once and referring to it is the repair that stops the fifth."
-    }
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "correctionOfRoundTwelve": {
+    "what": "Round 12's handoff carried `completed: 2026-10-25T20:05:00Z`. That was an estimate written in the grammar of a measurement; no clock was read for it, and the same is true of all twelve of this role's earlier handoffs, each a round minute 5 to 22 minutes later than the commit carrying it.",
+    "whatWasReal": "The lane states round 12 reported were real reads. GitHub's own `completed_at` at that code head confirms them.",
+    "whereTheMeasuredTimesAre": "The pull request body's Verification section, which now carries GitHub's fields and never a session's clock.",
+    "ruleAdopted": "A time comes from `date -u` or from a named GitHub field, with the field named beside it. If no clock was read, the sentence carries no number. This file's `completed` is written that way rather than filled with a plausible instant."
+  },
+  "roundTwelveFindingsVerified": [
+    "The four 'every launch provisions the workspace afresh' claims are gone, replaced by one owner. `docs/kubernetes.md:3879-3896` states the mechanism rather than summarising it: a role launched while the pod is live and nothing replaces it provisions nothing, no init container runs, no provisioning token is minted, the workspace is as the roles before it left it with unpushed work included, and in an ordinary run that is five of six roles. Checked against `relaunch.go:123-128` (a live, undrifted pod whose addresses have not moved is kept), `:166` (provision runs only inside the replace branch) and `:213-218` (a kept pod goes straight to recordAddresses and launchers.start).",
+    "The test the owner cites by name, `TestRoleStartsShareOneIssuePodAndDoNotReinitializeIt`, exists in `relaunch_test.go` at this head. A cited test name reads as proof and survives a rename, so it was checked rather than taken.",
+    "The three references defer rather than restate: `podkind.go:84-89` names `provision` and `relaunch` and points to the doc for which launch is which; `docs/kubernetes.md:749-756` says it once and points; `:1209-1217` and the other pointers are bare links.",
+    "Residue swept: the only remaining `every launch` matches in `docs/kubernetes.md` are the image-ENV line and the controller's start procedure, neither about provisioning.",
+    "The conflict GitHub reported at the round-12 head is resolved: `mergeable` is MERGEABLE at this head and the five conflicts were resolved to carry both sides."
   ],
-  "roundElevenVerification": {
-    "note": "Both round-11 findings are fixed, verified at the head, and both passes agree member by member.",
-    "verified": [
-      "skills/legion-architect/SKILL.md:418-424 and the claude-envoy mirror now make a queued wake the exception whichever way the look ended, and say a `pass` or `fail` closes the check and takes the pod. Checked against workflow/check.go: linger.go:77-101 excludes the implementer and queues no IssueSuspend at a merged close; check.go:198-217 and :276-294 close on pass or fail and queue the teardown; endLookPending at :223-261 returns through startLook on a queued wake before either suspension, on both the reported and unreported paths.",
-      "runtime/sandbox/issue_suspend.go:17-18 says a re-admission makes a Sandbox of its own rather than resuming this one, which matches the unconditional delete at :60 and issue_suspend_test.go:135's requirement of a different Sandbox and pod uid."
-    ]
+  "mergeResolutionVerifiedHere": {
+    "note": "The forward merge is new code and was reviewed as such rather than taken from the architect's account of it.",
+    "wakeEnumeration": "The account given to this role said the enumeration carries five members, all present in `check.go`'s switch. Read directly, `wokenBy` (`workflow/check.go:152-170`) has seven: `wakeMerge`, `wakeDeployed`, `wakeDaemonBoot`, `wakeDispatchStart`, `wakeDispatchBuild`, `wakeDeployRun`, `wakeBound`. All seven are accounted for in the prose: five in `merge-gate.md:254-271`'s parenthetical of task wordings, matching the switch string for string (`Dispatch's issue.deployed: `, `the deploy workflow's run: `, `the Legion daemon's boot on build `, `Dispatch's start on build `, `Dispatch's build `); `the bound: ` in the next bullet with its own wording; and `the merge`, which is the first look's cause rather than a wake of a pending check. Nothing main added was dropped and nothing the branch reworded was made false.",
+    "deepReviewAgreement": "The deep-review pass reached the same conclusion on the resolutions independently, including the outbox resolution against migration 0051 and `DecodeOutboxPayload`'s `DisallowUnknownFields`."
   },
-  "ciAtCodeHead": {
-    "head": "d8efa0ba2fb00423d368022e477312d84948ec21",
-    "requiredByBase": ["lint", "typecheck", "test", "pr-title"],
-    "read": "2026-10-25T19:58:00Z",
-    "verdict": "All four required lanes completed success at the code head, read at my own hand after the thermonuclear pair rather than at the round's start. The head the pull request now carries, 063ed32343a9, adds only .legion/INFRA-80/implement.json, and the compare d8efa0ba…063ed323 prints `ahead`, 2 files, both under .legion/, so that read stands for the code the branch holds.",
-    "note": "It does not stand for a head that has merged main, which the conflict now requires. A green read is about the head it was taken at; the forward merge makes a new one."
-  },
-  "headMovedMidRound": {
-    "what": "The branch head moved from d33d3a2a601d to 063ed32343a9 while this round ran, the architect having written to the implementer as though a round were open; the daemon refused the implementer's completion with HANDOFF_NOT_CURRENT_PHASE and nothing is half-applied.",
-    "handling": "I re-read at the new head rather than submitting against the one my round opened on: 063ed32343a9 touches only the implement handoff, the code head is unchanged, and the finding below is present there. My own handoff is committed on top of that tip, so the review names the head my push makes."
+  "judgementRequested": {
+    "site": "docs/kubernetes.md:1399-1403",
+    "question": "The tester left for this role whether the cutover section's sentence — an issue's Sandbox is deleted and made afresh, and the claim it owned is reaped with it — needs a clause naming its scope, since it reads false to a reader who lands on the line.",
+    "decision": "Not a finding.",
+    "reason": "The section's own first sentence states the scope explicitly and in the past tense, four lines above and in the same block: it is for a deployment already running issue pods of `legion-v10.1.0` to `legion-v10.2.x`, where each issue's Sandbox owned an `issue` volume claim that outlived its pods. The sentence makes no general claim about the world this change creates; its subject is that release's Sandbox, already established. That is different in kind from the two defects repaired in this pull request: `every launch provisions` was a general claim false in its own section's terms, and `lint in_progress at the time of writing` had a truth condition no reader could recover at all. Here the reader recovers the scope by reading the section's first line, which is the ordinary act of reading prose. Requiring every sentence inside a scoped section to restate its scope is the duplication pattern this round's refactor removed, and it would make the text worse."
   },
   "thermonuclear": {
-    "head": "d33d3a2a601def911286c32502bba7798a372129",
-    "deepReview": "CHANGES — the every-launch overstatement, with relaunch.go's replace branch as its evidence. It judged every member of the corrected architect sentence against the mechanism and found none that fails, and found nothing further in migration 0051, the displacement fence, the store kinds, the ephemeral volume rendering, the provider guards, legionClaim or the e2e host paths.",
-    "codeQuality": "CHANGES — the same finding, reached independently, with the structural note above. Its sweep names what it searched for; it reports no dead state, no orphaned golden and no new size threshold crossed, and it answered the question I asked about why these lifecycle sentences keep being wrong: the two round-11 errors sat on different boundaries — workflow decides when to stop, the runtime decides what stopping deletes — so no single contract would have caught both; the every-launch claim is the one case of genuine prose duplication.",
-    "independence": "As stated in the pull request body: separate agents, separate prompts, separate reads of the source, neither told about the other. Not a claim about model family; nobody has read .message.provider or .message.model for those sessions."
+    "head": "b247931acbcace344f90e6645e7a12d4dbc5e248",
+    "deepReview": "APPROVE, no findings. Covered the five conflict resolutions, strict outbox decoding with migration 0051, the pod-lifetime contract, the displacement gap, both database store kinds, the provider guards and agent-controlled export names.",
+    "codeQuality": "APPROVE, no findings. Searched for the claim rather than its former wording — every/each launch, spawn and resume with provision, afresh, fresh or empty disk or workspace, recreation, pushed branch, retained volume, lost-session machinery — across docs, Go comments, skills, scripts and the claude-envoy mirrors, and found no fifth restatement. The retained manifest goldens all have consumers and `recovered.json` is removed.",
+    "independence": "Separate agents, separate prompts, separate reads of the source, neither told about the other. Not a claim about model family; nobody has read `.message.provider` or `.message.model` for those sessions."
   },
-  "deadline": {
-    "note": "The switchover window drains this project at 21:00Z. This round ends in a request for changes at about 20:05Z on a conflict GitHub reports and a false sentence in four places, neither of which a clock changes. The rule I gave the architect in advance holds: a parked tree costs a generation, an approval I did not mean costs what twelve rounds were for."
+  "ciAtCodeHead": {
+    "head": "b247931acbcace344f90e6645e7a12d4dbc5e248",
+    "requiredByBase": ["lint", "typecheck", "test", "pr-title"],
+    "allSuccess": true,
+    "completedAtFromGitHub": {
+      "typecheck": "2026-10-25T20:42:21Z",
+      "pr-title": "2026-10-25T20:54:32Z",
+      "lint": "2026-10-25T20:56:31Z",
+      "test": "2026-10-25T20:56:47Z"
+    },
+    "supersededRun": "An earlier `pr-title` run at this same head is `completed`/`cancelled` (20:34:54Z), superseded by the successful one above; both are reported rather than the convenient one.",
+    "compareToReviewHead": "`b247931a...69d44a69` read as {status: ahead, total_commits: 2, files_returned: 2, truncated: false}, the two files being `.legion/INFRA-80/implement.json` and `.legion/INFRA-80/test.json`. Read in that form because a compare GitHub cut, or one that omits the `files` key, returns the passing answer to this question.",
+    "note": "This is a full rerun over the 71 commits the forward merge brought in; nothing of the pre-merge head's reads was carried."
   },
-  "threads": { "unresolvedAtThisHead": 0, "botThreads": 0 },
-  "e2eLines": { "implementer": "present", "tester": "present" }
+  "forTheMerger": {
+    "compareCap": "`gh api repos/OWNER/REPO/compare/<base>...<head>` returns at most 300 files, and past that GitHub cuts the list or omits the `files` key entirely, so a bare `.files[].filename` reads as an empty diff — which is exactly 'nothing but `.legion/` changed above the approved head', the answer READY looks for. Read `{status, total_commits, files_returned, truncated}`, conclude nothing from a null `files` or a count of exactly 300, and refuse rather than conclude: `READY_UNREVIEWED_CHANGE` already carries that case. A count landing on 100, 300 or 1,000 is a page boundary until proven otherwise.",
+    "whyItIsHere": "The merger's role topic has no holder until its phase opens, so this is carried in the artefact rather than sent. It is also in the pull request body, above the contract census."
+  },
+  "approval": {
+    "headApproved": "the commit this handoff is committed in, named by SHA in the review submitted after the push",
+    "e2eLines": "both present: `E2E (implementer)` and `E2E (tester)` in the pull request body",
+    "threads": "none unresolved; no bot threads on this pull request"
+  },
+  "standingRisk": "The seven inverted Stage 4a per-check assertions remain unrun, and Stage 4b has run at no head. Both are stated in the pull request body's `Not proven / risk`, with the Stage 4a account attributed to the architect rather than presented as measured here, since no run report for it exists on the pull request."
 }
