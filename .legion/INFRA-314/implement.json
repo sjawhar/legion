@@ -1,0 +1,57 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-314",
+  "completed": "2026-10-25T18:39:19Z",
+  "proof": [
+    {
+      "criterion": "A1, A2, A5, A10, A11: the broker serves its own approval page with sign-in on its own origin; the record's approver approves with one POST and the session receives the value; nothing Dispatch holds decides a secret request; sign-in settings are all-or-none and none means approvals off; a sign-in survives across processes",
+      "surface": "the real compiled broker binary (cmd/broker) on a real Postgres 17, driven over HTTP by a redirect-following, cookie-keeping client, against an in-process oidctest issuer serving ServiceAccount tokens and a person's code-flow sign-in",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=<pod Postgres> go test -count=1 -v -run TestTheBinaryApprovesASecretOnItsOwnPage ./cmd/broker/",
+      "observed": "12/12 subtests PASS, none skipped (output: https://github.com/sjawhar/legion/pull/2198#issuecomment-6401584593). No session -> 302 to the issuer with the broker's client id, redirect_uri <public url>/signin/callback, code_challenge_method=S256, nonce, state and login_hint=ada@example.com, no access_type/prompt=consent; back on the same record's page it prints the secret, the enrollment, the reason and Approve/Deny; ada's one Approve POST grants it and the pod reads ADA_DEPLOY_KEY's value through POST /v1/grants/{id}/values. Partial BROKER_SIGNIN_* refuses boot naming the missing ones; none boots with 'approval sign-in off' and the page answers 503 naming the four; BROKER_SIGNIN_SESSION_SECONDS=86401 refuses boot. A sign-in begun on process 1 finishes on process 2 and its session decides on process 3.",
+      "headSha": "b37470fcda090eae538470850da744b10d5b3bc9",
+      "negativeControl": "Against a second pending record, each given input decided nothing and the record stayed pending: carol's signed-in session and a page token computed from her own cookie (no button; outcome 'not yours to decide'); Dispatch's ServiceAccount token on POST /v1/credential-requests/{record}/approve and /deny (403 DECIDE_ON_BROKER_PAGE with approve_url); an ID token for ada minted for Dispatch's OAuth client as a Bearer on POST /approve (403) and on the account route (401 ACCOUNT_TOKEN_INVALID); a callback with a code from a sign-in the broker did not start (400, no session); a session past BROKER_SIGNIN_SESSION_SECONDS=2 (403, GET redirects to sign-in); a logged-out session's replayed cookie (403)."
+    },
+    {
+      "criterion": "A4 (browser), A7, A12 (Inbox): two clicks from the Inbox to an approval on the broker's page, sign-in only when the session lapsed, Approve all N shown, the wrong account switches, and a sibling origin cannot decide",
+      "surface": "Dispatch's Playwright browser suite in real Chromium: the real Dispatch server, the real broker binary (e2e/run-broker.sh) on its own Postgres database, and cmd/dev-oidc-issuer as the sign-in provider; pending records created on the real broker by a pod enrolled through the dev issuer",
+      "command": "cd packages/dispatch && DATABASE_URL=<pod Postgres>/dispatch_e2e bun run e2e -- broker-approval.e2e.ts inbox.e2e.ts --project chromium",
+      "observed": "52 passed, 1 skipped (inbox.e2e.ts:1647, untouched by this change); all 5 broker-approval rows pass: the Inbox item lands on <broker>/approve/<record> with no request to the issuer and one Approve grants it (API reads 'granted with a grant'); a lapsed session goes approve page -> /authorize (login_hint alice) -> /signin/callback -> the same record's page; one 'Approve all 3 shown' grants three; signed in as bob the page offers only the switch, which signs in alice and returns to the record; Chromium keeps the __Host-broker-session cookie (Secure, HttpOnly, SameSite=Lax, Path=/) on loopback http (output: https://github.com/sjawhar/legion/pull/2198#issuecomment-6401584593).",
+      "headSha": "b37470fcda090eae538470850da744b10d5b3bc9",
+      "negativeControl": "A page on another 127.0.0.1 port with alice's broker session live: its form POST to /approve gets the broker's 'Refused' page, its credentialed fetch fails CORS, its iframe of the record page is blocked by frame-ancestors 'none', and the record stays pending. And the same new tests run against the Inbox SPA before this change (packages/dispatch/web/src from acbffd06ea9f): 6 failed, inbox.e2e.ts:830 'Expected: \"https://secrets.internal.example/approve/record-alice\" Received: \"/credentials/record-alice\"'."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/oidc: CodeFlow online mode (OnlineAuthURL/OnlineExchange with PKCE S256, nonce, no refresh token), WorkspaceLogin and EmailShape shared with Dispatch's DomainRule/GroupRule; oidctest: PKCE check, OmitRefreshTokens, SpoilIDTokens, SignInUnqueued, NewOnListener, Handle",
+    "packages/envoy/cmd/dev-oidc-issuer: --listen, --sign-in-client, --sign-in-client-secret-file, --sign-in-domain, --sign-in-default, POST /dev/sign-in-as, POST /dev/mint (additive)",
+    "packages/envoy/internal/broker/config: BROKER_SIGNIN_* (all or none), BROKER_SIGNIN_SESSION_SECONDS (default and max 86400), BROKER_SIGNIN_CLIENT_SECRET refused, SignInSettings",
+    "packages/envoy/internal/broker/store: migration 0019_browser_sessions and its functions; requests/sweeper.go deletes expired sessions",
+    "packages/envoy/internal/broker/approval (new): the page, sign-in, callback, logout, page token, origin check, headers, templates and stylesheet",
+    "packages/envoy/internal/broker/api: signInAuth route kind and five routes; account approve/deny refuse agent_secret with 403 DECIDE_ON_BROKER_PAGE + approve_url; approve_url on pending rows and request answers; GET /v1/credential-requests/{record} removed; route comments",
+    "packages/envoy/internal/broker/brokertest: approval.go (Browser, Decide), pods.go, requestseed (e2e seeder); record.ValidID; requests.RecordDecision Login/Detail",
+    "packages/envoy/cmd/broker: main.go wiring and sign-in boot log; approval_page_test.go (live-binary test); cmd/broker-refgen labels and pages",
+    "packages/envoy/cmd/agent-secrets: waiting line names approve_url; cmd/agent-secrets-devrelay: approve/deny removed; scripts/dev-broker.sh(+test): sign-in through dev-oidc-issuer",
+    "packages/envoy/internal/dispatch: agentsecrets Client.Record and GET /api/v1/credential-requests/{id} removed; relay comments; contract tests approve on the broker page",
+    "packages/dispatch/web/src: Inbox secret row links approve_url; CredentialRecordPage, its route and getCredentialRecord removed",
+    "packages/dispatch/e2e: broker-approval.e2e.ts, run-broker.sh, real-broker.ts, harness ports 9025/9026, fake broker carries approve_url, inbox.e2e.ts href assertions",
+    "docs: packages/envoy/AGENTS.md, CHANGELOG.md, packages/dispatch/AGENTS.md/README.md, docs/site broker and Dispatch pages, retaken screenshots, media rig code, two docs/solutions port lists, biome.json ignores the Go templates, .github/workflows/envoy-and-contracts.yaml path triggers"
+  ],
+  "trickyParts": [
+    "Referrer-Policy is same-origin, not the plan's no-referrer: under no-referrer a browser sends Origin: null on the page's own form posts, which the exact-origin check refuses.",
+    "The account switch is a GET link (/approve/<record>?switch=1) because the CSP's form-action 'self' governs a form submission's redirect, which would block a POST that redirected to the provider.",
+    "Chromium keeps __Host-/Secure cookies on plain http://127.0.0.1; Go's cookiejar does not, so the Go helpers send them explicitly; Playwright's context.cookies(url) drops them for non-localhost http, so the spec reads context.cookies().",
+    "sjawhar/legion#2187 merged mid-implementation; the retarget to main conflicted in 38 files, resolved by a three-way merge of each of this issue's files against the #2187 head it had merged (acbffd06ea9f) onto main, with no conflicting hunk; the 136-file diff against main equals the branch's own diff against that head."
+  ],
+  "deviations": [
+    "Plan D7: Referrer-Policy same-origin (reason above).",
+    "Plan D1: the switch is GET /approve/<record>?switch=1, and POST /signin/logout answers a page rather than redirecting (reason above).",
+    "Plan D13: no second dev issuer; cmd/dev-oidc-issuer (from #2187) is extended additively, agreed with the architect.",
+    "Plan step 12: the narrated walkthrough video is not re-recorded (the rig needs sudo and SO_PEERPIDFD, which the pod lacks); per the architect's ruling the page embeds no video and says it is being remade, and the re-record is the PR's Fast-follow with its command.",
+    "Plan step 1: no new Google OAuth client ask; the architect already opened dispatch://INFRA-314/ask/324788c4-6a02-4709-ae44-8fe61b5db92a.",
+    "A first merge commit for the retarget (81a8cceaa1f6) was pushed with the wrong main parent and replaced by b37470fcda09 (same tree, parent 4ceb3aa9c553) with a sideways push, recorded in https://github.com/sjawhar/legion/pull/2198#issuecomment-6401536900; nothing was built on it."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Known environment failures in a Legion pod, unrelated to this change: helper and agent-secrets tests needing SO_PEERPIDFD, the broker store IAM test under trust auth, Dispatch packages needing rootless Docker, pmdoc, and two Dispatch api tests that need a non-C collation."
+  ]
+}
