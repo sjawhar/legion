@@ -9,8 +9,9 @@ export interface ComposerSend {
   /** The send its target holds - out, or refused - which a composer mounting now shows. */
   readonly held: HeldSend | undefined;
   /** Builds the request and sends it, unless a send under the composer's name is out; `build`
-   *  runs only when it goes, handed the request of the refused send it replaces, if any. */
-  readonly send: (build: (refused: SentRequest | undefined) => SentRequest) => void;
+   *  runs only when it goes, handed the refused send it replaces, if any - its request and what
+   *  refused it. */
+  readonly send: (build: (refused: HeldSend | undefined) => SentRequest) => void;
   /** Whether a send is out, past its deadline included, as of the last render. */
   readonly sending: boolean;
   /** Whether the send is past its deadline and still waiting for its answer. */
@@ -22,7 +23,7 @@ export interface ComposerSend {
   readonly sendingNow: () => boolean;
   /** Drops a refusal, its draft with it. */
   readonly discard: () => void;
-  /** Stops trying a late send to one session (Stop trying; `HeldSends.stop`). */
+  /** Stops trying a late send (Stop trying; `HeldSends.stop`). */
   readonly stop: () => void;
   /** Keeps what the reader wrote over a refusal, for the composer that mounts next. */
   readonly keep: (draft: HeldDraft) => void;
@@ -70,7 +71,7 @@ export function useComposerSend(
     send: (build) => {
       if (store.sendingNow(key)) return;
       // No send is out, so what the store holds under the name, if anything, is a refusal.
-      store.send(key, build(store.get(key)?.request));
+      store.send(key, build(store.get(key)));
     },
     sending: held !== undefined && held.status !== "refused",
     sendingNow: () => store.sendingNow(key),

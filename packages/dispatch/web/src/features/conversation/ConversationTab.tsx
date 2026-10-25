@@ -1,8 +1,8 @@
-import { type MutationKey, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type MutationKey, useQuery, useQueryClient } from "@tanstack/react-query";
 import { type ReactNode, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { Link } from "react-router-dom";
 
-import { api } from "../../api/client";
+import { api, type WriteBounds } from "../../api/client";
 import { userStateQuery, whoAmIQuery } from "../../api/queries";
 import type {
   Agent,
@@ -49,6 +49,7 @@ import { useMarkThreadRead } from "../replies/useMarkThreadRead";
 import { PHONE_VIEWPORT_QUERY, useDialog, useMediaQuery } from "../shell/useDialog";
 import { type DwellRef, useDwell } from "../shell/useDwell";
 import { ViewportAnchor } from "../shell/ViewportAnchor";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 import { Avatar } from "./Avatar";
 import { type Author, resolveAuthor } from "./authors";
 import type { ReplyTarget } from "./composer-model";
@@ -197,14 +198,16 @@ function ConversationReply({
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: (delivery: MessageDeliveryMode) => api.createMessageDelivery(reply.id, delivery),
+  const targetName = targetNameOf(reply.deliveries, root.root.target, agents);
+  const retry = useKeyedWrite({
+    label: (delivery: MessageDeliveryMode) =>
+      `Delivery to ${targetName} again, as ${MODE_LABELS[delivery]}`,
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-messages", issueKey] }),
+    write: (delivery, bounds) => api.createMessageDelivery(reply.id, delivery, bounds),
   });
   const author = resolveAuthor(reply.author, titles);
   const capabilities = capabilitiesForTarget(root.root.target, agents);
   const lastAttempt = reply.deliveries.at(-1);
-  const targetName = targetNameOf(reply.deliveries, root.root.target, agents);
   const answer = root.replies.find(
     (candidate) => candidate.in_reply_to === reply.id && candidate.author.kind === "session"
   );
@@ -558,11 +561,12 @@ function CommentTurn({
   const queryClient = useQueryClient();
   const [editingCommentId, setEditingCommentId] = useState<string>();
   const [savingCommentEditId, setSavingCommentEditId] = useState<string>();
+  /** One attempt of a comment edit's save, under the composer's key (`sendRequest`). */
   const editComment = useCallback(
-    async (id: string, body: string) => {
+    async (id: string, body: string, bounds: WriteBounds) => {
       setSavingCommentEditId(id);
       try {
-        const comment = await api.editComment(id, { body });
+        const comment = await api.editComment(id, { body }, bounds);
         await queryClient.invalidateQueries({ queryKey: ["comments", issueKey] });
         return comment;
       } finally {
@@ -581,11 +585,13 @@ function CommentTurn({
     untilDeadline: true,
   });
   const retryGuard = useSubmitGuard();
-  const retry = useMutation({
-    mutationFn: (delivery: CommentDeliveryAttempt) =>
-      api.createCommentDelivery(delivery.comment_id, delivery.target, delivery.delivery),
+  const retry = useKeyedWrite({
+    label: (delivery: CommentDeliveryAttempt) =>
+      `Delivery of the comment to ${delivery.target} again, as ${MODE_LABELS[delivery.delivery]}`,
     onSettled: () => retryGuard.release(),
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["comments", issueKey] }),
+    write: (delivery, bounds) =>
+      api.createCommentDelivery(delivery.comment_id, delivery.target, delivery.delivery, bounds),
   });
   const thread: CommentThread = {
     anchor: item.root.anchor,
@@ -722,13 +728,14 @@ function TargetedMessageTurn({
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: (delivery: MessageDeliveryMode) =>
-      api.createMessageDelivery(item.root.id, delivery),
+  const targetName = targetNameOf(item.root.deliveries, item.root.target, agents);
+  const retry = useKeyedWrite({
+    label: (delivery: MessageDeliveryMode) =>
+      `Delivery to ${targetName} again, as ${MODE_LABELS[delivery]}`,
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["issue-messages", issueKey] }),
+    write: (delivery, bounds) => api.createMessageDelivery(item.root.id, delivery, bounds),
   });
   const capabilities = capabilitiesForTarget(item.root.target, agents);
-  const targetName = targetNameOf(item.root.deliveries, item.root.target, agents);
   const asker = resolveAuthor(item.root.author, titles);
 
   return (

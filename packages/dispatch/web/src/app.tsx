@@ -10,7 +10,6 @@ import type { AuthenticatedUser } from "./api/types";
 import { broadcastQueue } from "./features/agents/broadcast-queue";
 import { totalUnreadReplies, unreadRepliesLabel } from "./features/agents/unread";
 import { heldSends } from "./features/conversation/held-sends";
-import { keyedSendStorage } from "./features/conversation/keyed-send-storage";
 import { useNeedsYouCount } from "./features/inbox/BlockedOnYou";
 import { Inbox } from "./features/inbox/Inbox";
 import { InboxDrawer } from "./features/inbox/InboxDrawer";
@@ -45,6 +44,10 @@ import { useDocumentTitle } from "./features/shell/useDocumentTitle";
 import { useKeyboardFit } from "./features/shell/useKeyboardFit";
 import { useUserPreference } from "./features/shell/userPreference";
 import { Sidebar } from "./features/sidebar/Sidebar";
+import { PendingWritesIndicator } from "./features/writes/PendingWritesIndicator";
+import { pendingWrites } from "./features/writes/pending-writes";
+import { useKeyedWrite } from "./features/writes/useKeyedWrite";
+import { writeStorage } from "./features/writes/write-storage";
 import {
   backdrop50,
   badgeBlocking,
@@ -498,18 +501,21 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
       when: () => !isCompactViewport && hasMargin,
     },
   ]);
-  const signOut = useMutation({
-    mutationFn: () => api.logout(),
+  const signOut = useKeyedWrite({
+    inline: true,
+    label: () => "Sign out",
     onSuccess: () => {
       // `resetQueries` (not `clear`) forces the active `["whoami"]` observer in AuthGate to
       // refetch immediately — a signed-out user must land on sign-in without a manual reload.
       void queryClient.resetQueries({ queryKey: ["whoami"] });
       queryClient.removeQueries({ predicate: (query) => query.queryKey[0] !== "whoami" });
-      // A kept send belongs to the person who pressed it, so none outlives their session: the
-      // next person to sign in here resumes nothing of theirs, and the page stops asking to
-      // confirm leaving (`keyed-send-storage.ts`).
-      keyedSendStorage().clear();
+      // A kept write belongs to the person who made it, so none outlives their session: the
+      // next person to sign in here resumes nothing of theirs, sees none of their refusals, and
+      // the page stops asking to confirm leaving (`write-storage.ts`).
+      writeStorage().clear();
+      pendingWrites(queryClient).clear();
     },
+    write: (_: void, bounds) => api.logout(bounds),
   });
   // Tabs within the same issue manage their own focus (roving tabindex); only a
   // genuine page change — a different issue, or a different top-level route —
@@ -566,31 +572,35 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
         >
           Skip to content
         </a>
-        {/* Above the highest composer fixed at the foot of the screen (`--foot-composer-inset`,
-            `useFootInset`), so the pill never sits over its controls; otherwise just above the
-            phone's bottom bar. A socket Dispatch refuses carries no status the page can read, so
-            nothing here is terminal: once reconnecting has gone on for two minutes the pill offers
-            a reload, and the page keeps trying underneath. */}
-        {connection === "stuck" ? (
-          <p
-            aria-live="polite"
-            className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
-            data-testid="connection-pill"
-          >
-            Live updates are not reaching this page
-            <button className="underline" onClick={() => window.location.reload()} type="button">
-              Reload
-            </button>
-          </p>
-        ) : connection === "reconnecting" ? (
-          <p
-            aria-live="polite"
-            className={`fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-40 rounded-full border px-3 py-1 text-xs font-medium shadow-lg xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
-            data-testid="connection-pill"
-          >
-            Reconnecting…
-          </p>
-        ) : null}
+        {/* The shell's status corner: the pending-writes indicator above the connection pill.
+            Above the highest composer fixed at the foot of the screen (`--foot-composer-inset`,
+            `useFootInset`), so neither sits over its controls; otherwise just above the phone's
+            bottom bar. Only what it shows takes the pointer. A socket Dispatch refuses carries no
+            status the page can read, so nothing in the pill is terminal: once reconnecting has
+            gone on for two minutes it offers a reload, and the page keeps trying underneath. */}
+        <div className="pointer-events-none fixed right-4 bottom-[max(5rem,calc(var(--foot-composer-inset,0px)_+_1rem))] z-50 flex w-[min(28rem,calc(100vw-2rem))] flex-col items-end gap-2 xl:bottom-[calc(var(--foot-composer-inset,0px)_+_1rem)] *:pointer-events-auto">
+          <PendingWritesIndicator />
+          {connection === "stuck" ? (
+            <p
+              aria-live="polite"
+              className={`flex items-center gap-2 rounded-full border px-3 py-1 text-xs font-medium shadow-lg ${calloutDangerBorder} ${calloutDangerBg} ${badgeBlocking.text}`}
+              data-testid="connection-pill"
+            >
+              Live updates are not reaching this page
+              <button className="underline" onClick={() => window.location.reload()} type="button">
+                Reload
+              </button>
+            </p>
+          ) : connection === "reconnecting" ? (
+            <p
+              aria-live="polite"
+              className={`rounded-full border px-3 py-1 text-xs font-medium shadow-lg ${calloutWarningBorder} ${statusConnecting.bg} ${statusConnecting.text}`}
+              data-testid="connection-pill"
+            >
+              Reconnecting…
+            </p>
+          ) : null}
+        </div>
         {isCompactViewport ? (
           <header
             className={`flex items-center justify-between border-b px-3 ${railBorder} ${railBg} ${railText}`}
@@ -752,16 +762,17 @@ function AppShell({ user }: { user: AuthenticatedUser }): ReactNode {
 }
 
 function AuthenticatedApp({ user }: { user: AuthenticatedUser }): ReactNode {
-  // Signed in, and before any page's own send, the keyed sends this person's reload interrupted
-  // go on under their keys, and their refusals show again (`keyed-send-storage.ts`). In an
-  // effect, not in the render: a resume sends requests and writes to the stores, which a render
-  // must not do, and React runs the render twice under StrictMode. Each store takes them up once,
-  // so a later effect does nothing.
+  // Signed in, and before any page's own write, the writes this person's reload interrupted go
+  // on under their keys, and their refusals show again (`write-storage.ts`): a composer's send,
+  // a broadcast, and every other write. In an effect, not in the render: a resume sends requests
+  // and writes to the stores, which a render must not do, and React runs the render twice under
+  // StrictMode. Each store takes them up once, so a later effect does nothing.
   const queryClient = useQueryClient();
   const login = user.login;
   useEffect(() => {
     heldSends(queryClient).resume(login);
     broadcastQueue(queryClient).resume(login);
+    pendingWrites(queryClient).resume(login);
   }, [login, queryClient]);
   useEventFeed();
   return (

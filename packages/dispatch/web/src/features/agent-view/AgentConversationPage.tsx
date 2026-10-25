@@ -22,11 +22,12 @@ import {
 import { useMarkRepliesRead } from "../agents/unread";
 import { MODE_LABELS } from "../conversation/delivery";
 import { StopTryingButton } from "../conversation/StopTryingButton";
-import { KEYED_SEND_LATE_TEXT, SendStoppedError } from "../conversation/send-request";
+import { KEYED_SEND_LATE_TEXT } from "../conversation/send-request";
 import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
 import { ErrorBoundary } from "../shell/ErrorBoundary";
 import { useDocumentTitle } from "../shell/useDocumentTitle";
+import { SendStoppedError } from "../writes/keyed-write";
 import { AgentRuntimeThread } from "./AgentRuntimeThread";
 import { currentModel, sessionCommands } from "./conversation";
 import { type AgentStreamStatus, useAgentStream } from "./useAgentStream";

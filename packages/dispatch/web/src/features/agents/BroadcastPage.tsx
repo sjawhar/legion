@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import type { ReactNode } from "react";
 import { Link, useLocation, useParams } from "react-router-dom";
 
@@ -35,6 +35,7 @@ import { useAgents } from "../conversation/useAgents";
 import { sessionLabel } from "../refs/actor";
 import { MarkdownBody } from "../refs/MarkdownBody";
 import { Timestamp } from "../refs/Timestamp";
+import { useKeyedWrite } from "../writes/useKeyedWrite";
 
 import { deliveryAttempts } from "./attempts";
 import { useMarkShownRepliesRead } from "./unread";
@@ -72,15 +73,15 @@ function BroadcastRecipientRow({
   titles: ReadonlyMap<string, string>;
 }): ReactNode {
   const queryClient = useQueryClient();
-  const retry = useMutation({
-    mutationFn: (mode: MessageDeliveryMode) =>
-      api.createMessageDelivery(recipient.message.id, mode),
+  const label = sessionLabel(recipient.session_id, titles.get(recipient.session_id) ?? "");
+  const retry = useKeyedWrite({
+    label: (mode: MessageDeliveryMode) => `Delivery to ${label} again, as ${MODE_LABELS[mode]}`,
     onSuccess: () => void queryClient.invalidateQueries({ queryKey: ["broadcast"] }),
+    write: (mode, bounds) => api.createMessageDelivery(recipient.message.id, mode, bounds),
   });
   // The row shows the recipient's whole thread, so its replies are read. Only these: the
   // session's replies anywhere else, older or newer, stay unread until a view shows them.
   useMarkShownRepliesRead(recipient.session_id, recipient.replies);
-  const label = sessionLabel(recipient.session_id, titles.get(recipient.session_id) ?? "");
   const answer = recipient.replies.find((reply) => reply.author.kind === "session");
   const answeredBy = answer === undefined ? undefined : resolveAuthor(answer.author, titles).label;
   const attempts = deliveryAttempts(recipient.message.deliveries, label);

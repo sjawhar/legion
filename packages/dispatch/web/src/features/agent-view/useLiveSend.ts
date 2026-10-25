@@ -13,8 +13,9 @@ export interface LiveSendControls {
   /** Sends `body` as written in `delivery` under a key of its own, unless the session holds a
    *  send already, out or refused. */
   readonly send: (body: string, delivery: MessageDeliveryMode) => void;
-  /** Sends the refused message again: as it was sent, under its own key, or, where the draft was
-   *  written over since - on this session's Agents row - that draft, under a key of its own. */
+  /** Sends the refused message again: as it was sent - under its own key when it ended without
+   *  Dispatch's verdict, a new one when Dispatch refused it - or, where the draft was written over
+   *  since on this session's Agents row, that draft, under a key of its own. */
   readonly retry: () => void;
   readonly discard: () => void;
   /** Stops trying a late message once the attempt in flight settles. */
@@ -25,7 +26,7 @@ export interface LiveSendControls {
  * The live view's message to session `sessionId`, held by the app's held-send store under the
  * session's own send name (`agentSendKey`), the one its Agents row sends under: a send belongs to
  * its session, not to the view that made it. Leaving the view - for another session, another page
- * - leaves it being tried (`sendKeyedAgentMessage`), and the view, or the row, shows it again on
+ * - leaves it being tried under its key (`sendRequest`), and the view, or the row, shows it again on
  * return; it ends only when Dispatch answers, the reader stops it, or the reader discards its
  * refusal. One send per name, so a press on either surface sends nothing while the session holds
  * one, and a second message never goes out beside the first under a key of its own. `landed` runs
@@ -52,13 +53,13 @@ export function useLiveSend(sessionId: string, landed: () => void): LiveSendCont
       if (refused?.status !== "refused") return;
       // The row and this view share one send, so Retry sends the draft the store holds, which the
       // row's composer writes what the reader typed over the refusal into: unedited, that is the
-      // refused request itself, key and picked mode included, so Dispatch makes one message of
-      // the two; edited, it is another message, in the mode this one went in, under a key of its
-      // own (`requestFor`).
+      // refused request itself, picked mode included - under its key when it ended without
+      // Dispatch's verdict, so Dispatch makes one message of the two; edited, it is another
+      // message, in the mode this one went in, under a key of its own (`requestFor`).
       const { sendKey: _sent, ...addressed } = refused.request;
       store.send(
         key,
-        requestFor(refused.request, {
+        requestFor(refused.request, refused.refusal, {
           ...addressed,
           ask: refused.draft.ask,
           draft: refused.draft.draft,

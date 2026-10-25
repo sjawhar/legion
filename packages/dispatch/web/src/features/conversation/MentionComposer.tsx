@@ -16,7 +16,13 @@ import {
   useState,
 } from "react";
 
-import { ApiError, type ArtifactOwner, api, apiErrorMessage } from "../../api/client";
+import {
+  ApiError,
+  type ArtifactOwner,
+  api,
+  apiErrorMessage,
+  type WriteBounds,
+} from "../../api/client";
 import type { Agent, AskOption, AskUrgency } from "../../api/types";
 import { Chip } from "../../components/Chip";
 import { QueryError } from "../../components/QueryError";
@@ -60,6 +66,7 @@ import { appendToDraft, DraftUploadStatus, useDraftUpload } from "../artifacts/A
 import { ASK_URGENCIES_ASCENDING, URGENCY_LABELS } from "../inbox/ask-urgency";
 import { ReferencePicker } from "../refs/ReferencePicker";
 import { composerReferences } from "../refs/routes";
+import { SendStoppedError } from "../writes/keyed-write";
 import type {
   AcceptedMention,
   ComposerAnchor,
@@ -68,6 +75,7 @@ import type {
   ReplyTarget,
 } from "./composer-model";
 import { MODE_LABELS, plainDelivery } from "./delivery";
+import type { HeldSend } from "./held-sends";
 import { ReplyQuote } from "./ReplyQuote";
 import { StopTryingButton } from "./StopTryingButton";
 import {
@@ -77,8 +85,6 @@ import {
   KEYED_SEND_LATE_TEXT,
   mentionText,
   requestFor,
-  SEND_DEADLINE_MS,
-  SendStoppedError,
   type SentRequest,
   survivingMentions,
   unedited,
@@ -409,7 +415,7 @@ interface MentionComposerProps {
   readonly onSent: () => void;
   readonly owner: ComposerOwner;
   readonly replyTo?: ReplyTarget | null;
-  readonly saveEdit?: (id: string, body: string) => Promise<unknown>;
+  readonly saveEdit?: (id: string, body: string, bounds: WriteBounds) => Promise<unknown>;
   /** Shows the Comment / Suggest / Ask switch and hands each pick to the host, which answers
    *  through `kind` - a selected document mark is the only surface where the kind can change, and
    *  its mark has to change with it (the margin retypes it) - or returns, in the reader's words,
@@ -809,7 +815,10 @@ export function MentionComposer({
     edit:
       edit === undefined
         ? undefined
-        : { id: edit.id, save: saveEdit ?? ((id, text) => api.editComment(id, { body: text })) },
+        : {
+            id: edit.id,
+            save: saveEdit ?? ((id, text, bounds) => api.editComment(id, { body: text }, bounds)),
+          },
     kind,
     owner,
     plainDelivery: plainMode,
@@ -817,10 +826,9 @@ export function MentionComposer({
   });
   /** The send as it stands, for `sendRequest`: the fields' own text, since a keystroke in Send's
    *  task may not have rendered yet, and every prop and setting that addresses or shapes it - or,
-   *  for a Retry of an unedited message to one session, `refused`, the refusal's own request, as
-   *  it was sent (`requestFor`). */
-  const sentRequest = (refused: SentRequest | undefined): SentRequest =>
-    requestFor(refused, {
+   *  for a Retry, what `requestFor` makes of the refused send it replaces. */
+  const sentRequest = (refused: HeldSend | undefined): SentRequest =>
+    requestFor(refused?.request, refused?.refusal, {
       ...composedRequest(),
       draft: {
         body: textarea.current?.value ?? body,
@@ -1359,15 +1367,13 @@ export function MentionComposer({
   // itself only for a send of its own that is out or that send's refusal; otherwise it renders
   // nothing, its frame with it.
   if (dormant) return null;
-  // Past its deadline a send is still the server's: no Retry, which would post it twice. A message
-  // to one session is still being tried under its key, so it says so and offers Stop trying, which
-  // sits outside the held fieldset, the one control a send that is out leaves the reader.
+  // Past its deadline a send is still the server's: no Retry, which would post it twice. It is
+  // still being tried under its key, so it says so and offers Stop trying, which sits outside the
+  // held fieldset, the one control a send that is out leaves the reader.
   const lateStatus = late ? (
     <div className="flex flex-wrap items-center gap-3">
       <p className={`text-sm ${textMutedOnSurfaceMuted}`} role="status">
-        {outgoing.held?.request.owner.kind === "session"
-          ? KEYED_SEND_LATE_TEXT
-          : `Still sending — the server has not answered in ${SEND_DEADLINE_MS / 1000} seconds. The draft stays here until it does.`}
+        {KEYED_SEND_LATE_TEXT}
       </p>
       <StopTryingButton held={outgoing.held} onStop={outgoing.stop} />
     </div>

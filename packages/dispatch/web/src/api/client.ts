@@ -1,3 +1,10 @@
+import {
+  IDEMPOTENCY_ANSWER_NOT_KEPT,
+  IDEMPOTENCY_KEY_HEADER,
+  IDEMPOTENCY_KEY_IN_FLIGHT,
+  IDEMPOTENCY_REPLAYED_HEADER,
+} from "@legion/contracts";
+
 import type {
   Agent,
   AgentToken,
@@ -80,24 +87,10 @@ export type FetchImplementation = (
   init?: RequestInit
 ) => Promise<Response>;
 
+/** The largest body a write the page lets finish as it goes (`keepalive`) may carry: the browser
+ *  caps every such request's body together at 64 KiB. */
 const maxKeepaliveBodyBytes = 30 * 1024;
 const utf8 = new TextEncoder();
-
-function idempotentWriteInit(method: "DELETE" | "PUT", body?: unknown): RequestInit {
-  const serializedBody = body === undefined ? undefined : JSON.stringify(body);
-  const keepalive =
-    serializedBody === undefined || utf8.encode(serializedBody).byteLength < maxKeepaliveBodyBytes;
-  return {
-    ...(serializedBody === undefined
-      ? {}
-      : {
-          body: serializedBody,
-          headers: { "Content-Type": "application/json" },
-        }),
-    ...(keepalive ? { keepalive: true } : {}),
-    method,
-  };
-}
 
 interface ErrorPayload {
   code?: string;
@@ -128,8 +121,8 @@ export class ApiError extends Error {
 export const REQUEST_DEADLINE_MS = 30_000;
 
 /** A request Dispatch did not answer within its deadline, which the page then aborted. It is no
- *  refusal: the request may still have reached Dispatch, so only a read, or a write named to be
- *  repeated safely (a keyed send to a session), is asked again. */
+ *  refusal: the request may still have reached Dispatch, so only a read, or a write made again
+ *  under its key (`writeUnderKey`), is asked again. */
 export class RequestTimeoutError extends Error {
   readonly path: string;
 
@@ -145,6 +138,48 @@ export class RequestTimeoutError extends Error {
  *  its headers, then each piece of its body - and every other method has no deadline). */
 export interface RequestBounds {
   readonly deadlineMs?: number | null;
+}
+
+/** One write as it goes to Dispatch: its method, its path and its body - JSON, a multipart form
+ *  (an upload), or none. A kept write is this, made again after a reload (`send`). */
+export interface WriteRequest {
+  readonly method: "DELETE" | "PATCH" | "POST" | "PUT";
+  readonly path: string;
+  readonly body?: unknown;
+}
+
+/** One attempt of a write: the key that names the person's action - minted by the caller when the
+ *  person acts, and the same on every attempt of it (`Idempotency-Key`, sent on a `POST` and a
+ *  `PATCH`) - the attempt's deadline, and `sent`, told the request as it goes out, for a caller
+ *  that keeps it to make again. */
+export interface WriteBounds extends RequestBounds {
+  readonly key: string;
+  readonly sent?: (request: WriteRequest) => void;
+}
+
+/** One attempt of a `PUT` or a `DELETE`: as `WriteBounds`, but with no key, since it is the same
+ *  write however often it is made. A caller that only lets one go - a read mark - passes none. */
+export type IdempotentBounds = Omit<WriteBounds, "key">;
+
+/** A write Dispatch had already run, whose first answer was too large for it to keep: it answered
+ *  the repeat with the first one's status and no resource (`IDEMPOTENCY_ANSWER_NOT_KEPT`). The
+ *  write landed; its caller reads what it wrote again. */
+export class AnswerNotKeptError extends Error {
+  readonly status: number;
+
+  constructor(status: number, message: string) {
+    super(message);
+    this.name = "AnswerNotKeptError";
+    this.status = status;
+  }
+}
+
+/** Whether Dispatch is still running the first request under this write's key: nothing ran, and
+ *  the write is asked again under the same key. */
+export function isKeyInFlight(error: unknown): boolean {
+  return (
+    error instanceof ApiError && error.status === 409 && error.code === IDEMPOTENCY_KEY_IN_FLIGHT
+  );
 }
 
 // A 401 means "not signed in" and should never be retried or confused with a transient
@@ -341,7 +376,7 @@ export class DispatchApiClient {
    *  one that stops arriving fails as headers that never come do, the error body `errorFrom`
    *  reads included. Every other method has no deadline. A caller's `deadlineMs` (`null` for
    *  none) holds the whole answer instead, `read` included: it bounds one attempt of a request
-   *  the caller makes again (`sendUnderKey`). A caller's `init.signal` still aborts the request,
+   *  the caller makes again (`writeUnderKey`). A caller's `init.signal` still aborts the request,
    *  as itself. */
   private async exchange<T>(
     path: string,
@@ -420,25 +455,65 @@ export class DispatchApiClient {
     return this.exchange(path, init, deadlineMs, (response) => response.json() as Promise<T>);
   }
 
-  private send<T>(
-    method: "PATCH" | "POST" | "PUT",
-    path: string,
-    body: unknown,
-    { deadlineMs }: RequestBounds = {}
+  /**
+   * The one path every write to Dispatch takes. A `POST` or a `PATCH` goes under `bounds.key`, the
+   * `Idempotency-Key` that names the person's action, so a repeat of it - a retry after a dropped
+   * answer, a reload resuming it - is answered with what the first did rather than done twice; a
+   * `PUT` or a `DELETE` is the same however often it is made, so it carries none, and one with a
+   * small body is let finish as the page goes (`keepalive`). The key is the caller's, minted when
+   * the person acts (`PendingWrites.run`), never here. A JSON body goes as JSON and a multipart
+   * form as itself; `bounds.sent` is told the request as it goes out. Answers what Dispatch
+   * answered (nothing for an empty body), or rejects with its refusal; a replay of an answer
+   * Dispatch did not keep rejects with `AnswerNotKeptError`.
+   */
+  send<T>(
+    request: WriteRequest,
+    { deadlineMs, key, sent }: IdempotentBounds & { readonly key?: string }
   ): Promise<T> {
-    return this.json<T>(
-      path,
-      {
-        body: JSON.stringify(body),
-        headers: { "Content-Type": "application/json" },
-        method,
+    const { body, method, path } = request;
+    const idempotent = method === "PUT" || method === "DELETE";
+    const json = body === undefined || body instanceof FormData ? undefined : JSON.stringify(body);
+    const keepalive =
+      idempotent && (json === undefined || utf8.encode(json).byteLength < maxKeepaliveBodyBytes);
+    const init: RequestInit = {
+      ...(body === undefined ? {} : { body: json ?? (body as FormData) }),
+      headers: {
+        ...(idempotent || key === undefined ? {} : { [IDEMPOTENCY_KEY_HEADER]: key }),
+        ...(json === undefined ? {} : { "Content-Type": "application/json" }),
       },
-      deadlineMs
-    );
+      ...(keepalive ? { keepalive: true } : {}),
+      method,
+    };
+    sent?.(request);
+    return this.exchange(path, init, deadlineMs, async (response) => {
+      const text = await response.text();
+      const answer: unknown = text === "" ? undefined : JSON.parse(text);
+      if (
+        response.headers.has(IDEMPOTENCY_REPLAYED_HEADER) &&
+        typeof answer === "object" &&
+        answer !== null &&
+        Reflect.get(answer, "code") === IDEMPOTENCY_ANSWER_NOT_KEPT
+      ) {
+        const reason = Reflect.get(answer, "error");
+        throw new AnswerNotKeptError(
+          response.status,
+          typeof reason === "string" ? reason : "Dispatch did not keep this write's answer"
+        );
+      }
+      return answer as T;
+    });
   }
 
-  private post<T>(path: string, body: unknown, bounds?: RequestBounds): Promise<T> {
-    return this.send<T>("POST", path, body, bounds);
+  private post<T>(path: string, body: unknown, bounds: WriteBounds): Promise<T> {
+    return this.send<T>({ body, method: "POST", path }, bounds);
+  }
+
+  private put<T>(path: string, body: unknown, bounds: IdempotentBounds): Promise<T> {
+    return this.send<T>({ body, method: "PUT", path }, bounds);
+  }
+
+  private remove<T>(path: string, bounds: IdempotentBounds): Promise<T> {
+    return this.send<T>({ method: "DELETE", path }, bounds);
   }
 
   getBlockSchema(): Promise<BlockSchema> {
@@ -449,8 +524,8 @@ export class DispatchApiClient {
     return this.json<Project[]>("/api/v1/projects");
   }
 
-  createProject(input: CreateProjectInput): Promise<Project> {
-    return this.post<Project>("/api/v1/projects", input);
+  createProject(input: CreateProjectInput, bounds: WriteBounds): Promise<Project> {
+    return this.post<Project>("/api/v1/projects", input, bounds);
   }
 
   listRepoProjects(): Promise<RepoProject[]> {
@@ -459,13 +534,14 @@ export class DispatchApiClient {
 
   putRepoProject(
     repo: string,
-    input: { project: string; default?: boolean }
+    input: { project: string; default?: boolean },
+    bounds: IdempotentBounds = {}
   ): Promise<RepoProject> {
-    return this.send<RepoProject>("PUT", `/api/v1/settings/repo-projects/${repoPath(repo)}`, input);
+    return this.put<RepoProject>(`/api/v1/settings/repo-projects/${repoPath(repo)}`, input, bounds);
   }
 
-  async deleteRepoProject(repo: string): Promise<void> {
-    await this.response(`/api/v1/settings/repo-projects/${repoPath(repo)}`, { method: "DELETE" });
+  async deleteRepoProject(repo: string, bounds: IdempotentBounds = {}): Promise<void> {
+    await this.remove(`/api/v1/settings/repo-projects/${repoPath(repo)}`, bounds);
   }
 
   listArchitectureSources(): Promise<ArchitectureSource[]> {
@@ -481,26 +557,25 @@ export class DispatchApiClient {
 
   putArchitectureSource(
     project: string,
-    input: { repo: string; branch: string }
+    input: { repo: string; branch: string },
+    bounds: IdempotentBounds = {}
   ): Promise<ArchitectureSource> {
-    return this.send<ArchitectureSource>(
-      "PUT",
+    return this.put<ArchitectureSource>(
       `/api/v1/projects/${pathSegment(project)}/architecture-source`,
-      input
+      input,
+      bounds
     );
   }
 
-  syncArchitectureSource(project: string): Promise<ArchitectureSource> {
-    return this.json<ArchitectureSource>(
-      `/api/v1/projects/${pathSegment(project)}/architecture-source/sync`,
-      { method: "POST" }
+  syncArchitectureSource(project: string, bounds: WriteBounds): Promise<ArchitectureSource> {
+    return this.send<ArchitectureSource>(
+      { method: "POST", path: `/api/v1/projects/${pathSegment(project)}/architecture-source/sync` },
+      bounds
     );
   }
 
-  async deleteArchitectureSource(project: string): Promise<void> {
-    await this.response(`/api/v1/projects/${pathSegment(project)}/architecture-source`, {
-      method: "DELETE",
-    });
+  async deleteArchitectureSource(project: string, bounds: IdempotentBounds = {}): Promise<void> {
+    await this.remove(`/api/v1/projects/${pathSegment(project)}/architecture-source`, bounds);
   }
 
   /** The project's component tree with the work attached; 404 SOURCE_NOT_FOUND without a source. */
@@ -512,15 +587,12 @@ export class DispatchApiClient {
     return this.json<AgentToken[]>("/api/v1/me/agent-tokens");
   }
 
-  createAgentToken(input: { name: string }): Promise<CreatedAgentToken> {
-    return this.post<CreatedAgentToken>("/api/v1/me/agent-tokens", input);
+  createAgentToken(input: { name: string }, bounds: WriteBounds): Promise<CreatedAgentToken> {
+    return this.post<CreatedAgentToken>("/api/v1/me/agent-tokens", input, bounds);
   }
 
-  async revokeAgentToken(id: string): Promise<void> {
-    await this.response(
-      `/api/v1/me/agent-tokens/${pathSegment(id)}`,
-      idempotentWriteInit("DELETE")
-    );
+  async revokeAgentToken(id: string, bounds: IdempotentBounds = {}): Promise<void> {
+    await this.remove(`/api/v1/me/agent-tokens/${pathSegment(id)}`, bounds);
   }
 
   /** Everyone who has signed in, sorted by email: the assignee picker's options. */
@@ -539,25 +611,25 @@ export class DispatchApiClient {
     return this.json<SearchResponse>(pathWithQuery("/api/v1/search", { q: query, ...options }));
   }
 
-  createIssue(input: CreateIssueInput): Promise<Issue> {
-    return this.post<Issue>("/api/v1/issues", input);
+  createIssue(input: CreateIssueInput, bounds: WriteBounds): Promise<Issue> {
+    return this.post<Issue>("/api/v1/issues", input, bounds);
   }
 
   getIssue(key: string): Promise<IssueDetails> {
     return this.json<IssueDetails>(`/api/v1/issues/${pathSegment(key)}`);
   }
 
-  patchIssue(key: string, input: UpdateIssueInput): Promise<Issue> {
-    return this.send<Issue>("PATCH", `/api/v1/issues/${pathSegment(key)}`, input);
+  patchIssue(key: string, input: UpdateIssueInput, bounds: WriteBounds): Promise<Issue> {
+    return this.send<Issue>(
+      { body: input, method: "PATCH", path: `/api/v1/issues/${pathSegment(key)}` },
+      bounds
+    );
   }
 
   /** `DELETE /api/v1/issues/{key}/claim`: release the claim. A human may release any claim;
    *  the issue's status does not move. */
-  releaseIssueClaim(key: string): Promise<Issue> {
-    return this.json<Issue>(
-      `/api/v1/issues/${pathSegment(key)}/claim`,
-      idempotentWriteInit("DELETE")
-    );
+  releaseIssueClaim(key: string, bounds: IdempotentBounds = {}): Promise<Issue> {
+    return this.remove<Issue>(`/api/v1/issues/${pathSegment(key)}/claim`, bounds);
   }
 
   getIssueEvents(key: string, options: ListEventsOptions = {}): Promise<Event[]> {
@@ -573,25 +645,26 @@ export class DispatchApiClient {
 
   /** `PUT /api/v1/me/asks/{id}/snooze`: fold this inbox row away for the caller until
    *  `snoozedUntil` (RFC3339). Human-only, like the inbox itself. */
-  snoozeAsk(id: string, snoozedUntil: string): Promise<AskSnooze> {
-    return this.json<AskSnooze>(
+  snoozeAsk(id: string, snoozedUntil: string, bounds: IdempotentBounds = {}): Promise<AskSnooze> {
+    return this.put<AskSnooze>(
       `/api/v1/me/asks/${pathSegment(id)}/snooze`,
-      idempotentWriteInit("PUT", { snoozed_until: snoozedUntil })
+      { snoozed_until: snoozedUntil },
+      bounds
     );
   }
 
   /** `DELETE /api/v1/me/asks/{id}/snooze`: bring the row back now. A row that is not snoozed
    *  answers the same 204. */
-  async unsnoozeAsk(id: string): Promise<void> {
-    await this.response(`/api/v1/me/asks/${pathSegment(id)}/snooze`, idempotentWriteInit("DELETE"));
+  async unsnoozeAsk(id: string, bounds: IdempotentBounds = {}): Promise<void> {
+    await this.remove(`/api/v1/me/asks/${pathSegment(id)}/snooze`, bounds);
   }
 
   listAgents(): Promise<Agent[]> {
     return this.json<Agent[]>("/api/v1/agents");
   }
 
-  createAsk(key: string, input: CreateAskInput): Promise<Ask> {
-    return this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input);
+  createAsk(key: string, input: CreateAskInput, bounds: WriteBounds): Promise<Ask> {
+    return this.post<Ask>(`/api/v1/issues/${pathSegment(key)}/asks`, input, bounds);
   }
 
   /** `GET /api/v1/issues/{key}/asks`: the issue's asks with their newest reply and no thread,
@@ -613,8 +686,8 @@ export class DispatchApiClient {
     );
   }
 
-  answerAsk(id: string, input: AnswerAskInput): Promise<Ask> {
-    return this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input);
+  answerAsk(id: string, input: AnswerAskInput, bounds: WriteBounds): Promise<Ask> {
+    return this.post<Ask>(`/api/v1/asks/${pathSegment(id)}/answer`, input, bounds);
   }
 
   getAsk(id: string): Promise<AskRead> {
@@ -642,17 +715,27 @@ export class DispatchApiClient {
   /** `PUT /api/v1/me/threads/{id}/read`: move the signed-in person's read mark on one thread
    *  forward to `readThrough` (RFC3339, the newest reply shown). Answers 204 whether or not it
    *  moved. */
-  async markThreadRead(threadId: string, readThrough: string): Promise<void> {
-    await this.response(
+  async markThreadRead(
+    threadId: string,
+    readThrough: string,
+    bounds: IdempotentBounds = {}
+  ): Promise<void> {
+    await this.put(
       `/api/v1/me/threads/${pathSegment(threadId)}/read`,
-      idempotentWriteInit("PUT", { read_through: readThrough })
+      { read_through: readThrough },
+      bounds
     );
   }
 
-  async removeAskFollower(id: string, sessionId: string): Promise<void> {
-    await this.response(`/api/v1/asks/${pathSegment(id)}/followers/${pathSegment(sessionId)}`, {
-      method: "DELETE",
-    });
+  async removeAskFollower(
+    id: string,
+    sessionId: string,
+    bounds: IdempotentBounds = {}
+  ): Promise<void> {
+    await this.remove(
+      `/api/v1/asks/${pathSegment(id)}/followers/${pathSegment(sessionId)}`,
+      bounds
+    );
   }
 
   listComments(key: string, artifact?: string): Promise<Comment[]> {
@@ -661,54 +744,59 @@ export class DispatchApiClient {
     );
   }
 
-  createComment(key: string, input: CreateCommentInput): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/issues/${pathSegment(key)}/comments`, input);
+  createComment(key: string, input: CreateCommentInput, bounds: WriteBounds): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/issues/${pathSegment(key)}/comments`, input, bounds);
   }
 
   getComment(id: string): Promise<CommentRead> {
     return this.json<CommentRead>(`/api/v1/comments/${pathSegment(id)}`);
   }
 
-  resolveComment(id: string): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/resolve`, {});
+  resolveComment(id: string, bounds: WriteBounds): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/resolve`, {}, bounds);
   }
 
-  reopenComment(id: string): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/reopen`, {});
+  reopenComment(id: string, bounds: WriteBounds): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/reopen`, {}, bounds);
   }
 
-  editComment(id: string, input: EditCommentInput): Promise<Comment> {
-    return this.send<Comment>("PATCH", `/api/v1/comments/${pathSegment(id)}`, input);
+  editComment(id: string, input: EditCommentInput, bounds: WriteBounds): Promise<Comment> {
+    return this.send<Comment>(
+      { body: input, method: "PATCH", path: `/api/v1/comments/${pathSegment(id)}` },
+      bounds
+    );
   }
 
-  acceptComment(id: string): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/accept`, {});
+  acceptComment(id: string, bounds: WriteBounds): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/accept`, {}, bounds);
   }
 
-  rejectComment(id: string): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/reject`, {});
+  rejectComment(id: string, bounds: WriteBounds): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/comments/${pathSegment(id)}/reject`, {}, bounds);
   }
+
   createCommentDelivery(
     id: string,
     target: string | undefined,
-    delivery: "btw" | "aside" | "steer"
+    delivery: "btw" | "aside" | "steer",
+    bounds: WriteBounds
   ): Promise<CommentDelivery> {
-    return this.post<CommentDelivery>(`/api/v1/comments/${pathSegment(id)}/deliveries`, {
-      delivery,
-      ...(target === undefined ? {} : { target }),
-    });
+    return this.post<CommentDelivery>(
+      `/api/v1/comments/${pathSegment(id)}/deliveries`,
+      { delivery, ...(target === undefined ? {} : { target }) },
+      bounds
+    );
   }
 
-  createMessage(key: string, input: CreateMessageInput): Promise<Message> {
-    return this.post<Message>(`/api/v1/issues/${pathSegment(key)}/messages`, input);
+  createMessage(key: string, input: CreateMessageInput, bounds: WriteBounds): Promise<Message> {
+    return this.post<Message>(`/api/v1/issues/${pathSegment(key)}/messages`, input, bounds);
   }
 
-  /** A person's message to one session. `bounds` holds one attempt of a keyed send to its own
-   *  deadline (`sendUnderKey`). */
+  /** A person's message to one session. */
   createAgentMessage(
     sessionID: string,
     input: CreateAgentMessageInput,
-    bounds?: RequestBounds
+    bounds: WriteBounds
   ): Promise<Message> {
     return this.post<Message>(`/api/v1/agents/${pathSegment(sessionID)}/messages`, input, bounds);
   }
@@ -717,9 +805,8 @@ export class DispatchApiClient {
     return this.json<MessageRead[]>(`/api/v1/agents/${pathSegment(sessionID)}/messages`);
   }
 
-  /** A person's message to many sessions. `bounds` holds one attempt of the keyed send to its own
-   *  deadline (`sendUnderKey`). */
-  createBroadcast(input: CreateBroadcastInput, bounds?: RequestBounds): Promise<BroadcastCreated> {
+  /** A person's message to many sessions. */
+  createBroadcast(input: CreateBroadcastInput, bounds: WriteBounds): Promise<BroadcastCreated> {
     return this.post<BroadcastCreated>("/api/v1/broadcasts", input, bounds);
   }
 
@@ -731,10 +818,16 @@ export class DispatchApiClient {
     return this.json<BroadcastRead>(`/api/v1/broadcasts/${pathSegment(id)}`);
   }
 
-  createMessageDelivery(id: string, delivery: "btw" | "aside" | "steer"): Promise<MessageDelivery> {
-    return this.post<MessageDelivery>(`/api/v1/messages/${pathSegment(id)}/deliveries`, {
-      delivery,
-    });
+  createMessageDelivery(
+    id: string,
+    delivery: "btw" | "aside" | "steer",
+    bounds: WriteBounds
+  ): Promise<MessageDelivery> {
+    return this.post<MessageDelivery>(
+      `/api/v1/messages/${pathSegment(id)}/deliveries`,
+      { delivery },
+      bounds
+    );
   }
 
   getMessage(key: string, id: string): Promise<MessageRead> {
@@ -757,18 +850,18 @@ export class DispatchApiClient {
     );
   }
 
-  async uploadArtifact(
+  uploadArtifact(
     owner: ArtifactOwner,
-    input: CreateArtifactInput
+    input: CreateArtifactInput,
+    bounds: WriteBounds
   ): Promise<ArtifactUploadResponse> {
     const path = artifactsPath(owner);
     if ("content" in input) {
-      return this.post<ArtifactUploadResponse>(path, {
-        actor: input.actor,
-        content: input.content,
-        name: input.name,
-        summary: input.summary,
-      });
+      return this.post<ArtifactUploadResponse>(
+        path,
+        { actor: input.actor, content: input.content, name: input.name, summary: input.summary },
+        bounds
+      );
     }
     const body = new FormData();
     body.set("name", input.name);
@@ -780,10 +873,7 @@ export class DispatchApiClient {
     }
     body.set("file", input.file);
 
-    return this.json<ArtifactUploadResponse>(path, {
-      body,
-      method: "POST",
-    });
+    return this.post<ArtifactUploadResponse>(path, body, bounds);
   }
 
   getArtifact(id: string): Promise<Artifact> {
@@ -807,10 +897,16 @@ export class DispatchApiClient {
     return this.json<ArtifactText>(`/api/v1/artifacts/${pathSegment(id)}/text`);
   }
 
-  rebuildArtifact(id: string, markdown?: string): Promise<ArtifactRebuildReport> {
-    return this.post<ArtifactRebuildReport>(`/api/v1/artifacts/${pathSegment(id)}/rebuild`, {
-      ...(markdown === undefined ? {} : { markdown }),
-    });
+  rebuildArtifact(
+    id: string,
+    markdown: string | undefined,
+    bounds: WriteBounds
+  ): Promise<ArtifactRebuildReport> {
+    return this.post<ArtifactRebuildReport>(
+      `/api/v1/artifacts/${pathSegment(id)}/rebuild`,
+      markdown === undefined ? {} : { markdown },
+      bounds
+    );
   }
 
   getArtifactBlocks(id: string): Promise<ArtifactBlock[]> {
@@ -834,42 +930,58 @@ export class DispatchApiClient {
     return { blob: await response.blob(), mime, version };
   }
 
-  createArtifactVersion(id: string, input: CreateVersionInput): Promise<Version> {
-    return this.post<Version>(`/api/v1/artifacts/${pathSegment(id)}/versions`, input);
+  createArtifactVersion(
+    id: string,
+    input: CreateVersionInput,
+    bounds: WriteBounds
+  ): Promise<Version> {
+    return this.post<Version>(`/api/v1/artifacts/${pathSegment(id)}/versions`, input, bounds);
   }
 
   listArtifactReviews(id: string): Promise<ArtifactReview[]> {
     return this.json<ArtifactReview[]>(`/api/v1/artifacts/${pathSegment(id)}/reviews`);
   }
 
-  createArtifactReview(id: string, input: CreateArtifactReviewInput): Promise<ArtifactReview> {
-    return this.post<ArtifactReview>(`/api/v1/artifacts/${pathSegment(id)}/reviews`, input);
+  createArtifactReview(
+    id: string,
+    input: CreateArtifactReviewInput,
+    bounds: WriteBounds
+  ): Promise<ArtifactReview> {
+    return this.post<ArtifactReview>(`/api/v1/artifacts/${pathSegment(id)}/reviews`, input, bounds);
   }
 
   listArtifactAsks(id: string, state: "all" | "open" | "answered" = "all"): Promise<Ask[]> {
     return this.json<Ask[]>(pathWithQuery(`/api/v1/artifacts/${pathSegment(id)}/asks`, { state }));
   }
 
-  createArtifactAsk(id: string, input: CreateAskInput): Promise<Ask> {
-    return this.post<Ask>(`/api/v1/artifacts/${pathSegment(id)}/asks`, input);
+  createArtifactAsk(id: string, input: CreateAskInput, bounds: WriteBounds): Promise<Ask> {
+    return this.post<Ask>(`/api/v1/artifacts/${pathSegment(id)}/asks`, input, bounds);
   }
 
   listArtifactComments(id: string): Promise<Comment[]> {
     return this.json<Comment[]>(`/api/v1/artifacts/${pathSegment(id)}/comments`);
   }
 
-  createArtifactComment(id: string, input: CreateCommentInput): Promise<Comment> {
-    return this.post<Comment>(`/api/v1/artifacts/${pathSegment(id)}/comments`, input);
+  createArtifactComment(
+    id: string,
+    input: CreateCommentInput,
+    bounds: WriteBounds
+  ): Promise<Comment> {
+    return this.post<Comment>(`/api/v1/artifacts/${pathSegment(id)}/comments`, input, bounds);
   }
 
   getArtifactSubscribers(id: string): Promise<Subscriber[]> {
     return this.json<Subscriber[]>(`/api/v1/artifacts/${pathSegment(id)}/subscribers`);
   }
 
-  async unsubscribeArtifactSession(id: string, sessionId: string): Promise<void> {
-    await this.response(
+  async unsubscribeArtifactSession(
+    id: string,
+    sessionId: string,
+    bounds: IdempotentBounds = {}
+  ): Promise<void> {
+    await this.remove(
       `/api/v1/artifacts/${pathSegment(id)}/subscribers/${pathSegment(sessionId)}`,
-      { method: "DELETE" }
+      bounds
     );
   }
 
@@ -892,46 +1004,56 @@ export class DispatchApiClient {
 
   /** Replaces the delivery timeline's configuration (human callers only). The server first proves
    *  the GitHub App can read `deploy_repo`, answering `409 DELIVERY_SETTINGS_ACCESS` when not. */
-  putDeliverySettings(input: DeliverySettingsInput): Promise<DeliverySettings> {
-    return this.send<DeliverySettings>("PUT", "/api/v1/settings/delivery", input);
+  putDeliverySettings(
+    input: DeliverySettingsInput,
+    bounds: IdempotentBounds = {}
+  ): Promise<DeliverySettings> {
+    return this.put<DeliverySettings>("/api/v1/settings/delivery", input, bounds);
   }
 
   /** Creates a Delivery session group: its sessions' pull requests take it as their Parent agent.
    *  A session another group holds is `409 SESSION_IN_GROUP`; a name another group has, or that is
    *  the title of a session outside the group, is `409` as well, the message naming which. */
   createDeliverySessionGroup(
-    input: CreateDeliverySessionGroupInput
+    input: CreateDeliverySessionGroupInput,
+    bounds: WriteBounds
   ): Promise<DeliverySessionGroup> {
-    return this.post<DeliverySessionGroup>("/api/v1/delivery/session-groups", input);
+    return this.post<DeliverySessionGroup>("/api/v1/delivery/session-groups", input, bounds);
   }
 
   /** Renames a session group, adds sessions to it or removes sessions from it. */
   updateDeliverySessionGroup(
     id: string,
-    input: UpdateDeliverySessionGroupInput
+    input: UpdateDeliverySessionGroupInput,
+    bounds: WriteBounds
   ): Promise<DeliverySessionGroup> {
     return this.send<DeliverySessionGroup>(
-      "PATCH",
-      `/api/v1/delivery/session-groups/${pathSegment(id)}`,
-      input
+      {
+        body: input,
+        method: "PATCH",
+        path: `/api/v1/delivery/session-groups/${pathSegment(id)}`,
+      },
+      bounds
     );
   }
 
   /** Deletes a session group; its sessions show as themselves again. */
-  async deleteDeliverySessionGroup(id: string): Promise<void> {
-    await this.response(`/api/v1/delivery/session-groups/${pathSegment(id)}`, {
-      method: "DELETE",
-    });
+  async deleteDeliverySessionGroup(id: string, bounds: IdempotentBounds = {}): Promise<void> {
+    await this.remove(`/api/v1/delivery/session-groups/${pathSegment(id)}`, bounds);
   }
 
   getIssueSubscribers(key: string): Promise<Subscriber[]> {
     return this.json<Subscriber[]>(`/api/v1/issues/${pathSegment(key)}/subscribers`);
   }
 
-  async unsubscribeIssueSession(key: string, sessionId: string): Promise<void> {
-    await this.response(
+  async unsubscribeIssueSession(
+    key: string,
+    sessionId: string,
+    bounds: IdempotentBounds = {}
+  ): Promise<void> {
+    await this.remove(
       `/api/v1/issues/${pathSegment(key)}/subscribers/${pathSegment(sessionId)}`,
-      { method: "DELETE" }
+      bounds
     );
   }
 
@@ -939,21 +1061,27 @@ export class DispatchApiClient {
     return this.json<UserState>("/api/v1/me/state");
   }
 
-  putIssueState(key: string, input: Partial<UserIssueState>): Promise<UserIssueState> {
-    return this.json<UserIssueState>(
-      `/api/v1/me/issues/${pathSegment(key)}/state`,
-      idempotentWriteInit("PUT", input)
-    );
+  putIssueState(
+    key: string,
+    input: Partial<UserIssueState>,
+    bounds: IdempotentBounds = {}
+  ): Promise<UserIssueState> {
+    return this.put<UserIssueState>(`/api/v1/me/issues/${pathSegment(key)}/state`, input, bounds);
   }
 
   getMyAgentState(): Promise<UserAgentStates> {
     return this.json<UserAgentStates>("/api/v1/me/agents/state");
   }
 
-  putAgentState(sessionID: string, input: UserAgentStateInput): Promise<UserAgentState> {
-    return this.json<UserAgentState>(
+  putAgentState(
+    sessionID: string,
+    input: UserAgentStateInput,
+    bounds: IdempotentBounds = {}
+  ): Promise<UserAgentState> {
+    return this.put<UserAgentState>(
       `/api/v1/me/agents/${pathSegment(sessionID)}/state`,
-      idempotentWriteInit("PUT", input)
+      input,
+      bounds
     );
   }
 
@@ -961,11 +1089,12 @@ export class DispatchApiClient {
     return this.json<AuthenticatedUser>("/auth/whoami");
   }
 
-  logout(): Promise<{ ok: true }> {
-    return this.post<{ ok: true }>("/auth/logout", {});
+  logout(bounds: WriteBounds): Promise<{ ok: true }> {
+    return this.post<{ ok: true }>("/auth/logout", {}, bounds);
   }
 
-  async githubRest(path: string, init: RequestInit = {}): Promise<Response> {
+  /** A read through Dispatch's GitHub proxy; it makes no write. */
+  githubRest(path: string, init: { readonly signal?: AbortSignal } = {}): Promise<Response> {
     return this.response(`/api/github/rest/${path.replace(/^\/+/, "")}`, init);
   }
 
@@ -987,30 +1116,38 @@ export class DispatchApiClient {
    *  the code the viewer typed. */
   approveCredentialRecord(
     recordId: string,
-    body: { code?: string } = {}
+    body: { code?: string },
+    bounds: WriteBounds
   ): Promise<CredentialDecisionResponse> {
     return this.post<CredentialDecisionResponse>(
       `/api/v1/credential-requests/${pathSegment(recordId)}/approve`,
-      body
+      body,
+      bounds
     );
   }
 
   /** Deny a credential request as the signed-in viewer; a machine login also carries its code. */
   denyCredentialRecord(
     recordId: string,
-    body: { code?: string } = {}
+    body: { code?: string },
+    bounds: WriteBounds
   ): Promise<CredentialDecisionResponse> {
     return this.post<CredentialDecisionResponse>(
       `/api/v1/credential-requests/${pathSegment(recordId)}/deny`,
-      body
+      body,
+      bounds
     );
   }
 
   /** A machine (`launcher_credential`) record is only ever selected through this route: the code
    *  the operator types in is what proves which pending login they mean, and deciding it takes
    *  the same code again. */
-  lookupMachineCredential(code: string): Promise<CredentialRecord> {
-    return this.post<CredentialRecord>("/api/v1/credential-requests/machine-lookup", { code });
+  lookupMachineCredential(code: string, bounds: WriteBounds): Promise<CredentialRecord> {
+    return this.post<CredentialRecord>(
+      "/api/v1/credential-requests/machine-lookup",
+      { code },
+      bounds
+    );
   }
 
   /** `GET /api/v1/credential-grants?approver=me`: every live grant of the viewer's sessions,
@@ -1024,12 +1161,8 @@ export class DispatchApiClient {
   /** Revoke a grant as the signed-in viewer, its approver or its enrollment's operator. The
    *  operator's revoke of an automatic grant also ends that session's other automatic grants of
    *  those secrets and makes it ask before it gets them again. */
-  async revokeCredentialGrant(grantId: string): Promise<void> {
-    await this.response(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {
-      body: JSON.stringify({}),
-      headers: { "Content-Type": "application/json" },
-      method: "POST",
-    });
+  async revokeCredentialGrant(grantId: string, bounds: WriteBounds): Promise<void> {
+    await this.post(`/api/v1/credential-grants/${pathSegment(grantId)}/revoke`, {}, bounds);
   }
 
   /** `GET /api/v1/machine-logins`: the machine logins the viewer may revoke, their own machines'
@@ -1042,12 +1175,8 @@ export class DispatchApiClient {
   /** Revoke a machine login, expired or not: a service's, or one of the viewer's machines'.
    *  Dispatch names the viewer as the person revoking, and every session the login enrolled ends
    *  with it. */
-  async revokeMachineLogin(credentialId: string): Promise<void> {
-    await this.response(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {
-      body: JSON.stringify({}),
-      headers: { "Content-Type": "application/json" },
-      method: "POST",
-    });
+  async revokeMachineLogin(credentialId: string, bounds: WriteBounds): Promise<void> {
+    await this.post(`/api/v1/machine-logins/${pathSegment(credentialId)}/revoke`, {}, bounds);
   }
 }
 

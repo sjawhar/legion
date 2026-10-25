@@ -1,4 +1,4 @@
-import { KeyedSendStorage } from "../features/conversation/keyed-send-storage";
+import { WriteStorage } from "../features/writes/write-storage";
 
 /** A `beforeunload` target that counts its listeners: the page asks to confirm leaving exactly
  *  while it holds one. */
@@ -32,12 +32,12 @@ export class UnloadTarget extends EventTarget {
 }
 
 /** One browser tab's sessionStorage, which a reload keeps, and the pages it holds in turn: each
- *  `page` is the kept sends of one load of the app, the last one after a reload. */
+ *  `page` is the kept writes of one load of the app, the last one after a reload. */
 export interface KeptTab {
   readonly storage: Storage;
-  /** The kept sends of the next page load, asking on `unload` to confirm leaving. */
-  page: (unload?: EventTarget) => KeyedSendStorage;
-  /** What the tab keeps for the send under `key`, as written. */
+  /** The kept writes of the next page load, asking on `unload` to confirm leaving. */
+  page: (unload?: EventTarget) => WriteStorage;
+  /** What the tab keeps for the write under `key`, as written. */
   kept: (key: string) => unknown;
   /** Ends every page, its kept sends with it. */
   close: () => void;
@@ -59,17 +59,17 @@ export function keptTab(): KeptTab {
       items.set(name, String(value));
     },
   };
-  const pages: KeyedSendStorage[] = [];
+  const pages: WriteStorage[] = [];
   return {
     close: () => {
       for (const page of pages) page.retire();
     },
     kept: (key) => {
-      const value = items.get(`dispatch.keyed-send:${key}`);
+      const value = items.get(`dispatch.write:${key}`);
       return value === undefined ? undefined : JSON.parse(value);
     },
     page: (unload = new UnloadTarget()) => {
-      const page = new KeyedSendStorage(storage, unload);
+      const page = new WriteStorage(storage, unload);
       pages.push(page);
       return page;
     },

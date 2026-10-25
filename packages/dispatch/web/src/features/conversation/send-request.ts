@@ -1,4 +1,4 @@
-import { ApiError, api, type RequestBounds } from "../../api/client";
+import { api, type WriteBounds, type WriteRequest } from "../../api/client";
 import type {
   AskOption,
   AskUrgency,
@@ -8,6 +8,7 @@ import type {
   Message,
 } from "../../api/types";
 import { newSendKey } from "../../lib/send-key";
+import { retriesUnderItsKey, SEND_DEADLINE_MS, writeUnderKey } from "../writes/keyed-write";
 import type {
   AcceptedMention,
   ComposerAnchor,
@@ -44,7 +45,7 @@ export interface SentRequest {
   readonly edit:
     | {
         readonly id: string;
-        readonly save: (id: string, body: string) => Promise<unknown>;
+        readonly save: (id: string, body: string, bounds: WriteBounds) => Promise<unknown>;
       }
     | undefined;
   readonly kind: ComposerKind;
@@ -57,10 +58,9 @@ export interface SentRequest {
    *  live view sends a session its commands verbatim. */
   readonly pickedDelivery?: DeliveryCapability;
   readonly replyTo: ReplyTarget | null;
-  /** The key that names this send to Dispatch where its route takes one - a message to one
-   *  session (`idempotency_key`) - so that a repeat of the request is that one message there.
-   *  Minted when Send builds the request, and kept by a Retry that sends the same message
-   *  (`requestFor`). */
+  /** The key that names this send to Dispatch (`Idempotency-Key`), so that every attempt of it,
+   *  and a reload's, is that one write there. Minted when Send builds the request, and kept by a
+   *  Retry of a send that ended without Dispatch's verdict (`requestFor`). */
   readonly sendKey: string;
 }
 
@@ -126,11 +126,6 @@ export function survivingMentions(
   return surviving;
 }
 
-/** How long a send holds what takes the reader away from its composer - a host's Back, Escape or
- *  Collapse thread - before it lets go: a request the server never answers would hold them for
- *  good. The request goes on past it, and its answer is still the send's outcome. */
-export const SEND_DEADLINE_MS = 30_000;
-
 /** A send the server did not answer within `SEND_DEADLINE_MS`. It is not a refusal: the request
  *  goes on, and `answer` is still its outcome. */
 export class SendDeadlineError extends Error {
@@ -143,23 +138,10 @@ export class SendDeadlineError extends Error {
   }
 }
 
-/** How long one attempt of a keyed send - to one session, or a broadcast - may go unanswered before
- *  it is given up and made again under the same key. */
-export const KEYED_SEND_ATTEMPT_MS = 15_000;
-
-/** What a keyed send to a session says once it is past `SEND_DEADLINE_MS`: still the server's, as
- *  any late send is, and still being tried under its key, which Dispatch takes once. */
+/** What a send says once it is past `SEND_DEADLINE_MS`: still the server's, as any late send is,
+ *  and still being tried under its key, which Dispatch takes once. */
 export const KEYED_SEND_LATE_TEXT =
   "Still sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once.";
-
-/** The wait before a keyed send's first retry, doubling after each failed attempt up to
- *  `KEYED_SEND_MAX_BACKOFF_MS`. */
-const KEYED_SEND_FIRST_BACKOFF_MS = 1_000;
-const KEYED_SEND_MAX_BACKOFF_MS = 30_000;
-
-/** A message to one session as Dispatch receives it, but for its key: what Dispatch compares to
- *  decide whether two requests under one key are one message. */
-type AgentMessage = Omit<CreateAgentMessageInput, "idempotency_key">;
 
 /** The message a send to a session puts on the wire: its body with any delivery command stripped,
  *  the mode it names or the reply's thread or the session takes, and the reply it answers - or, in
@@ -169,7 +151,10 @@ function agentMessage({
   pickedDelivery,
   plainDelivery,
   replyTo,
-}: Pick<SentRequest, "draft" | "pickedDelivery" | "plainDelivery" | "replyTo">): AgentMessage {
+}: Pick<
+  SentRequest,
+  "draft" | "pickedDelivery" | "plainDelivery" | "replyTo"
+>): CreateAgentMessageInput {
   const reply = replyTo === null ? {} : { in_reply_to: replyTo.id };
   if (pickedDelivery !== undefined) return { body: draft.body, delivery: pickedDelivery, ...reply };
   const inheritedDelivery = replyTo?.thread?.delivery ?? plainDelivery;
@@ -177,26 +162,24 @@ function agentMessage({
   return { body: plan.body, delivery: plan.delivery ?? inheritedDelivery, ...reply };
 }
 
-/** The key `next` goes under once its draft or address differs from the refused send's. A message
- *  to the same session that is still the refused send's message on the wire - the same body, mode
- *  and reply - keeps the refused send's key: the refusal may follow a request Dispatch did act on,
- *  and the key is how Dispatch answers the repeat with that message rather than making a second.
- *  Anything else is another message, under a key of its own. */
-function sendKeyFor(refused: SentRequest | undefined, next: Omit<SentRequest, "sendKey">): string {
+/** Whether `next`, an edited draft, is still the refused send's message on the wire: to the same
+ *  session, with the same body, mode and reply. Dispatch compares the wire, so such a message is
+ *  the same write under the same key. */
+function sameMessage(refused: SentRequest, next: Omit<SentRequest, "sendKey">): boolean {
   if (
-    refused?.owner.kind !== "session" ||
+    refused.owner.kind !== "session" ||
     next.owner.kind !== "session" ||
     refused.owner.sessionId !== next.owner.sessionId
   ) {
-    return newSendKey();
+    return false;
   }
   const before = agentMessage(refused);
   const after = agentMessage(next);
-  return before.body === after.body &&
+  return (
+    before.body === after.body &&
     before.delivery === after.delivery &&
     before.in_reply_to === after.in_reply_to
-    ? refused.sendKey
-    : newSendKey();
+  );
 }
 
 /** Whether `next` is the refused send unedited: the same draft - its text, accepted mentions and a
@@ -217,139 +200,67 @@ export function unedited(refused: SentRequest, next: Omit<SentRequest, "sendKey"
 }
 
 /**
- * What Send or Retry sends, given `refused`, the request of the refusal it replaces, if any. A
- * Retry of a message to one session whose draft the reader has not edited is the refused request
- * itself, as it was sent - its mode, picked or plain, and its key - whichever surface made it and
- * whichever presses Retry, so a message the live view sent in a mode it picked never goes out again
- * in the Agents row's mode under a key of its own. Any other Retry, and an edited draft, is the
- * request as the composer shows it now (`sendKeyFor`): a comment carries no key to keep, and goes
- * in the modes its mentioned sessions advertise now.
+ * What Send or Retry sends, given `refused`, the request of the refusal it replaces, if any, and
+ * `refusal`, what ended it. A send that ended without Dispatch's verdict - stopped, or interrupted
+ * by a reload - may have landed, so its unedited Retry is the refused request itself, its key
+ * included, whichever surface made it and whichever presses Retry, and Dispatch answers it with
+ * what the first did; an edited one keeps the key only while it is still that message on the wire
+ * (`sameMessage`). A refusal Dispatch gave is its verdict on that key, so any Retry after it goes
+ * under a new key: for a message to one session, unedited, the refused request as it was sent - its
+ * mode, picked or plain - so a message the live view sent in a mode it picked never goes out again
+ * in the Agents row's mode; for anything else, and an edited draft, the request as the composer
+ * shows it now, a comment in the modes its mentioned sessions advertise now.
  */
 export function requestFor(
   refused: SentRequest | undefined,
+  refusal: Error | undefined,
   next: Omit<SentRequest, "sendKey">
 ): SentRequest {
-  if (refused !== undefined && refused.owner.kind === "session" && unedited(refused, next)) {
-    return refused;
-  }
-  return { ...next, sendKey: sendKeyFor(refused, next) };
-}
-
-/** Waits `ms`, and says whether it waited the whole of it: `false` once `signal` aborts, at once. */
-function pause(ms: number, signal: AbortSignal | undefined): Promise<boolean> {
-  if (signal?.aborted === true) return Promise.resolve(false);
-  const { promise, resolve } = Promise.withResolvers<boolean>();
-  const stop = () => {
-    clearTimeout(timer);
-    resolve(false);
-  };
-  const timer = setTimeout(() => {
-    signal?.removeEventListener("abort", stop);
-    resolve(true);
-  }, ms);
-  signal?.addEventListener("abort", stop, { once: true });
-  return promise;
-}
-
-/** A keyed send - to one session, or a broadcast - that stopped trying before Dispatch confirmed
- *  it: the reader pressed Stop trying. Not Dispatch's refusal: the message may have reached it, and
- *  a Retry under the same key is answered with that message rather than a second one. */
-export class SendStoppedError extends Error {
-  constructor(
-    message = "Dispatch has not confirmed this message. Retry sends it again under the same key, so it is delivered at most once."
+  const underItsKey = refused !== undefined && retriesUnderItsKey(refusal);
+  if (
+    refused !== undefined &&
+    (underItsKey || refused.owner.kind === "session") &&
+    unedited(refused, next)
   ) {
-    super(message);
-    this.name = "SendStoppedError";
+    return underItsKey ? refused : { ...refused, sendKey: newSendKey() };
   }
+  return {
+    ...next,
+    sendKey: underItsKey && sameMessage(refused, next) ? refused.sendKey : newSendKey(),
+  };
 }
 
-/** A keyed send a reload interrupted longer ago than `KEPT_SEND_RESUME_MS`
- *  (`keyed-send-storage.ts`), which the page does not make again on its own: the reader may no
- *  longer mean it. It stopped as a stopped send does, so it offers what a stopped send offers - a
- *  Retry under the same key, and Discard. */
-export class SendInterruptedError extends SendStoppedError {
-  constructor() {
-    super(
-      "Not sent: this page was closed before Dispatch confirmed it. Retry sends it under the same key, so it is delivered at most once."
-    );
-    this.name = "SendInterruptedError";
-  }
-}
-
-/**
- * Makes `attempt`, a write that names itself to Dispatch by a key it carries, until Dispatch
- * decides it. Each attempt is held to `KEYED_SEND_ATTEMPT_MS`, and one that ends without
- * Dispatch's verdict - the fetch failed, the attempt timed out, a 5xx, a 429, or a 2xx `decided`
- * says is not yet the outcome - is made again after 1 s, 2 s, 4 s … never more than 30 s apart,
- * so however many of them reach Dispatch, the key makes it act once. Resolves with any other 2xx;
- * rejects with any other 4xx, its refusal. `signal` stops the trying between attempts - a wait
- * ends at once, an attempt in flight is let finish, since it may already have reached Dispatch and
- * its answer is still the send's - and the send then rejects with `SendStoppedError`.
- */
-export async function sendUnderKey<T>(
-  attempt: (bounds: RequestBounds) => Promise<T>,
-  signal: AbortSignal | undefined,
-  decided: (answer: T) => boolean = () => true
-): Promise<T> {
-  let backoff = KEYED_SEND_FIRST_BACKOFF_MS;
-  for (;;) {
-    try {
-      const answer = await attempt({ deadlineMs: KEYED_SEND_ATTEMPT_MS });
-      if (decided(answer)) return answer;
-    } catch (error) {
-      if (error instanceof ApiError && error.status !== 429 && error.status < 500) throw error;
-    }
-    if (!(await pause(backoff, signal))) throw new SendStoppedError();
-    backoff = Math.min(backoff * 2, KEYED_SEND_MAX_BACKOFF_MS);
-  }
-}
-
-/**
- * Sends `input` to session `sessionId` under `key` until Dispatch decides it (`sendUnderKey`), so
- * Dispatch makes the message once and sends it once. A 2xx whose message's one attempt is still
- * pending is not yet its outcome: the message is stored but not yet on its way.
- */
-export function sendKeyedAgentMessage(
-  sessionId: string,
-  input: AgentMessage,
-  key: string,
-  signal?: AbortSignal
-): Promise<Message> {
-  const keyed = { ...input, idempotency_key: key };
-  return sendUnderKey(
-    (bounds) => api.createAgentMessage(sessionId, keyed, bounds),
-    signal,
-    // Dispatch answers a repeat with the attempt pending while another request is sending it, or
-    // while a sender that died - a crashed process - still holds its claim, and resumes the
-    // attempt for the first repeat after that claim lapses (a minute). It never resumes an attempt
-    // of a message retried from its card, which has more than one, so that answer lands as it is.
-    ({ deliveries: [only, ...more] }) => only?.state !== "pending" || more.length > 0
-  );
+/** How a send is made: `signal` stops its trying, `sent` is told each attempt's request as it goes
+ *  out, and `wire` is a request kept from an earlier page to make again verbatim. */
+export interface SendOptions {
+  readonly sent?: (request: WriteRequest) => void;
+  readonly signal?: AbortSignal;
+  readonly wire?: WriteRequest;
 }
 
 /** `sendRequest`, answered by the server, or rejected with a `SendDeadlineError` carrying the
- *  request's own answer once `SEND_DEADLINE_MS` passes without one. `stop` stops a keyed send's
- *  trying (`sendKeyedAgentMessage`). */
-export function sendWithinDeadline(sent: SentRequest, stop?: AbortSignal): Promise<unknown> {
-  const answer = sendRequest(sent, stop);
+ *  request's own answer once `SEND_DEADLINE_MS` passes without one. */
+export function sendWithinDeadline(sent: SentRequest, options: SendOptions = {}): Promise<unknown> {
+  const answer = sendRequest(sent, options);
   const { promise, reject, resolve } = Promise.withResolvers<unknown>();
   const deadline = setTimeout(() => reject(new SendDeadlineError(answer)), SEND_DEADLINE_MS);
   answer.then(resolve, reject).finally(() => clearTimeout(deadline));
   return promise;
 }
 
-/** Sends a `SentRequest`. It sits outside the composer, so no later render's props or state can
- *  reach the request it builds. A message to one session goes under the request's key, and is
- *  tried until Dispatch decides it or `stop` aborts (`sendKeyedAgentMessage`). */
-export async function sendRequest(sent: SentRequest, stop?: AbortSignal): Promise<unknown> {
+/** One attempt of `sent`, any send but a message to one session (`sendRequest`), under `bounds`:
+ *  built from that value alone, so no later render's props or state can reach the request it
+ *  makes. */
+function attempt(sent: SentRequest, bounds: WriteBounds): Promise<unknown> {
   const { anchor, ask, draft, edit, kind, owner, plainDelivery, replyTo } = sent;
   const { body, mentions, replacement } = draft;
-  if (edit !== undefined) return edit.save(edit.id, body.trim());
+  if (edit !== undefined) return edit.save(edit.id, body.trim(), bounds);
+  if (owner.kind === "session") {
+    return Promise.reject(new Error("The direct session channel does not support asks."));
+  }
   const selection =
     anchor === undefined ? undefined : { artifact: anchor.artifact, mark_id: anchor.mark_id };
   if (kind === "ask") {
-    if (owner.kind === "session")
-      throw new Error("The direct session channel does not support asks.");
     const input = {
       anchor: selection,
       multiple: ask.multiple,
@@ -358,22 +269,22 @@ export async function sendRequest(sent: SentRequest, stop?: AbortSignal): Promis
       urgency: ask.urgency,
     };
     return owner.kind === "issue"
-      ? api.createAsk(owner.issueKey, input)
-      : api.createArtifactAsk(owner.artifactId, input);
+      ? api.createAsk(owner.issueKey, input, bounds)
+      : api.createArtifactAsk(owner.artifactId, input, bounds);
   }
-  if (owner.kind === "session") {
-    return sendKeyedAgentMessage(owner.sessionId, agentMessage(sent), sent.sendKey, stop);
-  }
-  if (replyTo?.parentKind === "message") {
-    if (owner.kind !== "issue") throw new Error("Legacy message replies belong to an issue.");
+  if (replyTo?.parentKind === "message" && owner.kind === "issue") {
     const plan = deliveryPlan(body, replyTo.thread?.delivery);
-    return api.createMessage(owner.issueKey, {
-      body: plan.body,
-      in_reply_to: replyTo.id,
-      ...(replyTo.thread === undefined
-        ? {}
-        : { delivery: plan.delivery, target: replyTo.thread.target }),
-    });
+    return api.createMessage(
+      owner.issueKey,
+      {
+        body: plan.body,
+        in_reply_to: replyTo.id,
+        ...(replyTo.thread === undefined
+          ? {}
+          : { delivery: plan.delivery, target: replyTo.thread.target }),
+      },
+      bounds
+    );
   }
   const targets = survivingMentions(body, mentions).map((mention) => mention.target);
   const baseBody = kind === "suggestion" && body.trim() === "" ? "Suggested replacement." : body;
@@ -391,6 +302,53 @@ export async function sendRequest(sent: SentRequest, stop?: AbortSignal): Promis
   };
   const input = replyTo === null ? { ...comment, anchor: selection } : comment;
   return owner.kind === "issue"
-    ? api.createComment(owner.issueKey, input)
-    : api.createArtifactComment(owner.artifactId, input);
+    ? api.createComment(owner.issueKey, input, bounds)
+    : api.createArtifactComment(owner.artifactId, input, bounds);
+}
+
+/**
+ * Sends a `SentRequest` under its key until Dispatch decides it (`writeUnderKey`), so however many
+ * attempts reach Dispatch it is one write there; `options.wire`, a request an earlier page kept, is
+ * made verbatim instead of built again. It sits outside the composer, so no later render's props
+ * or state can reach the request it builds. A message to one session is not decided by a 2xx
+ * whose one attempt is still pending - another request is sending it, or a sender that died holds
+ * its claim, which Dispatch resumes for the first repeat after that claim lapses - since the
+ * message is stored but not yet on its way.
+ */
+export function sendRequest(
+  sent: SentRequest,
+  { sent: told, signal, wire }: SendOptions = {}
+): Promise<unknown> {
+  const { edit, kind, owner, replyTo } = sent;
+  if (edit === undefined && kind === "ask" && owner.kind === "session") {
+    return Promise.reject(new Error("The direct session channel does not support asks."));
+  }
+  if (edit === undefined && replyTo?.parentKind === "message" && owner.kind === "artifact") {
+    return Promise.reject(new Error("Legacy message replies belong to an issue."));
+  }
+  if (edit !== undefined || owner.kind !== "session") {
+    return writeUnderKey(
+      (bounds) => (wire === undefined ? attempt(sent, bounds) : api.send<unknown>(wire, bounds)),
+      sent.sendKey,
+      { sent: told, signal }
+    );
+  }
+  const sessionId = owner.sessionId;
+  return writeUnderKey(
+    (bounds) =>
+      wire === undefined
+        ? api.createAgentMessage(sessionId, agentMessage(sent), bounds)
+        : api.send<Message>(wire, bounds),
+    sent.sendKey,
+    {
+      // Dispatch answers a repeat with the attempt pending while another request is sending it,
+      // or while a sender that died - a crashed process - still holds its claim, and resumes the
+      // attempt for the first repeat after that claim lapses (a minute). It never resumes an
+      // attempt of a message retried from its card, which has more than one, so that answer
+      // lands as it is.
+      decided: ({ deliveries: [only, ...more] }) => only?.state !== "pending" || more.length > 0,
+      sent: told,
+      signal,
+    }
+  );
 }

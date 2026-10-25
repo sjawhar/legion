@@ -15,21 +15,22 @@ import {
   useSyncExternalStore,
 } from "react";
 
+import { AnswerNotKeptError, api, type WriteRequest } from "../../api/client";
 import { agentMessagesQuery } from "../../api/queries";
 import { pastDeadlineKey } from "../../hooks/useSending";
-import type { ReplyTarget } from "./composer-model";
+import { SendInterruptedError } from "../writes/keyed-write";
 import {
-  type KeyedSendStorage,
   keptRefusal,
-  keyedSendStorage,
   refusalFrom,
   resumesOnItsOwn,
   shape,
   signedInLogin,
-} from "./keyed-send-storage";
+  type WriteStorage,
+  writeStorage,
+} from "../writes/write-storage";
+import type { ReplyTarget } from "./composer-model";
 import {
   SendDeadlineError,
-  SendInterruptedError,
   type SentDraft,
   type SentRequest,
   sendRequest,
@@ -69,11 +70,10 @@ export interface HeldSend {
   readonly pressedAt: number;
 }
 
-/** Whether `held` is a late send to one session, the one kind of send the reader may stop: it is
- *  being tried again under its key until Dispatch decides it, which a lasting outage can hold off
- *  for good. */
+/** Whether `held` is a late send the reader may stop: it is being tried again under its key until
+ *  Dispatch decides it, which a lasting outage can hold off for good. */
 export function stoppable(held: HeldSend | undefined): boolean {
-  return held?.status === "late" && held.request.owner.kind === "session" && !held.stopping;
+  return held?.status === "late" && !held.stopping;
 }
 
 /** What became of a held send: it landed, the server refused it, or the reader dropped its
@@ -114,13 +114,12 @@ function refreshAfter(client: QueryClient, { anchor, owner }: SentRequest): void
 
 const NO_HELD_SENDS: readonly HeldSend[] = Object.freeze([]);
 
-/** A send to one session as it is kept across a reload (`keyed-send-storage.ts`): its name, its
- *  request, the draft its composer holds, and when it was pressed. */
+/** A send as it is kept across a reload (`write-storage.ts`), beside the request it went out as:
+ *  its name, its request - an edit's by the comment it saves - and the draft its composer holds. */
 interface KeptHeldSend {
   readonly draft: HeldDraft;
   readonly mutationKey: readonly string[];
-  readonly pressedAt: number;
-  readonly request: Omit<SentRequest, "anchor" | "edit">;
+  readonly request: Omit<SentRequest, "edit"> & { readonly edit: string | null };
 }
 
 const keptAsk = shape.record({
@@ -149,12 +148,23 @@ const keptDelivery = shape.oneOf(...DELIVERY_CAPABILITIES);
 const keptHeldSend = shape.record({
   draft: shape.record({ ask: keptAsk, draft: keptDraft }),
   mutationKey: shape.array(shape.string),
-  pressedAt: shape.number,
   request: shape.record({
+    anchor: shape.optional(
+      shape.record({ artifact: shape.string, mark_id: shape.string, quote: shape.string })
+    ),
     ask: keptAsk,
     draft: keptDraft,
+    edit: shape.nullable(shape.string),
     kind: shape.oneOf("ask", "comment", "suggestion"),
-    owner: shape.record({ kind: shape.oneOf("session"), sessionId: shape.string }),
+    owner: shape.either(
+      shape.record({ issueKey: shape.string, kind: shape.oneOf("issue") }),
+      shape.record({
+        artifactId: shape.string,
+        kind: shape.oneOf("artifact"),
+        project: shape.string,
+      }),
+      shape.record({ kind: shape.oneOf("session"), sessionId: shape.string })
+    ),
     pickedDelivery: shape.optional(keptDelivery),
     plainDelivery: keptDelivery,
     replyTo: shape.nullable(
@@ -176,13 +186,25 @@ const keptHeldSend = shape.record({
   }),
 });
 
+/** The request a kept send names, whole again: an edit saves its comment as the composer's own
+ *  default save does, since the host that gave the page its save is gone with the page. */
+function heldRequest({ edit, ...request }: KeptHeldSend["request"]): SentRequest {
+  return {
+    ...request,
+    edit:
+      edit === null
+        ? undefined
+        : { id: edit, save: (id, body, bounds) => api.editComment(id, { body }, bounds) },
+  };
+}
+
 /**
  * The app's held sends, one per send name, beside its `QueryClient` (`heldSends`): above the
  * router, so no route change, collapse or unmount below it drops one. An entry leaves when its
- * send lands or the reader discards its refusal; nothing else removes it. A reload loses every
- * one but a send to one session, which goes under its key: that one is kept across a reload
- * (`keyed-send-storage.ts`), out or refused, for the person who pressed it, and `resume` takes it
- * up again on load. Each send also runs as a TanStack mutation under its name - and under
+ * send lands or the reader discards its refusal; nothing else removes it. Every send goes under
+ * its key (`sendRequest`), so each is kept across a reload (`write-storage.ts`), out or refused,
+ * for the person who pressed it, with the request it last went out as, and `resume` takes it up
+ * again on load. Each send also runs as a TanStack mutation under its name - and under
  * `pastDeadlineKey` once past its deadline - so a host's hold on the name (`useSending`) counts
  * it as before. That mutation runs whether or not the browser says it is online (`networkMode:
  * "always"`): the send's own tries are what wait out a network that is down, and a mutation
@@ -191,8 +213,11 @@ const keptHeldSend = shape.record({
  */
 export class HeldSends {
   readonly #client: QueryClient;
-  readonly #kept: KeyedSendStorage;
+  readonly #kept: WriteStorage;
   readonly #entries = new Map<string, HeldSend>();
+  /** The request each send last went out as, under its key, by its name's hash: what a reload
+   *  makes again. */
+  readonly #wires = new Map<string, { readonly key: string; readonly request: WriteRequest }>();
   /** `under`'s answers that hold a send, by the prefix's hash, each dropped when a send beneath
    *  its prefix changes. */
   readonly #under = new Map<
@@ -201,11 +226,11 @@ export class HeldSends {
   >();
   readonly #listeners = new Set<() => void>();
   readonly #outcomes = new Set<(outcome: HeldSendOutcome) => void>();
-  /** What stops each keyed send still out, by its name's hash (`stop`). */
+  /** What stops each send still out, by its name's hash (`stop`). */
   readonly #stops = new Map<string, AbortController>();
   #resumed = false;
 
-  constructor(client: QueryClient, kept: KeyedSendStorage = keyedSendStorage()) {
+  constructor(client: QueryClient, kept: WriteStorage = writeStorage()) {
     this.#client = client;
     this.#kept = kept;
   }
@@ -256,30 +281,31 @@ export class HeldSends {
   }
 
   /**
-   * Takes up, once, the sends to one session a reload interrupted that `login`, the person signed
-   * in, pressed (`keyed-send-storage.ts`); another person's are dropped unsent. One still out and
-   * pressed within `KEPT_SEND_RESUME_MS` is made again under its key, past its deadline already if
-   * it was then: Dispatch answers the repeat with the message the first request made, if it made
-   * one. One the reader was stopping, whose last attempt went with the page, is asked once more
-   * under its key, and lands if Dispatch takes it, or ends stopped. One pressed longer ago is not
-   * made again on its own: it shows refused (`SendInterruptedError`), for a Retry under its key or
-   * Discard. A refusal shows again with the draft written over it. The app calls this once
-   * signed in.
+   * Takes up, once, the sends a reload interrupted that `login`, the person signed in, pressed
+   * (`write-storage.ts`); another person's are dropped unsent. One still out and pressed within
+   * `KEPT_SEND_RESUME_MS` is made again under its key, as the request it last went out as, past
+   * its deadline already if it was then: Dispatch answers the repeat with what the first request
+   * did, if it did anything. One the reader was stopping, whose last attempt went with the page,
+   * is asked once more under its key, and lands if Dispatch takes it, or ends stopped. One pressed
+   * longer ago is not made again on its own: it shows refused (`SendInterruptedError`), for a
+   * Retry under its key or Discard. A refusal shows again with the draft written over it. The app
+   * calls this once signed in.
    */
   resume(login: string): void {
     if (this.#resumed) return;
     this.#resumed = true;
-    const kept = this.#kept.load("session", login, (send, key) =>
-      keptHeldSend(send) && (send as KeptHeldSend).request.sendKey === key
-        ? (send as KeptHeldSend)
+    const kept = this.#kept.load("composer", login, (detail, key) =>
+      keptHeldSend(detail) && (detail as KeptHeldSend).request.sendKey === key
+        ? (detail as KeptHeldSend)
         : undefined
     );
     const now = Date.now();
-    for (const { refusal, send, state } of kept) {
-      const { draft, mutationKey, pressedAt } = send;
-      const request: SentRequest = { ...send.request, anchor: undefined, edit: undefined };
+    for (const { detail, pressedAt, refusal, request: wire, state } of kept) {
+      const { draft, mutationKey } = detail;
+      const request = heldRequest(detail.request);
       const id = hashKey(mutationKey);
       if (this.#entries.has(id)) continue;
+      if (wire !== null) this.#wires.set(id, { key: request.sendKey, request: wire });
       if (state !== "refused" && state !== "queued" && resumesOnItsOwn(pressedAt, now)) {
         this.#start(mutationKey, request, pressedAt, state);
         continue;
@@ -301,7 +327,8 @@ export class HeldSends {
 
   /** Holds `request`, pressed at `pressedAt`, under `mutationKey` as out, and sends it: within its
    *  deadline (`sending`), as a send already past it (`late`), or as one past it the reader has
-   *  stopped (`stopping`), which makes one attempt and no other. */
+   *  stopped (`stopping`), which makes one attempt and no other. A send under the key it last went
+   *  out under goes as that request again (`#wires`), so Dispatch sees the same write. */
   #start(
     mutationKey: MutationKey,
     request: SentRequest,
@@ -312,6 +339,18 @@ export class HeldSends {
     const stop = new AbortController();
     if (from === "stopping") stop.abort();
     this.#stops.set(id, stop);
+    const kept = this.#wires.get(id);
+    if (kept !== undefined && kept.key !== request.sendKey) this.#wires.delete(id);
+    const options = {
+      sent: (wire: WriteRequest) => {
+        if (wire.body instanceof FormData || this.#stops.get(id) !== stop) return;
+        this.#wires.set(id, { key: request.sendKey, request: wire });
+        const held = this.#entries.get(id);
+        if (held !== undefined) this.#remember(held, held);
+      },
+      signal: stop.signal,
+      wire: kept?.key === request.sendKey ? kept.request : undefined,
+    };
     this.#set(id, {
       draft: { ask: request.ask, draft: request.draft },
       mutationKey,
@@ -330,17 +369,23 @@ export class HeldSends {
     };
     const refused = (error: Error) => {
       this.#stops.delete(id);
+      // A write that ran but whose answer Dispatch did not keep landed; what it wrote is read
+      // again (`refreshAfter`).
+      if (error instanceof AnswerNotKeptError) {
+        landed();
+        return;
+      }
       const held = this.#update(id, { refusal: error, status: "refused", stopping: false });
       if (held !== undefined) this.#emit({ kind: "refused", send: held });
     };
     if (from !== "sending") {
-      this.#run(pastDeadlineKey(mutationKey), () => sendRequest(request, stop.signal), {
+      this.#run(pastDeadlineKey(mutationKey), () => sendRequest(request, options), {
         onError: refused,
         onSuccess: landed,
       });
       return;
     }
-    this.#run(mutationKey, () => sendWithinDeadline(request, stop.signal), {
+    this.#run(mutationKey, () => sendWithinDeadline(request, options), {
       onError: (error) => {
         // Past its deadline the request is not refused: it goes on under `pastDeadlineKey`,
         // started before the first mutation settles, so a hold on the name never drops between
@@ -359,10 +404,10 @@ export class HeldSends {
     });
   }
 
-  /** Stops trying the late send to one session under `mutationKey` (Stop trying): no attempt is
-   *  made after the one in flight, whose answer is still the send's, and the send is then refused
-   *  with `SendStoppedError`, which a Retry sends again under the same key. Says whether it
-   *  stopped one. */
+  /** Stops trying the late send under `mutationKey` (Stop trying): no attempt is made after the
+   *  one in flight, whose answer is still the send's, and the send is then refused with
+   *  `SendStoppedError`, which a Retry sends again under the same key. Says whether it stopped
+   *  one. */
   stop(mutationKey: MutationKey): boolean {
     const id = hashKey(mutationKey);
     if (!stoppable(this.#entries.get(id))) return false;
@@ -421,8 +466,12 @@ export class HeldSends {
   #set(id: string, held: HeldSend | undefined): void {
     const before = this.#entries.get(id);
     const changed = held ?? before;
-    if (held === undefined) this.#entries.delete(id);
-    else this.#entries.set(id, held);
+    if (held === undefined) {
+      this.#entries.delete(id);
+      this.#wires.delete(id);
+    } else {
+      this.#entries.set(id, held);
+    }
     if (changed !== undefined) {
       for (const [prefixId, { prefix }] of this.#under) {
         if (partialMatchKey(changed.mutationKey, prefix)) this.#under.delete(prefixId);
@@ -432,33 +481,30 @@ export class HeldSends {
     for (const listener of this.#listeners) listener();
   }
 
-  /** Keeps a send to one session across a reload as it changes, for the person signed in, and
-   *  lets it go once it leaves: only such a send carries a key, and only a send under a key is
-   *  safe to make again. */
+  /** Keeps a send across a reload as it changes, for the person signed in, with the request it
+   *  last went out as, and lets it go once it leaves. */
   #remember(before: HeldSend | undefined, held: HeldSend | undefined): void {
-    if (
-      before?.request.owner.kind === "session" &&
-      before.request.sendKey !== held?.request.sendKey
-    ) {
+    if (before !== undefined && before.request.sendKey !== held?.request.sendKey) {
       this.#kept.forget(before.request.sendKey);
     }
-    if (held?.request.owner.kind !== "session") return;
-    const { ask, draft, kind, owner, pickedDelivery, plainDelivery, replyTo, sendKey } =
-      held.request;
+    if (held === undefined) return;
+    const { edit, ...request } = held.request;
+    const wire = this.#wires.get(hashKey(held.mutationKey));
     this.#kept.keep<KeptHeldSend>(
       {
-        key: sendKey,
-        kind: "session",
+        detail: {
+          draft: held.draft,
+          mutationKey: held.mutationKey.map(String),
+          request: { ...request, edit: edit?.id ?? null },
+        },
+        key: request.sendKey,
+        kind: "composer",
+        pressedAt: held.pressedAt,
         refusal:
           held.status === "refused" && held.refusal !== undefined
             ? keptRefusal(held.refusal)
             : null,
-        send: {
-          draft: held.draft,
-          mutationKey: held.mutationKey.map(String),
-          pressedAt: held.pressedAt,
-          request: { ask, draft, kind, owner, pickedDelivery, plainDelivery, replyTo, sendKey },
-        },
+        request: wire?.key === request.sendKey ? wire.request : null,
         state: held.status === "refused" ? "refused" : held.stopping ? "stopping" : held.status,
       },
       signedInLogin(this.#client)

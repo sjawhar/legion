@@ -112,22 +112,31 @@ function restoredBroadcastPlan(
   return { excluded, recipients: [...restored.session_ids] };
 }
 
-/** What the composer would send, and the plan it shows for it. */
+/** What the composer would send - the request and the key it goes under - and the plan it shows
+ *  for it. */
 export interface ComposedBroadcast {
   readonly input: CreateBroadcastInput;
+  readonly key: string;
   readonly plan: BroadcastPlan;
 }
 
+/** A refused send Restore draft put back: its request, and the key a re-send goes under - its own
+ *  when the send ended without Dispatch's verdict, a new one when Dispatch refused it. */
+export interface RestoredBroadcast {
+  readonly input: CreateBroadcastInput;
+  readonly key: string;
+}
+
 /**
- * The composer's one restored-or-live decision. A restored request goes out word for word and is
- * described as it is (`restoredBroadcastPlan`); otherwise the live plan of the current composition
- * names the sessions, under the composition's key.
+ * The composer's one restored-or-live decision. A restored request goes out word for word under
+ * the key it was restored with, and is described as it is (`restoredBroadcastPlan`); otherwise
+ * the live plan of the current composition names the sessions, under the composition's key.
  */
 export function composedBroadcast(
   composition: {
     readonly delivery: MessageDeliveryMode;
     readonly draft: string;
-    readonly restored: CreateBroadcastInput | null;
+    readonly restored: RestoredBroadcast | null;
     readonly selected: ReadonlySet<string>;
     readonly sendKey: string;
   },
@@ -135,11 +144,16 @@ export function composedBroadcast(
 ): ComposedBroadcast {
   const { delivery, draft, restored, selected, sendKey } = composition;
   if (restored !== null) {
-    return { input: restored, plan: restoredBroadcastPlan(restored, selected, agents) };
+    return {
+      input: restored.input,
+      key: restored.key,
+      plan: restoredBroadcastPlan(restored.input, selected, agents),
+    };
   }
   const plan = broadcastPlan(selected, agents, delivery);
   return {
-    input: { body: draft, delivery, idempotency_key: sendKey, session_ids: plan.recipients },
+    input: { body: draft, delivery, session_ids: plan.recipients },
+    key: sendKey,
     plan,
   };
 }

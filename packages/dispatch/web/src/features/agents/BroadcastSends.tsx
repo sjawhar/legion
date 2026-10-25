@@ -14,9 +14,9 @@ import {
   textMutedOnSurface,
   textSecondaryOnSurface,
 } from "../../theme/classes";
-import { StopTrying } from "../conversation/StopTryingButton";
-import { SendInterruptedError, SendStoppedError } from "../conversation/send-request";
 import { MarkdownPreview } from "../refs/MarkdownPreview";
+import { SendInterruptedError, SendStoppedError } from "../writes/keyed-write";
+import { StopTrying } from "../writes/StopTrying";
 import { type BroadcastSend, type BroadcastSendRow, broadcastQueue } from "./broadcast-queue";
 
 /**
