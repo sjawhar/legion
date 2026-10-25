@@ -54,11 +54,11 @@ func (e *Engine) dispatchAskOpened(ctx context.Context, tx pgx.Tx, fact intake.D
 		return intake.Result{}, nil
 	}
 	issue, err := e.store.Issue(ctx, tx, fact.Key)
-	if err != nil || issue == nil || e.waitFenced(ctx, *issue, fact.Mark, "question opened") {
+	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
 	ownsTree, err := e.store.SessionClaimsTree(ctx, tx, issue.Tree, fact.AuthorSession)
-	if err != nil || !ownsTree {
+	if err != nil || !ownsTree || e.waitFenced(ctx, *issue, fact.Mark, "question opened") {
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.awaitPerson(ctx, tx, *issue, record.Awaiting{Ask: fact.Ask, Since: fact.Mark}, fmt.Sprintf("question %s is awaiting an answer", fact.Ask))

@@ -254,6 +254,34 @@ func TestALateHandBackARegistrationCoveredStartsNoSecondWait(t *testing.T) {
 	}
 }
 
+// A registration that keeps the slot still raises the wait fence to its read. The architect hands
+// the request back at seq 9; at seq 10 a session's note moves the turn to the agent; register_gate
+// reads seq 10, sees the request waiting on the agent, and keeps the slot, starting no wait. The
+// seq-9 hand-back, delivered now, is an act that read covered: a wait started from it would wait on
+// version 4 while Dispatch waits on the agent, and nothing would answer it.
+func TestARegistrationThatKeepsTheSlotStillFencesTheHandBackItCovered(t *testing.T) {
+	pool := migratedPool(t)
+	admission := newAdmission(t, 1, nil)
+	seedSlotted(t, pool, "LEGION-ROOT", "A")
+	seedWaiting(t, pool, "LEGION-NEXT", "B")
+	seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+	read := record.EventMark{Seq: 10, At: handedBackAt.Add(time.Minute)}
+	if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
+		Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, RequestWaitsOnAgent: true, Since: read,
+	}, admission.engine, admission); err != nil {
+		t.Fatalf("register gate v4: %v", err)
+	}
+	if kept := issue(t, pool, "LEGION-ROOT"); kept.Phase != phase.Admitted || kept.Awaiting != nil || kept.WaitFenceSeq != read.Seq {
+		t.Fatalf("root after a registration that kept the slot = %#v, want admitted with no wait and wait fence %d", kept, read.Seq)
+	}
+	applyFact(t, pool, admission, "late-hand-back", intake.DispatchAskReply{
+		Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: record.EventMark{Seq: 9, At: handedBackAt}})
+	if late := issue(t, pool, "LEGION-ROOT"); late.Phase != phase.Admitted || late.Awaiting != nil {
+		t.Fatalf("root after a hand-back the registration's read covered = %#v, want it still admitted with no wait", late)
+	}
+	assertSlots(t, pool, []record.Slot{{Issue: "LEGION-ROOT", Index: 0, AdmittedAt: fixedNow}})
+}
+
 // A registration whose read is older than the gate's newest version changes no gate state, but it
 // still queues the gate seed at the gate's version: that read of Dispatch is what catches a
 // review whose own event was lost.

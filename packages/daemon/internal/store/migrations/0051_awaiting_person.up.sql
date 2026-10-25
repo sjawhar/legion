@@ -14,8 +14,9 @@
 --
 -- wait_fence_seq is the highest Dispatch event sequence of the issue that a wait has started from,
 -- or that a register_gate read of Dispatch covered, kept in every phase and across a resume and a
--- re-admission: an ask.handed_back or ask.opened event at or below it is an act a wait or a
--- registration already covered, delivered late, and starts no wait. 0 is none.
+-- re-admission: a hand-back (ask.handed_back, or a comment.created reply that leaves the turn with
+-- the person) or an ask.opened event at or below it is an act a wait or a registration already
+-- covered, delivered late, and starts no wait. 0 is none.
 --
 -- claimed_by is who holds the issue's Dispatch claim (`<kind>:<id>`, '' for nobody or not yet
 -- seen), and claim_seq the Dispatch sequence it was seen at: a root another session or a person
