@@ -125,14 +125,22 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	key := r.PathValue("key")
+	if input.Status != nil && status == "done" {
+		// Before the transaction, which settlement's own would queue behind on the issue's row.
+		s.settleIssueBeforeClose(r.Context(), key)
+	}
 	tx, err := s.begin(r.Context())
 	if err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
 	defer tx.Rollback(r.Context())
+	// A close withdraws the issue's open asks and a reopen restores them, writing their blocks
+	// into the issue's documents, which reach their rooms through the ledger's commit.
+	documentCtx, ledger := s.deps.Docs.Join(r.Context(), tx)
+	defer ledger.Discard()
 
-	key := r.PathValue("key")
 	dependencyWrite := input.BlockedBy != nil || parentProvided
 	if dependencyWrite || input.Rank != nil {
 		var project string
@@ -364,25 +372,21 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		advice := s.writeAdvice(
 			r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", before.Status,
 		)
-		if err := tx.Commit(r.Context()); err != nil {
+		if err := ledger.Commit(r.Context()); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
 		WriteJSON(w, http.StatusOK, withAdvice(before, advice))
 		return
 	}
-	after, err := s.loadIssue(r.Context(), tx, key)
-	if err != nil {
-		s.writeHandlerError(w, err)
-		return
+	statusChanged := input.Status != nil && before.Status != status
+	afterParent := before.Parent
+	if parentProvided {
+		afterParent = parent
 	}
-	events := []model.Event{}
-	statusChanged := input.Status != nil && before.Status != after.Status
-	parentChanged := parentProvided && !stringPointersEqual(before.Parent, after.Parent)
-	eventType := "issue.updated"
-	if statusChanged && after.Status == "done" {
-		eventType = "issue.closed"
-	}
+	parentChanged := parentProvided && !stringPointersEqual(before.Parent, afterParent)
+	closing := input.Status != nil && status == "done" && before.ClosedAt == nil
+	reopening := input.Status != nil && before.ClosedAt != nil
 	// Every owner this transaction appends to must be in one LockOwners call before the
 	// first append: the issue itself, the status-change parent, and both ends of a reparent.
 	// lockPatchRowsAndParent already holds each of those rows, so LockOwners re-locks them in that order.
@@ -396,17 +400,41 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		owners = append(owners, issueOwner(*parentKey).event("", actor, nil))
 	}
 	if statusChanged {
-		addOwner(after.Parent)
+		addOwner(afterParent)
 	}
 	if parentChanged {
 		addOwner(before.Parent)
-		addOwner(after.Parent)
+		addOwner(afterParent)
 	}
 	if len(owners) > 1 {
 		if err := s.deps.Events.LockOwners(r.Context(), tx, owners...); err != nil {
 			s.writeHandlerError(w, err)
 			return
 		}
+	}
+	// The asks' events come before the status event, and their document writes before either.
+	var withdrawn []model.Ask
+	events := []model.Event{}
+	switch {
+	case closing:
+		withdrawn, events, err = s.withdrawIssueAsksTx(documentCtx, tx, key, actor, false)
+	case reopening:
+		_, events, err = s.restoreIssueAsksTx(documentCtx, tx, key, actor)
+	}
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	// Read once every event so far is in, the document writes' own included, so the response's
+	// last_seq and open asks are what a read of the issue answers.
+	after, err := s.loadIssue(r.Context(), tx, key)
+	if err != nil {
+		s.writeHandlerError(w, err)
+		return
+	}
+	eventType := "issue.updated"
+	if statusChanged && after.Status == "done" {
+		eventType = "issue.closed"
 	}
 	after.LastSeq++
 	event, err := s.appendEvent(r.Context(), tx, issueOwner(key).event(eventType, actor, model.NewIssueEventPayload(after, model.ReferenceChanges{})))
@@ -461,7 +489,7 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 	advice := s.writeAdvice(
 		r.Context(), tx, "PATCH /api/v1/issues/{key}", key, actor, "", after.Status,
 	)
-	if err := tx.Commit(r.Context()); err != nil {
+	if err := ledger.Commit(r.Context()); err != nil {
 		s.writeHandlerError(w, err)
 		return
 	}
@@ -473,6 +501,12 @@ func (s *server) patchIssue(w http.ResponseWriter, r *http.Request) {
 		s.deps.Docs.SetIssueClosed(context.WithoutCancel(r.Context()), key, after.ClosedAt != nil)
 	}
 	s.publish(events...)
+	if closing {
+		// The rooms are closed now, so no browser of this process writes another ask block
+		// into them; the sweep catches the ones written since the close forked each document.
+		// It runs after the publish so every event reaches subscribers in commit order.
+		s.sweepClosedIssueAsks(context.WithoutCancel(r.Context()), key, withdrawn, actor)
+	}
 	WriteJSON(w, http.StatusOK, withAdvice(after, advice))
 }
 

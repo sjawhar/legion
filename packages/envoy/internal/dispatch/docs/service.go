@@ -1065,13 +1065,14 @@ func (s *Service) readSettlementTree(state *roomState, owed map[string]model.Act
 }
 
 // settlementAuthors takes the authors a settlement's version lists (captureAuthors), and names
-// the actor its derived events carry: the latest editor when the version lists them or lists no
-// one, otherwise SettlementActor. The caller holds state.mu.
+// the actor its derived events carry: the latest editor when the version lists them, or lists no
+// one besides authors that only server lifecycle writes credited (roomState.lifecycleAuthors),
+// none of whom made an edit; otherwise SettlementActor. The caller holds state.mu.
 func settlementAuthors(state *roomState, owed map[string]model.Actor) settlementVersionCredit {
 	capture := captureAuthors(state, owed, nil, nil)
 	credit := settlementVersionCredit{capture: capture, state: state, authors: actorSlice(capture.authors)}
 	if latest := state.lastActor; latest != nil {
-		if _, found := capture.authors[actorKey(*latest)]; found || len(credit.authors) == 0 {
+		if _, found := capture.authors[actorKey(*latest)]; found || state.onlyLifecycleAuthors(capture.authors) {
 			credit.actor = *latest
 			return credit
 		}
@@ -1881,7 +1882,9 @@ func waitGroup(ctx context.Context, wg *sync.WaitGroup) {
 }
 
 // SetIssueClosed refreshes the closed state every room of an issue remembers, and closes them when
-// the issue closes. A document with no state has no room to tell: its next load reads the issue.
+// the issue closes. When it reopens, a state the close left without a latest edit source takes the
+// one its document's pending-settlement row holds (restoreLastActor). A document with no state has
+// no room to tell: its next load reads the issue.
 // Its caller runs it after its own transaction has committed, and it takes that caller's context
 // so the pool can see it: a caller that ever runs it with a transaction still open is refused, not
 // wedged. That context is one caller holding at most one connection, so the rooms are recorded and
@@ -1901,6 +1904,7 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 	for _, room := range rooms {
 		state := s.lockExistingState(room)
 		changed := true
+		reopened := false
 		var (
 			lastActor *model.Actor
 			creditSeq uint64
@@ -1918,7 +1922,13 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 				// lives in the state alone.
 				lastActor, creditSeq = state.lastActor, state.creditSeq.Load()
 			}
+			if !closed && changed && state.lastActor == nil {
+				reopened, creditSeq = true, state.creditSeq.Load()
+			}
 			s.unlockState(room, state)
+		}
+		if reopened {
+			s.restoreLastActor(ctx, room, creditSeq)
 		}
 		if closed && changed {
 			persisted := lastActor == nil
@@ -1936,6 +1946,31 @@ func (s *Service) SetIssueClosed(ctx context.Context, issueKey string, closed bo
 			_ = s.srv.CloseRoom(room, true)
 		}
 	}
+}
+
+// restoreLastActor gives the state of a reopened issue's document the latest edit source its
+// pending-settlement row holds, as a room's load does (onLoadDocument): the close moved it from
+// the state to the row (lastActorPersisted), and a room that loaded while the issue was closed
+// restored none, so without this the settlement the document owes would name no latest editor.
+// An edit observed since the reopen's snapshot (a later creditSeq) keeps its own.
+func (s *Service) restoreLastActor(ctx context.Context, room string, creditSeq uint64) {
+	owed, lastActor, err := readOwedSettlement(ctx, s.store.Pool, room)
+	if err != nil {
+		slog.Error("dispatch: restore a reopened document's latest edit source", "room", room, "error", err)
+		return
+	}
+	if !owed || lastActor == nil {
+		return
+	}
+	state := s.lockExistingState(room)
+	if state == nil {
+		return
+	}
+	if !state.closed && state.lastActor == nil && state.creditSeq.Load() == creditSeq {
+		state.lastActor = lastActor
+		state.unsettled = true
+	}
+	s.unlockState(room, state)
 }
 
 // lastActorPersisted forgets a closed document's latest edit source once its pending-settlement

@@ -43,7 +43,7 @@ import (
 // restoration of the source settles it again. The rows are read, never locked or written:
 // settlement holds this document's owner row and room lock, and a source's answer route takes the
 // source's ask row before its own document's room. A project document's settlement also takes its
-// project's copy lock first (lockProjectCopies).
+// project's copy lock first (lockProjectCopies), and then reads the sources (readCopiedAskSources).
 func copiedAskSources(
 	ctx context.Context,
 	tx pgx.Tx,
@@ -52,17 +52,40 @@ func copiedAskSources(
 	blocks []askBlock,
 	rows map[string]model.Ask,
 ) (map[string]copiedSource, error) {
+	unindexed := unindexedAskBlockIDs(blocks, rows)
+	if len(unindexed) == 0 {
+		return nil, nil
+	}
+	if err := lockProjectCopies(ctx, tx, owner); err != nil {
+		return nil, err
+	}
+	return readCopiedAskSources(ctx, tx, artifactID, owner, blocks, unindexed)
+}
+
+// unindexedAskBlockIDs is the id of each block of blocks no ask of its document indexes (rows).
+func unindexedAskBlockIDs(blocks []askBlock, rows map[string]model.Ask) []string {
 	var unindexed []string
 	for _, block := range blocks {
 		if _, indexed := rows[block.id]; !indexed {
 			unindexed = append(unindexed, block.id)
 		}
 	}
+	return unindexed
+}
+
+// readCopiedAskSources is copiedAskSources for the blocks of blocks under the ids unindexed, which
+// takes no copy lock: its caller has taken the one owner needs, or owner is an issue, whose
+// documents need none (lockProjectCopies).
+func readCopiedAskSources(
+	ctx context.Context,
+	tx pgx.Tx,
+	artifactID string,
+	owner artifactOwner,
+	blocks []askBlock,
+	unindexed []string,
+) (map[string]copiedSource, error) {
 	if len(unindexed) == 0 {
 		return nil, nil
-	}
-	if err := lockProjectCopies(ctx, tx, owner); err != nil {
-		return nil, err
 	}
 	query, ownerKey := copiedAskSourcesQuery(owner)
 	found, err := tx.Query(ctx, query, unindexed, artifactID, ownerKey)

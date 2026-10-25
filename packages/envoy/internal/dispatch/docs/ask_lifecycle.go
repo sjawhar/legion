@@ -24,9 +24,26 @@ type BlockRef struct {
 // transaction of its own and takes the issue's row, which a caller's open transaction can hold.
 var errSettleJoined = errors.New("docs: an issue's documents settle outside every transaction")
 
+type lifecycleWriteContextKey struct{}
+
+// withLifecycleWrite marks the live writes made with ctx as server lifecycle writes
+// (WriteIssueAskStates): the server writing into an ask's blocks the state an issue's close or
+// reopen gave it. Such a write credits its actor as a pending author, as any live write does, but
+// is no edit of the document, so it does not become the document's latest edit source
+// (liveWrite.editSource), which settlement names as the author of an ask block it indexes with no
+// author of its own: the close of an issue must not take the credit for a block a session wrote.
+func withLifecycleWrite(ctx context.Context) context.Context {
+	return context.WithValue(ctx, lifecycleWriteContextKey{}, true)
+}
+
+func isLifecycleWrite(ctx context.Context) bool {
+	lifecycle, _ := ctx.Value(lifecycleWriteContextKey{}).(bool)
+	return lifecycle
+}
+
 // WriteIssueAskStates writes the state of each of asks into the blocks that show it in every
 // document of issueKey, in the documents' id order: an ask's own block on its document, and every
-// block copiedAskSources classifies as a copy of one of asks on another, which keeps naming its
+// block readCopiedAskSources classifies as a copy of one of asks on another, which keeps naming its
 // source (copied_from, copied_from_document). Each block gets the server attributes settlement
 // writes from the ask (setAskServerAttributes), so asks carry the state the caller wants shown:
 // resolved for an issue's close, open for its reopen. Every other block is left as it is - the
@@ -44,7 +61,8 @@ var errSettleJoined = errors.New("docs: an issue's documents settle outside ever
 // row, as settlement holds it, so the writes are owner-verified: they reach a document whose room
 // is flagged closed, and one no room holds, while every other write to a closed issue's document
 // is refused. A write is credited to actor as any live write is (applyLive), never clearing the
-// authors already pending, and writes no version: the settlement it leaves owed versions it, and
+// authors already pending, but leaves the document's latest edit source as it was
+// (withLifecycleWrite), and writes no version: the settlement it leaves owed versions it, and
 // none whose markdown repeats the latest version is written. A document it changes nothing in is
 // written nothing.
 func (s *Service) WriteIssueAskStates(ctx context.Context, issueKey string, asks []model.Ask, actor model.Actor, markUnindexed bool) ([]BlockRef, error) {
@@ -67,7 +85,7 @@ func (s *Service) WriteIssueAskStates(ctx context.Context, issueKey string, asks
 	if err != nil {
 		return nil, fmt.Errorf("list the issue's documents: %w", err)
 	}
-	ctx = withOwnerVerified(ctx)
+	ctx = withLifecycleWrite(withOwnerVerified(ctx))
 	owner := artifactOwner{IssueKey: &issueKey}
 	var unindexed []BlockRef
 	for _, document := range documents {
@@ -106,7 +124,9 @@ func (s *Service) writeDocumentAskStates(
 		if err != nil {
 			return err
 		}
-		sources, err := copiedAskSources(ctx, tx, artifactID, owner, blocks, rows)
+		// An issue's documents take no copy lock (lockProjectCopies): the caller holds the issue's
+		// row, as every transaction reading or marking the copies among its documents does.
+		sources, err := readCopiedAskSources(ctx, tx, artifactID, owner, blocks, unindexedAskBlockIDs(blocks, rows))
 		if err != nil {
 			return err
 		}

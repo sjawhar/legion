@@ -216,7 +216,7 @@ func TestListOpenAsksForSession(t *testing.T) {
 	priorityIssue := decodeBody[model.Issue](t, priorityIssueResponse)
 	priorityAsk := createAsk("/api/v1/issues/"+priorityIssue.Key+"/asks", "Priority question", ownerSession)
 	documentAsk := createAsk("/api/v1/artifacts/"+document.ID+"/asks", "Document question", ownerSession)
-	createAsk("/api/v1/issues/"+issue.Key+"/asks", "Other session", "session-other")
+	otherSessionAsk := createAsk("/api/v1/issues/"+issue.Key+"/asks", "Other session", "session-other")
 	answered := createAsk("/api/v1/issues/"+issue.Key+"/asks", "Answered question", ownerSession)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+answered.ID+"/answer", map[string]any{
 		"text": "Done",
@@ -292,17 +292,33 @@ func TestListOpenAsksForSession(t *testing.T) {
 	}, "alice"); response.Code != http.StatusOK {
 		t.Fatalf("close issue: status=%d body=%s", response.Code, response.Body.String())
 	}
+	// The close withdrew the issue's open asks, so they leave the list; the answered and the
+	// retracted ask keep their own records.
 	closed := listOpenAsks(t, handler, ownerSession, "")
 	if closed.Count != 2 || len(closed.Asks) != 2 || closed.Asks[0].ID != priorityAsk.ID || closed.Asks[1].ID != documentAsk.ID {
 		t.Fatalf("closed issue open asks = %#v, want priority and document asks", closed)
+	}
+	for _, id := range []string{issueAsk.ID, otherSessionAsk.ID} {
+		requireWithdrawn(t, handler, issue.Key, id, model.Actor{Kind: "user", ID: "alice"})
+	}
+	if got := readAskRecord(t, handler, answered.ID); got.State != "answered" {
+		t.Fatalf("answered ask after the close = %s, want answered", got.State)
+	}
+	if got := readAskRecord(t, handler, retracted.ID); got.State != "resolved" || got.Resolution == nil || got.Resolution.Kind != "retracted" {
+		t.Fatalf("retracted ask after the close = %s %#v, want retracted", got.State, got.Resolution)
 	}
 	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
 		"status": "todo",
 	}, "alice"); response.Code != http.StatusOK {
 		t.Fatalf("reopen issue: status=%d body=%s", response.Code, response.Body.String())
 	}
+	// The reopen restored them.
 	reopened := listOpenAsks(t, handler, ownerSession, "")
-	if reopened.Count != 3 {
+	restored := false
+	for _, ask := range reopened.Asks {
+		restored = restored || ask.ID == issueAsk.ID
+	}
+	if reopened.Count != 3 || !restored {
 		t.Fatalf("reopened issue open asks = %#v, want all active asks", reopened)
 	}
 }
@@ -375,7 +391,8 @@ func TestListOpenAsksForProject(t *testing.T) {
 		t.Fatalf("document-owned row = %#v, want the TEST runbook document", listed.Asks[1])
 	}
 
-	// A closed issue's asks leave project scope exactly as they leave session scope.
+	// Closing the issue withdraws its ask, so it leaves project scope exactly as it leaves session
+	// scope; the unlinked document's ask stays.
 	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
 		"status": "done",
 	}, "alice"); response.Code != http.StatusOK {
@@ -385,6 +402,7 @@ func TestListOpenAsksForProject(t *testing.T) {
 	if closed.Count != 1 || len(closed.Asks) != 1 || closed.Asks[0].ID != documentAsk.ID {
 		t.Fatalf("project open asks after close = %#v, want only the document ask", closed)
 	}
+	requireWithdrawn(t, handler, issue.Key, issueAsk.ID, model.Actor{Kind: "user", ID: "alice"})
 }
 
 func TestListOpenAsksRequiresExactlyOneScope(t *testing.T) {

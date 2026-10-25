@@ -110,6 +110,118 @@ func TestWritingIssueAskStatesReachesTheAsksBlocksAndTheirCopiesAlone(t *testing
 	}
 }
 
+// The close's write of its asks' states credits the closer as a pending author, as any live write
+// does, but is no edit: the document's latest edit source, which settlement names as the author of
+// an ask block it indexes with no author of its own, stays the session that wrote the unindexed
+// block, on the pending-settlement row and in the room, and settlement still names it when the
+// session's edit wrote its own version, as POST /edits does, so that the closer alone is pending.
+// An edit the same transaction made before the close's write is still the latest edit source.
+func TestWritingIssueAskStatesLeavesTheLatestEditSourceAlone(t *testing.T) {
+	session := model.Actor{Kind: "session", ID: "late-asking-session"}
+	closer := model.Actor{Kind: "user", ID: "carol"}
+	editor := model.Actor{Kind: "user", ID: "erin"}
+	for _, test := range []struct {
+		name    string
+		version ledgerWriteVersion
+		edit    bool
+		want    model.Actor
+		pending []model.Actor
+	}{
+		{name: "the close's write alone", version: withoutVersion, want: session, pending: []model.Actor{closer, session}},
+		{name: "after the session's edit wrote its own version", version: withSnapshotVersion, want: session, pending: []model.Actor{closer}},
+		{name: "after an edit in the same transaction", version: withoutVersion, edit: true, want: editor, pending: []model.Actor{closer, session, editor}},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			service, artifactID := newTestService(t)
+			service.settle = time.Hour
+			seedServiceText(t, service, artifactID, "Context\n\n"+regionBlock)
+			settleCurrentGeneration(t, service, artifactID)
+			region := blockAskOn(t, service, artifactID, "region")
+			writeThroughLedger(t, service, artifactID, session, freshBlock, test.version)
+
+			var marked []BlockRef
+			err := joinedWrite(service, func(ctx context.Context) (err error) {
+				tx, _ := txFromContext(ctx)
+				if _, err := tx.Exec(ctx, `select 1 from issues where key = 'DOC-1' for no key update`); err != nil {
+					return fmt.Errorf("lock the issue: %w", err)
+				}
+				if test.edit {
+					if _, err := service.ApplyOps(ctx, artifactID, []model.EditOp{{Op: "insert", After: "end", Markdown: "Erin's paragraph.\n"}}, editor, nil); err != nil {
+						return fmt.Errorf("apply the edit: %w", err)
+					}
+				}
+				marked, err = service.WriteIssueAskStates(ctx, "DOC-1", []model.Ask{withdrawnAsk(region, closer)}, closer, true)
+				return err
+			})
+			if err != nil {
+				t.Fatalf("write the close's ask states: %v", err)
+			}
+			if want := []BlockRef{{ArtifactID: artifactID, BlockID: "fresh"}}; !reflect.DeepEqual(marked, want) {
+				t.Fatalf("the close's write marked %+v, want %+v", marked, want)
+			}
+			requireLatestEditSource(t, service, artifactID, test.want)
+			pending := pendingAuthorRows(t, service.store, artifactID)
+			for _, author := range test.pending {
+				if !slices.Contains(pending, author) {
+					t.Fatalf("pending authors = %+v, want %+v among them", pending, test.pending)
+				}
+			}
+		})
+	}
+}
+
+// The close moves a document's latest edit source from its room to its pending-settlement row, and
+// a room that loads while the issue is closed restores none. The reopen gives it back, after the
+// close's write of its asks' states credited the closer, so the settlement the document owes names
+// the session that edited it last.
+func TestReopeningAnIssueRestoresTheLatestEditSourceOfARoomLoadedWhileClosed(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	ctx := context.Background()
+	seedServiceText(t, service, artifactID, "Context\n\n"+regionBlock)
+	settleCurrentGeneration(t, service, artifactID)
+	region := blockAskOn(t, service, artifactID, "region")
+	session := model.Actor{Kind: "session", ID: "reopened-session"}
+	writeThroughLedger(t, service, artifactID, session, freshBlock, withSnapshotVersion)
+	closeTestIssue(t, service)
+	closer := model.Actor{Kind: "user", ID: "carol"}
+	writeIssueAskStates(t, service, []model.Ask{withdrawnAsk(region, closer)}, closer, true)
+	if err := service.srv.Apply(withOwnerVerified(ctx), artifactID, func(*crdt.Doc, func(func(*crdt.Transaction))) {}); err != nil && !errors.Is(err, ygws.ErrNoChanges) {
+		t.Fatalf("load the closed issue's room: %v", err)
+	}
+	if service.srv.GetDoc(artifactID) == nil || !service.roomClosed(artifactID) {
+		t.Fatal("the closed issue's room is not resident and flagged closed")
+	}
+
+	reopenTestIssue(t, service)
+	requireLatestEditSource(t, service, artifactID, session)
+}
+
+// requireLatestEditSource fails unless want is artifactID's latest edit source: on its
+// pending-settlement row, in its room, and as the actor settlement names (settlementAuthors).
+func requireLatestEditSource(t *testing.T, service *Service, artifactID string, want model.Actor) {
+	t.Helper()
+	ctx := context.Background()
+	owed, lastActor, err := readOwedSettlement(ctx, service.store.Pool, artifactID)
+	if err != nil || !owed || lastActor == nil || *lastActor != want {
+		t.Fatalf("the pending settlement (owed %t, %v) names %+v, want %+v", owed, err, lastActor, want)
+	}
+	owedAuthors, err := readPendingAuthors(ctx, service.store.Pool, artifactID)
+	if err != nil {
+		t.Fatalf("read the pending authors: %v", err)
+	}
+	state := service.lockState(artifactID)
+	latest := state.lastActor
+	credit := settlementAuthors(state, owedAuthors)
+	service.unlockState(artifactID, state)
+	if latest == nil || *latest != want {
+		t.Fatalf("the room's latest edit source = %+v, want %+v", latest, want)
+	}
+	if credit.actor != want {
+		t.Fatalf("settlement names %+v, want %+v", credit.actor, want)
+	}
+}
+
 // A closed issue's documents refuse every ordinary write, and the close's own still reaches them,
 // since its caller holds the issue's row: a room flagged closed that a reader loaded again, and a
 // document no room holds, whose write the store keeps.

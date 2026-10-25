@@ -414,10 +414,14 @@ func TestClosedIssueAsksCannotBeAnsweredOrShown(t *testing.T) {
 	if closed.Code != http.StatusOK {
 		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
 	}
+	// The close withdrew the ask; an answer on the closed issue is still refused, and leaves the
+	// close's record as it was.
+	requireWithdrawn(t, handler, issue.Key, ask.ID, model.Actor{Kind: "user", ID: "alice"})
 	answer := dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/answer", map[string]any{}, "alice")
 	if answer.Code != http.StatusConflict || !strings.Contains(answer.Body.String(), `"code":"ISSUE_CLOSED"`) {
 		t.Fatalf("answer ask on closed issue: status=%d body=%s", answer.Code, answer.Body.String())
 	}
+	requireWithdrawn(t, handler, issue.Key, ask.ID, model.Actor{Kind: "user", ID: "alice"})
 	inbox := dispatchRequest(t, handler, http.MethodGet, "/api/v1/inbox?project=TEST", nil, "alice")
 	if inbox.Code != http.StatusOK || strings.Contains(inbox.Body.String(), ask.ID) {
 		t.Fatalf("closed issue ask appeared in inbox: status=%d body=%s", inbox.Code, inbox.Body.String())
@@ -1927,7 +1931,12 @@ func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 	assertClosed("ask", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Later ask", "actor": sessionActor(),
 	}))
+	// The close withdrew the open ask; its answer is refused with the rest.
+	requireWithdrawn(t, handler, issue.Key, askID, model.Actor{Kind: "user", ID: "alice"})
 	assertClosed("ask answer", dispatchRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/answer", map[string]any{}, "alice"))
+	assertClosed("ask resolution", sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+askID+"/resolve", map[string]any{
+		"kind": "retracted", "reason": "Later retraction.", "actor": sessionActor(),
+	}))
 	assertClosed("comment", sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]any{
 		"body": "Later comment", "actor": sessionActor(),
 	}))
@@ -1958,6 +1967,9 @@ func TestDoneIssueRejectsEveryMutation(t *testing.T) {
 	reopened := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "todo"}, "alice")
 	if reopened.Code != http.StatusOK || strings.Contains(reopened.Body.String(), `"closed_at":`) && !strings.Contains(reopened.Body.String(), `"closed_at":null`) {
 		t.Fatalf("reopen done issue: status=%d body=%s", reopened.Code, reopened.Body.String())
+	}
+	if restored := readAskRecord(t, handler, askID); restored.State != "open" || restored.Resolution != nil {
+		t.Fatalf("withdrawn ask after reopen = %s %#v, want open again", restored.State, restored.Resolution)
 	}
 	if created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Reopened ask", "actor": sessionActor(),
@@ -2515,6 +2527,8 @@ func TestResolveAskRejectsInvalidInputAndClosedIssues(t *testing.T) {
 	for _, input := range []map[string]any{
 		{"kind": "closed", "reason": "No."},
 		{"kind": "resolved", "reason": "   "},
+		// Withdrawn is the record an issue's close writes, never a caller's.
+		{"kind": "withdrawn", "reason": "Withdrawn by the close of " + issue.Key + "."},
 	} {
 		input["actor"] = sessionActor()
 		if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", input); response.Code != http.StatusBadRequest || !strings.Contains(response.Body.String(), `"code":"INVALID_RESOLUTION"`) {
@@ -2524,11 +2538,14 @@ func TestResolveAskRejectsInvalidInputAndClosedIssues(t *testing.T) {
 	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{"status": "done"}, "alice"); response.Code != http.StatusOK {
 		t.Fatalf("close issue: status=%d body=%s", response.Code, response.Body.String())
 	}
+	// The close withdrew the ask, and its record stays the close's.
+	requireWithdrawn(t, handler, issue.Key, ask.ID, model.Actor{Kind: "user", ID: "alice"})
 	if response := sessionRequest(t, handler, http.MethodPost, "/api/v1/asks/"+ask.ID+"/resolve", map[string]any{
 		"kind": "resolved", "reason": "Found the answer.", "actor": sessionActor(),
 	}); response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"ISSUE_CLOSED"`) {
 		t.Fatalf("resolve ask on closed issue: status=%d body=%s", response.Code, response.Body.String())
 	}
+	requireWithdrawn(t, handler, issue.Key, ask.ID, model.Actor{Kind: "user", ID: "alice"})
 }
 
 func TestInboxGroupsAsksWaitingOnTheirAskerAfterThoseNeedingAHuman(t *testing.T) {

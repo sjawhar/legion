@@ -343,9 +343,10 @@ func (l *Ledger) addLiveWrite(write *liveWrite) {
 // (deleteCapturedPendingAuthors), then records, in one statement per write, each write's authors no
 // version of the transaction lists (recordVersion), each at the append that recorded that author's
 // latest change (liveWrite.creditedBy), and each write's and seed's latest edit source on the
-// document's pending-settlement row. Deleting first means the write's own authors are recorded
-// after the delete that would otherwise take them out. Both commit or roll back with the content,
-// before the request context can be canceled after commit.
+// document's pending-settlement row; a write that made no edit, only server lifecycle writes
+// (liveWrite.editSource), leaves the row's. Deleting first means the write's own authors are
+// recorded after the delete that would otherwise take them out. Both commit or roll back with the
+// content, before the request context can be canceled after commit.
 func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 	for _, written := range l.versions {
 		if err := deleteCapturedPendingAuthors(ctx, l.tx, written.artifactID, written.capture); err != nil {
@@ -370,7 +371,10 @@ func (l *Ledger) recordSettlementCredit(ctx context.Context) error {
 		if err := upsertPendingAuthors(ctx, l.tx, artifactID, pending); err != nil {
 			return err
 		}
-		if err := recordLatestEditSource(ctx, l.tx, artifactID, write.actor); err != nil {
+		if write.editSource == nil {
+			continue
+		}
+		if err := recordLatestEditSource(ctx, l.tx, artifactID, write.editSource); err != nil {
 			return err
 		}
 	}
@@ -396,14 +400,18 @@ func (l *Ledger) releasedAuthors() map[string]map[string]struct{} {
 
 // creditRooms records, once the transaction has committed and before its live writes publish,
 // each seed's and write's latest edit source in its room, which the settlement it arms names on
-// its events, and registers the ask blocks each introduced to its author. The authors themselves
-// are already recorded in the database (recordSettlementCredit).
+// its events, and registers the ask blocks each introduced to its author. A write that made no
+// edit (liveWrite.editSource) leaves the room's latest edit source as it was, and each author it
+// credited for server lifecycle writes alone is recorded as such (roomState.lifecycleAuthors);
+// every other author it or a seed credited is an editor again. The authors themselves are already
+// recorded in the database (recordSettlementCredit).
 func (l *Ledger) creditRooms() {
 	for artifactID, seed := range l.seeds {
 		state := l.service.lockState(artifactID)
 		state.creditSeq.Add(1)
 		state.lastActor = new(seed.actor)
 		state.unsettled = true
+		delete(state.lifecycleAuthors, actorKey(seed.actor))
 		state.registerAskAuthors(askBlockIDs(seed.rendered.tree), seed.actor)
 		l.service.unlockState(artifactID, state)
 	}
@@ -414,8 +422,11 @@ func (l *Ledger) creditRooms() {
 		}
 		state := l.service.lockState(artifactID)
 		state.creditSeq.Add(1)
-		state.lastActor = write.actor
+		if write.editSource != nil {
+			state.lastActor = write.editSource
+		}
 		state.unsettled = true
+		state.recordCreditKinds(write.credits, write.lifecycleCredits)
 		if write.actor != nil {
 			// The carried-forward author of a renamed id is registered before the ids this
 			// write's own before/after diff adds, so a rename's more specific registration is

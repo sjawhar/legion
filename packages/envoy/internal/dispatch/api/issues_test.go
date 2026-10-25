@@ -233,11 +233,13 @@ func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
 		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
 	}
 	issue := decodeBody[model.Issue](t, created)
-	if ask := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]string{
+	asked := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]string{
 		"question": "Which option?",
-	}, "alice"); ask.Code != http.StatusCreated {
-		t.Fatalf("create ask: status=%d body=%s", ask.Code, ask.Body.String())
+	}, "alice")
+	if asked.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", asked.Code, asked.Body.String())
 	}
+	ask := decodeBody[model.Ask](t, asked)
 
 	assertOpenAskCount := func(want int) {
 		t.Helper()
@@ -257,7 +259,9 @@ func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
 	}, "alice"); closed.Code != http.StatusOK {
 		t.Fatalf("close issue: status=%d body=%s", closed.Code, closed.Body.String())
 	}
+	// The close withdrew the ask, which no longer counts.
 	assertOpenAskCount(0)
+	requireWithdrawn(t, handler, issue.Key, ask.ID, model.Actor{Kind: "user", ID: "alice"})
 	openOnly := dispatchRequest(t, handler, http.MethodGet, "/api/v1/issues?project=TEST&open=true", nil, "alice")
 	if openOnly.Code != http.StatusOK || len(decodeBody[[]model.IssueSummary](t, openOnly)) != 0 {
 		t.Fatalf("open issue list: status=%d body=%s", openOnly.Code, openOnly.Body.String())
@@ -267,7 +271,11 @@ func TestListIssuesExcludesOpenAsksOnClosedIssues(t *testing.T) {
 	}, "alice"); reopened.Code != http.StatusOK {
 		t.Fatalf("reopen issue: status=%d body=%s", reopened.Code, reopened.Body.String())
 	}
+	// The reopen restored it.
 	assertOpenAskCount(1)
+	if restored := readAskRecord(t, handler, ask.ID); restored.State != "open" || restored.Resolution != nil {
+		t.Fatalf("ask after the reopen = %s %#v, want open", restored.State, restored.Resolution)
+	}
 }
 
 func TestListIssuesFiltersByUpdatedSince(t *testing.T) {

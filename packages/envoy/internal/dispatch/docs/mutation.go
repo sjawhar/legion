@@ -218,7 +218,7 @@ func (s *Service) applyLive(ctx context.Context, artifactID string, actor model.
 	write.versions = append(write.versions, version)
 	recorded = true
 	if contentChanged {
-		s.creditLiveWrite(write, actor)
+		s.creditLiveWrite(write, actor, !isLifecycleWrite(ctx))
 		maps.DeleteFunc(added, func(id string, _ struct{}) bool {
 			_, excluded := write.renamedAskBlockIDs[id]
 			return excluded
