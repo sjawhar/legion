@@ -1114,6 +1114,12 @@
   and the self-health monitor treats an unbound durable as terminal: it confirms the reading
   with a second one, rebinds, and reports success only once the server itself reports this
   listener bound (INFRA-182).
+- No NATS server URL the bus logs carries its userinfo: `envoy nats reconnected` and the refusal
+  of a NATS server that is not this machine's wrote the configured URL whole, and nats.go
+  authenticates with a URL's userinfo, a user name alone as a token and `user:password` as a
+  password, so `NATS_URLS=nats://user:password@host:4222` put the password in the process's log.
+  Each URL is now written without its userinfo, as `envoy nats reconnect attempt failed` writes
+  its servers (INFRA-182).
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
   but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
   which replaces a machine's own credentials for every program that uses them. A write under
