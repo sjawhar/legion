@@ -33,8 +33,12 @@
   step the person must do with their own hands when the agent did not try its own access first. A
   match refuses the call in `warn` mode as well as in `block` mode. `--advisor-rebuttal '<line>'`
   on a command, `"advisor_rebuttal": "<line>"` in a device's JSON, or the third attempt on the same
-  target sends the call anyway. The `advisor-gate` entry gains `rule`, `ruleAsk`, `ruleQuote`,
-  `ruleOutcome`, `ruleModel`, `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut` and
+  target sends the call anyway. The breaker counts only the calls the gate refused, so a charter
+  revise in `warn` mode, which sends the call, never moves it, and its free pass covers only the
+  thing that was refused: a target whose refusals named no ask, or a call opening one of the asks
+  a rules refusal named there. Another ask on that target is reviewed like any other call. The
+  `advisor-gate` entry gains `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleModel`,
+  `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut` and
   `target`, and `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors
   and the refusals the agent overrode.
 - AskGate publishes each rule decision, and each refused call the agent sent again with a rebuttal

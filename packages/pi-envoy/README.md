@@ -285,8 +285,14 @@ instead and how to send the call anyway. The agent sends the call anyway in one 
 
 - `--advisor-rebuttal '<line>'` on a `dispatch` command.
 - `"advisor_rebuttal": "<line>"` in a device's JSON.
-- The third attempt on the same target: after the gate sends back two calls in a row on one
-  target, it sends the third without review.
+- The third attempt on the same target: after the gate refuses two calls in a row on one target,
+  it sends the third without review. Only a refusal counts: in `warn` mode a charter `revise`
+  sends the call, so it never moves the breaker, while a match of the rules check refuses the
+  call in either mode and always does. The third call goes out unreviewed only where it is the
+  thing that was refused: a target whose refusals named no ask (the call as a whole was sent
+  back), or a call opening one of the asks a rules refusal named there. A call opening a
+  different ask on that target is reviewed like any other, and leaves the count for the ask that
+  raised it.
 
 A rebuttal sends the call with no review by either check, and the entry records the line. A rules
 call that ends in an error, a timeout or an answer that does not parse refuses nothing: the

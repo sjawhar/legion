@@ -634,8 +634,8 @@ describe("untrusted text (security)", () => {
 });
 
 describe("breaker (test 7)", () => {
-  test("two revises on one target trip it for that target only, and the trip resets it", async () => {
-    const g = bind({ complete: async () => ({ text: REVISE }) });
+  test("two refusals on one target trip it for that target only, and the trip resets it", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
     await g.device("a", "dispatch_comment", { issue: "X-1", body: "one" });
     await g.device("b", "dispatch_comment", { issue: "X-1", body: "two" });
     await g.device("c", "dispatch_comment", { issue: "X-2", body: "other" });
@@ -657,7 +657,7 @@ describe("breaker (test 7)", () => {
     ]);
     expect(g.entries[3].revisesForKey).toBe(2);
   });
-  test("the second revise on a target says the third unchanged resend goes out unreviewed, in both modes", async () => {
+  test("the second refusal on a target says the third unchanged resend goes out unreviewed; a warn revise, which refuses nothing, says no such thing", async () => {
     const SECOND =
       "This is the second revise on this target: a third unchanged resend is sent without review and recorded.";
     const block = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
@@ -672,7 +672,12 @@ describe("breaker (test 7)", () => {
     const context =
       (await warn.device("b", "dispatch_comment", { issue: "X-1", body: "two" }))
         ?.additionalContext ?? "";
-    expect(context).toMatch(new RegExp(`${SECOND.replace(/[.:]/g, "\\$&")}\\n</advisor-gate>$`));
+    expect(context).not.toContain(SECOND);
+    expect(context.trimEnd().endsWith("</advisor-gate>")).toBe(true);
+    // Both calls ran as the agent wrote them, so the third is reviewed like the first two.
+    const third = await warn.device("c", "dispatch_comment", { issue: "X-1", body: "three" });
+    expect(third?.additionalContext).toContain('verdict="revise"');
+    expect(warn.calls).toHaveLength(3);
   });
   test("the request carries the reasons already given for the target", async () => {
     const g = bind({ complete: async () => ({ text: REVISE }) });
@@ -695,7 +700,7 @@ describe("breaker (test 7)", () => {
     expect(g.calls).toHaveLength(4);
   });
   test("each artifact of one project is its own breaker target", async () => {
-    const g = bind({ complete: async () => ({ text: REVISE }) });
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: async () => ({ text: REVISE }) });
     await g.device("a", "dispatch_doc_edit", { project: "P", artifact: "a.md", edits: [] });
     await g.device("b", "dispatch_doc_edit", { project: "P", artifact: "a.md", edits: [] });
     await g.device("c", "dispatch_doc_edit", { project: "P", artifact: "b.md", edits: [] });
@@ -1743,7 +1748,11 @@ console.log(JSON.stringify(args, null, 2));
     expect(inline?.input).toEqual({ command: "dispatch comment --issue X-1 --body hi" });
   });
   test("a device call and a command on one target share its breaker", async () => {
-    const g = bind({ env: STUB, cwd: work, complete: async () => ({ text: REVISE }) });
+    const g = bind({
+      env: { ...STUB, OMP_ASKGATE: "block" },
+      cwd: work,
+      complete: async () => ({ text: REVISE }),
+    });
     await g.device("a", "dispatch_comment", { issue: "X-1", body: "one" });
     await g.bash("b", "dispatch comment --issue X-1 --body two");
     const third = await g.bash("c", "dispatch comment --issue X-1 --body three");
@@ -3157,6 +3166,51 @@ describe("rules check", () => {
       ["verdict", "revise", 1],
       ["verdict", "revise", 2],
       ["breaker", "allow", 2],
+    ]);
+  });
+  test("two warn-mode charter revises refuse nothing, so the ask after them is still checked against the rules (rules test 14a)", async () => {
+    let rules = RULES_NONE;
+    const g = bind({ complete: bySystem(REVISE, async () => ({ text: rules, usage: USAGE })) });
+    for (const id of ["a", "b"]) {
+      const warned = await g.device(id, "dispatch_ask", KEEP_INPUT);
+      expect(warned?.block).toBeUndefined();
+      expect(warned?.additionalContext).not.toContain(SECOND);
+    }
+    rules = NO_CHANGE;
+    const third = await g.device("c", "dispatch_ask", KEEP_INPUT);
+    expect(third?.block).toBe(true);
+    expect(third?.reason).toContain('matches the rule "no change"');
+    expect(g.calls.filter(isRules)).toHaveLength(3);
+    expect(g.entries.map((e) => [e.outcome, e.decision, e.rule])).toEqual([
+      ["verdict", "revise", undefined],
+      ["verdict", "revise", undefined],
+      ["verdict", "revise", "no_change"],
+    ]);
+  });
+  test("a tripped breaker does not cover a different ask on the same target, and still covers the refused one (rules test 14b)", async () => {
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: bySystem(ALLOW, NO_CHANGE) });
+    for (const id of ["a", "b"])
+      expect((await g.device(id, "dispatch_ask", KEEP_INPUT))?.block).toBe(true);
+    const asked = g.calls.length;
+    const other = {
+      ...KEEP_INPUT,
+      question:
+        "The soak is still running and the deploy window closes at 18:00. Should I hold the release? Recommendation: hold it.",
+    };
+    const different = await g.device("c", "dispatch_ask", other);
+    expect(different?.block).toBe(true);
+    expect(different?.reason).toContain('matches the rule "no change"');
+    // The charter call and the rules call both ran on it: the breaker bought it no free pass.
+    expect(g.calls).toHaveLength(asked + 2);
+    // The loop the breaker ends is still ended: the ask it refused goes out unasked.
+    const pass = await g.device("d", "dispatch_ask", KEEP_INPUT);
+    expect(pass?.additionalContext).toContain('outcome="breaker"');
+    expect(g.calls).toHaveLength(asked + 2);
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual([
+      ["verdict", "revise"],
+      ["verdict", "revise"],
+      ["verdict", "revise"],
+      ["breaker", "allow"],
     ]);
   });
   test("the rules call never sees the charter's frame or answer format (rules test 15)", async () => {
