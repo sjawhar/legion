@@ -2,8 +2,12 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-182",
-  "completed": "2026-10-25T08:03:41Z",
-  "round": 3,
+  "completed": "2026-10-25T08:27:30Z",
+  "round": 4,
+  "roundFour": {
+    "implementerProof": "verified: its round-4 proof (a throwaway -race test with a goroutine logging through the default slog while the capture is read) reproduced with a test of my own, four writer goroutines while TestLoggedNATSURLsCarryNoUserinfo and TestAConsumerNotActiveReportIsAWarning run in a loop for 2 s: ok at 29ebf098c578, 20 DATA RACE reports and FAIL against dd2fb2b41ecf's test files.",
+    "delta": "29ebf098c578 changes three test files of internal/bus (async_error_test.go, log_url_test.go, stream_config_test.go) and nothing else under packages/; no production file differs from dd2fb2b41ecf, whose real-surface verification (round 3, the proof array below) stands."
+  },
   "implementerProof": {
     "verdict": "verified",
     "how": "Round 3 (answers to review round 1 at c939145e2b04). I drove each of the implementer's four round-3 observations on the same surface independently, with binaries and servers of my own: the real envoy-listener built at dd2fb2b41ecf (production files identical at the handoff head 93ec8c10cdcb) and, as control, at c939145e2b04 from git archive, each against real nats-server v2.11.4 processes. Its user:password, token and refusal runs reproduced (0 occurrences at the head, the secret printed by the control); its rebind-deadline claim, which it proved with a throwaway in-package test, I proved on the real listener through a TCP proxy that holds awaitDurableBound's read (3.001 s at the head, 10.001 s in the control); its generation fix reproduced with TestAWaitARepairClearedReportsNotTheNextStop run against a local JetStream server, passing at the head and failing with the generation check removed; its shutdown-cut-writes-no-ERROR claim reproduced on the real listener (no ERROR at the head, 'self-health rebuild failed ... after 10.001s' in the control)."
@@ -11,6 +15,14 @@
   "failures": [],
   "failed": 0,
   "proof": [
+    {
+      "criterion": "Review round 2 finding PRRT_kwDORFy7ds6v_jdd: package bus tests read the captured default log only behind the writer's lock, so a closed client's late ClosedCB cannot race a read in envoy-go-race; and the rewritten tests still catch a credential in the log.",
+      "surface": "go test -race -ldflags=-linkmode=external with CC='zig cc' (zig 0.13.0; the pod has no C compiler) on git archives of 29ebf098c578 and dd2fb2b41ecf, with a local nats-server v2.11.4 (--user tU --pass tP) in place of testnats.URL for the one container-backed test; plus the real envoy-listener rebuilt at 29ebf098c578 against a real nats-server.",
+      "command": "Throwaway zz_race_test.go (deleted): 4 goroutines slog.Info('envoy nats connection closed', name=late-closed) while t.Run(TestLoggedNATSURLsCarryNoUserinfo) and t.Run(TestAConsumerNotActiveReportIsAWarning) loop for 2 s; go test -race -run TestZZCaptureUnderLateWriter ./internal/bus/. Then go test -race -count=3 -run '<the seven tests of the three changed files>' ./internal/bus/. Then the reconnect WARN and reconnected line reverted to the raw URL in connect.go and the two URL tests run. Smoke: secret_run.sh listener-r4 with NATS_URLS=nats://envoy:p@ssSECRET51@127.0.0.1:4222.",
+      "observed": "At 29ebf098c578: 'ok github.com/sjawhar/envoy/internal/bus 3.076s', no race report. The seven tests (TestNATSURLWithoutUserinfo, TestLoggedNATSURLsCarryNoUserinfo, TestTheReconnectedLineCarriesNoUserinfo, TestAConsumerNotActiveReportIsAWarning and the three stream-config log tests) PASS 3 times each under -race. With the redaction reverted both URL tests FAIL ('the failed reconnect WARN holds \"user-marker-0\"', 'the logged url \"nats://tU:tP@127.0.0.1:4222\" carries userinfo'). Smoke: 'WARN envoy nats reconnect attempt failed name=envoy servers=nats://127.0.0.1:4222', 'INFO envoy nats reconnected name=envoy url=nats://127.0.0.1:4222', 0 occurrences of the secret.",
+      "headSha": "29ebf098c5781cdb502d6409eafc9541c9ea53f4",
+      "negativeControl": "The same throwaway race test against dd2fb2b41ecf's test files: 'WARNING: DATA RACE' 20 times, 'race detected during execution of test', FAIL."
+    },
     {
       "criterion": "R3 (review finding PRRT_kwDORFy7ds6v_JF6): no line the bus logs and no logged refusal carries a NATS URL's userinfo, whatever the credential's shape, including a server nats.go discovered and gave the configured userinfo.",
       "surface": "The real envoy-listener binary built at dd2fb2b41ecf, run as a process (PORT=9099 ENVOY_MACHINE_ID=smoke NATS_URLS=...) against real nats-server v2.11.4 processes in the issue pod: single servers with --user/--pass or --auth, a 3-node JetStream cluster with token auth, and remote refusals.",
@@ -44,7 +56,7 @@
       "negativeControl": "With the generation check removed, the stale-wait test FAILs: 'the repaired stop's wait logged 1 \"test cache watcher was not repaired\" errors, want none: [... reason:no repair within 1m0s ...]' - the permanent test catches the defect the reviewer named."
     }
   ],
-  "ci": "Read 2026-10-25T08:05Z at the code head dd2fb2b41ecf: Legion Envoy and Contracts run 40173085050 queued (envoy-go and envoy-go-race, where the container-backed new tests run), Tests run 40173085068 in progress, PR Title run 40173188166 pending (40173138159 and 40173138391 success), Docs run 40173085046 success, Worker Image run 40173085039 success. The handoff heads after it carry skip-checks: true. This tester waits for none of them.",
+  "ci": "Read 2026-10-25T08:27Z at the code head 29ebf098c578: Legion Envoy and Contracts run 40176279896 queued (envoy-go and envoy-go-race, where the container-backed new tests run), Tests run 40176279866 queued, PR Title 40176279888 cancelled (superseded; re-runs 40176286348, 40176286758, 40176319491 queued), Docs run 40176279904 in progress, Worker Image run 40176279892 in progress. At dd2fb2b41ecf Tests, Docs and Worker Image ended success and Legion Envoy and Contracts run 40173085050 cancelled (superseded), so A1-A3's container tests have yet to finish in CI at any head. This tester waits for none of them.",
   "observations": [
     "Pre-existing and outside this change: /healthz runs its NATS reads (FlushTimeout, each cache's Ping, ConsumerInfo with the handle's 10 s MaxWait) inside the HTTP server's 10 s WriteTimeout, so while JetStream does not answer a request can get no response at all (curl HTTP 000 after about 10 s) rather than a 503. Seen once, on a 3-node cluster just after the node the listener was connected to was killed; the c939145e2b04 binary did the same, and the ConsumerInfo read is in main's handler too. A health check reads either as unhealthy, so no acceptance criterion is affected.",
     "natsURLWithoutUserinfo renders a URL with an '@' after its authority (tls://tok@host:4222/x@y) as what follows the last '@' ('y'), losing the host from the refusal. It is safe and the unit table pins it; such a URL is not a usable NATS URL.",
@@ -52,6 +64,7 @@
   ],
   "history": {
     "round1": "At 171bf849883c: 0 real-surface defects; 2 failures recorded against this change's own tests (TestAFailedReconnectAttemptLogsOneWarnAMinute at reconnect_err_test.go:152; three repair_test.go cases at :140, :170, :205), answered by the test-only commit c939145e2b04.",
-    "round2": "At 40cdc5218694: test-only delta, real-surface smoke re-run, verdict pass."
+    "round2": "At 40cdc5218694: test-only delta, real-surface smoke re-run, verdict pass.",
+    "round3": "At dd2fb2b41ecf: full real-surface round on review round 1's four fixes, 0 failures, verdict pass."
   }
 }
