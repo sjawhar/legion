@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-221",
-  "completed": "2026-10-25T06:55:29Z",
+  "completed": "2026-10-25T07:04:24Z",
   "proof": [
     {
       "criterion": "A role that needs a tool its work requires can get it, in one documented step, without a person — the image half: the five clients are in the pod.",
@@ -43,6 +43,14 @@
       "observed": "Each of the four notes names the heading once (1, 1, 1, 1); tools.md carries the heading exactly once (1); the two one-condition paraphrases appear nowhere in docs/solutions ('none'). The LEGION-695 note now says the /tmp placement is replaced by a root on the issue's volume (the INFRA-43 learning) and that a build under /tmp fails the first condition; the INFRA-42 note places <root> and <data> on the volume. Since code head 21c0047b only docs/solutions and .legion/ changed, neither of which the worker image copies (worker.Dockerfile's COPY lines name skills/ and packages/, never docs/solutions), so the image proof above at sha-21c0047b30ea re-passes unchanged.",
       "headSha": "b82e5899a5e486366001d2cea990d3dc6b683b43",
       "negativeControl": "The same heading count over the same four notes at the previous head c89a473c26c9 is 0, and that head's LEGION-695 note opens 'still the step' directly under the recipe that 'builds one under `/tmp`' (:37, :43) — the endorsement the reviewer found."
+    },
+    {
+      "criterion": "Each of the five INFRA-221 notes is true of the tree as it is now and agrees with tools.md 'The test: where it lands, and what it leaves resolving' and with the other notes (tester round 10's two failures, and a final read of all five).",
+      "surface": "The tree at code head b4ebc2dd74e2ad31e87c5786057e4e126157c5b7: the five notes, the tools.md section they name (:82-100, :158-165, :170-188), and the runtime code the INFRA-44 note cites.",
+      "command": "For each of the LEGION-695, INFRA-42, INFRA-43, INFRA-44 and LEGION-748 notes, unwrapped: grep -o 'The test: where it lands, and what it leaves resolving' | wc -l and grep -o 'both conditions\\|first condition' | wc -l; grep -rn 'about scope\\|a harness that passes the test' docs/solutions; jj file annotate packages/daemon/internal/runtime/sandbox/manifest.go (lines 731-737); gh pr view 2085/2088 --json mergedAt; echo $TMPDIR; df -h /tmp /legion/scratch/tmp; then a read of each note's claim against the section.",
+      "observed": "Heading once and a condition named once in each of the five notes (1/1 x5); 'about scope' and 'a harness that passes the test' appear nowhere in docs/solutions. roleEnvironment's TMPDIR, GOCACHE and GOMODCACHE lines all come from 59214edf47fc (#2085, merged 2026-10-21T06:29:42Z); the INFRA-44 learning merged in #2088 at 2026-10-21T03:32:31Z; in this container TMPDIR=/legion/scratch/tmp on the 49G /legion volume while /tmp is on the container's /. The final read found one more claim not true against the section: the INFRA-43 note said a role reaches the root 'only by sourcing the env file' while the learning has every role source it, which leaves the export in the working shell; it now says to source it in the same invocation as the harness command. The LEGION-695, INFRA-42 and other claims read true. Only docs/solutions and .legion/ changed since 21c0047b; the worker image copies neither, so the image proof re-passes.",
+      "headSha": "b4ebc2dd74e2ad31e87c5786057e4e126157c5b7",
+      "negativeControl": "At the previous code head b82e5899a5e4 the LEGION-748 note counts 0 for the heading and contains 'That line is about scope' and 'a harness that passes the test'; its INFRA-44 note called the staging 'still the step' under the bullet that says 'No role container sets TMPDIR', which `echo $TMPDIR` in this container contradicts."
     }
   ],
   "filesChanged": [
