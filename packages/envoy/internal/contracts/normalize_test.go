@@ -2889,6 +2889,54 @@ func TestSlackDeliveredText(t *testing.T) {
 			wantText:    "Build failed",
 		},
 		{
+			name: "the message's own words echoed by a block and an attachment",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "deploy failed",
+					"blocks": []any{map[string]any{
+						"type": "section",
+						"text": map[string]any{"type": "mrkdwn", "text": "deploy failed"},
+					}},
+					"attachments": []any{map[string]any{"text": "deploy failed", "fallback": "deploy failed"}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: deploy failed",
+			wantText:    "deploy failed",
+		},
+		{
+			name: "two attachments carrying the same status",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"attachments": []any{
+						map[string]any{"title": "web-1", "text": "ok"},
+						map[string]any{"title": "web-2", "text": "ok"},
+					},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: web-1",
+			wantText:    "web-1\nok\nweb-2\nok",
+		},
+		{
+			name: "four sibling sections saying the same thing",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"blocks": []any{
+						map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": "retry scheduled"}},
+						map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": "retry scheduled"}},
+						map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": "retry scheduled"}},
+						map[string]any{"type": "section", "text": map[string]any{"type": "mrkdwn", "text": "retry scheduled"}},
+					},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: retry scheduled",
+			wantText:    "retry scheduled\nretry scheduled\nretry scheduled\nretry scheduled",
+		},
+		{
 			name: "own words and the client's rich-text copy",
 			body: map[string]any{
 				"team_id": "T01234567",
@@ -3131,7 +3179,7 @@ func TestSlackDeliveredText(t *testing.T) {
 				},
 			},
 			wantSummary: "slack message in C01234567 from U01234567: <@U0LEG> page: incident 4213",
-			wantText:    "<@U0LEG> page: incident 4213\nDisk check\nSeverity: 1\nHosts down: 2\nAction: page oncall",
+			wantText:    "<@U0LEG> page: incident 4213\nDisk check\nSeverity\n1\nHosts down\n2\nAction\npage oncall",
 		},
 		{
 			name: "two fields sharing a value keep their labels",
@@ -3149,7 +3197,7 @@ func TestSlackDeliveredText(t *testing.T) {
 				},
 			},
 			wantSummary: "slack message in C01234567 from U01234567: Deploy failed",
-			wantText:    "Deploy failed\nPrimary: oncall-a\nSecondary: oncall-a\nEscalation: oncall-b",
+			wantText:    "Deploy failed\nPrimary\noncall-a\nSecondary\noncall-a\nEscalation\noncall-b",
 		},
 		{
 			name: "a section's own text before its fields",
@@ -3169,6 +3217,50 @@ func TestSlackDeliveredText(t *testing.T) {
 			},
 			wantSummary: "slack message in C01234567 from U01234567: *p99* is 3.2s",
 			wantText:    "*p99* is 3.2s\n*Service*\napi",
+		},
+		{
+			name: "a CI alert whose counts repeat",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"blocks": []any{map[string]any{
+						"type": "section",
+						"fields": []any{
+							map[string]any{"type": "mrkdwn", "text": "*Passed*"},
+							map[string]any{"type": "mrkdwn", "text": "3"},
+							map[string]any{"type": "mrkdwn", "text": "*Failed*"},
+							map[string]any{"type": "mrkdwn", "text": "0"},
+							map[string]any{"type": "mrkdwn", "text": "*Skipped*"},
+							map[string]any{"type": "mrkdwn", "text": "0"},
+						},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: *Passed*",
+			wantText:    "*Passed*\n3\n*Failed*\n0\n*Skipped*\n0",
+		},
+		{
+			name: "a section's fields with two equal values",
+			body: map[string]any{
+				"team_id": "T01234567",
+				"event": map[string]any{
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
+					"blocks": []any{map[string]any{
+						"type": "section",
+						"fields": []any{
+							map[string]any{"type": "mrkdwn", "text": "*Primary*"},
+							map[string]any{"type": "mrkdwn", "text": "oncall-a"},
+							map[string]any{"type": "mrkdwn", "text": "*Secondary*"},
+							map[string]any{"type": "mrkdwn", "text": "oncall-a"},
+							map[string]any{"type": "mrkdwn", "text": "*Escalation*"},
+							map[string]any{"type": "mrkdwn", "text": "oncall-b"},
+						},
+					}},
+				},
+			},
+			wantSummary: "slack message in C01234567 from U01234567: *Primary*",
+			wantText:    "*Primary*\noncall-a\n*Secondary*\noncall-a\n*Escalation*\noncall-b",
 		},
 		{
 			name: "a button's label before its hidden value",
