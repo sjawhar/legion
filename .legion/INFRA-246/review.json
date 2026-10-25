@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-246",
-  "completed": "2026-10-25T09:40:00Z",
+  "completed": "2026-10-25T10:35:00Z",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
@@ -10,53 +10,38 @@
   "keyFindings": [
     {
       "severity": "important",
-      "file": ".github/scripts/check-heartbeat-margin.sh:252",
-      "description": "The renewal rule is `if renewal_window > lifetime.value`, so 3 x heartbeat + call_budget == lifetime passes. The rule's own failure text says the third refresh 'does not complete inside the lifetime... still owes its round trip - and setInterval fires late', which is exactly as true at equality as one millisecond past it, and the success path then prints that the window is 'inside' the lifetime. This is the half of the architect's round-1 ruling that is not in the code: it asked for three attempts plus their call budget to fit STRICTLY inside, and the implementation delivered the slack (the + call_budget term) but kept a non-strict comparison. The PR body's Change list repeats the claim, 'strictly, so a boundary that the third refresh cannot complete inside no longer passes', which the comparison does not deliver. Reachable configuration: DEFAULT_TIMEOUT_MS 14_875 with today's other constants gives a call budget of 30000 ms and a renewal window of exactly 300000 ms, and the check exits 0. Today's tree has 19750 ms of slack, so nothing lapses now; the defect is in the guard this change exists to leave behind. Fix: reject equality (>=), move the suggested maximum and minimum with it, and add a case at 3H + B == TTL - the suite's existing boundary case at check-heartbeat-margin.test.sh:143-157 is 3H == TTL, which the call budget already pushes past the lifetime, so it does not cover this one."
+      "file": "packages/pi-envoy/extensions/envoy.ts:2304",
+      "description": "The new skip in settleEndedHolds' failed-restore loop tests the topic alone - `if (topic === claimedRoleTopic) continue;` - while its comment claims the matching topic means 'a newer move's claim, which dropped every hand-back of it left pending'. That is not guaranteed: claimedRoleTopic is also set, a few lines above in this same loop, by the unconfirmed adoption at :2281-2285, which writes claimedRoleTopic = hold.topic, claimedRoleSessionID = hold.id and holdUnconfirmed = true without the listener having confirmed anything. So when pendingHandBacks carries two entries of one topic under different sessions - reachable because setEnvoyRole's abandoned branch adds `<topic>@<id>` at :1929 without the dedupe delete that only a live, claimed branch performs at :1938-1941 - the loop adopts the wanted one and then drops the other instead of recording abandonedHolds[topic] = {the other session}. The lost record is exactly what observeAbandonedHold reads (:1864-1865) to tell this process's own stale holder, which the listener will reap, from a genuine competitor: without it the next refusal records refusedRoles[id] = role (:1978), desiredRole then answers undefined for that session (:2036-2039), and the pane stops trying for the role until a session event or an explicit claim clears it - a live pane that should have reclaimed the role once the stale hold expired does not. Round 4's behaviour here was to restore always, whose worst case I audited as a redundant soft claim of a role the session already holds; this round traded that harmless redundancy for a sticky refusal in the harm class. Fix: discriminate on confirmation, not on the topic - `if (topic === claimedRoleTopic && !holdUnconfirmed) continue;`. Not the session id: a confirmed claim legitimately carries a different claimedRoleSessionID from the failed hold's, so `id === claimedRoleSessionID` would restore exactly the case the skip exists for. Reverting the line to round 4's unconditional restore is also acceptable, since that behaviour is audited and bounded."
     },
     {
       "severity": "minor",
-      "file": ".github/scripts/check-heartbeat-margin.sh:272",
-      "description": "The two-interval rule (worst_case = 2 * heartbeat + call_budget) can never fail without the renewal rule failing first: 2H + B <= 3H + B for every heartbeat the parser accepts, so any tree that trips it has already tripped rule 1. It adds no rejection, only a second diagnostic for one violated margin with a different prescribed remedy - the suite's own worst-case fixture reports two problems prescribing minimum lifetimes of 300400 ms and 260400 ms, so following the weaker one leaves the stronger failing. Delete the branch and its duplicate assertions, and keep the backstop explanation in the header, which is the part that earns its place: it is the reason the pass deadline is not in the formula at all. This was my round-1 finding, and rule 1 gaining the call budget in round 3 subsumed it."
+      "file": ".github/scripts/check-heartbeat-margin.sh:19-21",
+      "description": "The header says that at equality 'the third refresh is due at the very instant the record expires', which conflates dispatch with completion. With the suite's own tie fixture (heartbeat 40000, call budget 60000, lifetime 180000) the third refresh is due at 120000 ms and its budgeted completion reaches 180000. The rule is right and the fixtures are right; the sentence explaining them is not, and it is the sentence a future timing change starts from. Say that the third refresh's budgeted completion reaches expiry, leaving no scheduling margin."
     }
   ],
-  "roundThreeFindingsVerified": [
-    "One named predicate per scope: owns at envoy.ts:1656, :2168, :2324 and stillHolds at :1657, with the compound spellings gone from reconcileNow and settleRole. The blocking site is closed at :1967-1978, and distinguishes abandonment from a moved session in the warning so a reader is not sent after a refusedRoles entry that was never written. The fifth site the refactor exposed, roleSettledFor after the claim await, is closed at :2399.",
-    "registeredFor beside registeredAt (envoy.ts:1583, :1622), the backstop keyed by session at :1763, so a switch during a stall registers the new session.",
-    "envoySettings decides passDeadlineMs and passDeadlineRaisedFrom together (envoy-settings.ts:271-299) and startNotice formats them (session-settings.ts:103-106); the env parameter and the hand-copied predicate are gone.",
-    "Both vacuous assertions are gone: grep over .github/ finds neither string at this head.",
-    "The header's rule count is accurate, and the two hand-copied listener windows are now read and compared rather than excused in a comment."
+  "roundFourFindingsVerified": [
+    "check-heartbeat-margin.sh:261 is `renewal_window >= lifetime.value`, with the message naming 'equal to' or 'past' and stating that the tie is refused as surely as what is past it.",
+    "The remedy arithmetic moved with the comparison and went further: max_heartbeat = (lifetime - call_budget - 1) // RENEWALS // SECOND * SECOND and min_lifetime = (renewal_window // SECOND + 1) * SECOND, rounded to whole seconds because the Go sites a maintainer edits are parsed as whole seconds or minutes. The suite proves both by applying each prescribed remedy to a complete fixture (exit 0 at 177000 against 180000, and at 180000 against 181000), and refuses the tie itself at exactly 180000.",
+    "The subsumed two-interval rule and its worst_case term are gone from the check, its suite and the smoke; the header reads four rules and keeps the backstop paragraph in full under rule 1."
   ],
-  "fenceAudit": {
-    "scope": "every function reachable from the passes and roleMoves queues, every await followed by a write to claimedRoleTopic, claimedRoleSessionID, holdUnconfirmed, pendingHandBacks, abandonedHolds, refusedRoles, registeredAt, connection, subscriptions, agentSessions, inboundOpenFor, roleSettledFor and agentStreamControl*",
-    "result": "No omitted fence re-read remains. The two deliberate exceptions are bounded: registerSession's clock stamp carries the session id it captured, so an old session's late reply cannot suppress the new one and the worst case is one extra registration outside the queues; settleEndedHolds' failed-hand-back restore can reintroduce bookkeeping a newer claim cleared, whose worst case is a redundant soft claim of a role the session already holds, or a hand-back to a listener that no longer names that session. Neither reaches the harm class the three fixed sites did. The architect routed the restore site to dispatch://INFRA-49/ask/c7051816-2e86-4cb6-ad56-02ccb01e9355 with its trace."
-  },
-  "fingerprint": {
-    "reason": "the implementer forward-merged main to resolve a GitHub-reported conflict",
-    "preMergeHead": "eb3791429458",
-    "preMergeFingerprint": "e9e6a5e0 over 3007 lines",
-    "head": "40a7ea16311abd5b04f1d1e6d699b6bd1a213587",
-    "headFingerprint": "d5eac4b3 over 3005 lines",
-    "residue": "exactly two lines, `+### Added` and its blank line, in packages/envoy-client/CHANGELOG.md, which main now supplies. Nothing else moved. Computed by the reviewer, not accepted from the tester's report.",
-    "note": "The reviewer's own last review commit 37cc6e3d fingerprints 512170bd, which differs because round 4's code sits between them; this is a new round in any case, never a fingerprint confirmation."
-  },
   "ciRead": {
-    "codeHead": "f9e1a8fdd768f4e125dcce7295764cb31f46a8ec",
+    "codeHead": "0a3dc8ad4937dc332d17f03158dc12c367149dc3",
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "verdict": "all four completed success at the code head; compare f9e1a8fd...40a7ea16 is ahead with only .legion/INFRA-246/implement.json and test.json above it. envoy-go-race, envoy-smoke, envoy-infra-go and dispatch-memory were still running; none is required and none was waited for.",
+    "verdict": "all four completed success at the code head. One pr-title check-run is `cancelled` (run 15374, 09:38Z), superseded by run 15389 at 09:51Z which is success - the workflow's concurrency group cancels the earlier run when a body edit starts a new one, and the newest run for the required context is green. compare 0a3dc8ad...f1c34692 is ahead with only .legion/INFRA-246/implement.json and test.json above it. Several non-required lanes (envoy-go, envoy-client, pi-envoy, pi-shared, pi-legion, envoy-e2e-local, envoy-go-race, envoy-infra-go, dispatch-memory) were queued or running; none was waited for.",
     "reviewedHead": "the head this round's handoff push makes"
   },
   "threads": {
-    "openedByReviewer": 13,
-    "answeredByImplementer": 13,
-    "reviewerRepliesPosted": 13,
+    "openedByReviewer": 15,
+    "answeredByImplementer": 15,
+    "reviewerRepliesPosted": 15,
     "botThreadsAccepted": [],
-    "note": "Round 1's eight and round 3's five, each verified in the code before the reviewer's reply."
+    "note": "Rounds 1, 3 and 4; each fix verified in the code before the reviewer's reply."
   },
   "thermonuclear": {
-    "head": "40a7ea16",
-    "scope": "the whole pull request, since there is still no approval",
-    "deepReview": "CHANGES - 1 low, with an exhaustive per-await fence audit finding no omitted re-read in the product code",
-    "codeQuality": "CHANGES - 1 P2",
-    "adjudication": "Both findings carried; they are the two in this handoff. Nothing was declined this round."
+    "head": "f1c34692",
+    "scope": "the whole pull request, weighted to the round-5 delta d6884d57..f1c34692, since rounds 1-4 audited the rest",
+    "deepReview": "CHANGES - 1 medium, the hold-restore skip",
+    "codeQuality": "APPROVE - 1 P3, the header's dispatch-versus-completion wording",
+    "adjudication": "Both carried; they are the two findings in this handoff. The medium was verified in the code by the reviewer, including the shorter route to it (two same-topic pending hand-backs in one loop) rather than only the pair's six-step sequence. Nothing declined this round."
   }
 }
