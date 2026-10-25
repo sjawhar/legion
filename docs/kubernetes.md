@@ -699,7 +699,10 @@ Every generation of that role then gets its own connection, in this order
    names the file written in step 1 (`sessionDSNFile`, `manifest.go`).
 
 A failure in any of the first three refuses the generation. The start answers with the error,
-which names the generation and the instance; no child is started; the proxy, if it had started,
+which names what failed: clearing the private directory names it, or the entry it could not remove;
+making the generation's directory or writing one of its files (a credential, the connection URL)
+names the generation and the file; the proxy's start names the generation and the instance; the
+resume lookup names the recorded session file. No child is started; the proxy, if it had started,
 is closed and the generation's directory removed, so nothing is left bound and nothing is left on
 disk (`endSession`). An agent never runs against a proxy that cannot reach the database, because
 the proof dial happens before the proxy's start returns. That dial is bounded at half the

@@ -52,8 +52,9 @@ type Config struct {
 	// long as its caller's context lives. The per-connection dials after Start are not bounded by it.
 	ProofTimeout time.Duration
 	// Drain is how long Close lets established connections finish on their own before it closes
-	// them. Zero closes them at once; a negative Drain is refused. Whatever it is, Close is bounded
-	// by it: a client that never hangs up holds Close for Drain and no longer.
+	// them. Zero closes them at once; a negative Drain is refused. Close is bounded by it so long as
+	// every per-connection dial honours cancellation, as the Cloud SQL connector's does: a client
+	// that never hangs up then holds Close for Drain and no longer.
 	Drain time.Duration
 	// Log takes one line per event: the proxy's start, a connection the upstream refused, an
 	// accept loop that stopped on its own, connections Close closed once the drain was over. Nil
@@ -174,9 +175,11 @@ func Start(ctx context.Context, cfg Config) (*Proxy, error) {
 
 // Close stops accepting, releases the dialer, lets established connections finish for up to Drain,
 // then closes those still open, and returns once every connection has ended. It is the only way a
-// started proxy ends, and it never waits on a client longer than Drain: a holder that never hangs
-// up, inside the generation or outside it, cannot keep it from returning. A second call is a no-op
-// that returns nil.
+// started proxy ends. It cancels every per-connection dial at once, so it waits on a client no
+// longer than Drain so long as each dial honours that cancellation, as the Cloud SQL connector's
+// does: a holder that never hangs up, inside the generation or outside it, cannot keep it from
+// returning; a dial that ignored its cancelled context would hold Close until it returned. A second
+// call is a no-op that returns nil.
 func (p *Proxy) Close() error {
 	first := false
 	p.closeOnce.Do(func() {
