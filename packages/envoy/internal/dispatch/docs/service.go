@@ -174,6 +174,11 @@ type Service struct {
 	// before it takes the state's lock. Nil outside tests; tests use it to release the state in
 	// that window.
 	afterStateLookup func(room string)
+	// beforeCloseBehindHeadLock runs at the start of a close of a room behind the durable head,
+	// before it takes the room's state lock (closeRoomBehindHead). Nil outside tests; tests use it
+	// to open a write in the one window between the evictor's own check for a write in flight and
+	// the locked check that decides the close.
+	beforeCloseBehindHeadLock func(room string)
 	// afterRoomCloseReserved runs once a close of a room behind the durable head has reserved the
 	// room (reserveRoomCloseLocked) and released its state lock, before the close. Nil outside
 	// tests; tests use it to open a write, or to retire and reload the room, in that window.
@@ -1785,6 +1790,9 @@ func (s *Service) reloadRoomBehindHead(ctx context.Context, room string, state *
 // and one made for it here is the one the close settles. A settlement the reservation ended is
 // armed again (closeReservedRoom).
 func (s *Service) closeRoomBehindHead(ctx context.Context, room string, live *crdt.Doc) (closed bool, err error) {
+	if s.beforeCloseBehindHeadLock != nil {
+		s.beforeCloseBehindHeadLock(room)
+	}
 	state := s.lockState(room)
 	if state.writeInFlightLocked() {
 		s.unlockState(room, state)

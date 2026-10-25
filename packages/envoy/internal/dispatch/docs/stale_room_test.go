@@ -533,6 +533,104 @@ func TestACloseOfARoomBehindTheHeadIsNotRefusedByItsClosedIssue(t *testing.T) {
 	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
 }
 
+// A close that fails lifts the reservation it took. The reservation refuses every transaction the
+// room's writer slot (openLiveWrite, errRoomReloading), so a close that returned without lifting
+// it would leave a resident room answering 503 to every write until it unloaded - and a connected
+// browser keeps it resident, so that is an outage a person sees rather than one access. The close
+// is made to fail here as a rebuild makes it fail: a rebuild holds the document and refuses every
+// injection into its room, the one refusal the close's own mark does not pass (refuseIfRebuilding).
+func TestACloseOfARoomBehindTheHeadThatFailsLiftsItsReservation(t *testing.T) {
+	pair := newProcessPair(t)
+	pair.leaveTaskABehind(t, 1, model.Actor{Kind: "user", ID: "bob-on-task-b"}, "Bob's paragraph.\n")
+	stale := pair.taskA.srv.GetDoc(pair.artifactID)
+	var reserved atomic.Bool
+	pair.taskA.afterRoomCloseReserved = func(room string) {
+		if room == pair.artifactID && reserved.CompareAndSwap(false, true) {
+			pair.taskA.rebuilding.Store(room, struct{}{})
+		}
+	}
+
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, stale)
+	pair.taskA.rebuilding.Delete(pair.artifactID)
+	if !reserved.Load() {
+		t.Fatal("the close never reserved task A's room")
+	}
+	if closed {
+		t.Fatal("the refused close reports that it closed the room")
+	}
+	if err == nil {
+		t.Fatal("the refused close reports no error")
+	}
+
+	// The room is the one the close failed to close, and its writer slot is open again: the
+	// reservation was lifted. The room still stands behind the head, so the write takes the cold
+	// path rather than the room's, which is what a write on a reserved room is refused before
+	// reaching (errRoomReloading).
+	if live := pair.taskA.srv.GetDoc(pair.artifactID); live != stale {
+		t.Fatal("the refused close left another room behind")
+	}
+	state := pair.taskA.lockState(pair.artifactID)
+	reloading := state.reloading
+	pair.taskA.unlockState(pair.artifactID, state)
+	if reloading {
+		t.Fatal("the refused close left its reservation on the room, which refuses every write")
+	}
+	agent := model.Actor{Kind: "session", ID: "agent-session"}
+	insert := []model.EditOp{{Op: "insert", Markdown: "Agent's paragraph.", After: "Bob's paragraph."}}
+	if _, err := joinedApplyOps(pair.taskA, pair.artifactID, insert, agent, nil); err != nil {
+		t.Fatalf("a write after the refused close: %v", err)
+	}
+}
+
+// A write that opens after the evictor's own check for a write in flight, and before the close
+// takes the room's state lock, leaves the room open. The evictor reads that check outside any
+// lock (hasWriteInFlight), so the close reads it again under the lock that admits a writer
+// (closeRoomBehindHead): without the second read the close would retire the room under a write
+// whose commit still advances the replacement room's cursor, which is the stale-text-at-a-head-
+// cursor corruption the reservation exists to prevent. The room is left exactly as stale as it
+// was found, and the evictor keeps a window of its own for it.
+func TestAWriteThatOpensBeforeTheCloseTakesItsLockLeavesTheRoomOpen(t *testing.T) {
+	pair := newProcessPair(t)
+	evictor := newStaleRoomEvictor(pair.taskA)
+	pair.leaveTaskABehind(t, 2, model.Actor{Kind: "user", ID: "bob"}, "Bob types once.\n")
+	live := pair.taskA.srv.GetDoc(pair.artifactID)
+	var opened atomic.Bool
+	pair.taskA.beforeCloseBehindHeadLock = func(room string) {
+		if room != pair.artifactID || !opened.CompareAndSwap(false, true) {
+			return
+		}
+		state := pair.taskA.lockState(room)
+		state.liveWriter = &liveWrite{}
+		pair.taskA.unlockState(room, state)
+	}
+
+	if evictor.documentChanged(context.Background(), pair.artifactID) {
+		t.Fatal("the evictor closed the room under a write that opened after its own check")
+	}
+	if !opened.Load() {
+		t.Fatal("the close never reached its state lock, so nothing here is tested")
+	}
+	if pair.taskA.srv.GetDoc(pair.artifactID) != live {
+		t.Fatal("the room was closed under the write in flight on it")
+	}
+	if wake := evictor.wakeIn(); wake <= 0 {
+		t.Fatalf("the attempt that found a write in flight spent the room's window (wakeIn = %s)", wake)
+	}
+
+	// The write ends, and the same close closes the room: nothing else held it open.
+	state := pair.taskA.lockState(pair.artifactID)
+	state.liveWriter = nil
+	pair.taskA.unlockState(pair.artifactID, state)
+	closed, err := pair.taskA.closeRoomBehindHead(context.Background(), pair.artifactID, live)
+	if err != nil {
+		t.Fatalf("close the room once its write has ended: %v", err)
+	}
+	if !closed {
+		t.Fatal("the close of the room whose write has ended closed nothing")
+	}
+	waitForNoLiveDocument(t, pair.taskA, pair.artifactID)
+}
+
 // The close of a room behind the head holds the room it checked against ygo's idle sweep until it
 // has closed it: the sweep retires a room no peer is in once it has been idle for the room idle
 // timeout, and it takes no close gate, so a check of the instance ahead of the close would not
