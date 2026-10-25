@@ -594,7 +594,10 @@
   that did not answer. A publish the NATS server denies under this listener's own grant is not an
   outage and is not retryable: it is
   `403 {"error":"envoy: the message bus denied the publish under this listener's own permissions: <reason>"}`
-  with no `Retry-After`, since the grant forbids the subject until an operator changes it. A
+  with no `Retry-After`, since the grant forbids the subject until an operator changes it. Only
+  the publish route can be denied this way, and only for a topic the stream does not capture (a
+  role lane or an ad-hoc topic, published over core NATS): a send publishes
+  `notifications.agent.<id>`, which the stream captures, so it goes through JetStream. A
   publish that lost the race for a role's claim — every resolution attempt spent on a supersession
   — keeps the 503 and the `Retry-After: 1` but answers
   `{"error":"envoy: the holder of role <role> changed while this publish was resolving it"}`. The
@@ -604,14 +607,23 @@
   second, the same direct get the role paths already make — so
   `404 {"error":"no live session <id>"}` is now only the store's own word that the key is gone,
   and an agent delivery reads that same store before it pushes. A delivery this listener cannot
-  place — no session record, a record naming nothing to push to, or a push that failed on the wire
-  — is NAK'd and redelivered every five seconds, for as many whole deferrals as the new
-  `ENVOY_UNPLACEABLE_RETRY_WINDOW` (default `60s`) buys at that delay, counted from the message's
-  first delivery rather than from its age in the stream and stopping at 18 deliveries; at most 64
-  such messages are held deferred at once (a quarter of the durable's ack-pending budget, one slot
-  of which each deferral holds for its whole window), and one arriving past that cap is given up
-  at once. Each deferral logs `listener agent delivery deferred` at INFO with `reason`, `attempt`
-  and `window_deferrals`, and the give-up logs `listener agent delivery given up` at WARN with the
+  place — no session record, a record naming nothing to push to, or a push that failed — is NAK'd
+  and redelivered every five seconds, counted from the message's first delivery rather than from
+  its age in the stream and stopping at 18 deliveries. The first two causes push nothing, so a
+  retry repeats nothing, and they are deferred as many times as the new
+  `ENVOY_UNPLACEABLE_RETRY_WINDOW` (default `60s`) buys at that delay, twelve at the default. A
+  push that failed is deferred once, so it is delivered at most twice, however long the window:
+  it may have landed, since a refused prompt, a connection that never reached the session and an
+  answer lost after the session server took the prompt all come back as the same failure, and a
+  retry that clears the attempt record to push again would repeat an instruction the session may
+  already have, once per retry. At most 64 such messages are held deferred at once by the whole
+  listener (a quarter of the durable's ack-pending budget, one slot of which each deferral holds
+  for its whole window), in one budget shared by every delivery handler it builds — the one a
+  rebind after a NATS flap builds included — and keyed on each message, so only a message this
+  listener deferred gives a slot back when it is redelivered; one arriving past that cap is given
+  up at once. Each deferral logs `listener agent delivery deferred` at INFO with `reason`,
+  `attempt` and `window_deferrals`, the deferrals that message's cause is allowed (1 for
+  `push_failed`), and the give-up logs `listener agent delivery given up` at WARN with the
   `no_holder` delivery exception published once; the ambiguous `listener agent session not found
   anywhere`, which acknowledged such a message away on its first attempt and counted it `skipped`,
   is gone, and `envoy_messages_delivered_total` carries the new `delivery_status` labels
@@ -620,8 +632,9 @@
   INFO when accepted and WARN when refused, naming the route's destination (`target_session` or
   `topic`), the envelope's `event_id`, `source`, `source_session` and `payload_summary`, the
   `status` answered, the `holder` a role lane resolved, and an `outcome` of `accepted`,
-  `invalid_request`, `too_large`, `bus_unavailable`, `publish_denied`, `no_live_session`,
-  `capability_refused`, `role_unclaimed`, `role_lapsed` or `role_holder_changed` (INFRA-141).
+  `invalid_request`, `too_large` or `bus_unavailable` on either line, `no_live_session` or
+  `capability_refused` on a send, and `publish_denied`, `role_unclaimed`, `role_lapsed` or
+  `role_holder_changed` on a publish (INFRA-141).
 - A comment, comment edit, message or broadcast body is at most 32,000 characters
   (`contracts.DispatchBodyMax`, UTF-16 units), up from 2,000 (INFRA-45); a longer one is
   `400 CAP_EXCEEDED` as before, named the way every other cap names its own. The limit is
