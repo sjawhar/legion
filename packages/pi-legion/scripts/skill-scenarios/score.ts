@@ -1340,25 +1340,28 @@ function taskNames(step: Step, own: Outcome | undefined): string[] {
   return [...names];
 }
 /** The text Oh My Pi delivered for job `name` in the body of an `async-result` message that
- * delivers `count` jobs. Its task jobs carry no `resultText`, so the body is the only report. A
- * message of one job is a `Background job <name> has completed…` line, then the job's envelope;
+ * delivers the jobs `names`. Its task jobs carry no `resultText`, so the body is the only report.
+ * A message of one job is a `Background job <name> has completed…` line, then the job's envelope;
  * a message of several is a count line, then each job under a `── Job <id> (<label>) ──` line.
- * A job's section runs to the next such line of another job, or to the end. A message that names
- * the job's section other than once (another job's output can print a line of that form) gives it
- * no text: which section is the job's own cannot be told. */
-function jobSection(body: string, name: string, count: number): string {
+ * Only a line naming a job this message delivers frames a section, since a report may quote such a
+ * line of its own. A job's section runs to the next framing line of another job, or to the end. A
+ * message that frames the job's own section other than once gives it no text: which section is the
+ * job's own cannot be told. */
+function jobSection(body: string, name: string, names: string[]): string {
   const text = body.replace(/^\s*<system-notice>\s*/, "").replace(/\s*<\/system-notice>\s*$/, "");
-  if (count === 1) {
+  if (names.length === 1) {
     const lead = new RegExp(`^Background job ${escaped(name)} has completed\\.[^\\n]*\\n`).exec(
       text
     );
     return lead === null ? "" : text.slice(lead[0].length);
   }
-  const marks = [...text.matchAll(/^── Job (\S+) \(.*\) ──$/gm)].map((mark) => ({
-    id: mark[1],
-    start: mark.index ?? 0,
-    end: (mark.index ?? 0) + mark[0].length,
-  }));
+  const marks = [...text.matchAll(/^── Job (\S+) \(.*\) ──$/gm)]
+    .map((mark) => ({
+      id: mark[1],
+      start: mark.index ?? 0,
+      end: (mark.index ?? 0) + mark[0].length,
+    }))
+    .filter((mark) => mark.id !== undefined && names.includes(mark.id));
   const own = marks.filter((mark) => mark.id === name);
   const mark = own[0];
   if (own.length !== 1 || mark === undefined) return "";
@@ -1398,7 +1401,7 @@ function checkOutcome(
       });
     }
   else {
-    const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*)<\/task-result>\s*$/.exec(own.text);
+    const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*?)<\/task-result>/.exec(own.text);
     if (envelope !== null)
       ended.push({
         name: attribute(envelope[1] ?? "", "id") ?? "",
@@ -1417,6 +1420,11 @@ function checkOutcome(
           : undefined;
     const jobs = field(details, "jobs");
     if (!Array.isArray(jobs)) continue;
+    // The jobs this message delivers, by the name each is recorded under: a section's framing line
+    // names one of these, and nothing else frames a section.
+    const delivered = jobs
+      .map((job) => field(job, "id") ?? field(job, "jobId") ?? field(job, "agentId"))
+      .filter((name): name is string => typeof name === "string");
     for (const job of jobs) {
       if (field(job, "type") !== "task") continue;
       const name = field(job, "id") ?? field(job, "jobId") ?? field(job, "agentId");
@@ -1426,8 +1434,10 @@ function checkOutcome(
       const text =
         typeof resultText === "string"
           ? resultText
-          : jobSection(strings(entry.content).join(""), name, jobs.length);
-      const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*)<\/task-result>\s*$/.exec(text);
+          : jobSection(strings(entry.content).join(""), name, delivered);
+      // Oh My Pi writes a line of its own after the closing tag of most deliveries (the agent is
+      // idle, how to message it, where its transcript is), so the envelope is not the text's end.
+      const envelope = /^\s*<task-result\b([^>]*)>([\s\S]*?)<\/task-result>/.exec(text);
       const body =
         envelope !== null && attribute(envelope[1] ?? "", "id") === name ? (envelope[2] ?? "") : "";
       ended.push({ name, status, report: reportOf(body), index });
@@ -1439,7 +1449,10 @@ function checkOutcome(
   const problems: string[] = [];
   const reports: string[] = [];
   for (const name of names) {
-    const end = ended.find((one) => one.name === name && one.index < before);
+    // A job snapshot of a task still running is no end: a `wait` answers with every job it waited
+    // on, the running ones included, and the completion follows in a later entry.
+    const seen = ended.filter((one) => one.name === name && one.index < before);
+    const end = seen.find((one) => one.status === "completed") ?? seen[0];
     if (end === undefined)
       problems.push(
         ended.some((one) => one.name === name)

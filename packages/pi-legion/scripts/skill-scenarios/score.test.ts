@@ -860,6 +860,10 @@ const spawned = (id: string) =>
     id,
     `Spawned agent \`Check${id}\` (job \`Check${id}\`).\n\nResults auto-deliver; NEVER poll.`
   );
+/** The line Oh My Pi writes after a task's closing tag in a delivery, in its commonest wording.
+ * Most real deliveries carry one (1507 of 2254 envelopes in the operator's transcripts). */
+const idleTrailer = (name: string) =>
+  `\n\n${name} is now idle — message it via \`write agent://${name}\` to follow up; transcript at history://${name}`;
 /** A background task's report, delivered by Oh My Pi with the job's own structured status. */
 const asyncReport = (name: string, status = "completed", report = "No gaps.") => ({
   type: "custom_message",
@@ -868,7 +872,7 @@ const asyncReport = (name: string, status = "completed", report = "No gaps.") =>
     meta: { source: { type: "report", value: "background job delivery" } },
     jobs: [{ jobId: name, type: "task", status, agentId: name, label: name }],
   },
-  content: `<system-notice>\nBackground job ${name} has completed.\n${taskEnvelope(name, status, report)}\n</system-notice>`,
+  content: `<system-notice>\nBackground job ${name} has completed.\n${taskEnvelope(name, status, report)}${idleTrailer(name)}\n</system-notice>`,
 });
 /** A `wait` call whose structured job snapshot delivers a background task's report. */
 const waited = (id: string, name: string, status = "completed", report = "No gaps.") => {
@@ -1066,7 +1070,7 @@ const asyncReports = (jobs: [name: string, section: string][]) => ({
     })),
   },
   content: `<system-notice>\n${jobs.length} background jobs have completed. Resume your work using the results below.\n\n${jobs
-    .map(([name, section]) => `── Job ${name} (${name}) ──\n${section}`)
+    .map(([name, section]) => `── Job ${name} (${name}) ──\n${section}${idleTrailer(name)}`)
     .join("\n\n")}\n</system-notice>`,
 });
 // The check and another task delivered in one message: the check's section is its report.
@@ -1097,6 +1101,31 @@ specRun("spec-writing-head-66", {
           ),
         ],
         ["Checkc1", taskEnvelope("Checkc1", "completed", "(no output)")],
+      ]),
+    ]
+  ),
+});
+// A `wait` that returns the check still running, then its real completion in a later message.
+// The running snapshot is no end: the completion that follows is the check's report.
+specRun("spec-writing-head-67", {
+  transcript: firstCheck(
+    [checkCall("c1"), spawned("c1")],
+    waited("wt4", "Checkc1", "running", ""),
+    [asyncReport("Checkc1")]
+  ),
+});
+// Another job's report quotes a `── Job …` line of a job this message does not deliver. It frames
+// nothing: the check's own section runs to the next section of a job the message does deliver.
+specRun("spec-writing-head-68", {
+  transcript: firstCheck(
+    [checkCall("c1"), spawned("c1")],
+    [
+      asyncReports([
+        [
+          "OtherTask",
+          taskEnvelope("OtherTask", "completed", "Done. It reported:\n── Job L19 (L19) ──\nNone."),
+        ],
+        ["Checkc1", taskEnvelope("Checkc1", "completed", "No gaps.")],
       ]),
     ]
   ),
@@ -1972,6 +2001,10 @@ test("checked: a background check's report in a wait result or an async-result m
   expect(scoresOf("spec-writing-head-56")).toEqual(allPass);
   // One message that delivers the check beside another job.
   expect(scoresOf("spec-writing-head-65")).toEqual(allPass);
+  // A `wait` that found the check still running, then its completion.
+  expect(scoresOf("spec-writing-head-67")).toEqual(allPass);
+  // A `── Job …` line quoted in another job's report frames nothing.
+  expect(scoresOf("spec-writing-head-68")).toEqual(allPass);
   // `followed`'s checks are blocking, each with a completed `<task-result>` block.
   expect(scoresOf("spec-writing-head-1")).toEqual(allPass);
   expect(rowOf("spec-writing-head-1")).not.toContain("does not count");
