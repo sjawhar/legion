@@ -18,8 +18,8 @@ import (
 // The JSON names are RFC 7662's where it has one and the broker's own where it does not; the
 // route serialises this struct and adds no field of its own.
 type Introspection struct {
-	// Active is whether the token is live: known to the broker, not revoked, not expired.
-	// Everything else is set only when it is.
+	// Active is whether the token is live: one of the broker's access tokens, not revoked, not
+	// expired. Everything else is set only when it is.
 	Active bool `json:"active"`
 	// Session is the session the token's writes are recorded as.
 	Session string `json:"session,omitempty"`
@@ -51,14 +51,22 @@ type Introspection struct {
 //
 // A token the broker does not know, one it has revoked and one that has expired are all answered
 // as simply not live, with no error and nothing else disclosed, which is what RFC 7662 Section
-// 2.2 asks for. An error is returned only where the broker itself failed — a storage outage —
-// because answering that as "not live" would both deny a sound token and hide the outage.
+// 2.2 asks for. So is any token that is not an access token, a machine login's refresh token
+// among them: the answer carries no token type, so a refresh token answered live — it outlives
+// the access token issued beside it — would pass for a credential no request can present. The
+// library takes oauth2.AccessToken only as a hint and falls through to the refresh-token store
+// when the access lookup misses, so the kind it reports finding is checked here rather than
+// trusted to the hint. An error is returned only where the broker itself failed — a storage
+// outage — because answering that as "not live" would both deny a sound token and hide the outage.
 func (p *Provider) Introspect(ctx context.Context, token string) (Introspection, error) {
-	_, request, err := p.oauth.IntrospectToken(ctx, token, oauth2.AccessToken, oauthstore.NewExchangeSession())
+	kind, request, err := p.oauth.IntrospectToken(ctx, token, oauth2.AccessToken, oauthstore.NewExchangeSession())
 	if err != nil {
 		if oauth2.ErrorToRFC6749Error(err).CodeField >= http.StatusInternalServerError {
 			return Introspection{}, err
 		}
+		return Introspection{}, nil
+	}
+	if kind != oauth2.AccessToken {
 		return Introspection{}, nil
 	}
 	answer := Introspection{Active: true, Scope: strings.Join(request.GetGrantedScopes(), " ")}

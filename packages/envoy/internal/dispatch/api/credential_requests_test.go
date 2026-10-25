@@ -5,7 +5,9 @@
 package api
 
 import (
+	"bytes"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -39,6 +41,17 @@ func accountTokenFile(t *testing.T, token string) string {
 // other API test leaves the feature off, and this file's tests are the only ones that need it on.
 func newCredentialTestHandler(t *testing.T, brokerURL string) http.Handler {
 	t.Helper()
+	tokenFile := ""
+	if brokerURL != "" {
+		tokenFile = accountTokenFile(t, credentialTestAccountToken)
+	}
+	return newCredentialTestHandlerReading(t, brokerURL, tokenFile)
+}
+
+// newCredentialTestHandlerReading is newCredentialTestHandler with the client reading its bearer
+// from tokenFile, for a test of a token file Dispatch cannot read.
+func newCredentialTestHandlerReading(t *testing.T, brokerURL, tokenFile string) http.Handler {
+	t.Helper()
 	database := storetest.Open(t)
 	documentService := docs.New(docs.Deps{
 		Store: database, Events: events.NewBroker(), ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond,
@@ -55,7 +68,7 @@ func newCredentialTestHandler(t *testing.T, brokerURL string) http.Handler {
 	}
 	if brokerURL != "" {
 		depsInput.AgentSecretsURL = brokerURL
-		depsInput.AgentSecretsTokenFile = accountTokenFile(t, credentialTestAccountToken)
+		depsInput.AgentSecretsTokenFile = tokenFile
 	}
 	deps, err := NewDeps(depsInput)
 	if err != nil {
@@ -266,6 +279,37 @@ func TestCredentialRouteTransportFailureIsAgentSecretsUnavailable(t *testing.T) 
 	}](t, response)
 	if body.Code != "AGENT_SECRETS_UNAVAILABLE" {
 		t.Fatalf("code = %q, want AGENT_SECRETS_UNAVAILABLE", body.Code)
+	}
+}
+
+// A token file Dispatch cannot read stops the call before the broker is asked, so the answer
+// names Dispatch's own credential, never the unreachable broker 503 AGENT_SECRETS_UNAVAILABLE
+// would send the operator to, and the one log line it writes names the file to fix.
+func TestCredentialRouteWithAnUnreadableAccountTokenNamesDispatchsOwnCredential(t *testing.T) {
+	rig := newFakeBrokerRig(t)
+	missing := filepath.Join(t.TempDir(), "missing")
+	handler := newCredentialTestHandlerReading(t, rig.server.URL, missing)
+	previous := slog.Default()
+	var logs bytes.Buffer
+	slog.SetDefault(slog.New(slog.NewTextHandler(&logs, nil)))
+	t.Cleanup(func() { slog.SetDefault(previous) })
+
+	response := dispatchRequest(t, handler, http.MethodGet, "/api/v1/credential-requests/rec1", nil, "alice")
+	if response.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500: %s", response.Code, response.Body.String())
+	}
+	body := decodeBody[struct {
+		Code string `json:"code"`
+	}](t, response)
+	if body.Code != "AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE" {
+		t.Fatalf("code = %q, want AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE", body.Code)
+	}
+	if rig.lastAuth != "" {
+		t.Fatalf("the broker was called with Authorization %q, want no call at all", rig.lastAuth)
+	}
+	lines := strings.Split(strings.TrimSpace(logs.String()), "\n")
+	if len(lines) != 1 || !strings.Contains(lines[0], "level=ERROR") || !strings.Contains(lines[0], "path="+missing) {
+		t.Fatalf("logged %q, want one ERROR line naming %s", logs.String(), missing)
 	}
 }
 

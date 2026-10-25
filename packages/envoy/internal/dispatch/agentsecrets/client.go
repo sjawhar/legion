@@ -18,6 +18,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -85,9 +86,10 @@ func New(baseURL, tokenFile string, options ...Option) *Client {
 }
 
 // Error carries the broker's status and its {"code","error"} body so handlers can forward
-// both verbatim to the browser. Only a non-2xx broker response produces one; a transport
-// failure (connection refused, timeout, context canceled) is a plain wrapped error instead —
-// Task 2's routes treat anything that is not *Error as 503 AGENT_SECRETS_UNAVAILABLE.
+// both verbatim to the browser. Only a non-2xx broker response produces one; a call that stopped
+// before reaching the broker is an *AccountTokenError when Dispatch could not read its own token,
+// and a plain wrapped error for a transport failure (connection refused, timeout, context
+// canceled), which the routes answer 503 AGENT_SECRETS_UNAVAILABLE.
 type Error struct {
 	Status int
 	Code   string
@@ -98,10 +100,30 @@ func (e *Error) Error() string {
 	return fmt.Sprintf("agent-secrets: broker returned %d", e.Status)
 }
 
+// AccountTokenError is a call that never reached the broker because Dispatch could not read
+// its own ServiceAccount token from Path: the file is missing or unreadable, or holds nothing.
+// It is its own type because what is wrong is Dispatch's deployment, not the broker, and the
+// routes must say so rather than send the operator to a broker that was never asked.
+type AccountTokenError struct {
+	// Path is the token file Dispatch tried to read (DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE).
+	Path string
+	// Err is why it could not: the read's own error, or errEmptyAccountToken.
+	Err error
+}
+
+func (e *AccountTokenError) Error() string {
+	return fmt.Sprintf("agent-secrets: read the ServiceAccount token %s: %v", e.Path, e.Err)
+}
+
+func (e *AccountTokenError) Unwrap() error { return e.Err }
+
+// errEmptyAccountToken is an AccountTokenError's reason when the file reads but holds nothing.
+var errEmptyAccountToken = errors.New("the file is empty")
+
 // token is the bearer every call presents: TokenFile's trimmed contents, read again once the
 // copy it cached is older than tokenTTL. A file that cannot be read, or that holds nothing, is an
-// error naming the path and no request at all, never an empty bearer for the broker to refuse:
-// a projected token Dispatch cannot read is Dispatch's own misconfiguration.
+// *AccountTokenError naming the path and no request at all, never an empty bearer for the broker
+// to refuse: a projected token Dispatch cannot read is Dispatch's own misconfiguration.
 func (c *Client) token() (string, error) {
 	c.tokenMu.Lock()
 	defer c.tokenMu.Unlock()
@@ -110,19 +132,19 @@ func (c *Client) token() (string, error) {
 	}
 	data, err := os.ReadFile(c.TokenFile)
 	if err != nil {
-		return "", fmt.Errorf("agent-secrets: read the ServiceAccount token %s: %w", c.TokenFile, err)
+		return "", &AccountTokenError{Path: c.TokenFile, Err: err}
 	}
 	token := strings.TrimSpace(string(data))
 	if token == "" {
-		return "", fmt.Errorf("agent-secrets: the ServiceAccount token file %s is empty", c.TokenFile)
+		return "", &AccountTokenError{Path: c.TokenFile, Err: errEmptyAccountToken}
 	}
 	c.cached, c.readAt = token, time.Now()
 	return token, nil
 }
 
 // do sends a request relaying body (nil for a bodyless GET) and returns the broker's response
-// body verbatim, or *Error for a non-2xx response, or a plain wrapped error for a transport
-// failure or a token it could not read, which stops the call before it is built.
+// body verbatim, or *Error for a non-2xx response, an *AccountTokenError for a token it could not
+// read, which stops the call before it is built, or a plain wrapped error for a transport failure.
 func (c *Client) do(ctx context.Context, method, path string, body json.RawMessage) (json.RawMessage, error) {
 	token, err := c.token()
 	if err != nil {

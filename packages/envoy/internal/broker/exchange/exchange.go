@@ -224,9 +224,15 @@ func checkGrant(where, project, person, session string) error {
 //
 // A token carrying no pod uid is refused however the account is listed: Kubernetes mints such a
 // token to anyone holding the account's credentials, and it proves only that the account exists,
-// where a bound one proves a pod of this cluster is running right now. That uid is also what the
-// session name is bound to, so one pod cannot write under the session name another pod of the
-// same account is writing under.
+// where a bound one proves Kubernetes minted it for one pod of this cluster. It does not prove
+// that pod still runs: the broker's exchange verifies the token offline against the issuer's
+// published keys and asks the cluster nothing, so a token whose pod has been deleted is exchanged
+// until its own expiry, which the Kubernetes subject token's lifetime tolerance
+// (oauth.kubernetesTolerance) allows up to 24 hours ahead. What bounds the reach that follows is
+// the access token each exchange mints, which lives BROKER_ACCESS_TOKEN_SECONDS (15 minutes by
+// default). That trades immediate revocation of a pod's token for needing no access to the
+// cluster's own interface. The uid is also what the session name is bound to, so one pod cannot
+// write under the session name another pod of the same account is writing under.
 func (s *Set) Pod(token map[string]any, session string) (Claims, error) {
 	account, err := claimString(token, "sub")
 	if err != nil {
