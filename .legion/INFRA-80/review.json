@@ -2,68 +2,57 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T15:45:00Z",
+  "completed": "2026-10-25T16:35:00Z",
   "decision": "changes_requested",
-  "round": 6,
+  "round": 7,
   "critical": 0,
   "important": 1,
-  "minor": 3,
+  "minor": 1,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "scripts/e2e/stage4b-sandbox-tree.sh:2556-2564",
-      "description": "The half of round 5's finding that asked for the collector's own names to be reserved is not done, and the consequence is the same one the other half fixed: a run that lost evidence and passed. `session_copy` refuses an empty name, `.`, `..` and a collision between two keys, but not a name that collides with a directory the collector itself makes. A pod can write a session row keyed `<pod_sessions_dir>/controller` — the table takes arbitrary text keys (`internal/ompsessions/ompsessions.go:44-47`) — which derives to `controller` and is written as a regular file. `collect_transcripts` then runs `mkdir -p \"$evidence/transcripts/controller\"` and `cp -R …` unguarded at `:2560-2561`: both fail, neither clears `copied`, and `:2563` returns success. The teardown's new `if ! collect_transcripts` (`:2584`) therefore sees a success, records no `teardown_failed`, and goes on to destroy the work directory holding the operator controller's real sessions. The `session_copy` half is genuinely fixed and its refusal does reach the verdict; this is the reservation the same finding named. Reserve `controller` and `daemon-controller` in the derivation, and let the controller copy's own failures reach `copied`."
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:1131-1134",
+      "description": "Security[untrusted-input]: the separation closed the name half of the class and left the destination half. `record_pair` builds its destination from the reviewer's own recorded session path — `stem=$(basename \"$pair_session\" .jsonl)`, then `mkdir -p \"$evidence/review-pair/$stem\"` and `session_copy \"${pair_session%.jsonl}/\" \"$evidence/review-pair/$stem\"` — and `session_copy` canonicalises the destination it is given (`:997`, `dest=$(cd -- \"$dir\" && pwd -P)`) before deriving any name. So a `$stem` of `..` moves `dest` to `$evidence` itself, and every guard downstream then does its job correctly against the wrong directory: the derivation refuses nothing, and the containment test at `:1034-1036` is parent-equality against that already-relocated `dest`, so a key deriving to `run.json` is written over the collector's own run metadata and reported as copied. The recorded path is agent-controlled: `internal/api/claims.go:50-55` requires `ompSessionFile` only to be non-empty, and `internal/supervise/table.go:1003` has `reregister` assign `m.claim.SessionFile = r.SessionFile`, so a role re-registering its live session with its own boot token replaces that path. This is reachable because of this change: the old reader `cat`ed a file in the pod, where a path ending `/..` is a directory and fails, and the SQL reader takes the same string as a row key. `:5662-5664`'s daemon-controller copy derives its destination the same way. The remedy is the one the separation already demonstrates: keep the exporter's destinations harness-owned, or derive and contain the directory component as the names inside it are derived and contained — validated against a fixed exporter root rather than against the directory the caller passed."
     },
     {
       "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/operatorpod.go:190-198",
-      "description": "Security[sandbox], hardening: `legionClaim` refuses an operator volume naming a claim of Legion's own by three prefixes — `issue-legion-`, `cache-legion-`, `tree-legion-` — and the claim name this change introduces is none of them. An issue's disk is now the pod's own generic ephemeral volume, named `<pod>-issue`, so an operator `pod.volumes` entry naming it is accepted and projected into every role container (`manifest.go:448`), against the stated contract of the guard immediately above it. This needs the operator's own configuration, so it is not an agent's escalation and it is not blocking; the guard's own words are what make it worth closing."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:1407-1409",
-      "description": "The cutover tells a deployment still on the file store that it 'copies its sessions into the table first', linking to 'Copying file sessions before turning it on'. That section says plainly that only `legion-v10.0.0` can copy and that a deployment on `legion-v10.1.0` to `legion-v10.2.x` has no copy path at all — its switch is a drain at a pushed boundary with those sessions lost — and `scripts/sessions-import-pods.sh:44-50` refuses such a project by name. So the path is disclosed, not missing, and the thermonuclear reading of it as an unexecutable prerequisite overstates it. What stands is the one sentence: a reader on `v10.1.x` is told to copy and learns only by following the link that they cannot. Say it at the link."
-    },
-    {
-      "severity": "minor",
-      "file": "docs/kubernetes.md:918-919",
-      "description": "Three texts still teach what this change removed. `docs/kubernetes.md:918-919` says `legion sessions import` and `legion sessions mark-lost` 'are unchanged', while `cmd/legion/sessions.go` has deleted `mark-lost` and the same manual records its removal at `:1011-1013`. `manifest_test.go:825` says a later pod 'runs the .venv as it is and reuses what an earlier pod downloaded', which a disk that dies with its pod makes false. `relaunch.go:497` logs `relabelling a sandbox for its issue's new tree, keeping its volume`, an operator-visible line naming a volume an issue Sandbox no longer owns."
+      "file": "scripts/e2e/stage4b-sandbox-tree.sh:2561",
+      "description": "Requested on the architect's behalf rather than found: the comment explaining why the collision class is closed, above `collect_transcripts` where the layout is decided, with a pointer from `session_copy`'s comment at `:976`. Its correction is worth keeping — the containment at `:1034-1036` is `[ \"${resolved%/*}\" != \"${dest%/}\" ]`, a parent-equality test rather than a prefix one, so it refuses a name landing in a subdirectory as surely as one escaping — and so is its clause on why no guard would catch a later merge of the two directories: the derivation, the refusals and the containment are all about a name's shape and its parent, and none of them knows which names the collector owns. It costs this round nothing, since the round is open for the finding above."
     }
   ],
-  "roundFiveVerification": {
-    "note": "Three of round 5's findings are fixed and one is half fixed; I verified each at the head.",
+  "adjudicated": {
+    "productionAudit": "The architect left me the judgement on `production_audit`'s unchecked write at `:2669`. My answer is that it stays out of this change, and it is recorded on the pull request rather than left for a reader to rediscover. It is the same *shape* — a write whose failure nobody reads — but not the same *class*: the path is the fixed literal `run-sessions.json`, with nothing an agent chooses in it, so no key, name or recorded path can steer it. Its failure mode is a disk or a permission, where the class this change introduced is an agent choosing where a file lands. `production_audit` is not in this change's diff, and the line after it already handles its own failure. Fixing it here would widen the change for a shape match rather than a defect in what this change does."
+  },
+  "roundSixVerification": {
+    "note": "Every round-6 finding is fixed; I verified each at the head.",
     "verified": [
-      "launcher.go:412-414 and probe.go:1196-1198 pass --provider-env-dir only when mountsProviders(), and both comments now state the cloudsql-iam case that made the old premise false.",
-      "collect_transcripts returns failure and the teardown turns it into teardown_failed with a CHECK transcripts: FAIL line before the session database is destroyed — the half of the finding about session_copy's own refusals.",
-      "The five postgres-only texts are corrected: the published site page, the example file an operator copies, scripts/e2e/README.md and AGENTS.md.",
-      "names.go no longer names Options.SessionDSNKey.",
-      "podkind.go:73-75, cleanup.go:70-74 and manifest_test.go:657-662 state the pod-owned disk; three further sites of the same class are the minor finding above."
+      "The pods' sessions go to $evidence/transcripts/pods, so a derived name and a collector-owned directory are no longer in one namespace — the shape I asked for rather than the reserved list I first wrote.",
+      "The controller copy's mkdir -p and cp -R are guarded together and clear `copied` on failure (:2565-2568).",
+      "legionClaim refuses `legion-…-issue` beside its three prefixes (operatorpod.go:195-202), and CheckPod applies it.",
+      "The cutover says at the link that only legion-v10.0.0 can copy and that v10.1.0–v10.2.x has no copy path.",
+      "docs/kubernetes.md:918 says `legion sessions mark-lost` is gone; manifest_test.go:822-829 says no later pod reuses the uv cache; relaunch.go:497 logs `keeping the Sandbox`."
     ]
   },
   "ciAtCodeHead": {
-    "head": "2056d96c3f4821dd3fc535e113845c72313c0794",
+    "head": "054d4e014cf767a88a3b7a43d39cb09431e3a414",
     "requiredByBase": ["lint", "typecheck", "test", "pr-title"],
-    "read": "2026-10-25T15:40:00Z",
-    "verdict": "lint, typecheck and pr-title completed success; test still in_progress at the read. A request for changes does not wait on it, and this round's finding stands whatever it settles at.",
-    "inheritedLanes": "broker-multiprocess is completed/success at this head, so that one is cured here by the merge of main's #2194 — read, not inferred. envoy-go was still in_progress at my read, so I report it as running and not as cured; nobody should take it for green until it concludes.",
-    "compare": "gh api compare/2056d96c3f48...7032059f8e3b in its printing form: `ahead`, 2 files, .legion/INFRA-80/implement.json and .legion/INFRA-80/test.json."
-  },
-  "unprovenGapJudgement": {
-    "askedBy": "the architect, for its acceptance",
-    "position": "The framing of the remaining gap as two cluster-only behaviours, each a uid comparison, is accurate about what cannot be reached and understates what has not been exercised. Those two are acceptance 1's cluster half and acceptance 4, and nothing in this repository can reach them; that part is right. What it leaves out is that Stage 4b has run at no head at all, and this change rewrote its parked, released and lifecycle assertions, its delete log line and its whole transcript reader. Those are not behaviours we cannot reach: they are assertions whose own correctness is unverified, and the base rate on this change is that every reading of that harness found a defect — the Stage 4a marker path in round 2, two assertion families in round 2, the session reader in round 4, the exporter traversal in round 5, the unreserved collector name in this round. Five readings, five defects, no runs. An acceptance that says 'two behaviours remain provable only on a cluster' is true; one that lets a reader infer the rest is proven is not. The sentence I would want a stranger to read is that the tree-level proof is repaired but unexecuted, and that its repairs were found by reading rather than by running."
+    "read": "2026-10-25T16:12:00Z",
+    "verdict": "typecheck and pr-title completed success; lint and test still in_progress at the read, so the required set is not green at the head I reviewed and I say so rather than inherit an earlier commit's green. A request for changes does not wait on them.",
+    "otherLanes": "broker-multiprocess, build, changes, claude-envoy, contracts, dispatch-multiprocess, envoy-client, envoy-e2e-local, envoy-infra-go, envoy-plugin, envoy-smoke, pi-envoy, pi-legion, pi-shared all completed success at this head. envoy-go, envoy-go-race, dispatch and dispatch-memory were in_progress. The architect reports envoy-go's red at the previous head as a ten-minute hang in TestTwoSweepRunnersRunThePassOnceAndSkipOnce, a leased sweep in a package this branch does not touch, with a dispatch ask open carrying the evidence; I did not inherit that and report only what this head shows.",
+    "compare": "gh api compare/054d4e014cf7...5f228ffa4048 in its printing form: `ahead`, 2 files, .legion/INFRA-80/implement.json and .legion/INFRA-80/test.json."
   },
   "thermonuclear": {
-    "head": "7032059f8e3b7062a5f1f5dabe404c015c4d23d0",
-    "deepReview": "CHANGES — the reserved-name collision, and the operator-volume guard missing the new claim names. It judged the provider guards complete and found nothing standing in migration 0051, the outbox decode, the displacement gap and its counter, the store refusal or the ephemeral volume rendering.",
-    "codeQuality": "CHANGES — the cutover's copy link and the three remaining prose sites. It judged the provider guards consistent, every golden consumed, no dead helper or orphaned fixture, and no file crossing a thousand lines.",
-    "checked": "I verified both Important claims at the head before filing, and graded the cutover one down: the code-quality agent read it as an unexecutable prerequisite, and the linked section states the restriction plainly, so what stands is the link's own sentence."
+    "head": "5f228ffa4048ed4b72fdf6d282681cc323fb5216",
+    "deepReview": "CHANGES — the record_pair destination, reached independently and messaged to me mid-audit with its reachability trace. It found nothing standing in migration 0051, the displacement generation fence, the store kinds, the ephemeral volume rendering or the provider-mount guards.",
+    "codeQuality": "APPROVE — nothing stands. Transcript layout coherent and documented, the claim guard complete, the stale-prose class finally clean in the changed text, no orphaned fixture or dead helper, no file newly crossing a thousand lines.",
+    "checked": "I verified the destination finding at the head before filing: record_pair's basename, session_copy's canonicalisation of the destination at :997, the parent-equality containment at :1034-1036 measured against that relocated dest, api/claims.go's non-empty-only check and table.go:1003's reregister assignment."
   },
   "threads": {
-    "openedRoundFive": 2,
-    "answeredByImplementer": 2,
-    "resolved": 2,
+    "openedRoundSix": 1,
+    "answeredByImplementer": 1,
+    "resolved": 1,
     "botThreads": 0,
-    "note": "I replied on both at this head. Three of round 5's findings were in the review body rather than on threads; all three are fixed."
+    "note": "I replied on it at this head. Round 6's three Minors were in the review body rather than on threads; all three are fixed."
   },
   "e2eLines": { "implementer": "present", "tester": "present" }
 }
