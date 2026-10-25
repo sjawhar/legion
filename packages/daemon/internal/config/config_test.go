@@ -409,7 +409,7 @@ func TestLoadRefusesProjectSlackChannels(t *testing.T) {
 func TestLoadReadsProjectDeploys(t *testing.T) {
 	body := strings.Replace(minimalFile, "projects:\n  DEMO: {}\n", "projects:\n"+
 		"  DEMO:\n    deploys:\n"+
-		"      - {repo: theorem-labs/agent-infra, workflow: .github/workflows/envoy.yaml, step: Apply}\n"+
+		"      - {repo: acme/infra, workflow: .github/workflows/envoy.yaml, step: Apply}\n"+
 		"      - {repo: sjawhar/legion, workflow: .github/workflows/release.yml, step: Publish image}\n"+
 		"  OTHER: {}\n"+
 		"  EMPTY: { deploys: [] }\n", 1)
@@ -418,7 +418,7 @@ func TestLoadReadsProjectDeploys(t *testing.T) {
 		t.Fatalf("Load project deploys: %v", err)
 	}
 	want := []Deploy{
-		{Repo: ghrepo.MustParse("theorem-labs/agent-infra"), Workflow: ".github/workflows/envoy.yaml", Step: "Apply"},
+		{Repo: ghrepo.MustParse("acme/infra"), Workflow: ".github/workflows/envoy.yaml", Step: "Apply"},
 		{Repo: ghrepo.MustParse("sjawhar/legion"), Workflow: ".github/workflows/release.yml", Step: "Publish image"},
 	}
 	if got := cfg.Projects["DEMO"].Deploys; !reflect.DeepEqual(got, want) {

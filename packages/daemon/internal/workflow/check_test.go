@@ -770,8 +770,8 @@ func TestTheBootSweepClosesMigratedMergedIssuesAndLeavesARootWithARunningChild(t
 	}
 }
 
-// envoyDeploy is the deploy the deploy-run tests' project names: agent-infra's shape, its Apply
-// step in a top-level envoy.yaml, on the check rigs' repository.
+// envoyDeploy is the deploy the deploy-run tests' project names: a deployment repository's shape,
+// its Apply step in a top-level envoy.yaml, on the check rigs' repository.
 var envoyDeploy = config.Deploy{Repo: ghrepo.MustParse("sjawhar/legion"), Workflow: ".github/workflows/envoy.yaml", Step: "Apply"}
 
 // deployRunDetail is a deploy run's wake detail as the check_compare executor writes it.
