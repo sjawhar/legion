@@ -1,5 +1,5 @@
-import { expect, test } from "bun:test"
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { expect, spyOn, test } from "bun:test"
+import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { EnvoyClient } from "@legion/envoy-client/transport"
 import {
@@ -8,11 +8,20 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import {
+  pruneStaleSessionRoles,
+  readPersistedRole,
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
   writeSessionHandoff,
 } from "../src/session-identity"
+import {
+  readChosenTitleSync,
+  STATE_FILE_MAX_AGE_MS,
+  sessionTitleFile,
+  writeChosenTitle,
+} from "../src/session-state"
+import { sessionTitle } from "../src/session-title"
 import {
   deliveryRaw,
   directSubject,
@@ -92,7 +101,6 @@ test("follows the session id its Claude process hands off: new subject first, th
     // Whatever followed is a later tick doing nothing but re-registering.
     expect(handoffCalls.slice(6).filter((call) => call !== reregister)).toEqual([])
     expect(identity.id).toBe("ses_new")
-    expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_new.json"])
     expect(
       await executeEnvoyTool(
         { identity, client: client as EnvoyClient, session },
@@ -100,6 +108,8 @@ test("follows the session id its Claude process hands off: new subject first, th
         {},
       ),
     ).toMatchObject({ session_id: "ses_new" })
+
+    expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_new.json"])
 
     calls.length = 0
     await session.shutdown()
@@ -150,6 +160,45 @@ test("registers the session's title, and a handoff re-registers under the new id
     expect(new Set(titles)).toEqual(new Set(["ses_old legion ses_old", "ses_new legion ses_new"]))
     // The dispatch command's title is written once per id, not on every heartbeat.
     expect(stamped).toEqual(["ses_old legion ses_old", "ses_new legion ses_new"])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a name chosen after the server started is what the next registration and stamp carry", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_one", "/tmp")
+  const titles: string[] = []
+  const stamped: string[] = []
+  const client = recordingClient([], {
+    subscribe: async (input) => {
+      titles.push(input.title ?? "")
+      return noInterest()
+    },
+  })
+  // The real title function over the real state directory, so this row exercises the precedence
+  // the server wires rather than a stub of it.
+  const title = sessionTitle({}, "/work/legion", {
+    chosen: (sessionId) => readChosenTitleSync(sessionTitleFile(stateDirectory, sessionId)),
+  })
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, {
+      client,
+      heartbeatMs: 25,
+      title,
+      stampTitle: (sessionId, value) => stamped.push(`${sessionId} ${value}`),
+    }),
+  )
+
+  try {
+    expect(titles[0]).toBe("legion ses_one")
+    await writeChosenTitle(sessionTitleFile(stateDirectory, "ses_one"), "review the listener")
+    await waitFor(
+      async () => titles.includes("review the listener"),
+      "a registration carrying the chosen name",
+    )
+    expect(stamped).toEqual(["ses_one legion ses_one", "ses_one review the listener"])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })
@@ -523,6 +572,247 @@ test("two handoffs before a registration succeeds move the role from the first i
     )
     expect(calls).toContain("setRole ses_c reviewer soft previous=ses_a")
     expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_c.json"])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a role claim that fails at startup still starts the session, and the next heartbeat takes the role back", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_claude", role: "reviewer" }))
+  // The listener's own view of the role: the first two claims fail in transit, every later one
+  // lands. Two, not one: `transferRole` clears the queued retry only once `restoreRole` resolves,
+  // so a single failure would pass even if that retry were one-shot.
+  let holder = ""
+  let claims = 0
+  const client = recordingClient([], {
+    setRole: async (input) => {
+      claims += 1
+      if (claims <= 2) throw new Error("listener unavailable")
+      holder = input.sessionID
+      return { claimed: true, interest: noInterest() }
+    },
+    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+  })
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+  )
+
+  try {
+    expect(holder).toBe("")
+    await waitFor(async () => holder === "ses_claude", "the listener naming ses_claude holder")
+    expect(await readPersistedRole(roleFile)).toEqual({
+      session_id: "ses_claude",
+      role: "reviewer",
+    })
+    // The session counts the role as its own, not only the listener: a holder the listener then
+    // loses is one the heartbeat's soft claim takes back, and it reclaims only a role it holds.
+    holder = "ses_lost"
+    await waitFor(async () => holder === "ses_claude", "the heartbeat reclaiming the held role")
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a heartbeat that confirms this session as holder refreshes the role record the age sweep reads", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_claude", role: "reviewer" }))
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, {
+      client: recordingClient([], {
+        getRole: async (role) => ({ role, holder: identity.id, last_seen: 1 }),
+      }),
+      heartbeatMs: 25,
+    }),
+  )
+
+  try {
+    // Aged past the sweep's limit after startup restored it, as a record nothing had rewritten
+    // since a claim thirty days ago would be.
+    const past = new Date(Date.now() - STATE_FILE_MAX_AGE_MS - 60_000)
+    await utimes(roleFile, past, past)
+    await waitFor(
+      async () => (await stat(roleFile)).mtimeMs > Date.now() - STATE_FILE_MAX_AGE_MS,
+      `a heartbeat rewriting ${roleFile}`,
+    )
+    await session.shutdown()
+    // Swept as the next session that starts, not as this one: the sweep never drops its own
+    // record, so sweeping as `ses_claude` would pass however stale the record was left.
+    await pruneStaleSessionRoles(stateDirectory, "ses_other")
+
+    expect(await readPersistedRole(roleFile)).toEqual({
+      session_id: "ses_claude",
+      role: "reviewer",
+    })
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a record already past the sweep's age survives a startup whose claim was refused, and the heartbeat restores it", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_claude", role: "reviewer" }))
+  // Thirty days unconfirmed, as a long-held role's record is the moment before its session starts
+  // again: the startup sweep runs straight after the refused claim, before any heartbeat has
+  // touched it.
+  const past = new Date(Date.now() - STATE_FILE_MAX_AGE_MS - 60_000)
+  await utimes(roleFile, past, past)
+  let holder = ""
+  let claims = 0
+  const client = recordingClient([], {
+    setRole: async (input) => {
+      claims += 1
+      if (claims === 1) throw new Error("listener unavailable")
+      holder = input.sessionID
+      return { claimed: true, interest: noInterest() }
+    },
+    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+  })
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+  )
+
+  try {
+    // Both the record and the role have to survive that startup.
+    await waitFor(async () => holder === "ses_claude", "the heartbeat reclaiming the role")
+    expect(await readPersistedRole(roleFile)).toEqual({
+      session_id: "ses_claude",
+      role: "reviewer",
+    })
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a listener answer that is not JSON at startup still starts the session, and a later heartbeat takes the role back", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_claude", role: "reviewer" }))
+  // The first claim's answer is a proxy's HTML 502, parsed as the real client parses every
+  // answer; every later claim lands.
+  let holder = ""
+  let claims = 0
+  const client = recordingClient([], {
+    setRole: async (input) => {
+      claims += 1
+      if (claims === 1) return JSON.parse("<html><body>502 Bad Gateway</body></html>")
+      holder = input.sessionID
+      return { claimed: true, interest: noInterest() }
+    },
+    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+  })
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+  )
+
+  try {
+    expect(holder).toBe("")
+    await waitFor(async () => holder === "ses_claude", "a heartbeat taking the role back")
+    expect(await readPersistedRole(roleFile)).toEqual({
+      session_id: "ses_claude",
+      role: "reviewer",
+    })
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a role file whose bytes are not JSON starts the session without the role, and says so naming the file", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  // Truncated mid-write by a full disk.
+  await writeFile(roleFile, '{"session_id":"ses_claude","ro')
+  let holder = ""
+  let registrations = 0
+  const client = recordingClient([], {
+    subscribe: async () => {
+      registrations += 1
+      return noInterest()
+    },
+    setRole: async (input) => {
+      holder = input.sessionID
+      return { claimed: true, interest: noInterest() }
+    },
+    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+  })
+  const written: string[] = []
+  const stderr = spyOn(process.stderr, "write").mockImplementation((chunk) => {
+    written.push(String(chunk))
+    return true
+  })
+
+  try {
+    const session = await startChannelSession(
+      sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+    )
+    try {
+      await waitFor(async () => registrations >= 6, "five heartbeats after startup")
+      expect(holder).toBe("")
+      expect(written.filter((line) => line.includes(roleFile))).toEqual([
+        expect.stringContaining("the session starts without a role"),
+      ])
+    } finally {
+      await session.shutdown()
+    }
+  } finally {
+    stderr.mockRestore()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a role file that cannot be read does not stop the heartbeat adopting the registered interests", async () => {
+  const stateDirectory = await scratchState()
+  // A directory where the record should be: unreadable for any user, root included.
+  await mkdir(roleStateFile(stateDirectory, "ses_claude"), { recursive: true })
+  const alreadyRegistered = "notifications.dispatch.issue.DSP-5"
+  const entry = new Set<string>([directSubject, alreadyRegistered])
+  let reads = 0
+  const client = recordingClient([], {
+    subscribe: async (input) => {
+      for (const topic of input.topics) entry.add(topic)
+      return noInterest()
+    },
+    unsubscribe: async (input) => {
+      for (const topic of input.topics) entry.delete(topic)
+    },
+    getInterest: async (sessionID) => {
+      reads++
+      // The listener is down for exactly the startup read, so only a heartbeat can adopt.
+      if (reads === 1) throw new Error("listener unavailable")
+      return { ...noInterest(), session_id: sessionID, topics: [...entry] }
+    },
+  })
+  const session = await startChannelSession(
+    sessionOptions(new SessionIdentity("ses_claude", "/tmp"), stateDirectory, {
+      client,
+      heartbeatMs: 20,
+    }),
+  )
+
+  try {
+    await waitFor(
+      async () => session.topics().includes(alreadyRegistered),
+      `the heartbeat adopting ${alreadyRegistered}`,
+    )
+    expect([...entry].sort()).toEqual([directSubject, alreadyRegistered])
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

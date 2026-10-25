@@ -150,12 +150,14 @@ const legionPhaseView = z.strictObject({
  * when the reviewer completes. It shows from the review that decided it until the next round
  * opens or a new generation clears it, so a request for changes stays through implementing and
  * testing, and an approval through retro and every phase after it; absent until a review in a
- * round decides. */
+ * round decides. `state` is always present: a recorded pull request is open, merged or closed. */
 const legionPullRequestView = z.strictObject({
   /** The repository (`owner/name`) the pull request is in, its issue's (contract 31). */
   repo: nonEmptyString,
   number: z.number().int().positive(),
   head: nonEmptyString,
+  /** `open`, `merged` or `closed` (contract 36), `record.PullRequestState`'s values. */
+  state: z.enum(["open", "merged", "closed"]),
   checksVerdict: nonEmptyString.optional(),
   reviewDecision: nonEmptyString.optional(),
   fixAttempts: z.number().int().nonnegative(),
@@ -573,9 +575,10 @@ export type LegionGrant = z.output<typeof LegionGrantResponse>;
 
 /** Every completed fact route returns an intentional empty JSON object, never an unconstrained body. */
 export const LegionEmptyResponse = z.strictObject({});
-/** `api.HandoffCompleteResponse`: `note` is what READY's checks say when READY was published
- * without reading the head's checks (the pull request already merged, or its base requiring none);
- * every other completion answers none. */
+/** `api.HandoffCompleteResponse`: `note` is what READY answers when it has something to say about
+ * the merge it publishes - the pull request was already merged, so its head's handoffs went
+ * unread, or a person merges this one (`MANUAL_MERGE_REQUIRED:`); every other completion answers
+ * none. */
 export const LegionHandoffCompleteResponse = z.strictObject({
   note: nonEmptyString.optional(),
 });
@@ -665,7 +668,9 @@ export const LegionEscalateRequest = z.strictObject({
 });
 
 /** `api.SignOffRequest`, the owning architect's acceptance of an issue in `accepting`, which moves
- * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`). */
+ * it to `retro`; the daemon refuses it in every other phase (`SIGNOFF_OUTSIDE_ACCEPTING`), and
+ * refuses it 409 `SIGNOFF_CHILD_IN_WORKFLOW` while any issue beneath this one — its children,
+ * their children — is still in the workflow, naming each of them. */
 export const LegionSignOffRequest = z.strictObject({
   grantId: nonEmptyString,
   issue: nonEmptyString,

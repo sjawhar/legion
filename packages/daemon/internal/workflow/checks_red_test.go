@@ -240,8 +240,8 @@ func TestAPushClassifiedLateThatCompletesTheCarryOfARedSendsTheWorkBackFromEvery
 // implementer's start waiting on the role the red took the phase from, and the architect told the
 // phase the red stopped. In awaiting_merge the READY head arriving over its handoff push withdraws
 // nothing, as the late push does not (TestAPushClassifiedLateThatCarriesARedToTheREADYHeadWithdrawsNothing):
-// READY found the head's own CI green on GitHub, so the issue stays, nobody is told and nothing is
-// started.
+// that red stood before the READY and says nothing new about the submitted head, so the issue
+// stays, nobody is told and nothing is started.
 func TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackFromEveryPhase(t *testing.T) {
 	for _, tc := range []struct {
 		from    phase.Phase
@@ -314,9 +314,9 @@ func TestAHeadArrivingOverAKnownPushThatCompletesTheCarryOfARedSendsTheWorkBackF
 // READY is withdrawn, the return counted as a round, and the round returns through testing, review
 // and READY. A head a push that changed only .legion/ reached is no exception, as it is none before
 // READY either: no worker is at work in awaiting_merge, and only the implementer can change the
-// red. A red carried to the READY head from the code head before it moves nothing: READY found the
-// head's own CI green on GitHub, which is what GitHub merges by. Nor does a red only on a check the
-// base branch does not require.
+// red. A red carried to the READY head from the code head before it moves nothing: that red stood
+// before the READY and says nothing new about the submitted head. Nor does a red only on a check
+// the base branch does not require.
 func TestARedVerdictInAwaitingMergeSendsTheTreeBackToImplementing(t *testing.T) {
 	const required = "pr-checks-result"
 	for _, tc := range []struct {

@@ -2,7 +2,6 @@ package workflow
 
 import (
 	"context"
-	"slices"
 
 	"github.com/jackc/pgx/v5"
 
@@ -118,7 +117,10 @@ func (e *Engine) booted(ctx context.Context, tx pgx.Tx, fact intake.DaemonBooted
 
 // sweepMerged closes every issue of the project that awaits a merge GitHub already reported
 // (booted). Each is re-read before its close: a child's close may have closed its root
-// (closeAwaitingRoot), and a root's close lingers the tree its children then close under.
+// (closeAwaitingRoot), and a root's close lingers the tree its children then close under. A root
+// whose tree still runs is left where it stands by closeMerged, which owns that rule, and the
+// sweep tells nobody of the wait: a restart must not repeat the architect's notice, and a root can
+// now wait for days across many boots.
 func (e *Engine) sweepMerged(ctx context.Context, tx pgx.Tx) error {
 	issues, err := e.store.Issues(ctx, tx)
 	if err != nil {
@@ -142,22 +144,15 @@ func (e *Engine) sweepMerged(ctx context.Context, tx pgx.Tx) error {
 			}
 			continue
 		}
-		if claim.IsTreeRoot(issue.Key, issue.Tree) {
-			members, err := e.treeMembers(ctx, tx, *issue)
-			if err != nil {
-				return err
-			}
-			if running := slices.IndexFunc(members, func(m record.Issue) bool { return m.Key != issue.Key && InWorkflow(m) }); running >= 0 {
-				e.logOnCommit(ctx, "workflow: the boot leaves a merged root awaiting its merge while a child runs", "issue", issue.Key,
-					"pullRequest", pr.Number, "child", members[running].Key)
-				continue
-			}
+		waiting, err := e.closeMerged(ctx, tx, *issue, pr)
+		if err != nil {
+			return err
+		}
+		if len(waiting) > 0 {
+			continue
 		}
 		e.logOnCommit(ctx, "workflow: the boot closes an issue whose pull request merged before the upgrade", "issue", issue.Key,
 			"tree", issue.Tree, "pullRequest", pr.Number, "phase", issue.Phase)
-		if err := e.closeMerged(ctx, tx, *issue, pr); err != nil {
-			return err
-		}
 	}
 	return nil
 }
