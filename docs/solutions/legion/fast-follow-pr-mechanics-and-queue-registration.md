@@ -115,6 +115,15 @@ tightens and the same files are not in conflict twice.
 
 ## CI line on a narrow diff
 
+**Superseded 2026-10-23 (dispatch://INFRA-83):** the PR body has no `CI:` line, so there is nothing
+to say a legitimately absent run id in. The template is
+`skills/legion-worker/references/pr-body.md` and carries no such line; no role records a check
+result for a later step to trust, because the tester and the reviewer each read CI on GitHub at the
+head they are judging and record none of it (the reviewer's own four GitHub reads are in
+`skills/legion-worker/references/merge-gate.md`), where a path-filtered workflow that never fired is
+visible to each reader directly. The path-filtering fact below still holds; what follows records the
+body-line instruction it carried.
+
 A path-filtered workflow does not run on a diff outside its paths (`Legion Envoy and Contracts`
 is filtered to `packages/envoy`/`packages/contracts` and never fired on #1006), so the template's
 second run id is legitimately absent — say so in the `CI:` line rather than templating a

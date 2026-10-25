@@ -50,6 +50,17 @@ the merge queue and the reviewer know why it is red. Handoff pushes no longer co
 `fixAttempts` (the listener forwards `changed_paths`; the daemon classifies), and `pr-blocked`
 fires once per exhausted count. An expected-external red still counts real fixes as before.
 
+**Superseded 2026-10-23 (dispatch://INFRA-83):** there is no PR body CI line to report the external
+cause in — the template (`skills/legion-worker/references/pr-body.md`) carries no `CI:` line, and no
+role records a check result for a later step to trust: the tester and the reviewer each read CI on
+GitHub at the head they are judging and record none of it (the reviewer's own four GitHub reads are
+in `skills/legion-worker/references/merge-gate.md`), where an external red is visible to each of
+them with its failing job and step. Report the red's external cause to the architect over Envoy,
+as §2 below has a worker report a 409, and the architect carries it to the roles whose phase it
+touches. The finding itself is untouched: a worker fixes nothing about an external red, a
+handoff-only push does not count toward `fixAttempts` (LEGION-33), and a `pr-blocked` wake on such
+a PR means real fixes were pushed onto the red.
+
 ## 2. `/worker/started` overwrote `phases[issue]` unconditionally — fixed in LEGION-37 (#991)
 
 **Historical (main before #991).** `api/routes/workers.ts` (the `/worker/started` handler) ended

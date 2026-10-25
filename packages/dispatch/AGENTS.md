@@ -152,6 +152,26 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   left the page, or the session left the registry and returned - shows the send the store holds
   for it and holds its picker and Reply until it lands. An upload's reference names where the
   file went, whatever was picked while it was out.
+  A row's session name takes the row's width and is never cut: the heading holds no width of its
+  own (`min-w-0`, never a `max-w-*` cap) and its text wraps, mid-word where a name has nothing
+  else to break on, so a session a person named at length reads whole at every screen width, as a
+  taller row rather than a shortened name or a page wider than the screen, which matters because
+  a person finds a session by the name they gave it. The directory is what gives that width up,
+  down to a floor and no further: from `md` it keeps `md:min-w-48`, enough for its host and last
+  segment to be read and hovered, so a 64-character name costs the row a further line rather than
+  squeezing the directory to no width at all, where nothing is painted and no hover can reach it.
+  From `md` (768 px) it shows `<machine> · <last path segment>`
+  (`lastPathSegment`, which keeps the path itself when it holds no segment at all, as `/` does)
+  and keeps the whole `<machine> · <full path>` as its `title`, since a reader at that width has
+  a hover to ask with; below `md`, where a phone has no hover and the directory already sits on a
+  line of its own under the name (`order-last basis-full`), it shows the whole path. Neither
+  width ellipsises it: the shortened text exists to be read, so a host or last segment wider than
+  the floor wraps inside it rather than being cut, and `e2e/agents.e2e.ts`'s laptop row holds it
+  to `assertWhole` as well as to a painted box.
+  Which side of that line the page is on is answered once for the list
+  (`MD_VIEWPORT_QUERY`, Tailwind's `md` itself so it answers exactly when the row's own `md:`
+  classes apply, through `useMediaQuery` in `AgentsPage`, handed to each row as `mdViewport`), so
+  a list of two hundred rows holds one media-query listener rather than two hundred.
 - A person's direct Send or Aside reaches an Oh My Pi session as that person's own user turn once
   the session has accepted the attempt with Dispatch, so the live view shows it from the stream,
   where the session took it. When the stream tags it with its Dispatch id (`dispatchTurns` in
@@ -284,7 +304,7 @@ Inside each band, an owner's asks stay together (`features/inbox/grouping.ts`, `
 
 `web/src/components/` owns the shared status, label, approval, attention-count, empty, and loading primitives, plus `CopyButton.tsx` (the copy glyph behind every copy control, including `features/refs/CopyRefButton.tsx`), `PinButton.tsx`, `Chip.tsx`, `MultiSelect.tsx`, and `RefusableButton.tsx`. `PinButton` is the one pin glyph (outline, filled once pinned, `aria-pressed`) behind the issue header, agent rows, and every Conversation turn's top-right pin (`quiet`, borderless at rest so a list is not a column of boxes). `RefusableButton` is the button that says why it cannot be pressed, behind both Send buttons (the broadcast's and `MentionComposer`'s) and the Sends strip's Restore draft: given a `refusal` it is `aria-disabled` rather than `disabled`, so it stays in the tab order, carries the reason on `title` and through `aria-describedby` on the line that shows it (`refusalShownBy`), or on a hidden line of its own where none does, and does nothing when clicked, a submit button included; only `busy`, a press in flight its label names, renders `disabled`. Its `look` is one entry of a map of whole static strings: the filled primary (`primaryButton` in `classes.ts`) or the compact outlined secondary (`secondary-compact`, `secondaryButtonCompact`). Neither restates its cannot-press look for `aria-disabled`: the `refused` custom variant in `styles.css` matches `:disabled` and `[aria-disabled="true"]` alike, and `primaryButtonDisabled`, `primaryButtonEnabledHoverBg`, `secondaryButtonHoverBorder` and `secondaryButtonDisabledText` are written in it (`refused:`, `not-refused:hover:`), so every button wearing them, refusable or not, skips its hover and shows its cannot-press look for either attribute. Every primary button that cannot be pressed reads slate-700 on slate-300 (slate-300 on slate-700 in dark), 6.97:1, registered as a contrast check, because its label may be the only thing on screen saying why; a secondary that cannot be pressed keeps the dimmed label secondary buttons already had (`secondaryButtonDisabledText`), and the refused Restore draft has its reason on the line under it. `Chip` is the one interactive chip — a single `<button>` carrying the border, the fill, and the 44 px hit area, so the outline is always the shaded shape (never a border on a tall button wrapped around a smaller `Pill`); `selected` renders `aria-pressed` and the selected fill (`tone` picks the neutral strong surface or an ask urgency's badge, as the margin composer's Urgency row does), `removable` appends the `×` glyph and the whole chip is the remove control. A chip is never wider than its row (`max-w-full`): its text is a `TruncatedText` that ends in an ellipsis where it does not fit, and a host whose text can run that long passes it whole as `title` (the filter strip's active-filter chips). A non-button host that must look like a pill stays one element through `pillClassName` (the List's parent link). `MultiSelect` is the one searchable multi-select: a trigger (`aria-haspopup="listbox"`, `<label> · N`), a portalled popover with a `combobox` search over an `aria-multiselectable` listbox of checkbox rows, arrows/Enter/Escape/Tab from the input, outside-press close, focus returned to the trigger; the host owns `open` (so the issue header stages and saves) and `onCreate` adds the `Create "…"` row. Project lists and boards, Inbox, the margin, and Agents use the same icon-less empty state and card-shaped skeleton, so every loading or empty result preserves the surface's hierarchy.
 
-Text that truncates inside a control that is a flex container goes in `components/TruncatedText.tsx`, and the control keeps `truncate` on itself. Below 1280 px every link that is not `.prose a` or `.dispatch-inline-link` (an inline link keeps its own line box instead) and every button is an inline-flex box with centred items (`styles.css`, unlayered, so it beats a `block` or `items-*` class on the control); `text-overflow` never applies to a flex container's own text, so the control alone clips mid-word with no ellipsis. The span is the flex item the ellipsis applies to, and where the control is a block the control's own `truncate` draws it. The span takes a `className` for its flex sizing (`min-w-0 flex-1`, a `max-w-[18ch]` cap) and an explicit `title` — it derives none of its own, so a host passes one only when it wants the pointer tooltip: a host that already carries its own `title` on the wrapping element, a host whose link already opens a `RefPreview` hover card through `referenceTriggerProps` (both kinds of Inbox row owner, and attachment lists and component work rows), or a host whose truncated text is a quoted excerpt rather than a name — restating it in a tooltip would only repeat text already visible in the turn above it (`ReplyQuote`, whose quote is a `MarkdownPreview` given no `title` for that reason) — passes none, since a native tooltip would either duplicate the wrapper's, draw over the preview card, or restate text already on screen. A link that is not a flex item also needs a width cap (`max-w-full`), since an inline-flex box is as wide as its whole text. A link or button whose content is several lines stacks them itself, `flex flex-col` with `self-stretch` on each line (an item's `align-self` wins over the container's centred `align-items`), since below 1280 px a `block` control lays its lines side by side. Every truncating link and control does this: the project Documents list, the Artifacts tab, both kinds of Inbox row owner, the architecture rows, attachment lists and component work rows, `GitHubLink` (a pull request's title and a non-GitHub address), a document's open-decision link, the issue header's `Message route` button, a Broadcasts row, an @ picker option, `MultiSelect`'s label-picker option row, an Agents-page row's name button, `AskCard`'s author chip, `Chip`, and `ReplyQuote`. From `sm` a Documents row is a four-column grid; on a phone the name takes its own line and the kind, issue and time share the line under it.
+Text that truncates inside a control that is a flex container goes in `components/TruncatedText.tsx`, and the control keeps `truncate` on itself. Below 1280 px every link that is not `.prose a` or `.dispatch-inline-link` (an inline link keeps its own line box instead) and every button is an inline-flex box with centred items (`styles.css`, unlayered, so it beats a `block` or `items-*` class on the control); `text-overflow` never applies to a flex container's own text, so the control alone clips mid-word with no ellipsis. The span is the flex item the ellipsis applies to, and where the control is a block the control's own `truncate` draws it. The span takes a `className` for its flex sizing (`min-w-0 flex-1`, a `max-w-[18ch]` cap) and an explicit `title` — it derives none of its own, so a host passes one only when it wants the pointer tooltip: a host that already carries its own `title` on the wrapping element, a host whose link already opens a `RefPreview` hover card through `referenceTriggerProps` (both kinds of Inbox row owner, and attachment lists and component work rows), or a host whose truncated text is a quoted excerpt rather than a name — restating it in a tooltip would only repeat text already visible in the turn above it (`ReplyQuote`, whose quote is a `MarkdownPreview` given no `title` for that reason) — passes none, since a native tooltip would either duplicate the wrapper's, draw over the preview card, or restate text already on screen. A link that is not a flex item also needs a width cap (`max-w-full`), since an inline-flex box is as wide as its whole text. A link or button whose content is several lines stacks them itself, `flex flex-col` with `self-stretch` on each line (an item's `align-self` wins over the container's centred `align-items`), since below 1280 px a `block` control lays its lines side by side. Every truncating link and control does this: the project Documents list, the Artifacts tab, both kinds of Inbox row owner, the architecture rows, attachment lists and component work rows, `GitHubLink` (a pull request's title and a non-GitHub address), a document's open-decision link, the issue header's `Message route` button, a Broadcasts row, an @ picker option, `MultiSelect`'s label-picker option row, `AskCard`'s author chip, `Chip`, and `ReplyQuote`. An Agents-page row's name button is deliberately none of them: its name wraps whole at every width (`features/agents/`, above), so it holds a plain `break-words` span rather than a `TruncatedText`, and its `title` repeats the name for a reader who wants it in one line. From `sm` a Documents row is a four-column grid; on a phone the name takes its own line and the kind, issue and time share the line under it.
 
 ## Margin threads
 
@@ -497,12 +517,15 @@ service needs a new login approval. Revoking ends the login and every session it
 also invalidates the Live grants list.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
-broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
-resolved in `cmd/dispatch/main.go`'s boot config with the repo's usual trimmed-file-wins `_FILE`
-convention, threaded through `api.Deps`/`routes.AppContextOptions` as `Deps.AgentSecrets`, nil
-when unconfigured). Its reads and the machine lookup return the broker's JSON body as
-`json.RawMessage`, relayed unmodified. The UI bearer is the approval credential: the broker takes
-the approving human from the request body on that bearer's word, so Dispatch builds every decision
+broker's named-caller API (`DISPATCH_AGENT_SECRETS_URL`, and
+`DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, the file holding Dispatch's own projected Kubernetes
+ServiceAccount token, both resolved in `cmd/dispatch/main.go`'s boot config, threaded through
+`api.Deps`/`routes.AppContextOptions` as `Deps.AgentSecrets`, nil when unconfigured). Every call
+presents that token, read from the file at call time behind a 30-second cache since the kubelet
+rewrites it in place; the broker verifies it and finds Dispatch in its `BROKER_API_ACCOUNTS`. Its
+reads and the machine lookup return the broker's JSON body as `json.RawMessage`, relayed
+unmodified. The listed account's token is the approval credential: the broker takes the approving
+human from the request body on that caller's word, so Dispatch builds every decision
 body itself. `Approve` and `Deny` take an `agentsecrets.Decision{Approver, Code}`, where `Approver`
 is always `canonicalLogin` of the `requireHuman` caller and `Code` is the only field read from the
 browser's body; any other field the browser sends, an `approver` among them, is dropped.
@@ -521,8 +544,11 @@ configured client (`404 FEATURE_OFF` on a nil one), except the pending list, whi
 without a broker once its input is checked; the two `?approver=` routes accept only the
 literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own
 canonical login — the UI never asks for anyone else's list. A `*agentsecrets.Error` forwards the
-broker's exact status and body verbatim (e.g. `403 NOT_APPROVER`, `409 RECORD_TERMINAL`); any other
-failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go` pins the decision bodies
+broker's exact status and body verbatim (e.g. `403 NOT_APPROVER`, `409 RECORD_TERMINAL`); a call
+that stopped at Dispatch's own token, a file missing, unreadable or empty, is
+`500 AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE`, logged with the file's path, since the broker was
+never asked; any other failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go`
+pins the decision bodies
 against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips a real broker
 (`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
 `403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
@@ -875,13 +901,16 @@ exports `ENVOY_URL`). The harness ports stay inputs because the server script re
 the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved. The secrets broker
 the server relays credential requests to is one switch, `DISPATCH_E2E_AGENT_SECRETS_URL`, which
 `run-server.sh` and `e2e/harness-broker.ts` read alike (`${VAR-default}`, so empty and unset
-differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (default `9024`) with a
-throwaway UI bearer, so the credential-request feature is on; empty is no broker, the feature off
-as in a deployment that configures none (`DISPATCH_E2E_AGENT_SECRETS_URL= bun run e2e`, which is
-how the no-broker path is run locally); a URL is a broker the caller runs, whose bearer
-`run-server.sh` hands the server by `DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE`, a path it makes
-absolute against the caller's directory before it changes into `packages/envoy`. The broker's docs
-rig (`docs/site/media/broker/rig.sh`) sets a URL. Playwright starts the
+differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (default `9024`), which
+verifies no caller, so the server presents the throwaway token in
+`e2e/fake-broker-account-token` and the credential-request feature is on; empty is no broker, the
+feature off as in a deployment that configures none (`DISPATCH_E2E_AGENT_SECRETS_URL= bun run
+e2e`, which is how the no-broker path is run locally); a URL is a broker the caller runs, which
+lists the ServiceAccount whose token `run-server.sh` hands the server by
+`DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, a path it makes absolute against the caller's
+directory before it changes into `packages/envoy`. The broker's docs rig
+(`docs/site/media/broker/rig.sh`) sets a URL, and keeps that token with
+`packages/envoy/cmd/dev-oidc-issuer`, the local issuer its broker trusts. Playwright starts the
 fake broker only for the default, and the skill-scenarios rig sets the switch empty.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact

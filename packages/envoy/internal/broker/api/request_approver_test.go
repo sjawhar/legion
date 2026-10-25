@@ -35,7 +35,7 @@ func newApproverTestServer(t *testing.T) *testServer {
 		local.Put(policytest.Secret("SERVICE_KEY", approverService, policy.TierAgent, "service-v1"))
 		cur := policytest.Current(t, local, approverService)
 		d.Policy, d.Machine.Policy, d.MachineLogin.Policy = cur, cur, cur
-		d.Machine.ServiceAccounts = map[string]string{approverService: workerAccount}
+		d.Machine.ServicesByAccount = map[string]string{workerAccount: approverService}
 	})
 }
 
