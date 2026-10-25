@@ -125,7 +125,7 @@ func TestConnectWithContextDoesNotPoisonAutomaticReconnect(t *testing.T) {
 
 	// The property under test is that a connect context that is done by the time the server
 	// drops the connection does not poison automatic reconnect; cancel it explicitly instead of
-	// racing a short dial deadline against the freshly started container.
+	// racing a short dial deadline against the freshly started server.
 	connectCtx, cancel := context.WithTimeout(baseCtx, 10*time.Second)
 	defer cancel()
 	reconnected := make(chan struct{}, 1)
