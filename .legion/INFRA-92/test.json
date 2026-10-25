@@ -2,110 +2,88 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-92",
-  "completed": "2026-10-25T11:35:00Z",
-  "round": 4,
-  "verdict": "pass",
-  "headsInThisRound": {
-    "why": "This round's code was written at 39175757c326, which carried the review App as its author. I found that while checking the delta, the architect ruled it a record defect worth a round, and the implementer rewrote the commit as d4de531733a9 with its own identity. Every measurement below says which head it was taken at; the two heads are the same content, proved under identityCheck.",
-    "codeBeforeRewrite": "39175757c326",
-    "codeAfterRewrite": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
-    "handoffHead": "0a85301698574bee5a34c15a60420688bbd4f311"
+  "completed": "2026-10-25T12:40:00Z",
+  "round": 5,
+  "verdict": "fail",
+  "heads": {
+    "code": "301288e631cb",
+    "pushedHead": "e7fdeea43528f8c0227d6562788845fa244eda89",
+    "controlForEveryComparison": "d4de531733a9 — the previous code head, its committed dist/envoy-channel.js read with jj file show and run beside this head's in the same probe"
   },
   "implementerProof": {
     "verdict": "verified",
-    "how": "Every claim of the two handoffs this round covers was re-run here. The role work at 39175757c326 and again, unchanged, at the rewritten d4de531733a9: the refused startup claim and its retry, both sweep rules kept apart with their controls, the unparseable record, and the touch. The media-query claim I drove myself with a Chromium launch flag rather than reading its number. The page claim I checked by its delta first, as the architect asked: this round's own commit touches nothing under packages/dispatch, so the Agents spec in both profiles is the scope and round three's whole-project evidence stands for the markup. The rewrite round's own proof — that it changed identity and nothing else — I did not take from its handoff: I read it from the repository myself, under identityCheck."
+    "how": "Its three entries were re-run here, not read, and each with the previous head's bundle beside it in the same run: the listener answering HTML under a 200, the file faces, and the smoke. I drove two cases beyond them that the architect asked for — a listener answer of valid JSON that misses the schema, and the interests reconciliation observed on the registry rather than inferred — and both hold. The behaviour of this round is right. The round fails on the push that carried it, below, which is not a behaviour of the code."
   },
-  "failures": [],
-  "failed": 0,
+  "failures": [
+    {
+      "criterion": "Every code push of this pull request starts the repository's checks, and the head that merges has CI (skill://legion-worker, 'Every role pushes its own commits': a handoff-only push carries skip-checks: true, every other push carries no such line, and a head with no CI is refused at READY).",
+      "evidence": "The branch head e7fdeea43528f8c0227d6562788845fa244eda89 ends with 'skip-checks: true' after two empty lines — read with git log -1 --format=%B e7fdeea43528 | cat -A — and the push it headed carried a code commit, 301288e631cb, holding packages/claude-envoy/src/envoy-channel-server.ts, src/session-identity.ts, tests/envoy-channel-handoff.test.ts and the rebuilt dist. GitHub therefore started nothing: `gh pr checks 2154` lists one check, pr-title; `gh run list --commit e7fdeea43528f8c0227d6562788845fa244eda89` holds only PR Title runs, which come from pull_request events rather than from the push; and `gh run list --commit 301288e631cb` is empty. main's required set is lint, typecheck, test and pr-title, so three required checks have never run on this round's code. No red test can pin this: it is a property of the push, not of the source. The remedy is a head whose message carries no trailer — a rewrite of e7fdeea43528's message and a force-push, or any later push whose head carries none. This handoff's own push is handoff-only and so carries the trailer, which is right for it and does not cure the code head."
+    }
+  ],
+  "failed": 1,
+  "failureInContext": {
+    "theRemedyIsSound": "The three faces the reviewer and the architect named were all driven here and all hold, each with the previous head's bundle beside it in the same run. What fails is how this round was delivered, not the boundary move: the implementer should not read the verdict as the change being wrong.",
+    "secondOfItsClass": "This is the second defect of one shape in this issue, and the retro learning should carry the two together rather than as two incidents. In round four a code commit kept the review App as its author because handoff_complete guards the handoff commit of a push and nothing guards the code commit beside it. Here a trailer meant for a handoff-only push rode a push that also carried code, so GitHub started nothing for the code. Both are a rule that is right for one of the two commits in a push and silently wrong for the other, and in both the wrong half is the code commit — the half that matters most and is checked least."
+  },
   "proof": [
     {
-      "criterion": "Finding 1: a soft role claim refused at startup is retried on the heartbeat, and a refusal that repeats is retried again.",
-      "surface": "The committed dist/envoy-channel.js run as Claude Code runs it, against a real nats-server with JetStream and an Envoy listener built from this tree, behind a proxy of my own that answers 503 to the first two POSTs of /v1/roles/set and forwards everything else.",
-      "command": "a tester probe (/tmp/r4-role.sh with /tmp/r4-proxy.ts, deleted after the round), case A; the holder read from the listener's own GET /v1/roles/planner",
-      "observed": "The session alive, the proxy recording refusals=2, one stderr line — 'envoy-channel: could not restore the role from <…>/roles/a-0001.json (POST …/v1/roles/set failed with 503: injected listener outage); the next heartbeat retries' — and the listener answering holder=a-0001 after the retries. Two refusals, so a one-shot retry would not have reached the holder.",
-      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
-      "negativeControl": "The same probe's later cases run the same path with the proxy refusing nothing: the claim lands at startup, no retry line is written, and the holder is named without any heartbeat."
+      "criterion": "The reviewer's defect, listener face: an answer that is not JSON must not cost the session its role, and must be queued so a heartbeat takes the role back.",
+      "surface": "The committed dist/envoy-channel.js run as Claude Code runs it, against a real nats-server with JetStream and an Envoy listener built from this tree, behind a proxy of mine that shapes the first POST /v1/roles/set. Two shapes: an HTML body under a 200, which the real client parses at packages/envoy-client/src/transport.ts:395, and a 200 carrying valid JSON the role answer's schema rejects.",
+      "command": "a tester probe (/tmp/r5-role.sh with /tmp/r5-proxy.ts, deleted after the round), cases L1 and L3, with the holder read from the listener's own GET /v1/roles/planner",
+      "observed": "HTML under a 200: the session alive, one stderr line 'envoy-channel: could not restore the role (JSON Parse error: Unrecognized token \"<\"); the next heartbeat retries' — naming no file, because no file was at fault — and the listener then answering holder=l1-head with the record kept. Valid JSON missing the schema: the same, holder=l3-head. So a ZodError from the wire is queued, which is the half the remedy had to separate.",
+      "headSha": "301288e631cb",
+      "negativeControl": "The previous head's bundle, d4de531733a9, in the same run against the same proxy: 'could not restore the role from <…>/roles/l2-base.json (JSON Parse error: Unrecognized token \"<\"); the session starts without one' — blaming a role file that was good — and the holder still empty after twelve seconds. The same for the schema miss at l4-base. That is the defect reproduced and the fix beside it."
     },
     {
-      "criterion": "The architect's rule — the sweep must never delete the record of the session running it — holds, and the sweep still deletes an abandoned record in the same run.",
-      "surface": "The same live rig, one roles directory holding two records of identical age, swept by the session that owns one of them.",
-      "command": "the same probe, case B1: a 31-day-old record of the starting session whose claim the proxy refuses once, an identically aged abandoned record beside it, then the startup sweep and the heartbeats",
-      "observed": "Before: own=31.0 days, abandoned=31.0 days. After the refused claim, the startup sweep that follows it and the heartbeats: the own record kept and refreshed to 0.0, the abandoned record gone, holder=b1-0001 — so the role was recovered from the record the sweep would have deleted.",
-      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
-      "negativeControl": "The abandoned record itself: identical age, identical shape, same directory, same sweep, deleted. What kept the other one is the condition on the session id and not a sweep that stopped deleting."
+      "criterion": "The file face has not widened: only bytes that will never parse suppress the retry, and every other failure to read the record is queued.",
+      "surface": "The same live rig with no proxy refusals, one role record per case.",
+      "command": "the same probe, cases F1 to F5: truncated bytes, JSON that misses the schema, no record at all, the record at mode 000, and a directory standing where the record should be",
+      "observed": "Truncated bytes: one line, 'the role record <…>/roles/f1-trunc.json cannot be parsed (JSON Parse error: Unterminated string); the session starts without a role', the role never claimed over ten seconds, no retry line. JSON missing the schema ({\"session_id\":\"f2-schema\",\"role\":5}): the same suppression, naming the field — the file-side ZodError, the other half of the separation. No record: no line at all. Mode 000: 'could not restore the role (EACCES: permission denied, open …); the next heartbeat retries'. A directory in its place: the same with EISDIR. Each of the five left the session alive, and none wrote a second line: the startup catch marks the run reported, so the heartbeat's own retry does not repeat it.",
+      "headSha": "301288e631cb",
+      "negativeControl": "The two suppressed cases against the two queued ones in the same probe and the same rig: identical plumbing, opposite outcomes, so what decides is the origin of the failure and not the rig. The previous head's bundle, which suppressed a wire SyntaxError as well, is the control in the other direction."
     },
     {
-      "criterion": "Finding 2, kept apart from the rule above: a long-held record survives a sweep run by a different session only because the heartbeat refreshes it.",
-      "surface": "The same rig: a session holding its role against the real listener, its record and an abandoned one both aged to 31 days while it runs, then a second session whose startup sweep runs as someone else.",
-      "command": "the same probe, case B2",
-      "observed": "Aged under the live holder: live=31.0, abandoned=31.0, holder=b2-0001. After two heartbeats: live=0.0, abandoned=31.0 — only the live holder's record was touched. After the second session's startup sweep: live kept, abandoned gone.",
-      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
-      "negativeControl": "The abandoned record, identically aged at the start and swept by that same foreign sweep, deleted. The two rules therefore pass for their own reasons: B1's record is saved by the session-id condition with no heartbeat in it, B2's by the refresh with no condition in it, and neither case could have passed on the other's mechanism."
-    },
-    {
-      "criterion": "The kept record is a record a live session keeps, not a record nothing can ever remove (the architect's resume case).",
-      "surface": "The same rig, with a record carrying the running session's id but written by an earlier process and never touched by this one.",
-      "command": "the same probe, case B3: the record aged to 31 days before the session starts, then the session stopped, the record aged again, and another session's startup sweep run over it",
-      "observed": "While that session ran: resume=0.0 (kept, then refreshed), the abandoned control gone, holder=b3-0001. With that session gone and the record aged again to 31.0: a sweep by another session deleted it. So the record is unsweepable only while its own session runs, which is the whole of the rule and none of a leak.",
-      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
-      "negativeControl": "The same record before that second sweep, at 31.0 days and present: the deletion is the sweep's doing and not the session's exit."
-    },
-    {
-      "criterion": "The failure shapes around the role record cost the session its role and nothing else, and the heartbeat's touch leaves nothing beside the record.",
-      "surface": "The same rig: an unparseable record, a record at mode 000, the roles directory at mode 000, a directory standing where the record should be, and fifteen seconds of listings of roles/ during heartbeats.",
-      "command": "the same probe, cases C and D, and a second tester probe (/tmp/r4-guard.sh, deleted after the round) for the three permission shapes",
-      "observed": "The unparseable record: alive, exactly one stderr line over twelve seconds — so it is not queued and does not spin — and the record untouched. Mode 000 on the record, mode 000 on the directory, and a directory in its place: each alive, registered under its chosen name, and taking a later rename within the heartbeat, with one stderr line naming the file and the reason (EACCES, EACCES, EISDIR). Sixty listings of roles/ over fifteen seconds of one-second heartbeats showed one name and only one, the record itself: the touch drops no temporary file for a directory listing to catch.",
-      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
-      "negativeControl": "The same bundle with a well-formed readable record in the same probe: no stderr line at all and the role claimed at startup, so the single line is the failure being reported once and not noise the server always writes."
-    },
-    {
-      "criterion": "Finding 3: the row's media query and its md: classes answer alike at a root font size other than 16 px.",
-      "surface": "Dispatch's own browser suite in a real Chromium launched twice with --blink-settings=defaultFontSize=16 and =20, at an 800 px viewport — between 768 px as an absolute number and 48rem, which is 960 px at the larger root.",
-      "command": "a throwaway spec of mine (packages/dispatch/e2e/zz-rem-probe.e2e.ts, run in the chromium project and deleted) that reads both media queries, the computed root font size, and the row's rendered directory",
-      "observed": "root 16px: computed root=16px, (min-width:768px)=true, (min-width:48rem)=true, directory 192x16 reading 'build-host · features' — the laptop layout, agreed by both. root 20px: computed root=20px, (min-width:768px)=true, (min-width:48rem)=false, directory 708x20 reading the whole path — the below-md layout, which is where the md: classes are at that width too. The predicate and the classes now answer alike where they used to disagree.",
-      "headSha": "d4de531733a9e8668fa0caf63f6aa7926cfc960c",
-      "negativeControl": "The old constant measured in the same run: (min-width: 768px) answers true at root 20px, which is the divergence — the shortened directory inside the layout meant to keep the whole path — that the rem value removes."
+      "criterion": "A queued role retry must not stop the heartbeat's interests reconciliation, including the adoptHandoff path.",
+      "surface": "The same rig: the proxy answering every POST /v1/roles/set with 503 so the retry fails on every tick, and refusing the first GET /v1/interests/<session> so the startup read fails, with the session's interests in the registry changed under it while it runs.",
+      "command": "the same probe, cases R1 and R3: a topic added to the registry that the session does not follow, then the registry read back from the listener over the next heartbeats",
+      "observed": "With the claim failing every tick, the registry went from notifications.agent.r3-head, notifications.probe.drifted, notifications.probe.kept to notifications.agent.r3-head, notifications.probe.kept — the reconciliation removed the drifted topic and kept the followed one — and no 'registry heartbeat failed' line was written at all. So the tick ran past transferRole to syncRegisteredInterests on every beat while the role kept failing.",
+      "headSha": "301288e631cb",
+      "negativeControl": "The previous head's bundle in the same shape: the drifted topic was still in the registry after two more heartbeats, and 'envoy-channel: registry heartbeat failed (POST …/v1/roles/set failed with 503 …); retrying every heartbeat' was written once — the tick ending at transferRole, which is the starvation this change removes. One honest limit of the rig: a message published to a topic the registry lists reached the session on both heads, so delivery does not discriminate here — the listener fans out server-side. The registry drift is what does."
     },
     {
       "criterion": "Nothing on the Agents page moved, and the plugin still registers the name a person gave the session.",
-      "surface": "Dispatch's browser suite in a real Chromium, the Agents spec in the chromium and iphone projects; and the committed bundles against a real nats-server and Envoy listener.",
+      "surface": "Dispatch's own browser suite in a real Chromium, the Agents spec in the chromium and iphone projects; and the committed bundles against a real nats-server and Envoy listener.",
       "command": "cd packages/dispatch && DATABASE_URL=postgres://postgres@127.0.0.1:55432/dispatch_e2e_c ./node_modules/.bin/playwright test --config e2e/playwright.config.ts e2e/agents.e2e.ts --project chromium --project iphone; then bash packages/claude-envoy/scripts/smoke-session-title.sh",
-      "observed": "34 passed, 0 failed (3.4 minutes), the row at :1717 and my round-two red row at :1807 green in both profiles. The smoke PASS, all four cases: 'eeny meeny', then 'miny moe', then 'probe-project smoke-ti', with the dispatch stamp holding 'miny moe'.",
-      "headSha": "0a85301698574bee5a34c15a60420688bbd4f311",
+      "observed": "34 passed, 0 failed (3.5 minutes), the row at :1717 and my round-two red row at :1807 green in both profiles. The smoke PASS, all four cases, with the dispatch stamp holding the renamed title.",
+      "headSha": "e7fdeea43528f8c0227d6562788845fa244eda89",
       "negativeControl": "The smoke's own last case: main@origin's dist/envoy-channel.js registered the folder-and-short-id fallback and not the chosen name.",
-      "scopeNote": "The Agents spec rather than the whole chromium and iphone projects, on the architect's instruction and my own check of the delta: this round's commit touches nothing under packages/dispatch, and the only page change since round three's whole-project runs is the one media-query constant over markup those runs proved. Round three's 720/617/4 project runs are the evidence for the markup; they are not re-run here."
+      "scopeNote": "The Agents spec rather than the whole projects, by the rule I set myself in round four and the architect confirmed, after checking the delta: git diff --stat 4943aaa53531 e7fdeea43528 lists packages/claude-envoy (src, tests, dist) and .legion/ only, nothing under packages/dispatch. Round three's whole-project runs (chromium 720/2, iphone 617/1, plain-http 4/0) are the evidence for the page markup and are not re-run here."
     }
   ],
   "identityCheck": {
-    "why": "I raised the record defect, so the architect asked that I verify its fix myself rather than cite the implementer's: a record defect verified only by the role that made it is the same shape of mistake as a guard that covers one of two commits.",
-    "rewriteChangedIdentityAlone": "git rev-parse 39175757c326^{tree} and d4de531733a9^{tree} both read ba5069e1951b10ae229b293162c0b8e79fb85ab1; both have parent 898037479328; their messages are byte-identical including the Omp-Session trailer; and git diff 39175757c326 d4de531733a9 is empty. So the plugin numbers measured at the old commit are numbers at the new one.",
-    "branchAudit": "git log --format='%h A=%ae C=%ce' main..0a853016 over every commit of the branch: each code commit and each implement handoff is legion-implementer[bot] in both columns; each plan, test and review handoff is legion-reviewer[bot] in both columns, which is right, since the planner, tester and reviewer all carry the review App. No commit mixes the two, and the one that did (39175757c326, author legion-reviewer[bot], committer legion-implementer[bot]) is gone from the branch.",
-    "cause": "My own round-three push left an empty working-copy commit authored by the review App; the implementer split that commit rather than starting a new one, which keeps the author and takes the splitter as committer. skill://legion-worker warns against exactly that, and handoff_complete refuses a handoff carried by another App's commit — but nothing checks a code commit, which is why the defect showed on one of the two. That asymmetry belongs in the retro learning.",
-    "readAt": "the pushed head 0a85301698574bee5a34c15a60420688bbd4f311; saved to /legion/scratch/infra92-identity-check.txt"
+    "readAt": "e7fdeea43528f8c0227d6562788845fa244eda89",
+    "result": "git log --format='%h A=%ae C=%ce' over the two commits this round adds: 301288e631cb and e7fdeea43528 are both legion-implementer[bot] in both columns, and the reviewer's a89f88d315cd beside them is legion-reviewer[bot] in both. The round-four defect has not returned.",
+    "why": "I raised that defect, so I verify its absence myself rather than cite it."
   },
   "ciRead": {
-    "head": "0a85301698574bee5a34c15a60420688bbd4f311",
-    "readAt": "2026-10-25T11:33:00Z",
-    "runs": [
-      "Docs run 40188548432 — success",
-      "PR Title run 40188628373 — success",
-      "Tests run 40188548433 — in progress when read, cited as running and not waited for",
-      "Legion Envoy and Contracts run 40188548396 — in progress when read, cited as running and not waited for"
-    ],
-    "note": "The force-push is why these runs are at the handoff head rather than at the code commit: GitHub started them for the rewritten branch, and the pre-rewrite commits 39175757c326 and 4a642826c038 carry no runs at all. The static work — lint, types and the unit and integration suites — is CI's and was not re-run here."
+    "head": "e7fdeea43528f8c0227d6562788845fa244eda89",
+    "readAt": "2026-10-25T12:36:00Z",
+    "runs": ["PR Title run 40192696986 — success"],
+    "note": "That is the whole of it, and it is the failure recorded above: the push that carried the code commit was trailered skip-checks: true, so lint, typecheck, test and the Legion Envoy and Contracts lanes never started on this content. I did not re-run any of them myself — they are CI's work — and so this round has no static evidence to cite at all."
   },
   "notProven": [
-    "That Claude Code itself sends session_title, and that the daemon's seeded '/rename Legion <role> · <KEY>' (packages/daemon/internal/claudebridge/bridge.go:196-198) makes a pane read as its role and issue. Claude Code cannot run in a Legion issue pod, so every hook payload in every run here is JSON the harness writes in the documented shape.",
-    "The webkit, webkit-iphone, firefox and firefox-download-navigation projects: Playwright's host validation refuses to start those engines in this pod for want of system libraries no agent can install without root. CI carries them.",
+    "That Claude Code itself sends session_title, and that the daemon's seeded '/rename Legion <role> · <KEY>' makes a pane read as its role and issue: Claude Code cannot run in a Legion issue pod, so every hook payload in every run here is JSON the harness writes in the documented shape.",
+    "The webkit, webkit-iphone, firefox and firefox-download-navigation projects: Playwright's host validation refuses to start those engines in this pod for want of system libraries no agent can install without root. CI carries them — and at this head CI has not run at all.",
     "A session whose Envoy or inbound messages are off stamps its title once at startup, so a later rename does not reach its Dispatch attribution. Unchanged behaviour for every title, not this change's."
   ],
   "knownNotThisChange": [
-    "packages/dispatch/e2e/phone.e2e.ts:393, dispatch://INFRA-95's row, which was red three times of three in round three. Its fix, sjawhar/legion#2156, merged to main at 09:26Z after this branch's base; I re-ran that row six times on a throwaway clone of main at 14571f6f4aea and it passed six times of six, so the fix holds in a pod and this branch's red will go when the base comes in at the merge. Nothing of it is this change's.",
-    "packages/claude-envoy's 'queryTmux is bounded even by a tmux that ignores SIGTERM': the gVisor spawn-timeout host behaviour the stream lead settled as a retro learning."
+    "packages/claude-envoy's 'queryTmux is bounded even by a tmux that ignores SIGTERM': the gVisor spawn-timeout host behaviour the stream lead settled as a retro learning. The implementer saw it twice of six runs this round; no row of this change is involved.",
+    "packages/dispatch/e2e/phone.e2e.ts:393, dispatch://INFRA-95's row: its fix merged to main at 09:26Z after this branch's base, and I proved it green six times of six on a throwaway clone of main. This branch's copy stays red until the base comes in at the merge."
   ],
   "previousRounds": [
-    { "round": 1, "verdict": "pass", "head": "485db1c056d83304336ec530bb092124a6250751", "summary": "Plugin half driven and attacked; page half driven in a real Chromium, green at that head and red with AgentsPage.tsx restored to main@origin. Its page proof ran one row under -g, which is how ten keyboard rows were missed." },
-    { "round": 2, "verdict": "fail", "head": "398af3d484a287556c025836b1bdc8b20744ff5b", "summary": "Whole chromium project reproduced 721/0, but the directory beside the 64-character name measured 0 x 16 px and not visible at 1280. Pinned by the red row at agents.e2e.ts:1807." },
-    { "round": 3, "verdict": "pass", "head": "80d324defedc9db4cdee90809f0f440d7922745a", "summary": "The floor fixed it: 192 x 16 px at 768, 1024, 1280 and 1440, the red row passing unmodified. Whole projects run here (chromium 720/2, iphone 617/1, plain-http 4/0) with every failure classified by three isolated re-runs. The machine-filter finding went to the controller." }
+    { "round": 1, "verdict": "pass", "head": "485db1c056d8" },
+    { "round": 2, "verdict": "fail", "head": "398af3d484a2", "summary": "the directory squeezed to 0 x 16 px beside the 64-character name; pinned by the red row at agents.e2e.ts:1807" },
+    { "round": 3, "verdict": "pass", "head": "80d324defedc", "summary": "the floor fixed it; whole projects run here with every failure classified by isolated re-runs" },
+    { "round": 4, "verdict": "pass", "head": "0a8530169857", "summary": "the role retry, both sweep rules apart, the resume record, the rem breakpoint driven with a launch flag, and the identity rewrite verified by the tester" }
   ]
 }
