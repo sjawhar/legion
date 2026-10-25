@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-168",
+  "completed": "2026-10-25T05:05:00Z",
+  "proof": [
+    {
+      "criterion": "A2 — a no-change `dispatch ask` is refused before it posts, in a Legion pod, in both modes, and the refusal names the rule and what to do.",
+      "surface": "A nested headless Oh My Pi session on this branch's pi-envoy build, in this Legion pod, with the pod's real Claude model and production Dispatch, writing to the unassigned scratch issue dispatch://INFRA-301.",
+      "command": "env LEGION_ISSUE=INFRA-301 OMP_ASKGATE=block OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" -p \"Run exactly this command … dispatch ask --issue INFRA-301 --question 'The nightly export runs at 02:00 UTC … My recommendation is to keep it exactly as it is. Do you want the schedule changed?' --option 'Keep 02:00: nothing changes' --option 'Move it later: …'\", and the same with OMP_ASKGATE=warn (runs /tmp/proof/final-nochange-block.txt and final-nochange-warn.txt).",
+      "observed": "Both modes answered `AskGate did not send this call: a rule refuses a new ask in it.` then `The ask matches the rule \"no change\": \"My recommendation is to keep it exactly as it is.\"`, the fix to apply instead, and how to send it anyway with --advisor-rebuttal. No ask was created on INFRA-301.",
+      "headSha": "61c02aafab8daea79654fd44f0042588765adc8a",
+      "negativeControl": "The same ask sent again with `--advisor-rebuttal '<reason>'`, in the same session right after the refusal, opened ask 75f39ba2-2e2e-4e6e-a936-816b21960183 on INFRA-301 (retracted in the same run), so the refusal is the rule's and not the gate refusing everything."
+    },
+    {
+      "criterion": "A3 — a `dispatch doc-edit` that inserts an ask block whose recommendation is no change is refused, and the refusal names that block.",
+      "surface": "The same nested headless Oh My Pi session on this branch's build, against production Dispatch, editing dispatch://INFRA-301's spec.",
+      "command": "env LEGION_ISSUE=INFRA-301 OMP_ASKGATE=block OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" -p \"Run exactly this command … dispatch doc-edit --issue INFRA-301 --artifact spec --ops-json '[{\\\"op\\\":\\\"insert\\\",\\\"after\\\":\\\"end\\\",\\\"markdown\\\":\\\":::ask{urgency=\\\\\\\"med\\\\\\\"}…:::\\\"}]'\" (run /tmp/proof/final-docedit-block.txt; the same case in warn mode is /tmp/proof/docedit-warn-3.txt).",
+      "observed": "`AskGate did not send this call: a rule refuses a new ask in it.` then `The ask block that starts 'The nightly export runs at 02:00 UTC and takes about 40 minu' matches the rule \"no change\": \"I reviewed it and found nothing wrong with the schedule. My recommendation is to keep it exactly as it is.\"`. The spec was not edited.",
+      "headSha": "61c02aafab8daea79654fd44f0042588765adc8a",
+      "negativeControl": "The same run's doc-edit was first refused by Dispatch itself (`markdown is not a Proof document`) when the block was written without its `{…}` attributes, which shows the gate's refusal above is the rules check's answer to a block Dispatch would have accepted, not a malformed call."
+    },
+    {
+      "criterion": "A4 — an ask for a command the agent did not try is refused; the same ask carrying the agent's own error opens.",
+      "surface": "The same nested headless Oh My Pi session on this branch's build, against production Dispatch and the pod's real `gh`.",
+      "command": "env LEGION_ISSUE=INFRA-301 OMP_ASKGATE=block OMP_ASKGATE_RECORD_PROJECT=INFRA /opt/omp/bin/omp --extension \"$LEGION_WORKSPACE/packages/pi-envoy\" -p \"Run exactly this command … dispatch ask --issue INFRA-301 --question 'Please run gh api orgs/example-org/settings/billing/actions yourself and paste the output here …'\" (run /tmp/proof/final-untried-block.txt; warn mode is /tmp/proof/untried-warn-3.txt).",
+      "observed": "`AskGate did not send this call: a rule refuses a new ask in it.` then `The ask matches the rule \"untried access\": \"Please run gh api orgs/example-org/settings/billing/actions yourself and paste the output here\"`, with the fix naming the pane's gh wrapper. No ask was created.",
+      "headSha": "61c02aafab8daea79654fd44f0042588765adc8a",
+      "negativeControl": "The same ask after the agent ran `gh api repos/sjawhar/legion/actions/permissions` itself and quoted GitHub's `Resource not accessible by integration (HTTP 403)` was let through and opened ask 52353fb7-79c3-46ea-b5cf-7f6ec86447b4 (retracted in the same run), so the rule matches the untried step and not the subject."
+    },
+    {
+      "criterion": "A5, the session half — a session holding a Dispatch token and nothing else counts the day's rule decisions, overrides and errors, split by Legion pod and a person's machine.",
+      "surface": "Production Dispatch alone: the per-session documents the gate published during the runs above, read back with no access to the machine they were made on.",
+      "command": "bun packages/pi-envoy/scripts/askgate-report.ts --dispatch-project INFRA --since 2026-10-25T00:00:00Z --json (and `dispatch doc-read --project INFRA --artifact askgate-decisions-01a17122-ca26-728d-bb46-3e956985d0fb-md` for one document).",
+      "observed": "22 decision documents, 22 sessions, 0 unreadable, 0 unparsed lines; 22 rules calls, 17 refusals (12 no_change, 5 untried_access), 3 overrides, 0 errors, every one `source: pod`. The document read back holds its header line and one fenced JSON record per decision, carrying the time, session, source, project, tool, target, rule, rule fields, decision, outcome, mode, both latencies and the plugin version, and no ask text or quote.",
+      "headSha": "61c02aafab8daea79654fd44f0042588765adc8a",
+      "negativeControl": "Before the record named its own acting session, the same runs wrote nothing: every entry carried `recordError: bearer callers require actor.kind session` and `GET /api/v1/projects/INFRA/artifacts` listed no decision document. The reader printed 0 documents then and 22 after the fix, so the count is the records' and not the reader's."
+    },
+    {
+      "criterion": "A5, the Dispatch half — one command prints a day's ask counts so one day can be compared with another.",
+      "surface": "Production Dispatch, through the session's own bearer, over project INFRA.",
+      "command": "bun scripts/dispatch/ask-census.ts --project INFRA --from 2026-10-25T00:00:00Z --to 2026-10-25T03:42:45Z --json",
+      "observed": "One JSON object on stdout and nothing else: 85 asks on 42 issues of the project, 41 standalone questions, 25 decision blocks, 19 approval requests, 0 dropped, with the per-issue, per-session, approval-round and coding tables beside them. Recorded as day 1 in dispatch://INFRA-168/artifact/askcheck-outcome-md.",
+      "headSha": "61c02aafab8daea79654fd44f0042588765adc8a",
+      "negativeControl": "The same run without `--json` printed the console tables and no JSON, and the script's tests drive both modes over one fixture and fail if a number moves in one mode only."
+    },
+    {
+      "criterion": "Plan Task 4 — the charter call's own latency is recorded, so a slow charter call can be told from a gate waiting on the rules call.",
+      "surface": "The `advisor-gate` entries the proof runs above wrote into their own session transcripts, read from disk.",
+      "command": "bun packages/pi-envoy/scripts/askgate-report.ts --sessions ~/.omp/profiles/legion/agent/sessions/--legion-workspaces-sjawhar-legion-infra-168-- --since 2026-10-25T00:00:00Z --sample 0 --out /tmp/proof/sample, plus a read of each entry's charterLatencyMs grouped by whether its rules check ran.",
+      "observed": "Calls that ran both checks: charterLatencyMs median 19,045 ms, highest 24,749 ms (n=24). Calls that ran the charter alone (a `dispatch comment`, which opens no ask): median 17,188 ms, highest 21,835 ms (n=4). The rules call is concurrent and adds no charter latency; the report's own rules latency median was 5,000 ms against a gate latency median of 17,250 ms.",
+      "headSha": "61c02aafab8daea79654fd44f0042588765adc8a",
+      "negativeControl": "A unit test drives the gate with a clock only the two model calls move, so charterLatencyMs, ruleLatencyMs and the entry's latencyMs are three different numbers; wiring charterLatencyMs to the gate's own clock made it fail (expected 11, received 261)."
+    }
+  ],
+  "filesChanged": [
+    "packages/pi-envoy/extensions/askgate/decision-record.ts and decision-record.test.ts — new: each rule decision, and each call the agent sent anyway, published to one Dispatch project document per session.",
+    "packages/pi-envoy/extensions/askgate/askgate-core.ts — charterLatencyMs on the entry, recordError, the record awaited under its own 5 s stop before the handler returns, and the handler-ceiling margin derived from the abort grace plus that stop.",
+    "packages/pi-envoy/extensions/askgate/rules-check.ts and new-asks.ts — one openingOf, an upload's name compared as Dispatch stores it, ruleAsksCut measured on the text the bound clips, one scan of an upload's markdown.",
+    "packages/pi-envoy/scripts/askgate-report.ts and its test — the --dispatch-project reader with --json, the rule and outcome lists bound to the gate's unions, Dispatch resolved through activeDispatchSettings, documents read eight at a time.",
+    "scripts/dispatch/ask-census.ts and scripts/dispatch/__tests__/ask-census-json.test.ts — a --json output mode over the numbers the run already counts.",
+    "packages/pi-envoy/README.md, AGENTS.md, CHANGELOG.md and scripts/dispatch/README.md — the record, its project setting, the reader's flags and charterLatencyMs.",
+    "packages/claude-envoy/dist/{dispatch,envoy-channel,session-hook}.js — rebuilt, since that package bundles its own copy of the pi-envoy modules this change edits.",
+    "Adopted from the branch infra-168-askgate-rules, and merged with sjawhar/legion#2159 at f784353a: the whole two-rule check (packages/pi-envoy/extensions/askgate/{new-asks,rules-check,text}.ts, the three rule-check prompt files and their tests), packages/envoy-client/src/dispatch-execute.ts's readDocumentBlocks, the shared decision-block test table, and the five askgate scenario cases."
+  ],
+  "trickyParts": [
+    "Dispatch gives a second document, not a new version, when the same artifact name is posted twice (nextArtifactSlug, packages/envoy/internal/dispatch/api/artifacts.go), so a session uploads its decision document once and appends each later record with docEdit insert after end.",
+    "A bearer caller must name its own session (`actor: {kind: \"session\", id}`) or Dispatch refuses the write with ACTOR_KIND. The first live run lost every record to that, visible only as recordError on the gate's entry.",
+    "A Legion pod's LEGION_PROJECT is the daemon's lower-cased project name, and Dispatch answers 404 to any spelling of a project key but the uppercase one, so the record upper-cases it.",
+    "A rebuttal and the breaker are answered before either model call, so their entries carry no ruleOutcome; recording only rules-checked calls made the override count structurally zero.",
+    "The record is awaited inside the tool_call handler, so its 5 s stop had to be added to the gate's ceiling margin or a timed-out call could outlive the runner's handler ceiling."
+  ],
+  "deviations": [
+    "The pull request is open on base main carrying sjawhar/legion#2159's commits, as plan rev 9 settled and the architect confirmed; the spec's sentence about a stacked second pull request does not apply.",
+    "Plan Task 1 named the move's head 57e9c31a; the architect sent f784353a at 01:44Z and that is what this branch merged, resolving the five files both sides changed by keeping both sides.",
+    "The six skill-scenario runs a 401 interrupted are not run by this tree (no docker and no tmux in a Legion pod); the five askgate scenario cases ship unexercised here, as plan Task 8 states, and no acceptance line depends on them.",
+    "packages/envoy-client/CHANGELOG.md was left as the adopted branch wrote it: Tasks 4 to 7 changed nothing in that package."
+  ],
+  "openQuestions": [
+    "sjawhar/legion#2159 is still open. While it is, this pull request's diff against main shows its 41 files too, and the step under plan rev 9's \"When #2159 merges\" has to run before the review round that approves the head."
+  ],
+  "discoveredComplexity": [
+    "The report's `--sessions` mode counted 24 rules calls for the day where Dispatch held 16 at the same moment: the difference is exactly the records lost before the acting session was named. The two halves of A5 are therefore not interchangeable, and a day's Dispatch count is a floor on what the sessions made.",
+    "The simplify pass found three counting or comparison bugs in this change's own code (the escaped-bytes cut count, an upload's untrimmed name, and the duplicated opening), each fixed with a test that fails without it."
+  ]
+}
