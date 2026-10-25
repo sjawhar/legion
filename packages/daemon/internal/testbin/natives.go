@@ -127,8 +127,7 @@ func fillNativesCache(root, omp string) (string, error) {
 			return err
 		}
 		if !entry.Type().IsRegular() {
-			extracted[entry.Name()] = -1
-			return nil
+			return fmt.Errorf("%s is not a regular file", path)
 		}
 		info, err := entry.Info()
 		if err != nil {

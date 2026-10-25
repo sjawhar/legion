@@ -95,16 +95,15 @@ test("a fill holding a file short of its embedded size caches nothing, and the n
   expect(await missing(path.join(cache, "9.9.9", "pi_natives.test-modern.node"))).toBe(false);
 });
 
-// Oh My Pi writes each native to a `.tmp.<pid>.<ms>` file and renames it once it is whole, so a
-// write that failed and whose cleanup failed too leaves that file behind. The loop over the
-// embedded names this check replaced ignored it, and every later HOME would have linked it.
+// A file under natives that is not a native the binary embeds is refused by its name. Oh My Pi
+// writes each native to a `.tmp.<pid>.<ms>` file and renames it once whole, so a write that failed
+// and whose cleanup failed too leaves that file and no native beside it.
 test("a fill holding a leftover temporary file caches nothing", async () => {
   const dir = await scratch();
   const binary = await standIn(
     dir,
     ['{ variant: "default", filename: "pi_natives.test.node", size: 6 },'],
     `natives="$HOME/.omp/natives/9.9.9"\nmkdir -p "$natives"\n` +
-      `printf native >"$natives/pi_natives.test.node"\n` +
       `printf nat >"$natives/pi_natives.test.node.tmp.1.2"\n`
   );
   const root = path.join(dir, "cache");
@@ -129,7 +128,8 @@ test("a fill whose extraction writes no native caches nothing", async () => {
   expect(await missing(path.join(root, await cacheDigest(binary)))).toBe(true);
 });
 
-// With no embedded list, no file an extraction holds could be checked.
+// With no embedded list, every file an extraction holds would be refused by name anyway, so
+// refusing first fails with a precise message and never runs the binary to extract about 111 MiB.
 test("a binary that lists no embedded natives is refused before it runs", async () => {
   const dir = await scratch();
   const runs = path.join(dir, "runs");

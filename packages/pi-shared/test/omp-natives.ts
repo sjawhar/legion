@@ -105,8 +105,11 @@ export async function fillNativesCache(root: string, binary: string): Promise<st
         const file = path.join(natives, relative);
         const info = await lstat(file);
         if (info.isDirectory()) continue;
-        extracted.set(path.basename(file), info.isFile() ? info.size : -1);
-        if (info.isFile()) await chmod(file, 0o500);
+        if (!info.isFile()) {
+          throw new Error(`${file} is not a regular file, so nothing is cached`);
+        }
+        extracted.set(path.basename(file), info.size);
+        await chmod(file, 0o500);
       }
       if (extracted.size === 0) {
         throw new Error(

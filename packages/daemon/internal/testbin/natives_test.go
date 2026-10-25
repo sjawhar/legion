@@ -120,15 +120,14 @@ func TestANativesFillShortOfAnEmbeddedSizeCachesNothing(t *testing.T) {
 	}
 }
 
-// omp writes each native to a `.tmp.<pid>.<ms>` file and renames it once it is whole, so a write
-// that failed and whose cleanup failed too leaves that file behind. The loop over the embedded
-// names this check replaced ignored it, and every later HOME would have linked it.
+// A file under natives that is not a native the binary embeds is refused by its name. omp writes
+// each native to a `.tmp.<pid>.<ms>` file and renames it once it is whole, so a write that failed
+// and whose cleanup failed too leaves that file and no native beside it.
 func TestANativesFillHoldingALeftoverTemporaryFileCachesNothing(t *testing.T) {
 	dir := t.TempDir()
 	omp := standIn(t, dir, []string{
 		`{ variant: "default", filename: "pi_natives.test.node", size: 6 },`,
 	}, "natives=\"$HOME/.omp/natives/9.9.9\"\nmkdir -p \"$natives\"\n"+
-		"printf native >\"$natives/pi_natives.test.node\"\n"+
 		"printf nat >\"$natives/pi_natives.test.node.tmp.1.2\"\n")
 	root := filepath.Join(dir, "cache")
 	digest, _, err := readBinary(omp)
@@ -165,7 +164,8 @@ func TestANativesFillThatExtractsNothingCachesNothing(t *testing.T) {
 }
 
 // A binary that lists no embedded natives is refused before it runs: with nothing to check an
-// extraction against, a partial one would be cached.
+// extraction against, every file it wrote would be refused by name anyway, so refusing first fails
+// with a precise message and never runs omp to extract a native of about 111 MiB.
 func TestANativesFillRefusesABinaryThatListsNoEmbeddedNatives(t *testing.T) {
 	dir := t.TempDir()
 	runs := filepath.Join(dir, "runs")
