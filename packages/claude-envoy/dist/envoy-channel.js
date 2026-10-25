@@ -47124,7 +47124,7 @@ var import_nats2 = __toESM(require_mod4(), 1);
 // package.json
 var version2 = "1.0.0";
 var legion = {
-  daemonApiVersion: 36
+  daemonApiVersion: 37
 };
 
 // src/channel-forwarder.ts
