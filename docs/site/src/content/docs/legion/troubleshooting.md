@@ -593,7 +593,8 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
   failure, and the merger completes again. None of the head checks applies to a pull request a
   person already merged: its `READY` is published unread, and the merge closes the issue the moment
-  it reaches `awaiting_merge`. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
+  it reaches `awaiting_merge` — or, for a root whose tree still runs, once the last other issue of
+  that tree is done or parked. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
   for a pull request that deletes it.
 
 An issue back in `in_progress` from `retro` or `merging` had a required check or workflow turn red

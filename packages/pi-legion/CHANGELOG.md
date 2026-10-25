@@ -7,18 +7,24 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
-- Daemon API contract 36: a root admitted tree that waits only on a person has the phase
-  `awaiting_person`, and its `legion state` and `read_state` issue carries `waitingOn`, the design
-  gate version (`kind: "gate"`, `gateVersion`) or the question (`kind: "ask"`, `ask`) that returned
-  its admission slot, and `answeredAt` once the person answered. Only a person's act answers that
-  wait (a review, an answer, a resolution or a reply on one of the root's asks), plus a newer spec
-  version, whoever wrote it, since Dispatch then waits on the architect; a session's reply, answer or
-  resolution never does. The root architect's role prompt and skill say to register each closed spec
-  version with `register_gate` and end the turn, and that handing the approval request back to the
-  person (requesting approval again, or a thread reply that leaves the turn with them) starts the
-  next wait and returns the slot; the controller skill reads the new `awaiting-person` notice. The
-  strict state reader refuses a 35 state, and a 35 plugin refuses this one. Install this release
-  with a `legion` built from the same commit.
+- Daemon API contract 37 (INFRA-251): a root admitted tree that waits only on a person has the
+  phase `awaiting_person`, and its `legion state` and `read_state` issue carries `waitingOn`, the
+  design gate version (`kind: "gate"`, `gateVersion`) or the question (`kind: "ask"`, `ask`) that
+  returned its admission slot, and `answeredAt` once the person answered. Only a person's act
+  answers that wait (a review, an answer, a resolution or a reply on one of the root's asks), plus
+  a newer spec version, whoever wrote it, since Dispatch then waits on the architect; a session's
+  reply, answer or resolution never does. The root architect's role prompt and skill say to
+  register each closed spec version with `register_gate` and end the turn, and that handing the
+  approval request back to the person (requesting approval again, or a thread reply that leaves
+  the turn with them) starts the next wait and returns the slot; the controller skill reads the
+  new `awaiting-person` notice. The strict state reader refuses a 36 state, and a 36 plugin
+  refuses this one. Install this release with a `legion` built from the same commit.
+- Daemon API contract 36 (INFRA-229): `legion state` and the controller's `read_state` carry
+  `state` on an issue's pull request, its `open`, `merged` or `closed`. An architect's acceptance
+  is refused while an issue beneath it is still in the workflow and a merged root's close waits
+  for the rest of its tree, so a root stands in `awaiting_merge` for days and an operator reads
+  the merge here rather than guessing at it. Always emitted, so a plugin built before it refuses
+  the state. Install this release with a `legion` built from the same commit.
 - The `legion-controller` skill this plugin ships reorders a project's board with
   `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`, and its backlog
   stewardship reference is corrected to the rule the daemon applies: Legion admits waiting roots by

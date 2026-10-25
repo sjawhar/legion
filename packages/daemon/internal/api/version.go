@@ -298,8 +298,18 @@ package api
 // each released without this shape, so this branch takes the number above them, as the collision
 // note says.)
 //
-// 36: a root waiting only on a person is `awaiting_person`, and its strict state issue view gains
-// `waitingOn`, the gate version or question that released its slot and, once answered, the time it
-// rejoined admission's line. A 35 plugin rejects both additions, so the daemon and plugin must not
-// meet across this boundary.
-const DaemonAPIVersion = 36
+// 36: INFRA-229 (sjawhar/legion) -- `api.PullRequestView` gains `state`, the pull request's
+// `open`, `merged` or `closed`, always emitted: an architect's acceptance is now refused while an
+// issue beneath it is still in the workflow and a merged root's close waits for the rest of its
+// tree, so a root stands in `awaiting_merge` for days and an operator must see that its pull
+// request merged rather than guess at it. A 35 plugin's strict reader refuses a state whose pull
+// request views carry the field, so the boot gate and `legion probe-image` refuse the mixed pair.
+//
+// 37: INFRA-251 -- a root waiting only on a person is `awaiting_person`, and its strict state
+// issue view gains `waitingOn`, the gate version or question that released its slot and, once
+// answered, the time it rejoined admission's line. A 36 plugin rejects both additions, so the
+// daemon and plugin must not meet across this boundary. (This branch took 36; main then landed
+// INFRA-229 at 36, released without these shapes, so this branch takes the number above it, as
+// docs/solutions/legion/daemon-api-contract-collision-renumber-when-the-release-declaring-the-number-lacks-your-shapes.md
+// says.)
+const DaemonAPIVersion = 37

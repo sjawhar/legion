@@ -89,9 +89,10 @@ field from `legion.goDaemonApiVersion` when the plugin dropped its TypeScript-da
 (LEGION-223): a release before it declares the TypeScript daemon's 9 under this name and is
 refused naming that number. The split of the one plugin into this package and `@sjawhar/pi-envoy`
 (LEGION-247) moved no request, response or pane variable, so it bumped nothing of its own: the
-number is the one `DaemonAPIVersion` declares, last bumped by contract 36's `awaiting_person`
-phase and strict `waitingOn` issue view on `GET /legion/v1/state`; those additions make a 35
-plugin reject the state. Contract 35 added `settings`, the daemon's resolved legion.yaml with every
+number is the one `DaemonAPIVersion` declares, last bumped by contract 37's `awaiting_person`
+phase and strict `waitingOn` issue view on `GET /legion/v1/state`; those additions make a 36
+plugin reject the state. Contract 36 added `state` on an issue's pull request view (INFRA-229),
+always emitted; contract 35 added `settings`, the daemon's resolved legion.yaml with every
 credential, credential source and credential file path left out, parsed loosely so a later
 legion.yaml key bumps nothing, after contract 34's shared issue scratch
 (INFRA-31: every role container of a Kubernetes pod, a workflow role's and the

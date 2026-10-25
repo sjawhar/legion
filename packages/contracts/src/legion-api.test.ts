@@ -145,7 +145,7 @@ test("a backward move rejects future read-only phases", () => {
   ).toBeFalse();
 });
 
-// Contract 36: awaiting_person holds no slot while the architect waits for a person's answer,
+// Contract 37: awaiting_person holds no slot while the architect waits for a person's answer,
 // before planning, and no backward move reaches it; acceptance stays between reviewing and retro;
 // the merge closes the issue (`done`), and the production check after it is no phase.
 test("the phase lists are the daemon's, with awaiting_person after admitted and accepting before retro", () => {

@@ -904,7 +904,7 @@ describe("dispatchToolSpecs", () => {
     ).toBe(true);
   });
 
-  test("rejects dispatch_suggest and dispatch_doc_edit when neither artifact nor ref names the document", () => {
+  test("rejects dispatch_suggest without a document, and dispatch_doc_edit only on a project", () => {
     expect(
       schemaFor("dispatch_suggest").safeParse({
         issue: "CORE-1",
@@ -912,9 +912,16 @@ describe("dispatchToolSpecs", () => {
         replace_with: "final",
       }).success
     ).toBe(false);
+    // An issue's primary document is what doc-edit edits when no artifact names another.
     expect(
       schemaFor("dispatch_doc_edit").safeParse({
         issue: "CORE-1",
+        ops: [{ op: "replace", find: "draft", with: "final" }],
+      }).success
+    ).toBe(true);
+    expect(
+      schemaFor("dispatch_doc_edit").safeParse({
+        project: "CORE",
         ops: [{ op: "replace", find: "draft", with: "final" }],
       }).success
     ).toBe(false);

@@ -11,6 +11,13 @@
   own copy of the `legion-controller` skill carries the corrected backlog rule, since `dist/` and
   `legion/` were regenerated (INFRA-188).
 
+### Changed
+
+- The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
+  `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
+  and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
+
 ### Fixed
 
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on
@@ -104,7 +111,7 @@
 - A Legion phase worker can run on Claude Code (sjawhar/legion#2032). When `legion claude-bridge`
   launches Claude Code, the MCP server sees `LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL` and
   `CLAUDE_CONFIG_DIR`: it waits for the session's transcript, registers with the daemon (daemon API
-  contract 36, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
+  contract 37, pinned in `package.json`'s `legion.daemonApiVersion`), claims the issue's Envoy role
   soft and reports ready, and readies again whenever it regains the role. A registration the daemon
   refuses stops Claude Code so the daemon relaunches it.
 - The MCP tool `legion` (`read_record`, `handoff_complete`, `request_backward_move`) serves the
@@ -128,13 +135,13 @@
   controller parked for a hold of its own (its `Parked by Legion while it waits on:` comment) runs
   again on a person's decision that gives it a next step, and every other park waits for whoever
   made it.
-- The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`:
+- The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`:
   `GET /legion/v1/state` gains the phase `awaiting_person`, a root that returned its admission slot
   while its architect waits on a person, and the issue field `waitingOn` naming that gate version or
   question and, once answered, `answeredAt`, which only a person's act (or a newer spec version)
   sets. The MCP server's strict state reader admits both, and nothing this plugin reads or writes
   moved; the generated `legion/` architect and controller skills carry the new wait and its
-  hand-back. A session of it registers with a daemon at 36.
+  hand-back. A session of it registers with a daemon at 37.
 - The plugin declares daemon API contract 35 in `package.json`'s `legion.daemonApiVersion`
   (LEGION-791): `GET /legion/v1/state` carries `settings`, the daemon's resolved `legion.yaml` with
   every credential, credential source and credential file path left out and a URL's userinfo masked
