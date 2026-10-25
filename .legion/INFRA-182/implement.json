@@ -2,107 +2,65 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-182",
-  "completed": "2026-10-25T06:36:00Z",
+  "completed": "2026-10-25T07:36:00Z",
+  "round": 3,
+  "answers": "Review round 1 at c939145e2b04 (dispatch review in .legion/INFRA-182/review.json): one Important and three Minor findings, all fixed; the four threads replied to and resolved one by one.",
   "proof": [
     {
-      "criterion": "Round 2, the tester's failure 1 (A2/R3): TestAFailedReconnectAttemptLogsOneWarnAMinute timed out at its last step, `timed out waiting for: 12 reconnect failures`, in envoy-go and envoy-go-race at 171bf849883c. The step proves ReconnectedCB's throttle reset.",
-      "surface": "A throwaway Go program in this pod reproducing testnats.Gate exactly as the test uses it: a TCP listener on 127.0.0.1:24223 relaying each accepted connection to a real JetStream nats-server v2.11.4 on 127.0.0.1:4223, with a nats.go client on the bus's own options (MaxReconnect -1, ReconnectWait 1 s) and a ReconnectErrCB counting failures. This is the transport fact the fix turns on, driven for real rather than reasoned about.",
-      "command": "go run ./gateprobe  — connect through the relay; close the relay listener alone and read the client after 6 s; then stop the server as well and read it again after 6 s",
-      "observed": "connected=true failures=0 at the start. After closing the gate alone, with the server still running: connected=true failures=0 — the relay goes on copying a connection already joined, so nats.go never disconnects, never retries and writes no record, which is exactly why the test's twelfth record never came and its 30 s wait expired. After stopping the server as well: connected=false failures=5, every one `dial tcp 127.0.0.1:24223: connect: connection refused`. The fix makes that last step close the gate and then stop the server, as the test's first outage already does.",
-      "headSha": "c939145e2b0460a4067137f1ffb50fe9aa6a1606",
-      "negativeControl": "Step 1 is itself the control: the same program, the same client, the gate closed and the server left running produced zero reconnect failures in 6 s. A fix that only closed the gate would have left the test exactly as red as it was."
+      "criterion": "R3 (review finding PRRT_kwDORFy7ds6v_JF6): the reconnect WARN, and every other line the bus logs naming a NATS URL, never carries the credential, including URL userinfo, which nats.go authenticates with.",
+      "surface": "The real envoy-listener binary built at this head (cd packages/envoy && go build -o $TMPDIR/listener-new ./cmd/listener) run as a process with PORT=9099 ENVOY_MACHINE_ID=smoke against a real nats-server v2.11.4 on 127.0.0.1:4222 started with --user envoy --pass pw-SECRET-77, then with --auth tok-SECRET-88; the server killed with SIGKILL under the connected listener and started again.",
+      "command": "NATS_URLS=nats://envoy:pw-SECRET-77@127.0.0.1:4222 listener-new ; kill -9 <nats-server pid> ; sleep 4 ; start nats-server again ; SIGTERM ; count 'pw-SECRET-77' in the log. Same with NATS_URLS=nats://tok-SECRET-88@127.0.0.1:4222. Remote refusal: NATS_URLS=nats://envoy:pw-SECRET-99@nats.example.test:4222 listener-new.",
+      "observed": "user:password run: 'WARN envoy nats reconnect attempt failed name=envoy servers=nats://127.0.0.1:4222 error=\"dial tcp 127.0.0.1:4222: connect: connection refused\"' then 'INFO envoy nats reconnected name=envoy url=nats://127.0.0.1:4222', 0 occurrences of the password in the whole log. Token run: the same two lines, 0 occurrences. Refusal: 'bus: refusing a NATS server that is not this machine's: nats://nats.example.test:4222 (set ENVOY_ALLOW_REMOTE_NATS=1 to reach it)', exit 1, 0 occurrences.",
+      "headSha": "dd2fb2b41ecf03ec2af96a23bf75b5fb65b3ef23",
+      "negativeControl": "The binary built the same way from c939145e2b04 (the code round 1 reviewed, exported with git archive) under the same runs: 2 occurrences of the password (servers=nats://envoy:pw-SECRET-77@127.0.0.1:4222 and url=nats://envoy:pw-SECRET-77@127.0.0.1:4222), 2 of the token, and its refusal printed nats://envoy:pw-SECRET-99@nats.example.test:4222."
     },
     {
-      "criterion": "Round 2, the tester's failure 2 (A3/R4): TestAWatcherRepairedAfterItsConsumerWentLogsOneWarn, TestAWatcherWhoseBucketIsGoneLogsTheFailedRepair and TestAWatcherNothingRepairsLogsWhenItsMinutePasses each failed at 5.04 s with `timed out waiting for the stopped watcher's WARN` in envoy-go and envoy-go-race at 171bf849883c.",
-      "surface": "A throwaway Go test in packages/envoy/internal/kvwatch, removed before the push, running the real kvwatch.Watcher against a real JetStream nats-server v2.11.4 in this pod, on its own connection and a fresh bucket per run, so nothing is shared between runs. It measures the time from js.DeleteKeyValue to the watcher's own `test cache watcher stopped` WARN.",
-      "command": "KVWATCH_PROBE_URL=nats://127.0.0.1:4223 go test ./internal/kvwatch/ -run TestProbeStopDelay -count=1 -v",
-      "observed": "run 0: stop WARN 10.017s after the delete; run 1: 10.022s; run 2: 10.006s. The notice is nats.go's ordered consumer reporting its stream gone after two missed 5 s idle heartbeats, so it is inherent and deterministic, not a loaded runner: the package's `eventually`, whose deadline is 5 s (internal/kvwatch/kvwatch_test.go:91-100), can never see this WARN. waitForTheStopWarn now polls on a budget of its own, 60 s, six times the measured notice, and a passing case still returns in about ten seconds.",
-      "headSha": "c939145e2b0460a4067137f1ffb50fe9aa6a1606",
-      "negativeControl": "The architect's alternative reading — that the three cases share a connection or a bucket — is disproved by the same run: one connection and a fresh bucket per run still took 10 s, and testnats.URL(t) gives each test its own JetStream account, so the three cases never shared the kvwatch-test name. The old 5 s budget is the whole of the failure."
+      "criterion": "R1/R2 after the rebind change (review finding PRRT_kwDORFy7ds6v_JF8): an unbound durable still answers 503 at once and is rebound, and each rebind and probe read now ends with its context instead of the JetStream handle's 10 s wait.",
+      "surface": "The same real listener against a JetStream nats-server v2.11.4, the durable recreated with a throwaway nats.go program (ConsumerInfo, DeleteConsumer, AddConsumer with the same config and a fresh nats.NewInbox()); and a throwaway in-package test against a real nats-server without JetStream with $JS.API.> subscribed and never answered, through the real bus.Connect.",
+      "command": "natsfault recreate ENVOY_NOTIFICATIONS listener-smoke ; curl localhost:9099/healthz ; poll until 200 ; natsfault info ; and go test ./cmd/listener/ -run TestZZCtxSmoke (throwaway, deleted)",
+      "observed": "Baseline 200; recreate new_deliver=_INBOX.En4j4sTswYskIRYg2wQsSS; next request 503 {\"error\":\"durable consumer unavailable: not bound to this listener's subscription\",\"status\":\"unhealthy\"}; one interval later 'self-health probe failed', 'self-health rebuild started', 'self-health recovered'; push_bound=true deliver=_INBOX.En4j4sTswYskIRYg2wQsSS, /healthz 200, 0 ERROR lines. Unanswered JetStream: awaitDurableBound (deadline 1 s) 1.0 s, cancelled at 300 ms 0.30 s with context canceled; durableProbe cancelled at 300 ms 0.30 s, nil.",
+      "headSha": "dd2fb2b41ecf03ec2af96a23bf75b5fb65b3ef23",
+      "negativeControl": "The same throwaway test before the change: awaitDurableBound 10.0 s against its 1 s deadline, 10.0 s when cancelled at 300 ms, durableProbe 10.0 s when cancelled at 300 ms."
     },
     {
-      "criterion": "Round 1, unchanged at this head (round 2 touched only test files): A1/R2: a request to the health endpoint made before the monitor's next check answers 503, with the error the handler writes for a durable consumer it cannot use.",
-      "surface": "The real listener binary (go build -o /tmp/envoy-listener ./cmd/listener) run as a process against a real JetStream nats-server v2.11.4 on 127.0.0.1:4222 in the issue pod, with PORT=9099 ENVOY_MACHINE_ID=smoke; the fault is the spec's own reproduction, applied with a throwaway nats.go program: ConsumerInfo, DeleteConsumer, AddConsumer with the same config and a fresh nats.NewInbox() deliver subject.",
-      "command": "curl -s localhost:9099/healthz  (baseline) ; natsfault recreate listener-smoke ; curl -s localhost:9099/healthz",
-      "observed": "Baseline 200 {\"status\":\"healthy\"} with the consumer push_bound=true deliver_subject=_INBOX.2I4pbf18mHls3lEVKVnF6J. After the recreate (new_deliver=_INBOX.0OlEIPwNwIGCggDFOjQrqt) the very next request answered 503 {\"error\":\"durable consumer unavailable: not bound to this listener's subscription\",\"status\":\"unhealthy\"}, with no monitor interval in between.",
-      "headSha": "6f5055a5deefc9f71bc9d790f7e8a651829f160c",
-      "negativeControl": "The same binary and server with no recreation: /healthz answered 200 healthy on every poll across 70 s, two full 30 s monitor intervals (05:12:27-05:13:37), and the process log carried no 'self-health probe failed' line in that window."
+      "criterion": "R4 (review finding PRRT_kwDORFy7ds6v_JF-): a repair wait reports only the stop that armed it, so a wait a repair cleared never reports the replacement watcher's later stop.",
+      "surface": "A throwaway copy of the new TestAWaitARepairClearedReportsNotTheNextStop and the four existing repair tests, each run against a local nats-server v2.11.4 with JetStream instead of testnats.URL (no container runtime in the pod).",
+      "command": "go test -count=1 -run TestLocal -v ./internal/kvwatch/ (throwaway zz_local_test.go, deleted)",
+      "observed": "After the fix: TestLocalStaleWait (the reviewer's sequence: stop 1, repair, stop 2, fire wait 1, then wait 2) PASS, wait 1 logs nothing and wait 2 logs the one 'no repair within 1m0s' ERROR; the four existing flows PASS.",
+      "headSha": "dd2fb2b41ecf03ec2af96a23bf75b5fb65b3ef23",
+      "negativeControl": "Before the fix the same run failed: wait 1 logged 'ERROR test cache watcher was not repaired reason=\"no repair within 1m0s\"' for the second stop moments after it."
     },
     {
-      "criterion": "Round 1, unchanged at this head (round 2 touched only test files): A1/R1: the monitor then finds the durable unbound, binds again, never calls the terminate it was given, and a message published after the recreation arrives.",
-      "surface": "The same real listener process against the same real nats-server; one message published to notifications.github.acme.widgets.push.branch.main after the recreate, read back through the consumer's num_pending and the process log.",
-      "command": "natsfault publish notifications.github.acme.widgets.push.branch.main ; sleep 40 ; curl -s localhost:9099/healthz ; natsfault info listener-smoke",
-      "observed": "The message sat at num_pending=1 while the durable was unbound. One monitor interval later the log carried 'self-health probe failed ... error: durable consumer: not bound to this listener's subscription' (consecutive 1, threshold 3), then 'self-health rebuild started' and 'self-health recovered'; the process never terminated; /healthz answered 200 healthy, num_pending back to 0, and the consumer read push_bound=true deliver_subject=_INBOX.0OlEIPwNwIGCggDFOjQrqt, this listener's own subscription subject. Re-run whole at the simplify head 6f5055a5: identical, 200 -> 503 -> 200 with num_pending 0.",
-      "headSha": "6f5055a5deefc9f71bc9d790f7e8a651829f160c",
-      "negativeControl": "The same 70 s no-fault window: no probe failure, no rebuild, no terminate, /healthz 200 healthy throughout."
-    },
-    {
-      "criterion": "Round 1, unchanged at this head (round 2 touched only test files): R3: a failed reconnect attempt logs one WARN at most once a minute, naming the servers the client was configured with and the error, and a successful reconnect logs none.",
-      "surface": "The same real listener process; the NATS server killed with SIGKILL under it (nats.go then retries in place about once a second, ReconnectWait 1 s), the server started again, then killed again.",
-      "command": "kill -9 <nats-server pid> ; sleep 80 ; (read the listener's process log) ; start nats-server again ; sleep 15 ; kill -9 <nats-server pid>",
-      "observed": "05:15:47 'envoy nats disconnected error=EOF'; 05:15:48 one WARN 'envoy nats reconnect attempt failed name=envoy servers=nats://127.0.0.1:4222 error=\"dial tcp 127.0.0.1:4222: connect: connection refused\"' at once; nothing more until 05:16:48, exactly one minute later, though nats.go made about sixty attempts in between. After the restart, 05:17:20 'envoy nats reconnected' with no reconnect-failure WARN at all. The second outage logged its first WARN at 05:17:38, one second after the disconnect and without waiting out the previous outage's minute, which is ReconnectedCB's throttle reset.",
-      "headSha": "6f915612 (the code head before the simplify pass; the simplify diff touches no bus production file, only cmd/listener and the two test files)",
-      "negativeControl": "Between the listener's start (05:15:44) and the kill (05:15:47), while the client was connected, no 'envoy nats reconnect attempt failed' record was written; and the successful reconnect at 05:17:20 added none."
-    },
-    {
-      "criterion": "Round 1, unchanged at this head (round 2 touched only test files): R4: a watcher stop logs at WARN when it happens, and at ERROR when a repair fails, exactly once per unasked stop.",
-      "surface": "The same real listener process; the interest bucket deleted under it with the throwaway program (js.DeleteKeyValue(\"envoy_interests\")), which deletes the stream its ordered consumer reads, and never recreated, so every self-health Rewatch fails.",
-      "command": "natsfault delbucket envoy_interests ; sleep 45 ; (read the listener's process log over the next three 30 s monitor intervals)",
-      "observed": "05:13:51.801 WARN 'interest registry watcher stopped'. The rebuild that ran before the stop (05:13:51.535) logged no unrepaired ERROR. The next rebuild, 05:14:21.532, logged exactly one ERROR 'interest registry watcher was not repaired' with bucket=envoy_interests reason=\"repair failed\". The third failed rebuild, 05:14:51.535, added no second such ERROR, and the ordered shutdown that followed (the monitor's terminal threshold) added none either.",
-      "headSha": "6f915612 (the code head before the simplify pass; the simplify diff touches no kvwatch file)",
-      "negativeControl": "Across the listener's whole healthy life before the bucket was deleted (05:11:21-05:13:40, including a durable recreate and its repair) no 'watcher stopped' WARN and no 'watcher was not repaired' ERROR was written, and the ordered shutdown at 05:14:51 wrote neither."
-    },
-    {
-      "criterion": "Round 1, unchanged at this head (round 2 touched only test files): A1: the test fails at the commit the branch starts from and passes at the head.",
-      "surface": "The pull request's own envoy-go CI job, the only runner of the Go tests (every testnats test starts a container, and a Legion worker pod has no container runtime).",
-      "command": "gh run view --repo sjawhar/legion --job 121075215277 --log-failed (run 40161809451..40161809515, 'Legion Envoy and Contracts' at commit a0097fa5064a1a71db201f2a67378f0170308d98, the branch's first, tests-only commit)",
-      "observed": "--- FAIL: TestHealthzReportsARecreatedDurableUnhealthy (0.67s): durable_unbound_test.go:79: with the durable recreated: /healthz = 200 map[... status:healthy], want 503 unhealthy with error \"durable consumer unavailable: not bound to this listener's subscription\". That commit carries the test alone against base code, which is exactly the base-commit evidence A1 asks for.",
-      "headSha": "a0097fa5064a1a71db201f2a67378f0170308d98",
-      "negativeControl": "Every other workflow of that same commit (Tests, PR Title, Docs, Worker Image) passed, so the red is the new assertion and not a broken tree."
-    },
-    {
-      "criterion": "Round 1, unchanged at this head (round 2 touched only test files): A6/R5: the documented reasons for a 503 name an unbound durable in all three places that list them, in the words the endpoint answers with.",
-      "surface": "The workspace at the code head.",
-      "command": "grep -rn \"not bound to this listener's subscription\" docs/site/src/content/docs/dispatch/envoy.md packages/envoy/AGENTS.md packages/envoy/cmd/listener/main.go",
-      "observed": "Four hits in the three files: envoy.md:227 (the 503 unhealthy row), AGENTS.md:1872 (the health bullet), AGENTS.md:1876 (the self-health bullet's terminal failures) and main.go:336 (the healthzHandler comment, rewrapped so the literal sits on one line).",
-      "headSha": "6f5055a5deefc9f71bc9d790f7e8a651829f160c",
-      "negativeControl": "The same grep at the branch base finds the string nowhere."
+      "criterion": "An ordered shutdown writes no ERROR when it cuts a self-health rebuild mid-rebind (found on the real surface this round).",
+      "surface": "The real listener at 4d392e33/8076e90e against a JetStream nats-server, SIGTERM 0.4 s after the probe found a recreated durable; and the unit test TestRunSelfHealthMonitor_ShutdownCutRebuildLogsNoError.",
+      "command": "go test ./cmd/listener/ -run 'TestRunSelfHealthMonitor_ShutdownCutRebuildLogsNoError' -count=1",
+      "observed": "The real run before the fix logged 'ERROR self-health rebuild failed ... error=\"rebind durable consumer: context canceled\"'. After 91f61c5c the test passes, and the real durable runs at this head log 0 ERROR lines.",
+      "headSha": "dd2fb2b41ecf03ec2af96a23bf75b5fb65b3ef23",
+      "negativeControl": "The same test before the main.go change failed with that ERROR line."
     }
   ],
   "filesChanged": [
-    "Round 2: packages/envoy/internal/bus/reconnect_err_test.go — the reset step closes the gate and stops the server, in that order",
-    "Round 2: packages/envoy/internal/kvwatch/repair_test.go — stopNoticeBudget (60 s) and waitForTheStopWarn's own poll, with the measurement in its comment",
-    "Round 2: packages/envoy/internal/testnats/nats.go — one sentence on Gate.Close recording that it does not break a connection already joined",
-    "packages/envoy/cmd/listener/durable.go — errDurableUnbound, durableUnbound, durableProbe (named, with a ctx-bounded confirming second read), durableRebindInterval/Deadline, awaitDurableBound, waitUnlessDone",
-    "packages/envoy/cmd/listener/main.go — errDurableUnbound in the terminal set, rebuildListenerDependencies takes ctx and awaits the binding, the monitor's probe and rebuild closures run under monitorCtx, healthzHandler's unbound branch and its comment",
-    "packages/envoy/internal/bus/nats.go — Client.SubSubject(), Client.reconnectErrClock, WithReconnectErrClock, the clock threaded to both connect sites",
-    "packages/envoy/internal/bus/connect.go — reconnectErrEvery, reconnectErrThrottle, ReconnectErrCB's WARN, ReconnectedCB's reset, the clock parameter on options/connect/connectWithContext",
-    "packages/envoy/internal/kvwatch/kvwatch.go — Timer, AfterFunc, WithAfterFunc, unrepairedDelay, Watcher.repairTimer, the stop's WARN, reportUnrepaired, clearRepairArm, Rewatch's failed-repair report",
-    "packages/envoy/internal/testnats/nats.go — nkeyUserConfig, StartNkeyAuthorizedContainer, Gate (StartGate/URL/Open/Close)",
-    "packages/envoy/cmd/listener/durable_unbound_test.go (new) — A1's two tests and A4's control",
-    "packages/envoy/internal/bus/reconnect_err_test.go (new) — A2",
-    "packages/envoy/internal/kvwatch/repair_test.go (new) — A3's four cases",
-    "packages/envoy/cmd/listener/main_test.go, internal/bus/{async_error,connect_deadline,socks5_dialer,stream_config}_test.go — the call sites the two new parameters move",
-    "docs/site/src/content/docs/dispatch/envoy.md, packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md — A6 and the changelog"
+    "packages/envoy/internal/bus/reach.go: natsURLWithoutUserinfo; refuseRemoteNATS names the URL without its userinfo",
+    "packages/envoy/internal/bus/connect.go: the reconnect WARN's servers and the reconnected line's url have no userinfo; the comment says why",
+    "packages/envoy/internal/bus/log_url_test.go (new): the helper table, the reconnect WARN and refusal with user:password, token-only and schemeless URLs, and the reconnected line on a real connection (container)",
+    "packages/envoy/cmd/listener/durable.go: durableProbe and awaitDurableBound read under nats.Context; the comments say what bounds each read",
+    "packages/envoy/cmd/listener/main.go: the monitor comment; runSelfHealthMonitor returns without the ERROR when its ctx ended during the rebuild",
+    "packages/envoy/cmd/listener/main_test.go: TestRunSelfHealthMonitor_ShutdownCutRebuildLogsNoError",
+    "packages/envoy/internal/kvwatch/kvwatch.go: the repair wait's callback carries its generation; reportUnrepaired checks it under mu; reportFailedRepair",
+    "packages/envoy/internal/kvwatch/repair_test.go: the fake keeps every armed callback (fireAt); waitForStopWarns(want); TestAWaitARepairClearedReportsNotTheNextStop; the notice-budget comment",
+    "packages/envoy/CHANGELOG.md: Fixed entry for the URL userinfo in the bus's log lines"
   ],
   "trickyParts": [
-    "Round 2: closing a Gate does not disconnect a client already connected through it. The relay's join copies until one side ends, so the address goes and the connection stays. Order matters in the fix: the gate closes first, so no reconnect reaches a listening socket, and the server stops second, which is what drops the live connection.",
-    "nats.go runs ReconnectErrCB only when createConn (the dial) fails: an attempt that connects and then fails the protocol handshake is silent (nats.go@v1.50.0:3234-3259, createConn at :2232). A relay that accepts the connection and closes it therefore produces no WARN at all. A2's outage must be an address nothing listens on, which is why testnats.Gate exists and why it closes its listener rather than relaying to a stopped container.",
-    "Gate's port is picked from 20000-29999 rather than :0, because :0 comes from the kernel's ephemeral range (32768-60999), which is also where Docker publishes a container's random host port: another container started while the gate was closed could take it and the gate's address would never come back.",
-    "durableProbe returns nil for every ConsumerInfo error but nats.ErrConsumerNotFound. That is unchanged and load-bearing: main.go's monitor splits its transient and terminal counts on exactly that, so making a JetStream timeout a probe failure would change the restart bound.",
-    "Client.SubSubject() answers \"\" while the bus is replacing the held subscription, which a rebind does (internal/bus/nats.go:341-348 unsubscribes before it binds), so durableUnbound reads true in that window. /healthz already answers 503 there through SubOK, which it checks first, so nothing special-cases it and no test asserts which 503 body appears during a rebind."
+    "testnats.URL hands out nats://tN:tN@host URLs, so before this fix every container test's reconnected line already wrote a user:password URL; the new container test parses that line's url and requires User == nil.",
+    "url.URL.Redacted and nats.Conn.ConnectedUrlRedacted keep a token-only user name, which nats.go sends as the token (connectProto, nats.go:2807-2817), so the helper drops the whole userinfo; an unparseable URL keeps only what follows its last '@'.",
+    "nats.go wraps a ctx without a deadline in the JetStream handle's default wait (jsm.go:1791-1796), so durableProbe's reads stay bounded at 10 s while the monitor's cancel cuts them; a cancelled read returns context.Canceled, which durableProbe reads as success, as it always read an unclassified error."
   ],
   "deviations": [
-    "The plan's §3.3 named two new Watcher fields, repairTimer and a reported flag. Only repairTimer exists: a non-nil repairTimer is itself the marker that an unasked stop is outstanding and unreported, and the nil check under mu gives the same 'exactly one ERROR per stop' guarantee with one field instead of two. Proven live: the third failed rebuild at 05:14:51 added no second ERROR.",
-    "The plan's §3.2 said StartNkeyAuthorized should delegate to the new StartNkeyAuthorizedContainer; it does, and the container helper returns the container's own direct URL. The stoppable address A2 needs is the separate testnats.Gate, added for the nats.go reason in trickyParts; StartNkeyAuthorized's URL and signature are unchanged, so packages/envoy/infra/host/live_test.go, in the other Go module, sees no change (its module builds and vets clean).",
-    "The plan's A2 row named bus.HoldsSeed for the seed check. It is used as it stands: HoldsSeed is already exported from package bus for packages/envoy/infra, so the test adds no exported symbol of its own, which is what the architect asked for in its message of 2026-10-25.",
-    "Round 2: the architect's message of 2026-10-25T06:23Z read the kvwatch reds as a shared connection or bucket between the three cases, and the A2 red as nats.go's one-a-second attempt cadence on a loaded runner. Both readings were checked against the code and against a real server and neither holds: each case takes its own JetStream account from testnats.URL(t) and opens its own connection, the measured notice is a deterministic 10.0 s of missed idle heartbeats, and records 1 to 11 of the A2 test arrived normally while only the twelfth, after a gate close that breaks no live connection, never came. The fixes follow the measured causes. Reported to the architect with the measurements."
+    "Beyond the four findings, runSelfHealthMonitor now returns without logging when its ctx ended during a failed rebuild: cutting the rebind on the shutdown's cancel (the point of finding JF8) made an ordered shutdown log 'self-health rebuild failed ... context canceled' at ERROR, observed on the real listener this round.",
+    "The unread 'stops' counter of the kvwatch test fake was removed while the fake was rewritten to keep every callback."
   ],
-  "openQuestions": [
-    "Three CI reds at 171bf849883c are outside this diff and were not chased, as the architect directed: Tests run 40166215138 job `test`, `--- FAIL: TestFetchKeepsAFeedAfterGitGC/killed_during_repack` in packages/daemon/internal/workspace, which this pull request does not touch; and Docs run 40166214881 and Worker Image run 40166214875, both failing on a registry read (`could not fetch content descriptor sha256:96918c57… from remote: not found`). This round's push re-runs all three at the new head. If any of them is red again at c939145e2b04, it is a problem outside this issue and becomes a dispatch ask, not a fix carried here."
-  ],
+  "openQuestions": [],
   "discoveredComplexity": [
-    "Round 2: no production code changed, so the round's product behaviour is the round-1 proof's, unchanged; what changed is the two tests' own budgets and fault injection. The simplify pass is not re-run: skill://legion-worker/references/pr-body.md gives the implementer one ce-simplify-code pass per pull request, in its first implementing round, and a later round answering a review or a red runs no second pass.",
-    "ce-simplify-code ran once at 6f915612 with three reviewers; six findings applied in commit 6f5055a5 (one shared ctx-bounded wait for bindListenerDurable, awaitDurableBound and durableProbe's confirming read; durableProbe's duplicated classification folded into one two-pass loop; that confirming wait made cancellable, so a shutdown never waits out a timer monitorCancel cannot cut; both new test files reuse the log sinks their packages already have, cmd/listener's lockedBuffer and bus_test's captureBusLogs; the fixture's dead return and the duplicated monitor start in durable_unbound_test.go). Three findings skipped: cutting A2's ten throttle rounds (eleven records over ten advanced minutes is the issue's approved acceptance criterion), passing the monitor's probe error into rebuildListenerDependencies in place of its gate (it would change runSelfHealthMonitor's rebuild signature and every one of its tests, for an efficiency gain), and expressing StartRestartable through Gate (it would move its callers onto Gate's fixed port range for no benefit to them). The R1/R2 proof was re-run whole at the applied head."
+    "go test -race could not run in the pod (no C compiler); envoy-go-race runs it in CI. The container-backed tests (log_url_test.go's reconnected-line test, the new kvwatch test, the repair and listener container tests) run only in CI's envoy-go."
   ]
 }
