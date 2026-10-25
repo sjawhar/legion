@@ -14,7 +14,9 @@
 // and the daemon's own HTTP routes — and every assertion is a read of GET /legion/v1/state, of what
 // the daemon posted to the Dispatch stand-in or published to the Envoy listener stand-in, or of what
 // the fake worker runtime was asked to launch and suspend. Nothing reads the store to judge a step,
-// and nothing calls into the workflow package.
+// and nothing calls into the workflow package. The one read of the store outside the seeding is
+// step 7's wait for the daemon's record that it took the event the step drove, which no route
+// shows; what the step holds is still read from GET /legion/v1/state.
 //
 // What the proof stands in for lies outside the two rules. The broker is a native nats-server the
 // script starts and names in LEGION_E2E_NATS_URL, rather than the testcontainers one workflowNATS
@@ -101,10 +103,11 @@ type mergedRootWaitsLive struct {
 	// parent is the tree's root, the issue that is accepted and whose merge waits; child is the
 	// one issue beneath it.
 	parent, child string
-	// parentPR and childPR are their pull requests' numbers, this run's own: the store a pod
-	// re-runs the proof against holds every earlier run's pull requests, and a fact names a pull
-	// request by its repository and number.
-	parentPR, childPR int
+	// parentPR and childPR are their pull requests' numbers, and openedPR the pull request step 7
+	// opens from the root's branch, all this run's own: the store a pod re-runs the proof against
+	// holds every earlier run's pull requests, and a fact names a pull request by its repository
+	// and number.
+	parentPR, childPR, openedPR int
 	// github is the REST and GraphQL root the daemon's workflow reads (mergedRootWaitsGitHub).
 	github string
 	// architectTopic is the role topic the parent's architect is told on.
@@ -116,13 +119,14 @@ type mergedRootWaitsLive struct {
 	seq int64
 }
 
-// TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive drives the six steps of the proof against one
+// TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive drives the seven steps of the proof against one
 // booted daemon, in the order each step's state follows from the last: the acceptance refused
 // while the child runs and accepted once it is out (the plan's steps 1 and 6, the second the
 // first's control, with the park the refusal itself names between them), then the root's merge
 // and its wait, the restart that must leave that wait as it was, the child's completion in the
-// wait — as the session the restart's own relaunch gave it — and the child's merge, which closes
-// the root.
+// wait — as the session the restart's own relaunch gave it — then a pull request opened from the
+// waiting root's branch, which must leave the merge the root waits on, and last the child's merge,
+// which closes the root on that merge.
 func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
 	natsURL := os.Getenv(mergedRootWaitsNATSURL)
 	if natsURL == "" {
@@ -134,6 +138,7 @@ func TestAMergedRootsCloseWaitsForTheRestOfItsTreeLive(t *testing.T) {
 	r.step("step2-the-merged-root-waits-for-its-child", r.rootMergeWaits)
 	r.step("step5-a-restart-leaves-the-wait-and-tells-no-one-again", r.restartLeavesTheWait)
 	r.step("step3-the-waiting-roots-child-completes-its-phase", r.childCompletesItsPhase)
+	r.step("step7-a-pull-request-opened-from-the-waiting-roots-branch-leaves-its-merge", r.openedLeavesTheMerge)
 	r.step("step4-the-childs-merge-closes-the-root", r.childMergeClosesTheRoot)
 }
 
@@ -167,7 +172,7 @@ func newMergedRootWaitsLive(t *testing.T, natsURL string) *mergedRootWaitsLive {
 	r := &mergedRootWaitsLive{
 		t: t, cfg: cfg, rt: fake.NewRuntime(), built: &built{}, board: board, notices: notices,
 		records: record.NewStore(), project: project, parent: cfg.Project + "-1", child: cfg.Project + "-2",
-		parentPR: int(number) + 1, childPR: int(number) + 2,
+		parentPR: int(number) + 1, childPR: int(number) + 2, openedPR: int(number) + 3,
 		github: mergedRootWaitsGitHub(t), architectTopic: notify.RoleTopicPrefix + string(architect), seq: 1,
 	}
 	r.js = mergedRootWaitsStream(t, natsURL)
@@ -657,6 +662,43 @@ func (r *mergedRootWaitsLive) childCompletesItsPhase() {
 	r.note("read back: %s still waits in %s", r.parent, parent.Phase)
 }
 
+// Step 7. A pull request opens from the waiting root's branch: GitHub's opened, for a pull request
+// of this run's own that is neither the root's nor the child's, from legion/<root>. GitHub never
+// sends the root's merge again, so the opened must leave the merge the root waits on standing: the
+// root stays in awaiting_merge on its merged pull request, and step 4 closes it on that merge.
+// Before this change the opened replaced the merged pull request and the root never closed. The
+// workflow only logs the opened it leaves, so the state shows nothing new to wait for; the step
+// instead waits for the daemon's processed_events row for the envelope, which the intake writes in
+// the transaction that applies the event, so the window that follows starts with the event applied.
+func (r *mergedRootWaitsLive) openedLeavesTheMerge() {
+	t := r.t
+	eventID := r.publishOpened(r.parent, r.openedPR)
+	r.note("drove a pull request opened from %s's branch: a notifications.github.%s.pr.%d envelope, action opened, head_ref legion/%s",
+		r.parent, strings.ReplaceAll(mergedRootWaitsRepo, "/", "."), r.openedPR, r.parent)
+	testwait.Eventually(t, "the daemon's record that it took the opened", func() bool {
+		var taken bool
+		if err := r.st.Pool().QueryRow(context.Background(),
+			"select exists(select 1 from processed_events where source = 'github' and event_id = $1)", eventID).Scan(&taken); err != nil {
+			t.Fatalf("read the processed event %s: %v", eventID, err)
+		}
+		return taken
+	})
+	r.note("read back: the daemon took the event — its processed_events row for github %s", eventID)
+	deadline := time.Now().Add(mergedRootWaitsSettle)
+	for time.Now().Before(deadline) {
+		got := r.issue(r.parent)
+		if got.Phase != phase.AwaitingMerge || got.PullRequest == nil ||
+			got.PullRequest.Number != r.parentPR || got.PullRequest.State != string(record.PullRequestMerged) {
+			t.Fatalf("after the opened of #%d %s is in %s on pull request %+v, want it still awaiting its merge of #%d",
+				r.openedPR, r.parent, got.Phase, got.PullRequest, r.parentPR)
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	got := r.issue(r.parent)
+	r.note("read back over %s: %s is in %s on pull request #%d, pullRequest.state %s — not #%d",
+		mergedRootWaitsSettle, r.parent, got.Phase, got.PullRequest.Number, got.PullRequest.State, r.openedPR)
+}
+
 // Step 5. The daemon is restarted at the waiting root's state. The boot's sweep of merged pull
 // requests finds the root awaiting a merge GitHub already reported and leaves it there, and tells
 // nobody: a restart must not repeat the architect's notice, and a root can wait across many boots.
@@ -686,7 +728,8 @@ func (r *mergedRootWaitsLive) restartLeavesTheWait() {
 
 // Step 4. The child's own pull request merges, which closes it and takes the last open member out
 // of the tree: the root's close, waiting since step 2, runs as the merge's own close would have —
-// done on Dispatch, the tree suspended by its linger, the slot freed and the production check open.
+// done on Dispatch, the tree suspended by its linger, the slot freed and the production check open
+// on the root's merged pull request, the one step 7's opened left standing.
 func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 	t := r.t
 	r.seedIssue("the child in awaiting_merge, as its testing, review, acceptance, retro and merger left it", r.child, func(issue *record.Issue) {
@@ -704,6 +747,9 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 	})
 	r.note("read back: %s is in %s, status %s, no slot, production check open on #%d at %s",
 		r.parent, parent.Phase, parent.Status, parent.Check.PullRequest, parent.Check.MergeCommit)
+	if parent.Check.PullRequest != r.parentPR {
+		t.Fatalf("%s's production check is on #%d, want its merged pull request #%d", r.parent, parent.Check.PullRequest, r.parentPR)
+	}
 	// The state carries no linger deadline, so the linger is read through what it does: it suspends
 	// every claim of the tree, keeping each session, which the root's own architect shows.
 	suspended := r.waitFor("the tree suspended by the root's linger", r.parent, func(got api.Issue) bool {
@@ -745,6 +791,25 @@ func (r *mergedRootWaitsLive) publishMerge(issue string, number int, mergeSHA st
 	r.publish(subject, "github", fmt.Sprintf("pr-%d-merged", number), string(payload))
 }
 
+// publishOpened publishes GitHub's opened of number from issue's branch on the tree's repository,
+// as Envoy relays a GitHub pull-request event (decode.go's decodePullRequest reads it), and
+// returns the event id the daemon records it under.
+func (r *mergedRootWaitsLive) publishOpened(issue string, number int) string {
+	r.t.Helper()
+	payload, err := json.Marshal(map[string]string{
+		"action": "opened", "kind": "pr", "repo": mergedRootWaitsRepo, "number": fmt.Sprint(number),
+		"head_sha": "head-" + fmt.Sprint(number), "base_ref": "main", "head_ref": "legion/" + issue,
+		"title":      "a pull request opened from the waiting root's branch",
+		"url":        "https://github.com/" + mergedRootWaitsRepo + "/pull/" + fmt.Sprint(number),
+		"updated_at": time.Now().UTC().Format(time.RFC3339),
+	})
+	if err != nil {
+		r.t.Fatalf("encode the opened payload: %v", err)
+	}
+	subject := "notifications.github." + strings.ReplaceAll(mergedRootWaitsRepo, "/", ".") + ".pr." + fmt.Sprint(number)
+	return r.publish(subject, "github", fmt.Sprintf("pr-%d-opened", number), string(payload))
+}
+
 // publishChildPark publishes Dispatch's own issue.updated event moving the child to status, as a
 // person's move from the Dispatch dashboard makes one, on the next sequence the issue has seen.
 // Only the child is ever moved this way: the root's own moves are the daemon's.
@@ -770,10 +835,10 @@ func (r *mergedRootWaitsLive) publishChildPark(status string) {
 	r.publish("notifications.dispatch.issue."+key+"."+"issue.updated", "dispatch", fmt.Sprintf("%s-%s-%d", key, status, r.seq), string(payload))
 }
 
-// publish puts one Envoy envelope on the stream the daemon consumes. The event id carries the
-// run's own project, since a processed event is deduplicated by its id across the shared
-// database, and this proof's runs share one.
-func (r *mergedRootWaitsLive) publish(subject, source, eventID, payload string) {
+// publish puts one Envoy envelope on the stream the daemon consumes, and returns its event id. The
+// event id carries the run's own project, since a processed event is deduplicated by its id across
+// the shared database, and this proof's runs share one.
+func (r *mergedRootWaitsLive) publish(subject, source, eventID, payload string) string {
 	r.t.Helper()
 	eventID = r.cfg.Project + "-" + eventID
 	envelope, err := json.Marshal(map[string]any{
@@ -788,6 +853,7 @@ func (r *mergedRootWaitsLive) publish(subject, source, eventID, payload string) 
 	if _, err := r.js.Publish(ctx, subject, envelope); err != nil {
 		r.t.Fatalf("publish %s: %v", subject, err)
 	}
+	return eventID
 }
 
 // mergedRootWaitsDispatch is workflowConfig's Dispatch stand-in — the repository mapping and an

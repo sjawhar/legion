@@ -107,7 +107,7 @@ note "built $(basename "$driver") from $root/packages/daemon with -tags e2e"
 pass
 
 begin proof
-# The six steps print their own `== <name>` / `ok <name>` pair between this check's, so the run's
+# The seven steps print their own `== <name>` / `ok <name>` pair between this check's, so the run's
 # checks and the proof's read alike. The daemon's own log goes to the evidence directory rather
 # than into them.
 LEGION_E2E_NATS_URL="nats://127.0.0.1:$port_nats" \
