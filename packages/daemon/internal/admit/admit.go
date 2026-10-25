@@ -262,7 +262,8 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 // registered and no notice of the same kind still waits in the outbox, so a burst of events or
 // ticks queues one wake. The wake needs no record: the controller reads Dispatch and the daemon's
 // state (skill://legion-controller). A tick alone carries the daemon's open capabilities
-// (ReportCapabilities), the turn that posts the day's report.
+// (ReportCapabilities) and every issue Legion is waiting to start behind an unfinished Dispatch
+// issue (blocked), the turn that posts the day's report.
 func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, kind record.NoticeKind, issue string, dueAt time.Time) error {
 	registered, err := a.store.ControllerRegistered(ctx, tx, a.project)
 	if err != nil || !registered {
@@ -273,10 +274,35 @@ func (a *Admission) wakeController(ctx context.Context, tx pgx.Tx, kind record.N
 		return err
 	}
 	notice := record.ControllerNotice{Kind: kind}
-	if kind == record.TickNotice && a.openCapabilities != nil {
-		notice.OpenCapabilities = a.openCapabilities()
+	if kind == record.TickNotice {
+		if a.openCapabilities != nil {
+			notice.OpenCapabilities = a.openCapabilities()
+		}
+		if notice.Blocked, err = a.blocked(ctx, tx); err != nil {
+			return err
+		}
 	}
 	return a.enqueue(ctx, tx, issue, notice, dueAt)
+}
+
+// blocked is every issue Legion is waiting to start that waits on an unfinished Dispatch issue,
+// as the tick notice carries it: the roots promotion skips and the children the workflow holds,
+// judged from this transaction's own reads by the function the state's `blocked` is built with
+// (blockers.Blocked), so the controller is told exactly what `legion state` shows it.
+func (a *Admission) blocked(ctx context.Context, tx pgx.Tx) ([]record.BlockedIssue, error) {
+	issues, err := a.store.Issues(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("list admission issues: %w", err)
+	}
+	slots, err := a.store.Slots(ctx, tx)
+	if err != nil {
+		return nil, fmt.Errorf("list admission slots: %w", err)
+	}
+	rows, err := a.mirror(ctx, tx)
+	if err != nil {
+		return nil, err
+	}
+	return blockers.Blocked(rows, issues, record.Waiting(issues, ownSlots(issues, slots))), nil
 }
 
 // Reconcile applies the bounded Dispatch boot read to existing records, then fills newly available

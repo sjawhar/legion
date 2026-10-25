@@ -197,6 +197,33 @@ type Notice struct {
 	// the legion.yaml line that records a decision; a gap is the operator's to close or decide, a
 	// live row's the session's environment to fix, and neither is the controller's.
 	OpenCapabilities []string `json:"openCapabilities,omitempty"`
+	// Blocked is every issue Legion is waiting to start because it waits on a Dispatch issue
+	// nobody has finished (INFRA-225), with what each still waits on. Only a tick controller
+	// notice carries it, as OpenCapabilities does: the tick is the turn that posts the day's
+	// report, and an issue nobody finishes is a person's call in Dispatch, so the controller
+	// names it there. A tick with nothing blocked carries none.
+	Blocked []BlockedIssue `json:"blocked,omitempty"`
+}
+
+// BlockedIssue is one issue Legion is waiting to start and the issues it waits on that are not
+// done, in the order Dispatch lists them (blockers.Unfinished): a root admission skips, or a
+// child the workflow holds at `admitted`. It lives here, below both readers, so the tick notice
+// above and the state's `blocked` (api.BlockedIssue, an alias of this type) carry one shape
+// rather than two that could drift.
+type BlockedIssue struct {
+	Issue     string   `json:"issue"`
+	BlockedBy []string `json:"blockedBy"`
+}
+
+// MarshalJSON keeps `blockedBy` an array on the wire, empty rather than `null`: the plugin's
+// strict reader refuses a null.
+func (b BlockedIssue) MarshalJSON() ([]byte, error) {
+	type wire BlockedIssue
+	out := wire(b)
+	if out.BlockedBy == nil {
+		out.BlockedBy = []string{}
+	}
+	return json.Marshal(out)
 }
 
 // CatchUp is what a tree's root architect is told of its tree when its claim is ready at a launch

@@ -194,6 +194,14 @@ func populatedState(t *testing.T) State {
 			Cap:     2,
 			Active:  []string{"LEGION-208", "LEGION-210"},
 			Waiting: []string{"LEGION-211"},
+			// LEGION-211 is the waiting root admission skips, so it is in `waiting` too;
+			// LEGION-209 is a child of LEGION-208's tree the workflow holds at `admitted`, which
+			// no waiting line carries. Both are listed, by issue key, with what each waits on —
+			// LEGION-213 among them a key the daemon has no record of, which counts as unfinished.
+			Blocked: []BlockedIssue{
+				{Issue: "LEGION-209", BlockedBy: []string{"LEGION-210", "LEGION-213"}},
+				{Issue: "LEGION-211", BlockedBy: []string{"LEGION-210"}},
+			},
 		},
 		Issues: map[string]Issue{
 			"LEGION-208": {

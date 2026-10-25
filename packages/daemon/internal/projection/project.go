@@ -9,6 +9,7 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/api"
+	"github.com/sjawhar/legion/daemon/internal/blockers"
 	"github.com/sjawhar/legion/daemon/internal/capabilities"
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/classify"
@@ -204,6 +205,15 @@ func Project(ctx context.Context, tx pgx.Tx, s record.Store, project string, cla
 	for i, issue := range waiting {
 		projected.Admission.Waiting[i] = issue.Key
 	}
+	// What Legion is waiting for, judged from the project's whole mirror of what Dispatch says
+	// each issue waits on, read in this transaction's snapshot like every other fact here: one
+	// query, then the deciders' own judgement (blockers.Blocked), so the state names exactly the
+	// roots admission skips and the children the workflow holds.
+	mirrored, err := s.DispatchIssues(ctx, tx, project)
+	if err != nil {
+		return api.State{}, err
+	}
+	projected.Admission.Blocked = blockers.Blocked(blockers.Rows(mirrored), issues, waiting)
 	projected.PendingStatusWrites = make([]api.PendingStatusWrite, 0, len(pending))
 	for _, row := range pending {
 		if _, known := knownIssues[row.Issue]; !known {

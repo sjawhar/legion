@@ -8,7 +8,14 @@
 // the boot listing, and read back whole, one project at a time, by whoever judges.
 package blockers
 
-import "github.com/sjawhar/legion/daemon/internal/record"
+import (
+	"cmp"
+	"slices"
+
+	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/phase"
+	"github.com/sjawhar/legion/daemon/internal/record"
+)
 
 // doneStatus is the one Dispatch status that finishes an issue. Nothing else does: an issue moved
 // to backlog or icebox has stopped, not finished, and an issue waiting on it still waits.
@@ -46,4 +53,43 @@ func Unfinished(rows map[string]Row, key string) []string {
 		}
 	}
 	return unfinished
+}
+
+// Blocked is every issue Legion is waiting to start that waits on an issue Dispatch has not
+// finished, by issue key: what the daemon's state shows under `blocked` and what a tick notice
+// tells the controller, from the one judgement both readings and both deciders share.
+//
+// It is the two decisions themselves, read rather than made: a root of waiting — the line
+// admission promotes from, which the caller passes as it computes it — that promotion skips
+// (admit.waitsOn), and a recorded child the workflow holds at `admitted`
+// (workflow.Engine.StartUnblockedChildren). A candidate that carries a run is never judged, as
+// neither decider judges one: work already under way is never stopped and never re-checked,
+// whatever its links say.
+func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.BlockedIssue {
+	blocked := make([]record.BlockedIssue, 0, len(waiting))
+	for _, issue := range waiting {
+		if carriesRun(issue) {
+			continue
+		}
+		if unfinished := Unfinished(rows, issue.Key); len(unfinished) > 0 {
+			blocked = append(blocked, record.BlockedIssue{Issue: issue.Key, BlockedBy: unfinished})
+		}
+	}
+	for _, issue := range issues {
+		if claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Phase != phase.Admitted {
+			continue
+		}
+		if unfinished := Unfinished(rows, issue.Key); len(unfinished) > 0 {
+			blocked = append(blocked, record.BlockedIssue{Issue: issue.Key, BlockedBy: unfinished})
+		}
+	}
+	slices.SortFunc(blocked, func(a, b record.BlockedIssue) int { return cmp.Compare(a.Issue, b.Issue) })
+	return blocked
+}
+
+// carriesRun says whether an issue carries a run: it started a phase, and its tree neither left
+// it admitted nor finished it. It is admit.startedRun's rule, the one that keeps a handed-over
+// child or a re-admitted tree out of every blocker judgement.
+func carriesRun(issue record.Issue) bool {
+	return issue.Phase != phase.Admitted && issue.Phase != phase.Done
 }

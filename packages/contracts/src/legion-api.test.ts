@@ -355,6 +355,48 @@ test("a field the Go shape requires cannot be dropped", () => {
   expect(LegionStateResponse.safeParse(mutated).success).toBeFalse();
 });
 
+// Contract 36: the state names every issue Legion is waiting to start behind a Dispatch issue
+// nobody has finished — a child held at `admitted` and a waiting root alike — by issue key, each
+// with the keys it waits on, among them keys the state's `issues` does not record. `blocked` is
+// required, so a daemon older than the plugin cannot leave it out, and `waiting` keeps its own
+// meaning beside it: the roots' waiting line.
+test("the state golden names what every blocked issue waits on", () => {
+  const state = LegionStateResponse.parse(fixture("state.json"));
+
+  expect(state.admission.blocked).toEqual([
+    { issue: "LEGION-209", blockedBy: ["LEGION-210", "LEGION-213"] },
+    { issue: "LEGION-211", blockedBy: ["LEGION-210"] },
+  ]);
+  expect(state.admission.waiting).toEqual(["LEGION-211"]);
+
+  const dropped = fixture("state.json") as { admission: Record<string, unknown> };
+  delete dropped.admission.blocked;
+  expect(LegionStateResponse.safeParse(dropped).success).toBeFalse();
+
+  const malformed = fixture("state.json") as { admission: { blocked: unknown[] } };
+  malformed.admission.blocked = [{ issue: "LEGION-209" }];
+  expect(LegionStateResponse.safeParse(malformed).success).toBeFalse();
+});
+
+// Contract 36: a release is accepted whatever its children's links say, so the answer says which
+// of them it started and which it left held, with what each held child waits on. Both are
+// required, and `held` carries the same `{issue, blockedBy}` row the state's `blocked` does.
+test("a wave release answers what it started and what it held", () => {
+  expect(LegionWaveReleaseResponse.parse(fixture("wave-release.json"))).toEqual({
+    released: ["LEGION-209"],
+    started: [],
+    held: [],
+  });
+  expect(
+    LegionWaveReleaseResponse.safeParse({
+      released: ["LEGION-209", "LEGION-210"],
+      started: ["LEGION-210"],
+      held: [{ issue: "LEGION-209", blockedBy: ["LEGION-300"] }],
+    }).success
+  ).toBeTrue();
+  expect(LegionWaveReleaseResponse.safeParse({ released: ["LEGION-209"] }).success).toBeFalse();
+});
+
 test("the Stage 3 state golden carries the record status and pending Dispatch status write", () => {
   const state = LegionStateResponse.parse(fixture("state-stage3.json"));
 

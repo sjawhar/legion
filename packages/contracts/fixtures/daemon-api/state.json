@@ -14,6 +14,21 @@
     ],
     "waiting": [
       "LEGION-211"
+    ],
+    "blocked": [
+      {
+        "issue": "LEGION-209",
+        "blockedBy": [
+          "LEGION-210",
+          "LEGION-213"
+        ]
+      },
+      {
+        "issue": "LEGION-211",
+        "blockedBy": [
+          "LEGION-210"
+        ]
+      }
     ]
   },
   "issues": {
