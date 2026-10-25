@@ -845,9 +845,14 @@ func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 			record.refuse(w, http.StatusMethodNotAllowed, outcomeInvalidRequest, "method not allowed")
 			return
 		}
-		// The role-holder read and the publish below take the same deadline a send's do, derived
-		// from the caller's own context, so this route too answers a bus it cannot reach rather
-		// than spending the caller's attempt.
+		// The publish below takes this deadline, derived from the caller's own context, so this
+		// route too answers a bus it cannot reach rather than spending the caller's attempt. The
+		// role-holder read above it does not: resolveLiveRoleHolder takes no context, and the
+		// roleHolderSession it calls reads under context.Background() with roleHolderReadTimeout
+		// per attempt, up to roleHolderResolutionAttempts, so a role-lane publish can spend more
+		// than sendRequestBudget before the bounded publish begins. Bounding that read by this
+		// context would change a path this change did not set out to change; the residual is
+		// recorded in the pull request's Not proven / risk instead.
 		ctx, cancel := context.WithTimeout(r.Context(), sendRequestBudget)
 		defer cancel()
 		var request struct {
