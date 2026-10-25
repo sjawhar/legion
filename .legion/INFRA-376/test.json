@@ -1,0 +1,36 @@
+{
+  "schemaVersion": 1,
+  "phase": "test",
+  "issue": "INFRA-376",
+  "completed": "2026-10-25T10:42:54Z",
+  "implementerProof": {
+    "verdict": "verified",
+    "how": "Re-ran the implementer's command on a fresh staging ($TMPDIR/infra376t, bash scripts/pi-plugin-prepack.sh --stage-skills @sjawhar/pi-legion, staged files cmp-identical to the branch) with a per-run skills.customDirectories overlay: Oh My Pi printed '…/infra376t/skills/legion-architect/SKILL.md WHOLE NO' and '…/infra376t/skills/legion-architect/references/wake-routing.md WHOLE YES' at 51fbebcf38e8. Re-ran its negative control independently: main's 51,256-byte SKILL.md staged with references/ removed -> '…/SKILL.md SPILLED'."
+  },
+  "failures": [],
+  "failed": 0,
+  "proof": [
+    {
+      "criterion": "The architect skill reaches its reader whole and its pointer leads to the unchanged Wake routing table at skill://legion-architect/references/wake-routing.md",
+      "surface": "Oh My Pi in print mode reading the branch's staged pi-legion partition through a per-run --config overlay setting skills.customDirectories to $TMPDIR/infra376t/skills",
+      "command": "cd \"$TMPDIR/infra376t\" && omp --config \"$TMPDIR/infra376t/overlay.yml\" -p --no-session --tools read \"Read skill://legion-architect with the read tool. In its '## Wake routing' section it names where the wake table lives; read exactly that location with the read tool. Then reply with exactly three lines: line 1 the path of the file you read for the table, line 2 the first sentence of the third column of the row whose Wake is merge-stalled, copied verbatim character for character, line 3 the number of table rows (lines beginning with '| `') in that file.\"",
+      "observed": "Line 1 '/legion/scratch/tmp/infra376t/skills/legion-architect/references/wake-routing.md'; line 2 'Its `reason` names the pull request, the state and head GitHub shows (closed, or another head), since when GitHub has shown it, and READY's head, which the record still awaits.' (the table has two columns; this is the Procedure cell's first sentence, identical to the merge-stalled row in main 14571f6f4aea's SKILL.md); line 3 '17' (main's section lines 429-457 hold 17 rows).",
+      "headSha": "51fbebcf38e8b3553e0e365f5a993354423e69dd",
+      "negativeControl": "Oh My Pi read of skill://legion-architect/references/wake-routing-missing.md -> 'FAILED File not found: /legion/scratch/tmp/infra376t/skills/legion-architect/references/wake-routing-missing.md'; main's SKILL.md (51,256 bytes) staged with references/ removed -> '…/infra376t-main/skills/legion-architect/SKILL.md SPILLED'."
+    },
+    {
+      "criterion": "The moved text is byte-identical to main's, nothing else in SKILL.md changes, and the Claude Code copy carries the same files",
+      "surface": "The branch's files against main at 14571f6f4aea, read with jj file show (independent of the implementer's output)",
+      "command": "old() { jj file show -r 14571f6f4aea root:skills/legion-architect/SKILL.md; }; old | sed -n '429,457p' | cmp - skills/legion-architect/references/wake-routing.md; { old | sed -n '1,428p'; sed -n '429,434p' skills/legion-architect/SKILL.md; old | sed -n '459,$p'; } | cmp - skills/legion-architect/SKILL.md; cmp of both packages/claude-envoy/legion/skills/legion-architect files against the source",
+      "observed": "REF-IDENTICAL, SKILL-ONLY-MOVE, CLAUDE-COPY-IDENTICAL; SKILL.md 33,651 bytes and 456 lines (main 51,256 bytes, 480 lines), reference 17,786 bytes; the pointer is the skill:// form; main@origin is now 3ff609722797 (#2190), whose SKILL.md is cmp-identical to 14571f6f4aea's.",
+      "headSha": "51fbebcf38e8b3553e0e365f5a993354423e69dd",
+      "negativeControl": "The same Oh My Pi read of a deliberately wrong reference name (wake-routing-missing.md) failed 'File not found', so the pointer resolving is not a resolver that accepts any path."
+    }
+  ],
+  "guardScope": "packages/pi-legion and packages/pi-envoy src/skills-guard.test.ts run oversizedFiles(stageSkills(<package>)) (packages/pi-shared/test/skills-guard.ts:121), i.e. only the prepack --stage-skills partition, so packages/claude-envoy/dist/*.js bundles are outside the guard by construction. Measured staged partitions: largest pi-legion files legion-controller/SKILL.md 38,893, legion-worker/SKILL.md 35,874, legion-architect/SKILL.md 33,651; largest pi-envoy dispatch/SKILL.md 23,587; none at 51,200. The 500-line body guard (longSkillBodies) is also met: 456 lines.",
+  "ci": "At 51fbebcf38e8 read 2026-10-25T10:44Z: Tests 40185615826 queued; Legion Envoy and Contracts 40185615782, Docs 40185615791, Worker Image 40185615780, PR Title 40185615802 in progress. Not waited on, rerun none; a required red sends the issue back.",
+  "notes": [
+    "The moved table still says 'section 1', 'section 6' etc. of SKILL.md and 'above'/'below'; each 'above'/'below' read refers within the table or the tree, and the section numbers name SKILL.md's sections, which the spec's byte-for-byte rule keeps as written.",
+    "The architect's figure 'legion-worker next at 35,874 bytes' is off by one place: legion-controller/SKILL.md at 38,893 is the next-largest skill file; both are well under the threshold."
+  ]
+}
