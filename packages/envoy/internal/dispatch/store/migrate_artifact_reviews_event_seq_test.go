@@ -12,7 +12,8 @@ const artifactReviewsEventSeqVersion = 117
 
 // TestMigrationAddsTheReviewsEventSequence: a review recorded before the column reads back with no
 // sequence, so the approval read gives it its time alone; the release before it keeps inserting
-// reviews without the column; and a sequence below 1 is refused.
+// reviews without the column; its check is added `not valid`, so the migration reads no row of the
+// table it locks; and a sequence below 1 is refused all the same.
 func TestMigrationAddsTheReviewsEventSequence(t *testing.T) {
 	ctx := context.Background()
 	store := openEmptyTestStore(t)
@@ -52,5 +53,15 @@ func TestMigrationAddsTheReviewsEventSequence(t *testing.T) {
 	}
 	if _, err := store.Pool.Exec(ctx, `update artifact_reviews set event_seq = 0 where artifact_id = $1`, artifactID); err == nil || !strings.Contains(err.Error(), "check constraint") {
 		t.Fatalf("a review sequence of zero = %v, want a check constraint to refuse it", err)
+	}
+	// `not valid` is what keeps the migration off the rows: it writes the catalog alone, while an
+	// inline check would read every row under the table's ACCESS EXCLUSIVE lock.
+	var validated bool
+	if err := store.Pool.QueryRow(ctx, `select convalidated from pg_constraint where conname = 'artifact_reviews_event_seq_positive'
+		and conrelid = 'artifact_reviews'::regclass`).Scan(&validated); err != nil {
+		t.Fatalf("read the review sequence's check constraint: %v", err)
+	}
+	if validated {
+		t.Fatalf("the review sequence's check constraint is validated, want it added not valid")
 	}
 }
