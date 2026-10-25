@@ -87,7 +87,7 @@ A decision a human must make is an `:::ask{#slug}` block at the end of the secti
 ## Claim the issue before you work it
 
 - Before you implement, `dispatch claim --issue <KEY>` and `dispatch issue-update --issue <KEY> --status in_progress`. Release with `--release` when you finish, hand over or switch. Closing releases it.
-- Claiming does not deliver the issue's comments to you. In the same turn, route the issue to your session, `dispatch issue-update --issue <KEY> --route session:<your session id>`, or subscribe to it with `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. Never route an issue with the `legion` label: Legion's roles work it, not your session.
+- Claiming does not deliver the issue's comments to you. In the same turn, route the issue to your session, `dispatch issue-update --issue <KEY> --route session:<your session id>`, or subscribe to it with `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. When you release, clear the route with `--route ''`. Never route an issue with the `legion` label, or under one: Legion's roles work it, not your session.
 - Reading, commenting, asking or gating a PR claims nothing.
 - `409 ISSUE_CLAIMED`: someone else holds it. Never work it in parallel. Refusals and takeovers: [issues.md](skill://dispatch/references/issues.md).
 
