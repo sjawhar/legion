@@ -611,11 +611,13 @@ export function createLiveSocket(queryClient: QueryClient): LiveSocket {
   const remove = (sub: Subscription, unsubscribe: boolean) => {
     if (subs.get(sub.id) !== sub) return;
     subs.delete(sub.id);
-    // A feed Dispatch refused and the page has not sent again is one Dispatch does not hold.
-    const dispatchHolds = sub.kind !== "events" || sub.cancelRetry === undefined;
     if (sub.kind === "events") sub.cancelRetry?.();
     if (sub.kind === "delivery" && byHash.get(sub.hash) === sub) byHash.delete(sub.hash);
-    if (unsubscribe && dispatchHolds) send({ type: "unsubscribe", sub: sub.id });
+    // Told even for a feed waiting out a backoff: Dispatch holds a subscription whose events
+    // ended against the socket's cap of them until it is unsubscribed, and a page that never
+    // said so would spend a slot of every such feed for the socket's life. An unsubscribe for a
+    // sub Dispatch does not hold - one it refused - is no error there.
+    if (unsubscribe) send({ type: "unsubscribe", sub: sub.id });
     if (subs.size > 0 || idleClose) return;
     // A query switching keys drops its old subscription just before it adds its new one, so the
     // socket closes only if nothing subscribes again within this task.

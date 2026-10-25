@@ -84,12 +84,18 @@ test("unfetchable: a positive count adds a red row naming it, zero adds none", (
   );
 });
 
-const open = (changedAt: string | null, stale: readonly string[] = []): LiveSocketState => ({
+/** The socket open, with the verdict Dispatch last sent it: the sources it named stale and, where
+ *  a test gives one, the freshness object the same frame carried. */
+const open = (
+  changedAt: string | null,
+  stale: readonly string[] = [],
+  freshness: DeliveryFreshness = healthy
+): LiveSocketState => ({
   state: "open",
   since: null,
   stuck: false,
   changedAt,
-  verdict: stale.length === 0 ? null : { freshness: healthy, stale },
+  verdict: stale.length === 0 && freshness === healthy ? null : { freshness, stale },
 });
 
 test("live: while the socket is open the reconciled and event rows say Live with the last change's age, and the read rows are current", () => {
@@ -117,9 +123,12 @@ test("live: a source the verdict names stale, or a reconcile error, shows its re
   expect(failing.events?.text).toBe("Events Live · last change 4 min ago");
 
   const stale = byName(
-    { ...healthy, last_reconcile_at: "2024-06-01T11:40:00Z" },
+    healthy,
     NOW,
-    open("2024-06-01T11:56:00Z", ["prs", "runs", "ci"])
+    open("2024-06-01T11:56:00Z", ["prs", "runs", "ci"], {
+      ...healthy,
+      last_reconcile_at: "2024-06-01T11:40:00Z",
+    })
   );
   expect(stale.prs).toMatchObject({ red: true, text: "PRs 20 min ago" });
   expect(stale.events?.red).toBe(false);
@@ -145,4 +154,28 @@ test("live: while reconnecting each Live row reads Reconnecting and its seconds,
   expect(rows.prs?.text).toBe("PRs Reconnecting, 12 s");
   // The read rows were current until the socket was lost.
   expect(rows.dispatch).toMatchObject({ red: false, text: "Dispatch 12 s ago" });
+});
+
+// W17. A `freshness` frame carries the whole verdict, and Dispatch sends one right after each
+// subscription's first answer, so everything it says is applied - the reconcile's last error, the
+// last event, the unfetchable count - and not only its list of stale sources. Otherwise a page
+// that was away while the reconcile started failing would show the answer's own figures as
+// healthy until its next snapshot.
+test("live: the verdict's own freshness replaces the body's, error and count included", () => {
+  const rows = byName(
+    healthy,
+    NOW,
+    open("2024-06-01T11:56:00Z", ["prs", "runs", "ci", "events"], {
+      last_error: "rate limited",
+      last_event_at: "2024-06-01T11:30:00Z",
+      last_reconcile_at: "2024-06-01T11:40:00Z",
+      unfetchable_count: 2,
+    })
+  );
+  expect(rows.prs).toMatchObject({ red: true, text: "PRs 20 min ago: rate limited" });
+  expect(rows.events).toMatchObject({ red: true, text: "Events 30 min ago" });
+  expect(rows.unfetchable).toMatchObject({
+    red: true,
+    text: "2 pull requests can no longer be fetched from GitHub",
+  });
 });

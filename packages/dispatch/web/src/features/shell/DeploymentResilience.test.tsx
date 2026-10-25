@@ -72,6 +72,9 @@ test("a Vite preload error reloads once per session and always reaches its impor
     expect(first.defaultPrevented).toBe(false);
     expect(second.defaultPrevented).toBe(false);
     expect(reload).toHaveBeenCalledTimes(1);
+    // W20. The session's one reload is spent as the page goes, not when one is asked for.
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+    window.dispatchEvent(new Event("pagehide"));
     expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
   } finally {
     reload.mockRestore();
@@ -101,9 +104,41 @@ test("a chunk that fails while the page is being left does not reload over the n
 
     expect(afterReturning.defaultPrevented).toBe(false);
     expect(reload).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new Event("pagehide"));
     expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
   } finally {
     window.dispatchEvent(new Event("pageshow"));
+    reload.mockRestore();
+    window.sessionStorage.clear();
+  }
+});
+
+// W20. A reload asked for is not a reload taken: an unconfirmed keyed send raises a leave prompt,
+// and a reader who answers "stay" keeps the page they are on. The session's one reload is spent
+// as the page actually goes (`pagehide`), so the next failed chunk can still reload it; the
+// reader's press says the page is plainly still theirs.
+test("a reload the reader cancels at the leave prompt does not spend the session's one reload", () => {
+  window.sessionStorage.clear();
+  installChunkFailureRecoveryForTest();
+  const reload = spyOn(window.location, "reload").mockImplementation(() => undefined);
+
+  try {
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(reload).toHaveBeenCalledTimes(1);
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+
+    // The prompt is answered "stay": no `pagehide`, and the reader goes on using the page.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "a" }));
+    window.dispatchEvent(new Event("pagehide"));
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBeNull();
+
+    // So the next failure still has this session's reload to spend, and spends it when the page
+    // does go.
+    window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
+    expect(reload).toHaveBeenCalledTimes(2);
+    window.dispatchEvent(new Event("pagehide"));
+    expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
+  } finally {
     reload.mockRestore();
     window.sessionStorage.clear();
   }
@@ -153,6 +188,7 @@ test("a link answered with a download does not mark the page as left", () => {
     navigation.dispatchEvent(navigateEvent(false, ""));
     window.dispatchEvent(new Event("vite:preloadError", { cancelable: true }));
     expect(reload).toHaveBeenCalledTimes(1);
+    window.dispatchEvent(new Event("pagehide"));
     expect(window.sessionStorage.getItem("dispatch.reloaded-for-chunk")).toBe("true");
   } finally {
     window.dispatchEvent(new Event("pageshow"));
@@ -425,6 +461,9 @@ test("a deployment check Dispatch does not answer is given up at the read deadli
     return controller.signal;
   });
   const signals: (AbortSignal | null | undefined)[] = [];
+  // The index's body, for the test to finish once the check has been given up: a check still
+  // waiting on it would then read a changed asset and show the notice (below).
+  let indexBody: ReadableStreamDefaultController<Uint8Array> | undefined;
   function stalled(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
     signals.push(init?.signal);
     if (input === "/healthz" && signals.length > 1) {
@@ -435,8 +474,9 @@ test("a deployment check Dispatch does not answer is given up at the read deadli
     if (input === "/") {
       return Promise.resolve(
         new Response(
-          new ReadableStream({
+          new ReadableStream<Uint8Array>({
             start(body) {
+              indexBody = body;
               body.enqueue(new TextEncoder().encode('<script src="/assets/index-'));
               signal?.addEventListener("abort", () => body.error(signal.reason), { once: true });
             },
@@ -479,6 +519,18 @@ test("a deployment check Dispatch does not answer is given up at the read deadli
     const indexGivenUp = Promise.withResolvers<void>();
     setTimeout(indexGivenUp.resolve, 0);
     await indexGivenUp.promise;
+    // The body finishes, naming a changed asset, after the check was given up: a check still
+    // waiting on it would read it and show the notice, so this assertion fails if the deadline
+    // did not cut the read.
+    try {
+      indexBody?.enqueue(new TextEncoder().encode('new.js"></script>'));
+      indexBody?.close();
+    } catch {
+      // The abort errored the stream, which is the behaviour under test.
+    }
+    const bodyFinished = Promise.withResolvers<void>();
+    setTimeout(bodyFinished.resolve, 0);
+    await bodyFinished.promise;
     expect(screen.queryByRole("status", { name: "A new version is available" })).toBeNull();
   } finally {
     fetch.mockRestore();

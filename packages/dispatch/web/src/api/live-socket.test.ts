@@ -1294,10 +1294,12 @@ test("an error frame for the event feed resubscribes it after the socket's backo
     jest.advanceTimersByTime(10_000);
     expect(sockets.latest().subscribes()).toHaveLength(1);
 
-    // Leaving while a retry waits tells Dispatch nothing: it holds no subscription it refused.
+    // W19. Leaving while a retry waits tells Dispatch all the same: Dispatch holds the
+    // subscription of a feed whose events ended against the socket's cap until it is
+    // unsubscribed, and one it refused is no error to unsubscribe.
     sockets.latest().receive(refusal(sub));
     stop();
-    expect(sockets.latest().unsubscribes()).toEqual([]);
+    expect(sockets.latest().unsubscribes()).toEqual([{ type: "unsubscribe", sub }]);
     jest.advanceTimersByTime(10_000);
     expect(sockets.latest().subscribes()).toHaveLength(1);
   } finally {
@@ -1349,6 +1351,33 @@ test("ended frames with no events_start back off 1 s, 2 s, 4 s and the next star
     socket.receive(ended(sub));
     expect(socket.subscribes()).toHaveLength(6);
     expect(sockets.sockets).toHaveLength(1);
+  } finally {
+    random.mockRestore();
+    stop();
+  }
+});
+
+// W19. A feed the page drops while it waits out a backoff is one Dispatch still holds: its
+// `ended` left the subscription against the socket's cap of them, and a page that said nothing
+// would spend a slot per such feed until the socket went. The page's `unsubscribe` releases it,
+// and nothing is sent afterwards.
+test("a feed dropped during its backoff is unsubscribed, so its slot goes back", () => {
+  jest.useFakeTimers();
+  const random = spyOn(Math, "random").mockReturnValue(0.5);
+  const feed = eventFeed();
+  const stop = live.subscribeEvents(feed.handlers);
+  try {
+    const socket = sockets.latest();
+    socket.open();
+    const { sub } = socket.subscribed("events");
+    // Ended before it ever started: the page waits out the backoff before sending it again.
+    socket.receive({ type: "ended", sub, reason: "behind" });
+    expect(socket.subscribes()).toHaveLength(1);
+
+    stop();
+    expect(socket.unsubscribes()).toEqual([{ type: "unsubscribe", sub }]);
+    jest.advanceTimersByTime(60_000);
+    expect(socket.subscribes()).toHaveLength(1);
   } finally {
     random.mockRestore();
     stop();

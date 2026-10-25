@@ -136,11 +136,33 @@ function markPageLeavingForAnotherDocument(event: NavigateEvent): void {
 function markPageStaying(): void {
   leavingPage = false;
   lastDownloadUrl = undefined;
+  // A reload the reader turned down at a leave prompt - one an unconfirmed keyed send raises -
+  // leaves this session its one reload: the page is plainly still theirs, so nothing is spent.
+  reloadingForChunk = false;
 }
 
 function markPageStayingWhenVisible(): void {
   if (document.visibilityState === "visible") {
     markPageStaying();
+  }
+}
+
+// Whether a chunk failure asked for this session's one reload and the page has not gone yet.
+let reloadingForChunk = false;
+
+// Spends the session's one chunk reload as the page goes, rather than when one is asked for: the
+// browser may never leave - a leave prompt the reader cancels, a reload something else stops -
+// and a session that spent its reload without reloading would be left with the failed chunk and
+// no way back.
+function spendChunkReload(): void {
+  if (!reloadingForChunk) {
+    return;
+  }
+  reloadingForChunk = false;
+  try {
+    window.sessionStorage.setItem(CHUNK_RELOAD_STORAGE_KEY, "true");
+  } catch {
+    // A storage the browser refuses the page keeps no flag; the reload still happens.
   }
 }
 
@@ -154,10 +176,10 @@ function reloadForChunkFailure(): void {
   if (!navigator.onLine) {
     return;
   }
-  if (window.sessionStorage.getItem(CHUNK_RELOAD_STORAGE_KEY) === "true") {
+  if (reloadingForChunk || window.sessionStorage.getItem(CHUNK_RELOAD_STORAGE_KEY) === "true") {
     return;
   }
-  window.sessionStorage.setItem(CHUNK_RELOAD_STORAGE_KEY, "true");
+  reloadingForChunk = true;
   window.location.reload();
 }
 
@@ -172,6 +194,7 @@ export function installChunkFailureRecovery(): () => void {
   const navigation = window.navigation;
   window.addEventListener("beforeunload", markPageLeaving);
   navigation?.addEventListener("navigate", markPageLeavingForAnotherDocument);
+  window.addEventListener("pagehide", spendChunkReload);
   window.addEventListener("pageshow", markPageStaying);
   // Captured on the window, so a handler that stops a press from propagating cannot hide it.
   window.addEventListener("pointerdown", markPageStaying, { capture: true });
@@ -182,6 +205,7 @@ export function installChunkFailureRecovery(): () => void {
   return () => {
     window.removeEventListener("beforeunload", markPageLeaving);
     navigation?.removeEventListener("navigate", markPageLeavingForAnotherDocument);
+    window.removeEventListener("pagehide", spendChunkReload);
     window.removeEventListener("pageshow", markPageStaying);
     window.removeEventListener("pointerdown", markPageStaying, { capture: true });
     window.removeEventListener("keydown", markPageStaying, { capture: true });
