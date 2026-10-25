@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-141",
+  "completed": "2026-10-25T04:35:00Z",
+  "proof": [
+    {
+      "criterion": "A1 - Cache refilling, bus reachable, on the send: a send whose session is in the store but not yet back in the cache succeeds and the message is delivered, where today the sender is told 404 no live session <id>.",
+      "surface": "The listener's HTTP send route over a real NATS server (a JetStream account of the test's own), with the target's record written through a second session registry so this listener's cache has never seen it.",
+      "command": "cd packages/envoy && ENVOY_TEST_NATS_BIN=/tmp/bin/nats-server go test ./cmd/listener -run '^TestSendReadsTheSessionStoreWhileTheCacheIsCold$' -count=1",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 0.415s. The test asserts sessions.Get(target) returns nats.ErrKeyNotFound immediately before the send (so the cache is genuinely cold), then POST /v1/messages/send answers 200 and the envelope is read back off notifications.agent.<id> from a subscription opened before the send.",
+      "headSha": "dada2f259431d30a6f491276519a5de76f5d5261",
+      "negativeControl": "With liveSessionEntry cut back to the cache-only read it replaced (at head 6966043e2904), the same test fails: 'send to a session only the bucket holds: status 404, body {\"error\":\"no live session ses_cold_cache_target\"}'."
+    },
+    {
+      "criterion": "A2 - Cache refilling, on the delivery side: a message already accepted and handed to the delivery path is delivered, where today it is logged 'listener agent session not found anywhere', counted skipped and acknowledged away.",
+      "surface": "The listener's JetStream delivery handler over a real NATS server, with the target's record in the session bucket and absent from the delivering listener's cache.",
+      "command": "cd packages/envoy && ENVOY_TEST_NATS_BIN=/tmp/bin/nats-server go test ./cmd/listener -run '^TestAgentDeliveryReadsTheSessionStoreWhileTheCacheIsCold$' -count=1",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 0.379s. Exactly one HTTP push, to the port and session the bucket's record names (:1/session/ses_cold_cache_delivery_target/prompt_async), and envoy_messages_delivered_total{delivery_status=\"delivered\"} == 1; the cache is asserted to miss the target immediately before the delivery.",
+      "headSha": "dada2f259431d30a6f491276519a5de76f5d5261",
+      "negativeControl": "With liveSessionEntry cut back to the cache-only read (at head 6966043e2904), the same test fails: 'the cold-cache delivery pushed 0 times ([]), want exactly one push to the record only the bucket holds'."
+    },
+    {
+      "criterion": "A3 - Bus unreachable: the send is answered rather than left to time out - HTTP 503 whose message names Envoy's bus, inside the caller's default five-second deadline - where today the sender sees a timeout and the server records nothing.",
+      "surface": "Both surfaces. S1: the listener's send route with a TCP relay between it and a real NATS server, cut under the live connection as the hub's machine being recreated cut it. S2: the real envoy-listener binary with its nats-server stopped under it, driven over HTTP and through the real @legion/envoy-client.",
+      "command": "cd packages/envoy && ENVOY_TEST_NATS_BIN=/tmp/bin/nats-server go test ./cmd/listener -run '^TestSendAnswersServiceUnavailableWhileTheBusIsUnreachable$' -count=1; then cd packages/envoy && PATH=/tmp/bin:$PATH bash scripts/e2e-local.sh",
+      "observed": "S1: ok 3.907s - 503 in 3.501088086s, body 'envoy: the message bus did not answer: bus: waiting for NATS to reconnect: context deadline exceeded', header Retry-After: 1, under the asserted 4 s. S2: 'bus-down send: HTTP 503 in 3.503038 seconds' with that same body and Retry-After: 1 (packages/envoy/out/e2e/bus-down-send-response.json, bus-down-send-headers.txt, bus-down-send-result.txt), and 'client refusal: EnvoyApiError 503 envoy: the message bus did not answer: ...' from createEnvoyClient after its two attempts (bus-down-client-error.json) rather than a timeout.",
+      "headSha": "dada2f259431d30a6f491276519a5de76f5d5261",
+      "negativeControl": "The identical request before the relay is cut answers 200, in the same test, so the 503 is the cut's doing and not the rig's."
+    },
+    {
+      "criterion": "A4 - Bus reachable but refusing the publish: the same 503 and the same record, carrying the bus's own reason, with the existing 413 and 400 answers for an oversized or invalid message unchanged.",
+      "surface": "The listener's send and publish routes against a live, reachable NATS server whose notification stream has been deleted under the running listener.",
+      "command": "cd packages/envoy && ENVOY_TEST_NATS_BIN=/tmp/bin/nats-server go test ./cmd/listener -run '^TestSendAnswersServiceUnavailableWhenTheBusRefusesThePublish$' -count=1",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 1.589s. 503 with body 'envoy: the message bus did not answer: nats: no response from stream' and Retry-After: 1, plus exactly one WARN 'listener send' with outcome bus_unavailable and status 503.",
+      "headSha": "dada2f259431d30a6f491276519a5de76f5d5261",
+      "negativeControl": "In the same test and against the same stream-less bus, an oversized message still answers 413 with no Retry-After and one WARN outcome too_large, and the topic notifications..x still answers 400 with no Retry-After and one WARN 'listener publish' outcome invalid_request - so a handler answering 503 for every bus error would fail here."
+    },
+    {
+      "criterion": "A5 - Destination genuinely absent: the send is answered 404 no live session <id> as it is today, and the delivery path gives the message up after at most a minute of retrying, counting what it gave up and clearing its attempt entry so a redelivery is not swallowed as a repeat.",
+      "surface": "A real JetStream durable consumer over the notification stream on a real NATS server, running the listener's own jetStreamDeliveryHandler, with the server performing the redelivery the handler's NAK asks for.",
+      "command": "cd packages/envoy && ENVOY_TEST_NATS_BIN=/tmp/bin/nats-server go test ./cmd/listener -run '^TestUnplaceableAgentDeliveryRetriesThenGivesUp$' -count=1",
+      "observed": "ok github.com/sjawhar/envoy/cmd/listener 6.147s. First delivery: INFO 'listener agent delivery deferred' with reason no_session_record and attempt 1, envoy_messages_naked_total == 1, no delivery counter and no no_holder exception. After the server's redelivery: no 'listener attempt-dedupe skip' line at all, exactly one WARN 'listener agent delivery given up' carrying reason no_session_record and delivery_status unplaceable_no_record, exactly one unplaceable_no_record increment, no 'skipped' series, and exactly one no_holder delivery exception. The 404 for the same absent session is asserted byte for byte by TestListenerRecordsEverySendAndPublishRequest and by the e2e run above.",
+      "headSha": "dada2f259431d30a6f491276519a5de76f5d5261",
+      "negativeControl": "The sibling subtest with the window at 0 gives the message up on its first delivery: one give-up line, zero deferral lines, no envoy_messages_naked_total series at all. It differs from the positive case in exactly one field."
+    },
+    {
+      "criterion": "A6 - The record: one line per request naming the destination and the outcome, INFO when accepted and WARN when refused, and a counter label that separates a give-up with no session record from one whose record carries no push target, and both from skipped.",
+      "surface": "Both surfaces. S1: the listener's two HTTP routes and its delivery handler against a real NATS server, the lines read field by field out of the logger's own JSON. S2: the real envoy-listener binary's log file, out/e2e/listener.log.",
+      "command": "cd packages/envoy && ENVOY_TEST_NATS_BIN=/tmp/bin/nats-server go test ./cmd/listener -run '^(TestListenerRecordsEverySendAndPublishRequest|TestGiveUpCounterSeparatesItsTwoCauses)$' -count=1; then cd packages/envoy && PATH=/tmp/bin:$PATH bash scripts/e2e-local.sh",
+      "observed": "S1: ok 1.130s and ok 0.384s. Exactly one line per request: an accepted send is INFO 'listener send' with outcome accepted, status 200 and the request's own target_session, event_id, source, source_session and payload_summary; a send the store says is gone is WARN with outcome no_live_session and status 404; a send refused for an empty message is WARN with outcome invalid_request and status 400, written although no envelope exists; an accepted publish is INFO 'listener publish' carrying its topic; a publish to a role nobody holds is WARN with outcome role_unclaimed and status 404. A session with no record counts unplaceable_no_record and a record with Port == 0 and not self-subscribed counts unplaceable_no_push_target, neither counts skipped, a self-subscribed record with Port == 0 is still a delivered outcome, and 'listener agent session not found anywhere' appears nowhere. S2: out/e2e/listener.log carries one INFO 'listener send' {target_session: ses_e2e_local, outcome: accepted, status: 200, payload_summary: 'Direct acceptance summary.'} and one WARN {target_session: ses_e2e_local_absent, outcome: no_live_session, status: 404}.",
+      "headSha": "dada2f259431d30a6f491276519a5de76f5d5261",
+      "negativeControl": "Each assertion is 'exactly one line', not 'at least one', so a second or missing record fails it; and the two give-up labels are asserted against a metrics body read before and after, with the 'skipped' series required to stay absent."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/bus/nats.go - PublishWithin and PublishReportingDuplicateWithin take the caller's context as the whole publish's bound; the exported methods keep their 5 s.",
+    "packages/envoy/cmd/listener/api.go - liveSessionEntry generalises roleHolderSession's read-through; sendHandler and publishHandler take a 3.5 s budget from the request context, answer the documented status map through writeBusUnavailable, and write one requestRecord per request on every return path.",
+    "packages/envoy/internal/session/session.go - ErrNoSessionRecord and ErrNoPushTarget replace one ambiguous error; Deliverer holds no session source of its own (Deliver, DeliverWithResult and the Sessions field removed).",
+    "packages/envoy/internal/session/handler.go - HandleAgentMessage takes the resolved entry and reports HandleAgentReason.",
+    "packages/envoy/internal/session/lookup.go, lookup_test.go - removed: SessionLookup had no caller left.",
+    "packages/envoy/internal/session/registry.go - the Refresh comment's rule reversed: a caller that acts on a session being missing reads the bucket.",
+    "packages/envoy/cmd/listener/delivery.go - the delivery path resolves the entry through liveSessionEntry, retries an unplaceable delivery with finalizeAfter, and gives it up with its own line and counter label.",
+    "packages/envoy/cmd/listener/main.go - ENVOY_UNPLACEABLE_RETRY_WINDOW through the new envDuration helper, which ENVOY_CI_DEBOUNCE now shares; attemptCacheTTL named.",
+    "packages/envoy/cmd/listener/send_route_acceptance_test.go, unplaceable_delivery_acceptance_test.go, delivery_unplaceable_test.go - the acceptance proofs and the bound's arithmetic.",
+    "packages/envoy/cmd/listener/reconnect_shutdown_test.go - listenerRelay gained the cut() the bus-down proof needs.",
+    "packages/envoy/internal/testnats/local.go, nats.go, nats_test.go - the shared account server runs a local nats-server when ENVOY_TEST_NATS_BIN names one.",
+    "packages/envoy/scripts/e2e-local.sh, e2e-local.test.sh, README.md - the three new assertions and a NATS the script can start where it runs.",
+    "packages/envoy/docs/architecture.md, AGENTS.md, CHANGELOG.md - the status map, the record lines, the delivery_status label set and the new setting.",
+    "packages/envoy/cmd/listener/api_test.go, main_test.go, internal/session/handler_test.go, session_test.go, internal/integration/delivery_test.go, e2e_test.go - call sites updated for the two signature changes; no assertion weakened."
+  ],
+  "trickyParts": [
+    "A retry that does not clear its attempt-cache entry is swallowed by the listener's own attempt dedupe (delivery.go), so the redelivery never reaches the session. TestUnplaceableAgentDeliveryRetriesThenGivesUp asserts the absence of the 'listener attempt-dedupe skip' line for exactly that reason.",
+    "JetStream stops redelivering at max_deliver silently - nothing in this repository consumes its advisory - so the listener must write its give-up record first. unplaceableMaxDeliveries is consumerMaxDeliver - 2, and TestUnplaceableRetryWindowFitsTheBoundsItDependsOn pins both that and the window staying inside the attempt cache's TTL.",
+    "A session read that did not answer is not evidence of absence, and the delivery path must not give a message up on it. It leaves no entry, so HandleAgentMessage reports ReasonNoSessionRecord for it, which already holds the retry open - the explicit flag the first draft carried was provably redundant and was removed in the simplify pass.",
+    "bus.ErrTooLarge and bus.ErrInvalidSubject both satisfy errors.Is(err, bus.ErrRefused), so one guard in writeBusUnavailable keeps Retry-After off the 413 and the 400 and on nothing else.",
+    "A send cannot reach bus.ErrInvalidSubject: its subject is built from target_session, and a target that would make an invalid subject is refused by the session bucket first, so the route answers 404 before the bus sees it. The 400 is therefore asserted through the publish route, which takes its topic as written."
+  ],
+  "deviations": [
+    "The plan's A3 used testnats.StartRestartable/Stop to make the bus unreachable; this uses a TCP relay the test cuts under the live connection. The Legion pod has no container runtime, so those helpers cannot run there, and the relay is closer to the incident: the hub's TCP went away underneath a live connection. Approved by the architect on 2026-10-25 01:17Z.",
+    "The plan's A4 used testnats.StartNkeyGranted to make the server refuse the publish; this deletes the notification stream under the running listener, so the JetStream publish gets the server's own 'nats: no response from stream'. Same reason - that helper takes a container - and the architect judged it better than the nkey grant, since it is the literal answer shape reported from LEGION-665 in the issue's comment of 2026-10-24 01:28Z. 413 and 400 stay asserted in the same test, as the plan has them.",
+    "Two files exist only because a Legion worker pod has no container runtime: internal/testnats/local.go (the ENVOY_TEST_NATS_BIN backend for the shared account server) and scripts/e2e-local.sh's local nats-server path. Both are approved by the architect on 2026-10-25 01:17Z, named as temporary in the code, and deleted by dispatch://INFRA-250."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": [
+    "Fifteen cmd/listener tests and two internal/session tests each take a NATS container of their own and cannot run in a Legion pod; a container-taking test panics rather than failing, which ends the whole test binary and leaves every later test unrun. They are named in the -skip of every run recorded here, and CI runs them on containers. dispatch://INFRA-250 removes the split.",
+    "internal/bus's own tests are a mix; the container-free set was selected by file (no testnats.Start, no testcontainers, no startNATS) for the runs recorded here.",
+    "Moving the session resolution into the caller left Deliverer.Deliver, Deliverer.DeliverWithResult, the Sessions field and the SessionLookup interface with no production caller. They were removed in the simplify pass, and internal/integration's TestE2E_AgentToAgent_RemoteMachine now registers the remote session's own record instead of swapping a mock lookup onto the deliverer - with a push count asserted, since without that record nothing is pushed and the test's host assertion would never run."
+  ]
+}
