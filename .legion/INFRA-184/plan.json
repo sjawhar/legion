@@ -2,8 +2,19 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-184",
-  "completed": "2026-10-24T22:58:22Z",
+  "completed": "2026-10-25T02:36:36Z",
   "plan": "dispatch://INFRA-184/artifact/plan-md",
+  "reaffirmed": {
+    "generation": 3,
+    "at": "2026-10-25T02:36:36Z",
+    "why": "The daemon re-admitted this root as generation 3 and started planning again so the design gate could be registered on the approved spec; the architect asked for the committed plan to be re-checked rather than rewritten.",
+    "checked": [
+      "The spec is unchanged and still approved: dispatch://INFRA-184/spec reads back document token sha256:2495c41d83d2ea57351a47c4a6bf937a11b5de576a10144a522bb3b5cc5749ba, the same token this plan was drafted against, with 'approved v4 by sami@theorem.dev' and no artifact.version event after #8.",
+      "The pushed implementation follows this plan: `jj diff -r main..legion/INFRA-184 --stat` at head 76afb0413d55 touches the files Tasks 1-3 name and nothing else, with packages/claude-envoy/dist rebuilt in its own commit as Task 4 requires, and .legion/INFRA-184/implement.json records a proof for each of A1-A4 on the rig Task 0 specifies.",
+      "The two decisions this plan left to the architect are still open in the same shape: the implementer settled the field name as legion_managed_status with the label hard-coded, as this plan recommended, and the fourth wrong text (packages/envoy-client/src/dispatch-execute.ts:267-277) is still out of scope and still unaddressed."
+    ],
+    "unchanged": "No task, acceptance check, required skill, gap-analysis answer or spec departure below is altered by this round; only `completed` moved."
+  },
   "requiredSkills": {
     "implement": [
       "legion-worker: the implementer's whole contract here — the workspace rules, the push procedure, the pull request body template and what a proof is (skill://legion-worker/references/pr-body.md), and review-thread handling once the reviewer answers.",
