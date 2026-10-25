@@ -1798,3 +1798,65 @@ test("an agent row shows the whole session name at every width, and shortens its
     await setLiveSessions([]);
   }
 });
+
+test("an agent row's directory is still shown beside the longest name in use, so its path stays one hover away", async ({
+  browser,
+}) => {
+  // The name the spec sizes the row against: the longest in use on the Agents page today.
+  const name64 = "Legion implementer · INFRA-92 — the whole name shows on this row";
+  expect(name64).toHaveLength(64);
+  const dir70 = "/workspaces/sjawhar/legion/infra-92/packages/dispatch/web/src/features";
+  expect(dir70).toHaveLength(70);
+
+  const longName: FakeSession = {
+    capabilities: ["aside", "btw"],
+    dir: dir70,
+    last_seen: Date.now(),
+    machine_id: "build-host",
+    roles: ["implementer"],
+    session_id: "long-name-row",
+    title: name64,
+  };
+  // The same row with a short name, as the control: whatever width this one's directory gets is
+  // width the row has, so a directory of nothing beside the long name is the name taking it.
+  const shortName: FakeSession = { ...longName, session_id: "short-name-row", title: "Short" };
+  await setLiveSessions([longName, shortName]);
+
+  // A live session Dispatch has never heard from sits in the closed `No Dispatch activity` fold,
+  // where its row is hidden and nothing about it can be measured, so each one comments once.
+  await createProject({ key: "DIR", name: "Directory" });
+  const issue = await createIssue({ project: "DIR", title: "Agent row directory" });
+  for (const session of [longName, shortName]) {
+    await createComment(
+      issue.key,
+      { body: `Working from ${session.dir}.` },
+      { actor: { id: session.session_id, kind: "session" }, as: "agent" }
+    );
+  }
+
+  const context = await asUser(browser, "alice");
+  try {
+    const page = await context.newPage();
+    await page.goto("/agents");
+    await expect(agentRow(page, longName.session_id)).toBeVisible();
+
+    const shortRowDirectory = agentRow(page, shortName.session_id).locator("[data-agent-dir]");
+    await expect(shortRowDirectory).toBeVisible();
+    const control = await shortRowDirectory.boundingBox();
+
+    const directory = agentRow(page, longName.session_id).locator("[data-agent-dir]");
+    // Its text and its `title` are there at every width, and the row above pins both. What a
+    // person needs is a directory with a width: at zero nothing is painted and nothing can be
+    // hovered, so the path the shortened directory promises can be read nowhere.
+    const box = await directory.boundingBox();
+    expect(
+      Math.round(box?.width ?? 0),
+      `the directory beside the 64-character name is ${Math.round(box?.width ?? 0)}px wide, ` +
+        `against ${Math.round(control?.width ?? 0)}px in the same row with a short name`
+    ).toBeGreaterThan(0);
+    await expect(directory).toBeVisible();
+  } finally {
+    await context.close();
+    await setLiveSessions([]);
+  }
+});
