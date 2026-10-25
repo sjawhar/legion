@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-386",
+  "completed": "2026-10-25T15:57:15Z",
+  "decision": "approved",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
+  "reviewedCodeHead": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+  "critical": 0,
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "ci": "Required set (ruleset; branch protection has none): lint, typecheck, test, pr-title. CI head 97e9883b (newest pull_request run): Tests 40207963512 success (lint, typecheck, test), PR Title 40207963524 success, Legion Envoy and Contracts 40207963538 success; compare 97e9883b...b852e2a6 touches only .legion/.",
+  "threads": "0 review threads, 0 conversation comments (gh api graphql at b852e2a6).",
+  "thermo": "Not run: docs-only diff (docs/kubernetes.md and .legion/ only).",
+  "verifiedAgainstSource": [
+    "0.33 s and 0.35 s inside the create, Job deleted by label: .legion/INFRA-232/implement.json at 64dcfb2d",
+    "0.318 s and 0.320 s inside the create, trap deleted the Job: sjawhar/legion#2195 body, tester line",
+    "'two of the twenty-six': docs/kubernetes.md:3291-3295 at 97e9883b",
+    "SIGKILL label recovery measured (31 s): docs/kubernetes.md:3296-3299 at 97e9883b",
+    "3600 s on Job and pod, cpu \"4\": docs/kubernetes.md:3057, 3066, 3078 at 97e9883b",
+    "No other non-history restatement of the total clean-up claim in the tree (grep for 'short of a SIGKILL', 'no Job name was read', 'finds the Job the create', 'removes the workload'): only docs/kubernetes.md and the dated INFRA-232 learnings",
+    "check-private-names.sh exit 0 (5004 files) at b852e2a6; added lines carry no occurrence of the role pod's namespace"
+  ],
+  "notProvenOrRisk": [
+    "A create the API server stores only after the trap's label delete has listed the Jobs is not measured; the page names it as unmeasured and gives the re-list and label delete as the recovery.",
+    "The re-list after the sequence ends names no wait: how long after a stop the API server can still store a create whose client is gone was not measured, so an empty re-list is not stated, or proven, to rule such a Job out."
+  ],
+  "judgedNotDefects": [
+    "docs/kubernetes.md:3022's code line is now 108 characters; the block already holds lines over 100 at base and A8 bounds only the trap paragraph.",
+    "'neither the listing nor the block's closing comment covers it' (3172): the closing comment now names the case as an exception to its promise, so its promise does not cover it; the sentence is true as written."
+  ]
+}
