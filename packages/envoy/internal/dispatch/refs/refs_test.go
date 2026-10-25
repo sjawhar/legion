@@ -377,6 +377,14 @@ func TestGraphReadsSkipANodeKindThisBuildCannotAddress(t *testing.T) {
 	} else if want := map[string]int{"CORE-1": 1}; !reflect.DeepEqual(counts, want) {
 		t.Errorf("issue backlink counts = %v; want %v", counts, want)
 	}
+	// Every ask read passes AskBacklinkExclusions, so this is the count each ask card and the
+	// Inbox show: the comment's mention stays and the unknown-kind row stays out.
+	askCounts, err := BacklinkCounts(ctx, tx, "issue", []string{"CORE-1", "OPS-1"}, AskBacklinkExclusions)
+	if err != nil {
+		t.Errorf("count issue backlinks with the ask exclusions: %v", err)
+	} else if want := map[string]int{"CORE-1": 1}; !reflect.DeepEqual(askCounts, want) {
+		t.Errorf("issue backlink counts with the ask exclusions = %v; want %v", askCounts, want)
+	}
 	excluded, err := BacklinkCounts(ctx, tx, "issue", []string{"CORE-1", "OPS-1"}, []string{"mentions"})
 	if err != nil {
 		t.Errorf("count issue backlinks excluding mentions: %v", err)
