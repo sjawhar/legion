@@ -355,7 +355,7 @@ test("a field the Go shape requires cannot be dropped", () => {
   expect(LegionStateResponse.safeParse(mutated).success).toBeFalse();
 });
 
-// Contract 36: the state names every issue Legion is waiting to start behind a Dispatch issue
+// Contract 37: the state names every issue Legion is waiting to start behind a Dispatch issue
 // nobody has finished — a child held at `admitted` and a waiting root alike — by issue key, each
 // with the keys it waits on, among them keys the state's `issues` does not record. `blocked` is
 // required, so a daemon older than the plugin cannot leave it out, and `waiting` keeps its own
@@ -378,7 +378,7 @@ test("the state golden names what every blocked issue waits on", () => {
   expect(LegionStateResponse.safeParse(malformed).success).toBeFalse();
 });
 
-// Contract 36: a release is accepted whatever its children's links say, so the answer says which
+// Contract 37: a release is accepted whatever its children's links say, so the answer says which
 // of them it started and which it left held, with what each held child waits on. Both are
 // required, and `held` carries the same `{issue, blockedBy}` row the state's `blocked` does.
 test("a wave release answers what it started and what it held", () => {

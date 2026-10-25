@@ -13,6 +13,17 @@
 
 ### Changed
 
+- The plugin declares daemon API contract 37 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-225): `GET /legion/v1/state` carries `admission.blocked`, every root and child Legion is
+  waiting to start behind an unfinished Dispatch issue, each `{issue, blockedBy}`, and
+  `release_children` answers `started` and `held` beside `released`, all required, so the MCP
+  server's strict readers admit the fields and a plugin built before it refuses them; a session of
+  it registers with a daemon at 37. Install it with a `legion` built from the same commit. Its
+  `legion/` copies of the `legion-architect` and `legion-controller` skills carry the blocked-by
+  rule, since `legion/` was regenerated: children linked with `--blocked-by`, a held child
+  released all the same, a never-started child that still waits handed over carrying no run, the
+  controller's free slots counted without the waiting roots in `admission.blocked`, and a root both
+  waiting and blocked read in its admission reference.
 - The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
   (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
   `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field

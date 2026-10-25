@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -48,7 +49,10 @@ import (
 //     gate starts it, and nothing ever names it blocked;
 //  4. a child released through release_children is held, the answer naming the issue it waits on,
 //     and starts when that issue closes, its tree's architect told so by a child-status notice
-//     naming the issue it waited on;
+//     naming the issue it waited on; and a child released out of backlog, which the daemon has no
+//     record of when the answer is written, is answered held on that same issue, then held at
+//     admitted and named blocked once its todo event lands, while an unblocked one released beside
+//     it is in neither list and started by its own event;
 //  5. a waiting root a person moves to backlog and back to todo is still checked, since only a tree
 //     that ran starts again when Legion takes it back, and is admitted when its blocker closes;
 //  6. a root waiting on an issue Legion keeps no record of and nobody handed to it is admitted by
@@ -292,6 +296,104 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 			"same wait at the same moment, admission.blocked = %v\nstate %s", answer, child, blocked, state.Admission.Blocked, body)
 	}
 
+	// The same release out of backlog: Dispatch shows these two children in backlog, so the release
+	// writes them todo, and the daemon records each only when that write's event arrives, after the
+	// answer. The answer judges the wait from the blockers Dispatch showed the request, and what the
+	// daemon then does with the todo event must agree with it: the blocked child held at admitted
+	// and named in admission.blocked on the issue the answer named, the free one started by its own
+	// event, which the answer therefore does not call started.
+	stalled := createBlockersIssue(t, baseURL, cfg.Project, "Parked schema cleanup", free, []string{blocked})
+	ready := createBlockersIssue(t, baseURL, cfg.Project, "Queued logging refactor", free, nil)
+	for _, key := range []string{stalled, ready} {
+		setDispatchStatus(t, baseURL, key, "backlog")
+	}
+	state, body = settled(t, d, "mirror "+stalled+" and "+ready+" in backlog", func(api.State) bool {
+		for _, key := range []string{stalled, ready} {
+			var status string
+			if err := pool.QueryRow(t.Context(), `select status from dispatch_issues where key = $1`, key).Scan(&status); err != nil {
+				if errors.Is(err, pgx.ErrNoRows) {
+					return false
+				}
+				t.Fatalf("read the daemon's mirror of %s: %v", key, err)
+			}
+			if status != "backlog" {
+				return false
+			}
+		}
+		return true
+	})
+	for _, key := range []string{stalled, ready} {
+		if recorded, ok := state.Issues[key]; ok {
+			t.Fatalf("Legion keeps a record of %s at %s while Dispatch shows it in backlog; want none before its release\nstate %s",
+				key, recorded.Phase, body)
+		}
+	}
+	t.Logf("the daemon mirrors %s and %s in backlog and keeps no record of either before the release:\n%s", stalled, ready, body)
+
+	// In a deployment the release's todo events reach the daemon well after its answer; on this
+	// bench they can beat it, and an answer read back from the records those events write would
+	// pass here and fail there. So the test holds the daemon's mirror in share mode for the length
+	// of the request: every Dispatch event the daemon applies writes its issue's mirror row first,
+	// in the transaction that records the issue, so neither todo event can land before the answer,
+	// while the answer's own reads go on. The hold is let go before the answer is judged, and at
+	// the latest when the test ends, ahead of the daemon's own shutdown.
+	releaseGrant := grant()
+	lock, err := pool.Begin(t.Context())
+	if err != nil {
+		t.Fatalf("begin the hold on the daemon's mirror: %v", err)
+	}
+	t.Cleanup(func() { _ = lock.Rollback(context.Background()) })
+	if _, err := lock.Exec(t.Context(), "lock table dispatch_issues in share mode"); err != nil {
+		t.Fatalf("hold the daemon's mirror in share mode: %v", err)
+	}
+	status, answer = d.request(http.MethodPost, "/legion/v1/waves/release",
+		api.WaveReleaseRequest{GrantID: releaseGrant, Issues: []string{stalled, ready}}, false)
+	var recordedAtAnswer int
+	if err := pool.QueryRow(t.Context(), `select count(*) from issues where key = any($1)`, []string{stalled, ready}).
+		Scan(&recordedAtAnswer); err != nil {
+		t.Fatalf("read the daemon's records of %s and %s as the release answered: %v", stalled, ready, err)
+	}
+	if err := lock.Rollback(t.Context()); err != nil {
+		t.Fatalf("let go of the hold on the daemon's mirror: %v", err)
+	}
+	if recordedAtAnswer != 0 {
+		t.Fatalf("the daemon recorded %d of %s and %s before the release answered; want neither, their todo events held back",
+			recordedAtAnswer, stalled, ready)
+	}
+	if status != http.StatusOK {
+		t.Fatalf("release_children of %s and %s = %d; body %s", stalled, ready, status, answer)
+	}
+	released = api.WaveReleaseResponse{}
+	if err := json.Unmarshal(answer, &released); err != nil {
+		t.Fatalf("decode the release of %s and %s from %s: %v", stalled, ready, answer, err)
+	}
+	t.Logf("release_children of %s and %s out of backlog answered %s", stalled, ready, answer)
+	want = api.WaveReleaseResponse{
+		Released: []string{stalled, ready}, Started: []string{},
+		Held: []api.HeldChild{{Issue: stalled, BlockedBy: []string{blocked}}},
+	}
+	if !reflect.DeepEqual(released, want) {
+		t.Fatalf("release_children answered %s; want %s held on %s, and %s, which its own todo event starts, in neither list: "+
+			"the answer for a child released out of backlog cannot be read back from a record its todo event has not written yet",
+			answer, stalled, blocked, ready)
+	}
+	state, body = settled(t, d, "record "+stalled+" and start "+ready+" once their todo events landed", func(s api.State) bool {
+		_, recorded := s.Issues[stalled]
+		started, ok := s.Issues[ready]
+		return recorded && ok && started.Phase != phase.Admitted
+	})
+	t.Logf("the state once the todo events of %s and %s landed:\n%s", stalled, ready, body)
+	if waits, ok := blockedOn(state, stalled); state.Issues[stalled].Phase != phase.Admitted || !ok || !slices.Equal(waits, []string{blocked}) {
+		t.Fatalf("Legion took %s, answered held on %s, to %s with admission.blocked = %v; want it held at %s waiting on %s, "+
+			"as the answer said\nstate %s", stalled, blocked, state.Issues[stalled].Phase, state.Admission.Blocked, phase.Admitted, blocked, body)
+	}
+	if got := state.Issues[ready].Phase; got != phase.Planning {
+		t.Fatalf("the free child %s left %s into %s on its todo event; want its first phase, %s\nstate %s", ready, phase.Admitted, got, phase.Planning, body)
+	}
+	if waits, ok := blockedOn(state, ready); ok {
+		t.Fatalf("%s started and the state lists it blocked by %v\nstate %s", ready, waits, body)
+	}
+
 	awaitDispatchStatus(t, baseURL, blocked, "in_progress")
 	setDispatchStatus(t, baseURL, blocked, "done")
 	state, body = settled(t, d, "start the held child once its blocker closed", func(s api.State) bool {
@@ -312,6 +414,23 @@ func TestBlockedIssuesAreNotStartedAgainstScratchDispatch(t *testing.T) {
 		t.Fatalf("Legion started the held child %s once %s closed and queued its tree's architect the child-status notices %q; "+
 			"want the one reading %q\nstate %s", child, blocked, notices, wantNotice, body)
 	}
+
+	// The child released out of backlog was held on that same issue, so its close starts it too.
+	// Both children of that release then close, as a person would, so that no child of theirs is
+	// still running when the tree's root closes in step 8.
+	state, body = settled(t, d, "start the held child "+stalled+" once its blocker closed", func(s api.State) bool {
+		return s.Issues[stalled].Phase != phase.Admitted
+	})
+	if got := state.Issues[stalled].Phase; got != phase.Planning {
+		t.Fatalf("the child %s left %s into %s once %s closed; want its first phase, %s\nstate %s",
+			stalled, phase.Admitted, got, blocked, phase.Planning, body)
+	}
+	for _, key := range []string{stalled, ready} {
+		setDispatchStatus(t, baseURL, key, "done")
+	}
+	settled(t, d, "record "+stalled+" and "+ready+" done once a person closed them", func(s api.State) bool {
+		return s.Issues[stalled].Phase == phase.Done && s.Issues[ready].Phase == phase.Done
+	})
 
 	// 5. A waiting root a person takes off the board and back is still checked. A root linked to the
 	// late blocker waits in line while a slot stands free; moved to backlog it leaves the line, and

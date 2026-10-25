@@ -264,9 +264,8 @@ the child back to its implementer; a failure whose fix belongs in other work bec
 corrective child wave you create and release, and the tree returns to children-in-flight. Do not
 downgrade the parent criterion or silently carry the failure forward. A root that stays `done`
 through its linger with a child still in the workflow — a person's close now (section 7) — has
-that child handed to Legion as a root of its own (`todo` with
-the `legion` label), one never started that still waits on an unfinished issue included, its
-phase, gate, phase records and pull request carried into a new generation
+that child handed to Legion as a root of its own (`todo` with the `legion` label), its phase,
+gate, phase records and pull request carried into a new generation
 and that phase's role started. Its architect's catch-up says `handed_over` and `carried`: it
 resumes from the phase and never registers a spec or asks for approval again. Without a gate to
 carry the catch-up says `handed_over` alone; its workers already run their phases, so it
@@ -275,9 +274,11 @@ decomposes nothing and reads the root's phase from the catch-up (for a root `hel
 and starts nothing on that gate's `design-approved`; a child carried in `accepting` is yours to
 accept (section 6). In `awaiting_merge` the READY is through, so it registers none. `awaiting_merge` can
 move back — a red or conflicting head returns the root to `implementing` and its next READY reads
-the gate again — so a later `ready-refused` is when it registers, as that row says. The child
-stays its own tree; reopening the old root does not take it back. Park a child first when its
-work should stop with the root.
+the gate again — so a later `ready-refused` is when it registers, as that row says. A child that
+never started but still waits on an unfinished issue is handed over too, carrying no run: it waits
+in the line until its blockers are done, and its architect starts as a fresh root and registers
+its own spec. The child stays its own tree; reopening the old root does not take it back. Park a
+child first when its work should stop with the root.
 
 ## 4. Integration verification
 

@@ -76,6 +76,14 @@ func todoChild(key string, waits ...string) dispatch.Issue {
 	return dispatch.Issue{Key: key, ResolvedRepo: "acme/widgets", Title: key, Status: "todo", Parent: &parent, LastSeq: 7, BlockedBy: waits}
 }
 
+// backlogChild is a child Dispatch shows in backlog, so the release writes it todo and the daemon
+// records it only once that write's event arrives, after the release has answered.
+func backlogChild(key string, waits ...string) dispatch.Issue {
+	child := todoChild(key, waits...)
+	child.Status = "backlog"
+	return child
+}
+
 // seedMirrorRow writes what Dispatch says of an issue the release's own children wait on, as the
 // mirror handler writes one from that issue's event.
 func seedMirrorRow(t *testing.T, h *harness, key, status string) {
@@ -181,6 +189,90 @@ func TestWaveReleaseUnderAClosedDesignGateHoldsNoChild(t *testing.T) {
 	for _, key := range []string{first, second} {
 		if recorded := recordedChild(t, h, key); recorded == nil || recorded.Phase != phase.Admitted {
 			t.Fatalf("the record of %s = %#v, want it admitted behind the closed gate", key, recorded)
+		}
+	}
+}
+
+// A child the release moves out of backlog is recorded only when that move's todo event reaches
+// the daemon, after the answer: the answer judges what it waits on from Dispatch's own view of it,
+// not from a record it does not have yet. The blocked one is held and named with its blocker, as
+// its todo event will hold it at admitted; the free one is in neither list, since this request
+// started nothing — its own event does.
+func TestWaveReleaseAnswersForABacklogChildTheDaemonHasNotRecordedYet(t *testing.T) {
+	h, statuses := releaseHarness(t, true)
+	blocked, free := "LEGION-209", "LEGION-210"
+	statuses.issues[blocked] = backlogChild(blocked, "LEGION-300")
+	statuses.issues[free] = backlogChild(free)
+	seedMirrorRow(t, h, "LEGION-300", "in_progress")
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+
+	response, _ := releaseWave(t, h, architect, blocked, free)
+
+	want := WaveReleaseResponse{
+		Released: []string{blocked, free},
+		Started:  []string{},
+		Held:     []HeldChild{{Issue: blocked, BlockedBy: []string{"LEGION-300"}}},
+	}
+	if !reflect.DeepEqual(response, want) {
+		t.Fatalf("release answered %#v, want %#v", response, want)
+	}
+	if wantWrites := []statusWrite{{blocked, "todo"}, {free, "todo"}}; !reflect.DeepEqual(statuses.writes, wantWrites) {
+		t.Fatalf("Dispatch writes = %#v, want %#v", statuses.writes, wantWrites)
+	}
+	for _, key := range []string{blocked, free} {
+		if recorded := recordedChild(t, h, key); recorded != nil {
+			t.Fatalf("the record of %s = %#v, want none until its todo event arrives", key, recorded)
+		}
+	}
+}
+
+// A parked child — its record at done, Dispatch at backlog — released again keeps that record
+// until the release's todo event re-enters it, so the record's phase past admitted says nothing of
+// this request: it started nothing, and the child, waiting on an unfinished issue, is held.
+func TestWaveReleaseHoldsAParkedChildReleasedAgainWithoutCallingItStarted(t *testing.T) {
+	h, statuses := releaseHarness(t, true)
+	child, parent := "LEGION-210", releaseRoot
+	h.recordIssue(record.Issue{Key: child, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets", Tree: releaseRoot, Parent: &parent,
+		Project: testDispatchProject, Title: child, Phase: phase.Done, Generation: 1, Status: "backlog", DispatchStatus: "backlog"})
+	statuses.issues[child] = backlogChild(child, "LEGION-300")
+	seedMirrorRow(t, h, "LEGION-300", "in_progress")
+	architect := newLiveClaim(t, h, releaseRoot, claim.RoleArchitect)
+
+	response, _ := releaseWave(t, h, architect, child)
+
+	want := WaveReleaseResponse{Released: []string{child}, Started: []string{}, Held: []HeldChild{{Issue: child, BlockedBy: []string{"LEGION-300"}}}}
+	if !reflect.DeepEqual(response, want) {
+		t.Fatalf("release answered %#v, want %#v", response, want)
+	}
+	if recorded := recordedChild(t, h, child); recorded == nil || recorded.Phase != phase.Done || recorded.Generation != 1 {
+		t.Fatalf("the record of %s = %#v, want it parked at done until its todo event arrives", child, recorded)
+	}
+}
+
+// A release names a child started only for a first phase it began: the record after the release
+// runs a phase of a run that had none before it. A run already under way, a child still waiting at
+// admitted, and a parked child its todo event has not re-entered yet were started by nothing here;
+// a parked child that event did re-enter, as a new run, was.
+func TestStartedByReleaseIsAFirstPhaseTheReleaseBegan(t *testing.T) {
+	at := func(p phase.Phase, generation uint64) *record.Issue {
+		return &record.Issue{Key: "LEGION-209", Phase: p, Generation: generation}
+	}
+	for _, tc := range []struct {
+		name          string
+		before, after *record.Issue
+		want          bool
+	}{
+		{"unrecorded and still unrecorded", nil, nil, false},
+		{"recorded and started", nil, at(phase.Planning, 1), true},
+		{"recorded and held at admitted", nil, at(phase.Admitted, 1), false},
+		{"admitted and started", at(phase.Admitted, 1), at(phase.Planning, 1), true},
+		{"admitted and still admitted", at(phase.Admitted, 1), at(phase.Admitted, 1), false},
+		{"already running", at(phase.Implementing, 1), at(phase.Implementing, 1), false},
+		{"parked and not yet re-entered", at(phase.Done, 1), at(phase.Done, 1), false},
+		{"parked and re-entered as a new run", at(phase.Done, 1), at(phase.Planning, 2), true},
+	} {
+		if got := startedByRelease(tc.before, tc.after); got != tc.want {
+			t.Errorf("%s: startedByRelease = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

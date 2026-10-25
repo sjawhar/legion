@@ -66,8 +66,16 @@ func Load(ctx context.Context, tx pgx.Tx, store record.Store, project string) (m
 // arrives with the next event, the periodic turn or the next boot, and the wait ends then. A key
 // with no row of its own, on the other hand, names no blockers at all and so waits on nothing.
 func Unfinished(rows map[string]Row, key string) []string {
+	return UnfinishedOf(rows, rows[key].Blockers)
+}
+
+// UnfinishedOf is the keys of blockedBy that are not done, in its order, judged as Unfinished
+// judges a mirrored issue's own list. It takes the list from the caller for an issue whose own
+// row may not exist yet: release_children answers for a child it has only just written todo,
+// whose row arrives with that write's event, from the blockers Dispatch just showed it.
+func UnfinishedOf(rows map[string]Row, blockedBy []string) []string {
 	unfinished := []string{}
-	for _, blocker := range rows[key].Blockers {
+	for _, blocker := range blockedBy {
 		if row, ok := rows[blocker]; !ok || row.Status != doneStatus {
 			unfinished = append(unfinished, blocker)
 		}

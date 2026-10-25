@@ -257,8 +257,10 @@ registered, and none while one of the same kind is still unsent:
   the waits in the day's report and take nothing for them.
 
 On each, read the daemon's state with `read_state`: the free slots are `admission.cap` minus the
-roots in `admission.active` and in `admission.waiting`. Name them in your summary, take nothing for
-them, and do the rest of the turn ([Turn discipline](#turn-discipline)).
+roots in `admission.active` and the roots in `admission.waiting` that are not in
+`admission.blocked`, since a blocked root takes no slot until its blockers are done. Name them in
+your summary, take nothing for them, and do the rest of the turn
+([Turn discipline](#turn-discipline)).
 
 ## Findings, and the issues you file
 

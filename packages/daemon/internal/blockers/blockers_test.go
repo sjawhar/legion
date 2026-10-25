@@ -64,6 +64,18 @@ func TestUnfinishedHoldsOnEveryBlockerThatIsNotDone(t *testing.T) {
 	}
 }
 
+// UnfinishedOf judges a list its caller holds, so an issue the mirror has no row of yet is judged
+// all the same, and by the same rule as a mirrored one: a blocker with no row is not done.
+func TestUnfinishedOfJudgesAListWhoseIssueHasNoRow(t *testing.T) {
+	rows := map[string]Row{"LEGION-901": {Status: "done"}, "LEGION-902": {Status: "in_progress"}}
+	if got, want := UnfinishedOf(rows, []string{"LEGION-901", "LEGION-902", "LEGION-903"}), []string{"LEGION-902", "LEGION-903"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("UnfinishedOf = %#v, want %#v in the list's own order", got, want)
+	}
+	if got := UnfinishedOf(rows, nil); got == nil || len(got) != 0 {
+		t.Fatalf("UnfinishedOf of no blockers = %#v, want an empty list", got)
+	}
+}
+
 // Every caller reads its project's mirror in one query and judges in memory, so the rows arrive
 // as a slice and are indexed by key once.
 func TestRowsIndexesTheProjectByKey(t *testing.T) {

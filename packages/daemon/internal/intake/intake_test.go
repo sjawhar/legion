@@ -321,12 +321,17 @@ func TestCapturedIssueUpdatedEnvelopeDecodes(t *testing.T) {
 
 // Dispatch can add issue payload fields, or start filling one it has always sent empty, before a
 // deployed daemon consumes them: the old decoder must keep accepting those events until its
-// matching workflow change rolls out. The daemon reads no priority.
-func TestIssueEventIgnoresTheUnconsumedPriorityField(t *testing.T) {
+// matching workflow change rolls out. The daemon reads no priority, and no key the captured
+// fixture lacks, which a decoder rejecting unknown fields would refuse.
+func TestIssueEventIgnoresFieldsTheDaemonDoesNotConsume(t *testing.T) {
 	original := string(capturedIssueCreatedEnvelope(t))
-	widened := strings.Replace(original, `\"priority\":null`, `\"priority\":1`, 1)
-	if widened == original {
+	filled := strings.Replace(original, `\"priority\":null`, `\"priority\":1`, 1)
+	if filled == original {
 		t.Fatal("captured issue.created fixture has no priority field to fill")
+	}
+	widened := strings.Replace(filled, `\"labels\":[]`, `\"some_future_field\":1,\"labels\":[]`, 1)
+	if widened == filled {
+		t.Fatal("captured issue.created fixture has no empty labels field to widen beside")
 	}
 	subject := "notifications.dispatch.issue.CAPTURE-4.issue.created"
 	want, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(original))
@@ -335,7 +340,7 @@ func TestIssueEventIgnoresTheUnconsumedPriorityField(t *testing.T) {
 	}
 	got, err := decodeMessage(subject, "CAPTURE", capturedRepositories, []byte(widened))
 	if err != nil {
-		t.Fatalf("decode issue.created with a priority: %v", err)
+		t.Fatalf("decode issue.created with a priority and a field the fixture lacks: %v", err)
 	}
 	if !reflect.DeepEqual(got.Fact, want.Fact) {
 		t.Fatalf("widened fact = %#v, want %#v", got.Fact, want.Fact)

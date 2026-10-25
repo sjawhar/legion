@@ -211,11 +211,13 @@ tree. A waiting root moved to a status only a running tree has (`in_progress`, `
 parked root does, since no slot would ever reach it: the daemon records it `done`, starts nothing
 for it, and tells the controller (`unslotted`), and `todo` with the label queues it again. Each
 admission pass (a live event, the boot read, a tick) releases such a root, one an earlier release
-left behind included. Legion admits no root and starts no child while Dispatch shows it blocked by
-an issue that is not `done`: a blocker in `backlog` or `icebox` has stopped rather than finished,
-and one the daemon has never seen counts as unfinished too. A blocked root keeps its place in the
-waiting line and takes no slot, so it hides no free capacity — `legion state` reports the slot
-free while every root in the queue is blocked — admission passes over it before any tree of its
+left behind included. Outside the two exemptions below, Legion admits no root and starts no child
+while Dispatch shows it blocked by an issue that is not `done`: a blocker in `backlog` or `icebox`
+has stopped rather than finished, and one the daemon has never seen counts as unfinished too. A
+blocked root keeps its place in the waiting line and takes no slot, so it hides no free capacity —
+the daemon's `slot-free` wake to the controller counts it as taking none, and `legion state` shows
+fewer roots active than its cap while every waiting root is on its `blocked on Dispatch links:`
+line — admission passes over it before any tree of its
 own is opened and admits the next unblocked root in rank order, then admits it at its own rank
 position once its last blocker closes; it stays the live tree of its children, which are no
 orphans. A child is the same: `release_children` accepts the whole request whatever the links say
@@ -225,9 +227,11 @@ tree's design gate does not start it, and the daemon starts its first phase itse
 blocker closes, whichever door the child came through (a release, a person's move to `todo`, an
 architect's `rerun_child`), and tells the tree's architect with the existing `child-status`
 notice, whose reason names the child, its root and the issues it waited on, now done. Work
-already under way is never stopped or re-checked: an issue that carries a run into a tree of its
-own is admitted whatever its links say, and a blocker added to a running tree's issue changes
-nothing for it. Two backstops catch a close no event brought: the daemon's boot reads the whole
+already under way is never stopped or re-checked, and those are the two exemptions: an issue that
+carries a run into a tree of its own is admitted whatever its links say, and so is a tree that
+ran, taken back after it finished and lingered, which starts again at its person's `todo`; a
+blocker added to a running tree's issue changes nothing for it. Two backstops catch a close no
+event brought: the daemon's boot reads the whole
 project listing, and its periodic turn (`controller_wake_interval_seconds`, an hour by default)
 re-reads from Dispatch the issues anything is waiting on and looks again. `legion state` prints
 the waits as `blocked on Dispatch links:`, the state's JSON carries them under
