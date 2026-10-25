@@ -1,0 +1,90 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-228",
+  "completed": "2026-10-25T09:05:00Z",
+  "proof": [
+    {
+      "criterion": "A pod obtains a Dispatch access token naming the session, the person it acts for and the project it may write, by the standard OAuth token-exchange grant, holding no secret of its own.",
+      "surface": "The real compiled cmd/broker binary on a real Postgres, driven over HTTP. Its own boot lines: 'broker listening addr=127.0.0.1:41990' and 'token exchange state=on kubernetes=true github=true accounts=1 workflows=0'.",
+      "command": "bash /tmp/live-proof/run.sh (a throwaway harness outside the repository: it builds ./cmd/broker from this tree, creates a database over the wire with pgx, starts an OpenID issuer standing in for the cluster, boots the binary, drives it, then stops it and drops the database)",
+      "observed": "A pod service-account token carrying its pod uid, posted as an RFC 8693 token exchange with a DPoP proof of the caller's own key and no client credential, answered 200 with token_type=DPoP, issued_token_type=urn:ietf:params:oauth:token-type:access_token, expires_in=899. 13 of 13 steps passed, exit 0.",
+      "headSha": "150f5513cdac53f1d3542043b519524fd82fe588",
+      "negativeControl": "A sound, correctly-audienced pod token of system:serviceaccount:example-ns:example-other, an account the configuration does not list, minted nothing: 400 invalid_request naming the account."
+    },
+    {
+      "criterion": "A caller can see what the broker takes it for: the answer names the session, the person it acts for and the project it may write, and the token is useless without the key it is bound to.",
+      "surface": "The same live broker's RFC 7662 introspection route, called by a listed Kubernetes service account.",
+      "command": "bash /tmp/live-proof/run.sh, step 5.2 (POST /v1/oauth/introspect with Authorization: Bearer <service-account token of the listed API account system:serviceaccount:example-ns:example-dispatch>)",
+      "observed": "200 with {\"active\":true,\"client_id\":\"dispatch-token-exchange\",\"exp\":1792916870,\"jkt\":\"GDKgDS7waNSKrJH7-zIYM5Xm6keA2zK5xv_u-OlOLz8\",\"person\":\"ada@example.com\",\"project\":\"ACME\",\"project_scope\":\"named\",\"session\":\"example-session\"}. The jkt is the harness's own key's RFC 7638 thumbprint, so whoever reads the answer can refuse a holder that cannot prove that key.",
+      "headSha": "150f5513cdac53f1d3542043b519524fd82fe588",
+      "negativeControl": "An introspection with no service-account token at all was refused 401 ACCOUNT_TOKEN_INVALID before the token was read back, and one by system:serviceaccount:example-ns:example-other -- a sound token of the cluster for the right audience, but an account BROKER_API_ACCOUNTS does not name -- 403 ACCOUNT_NOT_LISTED."
+    },
+    {
+      "criterion": "A role still writes successfully after it has run longer than an access token's life, with nobody restarting it.",
+      "surface": "The same live broker, restarted with BROKER_ACCESS_TOKEN_SECONDS=3 so the lifetime passes in seconds rather than in fifteen minutes.",
+      "command": "bash /tmp/live-proof/run.sh, step 5.3 (exchange, wait 5s, introspect the first token, exchange again with the same standing pod token)",
+      "observed": "The first token introspected {\"active\":false} once its life had passed, and the same pod token -- unchanged, as a kubelet's projected token is between refreshes -- exchanged again for a different live token under the same session name example-renewal. A standing subject token is not refused as a replay, which is what makes renewal work.",
+      "headSha": "150f5513cdac53f1d3542043b519524fd82fe588",
+      "negativeControl": "A second pod of the very same listed account, with pod uid pod-uid-2, asking for the session name pod-uid-1 holds was refused 400 invalid_grant: the name is bound to the first pod's uid, not to the account, so renewal by the holder is not a way for anyone else in."
+    },
+    {
+      "criterion": "A token is useless to a caller that is not the identity it was minted for: the exchange accepts only a token bound to a live pod, for this broker's audience, and only from the one client on the one grant, with no credential standing in for a subject token.",
+      "surface": "The same live broker, negative controls only.",
+      "command": "bash /tmp/live-proof/run.sh, steps 6.2, 6.3, 6.5a, 6.5b",
+      "observed": "The listed account's own token minted for the enrolment audience https://broker.example instead of the exchange audience https://broker.example/exchange: 400 invalid_request naming the audience the broker accepts. The listed account's token with no kubernetes.io pod uid, the kind `kubectl create token` mints: 400 invalid_request for being bound to no pod. The same exchange request with a client_secret added: 401 invalid_client. The same credential-less request from client id agent-secrets-helper: 400 invalid_grant, the library's own refusal of a public client at that grant.",
+      "headSha": "150f5513cdac53f1d3542043b519524fd82fe588",
+      "negativeControl": "The positive control for this set is step 5.1 in the same run: the identical request, with the listed account's correctly-audienced pod-bound token from the exchange client and no credential, minted a token -- so each refusal above is the one thing that was changed, not a harness that cannot exchange at all."
+    },
+    {
+      "criterion": "A continuous-integration job exchanges its workflow token for a Dispatch token. Proven by a test of the exchange, since no job writes to Dispatch yet (the issue's own acceptance line).",
+      "surface": "The real broker handlers behind a test server, with a fake issuer standing in for GitHub's.",
+      "command": "cd packages/envoy && BROKER_TEST_DATABASE_URL=postgres://broker:brokerpw@127.0.0.1:5433/postgres go test -count=1 ./internal/broker/oauth/...",
+      "observed": "ok github.com/sjawhar/envoy/internal/broker/oauth 10.996s. The live run starts and configures a GitHub issuer too, and the binary reports github=true at boot.",
+      "headSha": "150f5513cdac53f1d3542043b519524fd82fe588",
+      "negativeControl": "The same workflow token presented a second time is refused: a workflow run mints a fresh token per request, so its jti is single-use, unlike a pod's standing token."
+    },
+    {
+      "criterion": "Nothing in the design names this deployment's people, machines or projects; the repository's check for private names passes.",
+      "surface": "The repository's own check, over the whole tree.",
+      "command": "bash .github/scripts/check-private-names.sh",
+      "observed": "no file or path names the private deployment repository or the company, and no text names a private internal host or a Tailscale MagicDNS host (4882 files in the repository)",
+      "headSha": "150f5513cdac53f1d3542043b519524fd82fe588",
+      "negativeControl": "The broker's documentation generator, which refuses a BROKER_* variable the configuration reads but no field documents and a documented variable nothing reads, was run over the tree and exited 0 writing api.md, config.md and errors.md -- so the new settings are documented under their real names and the removed one is gone from both sides."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/oidc/keys.go, keys_test.go: a JSON Web Key Set source, because the OAuth library validates a subject token through a jwt.Keyfunc that must return the key, and go-oidc's RemoteKeySet verifies a signature without handing its keys out.",
+    "packages/envoy/internal/broker/exchange/: the policy half -- what a verified subject token entitles its holder to, as the session, the person, the project and its scope, plus the platform identity the session name binds to.",
+    "packages/envoy/internal/broker/oauthstore/{exchange.go,client.go,store.go}: the session name binding, the subject-token replay store, the ExchangeSession the RFC 8693 handlers write on, token rows with no launcher credential, and the two client registrations.",
+    "packages/envoy/internal/broker/store/migrations/0017_oauth_token_exchange.up.sql: oauth_session_bindings and oauth_exchange_jtis, with their expiry indexes and sweeps.",
+    "packages/envoy/internal/broker/oauth/{provider.go,exchange.go,clientauth.go,introspect.go,codes.go}: the composed grant in the library's required factory order, the registered subject-token types, the narrowed client-authentication hook, the broker's own decision step, and Provider.Introspect.",
+    "packages/envoy/internal/broker/config/config.go: the exchange's settings, BROKER_API_ACCOUNTS, and BROKER_UI_TOKEN[_FILE] moved to removedVars.",
+    "packages/envoy/internal/broker/api/{routes_table.go,server.go,handlers_introspect.go,handlers_ui_*.go,limits.go}: the introspection route, the service-account authentication kind that replaces the shared bearer on every route it held, and the route documentation that names the approver residue and dispatch://INFRA-314.",
+    "packages/envoy/cmd/broker/main.go, packages/envoy/internal/broker/brokertest/rig.go, packages/envoy/scripts/dev-broker.sh: the wiring, the rig and the local run.",
+    "packages/envoy/internal/dispatch/agentsecrets/client.go, packages/envoy/cmd/dispatch/{main.go,settings.go}: Dispatch presents its own projected service-account token, read at call time behind a short cache because a projected token rotates.",
+    "packages/envoy/AGENTS.md: the broker's own guide brought true for the whole slice."
+  ],
+  "trickyParts": [
+    "The pinned library has no path for a credential-less token exchange: it refuses a public client that grant (handler/rfc8693/flow_token_exchange.go:36) and refuses the 'none' method to a confidential one (client_authentication_strategy.go:242). RFC 8693 Section 2.1 makes client authentication a deployment decision, so the broker supplies the library's own ClientAuthenticationStrategy hook for one client id, one grant, and a request carrying no credential of any kind; everything else goes to the library untouched. The alternatives were a client secret in every pod -- the shared secret this issue removes -- or keying client authentication, which would lock out the continuous-integration caller, which has no enrolled key.",
+    "A pod's projected service-account token is a standing credential its kubelet refreshes, so single-use (ValidateJTI) on that subject-token type would refuse every renewal. It is off for the Kubernetes type and on for the GitHub one, whose runs mint a fresh token per request.",
+    "RFC8693CustomJWTTypeFactory asserts the composed strategy to jwt.Strategy, which the broker's code strategy was not. The handler uses that strategy only to issue a JSON Web Token, which this provider never does, so the method set is implemented as explicit refusals: no signing key is generated anywhere and nothing can quietly mint a signed token.",
+    "The library checks a subject token's issuer and its expiry and never its audience, so the broker checks the audience itself -- without it a token a pod was given for another service would be spendable at the exchange.",
+    "oauthstore wrote and read only *oauth2.DefaultSession. The exchange needs a session the RFC 8693 handlers can write their subject and actor claims on, and an introspection reads those claims back out of the row, so the store now round-trips both kinds."
+  ],
+  "deviations": [
+    "The plan's decision D8 said the exchanging callers are public clients. That is not buildable against the pinned library, for the reason in trickyParts; the client is registered confidential and authenticates with no credential through the library's own strategy hook. Reported to the architect, who agreed and asked for the narrowness to be proved by test (it is: oauth/exchange_test.go, and live steps 6.5a and 6.5b) and for the reason to be in the pull request body (it is).",
+    "The plan's section 5 item 7 put the approver assertion in this slice, as a further configured issuer. The architect withdrew it in three steps and settled it as dispatch://INFRA-314: no approver-identity mechanism is built here, and the RFC 7523 assertion grant written for it was removed from the branch rather than left unused, since nothing presents a person-held assertion to the token endpoint.",
+    "The architect added to this slice, in its place, the removal of the broker's shared bearer: BROKER_UI_TOKEN is gone and every route it authenticated takes the caller's own Kubernetes service-account token. What those routes do with an approver's name is deliberately unchanged -- removing the bearer and the approver trust together would stop every agent secret being approved from the moment this deploys -- and the route table says so beside them.",
+    "The plan said a token's session claim comes from configuration. A Kubernetes service-account token names the account and the pod, never the agent's own session, so the exchange reads a session form parameter; a configured entry that fixes the name wins and refuses another, which is how the Legion daemon keeps the name it writes under today. The architect then required the name to be bound to the identity that first claimed it, which it is: first caller wins until its tokens lapse.",
+    "A dev box session's token carries no project, as a person's own cookie and personal token carry none. The architect required the absence to be explicit rather than missing, so every token carries a project scope and a later slice's check can refuse one carrying neither."
+  ],
+  "openQuestions": [
+    "Nothing presents a broker token to Dispatch yet: Dispatch accepting one is Child A and Legion presenting one is Child D, so this slice's credential kind is inert in production until those land. That is the plan's own ordering (section 7) and not a gap in this work.",
+    "The deployment change this slice needs is listed in the pull request body under 'Deployment'. BROKER_API_ACCOUNTS is required and replaces BROKER_UI_TOKEN in the same deploy: a broker started with the old variable refuses it by name, so the two must move together."
+  ],
+  "discoveredComplexity": [
+    "This pod cannot start a workload in the cluster (kubectl auth can-i create services and get services both answer no, and docs/kubernetes.md forbids submitting a Job on anything less than three bare yes answers), and it has no Docker and no psql. The live run was made possible by fetching a standalone Postgres build and running it in this pod; the harness talks to it with pgx. A role that needs a database for a live proof in this deployment has no sanctioned path until dispatch://INFRA-206's declarations are applied.",
+    "Five test packages fail in this pod for reasons that are the pod's and not the change's, and they pass in CI: internal/broker/helper, cmd/agent-secrets and cmd/agent-secrets-helper fail with 'SO_PEERPIDFD: protocol not available' (this kernel identifies no socket peer), and cmd/listener and cmd/natstail fail with 'rootless Docker not found'. Every other package of the module is green."
+  ]
+}
