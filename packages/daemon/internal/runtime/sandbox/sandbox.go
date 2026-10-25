@@ -141,6 +141,18 @@ type Runtime struct {
 	// keyed by its Sandbox's name (lockPod). Nothing serializes the pods of one tree against each
 	// other: each issue's pod provisions its own clone on its own volume.
 	podTurns map[string]chan struct{}
+	// stranded is, by Sandbox name, the pod an issue Sandbox this runtime is replacing named as the
+	// live pod a relaunch replaced (displacedAnnotation), held while no Sandbox of the name may exist
+	// to carry that name: put just before replaceSupersededSandbox sends the delete that takes the
+	// carrier away, dropped by the Create that puts one back carrying it (createSandbox). It is the
+	// annotation's stand-in for the gap the delete opens and nothing more: evaluate reads it only once
+	// the API server has confirmed the name holds no Sandbox, so whenever an object exists the
+	// annotation on it, the durable record, is what answers, as it is the only one a restarted daemon
+	// has. It names a pod by uid, which no other pod ever holds, and every process of that pod ended
+	// with the suspension that named it, so it can only ever call displaced a process that was; kept
+	// past the Create, it would set that name on whatever Sandbox the issue is next created as.
+	// Its writes run under the pod's launch turn, every read and write under mu.
+	stranded map[string]string
 	// occupiedCaches are the cache names RepositoryCache found held by another repository's cache and
 	// has logged, so each is logged once.
 	occupiedCaches map[string]bool
@@ -300,7 +312,7 @@ func configureProber(opts Options) (*Runtime, error) {
 		launchBound:   launchBound(opts.BootTimeout, provisionBound, opts.TerminationGrace),
 		probeInterval: opts.ProbeInterval, adoptTimeout: opts.AdoptTimeout, agent: opts.Agent, setup: slices.Clone(opts.Setup),
 		tokens: opts.Tokens, gitHubCredential: opts.GitHubCredential, store: opts.Store, conns: opts.Conns, now: opts.Now, log: opts.Log,
-		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{},
+		changed: make(chan struct{}), watch: map[claim.Token]runtime.Locator{}, podTurns: map[string]chan struct{}{}, stranded: map[string]string{},
 		launchers: newLaunchers(), cacheConfig: opts.RepositoryCache, mapped: opts.Mapped,
 		cacheDial: (&net.Dialer{}).DialContext, occupiedCaches: map[string]bool{}, cacheBearers: map[string]string{},
 	}

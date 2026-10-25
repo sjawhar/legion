@@ -327,25 +327,14 @@ func (controllerPod) diskSource(_ *Runtime, l launch) corev1.VolumeSource {
 // secretAnnotations are none: the controller's claim is the project's (claimToken).
 func (controllerPod) secretAnnotations(launch) map[string]string { return nil }
 
-// initContainers are one workspace-init, which mounts the controller's volume alone: `workspace-init
-// controller` provisions nothing and waits on no lock. It is told the image's PATH and nothing of
-// any session: every session is a row in the session database, which the role launcher looks up
-// before it starts the child (internal/launcher). It takes the controller's resources.
-func (controllerPod) initContainers(r *Runtime, l launch) []corev1.Container {
-	env := []corev1.EnvVar{{Name: "PATH", Value: imagePath}}
-	return []corev1.Container{{
-		Name:            initContainer,
-		Image:           r.image,
-		Command:         []string{r.tools.Legion, "workspace-init", "controller", "--root", TreeRoot},
-		Env:             env,
-		WorkingDir:      TreeRoot,
-		VolumeMounts:    []corev1.VolumeMount{{Name: issueVolume, MountPath: TreeRoot}},
-		Resources:       r.resources[l.spec.Role],
-		SecurityContext: restrictedContainer(),
-	}}
-}
+// initContainers are none: the controller's volume needs no preparing before its launcher starts.
+// The launcher works in the volume's root, which the mount itself makes, owned by the pod's group
+// (fsGroup, podTemplate); the scratch directories its agent is told are made by the shim
+// (podsafety.EnsureScratch); and its session is a row in the session database, which the role
+// launcher looks up before it starts the child (internal/launcher), not a file on the volume.
+func (controllerPod) initContainers(*Runtime, launch) []corev1.Container { return nil }
 
-// initVolumes are none: its init container mounts only its volume.
+// initVolumes are none: the controller's pod runs no init container.
 func (controllerPod) initVolumes(launch) []corev1.Volume { return nil }
 
 // agentEnv tells the agent LEGION_CONTROLLER=1, its pane marker, where its gh reads its

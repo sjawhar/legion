@@ -324,12 +324,7 @@ func TestAnOrphanRootKeepsTheSandboxItsOldTreeLeft(t *testing.T) {
 // death for the daemon's own replacement.
 func TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape(t *testing.T) {
 	name := SandboxName(workerToken)
-	labels := claimLabels(claim.RoleTester)
-	g := newRig(t, []k8sruntime.Object{
-		sandboxObject(t, name, "uid-sandbox-superseded", modeRunning, labels),
-		podObject(name, "uid-pod-old", "uid-sandbox-superseded", labels, runningStatus()),
-	})
-	g.suspendDelay = 50 * time.Millisecond
+	g := supersededIssue(t)
 	loc := g.spawn(workerSpec(t))
 	expectSteps(t, steps(t, g.writes(), name), "suspend", "delete sandbox", "create sandbox", "create secret", "run", "record addresses")
 	s := g.sandbox(name)
@@ -379,6 +374,162 @@ func TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape(t *testing.T) {
 	if !obs.Displaced {
 		t.Fatalf("the reviewer recorded in the replaced pod: %s, Displaced %t (%s); want the end read as the daemon's own, which the supervisor resumes uncharged",
 			obs.Kind, obs.Displaced, obs.Detail)
+	}
+}
+
+// supersededIssue is a rig holding an issue Sandbox of the release before the pod-owned disk,
+// Running, with its live pod uid-pod-old, in which the tester's launch and its five siblings run:
+// what every running issue is at the cutover.
+func supersededIssue(t *testing.T, options ...rigOption) *rig {
+	t.Helper()
+	name := SandboxName(workerToken)
+	labels := claimLabels(claim.RoleTester)
+	g := newRig(t, []k8sruntime.Object{
+		sandboxObject(t, name, "uid-sandbox-superseded", modeRunning, labels),
+		podObject(name, "uid-pod-old", "uid-sandbox-superseded", labels, runningStatus()),
+	}, options...)
+	g.suspendDelay = 50 * time.Millisecond
+	return g
+}
+
+// A sibling role of the pod a migrating launch replaces may be evaluated while that launch is
+// between deleting the Sandbox of the superseded disk shape and creating its replacement, when
+// the API server holds no Sandbox of the issue's name at all: the observer takes no launch turn.
+// Its end is the daemon's own all the same, and is read so — Displaced, which the supervisor
+// resumes uncharged — not as a death the replacement's annotation would arrive too late to undo,
+// since a Gone delivered leaves the watch. The probe here is made from inside that gap, on the Get
+// that confirms the delete, once the Sandbox store has lost the old Sandbox too, so neither the
+// store's copy nor the confirming read has anything to name the pod with.
+func TestASiblingReadBetweenAMigratingLaunchsDeleteAndCreateIsDisplaced(t *testing.T) {
+	name := SandboxName(workerToken)
+	sibling := sandboxLocator(otherToken, "uid-pod-old")
+	var deleting, probed atomic.Bool
+	var g *rig
+	var inGap runtime.Observation
+	var gapErr error
+	storeHeldIt := true
+	hooks := &sandboxHooks{
+		beforeDelete: func(n string) {
+			if n == name {
+				deleting.Store(true)
+			}
+		},
+		afterGet: func(n string) {
+			if n != name || !deleting.Load() || probed.Load() {
+				return
+			}
+			if _, err := g.dyn.Tracker().Get(sandboxGVR, testNamespace, name); !apierrors.IsNotFound(err) {
+				return
+			}
+			// The launch has seen the delete through and has yet to send its create. The probe's own
+			// confirming read comes through this hook too, so it is marked first.
+			probed.Store(true)
+			for deadline := time.Now().Add(time.Second); time.Now().Before(deadline); time.Sleep(5 * time.Millisecond) {
+				if s, _ := g.r.storedSandbox(name); s == nil {
+					storeHeldIt = false
+					break
+				}
+			}
+			inGap, gapErr = g.r.Probe(g.ctx, sibling)
+		},
+	}
+	g = supersededIssue(t, withSandboxHooks(hooks))
+	g.spawn(workerSpec(t))
+	if !probed.Load() {
+		t.Fatal("the launch never reached the gap between deleting the superseded Sandbox and creating its replacement")
+	}
+	if storeHeldIt {
+		t.Fatal("the Sandbox store still held the deleted Sandbox when the sibling was probed, so the probe proves nothing about the gap")
+	}
+	if gapErr != nil {
+		t.Fatal(gapErr)
+	}
+	if inGap.Kind != runtime.Gone || !inGap.Displaced {
+		t.Fatalf("the reviewer recorded in the replaced pod, read while no Sandbox of the issue exists: %s, Displaced %t (%s); want Gone and Displaced, the daemon's own replacement, which the supervisor resumes uncharged",
+			inGap.Kind, inGap.Displaced, inGap.Detail)
+	}
+}
+
+// A replacement whose Create fails leaves the issue's name with no Sandbox until the issue's next
+// launch: the roles of the pod it replaced are read Displaced throughout, not only for the moment
+// a successful Create would have taken, and the Sandbox that next launch creates carries the name,
+// so from then the durable record answers.
+func TestAReplacementWhoseCreateFailsKeepsTheReplacedPodsRolesDisplaced(t *testing.T) {
+	name := SandboxName(workerToken)
+	sibling := sandboxLocator(otherToken, "uid-pod-old")
+	g := supersededIssue(t)
+	var refused atomic.Bool
+	g.dyn.PrependReactor("create", "sandboxes", func(k8stesting.Action) (bool, k8sruntime.Object, error) {
+		if !refused.CompareAndSwap(false, true) {
+			return false, nil, nil
+		}
+		return true, nil, apierrors.NewForbidden(sandboxGVR.GroupResource(), name, errors.New("exceeded quota"))
+	})
+	g.launcher(workerToken)
+	if err := failedLaunch(t, g, workerSpec(t)); err == nil || !strings.Contains(err.Error(), "create sandbox") {
+		t.Fatalf("a launch whose replacement's Create is refused = %v, want its create's refusal", err)
+	}
+	if g.sandbox(name) != nil {
+		t.Fatal("the issue holds a Sandbox after its replacement's Create was refused")
+	}
+	g.eventually("the Sandbox store to lose the deleted Sandbox", func() bool {
+		s, _ := g.r.storedSandbox(name)
+		return s == nil
+	})
+	obs, err := g.r.Probe(g.ctx, sibling)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Kind != runtime.Gone || !obs.Displaced {
+		t.Fatalf("the reviewer recorded in the replaced pod, read after the replacement's Create failed: %s, Displaced %t (%s); want Gone and Displaced",
+			obs.Kind, obs.Displaced, obs.Detail)
+	}
+	g.spawn(workerSpec(t))
+	if named := g.sandbox(name).Annotations[displacedAnnotation]; named != "uid-pod-old" {
+		t.Fatalf("the Sandbox the next launch created names %q as the pod the daemon replaced, want uid-pod-old, which the failed replacement left with no Sandbox to carry it", named)
+	}
+	if obs, err := g.r.Probe(g.ctx, sibling); err != nil || !obs.Displaced {
+		t.Fatalf("the reviewer recorded in the replaced pod, once a Sandbox carries the name again: %+v, %v; want Displaced", obs, err)
+	}
+}
+
+// What the runtime keeps for the gap a replacement opens goes once the replacement carries it,
+// and is never read past that. A role of the replacement's own pod whose process then ends on its
+// own is a death, not the daemon's doing: the replacement's annotation names the pod the migration
+// replaced, never this one. And when the issue closes, deleting its Sandbox, and is later launched
+// again, the Sandbox made afresh names no pod at all: the one the migration replaced was never
+// that Sandbox's, and a name kept past the replacement's Create would be written onto it.
+func TestTheNameAReplacementKeptForItsGapGoesOnceTheReplacementCarriesIt(t *testing.T) {
+	name := SandboxName(workerToken)
+	g := supersededIssue(t)
+	loc := g.spawn(workerSpec(t))
+	if named := g.sandbox(name).Annotations[displacedAnnotation]; named != "uid-pod-old" {
+		t.Fatalf("the replacement names %q as the pod the daemon replaced, want uid-pod-old", named)
+	}
+	g.update(g.pod(name), func(p *corev1.Pod) {
+		p.Status.Phase = corev1.PodFailed
+		p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+			Name: string(claim.RoleTester), State: corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 137, Reason: "OOMKilled"}},
+		}}
+	})
+	g.eventually("the pod store to see the replacement's pod fail", func() bool { return phaseOf(g.r.storedPod(name)) == corev1.PodFailed })
+	obs, err := g.r.Probe(g.ctx, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obs.Kind != runtime.Gone || obs.Displaced {
+		t.Fatalf("the tester, whose pod in the replacement failed on its own: %s, Displaced %t (%s); want Gone and not Displaced, a death the supervisor charges",
+			obs.Kind, obs.Displaced, obs.Detail)
+	}
+	if err := g.r.SuspendIssue(g.ctx, testTree, testTree, func(context.Context) (bool, error) { return true, nil }); err != nil {
+		t.Fatal(err)
+	}
+	if g.sandbox(name) != nil {
+		t.Fatal("the closed issue still holds a Sandbox")
+	}
+	g.spawn(workerSpec(t))
+	if named, ok := g.sandbox(name).Annotations[displacedAnnotation]; ok {
+		t.Fatalf("the Sandbox the re-admitted issue's launch made afresh names %q as a pod the daemon replaced, want none: that pod was never this Sandbox's", named)
 	}
 }
 

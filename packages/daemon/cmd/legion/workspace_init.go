@@ -41,15 +41,14 @@ func secretFileFromEnv(name string) (string, error) {
 // which prepare the issue's clone and jj workspace on the pod's own disk: `fetch` is the first, the
 // one process of the pod that holds the provisioning token, in a container that mounts nothing an
 // agent of the issue can write; `provision` is the second, all the disk's work, in a container the
-// provisioning Secret is not mounted in. The controller's pod (`controller: daemon`) runs
-// `controller` alone, on the volume its own Sandbox owns. A repository cache's pod runs `cache` as
-// its one container, on its own volume, until it is stopped. Each one's log lines go to stdout and
-// its refusals and failures to stderr — together the init log the runtime quotes — with exit 1.
+// provisioning Secret is not mounted in. The controller's pod (`controller: daemon`) runs none. A
+// repository cache's pod runs `cache` as its one container, on its own volume, until it is stopped.
+// Each one's log lines go to stdout and its refusals and failures to stderr — together the init log
+// the runtime quotes — with exit 1.
 var workspaceInitCommands = map[string]command{
-	"fetch":      runWorkspaceFetch,
-	"provision":  runWorkspaceProvision,
-	"controller": runWorkspaceController,
-	"cache":      runWorkspaceCache,
+	"fetch":     runWorkspaceFetch,
+	"provision": runWorkspaceProvision,
+	"cache":     runWorkspaceCache,
 }
 
 func runWorkspaceInit(ctx context.Context, args []string, stdout, stderr io.Writer) int {
@@ -79,33 +78,6 @@ func runWorkspaceProvision(ctx context.Context, args []string, stdout, stderr io
 		return code
 	}
 	return workspaceInitExit(flags, workspaceInit(ctx, *issue, *repo, *defaultBranch, *root, *credentialHelper, *feed, stdout), stderr)
-}
-
-const workspaceControllerUsage = "legion workspace-init controller [--root /legion]"
-
-func runWorkspaceController(_ context.Context, args []string, stdout, stderr io.Writer) int {
-	flags := newFlags("workspace-init controller", "usage: "+workspaceControllerUsage, stderr)
-	root := flags.String("root", "/legion", "the controller's volume root directory")
-	if code, ok := parseWorkspaceInitFlags(flags, args, stderr); !ok {
-		return code
-	}
-	return workspaceInitExit(flags, workspaceController(*root), stderr)
-}
-
-// workspaceController prepares the controller's volume: nothing at all, beyond refusing a root
-// that is not the absolute path its pod mounts the volume at and a pod handed the provisioning
-// token. The controller works no repository and holds no GitHub credential, so it gets no
-// workspace and no gh files, and it is held to no session either: every session is a row in the
-// session database, which the role launcher looks up before it starts the child
-// (internal/launcher).
-func workspaceController(root string) error {
-	if !filepath.IsAbs(root) {
-		return fmt.Errorf("--root must be an absolute path (got %q)", root)
-	}
-	if _, set := os.LookupEnv(provisionTokenFileEnv); set {
-		return errors.New(provisionTokenFileEnv + " is set: the controller's pod holds no provisioning token")
-	}
-	return nil
 }
 
 // parseWorkspaceInitFlags parses one subcommand's flags, refusing a positional argument; a false

@@ -45,10 +45,11 @@ func controllerSpec(t *testing.T) runtime.SpawnSpec {
 // The controller's pod is the runtime's other kind of pod: the controller's launcher alone, on a
 // volume of its own the Sandbox owns, so a relaunch finds its workspace where it left it. It
 // provisions no workspace but holds the review App's GitHub credential like any workflow role's:
-// its one init container is told the image's PATH and nothing else, and its labels name the
-// controller and no tree or issue, so no tree's cleanup takes it for one of the tree's issue pods.
-// Where the runtime enrolls pods with the secrets broker it is enrolled as every workflow role's
-// launcher is, so its agent can be granted the secrets the Legion daemon's service owns.
+// it runs no init container, since nothing on its volume needs preparing before the launcher
+// starts, and its labels name the controller and no tree or issue, so no tree's cleanup takes it
+// for one of the tree's issue pods. Where the runtime enrolls pods with the secrets broker it is
+// enrolled as every workflow role's launcher is, so its agent can be granted the secrets the
+// Legion daemon's service owns.
 func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	opts := goldenOptions()
 	opts.AgentSecrets = &AgentSecrets{URL: "https://secrets.internal.example", Audience: "agent-secrets", TokenExpiry: time.Hour}
@@ -81,20 +82,8 @@ func TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn(t *testing.T) {
 	}
 
 	pod := r.podTemplate(l).Spec
-	if len(pod.InitContainers) != 1 || pod.InitContainers[0].Name != initContainer {
-		t.Fatalf("init containers %v, want %s alone", pod.InitContainers, initContainer)
-	}
-	init := pod.InitContainers[0]
-	if want := []string{opts.Tools.Legion, "workspace-init", "controller", "--root", TreeRoot}; !slices.Equal(init.Command, want) {
-		t.Errorf("init command %q, want %q", init.Command, want)
-	}
-	// Its session is a row in the session database, which the role launcher looks up before it
-	// starts the child, so the init container is told nothing of a resume.
-	if env := envOf(init); len(env) != 1 || env["PATH"] != imagePath {
-		t.Errorf("init env %v, want the image's PATH alone: the controller's session is in the database, not a file on its volume", env)
-	}
-	if mounts := init.VolumeMounts; len(mounts) != 1 || mounts[0].Name != issueVolume || mounts[0].MountPath != TreeRoot {
-		t.Errorf("init mounts %+v, want the controller's volume at %s alone", mounts, TreeRoot)
+	if len(pod.InitContainers) != 0 {
+		t.Fatalf("init containers %v, want none", pod.InitContainers)
 	}
 
 	if len(pod.Containers) != 1 || pod.Containers[0].Name != string(claim.RoleController) {
@@ -352,8 +341,8 @@ func TestAControllerWithNoOwnerRunsWithAnEmptyGhDirectory(t *testing.T) {
 }
 
 // The controller's pod is sized by its own entry under runtime.kubernetes.resources, as a workflow
-// role's pod is by that role's: both its containers carry it, the init container included, so a
-// controller the operator sized larger than the default runs at that size on every container.
+// role's pod is by that role's: its one container, the launcher, carries it, so a controller the
+// operator sized larger than the default runs at that size.
 func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
 	opts := goldenOptions()
 	sized := corev1.ResourceRequirements{
@@ -366,10 +355,10 @@ func TestTheControllersPodTakesItsOwnResources(t *testing.T) {
 		t.Fatal(err)
 	}
 	pod := podOf(t, r, controllerSpec(t))
-	if containers := slices.Concat(pod.InitContainers, pod.Containers); len(containers) != 2 {
-		t.Fatalf("the controller's pod runs %d containers, want its init container and its launcher", len(containers))
+	if containers := slices.Concat(pod.InitContainers, pod.Containers); len(containers) != 1 {
+		t.Fatalf("the controller's pod runs %d containers, want its launcher alone", len(containers))
 	}
-	for _, c := range slices.Concat(pod.InitContainers, pod.Containers) {
+	for _, c := range pod.Containers {
 		if !reflect.DeepEqual(c.Resources, sized) {
 			t.Errorf("container %s carries resources %+v, want the controller's %+v", c.Name, c.Resources, sized)
 		}

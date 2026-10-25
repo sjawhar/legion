@@ -119,8 +119,8 @@ func podQOS(spec corev1.PodSpec) corev1.PodQOSClass {
 // which is the kubelet's rule for the Guaranteed class — judged over every container of the pod,
 // the init containers included — and each is bounded on the node's disk, an ephemeral-storage
 // request under its limit. An issue pod's six launchers each carry their role's reservation and its
-// two init containers the launching role's; the controller's pod carries the controller's on both
-// its containers; and the image probe's one container carries the probe's own, which the daemon
+// two init containers the launching role's; the controller's pod carries the controller's on its
+// one container; and the image probe's one container carries the probe's own, which the daemon
 // hands it. A deployment with no `resources` block therefore runs only Guaranteed pods.
 func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	r, err := configure(goldenOptions())
@@ -138,7 +138,7 @@ func TestEveryContainerOfEveryPodIsGuaranteed(t *testing.T) {
 	}{
 		"root":       {podOf(t, r, rootSpec(t)), want[claim.RoleArchitect], 8},
 		"worker":     {podOf(t, r, workerSpec(t)), want[claim.RoleTester], 8},
-		"controller": {podOf(t, r, controllerSpec(t)), want[claim.RoleController], 2},
+		"controller": {podOf(t, r, controllerSpec(t)), want[claim.RoleController], 1},
 		"probe":      {probe.Spec.PodTemplate.Spec, probeReservation(), 1},
 	} {
 		t.Run(name, func(t *testing.T) {
@@ -1711,7 +1711,8 @@ func TestImageOwnedPathsCoverWhatAPodRunsFromTheImage(t *testing.T) {
 // keeps it off, another pod's node. Each issue pod owns a ReadWriteOnce volume of its own and
 // shares nothing with the other pods of its tree, so the scheduler places it wherever the pool has
 // room (LEGION-632). Pinned as the exact key set of the pod spec the manifest sends, so a field
-// added to the template shows here by name.
+// added to the template shows here by name; the controller's pod alone sends no initContainers,
+// since it runs none.
 func TestEveryLegionPodAsksNothingOfItsPlacementBeyondThePool(t *testing.T) {
 	r, err := configure(goldenOptions())
 	if err != nil {
@@ -1727,8 +1728,12 @@ func TestEveryLegionPodAsksNothingOfItsPlacementBeyondThePool(t *testing.T) {
 			r.agentSecrets = tc.agentSecrets
 			manifest := manifestOf(t, r, tc.spec).(map[string]any)
 			pod := manifest["spec"].(map[string]any)["podTemplate"].(map[string]any)["spec"].(map[string]any)
-			if got := slices.Sorted(maps.Keys(pod)); !slices.Equal(got, want) {
-				t.Errorf("the pod spec sent carries %v, want exactly %v", got, want)
+			expected := want
+			if tc.spec.Role == claim.RoleController {
+				expected = slices.DeleteFunc(slices.Clone(want), func(key string) bool { return key == "initContainers" })
+			}
+			if got := slices.Sorted(maps.Keys(pod)); !slices.Equal(got, expected) {
+				t.Errorf("the pod spec sent carries %v, want exactly %v", got, expected)
 			}
 		})
 	}
@@ -1778,8 +1783,9 @@ func TestAnIssuePodOwnsItsDiskAndItsSandboxOwnsNoVolume(t *testing.T) {
 }
 
 // The controller's Sandbox is the one this runtime still has own a volume claim template, so a
-// relaunch finds the session its last pod left on it. The template's labels are its pod's: the
-// project and the controller role, and no tree, which the controller has none of. The daemon's
+// relaunch finds the working root its last pod left on it; its session is a row in the session
+// database, as every role's is. The template's labels are its pod's: the project and the
+// controller role, and no tree, which the controller has none of. The daemon's
 // restricted identity has no PVC verb, so the labels the claim is created with are the labels it
 // keeps for life (LEGION-632).
 func TestTheControllersClaimTemplateCarriesItsProjectAndRoleAlone(t *testing.T) {

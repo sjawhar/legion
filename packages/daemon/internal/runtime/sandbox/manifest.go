@@ -632,8 +632,7 @@ const (
 
 // xdgEnvironment is the four XDG base directories on the image's HOME: what the issue pod's
 // workspace-init is told (initEnvironment), the one container of a pod told any of them besides
-// the role containers — workspace-fetch is told none (fetchEnvironment), and neither is the
-// controller pod's workspace-init (controllerPod.initContainers, podkind.go). A role container is
+// the role containers — workspace-fetch is told none (fetchEnvironment). A role container is
 // told none of them but the config home; its cache and data homes are the issue's scratch's and
 // its state home its own directory there (roleEnvironment).
 func xdgEnvironment() []corev1.EnvVar {

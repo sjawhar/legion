@@ -94,8 +94,9 @@ func (r *Runtime) Resume(ctx context.Context, prev *runtime.Locator, spec runtim
 // volume claim template that pod mounts — is replaced too, and its Sandbox with it: that field is
 // immutable in the CRD, so deleting the Sandbox at the issue's next launch and creating one of the
 // current shape is the only way to the pod-owned disk (replaceSupersededSandbox), which carries
-// the name the suspension wrote onto the Sandbox it creates, so the roles that replacement ended
-// are still read as displaced rather than dead.
+// the name the suspension wrote onto the Sandbox it creates, and keeps it in the runtime's hands
+// while the issue has no Sandbox at all (stranded), so the roles that replacement ended are read as
+// displaced rather than dead, in the gap between the delete and the create too.
 func (r *Runtime) relaunch(ctx context.Context, prev *runtime.Locator, spec runtime.SpawnSpec) (runtime.Locator, error) {
 	ctx = launching(ctx)
 	l, err := r.prepare(spec)
@@ -436,7 +437,8 @@ func (r *Runtime) suspendFailedLaunch(ctx context.Context, token claim.Token, s 
 // it is, still owning the `issue` claim template: the boot census lets that one shape through by
 // name rather than refusing the daemon (treeVolumeLayout), and the relaunch replaces it, Sandbox
 // and claim together, once its pod is gone (replaceSupersededSandbox). Nothing here deletes a
-// Sandbox.
+// Sandbox. One it creates carries the name of the pod a replacement whose own Create failed left
+// stranded (createSandbox), so the roles that replacement ended are read as displaced from it.
 func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error) {
 	deadline := time.Now().Add(r.bootTimeout)
 	// refused is the relabel the API server refused as invalid, and refusedAt the resourceVersion its
@@ -448,18 +450,14 @@ func (r *Runtime) ensureSandbox(ctx context.Context, l launch) (*sandbox, error)
 	for {
 		u, err := r.sandboxClient().Get(ctx, l.name, metav1.GetOptions{})
 		if apierrors.IsNotFound(err) {
-			manifest, err := encodeSandbox(r.sandboxManifest(l))
-			if err != nil {
-				return nil, err
-			}
-			createdObject, err := r.sandboxClient().Create(ctx, manifest, metav1.CreateOptions{})
+			created, err := r.createSandbox(ctx, l)
 			if apierrors.IsAlreadyExists(err) && time.Now().Before(deadline) {
 				continue
 			}
 			if err != nil {
 				return nil, err
 			}
-			return decodeSandbox(createdObject)
+			return created, nil
 		}
 		if err != nil {
 			return nil, err
@@ -556,27 +554,83 @@ func supersededDisk(s *sandbox, l launch) bool {
 // (displacedAnnotation): the five roles of the pod this launch just replaced are read as ended by
 // the daemon rather than dead only while their Sandbox names that pod (observe's names), and
 // migrate is true for every issue Sandbox of the previous release, so the cutover launch of every
-// running issue comes through here. sandboxManifest carries no annotations of its own, so the
-// replacement sets that one key on the object it creates rather than the manifest threading it.
+// running issue comes through here. Once the foreground delete's garbage collection is done and
+// the object is gone, no Sandbox of the name exists to name it until the create lands, and the
+// observer, which takes no launch turn, reads a sibling role's end in that gap as readily as after
+// it — a gap of a confirming read and a create when all goes well, and one a failed Create holds
+// open until the issue's next launch makes the Sandbox again. So the name is put in the runtime's
+// own keeping (stranded) before the delete is sent — the Sandbox carries it until it is gone, so no
+// instant is uncovered — and createSandbox sets it on the Sandbox it creates and drops it once the
+// API server holds that one. It is taken from s, not from this launch's suspension alone: a
+// launch that suspended the pod and failed before the delete left the name on the Sandbox, and the
+// next launch, finding the pod already gone, replaces that Sandbox without suspending anything.
+// A daemon that restarts inside the gap has neither, and reads those roles' ends as deaths.
 func (r *Runtime) replaceSupersededSandbox(ctx context.Context, l launch, s *sandbox) (*sandbox, error) {
 	r.log.Info("sandbox runtime: replacing the issue's sandbox of the disk shape before the pod-owned disk, reaping the volume claim it owns",
 		"sandbox", l.name, "uid", s.UID, "claim", IssueClaimName(l.spec.Claim), "issue", l.spec.Issue)
+	if named := s.Annotations[displacedAnnotation]; named != "" {
+		r.strand(l.name, named)
+	}
 	if err := r.deleteStoredSandbox(ctx, l.name); err != nil {
 		return nil, err
 	}
-	replacement := r.sandboxManifest(l)
-	if named, ok := s.Annotations[displacedAnnotation]; ok {
-		replacement.Annotations = map[string]string{displacedAnnotation: named}
-	}
-	manifest, err := encodeSandbox(replacement)
-	if err != nil {
-		return nil, err
-	}
-	created, err := r.sandboxClient().Create(ctx, manifest, metav1.CreateOptions{})
+	created, err := r.createSandbox(ctx, l)
 	if err != nil {
 		return nil, fmt.Errorf("create sandbox %s: %w", l.name, err)
 	}
+	return created, nil
+}
+
+// createSandbox creates l's Sandbox as sandboxManifest makes it, naming on it the pod held for its
+// name as displaced (stranded), and drops that record once the API server holds a Sandbox of the
+// name: from then the object answers, where a restarted daemon reads it too, and the record would
+// only outlive the gap it was kept for. A Create answered AlreadyExists drops it as well — a resend
+// of one the server applied, under the launch turn nothing else of this daemon creates the name —
+// since evaluate never reads the record while a Sandbox exists, and one kept past that would be set
+// on whatever Sandbox the name is next created as, after an issue's close and re-admission, naming
+// a pod that Sandbox never ran. Any other failure keeps it: the name may still hold no Sandbox, and
+// the roles the replacement ended are read as displaced until one exists. sandboxManifest carries
+// no annotations of its own, so this sets the one key rather than the manifest threading it.
+func (r *Runtime) createSandbox(ctx context.Context, l launch) (*sandbox, error) {
+	manifest := r.sandboxManifest(l)
+	held := r.strandedPod(l.name)
+	if held != "" {
+		manifest.Annotations = map[string]string{displacedAnnotation: held}
+	}
+	object, err := encodeSandbox(manifest)
+	if err != nil {
+		return nil, err
+	}
+	created, err := r.sandboxClient().Create(ctx, object, metav1.CreateOptions{})
+	if held != "" && (err == nil || apierrors.IsAlreadyExists(err)) {
+		r.unstrand(l.name)
+	}
+	if err != nil {
+		return nil, err
+	}
 	return decodeSandbox(created)
+}
+
+// strand keeps uid as the pod the Sandbox name names as displaced while that Sandbox is away
+// (stranded).
+func (r *Runtime) strand(name, uid string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.stranded[name] = uid
+}
+
+// strandedPod is the pod kept for the Sandbox name as displaced (stranded), "" when none is.
+func (r *Runtime) strandedPod(name string) string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.stranded[name]
+}
+
+// unstrand drops what is kept for the Sandbox name (stranded).
+func (r *Runtime) unstrand(name string) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.stranded, name)
 }
 
 // awaitPodGone waits, bounded by the boot timeout, until no pod the Sandbox owns holds its name —
