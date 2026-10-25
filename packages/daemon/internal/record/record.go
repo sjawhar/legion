@@ -94,6 +94,27 @@ type Issue struct {
 	// sequence than ClaimSeq is not applied.
 	ClaimedBy string
 	ClaimSeq  int64
+	// WaitFenceSeq is the highest Dispatch event sequence of the issue a wait started from, or a
+	// register_gate read covered, 0 for none. It outlives the wait, a resume and a re-admission: a
+	// hand-back or a question opened at or below it is an act already covered, delivered late, and
+	// starts no wait (WaitFenced).
+	WaitFenceSeq int64
+}
+
+// WaitFenced says whether a Dispatch event at mark that would start a wait is one a wait or a
+// registration already covered: its sequence is at or below WaitFenceSeq. An event Dispatch gave
+// no sequence is never fenced.
+func (i Issue) WaitFenced(mark EventMark) bool {
+	return mark.Seq > 0 && mark.Seq <= i.WaitFenceSeq
+}
+
+// RaiseWaitFence moves WaitFenceSeq up to seq, and reports whether it moved.
+func (i *Issue) RaiseWaitFence(seq int64) bool {
+	if seq <= i.WaitFenceSeq {
+		return false
+	}
+	i.WaitFenceSeq = seq
+	return true
 }
 
 // Repository is the repository the record names (Repo) in the spelling the record keeps: what

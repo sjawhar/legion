@@ -38,6 +38,13 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
+	// The registration's read of Dispatch began at fact.Since.Seq and decides the root's state from
+	// everything up to it: a hand-back or question at or below it, delivered after, starts no wait.
+	if issue.RaiseWaitFence(fact.Since.Seq) {
+		if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
+			return intake.Result{}, err
+		}
+	}
 	stored, err := e.store.Gate(ctx, tx, fact.Issue)
 	if err != nil {
 		return intake.Result{}, err

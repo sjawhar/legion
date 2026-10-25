@@ -6,11 +6,12 @@ import (
 	"testing"
 )
 
-// 0051 adds awaiting_person and what it waits on, where on Dispatch that wait began, and the gate
-// columns that record the changes request the architect was told of. An issue the old daemon left
-// in any phase migrates with no awaiting state and nobody's claim, and a gate it left with no
-// recorded request. Afterwards a root waits on exactly one of an ask or a gate version, and only in
-// that phase, a wait's start is set only in that phase, and a held issue never waits.
+// 0051 adds awaiting_person and what it waits on, where on Dispatch that wait began, the issue's
+// wait fence, and the gate columns that record the changes request the architect was told of. An
+// issue the old daemon left in any phase migrates with no awaiting state, nobody's claim and a wait
+// fence of 0, and a gate it left with no recorded request. Afterwards a root waits on exactly one
+// of an ask or a gate version, and only in that phase, a wait's start is set only in that phase,
+// the wait fence is kept in every phase, and a held issue never waits.
 func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
@@ -24,17 +25,18 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 	var claimedBy string
-	var claimSeq int64
+	var claimSeq, fence int64
 	var ask *string
 	var gateVersion *int
 	var sinceSeq *int64
 	var since *string
-	if err := store.Pool().QueryRow(ctx, `select claimed_by, claim_seq, awaiting_ask, awaiting_gate_version, awaiting_since_seq, awaiting_since::text
-		from issues where key = 'LEGION-208'`).Scan(&claimedBy, &claimSeq, &ask, &gateVersion, &sinceSeq, &since); err != nil {
+	if err := store.Pool().QueryRow(ctx, `select claimed_by, claim_seq, awaiting_ask, awaiting_gate_version, awaiting_since_seq, awaiting_since::text, wait_fence_seq
+		from issues where key = 'LEGION-208'`).Scan(&claimedBy, &claimSeq, &ask, &gateVersion, &sinceSeq, &since, &fence); err != nil {
 		t.Fatalf("read the migrated root: %v", err)
 	}
-	if claimedBy != "" || claimSeq != 0 || ask != nil || gateVersion != nil || sinceSeq != nil || since != nil {
-		t.Fatalf("root after 0051 = claimed_by %q claim_seq %d ask %v gate %v since %v/%v, want no claim and no wait", claimedBy, claimSeq, ask, gateVersion, sinceSeq, since)
+	if claimedBy != "" || claimSeq != 0 || ask != nil || gateVersion != nil || sinceSeq != nil || since != nil || fence != 0 {
+		t.Fatalf("root after 0051 = claimed_by %q claim_seq %d ask %v gate %v since %v/%v fence %d, want no claim, no wait and no fence",
+			claimedBy, claimSeq, ask, gateVersion, sinceSeq, since, fence)
 	}
 
 	for _, accepted := range []string{
@@ -43,6 +45,8 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 		`update issues set awaiting_since_seq = 10, awaiting_since = now() where key = 'LEGION-208'`,
 		`update issues set awaiting_gate_version = null, awaiting_ask = '6c83cb7f-8f4e-4820-9e05-7c94fa725007' where key = 'LEGION-208'`,
 		`update issues set phase = 'admitted', awaiting_ask = null, awaiting_answered_at = null, awaiting_since_seq = null, awaiting_since = null where key = 'LEGION-208'`,
+		// The fence outlives the wait: it is kept at admitted, after the wait's columns cleared.
+		`update issues set wait_fence_seq = 10 where key = 'LEGION-208'`,
 	} {
 		if _, err := store.Pool().Exec(ctx, accepted); err != nil {
 			t.Fatalf("%s: %v, want it accepted", accepted, err)
@@ -60,6 +64,7 @@ func TestAwaitingPersonArrivesWith0051AndItsShapeIsEnforced(t *testing.T) {
 		{"an empty ask", `update issues set phase = 'awaiting_person', awaiting_ask = '' where key = 'LEGION-208'`},
 		{"a gate version of zero", `update issues set phase = 'awaiting_person', awaiting_gate_version = 0 where key = 'LEGION-208'`},
 		{"a negative claim sequence", `update issues set claim_seq = -1 where key = 'LEGION-208'`},
+		{"a negative wait fence", `update issues set wait_fence_seq = -1 where key = 'LEGION-208'`},
 	} {
 		_, err := store.Pool().Exec(ctx, refused.statement)
 		if err == nil || !strings.Contains(err.Error(), "check constraint") {

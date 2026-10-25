@@ -319,7 +319,8 @@ func (e *Engine) admittedRoot(ctx context.Context, tx pgx.Tx, issue record.Issue
 // suspension waits for its current turn to end, keeping the session for the answer's resume. A root
 // Unresumable answers no for keeps its slot at admitted: released, nothing could ever resume it,
 // and admission's sweep would end its tree. That is the architect whose claim a person refused,
-// asking that person whether to release it.
+// asking that person whether to release it. The wait's start raises the root's wait fence, so the
+// event it began at, delivered late, starts no second wait.
 func (e *Engine) awaitPerson(ctx context.Context, tx pgx.Tx, root record.Issue, waiting record.Awaiting, reason string) error {
 	if root.Phase != phase.Admitted || !claim.IsTreeRoot(root.Key, root.Tree) || root.Lingers() || !InWorkflow(root) {
 		return nil
@@ -346,6 +347,7 @@ func (e *Engine) awaitPerson(ctx context.Context, tx pgx.Tx, root record.Issue, 
 		return nil
 	}
 	root.Phase, root.Awaiting = phase.AwaitingPerson, &waiting
+	root.RaiseWaitFence(waiting.Since.Seq)
 	if err := e.store.PutIssue(ctx, tx, root); err != nil {
 		return err
 	}
@@ -500,15 +502,15 @@ func (e *Engine) ReenterChild(ctx context.Context, tx pgx.Tx, child record.Issue
 // enterChild records a todo child under root's live tree, admitted at generation on the repository
 // at names, at its default branch and with GitHub's spelling of it, and starts its planning when the
 // tree's gate is open. A re-entered child (prior, its record) keeps the repository it was first
-// recorded with, and its Dispatch claim unless fact shows a newer one (ObserveClaim): admission's
-// synthetic fact for a stranded child names no claim at all.
+// recorded with, its wait fence, and its Dispatch claim unless fact shows a newer one
+// (ObserveClaim): admission's synthetic fact for a stranded child names no claim at all.
 func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, fact intake.DispatchIssue, generation uint64, at Resolution, prior *record.Issue) error {
 	parentKey := fact.Parent
 	child := record.Issue{Key: fact.Key, Tree: root.Tree, Project: root.Project, Title: fact.Title, Parent: &parentKey, Phase: phase.Admitted,
 		Generation: generation, Status: fact.Status, Rank: fact.Rank, HandedOver: fact.HandedOver, LastDispatchSeq: fact.Seq, DispatchStatus: fact.Status,
 		Repo: at.Repo, DefaultBranch: at.DefaultBranch, GitHubRepo: at.GitHubRepo}
 	if prior != nil {
-		child.ClaimedBy, child.ClaimSeq = prior.ClaimedBy, prior.ClaimSeq
+		child.ClaimedBy, child.ClaimSeq, child.WaitFenceSeq = prior.ClaimedBy, prior.ClaimSeq, prior.WaitFenceSeq
 	}
 	child.ObserveClaim(fact.ClaimedBy, fact.Seq)
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {

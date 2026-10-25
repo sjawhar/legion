@@ -191,6 +191,69 @@ func handBackOnAClosedGateAt(t *testing.T, pool *pgxpool.Pool, admission *Admiss
 	}
 }
 
+// A hand-back whose event is delivered after register_gate's read already covered it starts no
+// second wait. The architect hands the approval request back at seq 10; register_gate reads the
+// issue at seq 10 and starts the wait on version 4 before that event arrives; the gate seed's read
+// answers the wait (a version 5, or a changes request after the hand-back), and admission resumes
+// the root in a freed slot. The seq-10 hand-back, delivered now, is the act the registration
+// covered: a wait started from it would wait on an act the person already answered, and Dispatch,
+// waiting on the agent, would never answer it. A late question at or below the fence starts none
+// either, while a new hand-back past it starts the next wait.
+func TestALateHandBackARegistrationCoveredStartsNoSecondWait(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		answer  intake.DispatchArtifact
+		version int
+	}{
+		{name: "a newer version answered the wait", version: 5,
+			answer: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactVersion, Version: 5}},
+		{name: "a changes request answered the wait", version: 4,
+			answer: intake.DispatchArtifact{Key: "LEGION-ROOT", ArtifactID: "artifact-root", Kind: intake.DispatchArtifactChangesRequested,
+				Version: 4, Reason: "name the rollback path", Mark: record.EventMark{Seq: 11, At: handedBackAt.Add(time.Minute)}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			pool := migratedPool(t)
+			admission := newAdmission(t, 1, nil)
+			seedSlotted(t, pool, "LEGION-ROOT", "A")
+			seedWaiting(t, pool, "LEGION-NEXT", "B")
+			seedArchitectClaim(t, pool, "LEGION-ROOT", architect.ID)
+			if _, err := intake.ApplyFact(context.Background(), pool, "api", "register-v4", intake.GateRegistered{
+				Issue: "LEGION-ROOT", ArtifactID: "artifact-root", Version: 4, DispatchVersion: 4, Since: handBack,
+			}, admission.engine, admission); err != nil {
+				t.Fatalf("register gate v4: %v", err)
+			}
+			if waiting := issue(t, pool, "LEGION-ROOT"); waiting.Phase != phase.AwaitingPerson || waiting.WaitFenceSeq != handBack.Seq {
+				t.Fatalf("root after the registration = %#v, want awaiting_person with wait fence %d", waiting, handBack.Seq)
+			}
+			applyFact(t, pool, admission, "gate-seed", tc.answer)
+			apply(t, pool, admission, "next-finished", intake.DispatchIssue{
+				Key: "LEGION-NEXT", ResolvedRepo: "acme/widgets", Seq: 1, Type: "issue.closed", Status: "done",
+				Title: "LEGION-NEXT", Rank: "B", HandedOver: true,
+			}, admission.engine)
+			if resumed := issue(t, pool, "LEGION-ROOT"); resumed.Phase != phase.Admitted || resumed.Awaiting != nil || resumed.WaitFenceSeq != handBack.Seq {
+				t.Fatalf("root once a slot freed = %#v, want admitted with no wait and its wait fence kept", resumed)
+			}
+
+			applyFact(t, pool, admission, "late-hand-back", intake.DispatchAskReply{
+				Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: handBack})
+			applyFact(t, pool, admission, "late-question", intake.DispatchAskOpened{
+				Key: "LEGION-ROOT", Ask: "ask-question", Kind: "question", AuthorSession: architect.ID, Mark: record.EventMark{Seq: 9}})
+			if late := issue(t, pool, "LEGION-ROOT"); late.Phase != phase.Admitted || late.Awaiting != nil {
+				t.Fatalf("root after a hand-back and a question the registration covered = %#v, want it still admitted with no wait", late)
+			}
+
+			next := record.EventMark{Seq: 12, At: handedBackAt.Add(2 * time.Minute)}
+			applyFact(t, pool, admission, "new-hand-back", intake.DispatchAskReply{
+				Key: "LEGION-ROOT", Ask: "ask-approval", WaitingOn: "human", Actor: architect, Mark: next})
+			again := issue(t, pool, "LEGION-ROOT")
+			if again.Phase != phase.AwaitingPerson || again.Answered() || again.Awaiting.GateVersion != tc.version || again.Awaiting.Since != next ||
+				again.WaitFenceSeq != next.Seq {
+				t.Fatalf("root after a new hand-back past the fence = %#v, want waiting unanswered on version %d from seq %d", again, tc.version, next.Seq)
+			}
+		})
+	}
+}
+
 // A registration whose read is older than the gate's newest version changes no gate state, but it
 // still queues the gate seed at the gate's version: that read of Dispatch is what catches a
 // review whose own event was lost.

@@ -12,6 +12,11 @@
 -- the wait. The five are set only in that phase, and exactly one of the ask and the gate version
 -- is; either start may be unknown (null).
 --
+-- wait_fence_seq is the highest Dispatch event sequence of the issue that a wait has started from,
+-- or that a register_gate read of Dispatch covered, kept in every phase and across a resume and a
+-- re-admission: an ask.handed_back or ask.opened event at or below it is an act a wait or a
+-- registration already covered, delivered late, and starts no wait. 0 is none.
+--
 -- claimed_by is who holds the issue's Dispatch claim (`<kind>:<id>`, '' for nobody or not yet
 -- seen), and claim_seq the Dispatch sequence it was seen at: a root another session or a person
 -- claimed is never resumed from awaiting_person.
@@ -31,6 +36,7 @@ alter table issues add constraint issues_awaiting_shape check (
     else awaiting_ask is null and awaiting_gate_version is null and awaiting_answered_at is null
       and awaiting_since_seq is null and awaiting_since is null
   end);
+alter table issues add column wait_fence_seq bigint not null default 0 check (wait_fence_seq >= 0);
 
 alter table issues add column claimed_by text not null default '';
 alter table issues add column claim_seq bigint not null default 0 check (claim_seq >= 0);

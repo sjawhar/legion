@@ -397,7 +397,7 @@ func TestGateRoundTripsTheChangesRequestItRecords(t *testing.T) {
 	since := EventMark{Seq: 10, At: time.Date(2026, 10, 23, 17, 0, 0, 123456000, time.UTC)}
 	issue := Issue{Key: "LEGION-209", Repo: "sjawhar/legion", DefaultBranch: "main", GitHubRepo: "sjawhar/legion",
 		Tree: "LEGION-209", Project: "LEGION", Title: "gate", Phase: phase.AwaitingPerson, Generation: 1, Status: "in_progress", Rank: "U",
-		Awaiting: &Awaiting{GateVersion: 4, Since: since}}
+		Awaiting: &Awaiting{GateVersion: 4, Since: since}, WaitFenceSeq: since.Seq}
 	told := 4
 	closed := DesignGate{Issue: issue.Key, ArtifactID: "artifact-209", LatestVersion: 4, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path",
 		ToldChangesMark: EventMark{Seq: 12, At: since.At.Add(time.Minute)}}
@@ -410,8 +410,17 @@ func TestGateRoundTripsTheChangesRequestItRecords(t *testing.T) {
 		must(t, records.PutIssue(ctx, tx, issue))
 		gotIssue, err := records.Issue(ctx, tx, issue.Key)
 		must(t, err)
-		if gotIssue == nil || !reflect.DeepEqual(gotIssue.Awaiting, issue.Awaiting) {
-			t.Fatalf("awaiting root = %#v, want its wait %#v", gotIssue, issue.Awaiting)
+		if gotIssue == nil || !reflect.DeepEqual(gotIssue.Awaiting, issue.Awaiting) || gotIssue.WaitFenceSeq != issue.WaitFenceSeq {
+			t.Fatalf("awaiting root = %#v, want its wait %#v and wait fence %d", gotIssue, issue.Awaiting, issue.WaitFenceSeq)
+		}
+		// The fence outlives the wait: the root resumed keeps it.
+		resumed := *gotIssue
+		resumed.Phase, resumed.Awaiting = phase.Admitted, nil
+		must(t, records.PutIssue(ctx, tx, resumed))
+		gotIssue, err = records.Issue(ctx, tx, issue.Key)
+		must(t, err)
+		if gotIssue == nil || gotIssue.Awaiting != nil || gotIssue.WaitFenceSeq != since.Seq {
+			t.Fatalf("resumed root = %#v, want no wait and wait fence %d", gotIssue, since.Seq)
 		}
 		must(t, records.PutGate(ctx, tx, closed))
 		got, err := records.Gate(ctx, tx, issue.Key)
@@ -1665,7 +1674,7 @@ func TestRecordMigrationCreatesTheRequiredColumns(t *testing.T) {
 	ctx := context.Background()
 	st := migratedStore(t)
 	want := map[string][]string{
-		"issues":            {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch", "github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_answered_at", "awaiting_since_seq", "awaiting_since", "claimed_by", "claim_seq"},
+		"issues":            {"key", "tree", "project", "title", "parent", "phase", "generation", "status", "rank", "handed_over", "linger_until", "held_from", "last_dispatch_seq", "ready_pending_version", "hold_reason", "dispatch_status", "repo", "default_branch", "github_repo", "awaiting_ask", "awaiting_gate_version", "awaiting_answered_at", "awaiting_since_seq", "awaiting_since", "claimed_by", "claim_seq", "wait_fence_seq"},
 		"phases":            {"issue", "role", "claim", "handoff_commit", "rounds", "verdict", "summary", "last_handoff", "decision", "completed_at", "merge_note"},
 		"pull_requests":     {"issue", "repo", "number", "branch", "head_sha", "head_updated_at", "failing", "cancelled", "fix_attempts", "blocked_attempts", "check_runs", "generation", "snapshot", "pushes", "head_counted", "head_counted_before", "planned_red", "review_seen", "review_seen_at", "state", "checked_head", "required", "required_workflows", "required_workflows_head", "mergeability", "merge_sha"},
 		"production_checks": {"issue", "project", "tree", "repo", "pr_number", "merge_sha", "opened_at", "bound_at", "looks", "look_open", "look_wake_at", "last_wake_kind", "last_wake_detail", "last_wake_at", "pending_cause_kind", "pending_cause_detail", "last", "closed_at", "outcome"},

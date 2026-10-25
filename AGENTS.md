@@ -265,7 +265,10 @@ repeats an earlier one's version and wording is a new act and is. Each wait begi
 recorded the act that started it (the hand-back's or the question's own event, or, for a
 registration, the issue's sequence its read of Dispatch began at), and a changes request Dispatch
 recorded before the wait began does not answer it; an approval that opens the gate answers it
-whenever it was given. Approval and `changes_requested` both answer that wait, and so does a
+whenever it was given. The issue keeps the highest such start across its waits, resumes and
+re-admissions (`wait_fence_seq`): a hand-back or question whose event is at or below it, delivered
+late, was already covered by a registration or an earlier wait, and starts no wait. Approval and
+`changes_requested` both answer that wait, and so does a
 person's reply on an ask of the root; a newer version also answers it because Dispatch then waits
 on the architect. Once a slot is free the architect resumes its own
 session with a task naming the answer; an open gate advances the root and its admitted children

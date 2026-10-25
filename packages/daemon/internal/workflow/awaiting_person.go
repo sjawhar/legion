@@ -48,13 +48,13 @@ func Unresumable(ctx context.Context, store record.Store, tx pgx.Tx, issue recor
 
 // dispatchAskOpened releases a quiet admitted root only for a question its own tree session
 // opened. Approval asks are represented by the design gate instead. The wait begins at the
-// question's own event.
+// question's own event, and a question at or below the root's wait fence starts none (waitFenced).
 func (e *Engine) dispatchAskOpened(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskOpened) (intake.Result, error) {
 	if fact.Kind != "question" || fact.AuthorSession == "" {
 		return intake.Result{}, nil
 	}
 	issue, err := e.store.Issue(ctx, tx, fact.Key)
-	if err != nil || issue == nil {
+	if err != nil || issue == nil || e.waitFenced(ctx, *issue, fact.Mark, "question opened") {
 		return intake.Result{}, err
 	}
 	ownsTree, err := e.store.SessionClaimsTree(ctx, tx, issue.Tree, fact.AuthorSession)
@@ -123,11 +123,12 @@ func (e *Engine) answeredByPerson(ctx context.Context, tx pgx.Tx, key, ask strin
 // latest version, which the person's approval, changes request or reply answers; otherwise it waits
 // on the ask. The wait begins at the hand-back's own event, so a hand-back the daemon applies late
 // (replayed at boot) still begins where Dispatch put it, and a changes request Dispatch recorded
-// before it answers nothing. awaitPerson's guards hold: a tree member mid-phase, or a root that
-// could not resume, keeps the slot.
+// before it answers nothing. A hand-back at or below the root's wait fence starts no wait
+// (waitFenced). awaitPerson's guards hold: a tree member mid-phase, or a root that could not
+// resume, keeps the slot.
 func (e *Engine) handedBack(ctx context.Context, tx pgx.Tx, fact intake.DispatchAskReply) error {
 	issue, err := e.store.Issue(ctx, tx, fact.Key)
-	if err != nil || issue == nil || issue.Phase != phase.Admitted {
+	if err != nil || issue == nil || issue.Phase != phase.Admitted || e.waitFenced(ctx, *issue, fact.Mark, "hand-back") {
 		return err
 	}
 	ownsTree, err := e.store.SessionClaimsTree(ctx, tx, issue.Tree, fact.Actor.ID)
@@ -143,6 +144,21 @@ func (e *Engine) handedBack(ctx context.Context, tx pgx.Tx, fact intake.Dispatch
 			fmt.Sprintf("spec version %d is awaiting a person's review", gate.LatestVersion))
 	}
 	return e.awaitPerson(ctx, tx, *issue, record.Awaiting{Ask: fact.Ask, Since: fact.Mark}, fmt.Sprintf("ask %s was handed back to a person", fact.Ask))
+}
+
+// waitFenced says whether a Dispatch event at mark that would start issue's wait is one a wait or a
+// registration already covered (record.Issue.WaitFenced), and logs it. Such an event reaches the
+// daemon after the act it records was already taken into account: a register_gate read that began
+// past it, or a wait it or a later event started. That wait may since have been answered and the
+// root resumed, and a second wait started from the late event would wait on an act the person
+// already answered, which nothing would ever answer again.
+func (e *Engine) waitFenced(ctx context.Context, issue record.Issue, mark record.EventMark, event string) bool {
+	if !issue.WaitFenced(mark) {
+		return false
+	}
+	e.logOnCommit(ctx, "workflow: a late event a wait or registration already covered starts no wait", "issue", issue.Key,
+		"event", event, "seq", mark.Seq, "wait_fence_seq", issue.WaitFenceSeq)
+	return true
 }
 
 // dispatchClaim keeps the newest Dispatch claim separate from LastDispatchSeq: claim events do
