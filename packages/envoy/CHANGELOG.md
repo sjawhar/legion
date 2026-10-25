@@ -1097,6 +1097,13 @@
 
 ### Fixed
 
+- `gcp:Dispatch`'s `<hostname>-tailscale-state` RoleBinding names its Role by the Role's own
+  output, so a preview that creates the Role leaves the binding's role name unknown and
+  pulumi-kubernetes sends the API server no dry run of the binding. A consumer's deploy account
+  without the RBAC `bind` verb saw that dry run refused as the Role "not found" on a first
+  deployment. A deployed binding shows no diff: once the Role exists, the name is its own. The
+  component's README also lists the broker token's second holder, the secrets broker, which must
+  restart with the app after a rotation, and says the tailnet auth key needs no restart.
 - `agent-secrets secret` writes on a dev box under the person's own Google sign-in, with no setup
   but `gcloud auth login`, and never tells a person to run `gcloud auth application-default login`,
   which replaces a machine's own credentials for every program that uses them. A write under

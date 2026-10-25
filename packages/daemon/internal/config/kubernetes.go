@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"net"
+	"net/netip"
 	"net/url"
 	"os"
 	"path"
@@ -347,7 +348,9 @@ func readPlugins(value *yaml.Node) (*PluginsConfig, error) {
 // `9.x`, `~9.6`) is refused naming the key and that the pair must be one release's exact versions;
 // a source beginning with `//` is refused by the same message an http(s) URL with no host gets
 // (`https:///x.tgz`, `http:/cache/x.tgz` — the one slash u.Parse still calls absolute) — neither
-// names a host bun can fetch a tarball from.
+// names a host bun can fetch a tarball from. bun fetches a URL inside the pod, so its host is held
+// to every pod URL's rules (checkPodHost): ASCII, neither loopback nor the unspecified address, and
+// no numeric name an HTTP client reads as an IPv4 address.
 func readPluginSource(value *yaml.Node, key string) (string, error) {
 	source, err := requiredString(value, key, "")
 	if err != nil {
@@ -364,6 +367,9 @@ func readPluginSource(value *yaml.Node, key string) (string, error) {
 		if u.Host == "" {
 			return "", noHost
 		}
+		if err := checkPodHost(key, source, u.Hostname()); err != nil {
+			return "", err
+		}
 		return u.String(), nil
 	}
 	if !pluginVersion.MatchString(source) {
@@ -372,13 +378,56 @@ func readPluginSource(value *yaml.Node, key string) (string, error) {
 	return source, nil
 }
 
-// isLoopbackHost is localhost, with or without the root's trailing dot, or a loopback IP address.
+// hostAddr is host as an IP address with any zone removed (`::1%lo` is `::1`), or false when host
+// is no IP address in Go's strict form. net.ParseIP reads a zoned address as no address at all, so
+// a check built on it lets `[::1%25lo]` past, which Go's HTTP client dials as loopback.
+func hostAddr(host string) (netip.Addr, bool) {
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return netip.Addr{}, false
+	}
+	return addr.WithZone(""), true
+}
+
+// isLoopbackHost is localhost, with or without trailing dots (`localhost.`, `localhost..`), or a
+// loopback IP address, zoned or not.
 func isLoopbackHost(host string) bool {
-	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
+	if strings.EqualFold(strings.TrimRight(host, "."), "localhost") {
 		return true
 	}
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsLoopback()
+	addr, ok := hostAddr(host)
+	return ok && addr.IsLoopback()
+}
+
+// isNumericName is a host that is no IP address in Go's strict form yet ends in an all-digit or a
+// 0x label (numericLastLabel): a pod's HTTP client reads `127.1`, `2130706433` and `0x7f000001` as
+// IPv4 addresses (127.0.0.1 each, the WHATWG URL parser's short, decimal and hexadecimal forms),
+// so such a host can name loopback past isLoopbackHost. No DNS name a service is reached by ends so.
+func isNumericName(host string) bool {
+	_, ok := hostAddr(host)
+	return !ok && numericLastLabel(host)
+}
+
+// checkPodHost holds the host of a URL a pod is handed to the rules every such host meets: ASCII
+// (refuseNonASCIIHost), not loopback, which in a pod is the pod itself, not the unspecified
+// address, which is no host at all, and not a numeric name (isNumericName). key names the URL and
+// raw is the URL as written.
+func checkPodHost(key, raw, host string) error {
+	if err := refuseNonASCIIHost(key+" host", host); err != nil {
+		return err
+	}
+	var why string
+	switch {
+	case isLoopbackHost(host):
+		why = "names a loopback host, which in a pod is the pod itself"
+	case isUnspecifiedHost(host):
+		why = "names the unspecified address, which is no host a pod can dial"
+	case isNumericName(host):
+		why = "names a numeric host that is not an IP address in its standard form, which an HTTP client reads as an IPv4 address (127.1 is 127.0.0.1); write the address in full"
+	default:
+		return nil
+	}
+	return fmt.Errorf("%s %s %s; name the host pods reach it at when runtime is kubernetes", key, raw, why)
 }
 
 // isASCII reports whether s holds no rune above unicode.MaxASCII.
@@ -403,11 +452,11 @@ func refuseNonASCIIHost(key, host string) error {
 	return nil
 }
 
-// isUnspecifiedHost is the unspecified address (`0.0.0.0`, `::`): no host at all, which only a
-// listener may bind.
+// isUnspecifiedHost is the unspecified address (`0.0.0.0`, `::`, zoned or not): no host at all,
+// which only a listener may bind.
 func isUnspecifiedHost(host string) bool {
-	ip := net.ParseIP(host)
-	return ip != nil && ip.IsUnspecified()
+	addr, ok := hostAddr(host)
+	return ok && addr.IsUnspecified()
 }
 
 // readAdvertiseHost is `advertise_host`: an IP address or a DNS-1123 name, the host part alone of
@@ -1410,20 +1459,9 @@ func checkPodReachable(cfg Config) error {
 		if err != nil {
 			return fmt.Errorf("%s must be a valid URL", address.key)
 		}
-		host := parsed.Hostname()
-		if err := refuseNonASCIIHost(address.key+" host", host); err != nil {
+		if err := checkPodHost(address.key, address.value, parsed.Hostname()); err != nil {
 			return err
 		}
-		var why string
-		switch {
-		case isLoopbackHost(host):
-			why = "names a loopback host, which in a pod is the pod itself"
-		case isUnspecifiedHost(host):
-			why = "names the unspecified address, which is no host a pod can dial"
-		default:
-			continue
-		}
-		return fmt.Errorf("%s %s %s; name the host pods reach it at when runtime is kubernetes", address.key, address.value, why)
 	}
 	return nil
 }
