@@ -2,72 +2,76 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-246",
-  "completed": "2026-10-25T11:05:00Z",
-  "round": "testing round 6, over the revert of round 5's hand-back skip (code head fabca81c255be2d6cd75335f98a8b0848326c987)",
+  "completed": "2026-10-25T12:45:00Z",
+  "round": "testing round 7, over review round 6's blocking finding - the hold bookkeeping (code head 1363aa8f50571be6128fcc0b4ec202804e2fc158)",
   "implementerProof": {
     "verdict": "verified",
-    "how": "This round is a revert, one salvaged case and one header sentence, and each was checked as that. The revert was verified as a revert rather than read from a hash: `jj diff --from d6884d572684 --to cb9ef49b53f1 --stat packages/pi-envoy/extensions/envoy.ts` reports 0 files changed, so the plugin's product code is byte-identical to the head whose fence audit the reviewer completed, and round 2's fence comment sits below the restore loop again (envoy.ts:2303-2305). The salvaged case was mutation-checked in the ordering the implementer names, and separately shown not to depend on the behaviour the revert removed. The header sentence was compared with the fixture whose numbers it now quotes. Both live arms were re-run, since the product code moved even though it moved by reverting.",
+    "how": "The judge case was checked as a judge: byte-identical across all three commits of this round (sha256 of its 50 lines, 65b28855dee520e3 at d4d000b5, 1363aa8f and 87b2a25f), red when the round-6 product code is put back under it, green at this head. Every claim the implementer made about what its tests do and do not prove was re-measured here, including the one that matters most - that the judge does not judge the adoption gate. The two claims I could not confirm exactly are recorded below with the numbers I got. Both live arms were re-run, since the plugin's product code moved again, and after every mutation the file was restored and re-hashed to 9fd2cd7888b1f8320b393ca745a3275ad31b981a6b8f92e5635874bbbeffa0b5, the implementer's own baseline.",
     "rounds": {
-      "1": "verified at 7045a3a4 (worst accepted gap 200.0 s at the old 100 s interval).",
-      "2": "verified at 3355028f, verdict fail on the required `test` check.",
-      "3": "verified at e80f1d5d (rule 4 drift-proven, the notice first rendered in a pane).",
-      "4": "verified at 9d878270 (merge fingerprint residue read line by line; the invariant test reproduced both ways).",
-      "5": "verified at 4fca4b9c (the tie broken on both scripts; both printed remedies applied and shown to pass)."
+      "1": "verified at 7045a3a4; 2: verified at 3355028f, verdict fail; 3: verified at e80f1d5d; 4: verified at 9d878270; 5: verified at 4fca4b9c; 6: verified at cb9ef49b (the revert verified as a revert)."
     }
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "The round-5 skip is reverted, not patched: the plugin's product code is the code the reviewer's fence audit was completed over, and the failed hand-back is restored unconditionally again.",
-      "surface": "The workspace's own history, compared commit to commit, and the file read at the restore loop.",
-      "command": "cd \"$LEGION_WORKSPACE\" && jj diff --from d6884d572684ebef8ecaf412b38c19a90fb2a94a --to cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9 --stat packages/pi-envoy/extensions/envoy.ts",
-      "observed": "`0 files changed, 0 insertions(+), 0 deletions(-)` - byte-identical. Read at the site, settleEndedHolds' restore loop (envoy.ts:2299-2302) carries no condition, and round 2's fence comment and its `if (!live()) return false;` are back below it at :2303-2305. Against my own last verified head the plugin loses exactly those five lines (`jj diff --from f1c346924e6a --to cb9ef49b53f1 --stat` reports envoy.ts -5).",
-      "headSha": "cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9",
-      "negativeControl": "The same comparison after each mutation below: `jj diff --from d6884d572684 --to @ --stat packages/pi-envoy/extensions/envoy.ts` reports 0 files changed again, so every mutation this round made was undone byte-for-byte rather than approximately."
+      "criterion": "The blocking finding is closed by a test written before the design and never edited: this pane must not hold a role the listener names a live session for.",
+      "surface": "The plugin's suite against the fake listener, with the round-6 product code swapped under the unchanged test file.",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t 'a role another process holds under a session this process left stays with that live session when this pane wants the role', first with packages/pi-envoy/extensions/envoy.ts taken from fabca81c255be2d6cd75335f98a8b0848326c987 and then restored",
+      "observed": "Against the round-6 product code the case fails with `Expected: \"ses_lk\" / Received: \"ses_lk_b\"` at envoy.test.ts:6819 - the pane holding a role the listener names a live session for, exactly the reviewer's trace. Against this head's product code it passes. The case itself is byte-identical across every commit of this round (50 lines, sha 65b28855dee520e3 at d4d000b5d6e5, 1363aa8f5057 and 87b2a25fa00e), so it judges the design rather than describing it; it did not exist at 4fca4b9c or fabca81c, which is why the comparison is product code under a fixed test rather than two versions of the test. The product file was restored and re-hashed to 9fd2cd78… before anything else ran.",
+      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
+      "negativeControl": "The swap is the control: one file changed, the test untouched, red then green."
     },
     {
-      "criterion": "The salvaged case pins round 2's fix - a failed hand-back is restored for a later pass - and does not quietly depend on the behaviour the revert removed.",
-      "surface": "The plugin's own suite, against a mutated working tree in two different directions, each restored afterwards.",
-      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts -t \"a settle abandoned mid-hand-back restores the hold whose hand-back failed, for a later pass to hand back\", first with the restore loop moved below `if (!live()) return false;` (the pre-round-2 ordering), then with round 5's `if (topic === claimedRoleTopic) continue;` put back at the top of the loop",
-      "observed": "Pre-round-2 ordering: 1 fail - the case measures round 2's fix rather than restating it. Round 5's skip reinstated: 1 pass - so the case does not depend on the reverted behaviour in either direction, which is what makes it safe to keep after the revert. At the head as it ships, both hand-back cases pass (2 tests, 0 fail), and the tree was restored byte-for-byte after each mutation.",
-      "headSha": "cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9",
-      "negativeControl": "The first mutation is the control for the case's subject, the second for its independence: one makes it red by undoing the fix it pins, the other leaves it green while changing the code the revert removed."
+      "criterion": "The adoption's `sessionOpen(hold.id)` gate has a judge of its own, and it is not the case above - a gate whose only test passes without it would be this issue's own defect repeated.",
+      "surface": "The whole plugin suite against a mutated working tree, the gate removed from the adoption condition.",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts, with envoy.ts:2296-2300 reduced to `if (wanted !== undefined && hold.topic === ROLE_TOPIC_PREFIX + wanted) {`",
+      "observed": "852 pass, 1 fail. Both halves of the implementer's claim hold: the judge case above is among the 852 - it does not judge the gate - and the single failure is `a pass that adopts a hold and fails the hand-back of the same role under another session records that hold for the listener to reap`, the case the implementer names as the gate's own judge. Restored and re-hashed to 9fd2cd78….",
+      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
+      "negativeControl": "The same suite at the head: 853 pass, 0 fail, so the one failure is the mutation's and not a flake."
     },
     {
-      "criterion": "The margin check's header sentence says what the arithmetic says, and the numbers it quotes are the tie fixture's own.",
-      "surface": "The check's header and the suite's tie fixture, read in the tree, with the check run from the repository root as CI runs it.",
-      "command": "cd \"$LEGION_WORKSPACE\" && jj diff --from f1c346924e6a --to cb9ef49b53f1 --git .github/scripts/check-heartbeat-margin.sh ; grep -n 'fixture tie' .github/scripts/check-heartbeat-margin.test.sh ; .github/scripts/check-heartbeat-margin.sh",
-      "observed": "The header now reads `at equality the third refresh's budgeted completion reaches the instant the record expires, leaving no scheduling margin. With a 40 000 ms interval, a 60 000 ms call budget and a 180 000 ms lifetime, the third refresh is dispatched at 120 000 ms and its budget runs out at 180 000 ms`. The suite's tie fixture is `fixture tie 40_000 12_000 29_800` with the shared default lifetime: a 40 000 ms interval, a call budget of 2 x 29 800 + 400 = 60 000 ms and a 180 000 ms lifetime, summing to 180 000 ms - the same three numbers, and the assertion at :168 quotes `are 180000 ms, equal to the session record lifetime of 180000 ms`. The check itself still exits 0 on the shipping tree (280250 ms strictly inside 300000 ms).",
-      "headSha": "cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9",
-      "negativeControl": "Round 5's control stands and was not weakened by the wording change: the tie is still refused, since only the header comment moved - `jj diff --git` over that file shows six lines, all inside the comment block, and the comparison, the failure text and the remedies are untouched."
+      "criterion": "The three deletions are deletions, not weakenings: the captured host is unrepresentable, the failed loop really writes what it says, and nothing in the diff widens the door the architect left open.",
+      "surface": "The function's signature read in the tree, the suite against a mutated failed loop, and the round's whole plugin diff grepped for the three names the open door is written through.",
+      "command": "grep -n 'settleEndedHolds' packages/pi-envoy/extensions/envoy.ts ; cd packages/pi-envoy && bun test extensions/envoy.test.ts with the failed loop mutated to drop its failures ; jj diff --from e8e18568939a --to 87b2a25fa00e --git packages/pi-envoy/extensions/envoy.ts | grep -E '^[+-].*(supersedes|previousSessionID|claimedRoleSessionID)'",
+      "observed": "The signature is `settleEndedHolds(wanted: string | undefined, live: Fence)` - the host parameter is absent, not guarded, so round 5's shape cannot return - and its one caller passes two arguments. Mutating the failed loop to drop its failures turns exactly twelve cases red, the implementer's number, and the list is the right one: the three new invariant cases, the salvaged round-6 case, `a refusal an abandoned move read does not take the role from the claim that replaced it`, and seven more about abandoned holds and reaping. The grep over the whole plugin diff returns nothing: no hunk of this round adds or removes a line carrying `supersedes`, `previousSessionID` or `claimedRoleSessionID`, so the pre-existing door at envoy.ts:1957-1966 is neither widened nor narrowed here. Restored and re-hashed after the mutation.",
+      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
+      "negativeControl": "Twelve red against 853 green at the head is the control for the loop; the empty grep is checked against a grep without the `^[+-]` anchor, which does match context lines, so the empty result is the filter working rather than a typo."
     },
     {
-      "criterion": "The acceptance the issue rests on still holds at this head, whose plugin product code moved by reverting.",
+      "criterion": "The two removed or unwritten tests leave their behaviour pinned elsewhere, demonstrated by mutation rather than by reading.",
+      "surface": "The suite against two further mutations of the adoption, and the case the unwritten T4 would have duplicated, read in full.",
+      "command": "cd packages/pi-envoy && bun test extensions/envoy.test.ts with the adoption disabled (`if (false)`), then with `holdUnconfirmed = true` changed to `false`; and envoy.test.ts:6267-6311 read",
+      "observed": "Adoption disabled: 850 pass, 3 fail - `a resume rolled back after its event ended the role, with nothing else, keeps the hold …`, its sibling `… with the model claiming another role there …`, and the gate's case. Trusting the hold without claiming it: 850 pass, 3 fail - `a hold taken back on returning to its abandoned session is claimed before it is trusted, when the listener reaped it`, its sibling `… when a third session took the role`, and the gate's case again. So both behaviours the removed seventh case carried are pinned by named existing cases that go red when the behaviour is removed. For the unwritten T4 I read `an abandoned hold whose session another process heartbeats again is the newer holder: refused once seen, never taken back` (envoy.test.ts:6267): it moves `lastSeen` for the abandoned session, asserts exactly one further claim after that and none later, and asserts the pane never takes the role back once the other process ends. That is the `last_seen` bound T4 would have asserted, so a second case would have duplicated it.",
+      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
+      "negativeControl": "Each mutation is its own control, and the two mutations fail disjoint pairs of cases, so neither pair is passing by accident of the other's behaviour."
+    },
+    {
+      "criterion": "The acceptance the issue rests on still holds at the head that merges, whose plugin product code moved again.",
       "surface": "Real headless `omp --mode rpc --no-ui` panes of this checkout's plugin against the production Envoy listener, the same two arms as every round.",
       "command": "cd \"$LEGION_WORKSPACE\" && packages/pi-envoy/scripts/smoke-registration-stall.sh --arm stall ; packages/pi-envoy/scripts/smoke-registration-stall.sh --arm recover",
-      "observed": "SMOKE stall PASS: 01a172b0-5c36-7465-9047-8ddeed72225c stayed listed 365 s after registration 3 wedged, last_seen 1792925560893 -> 1792925995804, seven registrations, exactly one stall line; measured at the listener the accepted-registration gaps were 165.004, 89.914, 90.083 and 89.910 s, so the worst gap during the stall is 165.0 s against the 300 s lifetime. SMOKE recover PASS: 01a172b0-5c9a-7153-b575-7d55f0c0bd8a deleted while its process ran and re-registering itself 88 s later, inside one 90 s interval.",
-      "headSha": "cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9",
+      "observed": "SMOKE stall PASS: 01a17308-6336-7170-a304-68f1074685c5 stayed listed 365 s after registration 3 wedged, last_seen 1792931386912 -> 1792931836907, seven registrations, exactly one stall line; measured at the listener the accepted-registration gaps were 180.035, 89.995, 90.000 and 89.965 s, so the worst gap during the stall is 180.0 s against the 300 s lifetime. SMOKE recover PASS: 01a17308-6337-70c0-a443-71b2488959db deleted while its process ran and re-registering itself 93 s later.",
+      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
       "negativeControl": "Both controls stand from round 4 and measure code no round since has touched: `--arm stall --control --base-rev c88a3a194c79` PASS (the base plugin posted nothing after the wedge and its record was gone 213 s later, never returning, watched to 395 s) and `--arm recover --control` PASS (a SIGKILLed pane's deleted record stayed gone the whole 135 s)."
     },
     {
-      "criterion": "The pull request's head keeps every check the base branch requires green, and the one red lane is inherited rather than this branch's.",
-      "surface": "GitHub Actions on the code head and on main, read rather than re-run, with the repository's own ruleset read for the required set.",
-      "command": "gh run list --commit fabca81c255be2d6cd75335f98a8b0848326c987 ; gh run view 40185418035 ; gh api repos/sjawhar/legion/rules/branches/main ; gh api 'repos/sjawhar/legion/contents/skills/legion-architect/SKILL.md?ref=main' --jq .size",
-      "observed": "Tests run 40185418035: lint, typecheck and test all success. Docs run 40185418016 and Worker Image run 40185417996 success; PR Title runs 40185459489, 40185459944, 40185461479 and 40185461838 success. The pull request reads MERGEABLE. `Legion Envoy and Contracts` run 40185418002 carries one failing job, `pi-legion`, step `Test pi-legion`, and it is inherited: main's own copy of skills/legion-architect/SKILL.md is 51256 bytes against the 51200-byte (50 KiB) spill threshold packages/pi-shared/test/skills-guard.ts checks, this branch's copy is 50986 bytes, and a pull request stages main's copy in its merge commit, so no branch clears it; main's own run 40181781309 carries the same failing job. The required set is lint, typecheck, test and pr-title alone, so it blocks no merge. dispatch://INFRA-376 is the work that moves the architect skill's wake-routing table out and is in test and review now. Cited as inherited and tracked, checked rather than taken on trust.",
-      "headSha": "cb9ef49b53f1102ea7ac0b90524e1c20eda0cfe9",
-      "negativeControl": "The same `test` job is the one that went red at 872bfd6f in round 2, so a green there is a verdict this lane withholds when the branch is wrong; and the red lane's cause was located in main's file rather than assumed - the two byte counts, 51256 on main against 50986 here, are what distinguishes inherited from ours."
+      "criterion": "The head keeps every check the base branch requires green, and each red lane is inherited rather than this branch's.",
+      "surface": "GitHub Actions at the code head, the repository's ruleset, and the branch's own diff against its fork point.",
+      "command": "gh run list --commit 1363aa8f5057… ; gh run view 40192235745 ; gh run view 40192235713 ; jj diff --from 'fork_point(main@origin | 1363aa8f5057…)' --to 1363aa8f5057… --stat packages/envoy/cmd/broker packages/envoy/internal/broker",
+      "observed": "Tests run 40192235745: lint, typecheck and test all success. PR Title run 40193045366 success, Docs run 40192235779 success, Worker Image run 40192235740 success. The pull request reads MERGEABLE. `Legion Envoy and Contracts` run 40192235713 carries one failing job, `broker-multiprocess`, step `Two-process tests of the secrets broker`; this branch changes no file under packages/envoy/cmd/broker or packages/envoy/internal/broker (`0 files changed` against its fork point), the failure is tracked as dispatch://INFRA-379 (`main of sjawhar/legion fails go vet: a caller of startBroker was not updated for its new signature`, status todo), and the lane is not among the four checks main's ruleset requires. `pi-legion` passes in that same run, so the skills-guard red of round 6 is gone, as INFRA-376 landing on main would do.",
+      "headSha": "87b2a25fa00ed6fd92a573f8ebf996dd667b6fae",
+      "negativeControl": "The inheritance is established by the branch's own diff rather than by main's runs, which were all still in progress when read; and the required set was read from the ruleset rather than assumed."
     }
   ],
   "observations": [
-    "The test file's delta this round is a removal plus an addition, not a removal only: the case round 5 added was deleted with the skip, and the salvaged case `a settle abandoned mid-hand-back restores the hold whose hand-back failed, for a later pass to hand back` was added in its place. The implementer published that to the reviewer with its reasoning before this round completed, so it is disclosed rather than a surprise.",
-    "The site the revert leaves open is recorded against the extraction ask with both wrong discriminators named - the topic, which round 5 used and which `claimedRoleTopic` also carries from the loop's own unconfirmed adoption, and the session id, which would restore exactly the case a skip exists for. Nothing here asks for a seventh hand-written guard.",
+    "Two counts of mine differ from the implementer's, neither in a direction that changes a verdict, and both are recorded rather than smoothed over. Mutating the adoption to never adopt turns three cases red here, not four: the two `a resume rolled back after its event ended the role …` cases and the gate's own case. The fourth the implementer counted is most likely one of the `a hold taken back on returning to its abandoned session is claimed before it is trusted` pair, which my run showed red under the `holdUnconfirmed` mutation instead. The twelve-case count for the failed loop reproduced exactly.",
+    "Deliberately still open, and checked only for widening as the architect asked: envoy.ts:1957-1966, inside `if (!sessionOpen(id))`, writes `claimedRoleSessionID` for a session that is by construction not open, and `settleRole` can later name it as `previousSessionID`. It is pre-existing at c88a3a19, it is in the body's risk entry, and no hunk of this round touches any of the three names it is written through.",
     "What was left behind: two smoke panes in fresh /tmp scratch directories, no role claimed and no message sent; the only listener writes were the recover arm's single DELETE and one cleanup DELETE. GET /v1/sessions filtered to those directories returns zero rows.",
-    "Static lanes were read, not re-run: lint, typecheck and the unit and check suites are cited from the CI line at the code head. The three mutation runs above are the check of a specific claim about a specific case, each with the tree restored byte-for-byte afterwards."
+    "Static lanes were read, not re-run: lint, typecheck and the unit suites are cited from the CI line at the code head. The five mutation runs above are the check of specific claims about specific cases, each with the file restored and re-hashed to 9fd2cd7888b1f8320b393ca745a3275ad31b981a6b8f92e5635874bbbeffa0b5 afterwards."
   ],
   "ciRead": {
-    "codeHead": "fabca81c255be2d6cd75335f98a8b0848326c987",
+    "codeHead": "1363aa8f50571be6128fcc0b4ec202804e2fc158",
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "verdict": "all four required checks success at the code head (Tests run 40185418035; PR Title run 40185461838). Docs and Worker Image success. Legion Envoy and Contracts run 40185418002 has one failing job, pi-legion, inherited from main's oversized skills/legion-architect/SKILL.md (51256 bytes against the 51200-byte guard; this branch's copy is 50986), not in the required set, tracked at dispatch://INFRA-376. The pull request reads MERGEABLE."
+    "verdict": "all four required checks success at the code head (Tests run 40192235745; PR Title run 40193045366). Docs and Worker Image success. Legion Envoy and Contracts run 40192235713 has one failing job, broker-multiprocess, inherited from main and tracked at dispatch://INFRA-379; it is not in the required set. pi-legion passes there. The pull request reads MERGEABLE."
   }
 }
