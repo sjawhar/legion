@@ -766,9 +766,7 @@ func (r *mergedRootWaitsLive) childMergeClosesTheRoot() {
 		t.Fatalf("the architect was told %d pr-merged notices over the whole run, want the one the wait began with", len(told))
 	}
 	r.note("read back: one pr-merged notice over the whole run")
-	if !r.board.wrote(r.parent, "done") {
-		t.Fatalf("the Dispatch stand-in took no done write for %s, want the close's", r.parent)
-	}
+	testwait.Eventually(t, "the close's own done status on the Dispatch stand-in", func() bool { return r.board.wrote(r.parent, "done") })
 	r.note("read back: the Dispatch stand-in took the close's done write for %s", r.parent)
 }
 
