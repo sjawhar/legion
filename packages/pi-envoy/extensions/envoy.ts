@@ -1744,7 +1744,7 @@ export default function envoyExtension(pi: PiApi): void {
         // A pass that has not settled holds the queue, and with it the registration refresh that
         // is its last step. The age is measured from the last accepted registration (a session
         // that never had one accepted counts as older), and a pass still running a whole refresh
-        // interval after it has already cost the record a third of its life, so the refresh goes
+        // interval later has already spent 90 s of the record's 300 s lifetime, so the refresh goes
         // out on its own, outside the queues, exactly as `envoy_subscribe` posts it. A failure is
         // ignored: the next tick tries again.
         const refreshMs = requireEnvoy().settings.heartbeatMs;
@@ -2829,7 +2829,7 @@ export default function envoyExtension(pi: PiApi): void {
       legionManaged(id) ||
       // The host's live id, never the module's `sessionID`: a fresh TUI mints its id after
       // `session_start`, so the two disagree until the registration heartbeat heals the drift
-      // (up to `ENVOY_HEARTBEAT_MS`, 100 s by default) and a brand-new terminal went unchecked
+      // (up to `ENVOY_HEARTBEAT_MS`, 90 s by default) and a brand-new terminal went unchecked
       // for that whole window. The period already carries the id that armed it, and a session
       // change resets the period to 0 and bumps the generation, so this is the discriminator —
       // `before_agent_start` and `tool_result` read the live id for the same reason. A `task`

@@ -4,16 +4,24 @@
 
 ### Changed
 
-- A session refreshes its Envoy registration every 100 s rather than every 120 s: the listener
-  expires a session record 300 s after its last write, and a third of that lifetime leaves room for
-  two whole refreshes to fail before a live session's record is dropped.
+- A session refreshes its Envoy registration every 90 s rather than every 120 s: the listener
+  expires a session record 300 s after its last write, and three refresh attempts plus one whole
+  listener call's budget (10 250 ms: two 5 000 ms attempts and the 250 ms retry delay between
+  them) fit inside that lifetime — 3 × 90 000 + 10 250 = 280 250 ms — so two whole refreshes may
+  fail and the third still completes before a live session's record is dropped.
 
 ### Added
 
 - `ENVOY_PASS_DEADLINE_MS` resolves `passDeadlineMs`, the bound on one task of the pi-envoy
   plugin's serial queues, so a task that never settles cannot hold the next heartbeat tick, session
   event or Legion claim behind it. A finite value above 0 is used, floored at 25 ms; anything else
-  falls back to the resolved `heartbeatMs` or 30 s, whichever is longer.
+  falls back to `MIN_PASS_DEADLINE_MS`, 30 s, which the exported constant is named for: it is a
+  floor, not a default, since the resolved deadline is never shorter than the resolved
+  `heartbeatMs` either, and an explicit `ENVOY_PASS_DEADLINE_MS` below the heartbeat is raised to
+  it. A deadline inside one tick would abandon every pass before the next tick, so the heartbeat's
+  `healing` latch — and the registration backstop that runs under it, which keeps a pane with a
+  wedged pass registered — would be false at every tick and the backstop would never post. A
+  caller that wants a short deadline shortens `ENVOY_HEARTBEAT_MS` with it.
 
 ### Fixed
 

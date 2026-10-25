@@ -5,15 +5,39 @@
 ### Fixed
 
 - A pass or a role move that never settles no longer stops the registration heartbeat. Both serial
-  queues (`passes`, `roleMoves`) give each task a deadline: past it the caller's call rejects, the
-  queue starts the next task, and the abandoned task is fenced, so its late continuation writes
-  nothing over what ran after it. The heartbeat tick also re-posts the registration itself, outside
-  the queues, while a pass is still running and the last accepted registration is a whole refresh
-  interval old, so a pane whose pass is wedged keeps its `envoy ps` row and stays resolvable for its
-  role instead of being dropped five minutes in. A stall counts as a failed registration: the next
-  healthy tick re-asserts the role and fires the regain hook (`"reregistered"`), which re-runs a
-  Legion claim's readiness. The pane is told once per episode — one notification and one warning
-  line, not one per tick.
+  queues (`passes`, `roleMoves`) give each task a deadline, never shorter than the heartbeat
+  interval: past it the caller's call rejects, the queue starts the next task, and the abandoned
+  task is fenced, so its late continuation writes nothing over what ran after it. The heartbeat
+  tick also re-posts the registration itself, outside the queues, while a pass is still running
+  and the last accepted registration is a whole refresh interval old, so a pane whose pass is
+  wedged keeps its `envoy ps` row and stays resolvable for its role instead of being dropped five
+  minutes in. A stall counts as a failed registration: the next healthy tick re-asserts the role
+  and fires the regain hook (`"reregistered"`), which re-runs a Legion claim's readiness. The pane
+  is told once per episode — one notification and one warning line, not one per tick.
+
+- A role the listener granted is no longer pinned to a session that refuses its traffic. When a
+  role move was abandoned at its deadline while its claim was in flight, `envoy_role_set` threw
+  and discarded the grant, so the listener named that session as the role's holder while this
+  process had opened none of the role's notices and no pass knew of a hold to hand back: every
+  task and notice addressed to the role went to a pane that never showed one, for the life of the
+  process. The granted hold is now recorded as a pending hand-back before the throw, so the next
+  pass hands it back, or keeps it for the session that wants it.
+
+- A pass abandoned mid-hand-back no longer takes over the hand-backs a session event left for the
+  move that replaced it. `settleEndedHolds` reads its fence at the top of each loop iteration, now
+  before its `delete` rather than after the hand-back: a `Map` iterator visits entries inserted
+  after it was created, so an abandoned move could adopt a hold a session event had just ended and
+  record it as the role this process holds. The next pass then found that role unwanted and handed
+  it back, which closes every subject another plugin opened while the role was held — subjects only
+  that plugin reopens, on its next session switch or restart.
+
+- A NATS dial that lands after its pass was abandoned no longer becomes the session's shared
+  connection. `ensureConnection` re-checks its fence, the shutdown flag and whether another pass
+  established a connection meanwhile before assigning the shared field, and closes the dial it
+  loses with. A late dial used to displace the connection a newer pass had established: that one
+  held the session's live subscriptions and went unreferenced, so nothing drained it at session
+  end and `maxReconnectAttempts: -1` kept it reconnecting for the life of the process, while the
+  shared field named a connection carrying no subscriptions at all.
 
 - The run-end self-check's prompt counts as PROCEEDING a wait for a message, an answer or an event
   a human already said they will send and that is on its way: such a reply is an event, not an

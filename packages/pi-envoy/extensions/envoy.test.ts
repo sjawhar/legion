@@ -1714,7 +1714,7 @@ describe("envoy OMP extension", () => {
   test("checks a fresh TUI whose session id the extension has not healed to yet", async () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-lazy-id");
     // `session_start` ran before the host minted an id, so the extension's own `sessionID` is
-    // empty until the registration heartbeat heals it — up to 100 seconds of a brand-new
+    // empty until the registration heartbeat heals it — up to 90 seconds of a brand-new
     // terminal. The period carries the id that armed it, which is the live one.
     const session = await bootAskNudge(envoyExtension, "ses_nudge_lazy", () => ({}), {
       lazySessionID: true,
@@ -1756,7 +1756,7 @@ describe("envoy OMP extension", () => {
     const { default: envoyExtension } = await import("./envoy.ts?ask-nudge-drift-heal");
     // The heal re-establishes the session the extension is already in — it is how a fresh TUI's
     // id reaches the registry at all — so it must not count as a session change. It fires every
-    // `ENVOY_HEARTBEAT_MS` (100 s), and a first turn routinely runs longer than that.
+    // `ENVOY_HEARTBEAT_MS` (90 s), and a first turn routinely runs longer than that.
     const session = await bootAskNudge(envoyExtension, "ses_nudge_drift", () => ({}), {
       lazySessionID: true,
       selfCheck: async () => ({ replyText: "PROCEEDING" }),

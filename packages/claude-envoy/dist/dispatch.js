@@ -19415,8 +19415,8 @@ function dispatchSettings(env, config2) {
 
 // ../envoy-client/src/envoy-settings.ts
 var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
-var DEFAULT_HEARTBEAT_MS = 1e5;
-var DEFAULT_PASS_DEADLINE_MS = 30000;
+var DEFAULT_HEARTBEAT_MS = 90000;
+var MIN_PASS_DEADLINE_MS = 30000;
 var MIN_INTERVAL_MS = 25;
 function natsSeedFromEnvironment(env) {
   const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
@@ -19515,7 +19515,7 @@ function envoySettings(env, config2, options = {}) {
     token,
     inbound,
     heartbeatMs,
-    passDeadlineMs: intervalMs(env.ENVOY_PASS_DEADLINE_MS, Math.max(heartbeatMs, DEFAULT_PASS_DEADLINE_MS))
+    passDeadlineMs: Math.max(intervalMs(env.ENVOY_PASS_DEADLINE_MS, MIN_PASS_DEADLINE_MS), heartbeatMs)
   };
 }
 function normalizeEnvoyUrl(value) {

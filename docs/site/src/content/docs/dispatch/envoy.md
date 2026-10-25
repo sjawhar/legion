@@ -307,7 +307,7 @@ wherever a command or the `envoy.json` below names the default.
 
 NATS keeps the event stream and Envoy's key-value buckets in the `envoy-single-node_nats-data`
 volume. A restart keeps the last 72 hours of events, and the subscriptions and role claims of every
-session still running. A running session renews its registration every 100 seconds; once it stops,
+session still running. A running session renews its registration every 90 seconds; once it stops,
 Envoy drops its subscriptions and role claims within minutes.
 
 | Task | Command, from `packages/envoy/deploy/compose` |
