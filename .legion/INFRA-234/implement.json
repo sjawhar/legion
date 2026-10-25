@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-234",
-  "completed": "2026-10-25T06:50:30Z",
+  "completed": "2026-10-25T07:04:30Z",
   "proof": [
     {
-      "criterion": "A1: a role applying the Service exactly as the section publishes it gets a Service (spec finding 5)",
+      "criterion": "A1: a role applying the Service exactly as the section publishes it gets a Service (spec finding 5); and the evidence bullet's account of the reachability check is what a run observes",
       "surface": "This issue's Legion implementer role container, against the applied cluster, kubectl with the projected credential and its default namespace",
-      "command": "Extracted from docs/kubernetes.md as it stands at the head: the Job block (lines 2670-2699, the reader's three placeholders filled: the reachability label and compute-class selector read from the deployment's declaration, a random password), the Service block verbatim (2713-2722), and the sequence verbatim (2731-2756) with <issue key lowercased> = infra-234; run as `TMPDIR=<run dir> bash run.sh` from $TMPDIR, outside the checkout. Added between the published lines only: one label read after the Ready wait (`kubectl get pod -l job-name=\"$workload\" -o jsonpath='{.items[0].metadata.labels}'`), one Service read, and a second listing 20 s after the closing one. Workload infra-234-postgres-1c9d92, 06:42:34Z-06:44:08Z on 2026-10-25.",
-      "observed": "job.batch/infra-234-postgres-1c9d92 created; service/infra-234-postgres-1c9d92 created; --for=create condition met at once; Ready condition met after 70 s; the pod's labels carry batch.kubernetes.io/controller-uid = b3528056-64e0-47d8-9f58-2167891e5264 (the Job's uid) and the reachability label = \"true\"; the Service reads back selector {batch.kubernetes.io/controller-uid: <that uid>}, ClusterIP, owner Job/infra-234-postgres-1c9d92 with matching uid; the reachability check printed `answered` on its first try against infra-234-postgres-1c9d92.<ns>.svc.cluster.local:5432; kubectl logs ended `database system is ready to accept connections`; kubectl delete job: deleted; closing `kubectl get jobs,pods,svc` exit 0, one line naming the run (its pod, Terminating; Job and Service already gone); 20 s later zero lines naming the run.",
-      "headSha": "3bac57da727e34a365c22c6872a2c6e7a13be7ec",
-      "negativeControl": "kubectl create --dry-run=server of the Service as the page published it before this change (selector {job-name: <workload>}), fresh name and uid: refused, exit 1, `denied request: a … Service's selector is batch.kubernetes.io/controller-uid alone, at the uid of the Job that owns it` (policy and binding names elided). The same dry run of the block at the head: `service/… created (server dry run)`, exit 0. Nothing created by either."
+      "command": "Extracted from docs/kubernetes.md at head b5b5f61a: the Job block (lines 2670-2699, the reader's three placeholders filled: the reachability label and compute-class selector read from the deployment's declaration, a random password), the Service block verbatim (2714-2723), and the sequence verbatim (2732-2757) with <issue key lowercased> = infra-234; run as `TMPDIR=<run dir> bash run.sh` from $TMPDIR, outside the checkout. Added to the published lines only: a timestamp after the Ready wait, one label read (`kubectl get pod -l job-name=\"$workload\" -o jsonpath='{.items[0].metadata.labels}'`), one print per attempt inside the reachability loop (time, and the error class on failure), and a second listing 20 s after the closing one. Workload infra-234-postgres-af1ede, 07:00:58Z-07:02:46Z on 2026-10-25. Round 1's run (infra-234-postgres-1c9d92, 06:42:34Z-06:44:08Z, at 3bac57da, no per-attempt print) used byte-identical Job and Service blocks.",
+      "observed": "job.batch/infra-234-postgres-af1ede created; service/infra-234-postgres-af1ede created; --for=create condition met at once; Ready wait returned 07:02:23.693 (about 85 s after the apply); the pod's labels carry batch.kubernetes.io/controller-uid = fb06f550-de06-4acd-a5b2-a9da8ea1f355 (the Job's uid) and the reachability label = \"true\"; reachability loop: `attempt at 07:02:23.891` ConnectionRefusedError, `attempt at 07:02:25.947` answered, against infra-234-postgres-af1ede.<ns>.svc.cluster.local:5432; postgres logged `listening on IPv4 address \"0.0.0.0\", port 5432` at 07:02:24.779, 1.1 s after Ready; kubectl logs ended `database system is ready to accept connections`; kubectl delete job: deleted; closing `kubectl get jobs,pods,svc` exit 0 with only the pod naming the run, Terminating (Job and Service already gone); 20 s later zero lines naming the run. Round 1's run showed the same 2 s gap without the print (check at 06:43:45Z, listener 06:43:46.370, next step 06:43:47Z).",
+      "headSha": "b5b5f61ae51c16a5d2702194aee2fd5b1b2ea1fb",
+      "negativeControl": "kubectl create --dry-run=server of the Service as the page published it before this change (selector {job-name: <workload>}), fresh name and uid: refused, exit 1, `denied request: a … Service's selector is batch.kubernetes.io/controller-uid alone, at the uid of the Job that owns it` (policy and binding names elided). The same dry run of the corrected block: `service/… created (server dry run)`, exit 0. Nothing created by either."
     },
     {
       "criterion": "A2: the page's recorded gate answers are what the cluster returns, dated (spec finding 3)",
@@ -22,18 +22,18 @@
     },
     {
       "criterion": "A3/A4/A9: the evidence passage records the Service half as run with where and when, no 'Not executed' bullet survives, the page no longer says this identity may not list a Service, the closing listing shows the Service went with its Job, and no other sentence of the section moves",
-      "surface": "The change's diff, plus the live run of proof 1 as the thing it records",
-      "command": "jj -R \"$LEGION_WORKSPACE\" diff --git -r 3bac57da docs/kubernetes.md AGENTS.md",
-      "observed": "Hunks only at 2702-2706 (T2 prose), 2716 (T1 selector), 2730 (T2 sed g flag), 2751 (T3 closing listing), 2770-2810 (T3 paragraph and T4 evidence passage), AGENTS.md:127 (T5). The 'Submitted deliberately' and 'Not executed' bullets are gone; three dated bullets replace them. The closing listing in the live run showed the Job and Service gone at once.",
-      "headSha": "3bac57da727e34a365c22c6872a2c6e7a13be7ec",
-      "negativeControl": "Before this change `kubectl get jobs,pods,svc` was published as exiting 1 'services is forbidden'; in the live run it exited 0."
+      "surface": "The change's diff, plus the live runs of proof 1 as the thing it records",
+      "command": "jj -R \"$LEGION_WORKSPACE\" diff --git --from main@origin --to b5b5f61a docs/kubernetes.md AGENTS.md",
+      "observed": "Hunks only at the T1-T5 ranges: the Service prose and its selector, the sed g flag, the closing listing, the listing paragraph and the evidence passage, AGENTS.md:127. The blank line before the Service's fence is restored (every fence in the file has one again: awk check, no hits). The 'Submitted deliberately' and 'Not executed' bullets are gone; three dated bullets replace them, the first now saying the check answered about two seconds after Ready, after a refused first connection.",
+      "headSha": "b5b5f61ae51c16a5d2702194aee2fd5b1b2ea1fb",
+      "negativeControl": "Before this change `kubectl get jobs,pods,svc` was published as exiting 1 'services is forbidden'; in both live runs it exited 0."
     },
     {
-      "criterion": "A8: none of the plan's three elided literals reaches the diff, the commit message, the handoff or the pull request text",
+      "criterion": "A8: none of the plan's three elided literals reaches the diff, the commit messages, the handoff or the pull request text",
       "surface": "This role's own shell",
-      "command": "grep -c -i -F for each of: the reachability label's domain, the deployment owner's name, the two admission policy names, the scratch storage class, '-n <namespace>', '<namespace>.svc' — patterns held in shell variables read from the deployment's declaration, over the diff, the commit message, this handoff and the PR body file",
+      "command": "grep -c -i -F for each of: the reachability label's domain, the deployment owner's name, the two admission policy names, the scratch storage class, '-n <namespace>', '<namespace>.svc', the cluster region — patterns held in shell variables read from the deployment's declaration, over the diff, the commit messages, this handoff and the PR body file",
       "observed": "0 hits in each.",
-      "headSha": "3bac57da727e34a365c22c6872a2c6e7a13be7ec",
+      "headSha": "b5b5f61ae51c16a5d2702194aee2fd5b1b2ea1fb",
       "negativeControl": "A scratch file outside the workspace holding the label's domain: the same grep counts 1."
     }
   ],
@@ -42,8 +42,8 @@
     "AGENTS.md"
   ],
   "trickyParts": [
-    "The live run executed the manifests and sequence extracted from the working copy before the closing line's comment changed from '# nothing of it is left' to '# its Job and Service gone, its pod soon after', a change made because the run observed the pod still Terminating at the listing. The Service block is byte-identical to the one run (cmp), and the sequence's commands with comments stripped are identical (diff).",
-    "The published Job's pod lingers Terminating for seconds after `kubectl delete job` (background cascade), so the closing listing cannot show 'nothing of it' at once; the page now says what the listing shows."
+    "Round 1 wrote that the check answered 'on its first try', which the published block cannot show since it prints nothing per attempt; the tester measured a refused first attempt. Round 2 corrects the bullet and re-drove the sequence with one print per attempt: refused at 07:02:23.891, answered at 07:02:25.947, the listener 1.1 s after Ready.",
+    "The published Job's pod lingers Terminating for seconds after `kubectl delete job` (background cascade), so the closing listing cannot show 'nothing of it' at once; the page says what the listing shows."
   ],
   "deviations": [
     "T6 and T7 did not run: `gh pr view 2149 --repo sjawhar/legion --json state,mergedAt,mergeCommit` at 2026-10-25T06:40:53Z returned {\"mergeCommit\":null,\"mergedAt\":null,\"state\":\"OPEN\"}. Per the architect's ruling recorded in plan.md section 7, the successor is the architect's to file when #2149 merges.",
