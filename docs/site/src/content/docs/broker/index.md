@@ -101,6 +101,7 @@ pod. See [how Legion, Dispatch and the broker fit together](/legion/how-it-fits/
 - [Concepts](/legion/broker/concepts/): sessions, machine logins, owner and tier, grants, approvals
   and the audit record.
 - Guides: [manage a secret](/legion/broker/guides/manage-a-secret/),
+  [create a GitHub App for a development box](/legion/broker/guides/github-app-for-a-dev-box/),
   [approve a request](/legion/broker/guides/approve-a-request/),
   [log a machine in](/legion/broker/guides/log-a-machine-in/),
   [run an agent in a container](/legion/broker/guides/run-an-agent-in-a-container/),

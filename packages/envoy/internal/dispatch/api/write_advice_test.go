@@ -758,7 +758,7 @@ func TestWriteAdviceStaysBoundedOnLongIssueHistory(t *testing.T) {
 }
 
 func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
-	handler, database := newFailingAdviceHandler(t, "session_writes_since_human")
+	handler, database := newFailingAdviceHandler(t, "session_writes_since_human", 0)
 	createAdviceProject(t, handler, "FAIL")
 	spec := "# Failure isolation\n"
 	issue := createAdviceIssue(t, handler, "FAIL", "Advice failure", &spec)
@@ -794,7 +794,7 @@ func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
 // Only a session's write runs the issue-advice queries, so only a session's document edit can
 // meet one that fails; what it keeps is the document's own block count.
 func TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails(t *testing.T) {
-	handler, _ := newFailingAdviceHandler(t, "session_writes_since_human")
+	handler, _ := newFailingAdviceHandler(t, "session_writes_since_human", 0)
 	createAdviceProject(t, handler, "COUNT")
 	spec := "# Count-only advice\n"
 	issue := createAdviceIssue(t, handler, "COUNT", "Failed issue advice", &spec)
@@ -820,7 +820,7 @@ func TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails(t *testing.T) {
 	}
 }
 
-func newFailingAdviceHandler(t *testing.T, query string) (http.Handler, *store.Store) {
+func newFailingAdviceHandler(t *testing.T, query string, suggestionTimeout time.Duration) (http.Handler, *store.Store) {
 	t.Helper()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
@@ -845,7 +845,8 @@ func newFailingAdviceHandler(t *testing.T, query string) (http.Handler, *store.S
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	s := &server{
-		deps: deps,
+		deps:              deps,
+		suggestionTimeout: suggestionTimeout,
 		adviceQueryHook: func(ctx context.Context, tx pgx.Tx, got string) error {
 			if got != query {
 				return nil
