@@ -1,4 +1,8 @@
-import { dispatchDocumentSubject, dispatchIssueSubject } from "@legion/contracts";
+import {
+  dispatchDocumentSubject,
+  dispatchIssueSubject,
+  hasControlCharacter,
+} from "@legion/contracts";
 
 /**
  * Where an owner's events go and how a session names it: the label agents read in tool
@@ -57,16 +61,83 @@ export type Owner =
 /** A `dispatch://` reference as `parseDispatchRef` reads it. */
 export interface ParsedDispatchRef {
   readonly owner: Owner;
-  readonly kind: "issue" | "spec" | "log" | "children" | "artifact" | "ask" | "comment" | "message";
+  readonly kind:
+    | "issue"
+    | "spec"
+    | "log"
+    | "children"
+    | "artifact"
+    | "block"
+    | "ask"
+    | "comment"
+    | "message";
+  /** The item's id; for a block, the id of its document (`spec` or the slug). */
   readonly id: string;
   readonly version?: number;
-  /** The document slug a project-owned ask or comment ref names. */
+  /** The document slug a project-owned ask, comment or block ref names. */
   readonly artifact?: string;
+  /** The id of the block a block ref names, decoded. */
+  readonly block?: string;
+  /** The reference of the document a block ref names a block of. */
+  readonly document?: string;
+  /** The version of its document a pinned block ref (`#b-<id>@v<N>`) names. */
+  readonly pin?: number;
+}
+
+/**
+ * The block id a `#b-` fragment (`encoded`, after the `b-`) names, or undefined when it names
+ * none: empty, holding a raw `@` (a pin is no part of the id; `encodeBlockId` writes `@` as `%40`),
+ * not decoding, or decoding to an empty id or one holding a control character. Any valid
+ * percent-encoding is read, as the server's `text` package reads it.
+ */
+export function decodeBlockId(encoded: string): string | undefined {
+  if (encoded === "" || encoded.includes("@")) return undefined;
+  let id: string;
+  try {
+    id = decodeURIComponent(encoded);
+  } catch {
+    return undefined;
+  }
+  return id === "" || hasControlCharacter(id) ? undefined : id;
+}
+
+/**
+ * `ref` as the block reference `<document ref>#b-<block id>[@v<N>]` names, or null when it is no
+ * such reference: the document is an issue's spec or document, or a project's document, at no
+ * version, and a raw `@` in the fragment is only ever a well-formed pin.
+ */
+function parseBlockRef(document: string, fragment: string): ParsedDispatchRef | null {
+  const at = fragment.indexOf("@");
+  const pinned = at === -1 ? null : fragment.slice(at + 1).match(/^v([1-9][0-9]*)$/);
+  if (at !== -1 && pinned === null) return null;
+  const block = decodeBlockId(at === -1 ? fragment : fragment.slice(0, at));
+  const parsed = parseDispatchRef(document);
+  if (
+    block === undefined ||
+    parsed === null ||
+    parsed.version !== undefined ||
+    (parsed.kind !== "spec" && parsed.kind !== "artifact")
+  ) {
+    return null;
+  }
+  return {
+    owner: parsed.owner,
+    kind: "block",
+    id: parsed.id,
+    block,
+    document,
+    ...(parsed.owner.kind === "project" ? { artifact: parsed.id } : {}),
+    ...(pinned?.[1] === undefined ? {} : { pin: Number(pinned[1]) }),
+  };
 }
 
 /** `ref` as the issue or project item it names, or null for text that is no such reference.
  *  An agent conversation's upload (`dispatch://agent/...`) is `parseAgentArtifactRef`'s. */
 export function parseDispatchRef(ref: string): ParsedDispatchRef | null {
+  const hash = ref.indexOf("#");
+  if (hash !== -1 && ref.startsWith("b-", hash + 1)) {
+    return parseBlockRef(ref.slice(0, hash), ref.slice(hash + 3));
+  }
   const projectDocument = ref.match(
     /^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?$/
   );

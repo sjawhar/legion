@@ -36509,6 +36509,15 @@ function claimHolds(claim, titles) {
   }
   return titles.has(claim.actor.id) ? "holds" : "lapsed";
 }
+// ../contracts/src/dispatch-block-ref.ts
+function encodeBlockId(id) {
+  let encoded = "";
+  for (const byte of new TextEncoder().encode(id)) {
+    const bare = byte >= 48 && byte <= 57 || byte >= 65 && byte <= 90 || byte >= 97 && byte <= 122 || byte === 45;
+    encoded += bare ? String.fromCharCode(byte) : `%${byte.toString(16).toUpperCase().padStart(2, "0")}`;
+  }
+  return encoded;
+}
 // ../contracts/src/dispatch-href.ts
 function hasControlCharacter(value) {
   return /\p{Cc}/u.test(value);
@@ -38275,7 +38284,42 @@ function dispatchDocumentRef(owner, slug) {
 function dispatchChildRef(ownerRef, kind, id) {
   return `${ownerRef}/${kind}/${id}`;
 }
+function decodeBlockId(encoded) {
+  if (encoded === "" || encoded.includes("@"))
+    return;
+  let id;
+  try {
+    id = decodeURIComponent(encoded);
+  } catch {
+    return;
+  }
+  return id === "" || hasControlCharacter(id) ? undefined : id;
+}
+function parseBlockRef(document, fragment) {
+  const at = fragment.indexOf("@");
+  const pinned = at === -1 ? null : fragment.slice(at + 1).match(/^v([1-9][0-9]*)$/);
+  if (at !== -1 && pinned === null)
+    return null;
+  const block = decodeBlockId(at === -1 ? fragment : fragment.slice(0, at));
+  const parsed = parseDispatchRef(document);
+  if (block === undefined || parsed === null || parsed.version !== undefined || parsed.kind !== "spec" && parsed.kind !== "artifact") {
+    return null;
+  }
+  return {
+    owner: parsed.owner,
+    kind: "block",
+    id: parsed.id,
+    block,
+    document,
+    ...parsed.owner.kind === "project" ? { artifact: parsed.id } : {},
+    ...pinned?.[1] === undefined ? {} : { pin: Number(pinned[1]) }
+  };
+}
 function parseDispatchRef(ref) {
+  const hash2 = ref.indexOf("#");
+  if (hash2 !== -1 && ref.startsWith("b-", hash2 + 1)) {
+    return parseBlockRef(ref.slice(0, hash2), ref.slice(hash2 + 3));
+  }
   const projectDocument = ref.match(/^dispatch:\/\/([A-Z][A-Z0-9]{1,9})\/artifact\/([^/@]+)(?:@v(\d+))?(?:\/(ask|comment)\/([^/]+))?$/);
   if (projectDocument) {
     const [, project, artifact2, version3, targetKind, targetID] = projectDocument;
@@ -40618,6 +40662,10 @@ function dispatchRefFromUrl(value, serverUrl) {
     const value2 = url2.searchParams.get(name);
     return value2 !== null && /^[1-9][0-9]*$/.test(value2) ? `@v${value2}` : "";
   };
+  const blockOf = (versionName) => {
+    const id = url2.hash.startsWith("#b-") ? decodeBlockId(url2.hash.slice(3)) : undefined;
+    return id === undefined || url2.searchParams.get(versionName) ? "" : `#b-${encodeBlockId(id)}`;
+  };
   const issuePage = url2.pathname.match(/^\/issues\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)(?:\/(spec|log|conversation|activity|children)|\/artifacts\/([^/]+)|\/asks\/([^/]+)|\/comments\/([^/]+)|\/messages\/([^/]+))?\/?$/);
   if (issuePage) {
     const [, key, page, artifact, ask, comment, message] = issuePage;
@@ -40631,10 +40679,12 @@ function dispatchRefFromUrl(value, serverUrl) {
     }
     if (page === "spec" && version2 !== "")
       return `dispatch://${key}/artifact/spec${version2}`;
+    if (page === "spec")
+      return `dispatch://${key}/spec${blockOf("v")}`;
     if (page !== undefined)
       return `dispatch://${key}/${page === "conversation" ? "log" : page}`;
     if (artifact !== undefined) {
-      return `dispatch://${key}/artifact/${decodeURIComponent(artifact)}${version2}`;
+      return `dispatch://${key}/artifact/${decodeURIComponent(artifact)}${version2}${blockOf("v")}`;
     }
     if (ask !== undefined)
       return `dispatch://${key}/ask/${ask}`;
@@ -40661,21 +40711,21 @@ function dispatchRefFromUrl(value, serverUrl) {
   const item = itemFromSearch(url2.search);
   if (item === null)
     return;
-  return item === undefined ? `${document}${versionOf("version")}` : `${document}/${item.kind}/${item.id}`;
+  return item === undefined ? `${document}${versionOf("version")}${blockOf("version")}` : `${document}/${item.kind}/${item.id}`;
 }
-var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
+var refGrammarProblem = "ref must be a valid dispatch:// reference such as dispatch://KEY-1, " + "dispatch://KEY-1/ask/<uuid>, dispatch://KEY-1/comment/<uuid>, " + "dispatch://KEY-1/message/<uuid>, dispatch://KEY-1/artifact/<slug>, " + "dispatch://PROJECT/artifact/<document-ref> (an artifact id, slug, or filename), " + "dispatch://KEY-1/spec#b-<block id>, dispatch://KEY-1/artifact/<slug>#b-<block id> or " + "dispatch://PROJECT/artifact/<slug>#b-<block id> (one block of a document, its id " + "percent-encoded, optionally pinned to a version of the document with @v<N> after it; for " + "dispatch read), or " + "dispatch://agent/<session id>/artifact/<slug> (a picture in a conversation on the Agents page, " + "for dispatch doc-read); a dashboard URL on this Dispatch server is accepted too";
 var ownerRequiredProblem = "issue is required; supply issue or set LEGION_ISSUE";
 function innerRefProblem(tool, ref, refText) {
-  if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children") {
+  if (ref.kind !== "ask" && ref.kind !== "comment" && ref.kind !== "message" && ref.kind !== "log" && ref.kind !== "children" && ref.kind !== "block") {
     return;
   }
   if (tool === "dispatch_read" || tool === "dispatch_ask")
     return;
   const owner = refOwnerName(ref);
-  const suggestTool = tool === "dispatch_suggest";
-  const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${suggestTool ? " and artifact <the document's slug>" : ""}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
+  const documentArgument = ref.kind === "block" && tool !== "dispatch_comment" ? ` and artifact ${ref.id}` : tool === "dispatch_suggest" ? " and artifact <the document's slug>" : "";
+  const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentArgument}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
   const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
-  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : `a ${ref.kind}`;
+  const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : ref.kind === "block" ? `block ${ref.block}` : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
 }
 var documentItemPattern = /^dispatch:\/\/([A-Z][A-Z0-9]{1,9}-[1-9][0-9]*)\/artifact\/[^/@]+(?:@v\d+)?\/(ask|comment)\/([^/]+)$/;
@@ -40702,7 +40752,7 @@ function ownerConflictProblems(tool, args, parsedRef, refText) {
   const artifact = optionalString(args, "artifact");
   const version2 = optionalNumber(args, "version");
   const ref = tool === "dispatch_ask" && (issue2 !== undefined || project !== undefined) ? null : parsedRef;
-  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" ? ref.id : undefined;
+  const refDocument = ref === null ? undefined : ref.owner.kind === "project" ? ref.artifact ?? ref.id : ref.kind === "spec" || ref.kind === "artifact" || ref.kind === "block" ? ref.id : undefined;
   if (ref !== null && refText !== undefined) {
     const refOwner = refOwnerName(ref);
     if (issue2 !== undefined && (ref.owner.kind !== "issue" || nativeIssueKeyPattern.test(issue2) && issue2 !== ref.owner.issue)) {
@@ -40730,7 +40780,7 @@ function ownerConflictProblems(tool, args, parsedRef, refText) {
   }
   const projectOwned = project !== undefined || ref?.owner.kind === "project";
   if (tool === "dispatch_comment" && !projectOwned && optionalString(args, "quote") === undefined) {
-    const document = artifact ?? refDocument;
+    const document = artifact ?? (ref?.kind === "block" ? undefined : refDocument);
     if (document !== undefined) {
       problems.push(`${command} posts on the issue unless quote anchors it in a document, so document ${document} would be dropped: add --quote to comment on a passage of it, or name only the issue`);
     }
@@ -41110,7 +41160,8 @@ function referenceLines(edges) {
     return ["- none"];
   return edges.map((edge) => {
     const excerpt2 = edge.excerpt === undefined ? "" : `${textHead(edge.excerpt.text)} \xB7 `;
-    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt2}${edge.created_at})`;
+    const block = edge.block === undefined ? "" : ` (block ${edge.block.ref ?? edge.block.id})`;
+    return `- ${edge.kind} ${edge.node.kind} ${edge.node.ref ?? edge.node.id} (${excerpt2}${edge.created_at})${block}`;
   });
 }
 function unavailableReason(error48) {
@@ -41135,7 +41186,29 @@ async function graphSections(client, ref) {
     graphEdges(client, { to: ref }),
     graphEdges(client, { from: ref })
   ]);
+  return graphSectionLines(incoming, outgoing);
+}
+function graphSectionLines(incoming, outgoing) {
   return ["Referenced by:", ...referenceLines(incoming), "Links:", ...referenceLines(outgoing)];
+}
+function blockLines(node, ref) {
+  const head = [
+    `Block: ${node.block_id ?? ref.block}`,
+    `Document: ${node.document ?? ref.document}`,
+    ...node.changed_version === undefined ? [] : [`Changed in version: ${node.changed_version}`],
+    ...node.text === undefined ? [] : ["Text:", node.text]
+  ];
+  const { pin } = node;
+  if (pin === undefined)
+    return head;
+  const state = pin.state === "unchanged" ? `Unchanged since version ${pin.version}.` : pin.state === "changed" ? `Changed since version ${pin.version}; last changed in version ${node.changed_version}.` : `Removed in version ${pin.removed_version}.`;
+  return [
+    ...head,
+    `Pinned to version: ${pin.version}`,
+    state,
+    `Text at version ${pin.version}:`,
+    pin.text
+  ];
 }
 function logSummary(issue2, events) {
   return [
@@ -42486,6 +42559,30 @@ ${trailer.join(`
           text: messageSummary(messageRead, [...pictures3.lines, ...graph2]),
           details: { issue: messageRead.message.issue_key },
           ...showImages(pictures3)
+        };
+      }
+      if (ownerArguments.ref?.kind === "block") {
+        const ref = ownerArguments.ref;
+        const blockRef = stringArg(args, "ref");
+        const [incoming, outgoing] = await Promise.all([
+          client.getReferences({ to: blockRef }).catch((error48) => {
+            if (ref.pin === undefined && dispatchAnswered(error48, 404)) {
+              throw new Error(`No block ${ref.block} in ${ref.document}.`);
+            }
+            throw error48;
+          }),
+          graphEdges(client, { from: blockRef })
+        ]);
+        return {
+          text: [
+            ...blockLines(incoming.node, ref),
+            ...graphSectionLines(incoming.edges, outgoing)
+          ].join(`
+`),
+          details: {
+            ...ref.owner.kind === "project" ? { project: ref.owner.project } : { issue: ref.owner.issue },
+            block: incoming.node.block_id ?? ref.block
+          }
         };
       }
       const documentReference = optionalString(args, "artifact");

@@ -34,3 +34,25 @@ test("an issue document URL carrying both item parameters is refused", () => {
     dispatchRefFromUrl(`${server}/issues/CORE-1/spec?comment=c1&ask=a1`, server)
   ).toBeUndefined();
 });
+
+// A block's link on a live document page names the block, its id written as `encodeBlockId`
+// writes it; a version page, an item in the query, or a fragment that names no block leaves it.
+test.each([
+  ["/issues/CORE-1/spec#b-ship_it", "dispatch://CORE-1/spec#b-ship%5Fit"],
+  ["/issues/CORE-1/artifacts/notes-md?v=2#b-ship-it", "dispatch://CORE-1/artifact/notes-md@v2"],
+  ["/issues/CORE-1/spec?v=2#b-ship-it", "dispatch://CORE-1/artifact/spec@v2"],
+  [
+    "/projects/CORE/documents/handbook-md?version=3#b-ship-it",
+    "dispatch://CORE/artifact/handbook-md@v3",
+  ],
+  [
+    "/issues/CORE-1/spec?comment=44444444-4444-4444-8444-444444444444#b-ship-it",
+    "dispatch://CORE-1/comment/44444444-4444-4444-8444-444444444444",
+  ],
+  // A pin is written only as a dispatch:// reference, so a raw @ here names no block.
+  ["/issues/CORE-1/spec#b-ship-it@v2", "dispatch://CORE-1/spec"],
+  ["/issues/CORE-1/spec#b-%ZZ", "dispatch://CORE-1/spec"],
+  ["/issues/CORE-1/spec#b-", "dispatch://CORE-1/spec"],
+])("%s resolves to %s", (href, ref) => {
+  expect(dispatchRefFromUrl(`${server}${href}`, server)).toBe(ref);
+});
