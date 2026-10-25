@@ -1654,6 +1654,27 @@ const renderRebuttalAck = (rebuttal: string, override: Override) =>
   `<advisor-gate advisor="AskGate" outcome="rebuttal">\nYour ${override.name} "${agentFacing(rebuttal)}" was received and recorded; the call was sent without review, with that ${override.what} removed before sending.\n</advisor-gate>`;
 const renderBreakerAck = () =>
   `<advisor-gate advisor="AskGate" outcome="breaker">\nThird attempt on this target after two revises: sent without review and recorded.\n</advisor-gate>`;
+/**
+ * What the agent is told when its Dispatch write went out with no verdict. Every such outcome
+ * says so: a pass the agent cannot see reads the same as a gate that is working, and a headless
+ * session gets no UI notice at all (`hasUI`), so the note is the only record it sees.
+ */
+const UNREVIEWED_CAUSE: Partial<Record<GateEntry["outcome"], string>> = {
+  timeout: "the review did not answer within its deadline",
+  error: "the review failed",
+  "no-verdict": "the review answered with no verdict AskGate could read",
+  skipped: "this session's model is on another provider than the gate's",
+  halted:
+    "AskGate is paused for this session after three calls without a verdict, and reviews no Dispatch write until the session changes",
+};
+const renderUnreviewed = (outcome: GateEntry["outcome"], reason: string | undefined) => {
+  const cause = UNREVIEWED_CAUSE[outcome];
+  if (cause === undefined) return undefined;
+  const why = reason === undefined || reason === "" ? "" : `: ${agentFacing(reason)}`;
+  const opening =
+    outcome === "halted" ? cause : `AskGate did not review this Dispatch write: ${cause}`;
+  return `<advisor-gate advisor="AskGate" outcome="${outcome}">\n${opening}${why}. The call ran unreviewed.\n</advisor-gate>`;
+};
 /** Characters for a reason, each in code; a backtick, which inline code cannot hold, is named. */
 function characters(chars: readonly string[]): string {
   const named = chars.map((char) => (char === "`" ? "a backtick" : `\`${char}\``));
@@ -1709,7 +1730,7 @@ function renderUnreadable(
         : "";
   const resend =
     subcommand === undefined
-      ? ` ${ran ? "Send the next one" : `Run any other commands it held in a call of their own first, then send that \`${label}\` again`} on its own${program === undefined ? "" : ", calling \`dispatch\` by name"}.`
+      ? ` ${ran ? "Send the next one" : `Run any other commands it held in a call of their own first, then send that \`${label}\` again`} on its own${program === undefined ? "" : ", calling `dispatch` by name"}.`
       : " Send the `dispatch` command again with its subcommand written out.";
   return note(
     `${opening} ${LITERAL_GRAMMAR}${why} ${ending}${resend} Text it posts from a file goes in a \`--<field>-file <path>\` flag or in one here-document opened with a quoted delimiter (\`<<'EOF'\`) as the call's only other content.${wrapped === true ? ` If \`${label}\` here is text and no Dispatch write (a search pattern, a message, a file's content), keep it out of the command line: put that text in a file and name the file.` : ""}`
@@ -1919,11 +1940,23 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       result?: ToolCallResult;
       effect: "failure" | "verdict" | "none";
     };
+    /**
+     * The write goes out. Every outcome `UNREVIEWED_CAUSE` names hands the agent a note saying it
+     * went out unreviewed and why; `abandoned` and `shutdown` get none, their own tool or session
+     * having ended before anything could reach the agent.
+     */
     const pass = (
       outcome: GateEntry["outcome"],
       fields: Partial<GateEntry> = {},
       effect: Decision["effect"] = "none"
-    ): Decision => ({ fields: { decision: "allow", outcome, ...fields }, effect });
+    ): Decision => {
+      const note = renderUnreviewed(outcome, fields.reason);
+      return {
+        fields: { decision: "allow", outcome, ...fields },
+        ...(note === undefined ? {} : { result: { additionalContext: note } }),
+        effect,
+      };
+    };
     /**
      * A call given up without a verdict: its call, its run or the session ended first. Not the gate's
      * failure, so it never counts toward the halt. No verdict is not permission: block mode refuses it

@@ -190,6 +190,31 @@ describe("readSessions and computeStats", () => {
   });
 });
 
+describe("outcome counts and the sessions whose gate did not review", () => {
+  test("every outcome is counted, in a fixed order", () => {
+    const lines = formatReport(computeStats(records), 1);
+    expect(lines).toContain("outcome verdict: 8");
+    expect(lines).toContain("outcome unreadable: 2");
+    expect(lines).toContain("outcome timeout: 1");
+  });
+
+  test("a session with an unreviewed write is named with its counts", () => {
+    const lines = formatReport(computeStats(records), 1);
+    const named = lines.filter((line) => line.startsWith("session "));
+    // Session A holds one timeout; session B's entries are all reviews or revises.
+    expect(named).toHaveLength(1);
+    expect(named[0]).toContain("sessA.jsonl");
+    expect(named[0]).toContain("timeout 1");
+  });
+
+  test("no unreviewed write names no session", () => {
+    const reviewed = records.filter((r) => r.outcome === "verdict");
+    expect(formatReport(computeStats(reviewed), 1).some((l) => l.startsWith("session "))).toBe(
+      false
+    );
+  });
+});
+
 describe("sampleSentBack", () => {
   test("a fixed seed gives the same sample; another seed differs", () => {
     const many: GateRecord[] = Array.from({ length: 40 }, (_, i) => ({

@@ -31,6 +31,12 @@ export interface ToolShare {
   sentBack: number;
 }
 
+export interface SessionOutcomes {
+  session: string;
+  /** Each unreviewed outcome of that session and how many times it happened, by outcome name. */
+  counts: Array<[string, number]>;
+}
+
 export interface Stats {
   gatedCalls: number;
   reviews: number;
@@ -41,6 +47,10 @@ export interface Stats {
   costCount: number;
   refusals: number;
   perTool: ToolShare[];
+  /** Every outcome seen and how many entries carried it, most first. */
+  byOutcome: Array<[string, number]>;
+  /** The sessions where the gate reviewed nothing at least once, named with their counts. */
+  unreviewedSessions: SessionOutcomes[];
 }
 
 export interface Args {
@@ -183,6 +193,12 @@ export function percentile(values: number[], p: number): number | null {
   return sorted[rank - 1] ?? null;
 }
 
+/**
+ * The outcomes where the gate reviewed nothing: it failed, gave up, was paused, or had no model
+ * for the session. A reader cannot tell "no writes" from "no gate" without them.
+ */
+const UNREVIEWED_OUTCOMES = ["halted", "skipped", "timeout", "error", "no-verdict", "load-failed"];
+
 export function computeStats(records: GateRecord[]): Stats {
   const reviews = records.filter(isReview);
   const latencies = reviews.flatMap((r) => (r.latencyMs === null ? [] : [r.latencyMs]));
@@ -194,6 +210,15 @@ export function computeStats(records: GateRecord[]): Stats {
     if (isSentBack(review)) share.sentBack += 1;
     byTool.set(review.tool, share);
   }
+  const byOutcome = new Map<string, number>();
+  const bySession = new Map<string, Map<string, number>>();
+  for (const record of records) {
+    byOutcome.set(record.outcome, (byOutcome.get(record.outcome) ?? 0) + 1);
+    if (!UNREVIEWED_OUTCOMES.includes(record.outcome)) continue;
+    const counts = bySession.get(record.session) ?? new Map<string, number>();
+    counts.set(record.outcome, (counts.get(record.outcome) ?? 0) + 1);
+    bySession.set(record.session, counts);
+  }
   return {
     gatedCalls: records.length,
     reviews: reviews.length,
@@ -204,6 +229,13 @@ export function computeStats(records: GateRecord[]): Stats {
     costCount: costs.length,
     refusals: records.filter(isRefusal).length,
     perTool: [...byTool.values()].sort((a, b) => (a.tool < b.tool ? -1 : a.tool > b.tool ? 1 : 0)),
+    byOutcome: [...byOutcome.entries()].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1)),
+    unreviewedSessions: [...bySession.entries()]
+      .map(([session, counts]) => ({
+        session,
+        counts: [...counts.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)),
+      }))
+      .sort((a, b) => (a.session < b.session ? -1 : 1)),
   };
 }
 
@@ -222,7 +254,10 @@ export function formatReport(stats: Stats, seed: number): string[] {
       : `$${stats.costMedian.toFixed(4)} (${stats.costCount} reviews with a cost)`;
   return [
     "A gated call is any advisor-gate entry. A review is one where the model gave a verdict.",
-    "Sent back means the decision was revise.",
+    "Sent back means the gate did not pass the write as sent: a revise verdict, a call it could",
+    "not read, or a gate that did not load. A refusal is a write that did not post: one sent back",
+    "in block mode, and `no-model-role` and `load-failed`, which refuse in warn mode too.",
+    "A session named below had at least one write the gate did not review, with each outcome's count.",
     `gated calls: ${stats.gatedCalls}`,
     `reviews: ${stats.reviews}`,
     `sent back: ${share(stats.sentBack, stats.reviews)} (${stats.sentBack} of ${stats.reviews} reviews)`,
@@ -230,9 +265,14 @@ export function formatReport(stats: Stats, seed: number): string[] {
     `review latency p90: ${ms(stats.latencyP90)}`,
     `review cost median: ${cost}`,
     `refusals: ${stats.refusals}`,
+    ...stats.byOutcome.map(([outcome, count]) => `outcome ${outcome}: ${count}`),
     ...stats.perTool.map(
       (t) =>
         `tool ${t.tool}: ${t.reviews} reviews, sent back ${share(t.sentBack, t.reviews)} (${t.sentBack})`
+    ),
+    ...stats.unreviewedSessions.map(
+      ({ session, counts }) =>
+        `session ${session}: ${counts.map(([outcome, count]) => `${outcome} ${count}`).join(", ")}`
     ),
     `seed: ${seed}`,
   ];

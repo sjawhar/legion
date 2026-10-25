@@ -178,10 +178,21 @@ Each call waits for the load. Once the modules load, the core binds to a `pi` th
 so no call passes between the load and the binding. A load that fails (a module, an
 `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler ceiling too short for a verdict)
 is no off switch: `loadFailureGate` refuses each write the gate would review, in both modes, naming
-the error and `askgate.enabled`, and records a `load-failed` entry. `session_start` waits for the
-load and shows a load failure or a switch that does not parse as a notice. `askgate-core.ts` holds
+the error and `askgate.enabled`, and records a `load-failed` entry. Neither is a session whose
+envoy.json location cannot be worked out, which holds no switch to read: `registerAskGateRefusal`
+binds that same refusal with no module loaded. `session_start` waits for the
+load and shows a load failure, a switch that does not parse or a location it could not work out as
+a notice. `askgate-core.ts` holds
 every rule of the gate and takes the host through its dependencies, so `askgate.test.ts` drives it
-with fakes. The model walk (`askModel` in `createAskGate`) is the one path a review takes to the
+with fakes. The reader takes one form, the literal grammar of one `dispatch` call
+(`dispatchCommandHead`, the README's "The form the gate reads"): anything else, a gated write in
+the call's own text included, is `unreadable` (`unreadableDispatchWrite`), which block mode
+refuses and warn mode lets run with the reason as context. Every other way a write passes
+unreviewed records its outcome and tells the agent so (`renderUnreviewed`), and each one hands
+back the agent's own command, never the one naming a snapshot (`UNREVIEWED_OUTCOMES`): a gate that
+fails breaks no valid write. A snapshot goes when the command that reads it has run, which for a
+backgrounded call is the session's shutdown, and each gated call sweeps the snapshots older than a
+day. The model walk (`askModel` in `createAskGate`) is the one path a review takes to the
 model. The review's deadline is held 5 s under `extensionHandlers.toolCallTimeoutMs`, so at that
 key's 30 s default a review often times out and the write posts unreviewed: a session that loads
 this plugin sets the key to 120000 or more (the README's "The time limit"), and a deadline under

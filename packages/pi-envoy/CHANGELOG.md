@@ -32,12 +32,29 @@
   document. Its rules now also send back a fact the reader does not need and text longer than its
   decision needs, and a claim about what the person said is sourced only by a link to where they
   wrote it.
-- AskGate reads a write only when it can prove the posted bytes equal the reviewed bytes. It reads
-  output redirects and later pipeline stages that only read the write's output, literal setup
-  steps, read-only commands before the write, and statements after the write that hold no second
-  write. It refuses conditional or state-changing setup that the dry run cannot repeat,
-  `printf -v`, expanding here-documents, unproved program names, later stages that can write a
-  file, and second writes.
+- AskGate reads one form of a Dispatch write: `[cd <literal path> && ] dispatch <subcommand>
+  <literal words…> [2>&1] [<<'DELIM' … DELIM]`, with every word literal and nothing else in the
+  call. Any other form is `unreadable`, and so is a gated write in the call's own text, which is
+  what `bash -c`, `sh -c`, `eval`, `xargs`, a function or a variable would run. Block mode refuses
+  an unreadable call before anything in it runs; warn mode runs it and returns the reason. A gate
+  that did not load, and a session with no model role, still refuse in both modes.
+- AskGate says it when a write posts unreviewed. A timeout, a model error, an answer with no
+  verdict, a handler exception, a dry run that failed, the pause after three failures, a session
+  on another provider, a rebuttal and a breaker trip each record their outcome and tell the agent
+  that the write went out unreviewed and why, in a headless session too. A failed review hands
+  back the agent's own command, so a gate that fails breaks no valid write.
+- AskGate refuses a posted path that names a file descriptor of whichever process opens it
+  (`/dev/stdin`, `/dev/fd/N`, `/proc/self/fd/N`): AskGate would open it in Oh My Pi's process and
+  the command in its own shell. A `--path-file` is refused for the same reason.
+- AskGate keeps a snapshot until the command that reads it has run. A call the host backgrounds
+  (`async: true`, or `bash.autoBackground`) reports its start before the shell runs, so its
+  snapshot stays until the session shuts down, and each gated call removes the snapshots older
+  than a day.
+- A session whose envoy.json location cannot be worked out holds no AskGate switch, so AskGate
+  refuses each write it would review and says so at session start.
+- `scripts/askgate-report.ts` prints a count for each outcome and names every session that had a
+  write the gate did not review, with its counts. It counts `no-model-role` and `load-failed` as
+  both sent back and refused, and a warn-mode unreadable call as sent back and not refused.
 - AskGate needs `extensionHandlers.toolCallTimeoutMs` at 120000 or more in the session's settings.
   At the 30 s default its deadline is 25 s, a review of a long session often times out, and the
   write posts unreviewed. A deadline under 30 s logs one warning at start that names the key.

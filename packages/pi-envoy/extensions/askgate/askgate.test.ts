@@ -93,32 +93,51 @@ type Result =
   | undefined;
 type Handler = (event: unknown, ctx: unknown) => Promise<Result>;
 
+/** What a test changes about the session it binds; every field has a default below. */
+interface BindOptions {
+  env?: Record<string, string>;
+  complete?: (req: CompleteRequest) => Promise<Completion>;
+  kind?: "main" | "sub";
+  /** The models `@askgate` and `@default` resolve to: the askgate role's MODEL alone unless a test says otherwise. */
+  roles?: { askgate?: GateModel; default?: GateModel };
+  primary?: { provider: string; id: string };
+  /** The primary's context, as the entry's buildSessionContext binding returns it. */
+  context?: () => readonly Message[];
+  systemPrompt?: string[];
+  /** Every appendEntry throws: the session file cannot take the record. */
+  recordThrows?: boolean;
+  /** extensionHandlers.toolCallTimeoutMs as the entry reads it; 120 000 ms unless a test says otherwise. */
+  ceiling?: number;
+  /** The session's working directory (ctx.cwd). */
+  cwd?: string;
+  /** Runs a `dispatch` command's --dry-run; the real runner unless a test says otherwise. */
+  dryRun?: DryRunner;
+  /** The gate role's fallback chain after its first model, as the entry resolves it; none unless a test says otherwise. */
+  fallbacks?: Array<{ provider: string; id: string }>;
+  /** The session's entries, read on each call: an `experiments` entry whose askgate_block arm is off (warn) unless a test says otherwise. */
+  entries?: readonly unknown[] | (() => readonly unknown[]);
+  /** Whether the session has a UI, which a notice needs; true unless a test says otherwise. */
+  hasUI?: boolean;
+}
+
 /** One session binding of the gate, driven through a fake `pi` and `ctx`. */
-function bind(
-  opts: {
-    env?: Record<string, string>;
-    complete?: (req: CompleteRequest) => Promise<Completion>;
-    kind?: "main" | "sub";
-    /** The models `@askgate` and `@default` resolve to: the askgate role's MODEL alone unless a test says otherwise. */
-    roles?: { askgate?: GateModel; default?: GateModel };
-    primary?: { provider: string; id: string };
-    /** The primary's context, as the entry's buildSessionContext binding returns it. */
-    context?: () => readonly Message[];
-    systemPrompt?: string[];
-    /** Every appendEntry throws: the session file cannot take the record. */
-    recordThrows?: boolean;
-    /** extensionHandlers.toolCallTimeoutMs as the entry reads it; 120 000 ms unless a test says otherwise. */
-    ceiling?: number;
-    /** The session's working directory (ctx.cwd). */
-    cwd?: string;
-    /** Runs a `dispatch` command's --dry-run; the real runner unless a test says otherwise. */
-    dryRun?: DryRunner;
-    /** The gate role's fallback chain after its first model, as the entry resolves it; none unless a test says otherwise. */
-    fallbacks?: Array<{ provider: string; id: string }>;
-    /** The session's entries, read on each call: an `experiments` entry whose askgate_block arm is off (warn) unless a test says otherwise. */
-    entries?: readonly unknown[] | (() => readonly unknown[]);
-  } = {}
-) {
+interface BoundGate {
+  handlers: Map<string, Handler>;
+  entries: GateEntry[];
+  warnings: string[];
+  notices: string[];
+  dumps: Array<[string, string]>;
+  calls: CompleteRequest[];
+  fallbackRoles: string[];
+  dryRuns: Array<{ script: string; cwd: string; timeoutMs: number }>;
+  write(toolCallId: string, path: string, content: string): Promise<Result>;
+  device(toolCallId: string, toolName: string, input: Record<string, unknown>): Promise<Result>;
+  bash(toolCallId: string, command: string, extra?: Record<string, unknown>): Promise<Result>;
+  /** Any other event the extension listens to, such as session_switch. */
+  event(name: string, payload?: Record<string, unknown>): Promise<Result> | undefined;
+}
+
+function bind(opts: BindOptions = {}): BoundGate {
   const handlers = new Map<string, Handler>();
   const entries: GateEntry[] = [];
   const warnings: string[] = [];
@@ -164,7 +183,7 @@ function bind(
   const sessionEntries = opts.entries ?? [experimentsEntry(false)];
   const ctx = {
     agent: { kind: opts.kind ?? "main", id: "Main", name: "main", depth: 0 },
-    hasUI: true,
+    hasUI: opts.hasUI ?? true,
     ui: { notify: (message: string) => notices.push(message) },
     getSystemPrompt: () => opts.systemPrompt ?? ["PRIMARY SYSTEM RULES", "More rules."],
     models: {
@@ -713,7 +732,9 @@ describe("fail-open", () => {
       },
     });
     const started = Date.now();
-    expect(await g.device("t1", "dispatch_comment", COMMENT)).toBeUndefined();
+    const timedOut = await g.device("t1", "dispatch_comment", COMMENT);
+    expect(timedOut?.block).toBeUndefined();
+    expect(timedOut?.additionalContext).toContain("The call ran unreviewed.");
     expect(Date.now() - started).toBeLessThan(1000);
     expect(signals[0].aborted).toBe(true);
     expect(g.entries).toMatchObject([{ decision: "allow", outcome: "timeout", usage: PARTIAL }]);
@@ -756,7 +777,7 @@ describe("fail-open", () => {
       async (): Promise<Completion> => ({ text: '{"decision":"revise"}' }),
     ]) {
       const g = bind({ env: { OMP_ASKGATE: "block" }, complete });
-      expect(await g.device("t1", "dispatch_comment", COMMENT)).toBeUndefined();
+      expect((await g.device("t1", "dispatch_comment", COMMENT))?.block).toBeUndefined();
       outcomes.push(g.entries[0].outcome);
     }
     expect(outcomes).toEqual(["error", "error", "no-verdict", "no-verdict"]);
@@ -774,7 +795,7 @@ describe("fail-open", () => {
         throw new Error("context unavailable");
       },
     });
-    expect(await g.device("t1", "dispatch_comment", COMMENT)).toBeUndefined();
+    expect((await g.device("t1", "dispatch_comment", COMMENT))?.block).toBeUndefined();
     expect(g.entries).toMatchObject([{ decision: "allow", outcome: "error" }]);
     expect(g.entries[0].reason).toContain("context unavailable");
   });
@@ -785,9 +806,107 @@ describe("fail-open", () => {
       complete: untilAborted,
     });
     for (const id of ["a", "b", "c", "d"])
-      expect(await g.device(id, "dispatch_comment", COMMENT)).toBeUndefined();
+      expect((await g.device(id, "dispatch_comment", COMMENT))?.block).toBeUndefined();
     expect(g.calls).toHaveLength(3);
     expect(g.notices).toHaveLength(1);
+  });
+});
+
+// Every way the gate lets a Dispatch write through without a verdict says so to the agent, in a
+// headless session as in one with a UI: the write went out unreviewed, and why. A silent pass
+// cannot be told from a gate that is working (outside review, "Is the off state visible").
+describe("a write that passes unreviewed is recorded and said", () => {
+  const unreviewed = async (
+    options: BindOptions,
+    run?: (g: BoundGate) => Promise<void>
+  ): Promise<{ context: string; outcome: string }> => {
+    const g = bind({ hasUI: false, ...options });
+    await run?.(g);
+    const result = await g.device("final", "dispatch_comment", COMMENT);
+    expect(result?.block).toBeUndefined();
+    return {
+      context: result?.additionalContext ?? "",
+      outcome: g.entries.at(-1)?.outcome ?? "",
+    };
+  };
+
+  test("a review that times out", async () => {
+    const { context, outcome } = await unreviewed({
+      env: { OMP_ASKGATE_TIMEOUT_MS: "20" },
+      complete: untilAborted,
+    });
+    expect(outcome).toBe("timeout");
+    expect(context).toContain("AskGate did not review this Dispatch write");
+    expect(context).toContain("the review did not answer within its deadline");
+    expect(context).toContain("The call ran unreviewed.");
+  });
+  test("a model that errors", async () => {
+    const { context, outcome } = await unreviewed({
+      complete: async () => ({ text: "", error: "500 from the provider" }),
+    });
+    expect(outcome).toBe("error");
+    expect(context).toContain("500 from the provider");
+    expect(context).toContain("The call ran unreviewed.");
+  });
+  test("an answer the gate cannot parse", async () => {
+    const { context, outcome } = await unreviewed({
+      complete: async () => ({ text: "I think it is fine." }),
+    });
+    expect(outcome).toBe("no-verdict");
+    expect(context).toContain("answered with no verdict");
+    expect(context).toContain("The call ran unreviewed.");
+  });
+  test("a handler that throws", async () => {
+    const { context, outcome } = await unreviewed({
+      context: () => {
+        throw new Error("context unavailable");
+      },
+    });
+    expect(outcome).toBe("error");
+    expect(context).toContain("context unavailable");
+  });
+  test("a halt, which says the gate is paused for the session", async () => {
+    const { context, outcome } = await unreviewed(
+      { env: { OMP_ASKGATE_TIMEOUT_MS: "20" }, complete: untilAborted },
+      async (g) => {
+        for (const id of ["a", "b", "c"]) await g.device(id, "dispatch_comment", COMMENT);
+      }
+    );
+    expect(outcome).toBe("halted");
+    expect(context).toContain("AskGate is paused for this session");
+    expect(context).toContain("The call ran unreviewed.");
+  });
+  test("a session whose primary model is on another provider", async () => {
+    const { context, outcome } = await unreviewed({
+      primary: { provider: "openai-codex", id: "gpt-5.5" },
+    });
+    expect(outcome).toBe("skipped");
+    expect(context).toContain("openai-codex");
+    expect(context).toContain("The call ran unreviewed.");
+  });
+  test("a rebuttal and a breaker trip already say the write went unreviewed", async () => {
+    const g = bind({ hasUI: false, complete: async () => ({ text: REVISE }) });
+    await g.write(
+      "r1",
+      "xd://dispatch_comment",
+      '{"issue":"X-1","body":"b","advisor_rebuttal":"a"}'
+    );
+    const rebutted = await g.device("r1", "dispatch_comment", { issue: "X-1", body: "b" });
+    expect(rebutted?.additionalContext).toContain("the call was sent without review");
+    for (const id of ["b1", "b2"]) await g.device(id, "dispatch_comment", COMMENT);
+    const tripped = await g.device("b3", "dispatch_comment", COMMENT);
+    expect(tripped?.additionalContext).toContain("sent without review and recorded");
+    expect(g.entries.map((e) => e.outcome)).toEqual(["rebuttal", "verdict", "verdict", "breaker"]);
+  });
+  test("a dry run that fails says so and the command runs", async () => {
+    const g = bind({
+      hasUI: false,
+      dryRun: async () => ({ exitCode: 1, stdout: "", stderr: "unknown flag", timedOut: false }),
+    });
+    const result = await g.bash("d", "dispatch comment --issue X-1 --body hi");
+    expect(result?.block).toBeUndefined();
+    expect(result?.additionalContext).toContain("unknown flag");
+    expect(g.entries).toMatchObject([{ outcome: "error", decision: "allow" }]);
   });
 });
 
@@ -1263,7 +1382,11 @@ console.log(JSON.stringify(args, null, 2));
       { appendEntry: (_type, data) => entries.push(data as Record<string, unknown>) }
     );
     const refusedByLoad = refuse(
-      { toolName: "bash", toolCallId: "load", input: { command: "dispatch comment --issue X-1 --body hi" } },
+      {
+        toolName: "bash",
+        toolCallId: "load",
+        input: { command: "dispatch comment --issue X-1 --body hi" },
+      },
       { agent: { kind: "main" }, sessionManager: { getEntries: () => [] } } as never
     );
     expect(refusedByLoad?.block).toBe(true);
@@ -1585,11 +1708,7 @@ console.log(JSON.stringify(args, null, 2));
     ["sh -c", 'sh -c "dispatch ask --issue X-1 --question q"', "dispatch_ask"],
     ["eval", "eval 'dispatch comment --issue X-1 --body hi'", "dispatch_comment"],
     ["xargs", "echo X-1 | xargs -I{} dispatch comment --issue {} --body hi", "dispatch_comment"],
-    [
-      "a function",
-      'f(){ dispatch comment "$@"; }; f --issue X-1 --body hi',
-      "dispatch_comment",
-    ],
+    ["a function", 'f(){ dispatch comment "$@"; }; f --issue X-1 --body hi', "dispatch_comment"],
     [
       "a readable write and a wrapped one",
       "dispatch comment --issue X-1 --body one; bash -c 'dispatch comment --issue X-1 --body two'",
@@ -1625,13 +1744,13 @@ console.log(JSON.stringify(args, null, 2));
       env: { OMP_ASKGATE: "block" },
       primary: { provider: "openai-codex", id: "gpt-5.5" },
     });
-    expect(await elsewhere.bash("s", compound)).toBeUndefined();
+    expect((await elsewhere.bash("s", compound))?.block).toBeUndefined();
     const halted = bind({
       env: { OMP_ASKGATE: "block", OMP_ASKGATE_TIMEOUT_MS: "20" },
       complete: untilAborted,
     });
     for (const id of ["a", "b", "c"]) await halted.device(id, "dispatch_comment", COMMENT);
-    expect(await halted.bash("h", compound)).toBeUndefined();
+    expect((await halted.bash("h", compound))?.block).toBeUndefined();
     expect([elsewhere, halted].map((g) => g.entries.at(-1)?.outcome)).toEqual([
       "skipped",
       "halted",
@@ -2070,7 +2189,7 @@ console.log(JSON.stringify(args, null, 2));
   });
   test("a dry-run the CLI refuses is recorded as an error and the command runs, in block mode too", async () => {
     const g = bind({ env: { ...STUB, OMP_ASKGATE: "block" }, cwd: work });
-    expect(await g.bash("b1", "dispatch message --issue X-1 --fail")).toBeUndefined();
+    expect((await g.bash("b1", "dispatch message --issue X-1 --fail"))?.block).toBeUndefined();
     expect(g.calls).toHaveLength(0);
     expect(g.entries).toMatchObject([
       { tool: "dispatch_message", path: "dispatch message", decision: "allow", outcome: "error" },
@@ -2083,7 +2202,7 @@ console.log(JSON.stringify(args, null, 2));
       cwd: work,
       dryRun: async () => ({ exitCode: null, stdout: "", stderr: "", timedOut: true }),
     });
-    expect(await g.bash("b1", ASK)).toBeUndefined();
+    expect((await g.bash("b1", ASK))?.block).toBeUndefined();
     expect(g.entries).toMatchObject([{ tool: "dispatch_ask", outcome: "error" }]);
     expect(g.entries[0].reason).toContain("10000 ms");
   });
@@ -2336,7 +2455,7 @@ console.log(JSON.stringify(args, null, 2));
     });
     // A gate that fails must break no valid write: the rewritten command names a snapshot the
     // agent never saw, so an outcome without a verdict hands the agent's own command back.
-    const FAILED_REVIEW: Array<[string, Parameters<typeof bind>[0]]> = [
+    const FAILED_REVIEW: Array<[string, BindOptions]> = [
       [
         "a dry run that throws",
         {
