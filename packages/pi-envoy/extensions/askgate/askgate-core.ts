@@ -1970,12 +1970,18 @@ export function parseVerdict(
 }
 
 /**
- * How the breaker tells one new ask of a call from another: the ask's opening, the first words
- * that name it in a refusal. A retype carries no text of its own in this scan — only the rules
- * check reads the block from Dispatch — so the block it names stands for it.
+ * How the breaker tells one new ask of a call from another: a block's `#id` and its opening, the
+ * first words that name it in a refusal. The id keeps two blocks of one write that start alike
+ * apart; an ask without one is its opening alone, so an agent that rewords only an ask's tail
+ * resends the same thing and its loop still ends. A retype carries no text of its own in this
+ * scan — only the rules check reads the block from Dispatch — so the block it names stands for it.
  */
 const askIdentity = (ask: NewAsk): string =>
-  ask.kind === "retype" ? `retype\u0000${ask.id ?? ""}` : `ask\u0000${ask.opening}`;
+  ask.kind === "retype"
+    ? `retype\u0000${ask.id ?? ""}`
+    : ask.id === undefined
+      ? `ask\u0000${ask.opening}`
+      : `ask\u0000${ask.id}\u0000${ask.opening}`;
 
 /** The breaker's name for a call that opens no new ask: the call as a whole. No ask identity is empty. */
 const WHOLE_CALL = "";
@@ -2019,6 +2025,10 @@ class Breaker {
    * refused, none for a revise that sent the call. Returns whether a thing it refused has now
    * been refused GATE_BREAKER_REVISES times, so this refusal must warn that the same call again
    * goes out unreviewed.
+   *
+   * One refusal moves each thing once, however often it is named: both callers can name a thing
+   * twice (two asks of one call that share an identity, or two rules matches on them), and a
+   * count moved twice would warn on a first refusal and pass the next send unreviewed.
    */
   revised(key: string, refused: readonly string[], charter?: string): boolean {
     let held = this.#held.get(key);
@@ -2029,7 +2039,7 @@ class Breaker {
     held.revises++;
     if (charter !== undefined) held.charter.push(charter);
     let tripsNext = false;
-    for (const thing of refused) {
+    for (const thing of new Set(refused)) {
       const count = (held.refusals.get(thing) ?? 0) + 1;
       held.refusals.set(thing, count);
       if (count >= GATE_BREAKER_REVISES) tripsNext = true;

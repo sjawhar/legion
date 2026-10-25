@@ -24,6 +24,7 @@ import {
 } from "./askgate-core";
 import * as fx from "./askgate-fixtures";
 import { RECORD_TIMEOUT_MS, type RecordClient } from "./decision-record";
+import { newAsks } from "./new-asks";
 import {
   type DispatchSession,
   describeAsks,
@@ -3295,6 +3296,132 @@ describe("rules check", () => {
       ["verdict", "revise", "none"],
       ["verdict", "revise", "none"],
       ["breaker", "allow", undefined],
+    ]);
+  });
+  test("two ask blocks of one write that start alike are two things: refused once, the call is not warned of a pass, and its next send is reviewed (rules test 14f)", async () => {
+    // Two blocks whose text is the same, so their openings are too: only their ids tell them apart.
+    const twins = {
+      ...SPEC_TARGET,
+      ops: [
+        {
+          op: "insert",
+          after: "end",
+          markdown: `:::ask{#first}\n${KEEP_INPUT.question}\n:::\n\n:::ask{#second}\n${KEEP_INPUT.question}\n:::`,
+        },
+      ],
+    };
+    const asks = newAsks("dispatch_doc_edit", twins);
+    expect(asks.map((ask) => ask.id)).toEqual(["first", "second"]);
+    expect(asks[0].opening).toBe(asks[1].opening);
+    const BOTH = rulesAnswer([
+      { ask: 1, rule: "no_change", quote: "keep it as it is" },
+      { ask: 2, rule: "no_change", quote: "keep it as it is" },
+    ]);
+    // Each caller of the breaker refuses both asks: the rules check naming each of them, and a
+    // block-mode charter revise on a call whose rules check matched nothing.
+    for (const complete of [bySystem(ALLOW, BOTH), bySystem(REVISE, RULES_NONE)]) {
+      const g = bind({ env: { OMP_ASKGATE: "block" }, complete });
+      const first = await g.device("a", "dispatch_doc_edit", twins);
+      expect(first?.block).toBe(true);
+      expect(first?.reason).not.toContain(SECOND);
+      const asked = g.calls.length;
+      const second = await g.device("b", "dispatch_doc_edit", twins);
+      expect(second?.additionalContext).toBeUndefined();
+      expect(second?.block).toBe(true);
+      expect(second?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+      expect(g.calls).toHaveLength(asked + 2);
+      // The loop on the two of them still ends on the third attempt.
+      const third = await g.device("c", "dispatch_doc_edit", twins);
+      expect(third?.additionalContext).toContain('outcome="breaker"');
+      expect(g.calls).toHaveLength(asked + 2);
+      expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual([
+        ["verdict", "revise"],
+        ["verdict", "revise"],
+        ["breaker", "allow"],
+      ]);
+    }
+  });
+  test("asks with no id that open alike are one thing, so an ask reworded only in its tail still ends its loop on the third attempt (rules test 14g)", async () => {
+    // KEEP_INPUT's question runs past the 60 code points of an opening, so each tail below
+    // changes the ask's text and leaves its opening as it is.
+    const reworded = (tail: string) => ({
+      ...SPEC_TARGET,
+      ops: [
+        { op: "insert", after: "end", markdown: `:::ask{}\n${KEEP_INPUT.question} ${tail}\n:::` },
+      ],
+    });
+    const tails = ["The cache is warm.", "Nothing changed since.", "I looked again."];
+    const asks = tails.flatMap((tail) => newAsks("dispatch_doc_edit", reworded(tail)));
+    expect(asks.map((ask) => ask.id)).toEqual([undefined, undefined, undefined]);
+    expect(new Set(asks.map((ask) => ask.text)).size).toBe(3);
+    expect(new Set(asks.map((ask) => ask.opening)).size).toBe(1);
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: bySystem(ALLOW, NO_CHANGE) });
+    const first = await g.device("a", "dispatch_doc_edit", reworded(tails[0]));
+    expect(first?.block).toBe(true);
+    expect(first?.reason).not.toContain(SECOND);
+    const second = await g.device("b", "dispatch_doc_edit", reworded(tails[1]));
+    expect(second?.block).toBe(true);
+    expect(second?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    const asked = g.calls.length;
+    const third = await g.device("c", "dispatch_doc_edit", reworded(tails[2]));
+    expect(third?.block).toBeUndefined();
+    expect(third?.additionalContext).toContain('outcome="breaker"');
+    expect(g.calls).toHaveLength(asked);
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual([
+      ["verdict", "revise"],
+      ["verdict", "revise"],
+      ["breaker", "allow"],
+    ]);
+  });
+  test("two asks with no id that open alike in one write are one thing, which one refusal counts once (rules test 14h)", async () => {
+    const pair = {
+      ...SPEC_TARGET,
+      ops: [
+        {
+          op: "insert",
+          after: "end",
+          markdown: `:::ask{}\n${KEEP_INPUT.question} The cache is warm.\n:::\n\n:::ask{}\n${KEEP_INPUT.question} Nothing changed since.\n:::`,
+        },
+      ],
+    };
+    const asks = newAsks("dispatch_doc_edit", pair);
+    expect(asks.map((ask) => ask.id)).toEqual([undefined, undefined]);
+    expect(asks[0].opening).toBe(asks[1].opening);
+    // A block-mode charter revise refuses every ask of the call, so it names the shared one twice.
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: bySystem(REVISE, RULES_NONE) });
+    const first = await g.device("a", "dispatch_doc_edit", pair);
+    expect(first?.block).toBe(true);
+    expect(first?.reason).not.toContain(SECOND);
+    const asked = g.calls.length;
+    const second = await g.device("b", "dispatch_doc_edit", pair);
+    expect(second?.additionalContext).toBeUndefined();
+    expect(second?.reason?.trimEnd().endsWith(SECOND)).toBe(true);
+    expect(g.calls).toHaveLength(asked + 2);
+    const third = await g.device("c", "dispatch_doc_edit", pair);
+    expect(third?.additionalContext).toContain('outcome="breaker"');
+    expect(g.calls).toHaveLength(asked + 2);
+  });
+  test("a block refused twice gives a block of another id that starts alike no pass, and still covers itself (rules test 14i)", async () => {
+    const block = (id: string) => ({
+      ...SPEC_TARGET,
+      ops: [
+        { op: "insert", after: "end", markdown: `:::ask{#${id}}\n${KEEP_INPUT.question}\n:::` },
+      ],
+    });
+    const g = bind({ env: { OMP_ASKGATE: "block" }, complete: bySystem(ALLOW, NO_CHANGE) });
+    for (const id of ["a", "b"])
+      expect((await g.device(id, "dispatch_doc_edit", block("first")))?.block).toBe(true);
+    const asked = g.calls.length;
+    const other = await g.device("c", "dispatch_doc_edit", block("second"));
+    expect(other?.block).toBe(true);
+    expect(other?.reason).toContain('matches the rule "no change"');
+    expect(g.calls).toHaveLength(asked + 2);
+    const pass = await g.device("d", "dispatch_doc_edit", block("first"));
+    expect(pass?.additionalContext).toContain('outcome="breaker"');
+    expect(g.calls).toHaveLength(asked + 2);
+    expect(g.entries.map((e) => [e.outcome, e.decision])).toEqual([
+      ...Array(3).fill(["verdict", "revise"]),
+      ["breaker", "allow"],
     ]);
   });
   test("the rules call never sees the charter's frame or answer format (rules test 15)", async () => {
