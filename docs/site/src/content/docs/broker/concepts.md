@@ -199,12 +199,12 @@ it enrolled under. A pod has no operator, so a pod asking for a person's agent-t
 to that person for approval.
 
 An owner may also be a service the broker is configured with. `BROKER_SERVICES` binds each
-service's name to the Kubernetes service account its pods run as, for example
-`legion-daemon=system:serviceaccount:legion:legion-worker`. A service's own sessions are the pods
-that a launcher logged in as that service enrolled, and whose projected token proved that service
-account: the Legion daemon's worker pods, for `legion-daemon`. A launcher logs in as a service with
-its own token, for an account `BROKER_SERVICE_LOGINS` names; the pod's own token proving the pods'
-account is what makes a pod the service's.
+service's name to the Kubernetes service accounts its pods run as, one entry per account, for
+example `legion-daemon=system:serviceaccount:legion:legion-worker`. A service's own sessions are the
+pods that a launcher logged in as that service enrolled, and whose projected token proved one of
+that service's accounts: the Legion daemon's worker pods, for `legion-daemon`. A launcher logs in
+as a service with its own token, for an account `BROKER_SERVICE_LOGINS` names; the pod's own token
+proving the pods' account is what makes a pod the service's.
 
 A service's secrets go to its own sessions and to no one else. That includes a person's own
 session, and a pod run under another service account even when a launcher logged in as the service

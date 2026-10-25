@@ -23,6 +23,7 @@ type connectOpts struct {
 	name                        string
 	replicas                    int
 	publishAcknowledgementClock AcknowledgementClock
+	reconnectErrClock           func() time.Time
 	environment                 func(string) (string, bool)
 }
 
@@ -49,6 +50,13 @@ func (wallClock) WithTimeout(parent context.Context, timeout time.Duration) (con
 // WithPublishAcknowledgementClock overrides the clock that bounds JetStream publish acknowledgements.
 func WithPublishAcknowledgementClock(clock AcknowledgementClock) ConnectOption {
 	return func(o *connectOpts) { o.publishAcknowledgementClock = clock }
+}
+
+// WithReconnectErrClock overrides the clock that throttles the warning a failed reconnect attempt
+// logs (reconnectErrThrottle), so a test can see a minute pass without waiting one. nil, the
+// default, is time.Now.
+func WithReconnectErrClock(now func() time.Time) ConnectOption {
+	return func(o *connectOpts) { o.reconnectErrClock = now }
 }
 
 // WithReplicas overrides the replica count of the stream ConnectOwningStream ensures (default 1).
@@ -123,6 +131,7 @@ type Client struct {
 	credential                  nats.Option
 	dialer                      *socks5Dialer
 	publishAcknowledgementClock AcknowledgementClock
+	reconnectErrClock           func() time.Time
 	mu                          sync.Mutex
 
 	// subscriptionsMu guards subscriptions and stopMode. It is held to read and write them, never
@@ -180,7 +189,7 @@ func Dial(name string, urls []string, environment func(string) (string, bool)) (
 	if err != nil {
 		return nil, err
 	}
-	return connect(name, urls, credential, dialer, nil, nil)
+	return connect(name, urls, credential, dialer, nil, nil, nil)
 }
 
 // Connect opens a client that publishes and subscribes without touching the shared
@@ -228,9 +237,10 @@ func newClient(urls []string, ownsStream bool, opts connectOpts) (*Client, error
 		credential:                  credential,
 		dialer:                      dialer,
 		publishAcknowledgementClock: opts.publishAcknowledgementClock,
+		reconnectErrClock:           opts.reconnectErrClock,
 		stopCh:                      make(chan struct{}),
 	}
-	nc, err := connect(c.name, urls, credential, dialer, c.onReconnect, c.onClosed)
+	nc, err := connect(c.name, urls, credential, dialer, c.onReconnect, c.onClosed, c.reconnectErrClock)
 	if err != nil {
 		return nil, err
 	}
@@ -410,6 +420,24 @@ func (c *Client) SubOK() bool {
 	subOK := subscription.active != nil && subscription.active.IsValid()
 	c.subscriptionsMu.Unlock()
 	return connOK && subOK
+}
+
+// SubSubject is the subject the subscription this client holds on the JetStream transport actually
+// delivers on, which is what the listener compares against its durable consumer's configured
+// DeliverSubject. The registration's own subject is useless for that: registerSubscription stores
+// subject: "" for a nats.Bind registration (cmd/listener/durable.go binds with an empty subject),
+// while the subscription nats.go returns carries the consumer's configured DeliverSubject —
+// measured against a real server for INFRA-182, sub.Subject equals info.Config.DeliverSubject for
+// a nats.Bind push subscription. The empty string is the honest answer while the client is
+// replacing the subscription it holds, and the listener reads it as unbound.
+func (c *Client) SubSubject() string {
+	c.subscriptionsMu.Lock()
+	defer c.subscriptionsMu.Unlock()
+	active := c.subscriptions[jetStreamSubscription].active
+	if active == nil || !active.IsValid() {
+		return ""
+	}
+	return active.Subject
 }
 
 // ErrSubscriptionHeld is what Subscribe and SubscribeCore return for a registration on another
@@ -620,7 +648,7 @@ func (c *Client) ensureConnWithContext(ctx context.Context) error {
 			continue
 		}
 
-		nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.dialer, c.onReconnect, c.onClosed)
+		nc, err := connectWithContext(ctx, c.name, c.urls, c.credential, c.dialer, c.onReconnect, c.onClosed, c.reconnectErrClock)
 		if err != nil {
 			return err
 		}
