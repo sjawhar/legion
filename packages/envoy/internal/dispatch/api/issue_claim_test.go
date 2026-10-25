@@ -110,7 +110,8 @@ func claimIssueKey(t *testing.T, handler http.Handler, status string) string {
 	return key
 }
 
-// claimedIssue is the part of an issue read a claim test asserts on.
+// claimedIssue is the part of a claim answer a claim test asserts on: the issue, flat, with the
+// one field both routes add beside it.
 type claimedIssue struct {
 	Status string `json:"status"`
 	Claim  *struct {
@@ -123,6 +124,9 @@ type claimedIssue struct {
 		} `json:"actor"`
 		At string `json:"at"`
 	} `json:"claim"`
+	// A pointer: the answer omits the field when the walk failed (claimAnswer, issue_claim.go),
+	// and a test has to tell that apart from a stored false.
+	LegionManagedStatus *bool `json:"legion_managed_status,omitempty"`
 }
 
 func claimActorBody(id, title string) map[string]any {
@@ -375,6 +379,209 @@ func TestClaimAndStatusMoveIndependently(t *testing.T) {
 	if after.Claim != nil {
 		t.Fatalf("a status move must not claim the issue: %+v", after.Claim)
 	}
+}
+
+// labelledIssueKey seeds one issue of project (created if it is not there yet) with the given
+// labels under the given parent (empty for none), for the tests over who owns an issue's status:
+// both the claim routes' and the write advice's.
+func labelledIssueKey(t *testing.T, handler http.Handler, project, title string, labels []string, parent string) string {
+	t.Helper()
+	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
+		"key": project, "name": project + " project",
+	}, "alice")
+	if created.Code != http.StatusCreated && created.Code != http.StatusConflict {
+		t.Fatalf("create project %s: status=%d body=%s", project, created.Code, created.Body.String())
+	}
+	body := map[string]any{"project": project, "title": title, "force": true}
+	if labels != nil {
+		body["labels"] = labels
+	}
+	if parent != "" {
+		body["parent"] = parent
+	}
+	issue := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", body, "alice")
+	if issue.Code != http.StatusCreated {
+		t.Fatalf("create issue %s: status=%d body=%s", title, issue.Code, issue.Body.String())
+	}
+	return decodeBody[struct {
+		Key string `json:"key"`
+	}](t, issue).Key
+}
+
+// TestClaimAnswersWhoOwnsTheIssuesStatus covers the answer a session acts on: on an issue Legion
+// runs only its daemon writes the status, so both routes have to say so — on the issue's own
+// label whatever case it was typed in, and on a child that carries no label of its own.
+func TestClaimAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
+	live := &liveRegistry{}
+	live.set("session-one")
+	handler, _ := claimHandler(t, live)
+
+	lowercase := labelledIssueKey(t, handler, "TEST", "Rotate the staging certificates", []string{"legion"}, "")
+	uppercase := labelledIssueKey(t, handler, "TEST", "Back up the metrics volume", []string{"Legion"}, "")
+	parent := labelledIssueKey(t, handler, "TEST", "Split the billing worker", []string{"legion"}, "")
+	child := labelledIssueKey(t, handler, "TEST", "Draft an invoice renderer", nil, parent)
+	grandchild := labelledIssueKey(t, handler, "TEST", "Number the invoices", nil, child)
+	thirdCase := labelledIssueKey(t, handler, "TEST", "Drain the delivery queue", []string{"LEGION"}, "")
+	plain := labelledIssueKey(t, handler, "TEST", "Tidy the onboarding checklist", []string{"infra"}, "")
+
+	for _, want := range []struct {
+		name    string
+		key     string
+		managed bool
+	}{
+		{"the legion label", lowercase, true},
+		{"the label as Legion", uppercase, true},
+		{"a child under a labelled parent", child, true},
+		// Two links below the label: the answer is the recursive walk's, not a parent lookup's.
+		{"a grandchild under a labelled root", grandchild, true},
+		// A third case: the match is on lower(label), not on the two spellings above.
+		{"the label as LEGION", thirdCase, true},
+		{"no such label on it or above it", plain, false},
+	} {
+		t.Run(want.name, func(t *testing.T) {
+			claimed := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+want.key+"/claim", map[string]any{
+				"actor": claimActorBody("session-one", "Implementer"),
+			})
+			if claimed.Code != http.StatusOK {
+				t.Fatalf("claim: status=%d body=%s", claimed.Code, claimed.Body.String())
+			}
+			answer := decodeBody[claimedIssue](t, claimed)
+			if answer.LegionManagedStatus == nil || *answer.LegionManagedStatus != want.managed {
+				t.Fatalf("claim legion_managed_status=%v, want %v", answer.LegionManagedStatus, want.managed)
+			}
+			// The issue is still the body's own shape: the dashboard merges it into its cache.
+			if answer.Claim == nil {
+				t.Fatalf("the claim answer must still carry the issue it wrote: %s", claimed.Body.String())
+			}
+
+			released := bearerRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+want.key+"/claim", map[string]any{
+				"actor": claimActorBody("session-one", "Implementer"),
+			})
+			if released.Code != http.StatusOK {
+				t.Fatalf("release: status=%d body=%s", released.Code, released.Body.String())
+			}
+			if got := decodeBody[claimedIssue](t, released).LegionManagedStatus; got == nil || *got != want.managed {
+				t.Fatalf("release legion_managed_status=%v, want %v", got, want.managed)
+			}
+			// A release of an issue nobody holds writes nothing and answers the issue as it
+			// stands: that short-circuit has to answer who owns the status just the same.
+			again := bearerRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+want.key+"/claim", map[string]any{
+				"actor": claimActorBody("session-one", "Implementer"),
+			})
+			if again.Code != http.StatusOK {
+				t.Fatalf("release an unclaimed issue: status=%d body=%s", again.Code, again.Body.String())
+			}
+			if got := decodeBody[claimedIssue](t, again).LegionManagedStatus; got == nil || *got != want.managed {
+				t.Fatalf("second release legion_managed_status=%v, want %v", got, want.managed)
+			}
+		})
+	}
+}
+
+// TestClaimSurvivesAFailingLegionLabelWalk: the walk that answers who owns the status runs inside
+// the claim's own transaction, so its failure once rolled back a claim that had otherwise
+// succeeded. A claim is what stops two sessions working one issue; the advisory answer is not.
+// The failure is forced by pointing legionManagedStatusSQL at a statement Postgres refuses.
+func TestClaimSurvivesAFailingLegionLabelWalk(t *testing.T) {
+	live := &liveRegistry{}
+	live.set("session-one")
+	handler, _ := claimHandler(t, live)
+	key := claimIssueKey(t, handler, "triage")
+
+	// Swapping a package-level statement is safe only because no test in internal/dispatch/api
+	// calls t.Parallel, so no other test's walk can read the broken one before the cleanup puts
+	// it back; a test added here that does call t.Parallel breaks this one. The package's
+	// purpose-built seam, server.adviceQueryHook, is not used instead because it fires from
+	// computeWriteAdvice (write_advice.go) and never reaches claimWrite, and a hook that exists
+	// only for this test has no business in the claim path.
+	healthy := legionManagedStatusSQL
+	legionManagedStatusSQL = `select from no_such_relation_for_the_legion_walk`
+	t.Cleanup(func() { legionManagedStatusSQL = healthy })
+
+	claimed := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
+		"actor": claimActorBody("session-one", "Implementer"),
+	})
+	if claimed.Code != http.StatusOK {
+		t.Fatalf("claim with a failing label walk: status=%d body=%s", claimed.Code, claimed.Body.String())
+	}
+	if answer := decodeBody[claimedIssue](t, claimed); answer.Claim == nil || answer.Claim.Actor.ID != "session-one" {
+		t.Fatalf("the claim was discarded by the failed walk: %s", claimed.Body.String())
+	}
+	if _, answered := rawClaimFields(t, claimed)["legion_managed_status"]; answered {
+		t.Fatalf("a failed walk must omit legion_managed_status rather than answer it: %s", claimed.Body.String())
+	}
+	// The claim is the issue's, not the response's: a reader sees the same holder.
+	read := bearerRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("read the issue back: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if issue := decodeBody[claimedIssue](t, read); issue.Claim == nil || issue.Claim.Actor.ID != "session-one" {
+		t.Fatalf("the issue holds no claim after a failed walk: %s", read.Body.String())
+	}
+}
+
+// TestClaimSurvivesAHangingLegionLabelWalk: the walk used to run unbounded, on the request's own
+// context, between the claim's event and its COMMIT. A walk that hung there held the issue's row
+// lock for as long as it hung, and a cancellation landing in that window - a client hang-up, a
+// write deadline - stopped the savepoint's rollback, failed the COMMIT and discarded a claim that
+// had otherwise succeeded. Two changes close both: the walk now runs before any of the claim's
+// writes, so nothing at all sits between appendEvent and COMMIT, and it runs detached from the
+// request (context.WithoutCancel) inside a savepoint bounded at 500 ms, as the advice path bounds
+// the same predicate (issue_claim.go, write_advice.go).
+//
+// The statement below stands in for a walk that hangs, as the test above stands in for one
+// Postgres refuses, under the same package-level swap and the same no-t.Parallel constraint. It
+// sleeps ten times the bound, so what ends it is the bound; nothing in this test races a Go
+// timer against the database, and nothing asserts on elapsed time.
+func TestClaimSurvivesAHangingLegionLabelWalk(t *testing.T) {
+	live := &liveRegistry{}
+	live.set("session-one")
+	handler, _ := claimHandler(t, live)
+	key := claimIssueKey(t, handler, "triage")
+
+	healthy := legionManagedStatusSQL
+	legionManagedStatusSQL = `select count(*) > 0 from (select pg_sleep(5)) slow where $1 <> ''`
+	t.Cleanup(func() { legionManagedStatusSQL = healthy })
+
+	claimed := bearerRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/claim", map[string]any{
+		"actor": claimActorBody("session-one", "Implementer"),
+	})
+	if claimed.Code != http.StatusOK {
+		t.Fatalf("claim under a hanging walk: status=%d body=%s", claimed.Code, claimed.Body.String())
+	}
+	if answer := decodeBody[claimedIssue](t, claimed); answer.Claim == nil || answer.Claim.Actor.ID != "session-one" {
+		t.Fatalf("the hanging walk cost the claim: %s", claimed.Body.String())
+	}
+	if _, answered := rawClaimFields(t, claimed)["legion_managed_status"]; answered {
+		t.Fatalf("a timed-out walk must omit legion_managed_status rather than answer it: %s", claimed.Body.String())
+	}
+	// The claim is the issue's, not the response's, and the row the walk held is free: this read
+	// and the release that follows are served rather than blocked behind it.
+	read := bearerRequest(t, handler, http.MethodGet, "/api/v1/issues/"+key, nil)
+	if read.Code != http.StatusOK {
+		t.Fatalf("read the issue back: status=%d body=%s", read.Code, read.Body.String())
+	}
+	if issue := decodeBody[claimedIssue](t, read); issue.Claim == nil || issue.Claim.Actor.ID != "session-one" {
+		t.Fatalf("the issue holds no claim after a hanging walk: %s", read.Body.String())
+	}
+	legionManagedStatusSQL = healthy
+	released := bearerRequest(t, handler, http.MethodDelete, "/api/v1/issues/"+key+"/claim", map[string]any{
+		"actor": claimActorBody("session-one", "Implementer"),
+	})
+	if released.Code != http.StatusOK {
+		t.Fatalf("release after a hanging walk: status=%d body=%s", released.Code, released.Body.String())
+	}
+}
+
+// rawClaimFields reads a claim answer as raw JSON, so a test can tell a field the answer omitted
+// from one that came back false.
+func rawClaimFields(t *testing.T, response *httptest.ResponseRecorder) map[string]json.RawMessage {
+	t.Helper()
+	var body map[string]json.RawMessage
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode claim answer: %v body=%s", err, response.Body.String())
+	}
+	return body
 }
 
 // releasedHolder is the session named by the newest issue.released event: the contract makes

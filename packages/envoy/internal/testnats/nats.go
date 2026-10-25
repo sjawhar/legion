@@ -24,6 +24,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"math/rand/v2"
 	"net"
 	"os"
 	"path/filepath"
@@ -650,8 +651,107 @@ func Start(t testing.TB) (*Server, string) {
 // URL once the server refuses a client with no credential (awaitAuth).
 func StartNkeyAuthorized(t testing.TB, user string) string {
 	t.Helper()
-	_, uri := startNkeyConfig(t, nkeyConfig(fmt.Sprintf("{ nkey: %q }", user)))
+	_, uri := StartNkeyAuthorizedServer(t, user)
 	return uri
+}
+
+// StartNkeyAuthorizedServer runs the server StartNkeyAuthorized runs and returns it with its
+// client URL, for a test that must stop and start it under a connected client.
+func StartNkeyAuthorizedServer(t testing.TB, user string) (*Server, string) {
+	t.Helper()
+	return startNkeyConfig(t, nkeyConfig(fmt.Sprintf("{ nkey: %q }", user)))
+}
+
+// Gate is one TCP address a test holds for its whole life, which relays to srv while it is open
+// and has nothing listening at all while it is closed.
+//
+// nats.go runs ReconnectErrCB only for a reconnect attempt whose dial failed: an attempt that
+// connects and is then dropped is silent. The server's own relay accepts every connection while
+// the server is stopped and closes it, so a test that needs a connected client's reconnect
+// attempts to fail needs an address nothing listens on, and a test that then needs a successful
+// reconnect needs that same address to come back once the server is up. The gate's open relay
+// dials the server's URL, which names the server's relay and so survives Server.Stop and
+// Server.Start.
+type Gate struct {
+	t       testing.TB
+	address string
+	server  string
+
+	mu sync.Mutex
+	// relay is the gate's listener and its copies while the gate is open, and nil while it is
+	// closed.
+	relay *relay
+}
+
+// gatePortFirst and gatePortCount are the range a gate picks its port from. A :0 port would come
+// from the kernel's ephemeral range (32768-60999 on Linux), which is where every relay of this
+// rig, and every server's own listener, takes its port: while the gate was closed, a server
+// another test started could take the gate's port and the gate's address would never come back.
+// Nothing in 20000-29999 is allocated on its own, so a port this process has proven free by
+// binding it stays free for the test.
+const (
+	gatePortFirst = 20000
+	gatePortCount = 10000
+)
+
+// StartGate opens a gate on a free port of that range, relaying to srv, and closes it when the
+// test ends.
+func StartGate(t testing.TB, srv *Server) *Gate {
+	t.Helper()
+	g := &Gate{t: t, server: strings.TrimPrefix(srv.URL(), "nats://")}
+	var last error
+	for range 100 {
+		address := fmt.Sprintf("127.0.0.1:%d", gatePortFirst+rand.IntN(gatePortCount))
+		listener, err := net.Listen("tcp", address)
+		if err != nil {
+			last = err
+			continue
+		}
+		g.address = address
+		g.relay = newRelay(listener, g.target)
+		t.Cleanup(g.Close)
+		return g
+	}
+	t.Fatalf("hold a gate port: %v", last)
+	return nil
+}
+
+// target is the address the gate's relay dials: the server's relay, whose port the server's URL
+// names for the test's life.
+func (g *Gate) target() (string, error) { return g.server, nil }
+
+// URL is the client URL of the gate's address, which is the same for the test's whole life.
+func (g *Gate) URL() string { return "nats://" + g.address }
+
+// Close stops listening, so every dial of the gate's address is refused. It does nothing when the
+// gate is already closed. It does not break a connection already joined through the gate, which
+// keeps copying until one side ends, so a test that needs a connected client to lose its
+// connection stops the server too.
+func (g *Gate) Close() {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.relay == nil {
+		return
+	}
+	g.relay.Close()
+	g.relay = nil
+}
+
+// Open listens on the gate's address again, so dials reach the server once more. It does nothing
+// when the gate is already open, and fails the test when the address cannot be taken.
+func (g *Gate) Open() {
+	g.t.Helper()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	if g.relay != nil {
+		return
+	}
+	listener, err := net.Listen("tcp", g.address)
+	if err != nil {
+		g.t.Fatalf("open the gate at %s: %v", g.address, err)
+		return
+	}
+	g.relay = newRelay(listener, g.target)
 }
 
 // NkeyGrant is a NATS test server, started by StartNkeyGranted, whose one nkey user may publish
