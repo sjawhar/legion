@@ -87,6 +87,9 @@
   settled; each design choice no source states is a decision entry; the fresh reader gets the whole
   spec pasted before every spec write; an ask block names a requirement by what it is; unbuilt
   acceptance checks never delay approval; and text is about the design, never the person.
+- `dispatch-writing-specs`, "The outline": a spec's length scales with the change (a small change gets
+  a few sentences per part, no matrix), and the Summary names the change in the reader's own terms,
+  never in a category the writer coined.
 - `dispatch-writing-specs`, "Approval": after a person approves a spec, an agent makes a new version
   only for a change to scope, acceptance, cost, risk or a decision the person made, and puts all
   such changes into one version. Any other fix goes in the plan or a comment, so the person is not
