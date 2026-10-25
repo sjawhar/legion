@@ -8,6 +8,7 @@ import {
   createIssue,
   createProject,
   createProjectDocument,
+  disconnectAllStreams,
   getAsk,
   getInbox,
   getIssue,
@@ -1065,13 +1066,13 @@ test("a credential request seeded after the Inbox loads appears, and counts, wit
 });
 
 // With nothing waiting, "Nothing needs you" stays on screen through a window focus, which refetches
-// what has gone stale and reopens the event stream, whose reconnect refreshes every query, and
-// through leaving the Inbox and coming back. Every credential-list call after the page's first is
-// held, so a refetch of that list, had one put it back to loading, would take the empty state off
-// the screen for as long as the hold lasts. A Dispatch with no secrets broker answers the list
-// `null` and is asked again only when the stream reconnects, over the held answer, so the held
-// second call leaves the empty state on screen; with the fake broker the list keeps its empty
-// answer on screen while a refetch runs. Neither page may log a failed request.
+// what has gone stale, through a dropped live socket, whose reconnect refreshes every query once the
+// event feed starts again, and through leaving the Inbox and coming back. Every credential-list call
+// after the page's first is held, so a refetch of that list, had one put it back to loading, would
+// take the empty state off the screen for as long as the hold lasts. A Dispatch with no secrets
+// broker answers the list `null` and is asked again only after a gap in the socket, over the held
+// answer, so the held second call leaves the empty state on screen; with the fake broker the list
+// keeps its empty answer on screen while a refetch runs. Neither page may log a failed request.
 test("Nothing needs you stays on screen through a focus and a return to the Inbox", async ({
   browser,
 }) => {
@@ -1105,14 +1106,15 @@ test("Nothing needs you stays on screen through a focus and a return to the Inbo
       }).observe(document.body, { characterData: true, childList: true, subtree: true });
     });
 
-    // The stream's whole-cache refresh refetches the inbox list; once that has answered, every
-    // refetch the focus started is on the wire.
+    // The reconnect's whole-cache refresh refetches the inbox list; once that has answered, every
+    // refetch the focus and the reconnect started is on the wire.
     const refreshed = page.waitForResponse(
       (response) => new URL(response.url()).pathname === "/api/v1/inbox"
     );
     await page.evaluate(() =>
       document.dispatchEvent(new Event("visibilitychange", { bubbles: true }))
     );
+    await disconnectAllStreams();
     await refreshed;
     await page.evaluate(() => {
       const frames = Promise.withResolvers<void>();
