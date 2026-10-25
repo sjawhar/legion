@@ -2,71 +2,81 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-180",
-  "completed": "2026-10-25T07:11:00Z",
-  "round": 5,
+  "completed": "2026-10-25T07:58:00Z",
+  "round": 6,
   "pullRequest": "https://github.com/sjawhar/legion/pull/2166",
-  "headSha": "50f2638ba9413593f1e5cdcdf937860388d81109",
+  "headSha": "77f73e55e29b0cf14b077991ae17c804220c773b",
+  "closedByTheArchitect": "The architect ruled this the last round that changes code in pull request 2166 (Envoy message 44301d00f7aba09a97054c3f1c865887, 2026-10-25T07:46:31Z). Finding A is built; any later finding of any class is recorded here and on the pull request and changes no code, and one severe enough that shipping it would be wrong goes to the architect as a judgement for it to make.",
   "proof": [
     {
-      "criterion": "The review's one blocking defect: a word Slack shows is lost whenever two cells anywhere in a message carry the same string. The repeat comparison must be the object's, not the message's.",
-      "surface": "A real nats-server v2.11.4, a fake agent session subscribed to notifications.slack.> receiving over prompt_async, and two real envoy-listeners: one built from this head and one built from round 4's code head 709538bf7d44 as the before, each posted the same signed bodies through the tester's rig.",
-      "command": "cd -- \"$LEGION_WORKSPACE\" && LISTENER=$PWD/packages/envoy/out/bin/envoy-listener NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server CASES=$PWD/packages/envoy/out/e2e/infra180-r5-cases.jsonl bash packages/envoy/out/e2e/infra180-tester-rig.sh (and the same with LISTENER=$PWD/packages/envoy/out/bin/envoy-listener-r4)",
-      "observed": "6 posts, 6 wakes on each listener. A CI alert whose section fields read *Passed* 3, *Failed* 0, *Skipped* 0: '*Passed*\\n3\\n*Failed*\\n0\\n*Skipped*' before, '*Passed*\\n3\\n*Failed*\\n0\\n*Skipped*\\n0' after. Two attachments reading web-1/ok and web-2/ok: 'web-1\\nok\\nweb-2' before, 'web-1\\nok\\nweb-2\\nok' after. Four sibling sections all saying 'retry scheduled': one line before, four after. An attachment's fields Primary/Secondary/Escalation: 'Deploy failed\\nPrimary: oncall-a\\nSecondary: oncall-a\\nEscalation: oncall-b' before, 'Deploy failed\\nPrimary\\noncall-a\\nSecondary\\noncall-a\\nEscalation\\noncall-b' after. Both guards are identical on the two listeners: an attachment whose fallback repeats its own title delivers '[Triggered] CPU load high\\nhost web-1 is at 97%', two lines, and a message whose own words are echoed by a block and by an attachment's text and fallback delivers 'deploy failed' once.",
-      "headSha": "50f2638ba9413593f1e5cdcdf937860388d81109",
+      "criterion": "The review's one blocking defect: an attachment's fallback is doubled against blocks nested inside that same attachment, and, with it, a fallback stands ahead of the attachment's own body. The architect's rule: the fallback is read last of that attachment and only when its own subtree did not say it.",
+      "surface": "A real nats-server v2.11.4, a fake agent session subscribed to notifications.slack.> receiving over prompt_async, and two real envoy-listeners: one built from this head and one built from round 5's code head 50f2638ba941 as the before, each posted the same signed bodies through the tester's rig.",
+      "command": "cd -- \"$LEGION_WORKSPACE\" && LISTENER=$PWD/packages/envoy/out/bin/envoy-listener NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server CASES=$PWD/packages/envoy/out/e2e/infra180-r6-cases.jsonl bash packages/envoy/out/e2e/infra180-tester-rig.sh (and the same with LISTENER=$PWD/packages/envoy/out/bin/envoy-listener-r5)",
+      "observed": "4 posts, 4 wakes on each listener. A coloured attachment whose fallback copies its own section: 'Deploy failed on web-1\\nDeploy failed on web-1' at 50f2638ba941, 'Deploy failed on web-1' at 77f73e55e29b. An attachment whose fallback says more than its block: 'PLAIN COPY\\nthe real body' with the summary 'PLAIN COPY' before, 'the real body\\nPLAIN COPY' with the summary 'the real body' after — the round 2 note about a fallback leading its own body, retired. Both guards identical on the two listeners: the same-object collapse (title, text, fallback, the fallback equal to the title) delivers '[Triggered] CPU load high\\nhost web-1 is at 97%', and an attachment's fallback against a block elsewhere in the message delivers 'CPU high on host-a\\nCPU high'.",
+      "headSha": "77f73e55e29b0cf14b077991ae17c804220c773b",
       "negativeControl": "In each run the same body with the signature v0=deadbeef was refused HTTP 401 and woke nobody, and a correct HMAC over a timestamp 4,000 s old was refused HTTP 401 and woke nobody."
+    },
+    {
+      "criterion": "The walk's measured cost does not move: only an object carrying a non-blank string fallback pays for the subtree record, so no other object takes a call per piece.",
+      "surface": "SlackEnvelope driven in process on four chains of 9,900 rich_text levels through a plain object key, body 990,211 B, in two scratch copies of the module differing in normalize.go alone (this head's and round 5's).",
+      "command": "go test ./internal/contracts/ -count=1 -run TestDepthProbe -v, nine runs each, in /tmp copies of packages/envoy",
+      "observed": "37-46 ms on either side, the same spread, with the same delivered text. The bound round 4 established (85.385 s to 56.70 ms on the reviewer's body) is unchanged by this round.",
+      "headSha": "77f73e55e29b0cf14b077991ae17c804220c773b",
+      "negativeControl": "The two copies differ in normalize.go alone, restored with jj file show, so a difference would have been this round's and not the harness's."
     },
     {
       "criterion": "The symptom itself: an agent woken by a Slack message whose words are only in an attachment reads those words. Unchanged by this round and re-proven at its head.",
       "surface": "The same real nats-server, a real envoy-listener built from this head, and a subscribed session.",
       "command": "cd -- \"$LEGION_WORKSPACE\" && LISTENER=$PWD/packages/envoy/out/bin/envoy-listener NATS_SERVER=$PWD/packages/envoy/out/bin/nats-server bash packages/envoy/out/e2e/infra180-slack-wake-rig.sh",
-      "observed": "The wake carried 'Summary: slack bot message in C_RIG from datadog: [Triggered] CPU load high' and \"text\":\"[Triggered] CPU load high\\nhost web-1 is at 97% for 10 minutes\". At the branch's base commit the same post gave a summary ending at the colon and no text field at all.",
-      "headSha": "50f2638ba9413593f1e5cdcdf937860388d81109",
+      "observed": "The wake carried 'Summary: slack bot message in C_RIG from datadog: [Triggered] CPU load high' and \"text\":\"[Triggered] CPU load high\\nhost web-1 is at 97% for 10 minutes\". At the branch's base commit 499564c1876d the same post gave a summary ending at the colon and no text field at all.",
+      "headSha": "77f73e55e29b0cf14b077991ae17c804220c773b",
       "negativeControl": "'unsigned post status (want 401) : 401', 'wakes delivered: 1' — the one wake being the signed post's."
     },
     {
       "criterion": "Acceptance 1: Go tests in packages/envoy/internal/contracts assert the delivered text exactly for every shape the rule names, and fail at the commit before the change.",
       "surface": "The contracts package's own test binary, driving SlackEnvelope end to end.",
       "command": "cd -- \"$LEGION_WORKSPACE\"/packages/envoy && go test ./internal/contracts/ -count=1",
-      "observed": "ok github.com/sjawhar/envoy/internal/contracts, 37 TestSlackDeliveredText subtests passing with the tester's red case unmodified among them, and TestSlackSummary (8) and TestSlackPayload (5) still passing. Round 5's cases: a CI alert whose counts repeat; a section's fields with two equal values; two attachments carrying the same status; four sibling sections saying the same thing; the message's own words echoed by a block and an attachment; and the two whose expectations the deleted pairing moved, an attachment's label and value fields and two fields sharing a value keep their labels.",
-      "headSha": "50f2638ba9413593f1e5cdcdf937860388d81109",
-      "negativeControl": "The same 37-case table run against the base commit's normalize.go in a scratch copy fails 29 cases; the 8 that pass are guards asserting today's behaviour."
+      "observed": "ok github.com/sjawhar/envoy/internal/contracts, 39 TestSlackDeliveredText subtests passing with the tester's red case unmodified among them, and TestSlackSummary (8) and TestSlackPayload (5) still passing. Round 6's two cases: a coloured attachment whose fallback copies its own block, and an attachment whose fallback says more than its block.",
+      "headSha": "77f73e55e29b0cf14b077991ae17c804220c773b",
+      "negativeControl": "The same 39-case table run against the base commit's normalize.go in a scratch copy fails 31 cases; the 8 that pass are guards asserting today's behaviour."
     }
   ],
   "filesChanged": [
-    "packages/envoy/internal/contracts/normalize.go — the repeat comparison scoped: slackTextWalk.ownWords (the message's own text and its lines, walk-wide) replaces the message-wide taken set, and slackWalkPieces keeps a per-object tally of the strings an object yields under its own keys; slackFieldPiece, slackFieldHalf, the fields parameter and the pair latch are deleted.",
-    "packages/envoy/internal/contracts/normalize_test.go — TestSlackDeliveredText, 37 cases.",
+    "packages/envoy/internal/contracts/normalize.go — fallback out of the ranked display names into slackFallbackField; slackWalkObject holds the per-object key loop unchanged, and slackWalkFallback reads the rest of an object carrying a string fallback and then that fallback, only when the subtree did not yield it.",
+    "packages/envoy/internal/contracts/normalize_test.go — TestSlackDeliveredText, 39 cases.",
     "packages/envoy/internal/integration/webhook_redelivery_test.go — streamEnvelopes and TestSlackAttachmentWordsReachTheStream.",
-    "packages/envoy/CHANGELOG.md — the Fixed entry, rewritten for the scoped rule.",
+    "packages/envoy/CHANGELOG.md — the Fixed entry, with the fallback ordering.",
     "skills/legion-controller/references/slack-mentions.md — the text clause of 'What a mention carries'.",
     "packages/claude-envoy/legion/skills/legion-controller/references/slack-mentions.md — the committed plugin bundle's copy, regenerated with bun run build (check-dist: 'dist/ and legion/ match a fresh build')."
   ],
   "trickyParts": [
-    "The per-object tally reaches the object's own keys and never its subtree. A nested text object, and each element of a fields array, is an object of its own with a tally of its own; a subtree-wide tally would drop a nested block's word for matching a title above it, which is the same defect class one level down.",
-    "At most one string is yielded per display name, so a tally holds nine at the most and is a slice scanned straight through rather than a map.",
-    "takeOwn still delivers the own text as one piece and then records it and each of its non-blank lines; take compares against nothing else, so no piece gathered from the tree ever suppresses another.",
+    "Only an object carrying a non-blank string fallback wraps visit, so the subtree record costs nothing on every other object; a wrapper installed for every object would cost one call per ancestor per piece on a deeply nested body and would have moved the measured bound.",
+    "A fallback that is not a string is no piece and must still be descended into: with fallback out of slackDisplayFields, slackWalkKeys puts such a key in the alphabetical tail like any other container.",
+    "The subtree record notes the strings the producer yields, not the ones take accepts, which is how the per-object tally already works, so a fallback equal to a line the message's own words suppressed is still dropped.",
     "The committed claude-envoy plugin bundle mirrors skills/, and the required check-dist step fails if the skill file is edited without rebuilding it."
   ],
   "deviations": [
-    "Blocks are read before attachments, against approved spec version 11's 'in its attachments and blocks'. Authority: the architect's ruling of 2026-10-25T06:00:29Z (Envoy message 2bcf844fa07dac607ef80e0231d96a23). Slack renders blocks as the message body and an attachment after it.",
-    "The display names are nine, not the approved seven: alt_text and author_subname join them, in the rank pretext, author_name, author_subname, title, text, alt_text, value, footer, fallback. Same ruling as its authority: an image-only Block Kit post delivered nothing at all, and both strings are ones Slack renders for a person to read.",
-    "The walk knows one block kind by name, rich_text, and has two exceptions rather than the one approved spec version 11 states. Authority: the architect's rulings of 2026-10-25T04:55:00Z (d2bf744d502b32e22f038606045cd18b) and 05:18:01Z (d7ac4a19e3e6eeb53c232d618d7c8470); the architect has told the human what the code does.",
-    "The repeat comparison is the object's, with the message's own words and their lines walk-wide. Authority: the architect's ruling of 2026-10-25T06:56:27Z (617021e9e3dde5c07653f951a39ed57c), confirmed in ed4bd365529e0e4159e0e8a83b294bb4. The architect has put the scoped rule into the spec, which is at version 14 and with the human.",
-    "CLOSED THIS ROUND, not carried: round 4's deviation against approved spec version 11's 'each entry of its fields as that entry's title and value, each non-blank one on its own line'. The field pairing is deleted and an attachment's fields entry delivers its label and its value on their own lines again, which is what version 11 says.",
-    "Not in this round, recorded as risks on the architect's ruling and not built: an attachment's fallback still precedes the blocks nested inside that same attachment, which follows the ruled key order; the rich_text object skipped because every one of its display strings sits inside the message's own text; and the Security[prompt] paths — fallback and a button's value, which Slack renders to nobody, and Slack's link unfurl, which arrives as message_changed on a person's message carrying no bot_id, with packages/envoy/internal/session/session.go:113-118 rendering the payload into the wake prompt. The architect has the whole chain with the human.",
+    "An attachment's fallback is read last of that attachment and dropped when its own subtree already yielded it. Authority: the architect's ruling of 2026-10-25T07:46:31Z (Envoy message 44301d00f7aba09a97054c3f1c865887); spec version 15, with the human, says it.",
+    "The repeat comparison is the object's, with the message's own words and their lines walk-wide. Authority: the architect's ruling of 2026-10-25T06:56:27Z (617021e9e3dde5c07653f951a39ed57c), confirmed in ed4bd365529e0e4159e0e8a83b294bb4; spec version 14, with the human.",
+    "Blocks are read before attachments, against approved spec version 11's 'in its attachments and blocks'. Authority: 2bcf844fa07dac607ef80e0231d96a23.",
+    "The display names are nine, not the approved seven: alt_text and author_subname join them. Same authority.",
+    "The walk knows one block kind by name, rich_text, and has two exceptions rather than the one approved spec version 11 states. Authority: d2bf744d502b32e22f038606045cd18b and d7ac4a19e3e6eeb53c232d618d7c8470.",
+    "Closed in round 5 and not carried: the deviation against version 11's 'each non-blank one on its own line' — the field pairing is deleted and an attachment's fields entry delivers its label and its value on their own lines again.",
+    "Recorded, not built, each with the body the reviewer drove: the ownWords drop reaching a field value when an app's own text is a bare one-word status (no word is lost, and the narrowing offered would undo round 4's duplicate fix); two objects saying the same thing both delivering, the ruled trade; a one-line own text whose rich_text copy disagrees with it; a context element carrying only a link's url, which delivers nothing; and the Security[prompt] paths, where a link unfurl arrives as message_changed on a person's message with no bot_id and packages/envoy/internal/session/session.go:113-118 appends the payload to the wake prompt — the controller is not on that path, since slackKind returns mention only for app_mention, and the JSON string encoding holds as the delimiter. The architect has the chain with the human.",
     "ce-simplify-code ran once at e587427d7f0c in round 1, the one slot per pull request; a round answering a review runs no second pass."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "Acceptance 2's lane cannot run on an issue pod (no Docker, no Podman): packages/envoy/internal/integration starts a real NATS server through testcontainers. The test is compiled and type-checked here (go vet ./... and go test -run NoSuchTest ./internal/integration/ clean) and runs in CI, in the envoy-go job of 'Legion Envoy and Contracts', run 40171710283 on this head.",
-    "The before listener of this round's proof is built by restoring normalize.go from round 4's code head into a scratch copy of packages/envoy, so the two listeners differ in that file alone."
+    "Acceptance 2's lane cannot run on an issue pod (no Docker, no Podman): packages/envoy/internal/integration starts a real NATS server through testcontainers. The test is compiled and type-checked here (go vet ./... and go test -run NoSuchTest ./internal/integration/ clean) and runs in CI, in the envoy-go job of 'Legion Envoy and Contracts', run 40174605073 on this head.",
+    "Every evidence line of the pull request body is restamped at this head on the architect's instruction (925ffd5a787db76395653d8855e37b37): the Change bullets, Size, CI, the Threads stamp and E2E (implementer) name 77f73e55e29b, and every before-and-after names both commits. The E2E (tester) line is the tester's to replace at its own run."
   ],
   "reviewRound": {
-    "round": 3,
+    "round": 4,
     "decision": "changes_requested",
-    "reviewedHead": "17577750d5496cc39c36f12a023d4d6746dfc3b1",
-    "answeredAt": "50f2638ba9413593f1e5cdcdf937860388d81109",
+    "reviewedHead": "d85bc36c90f5f128206ebe7bbf7e2d447f20fe6d",
+    "answeredAt": "77f73e55e29b0cf14b077991ae17c804220c773b",
     "threads": [
-      {"id": "PRRT_kwDORFy7ds6v_JNd", "disposition": "fixed in 4bf6cd89d9e7ca5ba26c9f80df0c33e0aa2e38a6", "note": "the repeat comparison scoped to the object that yields the pieces, the message's own words walk-wide, the field pairing deleted with it", "resolved": true}
+      {"id": "PRRT_kwDORFy7ds6v_X6h", "disposition": "fixed in 11623e922edffad3f73d1846f2e523d66b4cc5ac", "note": "an attachment's fallback is read last of that attachment and yielded only when its own subtree did not say it", "resolved": true}
     ]
   },
   "localChecks": [
