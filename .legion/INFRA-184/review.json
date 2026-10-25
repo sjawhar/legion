@@ -1,0 +1,37 @@
+{
+  "schemaVersion": 1,
+  "phase": "review",
+  "issue": "INFRA-184",
+  "completed": "2026-10-25T04:30:00Z",
+  "decision": "changes_requested",
+  "critical": 0,
+  "important": 2,
+  "minor": 3,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/suggestions_test.go:338-360",
+      "description": "TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails is now vacuous. It arms newFailingAdviceHandler(t, \"session_writes_since_human\"), but the hook fires only from computeWriteAdvice, and this diff moved the actor check in front of that call (write_advice.go:156-158). The test's asks are posted with dispatchRequest(..., \"alice\"), a user actor, so writeAdvice returns early and the hook never runs: advice is never nil and the suggestions-only fallback (asks.go:298-301) the test exists to protect is never taken. Measured at 0a396ee7 on the shared rig: this test passes with no `dispatch: write advice omitted` warning, while TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails — the identical breakage the implementer did repair, converted to sessionRequest at write_advice_test.go:797 — logs that warning at the same head. The LEGION-550 regression lock is silently gone. Fix: post the asserted ask (suggestions_test.go:355, and the seeding ask at :343 where the premise needs it) with sessionRequest plus adviceSessionActor, as write_advice_test.go:797 now does."
+    },
+    {
+      "severity": "important",
+      "file": "packages/envoy/internal/dispatch/api/write_advice_test.go:502-520, packages/envoy/internal/dispatch/api/issue_claim_test.go:404-414",
+      "description": "Spec version 6's R2 has two clauses no unit case covers: an ancestor two or more links above the issue carrying the label, and a label written in a case other than `legion` or `Legion`. Both test tables stop at `legion`, `Legion`, a child of a labelled parent (one link) and an unlabelled issue. legionManagedStatusSQL's recursion is what carries the deeper chain; a refactor to a single parent lookup would pass the whole suite while breaking R2, which is exactly the regression a lock is for. The tester drove both live (a grandchild two links below a labelled root, and a LEGION label) and recorded them as uncovered by any test. The architect ruled these in scope for this pull request, not a follow-up. Add a row for each to both tables (labelledIssueKey already takes a parent, so a grandchild is one more seed)."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/contracts/src/dispatch-api.ts:320-330",
+      "description": "ClaimedIssue.legion_managed_status is declared required, but DispatchClient.#json does no runtime validation and dispatch-http.ts:427,438-442 casts the body straight to ClaimedIssue, so against a Dispatch older than this change the value is undefined where the type promises boolean. The tester proved the behaviour is safe today (a pre-change server still answers the old claim wording, because dispatch-execute.ts:3010 is a truthiness test), but the type states something the wire does not guarantee and a later `=== false` would invert silently. The contract's own write-advice twin is optional (dispatch-api.ts:226), and the repository's convention for skew-sensitive response fields is optional-plus-comment (lost_ops, dispatch-execute.ts:3546-3547). Make it `readonly legion_managed_status?: boolean;`."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/write_advice.go:151-155",
+      "description": "The new comment says \"A human or service write ... is answered here\", and the PR body repeats \"A write by a person or a service still gets the line\". No service actor reaches writeAdvice: optionalActor returns present=true only for the cookie identity with Kind \"user\" (server.go:625-632), and every bearer path falls through to bearerSessionActor, which refuses anything but a session with a non-empty id (server.go:669-672). The guard is right; the prose a future reader reasons from is not."
+    },
+    {
+      "severity": "minor",
+      "file": "packages/envoy/internal/dispatch/api/issue_claim.go:409-416",
+      "description": "legionManagedStatus runs inside claimWrite's own transaction, after writeIssueClaim and appendEvent and before tx.Commit, while the issue row is held `for no key update`. An error there returns claimApplied{}, err, the deferred rollback discards the claim, and resolveThenLock retries only errStaleResolution — so an advisory lookup can fail a claim that had otherwise succeeded, and it lengthens the locked window by a recursive CTE. The same predicate on the advice path is treated as advisory (a savepoint with a 500 ms statement_timeout, logged and omitted on failure). In practice the query fails only on a transaction or connection that is already doomed, so this is a judgment call rather than a live defect, and it is recorded rather than required."
+    }
+  ]
+}
