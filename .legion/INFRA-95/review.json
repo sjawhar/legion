@@ -2,52 +2,47 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-95",
-  "completed": "2026-10-25T07:20:26Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T08:50:22Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
+  "important": 0,
   "minor": 2,
-  "round": 2,
+  "round": 3,
+  "approvedHead": "the head this round's handoff push makes, named by SHA in the submitted review",
   "keyFindings": [
     {
-      "severity": "important",
-      "file": "packages/dispatch/e2e/phone.e2e.ts:654 and :521",
-      "description": "Round 2 moved probeClear above the clicks and left lowerClearance behind, so the row still carries one instance of the defect this round fixed. The mutation probe sits at upperText.bottom + 1 (:521) and the lower anchor's padding box starts at upperText.bottom + lowerClearance, measured as 2 on every machine anyone has run this on; the probe therefore clears its neighbour by exactly one pixel, out of a quantity that comes from the font's content-area height. The only assertion on it, expect(line.lowerClearance).toBeGreaterThanOrEqual(0) at :654, permits 1 and 0 and runs after the two clicks at :569 and :576 that it is the precondition for. At a clearance of 1 or 0 the mutation-sensitive click at :576 resolves to a point inside the lower anchor's padded box and the row dies with a 5 s TimeoutError naming the Lower line anchor - which the comment at :574-575 has already told the next reader means the three pixels of .prose a are gone. Move the assertion above the clicks, beside probeClear's at :553, and bound it at the margin the probe needs (>= 2), or derive probeY from the middle of the free band [upperText.bottom, upperText.bottom + lowerClearance] so the point cannot drift into the neighbour."
-    },
-    {
-      "severity": "important",
-      "file": "packages/dispatch/e2e/phone.e2e.ts:566-568 and :651-653",
-      "description": "'16px prose on 24px lines, the tightest pitch a body reaches' is refuted by the note the same commit corrected: styles.css:99-100 now records an agent turn's reasoning at 12px on 16px lines, and that surface is a .prose body too (AgentThread.tsx:112 wraps MarkdownBody, and markdown-engine.ts:171-172 gives every MarkdownBody the prose class list). Round 2 copied the superlative into a new comment at :566-568 while correcting the measurement that refutes it. It is the tightest pitch a *message* body reaches."
+      "severity": "minor",
+      "file": "packages/dispatch/e2e/phone.e2e.ts:432, :557, :573",
+      "description": "Fast-follow, not a blocking finding: 'the tightest pitch a message body reaches' is still an overstatement, now by a surface neither earlier round named. The agent view renders a stored Dispatch message body through MarkdownText - MarkdownBody, so a .prose body - inside text-sm wrappers: UserMessage at AgentThread.tsx:136 and :148, AssistantMessage at :172 and :183, with AgentRuntimeThread mapping message.body into them. text-sm is 14px on 20px lines, tighter than the Conversation turn's 16px on 24px. Verified by reading packages/dispatch/web/src/features/agent-view/AgentThread.tsx:107-197. Nothing in the change depends on it: the row measures the Conversation turn, the stylesheet note's own table claims no exhaustiveness and its conclusion (the 3px overlaps only the 12px/16px reasoning surface) is unaffected, since 14px on 20px clears by about 1px. The right fix is to drop the superlative in all three places, which belongs to the follow-up pull request that already rewrites these comments; a third round for one word would cost this issue a full tester cycle while the row keeps reddening other people's pull requests.",
+      "disposition": "named in the review body and in the pull request's Fast-follow line"
     },
     {
       "severity": "minor",
-      "file": "packages/dispatch/e2e/phone.e2e.ts:600-603",
-      "description": "Hardening: expect.poll invokes its callback outside the matcher's try, so an exception from the callback rethrows rather than polling again. If the capture listener at :585-596 ever failed to attach, the tap at :597 would navigate to https://example.invalid/upper and the row would die with 'Execution context was destroyed' rather than the designed no-click. A catch inside the poll callback keeps the diagnostic."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/dispatch/e2e/phone.e2e.ts:547",
-      "description": "Hardening: probeClear requires probeY < composer.getBoundingClientRect().top, but the composer is fixed inset-x-0 bottom-16 (MentionComposer.tsx:1324), so the 64 px band beneath it is not covered by the composer at all; a probe there would be refused with a message blaming the composer. Comparing against the composer's rect rather than its top edge alone would be exact."
+      "file": "pull request body, the section heading 'Every .prose pitch below 1280px' and the Change bullet 'records the measured line pitch of every .prose surface'",
+      "description": "Fast-follow, not a blocking finding, and a body edit that changes no head: the table enumerates three surfaces and omits the agent view's 14px/20px message presentation above, so 'every' overstates it. 'the .prose surfaces measured for this change' is what it carries. Named for the implementer to correct in the body at retro."
     }
   ],
-  "round1FindingsVerified": [
-    "styles.css:97-98 now reads 15px on 24.375px lines clearing by about 3.4px. Verified against AskCard.tsx:522 (text-[15px] leading-relaxed font-medium) and the built bundle, where .dispatch-markdown{font-size:inherit;line-height:inherit} sits after @layer utilities closes and .prose-sm is inside it, so the call site decides. The tester's control run in a text-sm wrapper returns exactly the refuted 14px/20px/1px, which explains the first note. The thread's own 'about 2px' was my arithmetic, not a measurement; the measured 3.38px is what stands, and the architect has corrected dispatch://INFRA-304.",
-    "expect(line.probeClear, ...) now runs at :553-556, before both trial clicks, and probeClear starts composer !== null so the lookup fails closed. The tester drove the state the finding was about rather than only the implementer's selector-rename control: with the settle's scrollIntoView replaced by window.scrollTo(0, 0) the row is red 3 of 3 in about 6.5 s at phone.e2e.ts:556:7 with the guard's own message and zero TimeoutError in the run, so the first trial click no longer pre-empts it; the renamed-selector control is red at the same line in 7.4 s.",
-    "The tap read-back is expect.poll at :600-603, on attention.e2e.ts:155's pattern. Bounded at 15 s by playwright.config.ts:93,102, inside the row's own 120 s. It held in all 48 repeats of this round, ten of them under two-core contention where each repeat stretched from 7.6-8.4 s to 11.9-12.7 s."
+  "round2FindingsVerified": [
+    "phone.e2e.ts:559-563 - expect(line.lowerClearance, <message>).toBeGreaterThanOrEqual(2) now sits immediately after the composer guard and before both trial clicks, and the weaker footer assertion (>= 0, after the clicks) is deleted rather than duplicated. The tester did not take the implementer's raised-bound control as sufficient: it built the condition the assertion exists for, .prose a { padding-block: 4px } with the bundle rebuilt, which puts lowerClearance at 1, and the round-3 row is red 3 of 3 in about 6.9 s at phone.e2e.ts:563 with the assertion's own message (Expected >= 2, Received 1) and zero TimeoutError in the run, while the round-2 row against that same bundle dies 3 of 3 with a bare 5 s locator.click timeout at :576 - the misdiagnosis this finding predicted, reproduced and then removed. The complement holds too: with the padding deleted the clearance widens to 5, the new guard fires in none of the five repeats, and the row still reds at :583:21, so the guard masks nothing.",
+    "The bound is not a hairline on the evidence available: every retained CI artifact of the old row records lowerClearance exactly 2 (the four traces under /legion/scratch/infra-95/traces/), the pod measures 2, the 4px bundle measures 1 and the 0px bundle 5. The quantity is integral at this pitch in this profile, and the dispatch browser job has now executed the >= 2 assertion on a GitHub runner, green.",
+    "phone.e2e.ts:432, :557, :573 - the refuted superlative 'the tightest pitch a body reaches' is gone from the file; grep finds 'a body reaches' nowhere. The narrower wording is still an overstatement by another surface, recorded above as a fast-follow rather than a third round."
   ],
   "ci": {
-    "codeHead": "e0aefdca1f423c7a59cf408b86ae84d26a5c3ecb",
+    "codeHead": "cacb8cbde0e350d560c9da95f2f2d0e3169ce119",
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "read": "All four required checks completed success at the code head (the newest pr-title check-run, completed 06:53:01Z from run 40169522007, is success; an earlier pr-title run was cancelled when superseded). compare/e0aefdca1f42...b37d0c9d7d78 lists only .legion/INFRA-95/implement.json and .legion/INFRA-95/test.json. The dispatch browser job (run 40169430214, not required on main) was still in_progress at 07:20 UTC, 48 minutes after it started; this round requests changes, so it does not wait for it."
+    "read": "All four required by main's rulesets are completed/success at the round-3 code head, read on GitHub: typecheck 07:57:44Z, pr-title 08:11:05Z (newest; one earlier pr-title run was cancelled when superseded), test 08:12:54Z, lint 08:21Z. compare/cacb8cbde0e3...90e2d5a301f0 lists only .legion/INFRA-95/implement.json and .legion/INFRA-95/test.json.",
+    "browserJob": "dispatch (not required by main) at the round-3 code head: completed success, started 08:14:14Z, completed 08:48:42Z, https://github.com/sjawhar/legion/actions/runs/40173677335/job/121113882844. This review waited for it rather than approving on the required four, because the round-3 diff adds the lowerClearance >= 2 assertion and a GitHub runner is the machine class every one of the six recorded failures came from and the one on which the old row measured that clearance at exactly 2. It is one run; the specification's post-merge record asks for the first five runs of the browser job on main that carry the merge, so the runner line stays on Not proven / risk."
   },
   "thermonuclear": {
-    "head": "b37d0c9d7d788c0ef1d22e558d9f68559343198a",
-    "deepReview": "CHANGES at b37d0c9d - three findings: the stale pull request body (two of its three bullets are the reviewer's own lines, rewritten this round; the Size line is the implementer's), the refuted 'tightest pitch a body reaches' superlative, and the unasserted one-pixel margin the mutation probe depends on. It confirmed all three round-1 fixes independently, the position arithmetic against playwright-core's _offsetPoint, expect.poll's 15 s bound, and that a late jumpToLatest can no longer re-create the under-composer state once a [data-turn] exists.",
-    "codeQuality": "CHANGES at b37d0c9d - the footer checklist survived its own renumbering (two assertions still sit 180 lines and two navigations from their measurement), and the 26-line wall-clock settle is deletable by the polled predicate this round introduced. Both are the fast-follow named in round 1, restated; the lowerClearance half of the first is carried as this round's finding 1."
+    "head": "90e2d5a301f0bceb69f37987a6a6d8f1cb786714",
+    "deepReview": "CHANGES at 90e2d5a3 - two Minors, both carried as fast-follow above: the narrowed superlative is still overstated by the agent view's text-sm message presentation, and the pull request body's brief described the round-2 head (the reviewer's own lines, rewritten this round). It read the four retained CI traces and found lowerClearance exactly 2 in each, confirmed nothing is lost by deleting the footer assertion, and confirmed the padding-removal failure still arrives at the second trial click.",
+    "codeQuality": "APPROVE at 90e2d5a3 - no defect introduced by round 3; the precondition now sits before the clicks that depend on it, the obsolete footer assertion is removed rather than duplicated, and the comments are narrowed without changing behaviour."
   },
   "threads": {
-    "round1": "All three round-1 threads carry the implementer's disposition reply and are resolved by it, the pull request's author; each carries the reviewer's confirming reply at this round.",
-    "openedThisRound": 2,
-    "botThreadsAdjudicated": 0
+    "total": 5,
+    "openedByReviewer": 5,
+    "allAnsweredAndResolved": true,
+    "botThreadsAdjudicated": 0,
+    "note": "All five carry the implementer's disposition reply and were resolved by it, the pull request's author; each carries the reviewer's reply. No bot has opened a thread on this pull request, so none was named to the implementer as accepted."
   }
 }
