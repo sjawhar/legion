@@ -232,10 +232,13 @@ rereads at once per session in each broker process, refilled one every ten secon
 `DefaultMissRereads` in `packages/envoy/internal/broker/requests/machine_state.go`), so a secret
 created a moment ago is served on its first request.
 
-A reread is the whole broker's, not one process's. A deployment may run several broker processes
-against one database, and the one a reread reaches tells the others to read that same name again,
+A reread asked for over `POST /v1/secrets/{name}/reread` is the whole broker's, not one process's.
+A deployment may run several broker processes against one database, and the one such a reread
+reaches tells the others to read that same name again,
 so a retag that narrows who may have a secret is in force everywhere within seconds rather than at
-each process's own next five-minute read. One exception is worth stating: a process whose
+each process's own next five-minute read. The miss-path reread above is the other way round: it
+stays in the process that served the request, deliberately, since fanning it out would spend every
+peer a store read for a name that peer may never be asked for. One exception is worth stating: a process whose
 connection to the database has dropped hears nothing while it is reconnecting, and nothing is
 replayed to it when it reconnects, so until its own five-minute read it goes on serving what it
 last read. That read is the backstop for everything the telling can miss.

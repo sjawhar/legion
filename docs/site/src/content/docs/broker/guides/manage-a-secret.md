@@ -320,18 +320,32 @@ them name the secret:
 | `broker: binding before the reread listener has had an answer waited=…` | no | A booting process bound without its `LISTEN`, so notifications sent in that gap reached it not at all. |
 
 A process left behind serves the secret as stored, and a grant of it there releases the stored
-value raw. So, before you store an App key or a Google login:
+value raw.
+
+**The way to avoid the question is not to convert.** Create the secret with its kind from the
+start, under a name no agent holds a grant on, and store the App key or the Google login there.
+A name that was never served as an ordinary secret has no grant that can release a raw value, so
+none of what follows applies to it. Converting a name agents already hold grants on is what opens
+the window, and it is worth a new name to close it.
+
+Where you must convert, before you store an App key or a Google login:
 
 - Read the broker's log since the retag. **If any of those five lines appears, do not store yet** —
   not only one naming your secret. Three of the five carry no secret at all, so a process that
   logged one may be behind on yours and nothing in the line will say so.
-- The remedy is to run the retag again and require another exit 0 with none of those lines after
-  it. A reread reads that one secret directly (`DescribeSecret`, `GetSecret`) rather than through
-  a listing, and the retag exits 1 unless the kind it reads back is the one it wrote, so exit 0
-  says that process has the new tags — which is the strongest statement the broker makes about a
-  name. On Secrets Manager that read answers a write at once; on Secret Manager a single read is
-  eventually consistent like the listing, which is why a retag there can need running more than
-  once.
+- Run the retag again and require another exit 0 with none of those lines after it. That says
+  **the answering process** has the new tags: its reread reads the one secret directly
+  (`DescribeSecret`, `GetSecret`) rather than through a listing, and the retag exits 1 unless the
+  kind it reads back is the one it wrote. On Secrets Manager that read answers a write at once;
+  on Secret Manager a single read is eventually consistent like the listing, which is why a retag
+  there can need running more than once.
+- **It says nothing about the peers, and no log line will.** A peer's reread reads the one name
+  too, so on Secret Manager it can succeed while still reading the old tags: the broker warns
+  only when that read returns an error, and a successful read of stale tags is not one. The
+  notification is asynchronous besides, so a healthy peer need not have applied the retag by the
+  time exit 0 is printed. Neither a second exit 0 nor a clean log establishes the peers — that is
+  the residual `dispatch://INFRA-375` tracks, and the reason the paragraph above recommends a new
+  name instead.
 - If you cannot read the log, wait at least five minutes after exit 0. That is the pod's own
   reload interval, and the wait is **the right action rather than a guarantee**: the reload is
   another listing read, and a store's listing lags a write by up to five minutes on Secrets

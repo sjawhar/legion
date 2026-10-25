@@ -236,8 +236,8 @@ func main() {
 	// that is what the drain is for — so for that window it is still one of the pods a reread has
 	// to reach, and a retag that narrows who may have a secret has to be in force there too.
 	// context.WithoutCancel keeps every value ctx carries and drops only its cancellation;
-	// endServing, called once srv.Shutdown has returned and no request is left to answer, is what
-	// ends these loops instead. Everything that legitimately stops at the signal — the request
+	// endServing, called once srv.Shutdown has returned - having answered the last request, or
+	// having spent its 60-second allowance - is what ends these loops instead. Everything that legitimately stops at the signal — the request
 	// sweeper below — stays on ctx.
 	serving, endServing := context.WithCancel(context.WithoutCancel(ctx))
 	defer endServing()
@@ -527,13 +527,20 @@ func main() {
 	if err := srv.Shutdown(shutdownCtx); err != nil {
 		slog.Warn("broker: shutdown", "error", err)
 	}
-	// The last request has been answered, so the work kept alive through the drain has nothing
-	// left to serve: this is where the reread listener and the five-minute policy reload stop.
-	// The order is a dependency — the listener holds its LISTEN connection through the store
-	// (st.Listener) and redials it forever, so it is ended before the store is closed rather than
-	// left redialing a pool that is going away. Closing the store, which nothing outside a test
-	// did until this shutdown path became what ends those loops, is what releases that connection
-	// and the two pools behind it, each of whose health checks is a goroutine of its own.
+	// Shutdown has returned, either having answered the last request or having spent the 60
+	// seconds above, so the work kept alive through the drain has nothing left to serve: this is
+	// where the reread listener and the five-minute policy reload stop.
+	//
+	// The order is a dependency, and it is not the one the pool makes: st.Listener hands pglisten
+	// a connection hijacked out of the pool (store.go, conn.Hijack), so st.Close never touches it
+	// and closing the store would not end a LISTEN. What ends it is pglisten's own deferred
+	// close of that connection when its loop returns, which endServing asks for by cancelling
+	// serving. endServing only asks: nothing here waits for that goroutine, and the process
+	// exits with the cancellation delivered and the close in flight, which costs nothing because
+	// Postgres ends a session whose connection goes with the process. The order still matters for
+	// the reload and the pools: endServing stops the loop that would otherwise read through a
+	// pool st.Close is about to shut, and st.Close releases the two pools behind it, each of
+	// whose health checks is a goroutine of its own.
 	endServing()
 	st.Close()
 }
@@ -586,14 +593,20 @@ func secondSignalFindsServing(again <-chan os.Signal, serveStarted <-chan struct
 const requestDeadline = 45 * time.Second
 
 // writeTimeout is the http.Server's own WriteTimeout: the request deadline plus the fifteen
-// seconds a handler that honours its context needs to write the answer it already has.
+// seconds a handler that honours its context needs to write the answer it already has. Go resets
+// the write deadline once a request's headers are read, so what it bounds is the exchange after
+// the headers and not the whole accepted connection, whose header read has its own
+// ReadHeaderTimeout above.
 const writeTimeout = requestDeadline + 15*time.Second
 
 // shutdownTimeout is how long the broker waits for its in-flight requests once the drain has run
 // out, and it is the write timeout rather than a figure of its own because that is the longest
-// exchange the server itself allows: a request admitted in the last instant of the drain still
-// gets its whole 45-second handler deadline, and WriteTimeout bounds the exchange around it at
-// 60 seconds, so 60 seconds covers every request the server ever let in. It is only safe to be
+// exchange the server itself allows a request already past its headers: one admitted in the last
+// instant of the drain still gets its whole 45-second handler deadline, and WriteTimeout bounds
+// the exchange around it at 60 seconds. A connection still sending headers when the drain ends
+// is not what this budget is for: Shutdown closes an idle connection at once and treats one that
+// has gone five seconds without its headers as idle (net/http closeIdleConns), so the longest it
+// waits for a connection that never sends a request is those five seconds. It is only safe to be
 // this long because the deployment's terminationGracePeriodSeconds has to cover it — past that
 // the kubelet SIGKILLs the process whatever it believes it is still allowed, and the in-flight
 // requests this budget exists to finish are dropped anyway. The stop-budget line main logs at

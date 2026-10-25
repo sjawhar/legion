@@ -155,9 +155,11 @@ func (l *Listener) onConnected() {
 }
 
 // notified rereads the secret one notification names, on the listener's goroutine. A payload this
-// build cannot read, and a name the reread refuses, are each dropped with one WARN and nothing
-// else: a notification is a hint to read a secret again, so there is nothing to retry and nobody
-// to answer. Neither line carries the payload's own text, which an unreadable payload makes
+// build cannot read, and a Refresh that fails, are each dropped with one WARN and nothing else: a
+// notification is a hint to read a secret again, so there is nothing to retry and nobody to
+// answer. A name the policy refuses is neither: RefreshOne answers it with a Lookup carrying the
+// reason and a nil error, which the Refresh this package is given discards, so it is the policy's
+// own refusal line that records it and nothing here fires. Neither line carries the payload's own text, which an unreadable payload makes
 // arbitrary bytes, and each names the fan-out rather than repeating the HTTP reread's own
 // "broker: reread secret failed", so an operator alarming on that line still reads one pod's
 // own request path alone.

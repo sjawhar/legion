@@ -3033,8 +3033,12 @@ goroutine is its only reader, deciding from `serveStarted`'s state — never fro
 both — whether the second signal is the drain's, handed over on `drainNow`, or an exit that
 skips it. A zero drain takes neither the timer nor that select) and only then closes the listener
 and calls `srv.Shutdown` under `shutdownTimeout`, which is `writeTimeout` (`requestDeadline` 45 s
-plus 15 s) rather than a figure of its own: the longest exchange the server itself allows, so a
-request admitted in the drain's last instant still gets its whole handler deadline. A deployment's
+plus 15 s) rather than a figure of its own: the longest exchange the server itself allows a
+request past its headers, so one admitted in the drain's last instant still gets its whole handler
+deadline. Go resets the write deadline once the headers are read, so it bounds that exchange
+rather than the whole accepted connection, and `Shutdown` closes an idle connection at once, treating
+one that has gone five seconds without its headers as idle, rather than waiting the budget out
+for it. A deployment's
 `terminationGracePeriodSeconds` therefore has to cover any preStop pause plus the drain plus 60 s,
 65 s at the defaults with no pause, the pause and the drain being paid out of the one grace
 period.
