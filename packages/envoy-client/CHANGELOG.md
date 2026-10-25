@@ -21,7 +21,10 @@
   it. A deadline inside one tick would abandon every pass before the next tick, so the heartbeat's
   `healing` latch — and the registration backstop that runs under it, which keeps a pane with a
   wedged pass registered — would be false at every tick and the backstop would never post. A
-  caller that wants a short deadline shortens `ENVOY_HEARTBEAT_MS` with it.
+  caller that wants a short deadline shortens `ENVOY_HEARTBEAT_MS` with it. A raise is reported
+  rather than applied in silence: when an explicit `ENVOY_PASS_DEADLINE_MS` is usable and shorter
+  than the resolved heartbeat, the session's start notice (`sessionSettings`' `notice`, which
+  pi-envoy shows at `session_start`) names both the configured value and the deadline in force.
 
 ### Fixed
 

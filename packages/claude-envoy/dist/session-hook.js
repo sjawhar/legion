@@ -19403,7 +19403,7 @@ function handedConfigFile(env) {
     return { path: null, error: messageFor(error48) };
   }
 }
-function startNotice(config2, dispatch, envoy, nats) {
+function startNotice(config2, dispatch, envoy, nats, env) {
   if (config2.kind === "failed")
     return `${config2.error}: Dispatch and Envoy are off`;
   const { missing, checkout } = config2;
@@ -19433,6 +19433,12 @@ function startNotice(config2, dispatch, envoy, nats) {
   if (envoy.enabled && nats && "off" in envoy.inbound) {
     parts.push(`Envoy's inbound messages are off: ${envoy.inbound.off}; the Envoy tools still work`);
   }
+  if (envoy.enabled) {
+    const named = Number(env.ENVOY_PASS_DEADLINE_MS);
+    if (Number.isFinite(named) && named > 0 && named < envoy.heartbeatMs) {
+      parts.push(`Envoy's pass deadline is ${envoy.passDeadlineMs} ms, not the ${named} ms ENVOY_PASS_DEADLINE_MS names: a deadline inside one ${envoy.heartbeatMs} ms heartbeat interval would abandon every pass before the next tick, so the registration refresh the heartbeat posts for a stalled pass would never run`);
+    }
+  }
   return parts.length === 0 ? null : parts.join("; ");
 }
 function sessionSettings(file2, env, options) {
@@ -19443,7 +19449,11 @@ function sessionSettings(file2, env, options) {
   const config2 = readEnvoyConfig(file2.path, env, options);
   const dispatch = dispatchSettings(env, config2);
   const envoy = envoySettings(env, config2, { nats: options.nats });
-  return { dispatch, envoy, notice: startNotice(config2, dispatch, envoy, options.nats !== false) };
+  return {
+    dispatch,
+    envoy,
+    notice: startNotice(config2, dispatch, envoy, options.nats !== false, env)
+  };
 }
 function sessionDispatchSettings(file2, env, options) {
   if (file2.path === null)
