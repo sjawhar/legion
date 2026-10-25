@@ -2,35 +2,30 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-354",
-  "completed": "2026-10-25T08:13:16Z",
-  "reviewedHead": "a1401b2e40c2f73a463796f2554d690125ec821a",
-  "codeHead": "d677494f626c8824b10a1b943b6b0896254e1af3",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T09:08:50Z",
+  "round": 2,
+  "reviewedHead": "bd184dc8b0c9603d9cdd5e6e672c8b6d7ef2bd05",
+  "codeHead": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
+  "decision": "approved",
   "critical": 0,
-  "important": 2,
-  "minor": 1,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/envoy/internal/broker/policy/policy.go:313-315",
-      "description": "Requester.Service's doc comment still states the retired rule: set only when the pod's verified account 'is the one BROKER_SERVICES binds that service to'. Plan D6/task F put every passage that states the one-account rule in scope because no machine check reaches them; this one, on the field that carries the authorization decision, was missed. Rewrite to 'one of the accounts BROKER_SERVICES maps to that service'."
-    },
-    {
-      "severity": "important",
-      "file": "docs/kubernetes.md:2784-2787",
-      "description": "Plan D10's run record: the older bullet still says, 'at this change's head', that get/list/create services answer 'no', while the new bullet at :2805 records them 'yes' on 2026-10-25. Date or qualify the older bullet ('at the time of that run') as the second bullet already does, so the record reads as one history rather than a contradiction."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/cmd/broker/service_account_scope_test.go:72-190",
-      "description": "The tester's test copies the HTTP call, JSON decode, token login, pod enrollment, signed request and response type of service_accounts_test.go:73-190. Factor one test-only fixture in a new file shared by the two tests (not service_login_test.go, so the overlap with #2162 does not widen); keep both tests' cases and the real-binary boundary."
-    }
-  ],
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
   "verified": [
-    "Production code: requester's guarded subject lookup (machine_state.go:214), Load's account-keyed map and direct overlap lookup (config.go:399-411), the same-service duplicate wording (config.go:221-225), loader's distinct services (main.go:133); all four requester call sites pass ServicesByAccount; no reader of the old ServiceAccounts field remains in packages/envoy or packages/daemon.",
-    "Sibling boundaries held by tests that fail when broken: unlisted account (service_accounts_test.go pod C; machine_test.go impostor), account listed for another service under a different launcher (service_account_scope_test.go, the tester's mutant), account dropped from the configuration (TestAServiceGrantStopsWhenItsServiceAccountChanges, inverted so its old subject is gone), session-kind and launcher-less pods (TestAServicesSecretGoesToItsOwnPodsAlone).",
-    "No contract change census needed: the change adds no refusal and removes or renames nothing at a process or package boundary; BROKER_SERVICES widens and the renamed fields are in internal packages.",
-    "Both E2E lines present with surface, command, observation, head and negative control; tester verified the implementer's proof.",
-    "CI at a1401b2e: Tests 40175223517, Legion Envoy and Contracts 40175223519, PR Title 40175310332 queued, Docs 40175223558 in progress at review time; not a basis for approval."
+    "Round-1 findings closed: policy.go:313-318 Requester.Service now states the account-keyed rule and matches machine_state.go:214; docs/kubernetes.md:2784-2789 dates the older run-record bullet so it no longer contradicts :2807-2819; pod_broker_test.go's podBroker fixture (no options) replaces both tests' copied closures, every state/grant_id/record_id/approver/values/boot-log assertion survives, and the dropped empty-address guards are enforced by startBroker -> waitForBoundAddress (main_test.go:320-327).",
+    "Thermonuclear pair at bd184dc8: deep review APPROVE, code quality APPROVE, no findings; both ran go vet ./cmd/broker/ ./internal/broker/policy/ and a compile-only go test ./cmd/broker/, exit 0.",
+    "Both E2E lines name 3ec1bea3; the any-listed-account mutant still fails TestAnAccountProvesOnlyTheServiceItIsListedFor (implementer and tester, independently).",
+    "CI at code head 3ec1bea3 (compare to bd184dc8: .legion/ only): required lint, typecheck, test, pr-title success (Tests 40176473240, PR Title 40176508515); Legion Envoy and Contracts 40176473247 success incl. envoy-go and envoy-go-race, which run the real-binary tests on Postgres; Docs 40176473279 and Worker Image 40176473285 success.",
+    "Thread PRRT_kwDORFy7ds6v_kJy (mine): fixed in 3ec1bea3, resolved by the implementer, accepted in my reply."
+  ],
+  "priorRounds": [
+    {
+      "round": 1,
+      "reviewedHead": "2a0e351d0a050a38091cd7e2fa0311dcf971ef4f",
+      "decision": "changes_requested",
+      "review": "https://github.com/sjawhar/legion/pull/2185#pullrequestreview-5642205959",
+      "important": 2,
+      "minor": 1
+    }
   ]
 }
