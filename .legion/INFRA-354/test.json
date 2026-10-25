@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-354",
-  "completed": "2026-10-25T08:04:05Z",
-  "codeHeadTested": "8b53654d4545988b8880e4f627aa11c593964572",
+  "completed": "2026-10-25T08:29:46Z",
+  "codeHeadTested": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its command independently against my own cluster Postgres (Job + ClusterIP Service per docs/kubernetes.md 'Running a workload in the cluster from a role', corrected controller-uid selector): `go test ./cmd/broker -run TestOneServicesTwoAccountsEachGetItsSecret -v -count=1` PASS (8.33s), pods A and B granted decision automatic approver null and read SERVICE_KEY=service-value, pod C denied decision deny with grant_id/record_id/approver null. Re-drove its hand-started broker runs on binaries I built myself (head 8b53654d, base 5c182bd16f0a from the GitHub tarball, outside the checkout): same observations, same base refusal."
+    "how": "Round 2 (review fixes at 3ec1bea3): re-ran its round command against a fresh cluster Postgres Job + ClusterIP Service: `go test ./cmd/broker -run 'TestOneServicesTwoAccountsEachGetItsSecret|TestAnAccountProvesOnlyTheServiceItIsListedFor' -v -count=1` both PASS through the shared podBroker fixture (A,B granted automatic, C denied; 6 cross-service denials, own pod granted). Re-ran its negative control independently: the any-listed-account mutant in a copy outside the checkout fails TestAnAccountProvesOnlyTheServiceItIsListedFor with three 'granted' replies. Read the diff d677494f..3ec1bea3: production change is the policy.go Requester.Service doc comment only; every State/GrantID/RecordID/Approver assertion of both tests survived the refactor; the boot-log owner-tag-malformed check is kept."
   },
   "failures": [],
   "failed": 0,
@@ -19,30 +19,39 @@
   ],
   "proof": [
     {
-      "criterion": "Line 1 and line 4: two accounts may name the same service, and the broker starts on that configuration (start-up path).",
-      "surface": "Real compiled broker binary (go build ./cmd/broker at head) started by hand against a Postgres Job + ClusterIP Service in the cluster, fake secrets file with SERVICE_KEY owned by example-service and OTHER_KEY owned by other-service.",
-      "command": "$TMPDIR/t354/run.sh ./broker-head \"example-service=<A> example-service=<B>\" (env: productionEnv equivalents, BROKER_FAKE_SECRETS_FILE, BROKER_DATABASE_URL on the cluster Postgres); then GET /healthz and POST /v1/secrets/{SERVICE_KEY,OTHER_KEY}/reread. Also newline/tab-separated \"example-service=<A>\\n\\texample-service=<B>\\nother-service=<D>\" and today's one-account-per-service \"example-service=<A> other-service=<D>\".",
-      "observed": "broker listening; healthz 200; SERVICE_KEY {served:true}; OTHER_KEY {served:false, reason owner-tag-malformed} (other-service unregistered, so the loader got the service names, not the accounts). Mixed-whitespace and today's shapes: listening, both secrets served.",
-      "headSha": "8b53654d4545988b8880e4f627aa11c593964572",
-      "negativeControl": "Base binary 5c182bd16f0a, same configuration: EXIT 1 before listening, `BROKER_SERVICES must give each service once, got \"example-service=system:serviceaccount:example-other:example-worker-b\"`."
+      "criterion": "Lines 1 and 4 at the review-round head: two accounts for one service start the broker (start-up path).",
+      "surface": "Real compiled broker built at 3ec1bea3, started by hand against a fresh cluster Postgres Job + ClusterIP Service.",
+      "command": "BROKER_SERVICES=\"example-service=<A> example-service=<B>\" with productionEnv equivalents and BROKER_FAKE_SECRETS_FILE; GET /healthz; POST /v1/secrets/SERVICE_KEY/reread.",
+      "observed": "broker listening; healthz 200; reread {\"name\":\"SERVICE_KEY\",\"served\":true}.",
+      "headSha": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
+      "negativeControl": "Same binary with A written twice: exit 1 `names the service account system:serviceaccount:example:example-worker-a twice for \"example-service\"`."
     },
     {
-      "criterion": "Line 2: a configuration naming one account twice is still refused, with a message naming the account.",
-      "surface": "Real compiled broker binary started by hand, as above.",
-      "command": "run.sh ./broker-head with BROKER_SERVICES = \"example-service=<A> example-service=<A>\"; \"example-service=<A> other-service=<A>\"; \"example-service=<A> example-service=<B> other-service=<D> example-service=<A>\" (repeat not adjacent); BROKER_SERVICE_LOGINS naming the service's second pod account B; BROKER_SERVICE_LOGINS naming another service's pod account; the default account as a second account.",
-      "observed": "Each EXIT 1 before listening: `names the service account system:serviceaccount:example:example-worker-a twice for \"example-service\"; each account proves one service, so name it once` (adjacent and non-adjacent); `... for both \"example-service\" and \"other-service\"; ...`; `BROKER_SERVICE_LOGINS names system:serviceaccount:example-other:example-worker-b, the account BROKER_SERVICES binds for \"example-service\"'s pods ...`; same for other-service's account; `names a namespace's default service account`.",
-      "headSha": "8b53654d4545988b8880e4f627aa11c593964572",
-      "negativeControl": "Same run with the two accounts distinct starts (proof 1). Base binary on \"A twice\" refuses with the old wording `for both \"example-service\" and \"example-service\"`, which the new same-service wording replaces."
+      "criterion": "Line 2 at the review-round head: a repeated account is refused naming it.",
+      "surface": "Real compiled broker built at 3ec1bea3, started by hand.",
+      "command": "BROKER_SERVICES=\"example-service=<A> example-service=<A>\" and \"example-service=<A> other-service=<A>\".",
+      "observed": "Both exit 1 before listening: `... twice for \"example-service\"; each account proves one service, so name it once` and `... for both \"example-service\" and \"other-service\"; ...`.",
+      "headSha": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
+      "negativeControl": "A and B distinct for the one service: starts and serves SERVICE_KEY."
     },
     {
-      "criterion": "Line 3: a pod under any of a service's accounts obtains its secrets; a pod under none does not, and gets no approval path -- including an account listed for a different service, and an account dropped from the configuration.",
-      "surface": "Real compiled broker over HTTP via the repository's real-process harness: local OIDC issuer, real projected pod tokens, token logins, pod enrollments, cluster Postgres.",
-      "command": "cd packages/envoy && go test ./cmd/broker -run 'TestOneServicesTwoAccountsEachGetItsSecret|TestAnAccountProvesOnlyTheServiceItIsListedFor' -v -count=1; plus a throwaway real-binary scenario (outside the checkout): pods A and B granted, a 20-request concurrent burst from both, then a second broker on the same database with BROKER_SERVICES listing only A.",
-      "observed": "Two services with own logins (example-service on A,B; other-service on D): other-service's pod on D granted OTHER_KEY; pods under other-service's credential running as A or B, and a pod under example-service's credential running as D, each denied SERVICE_KEY and OTHER_KEY with decision deny, grant_id/record_id/approver null (6 denials). Burst: 20/20 granted. After restart without B: pod A values 200 SERVICE_KEY=service-value and new request granted; pod B's held grant values 403 GRANT_NOT_LIVE 'the current policy no longer allows SERVICE_KEY', new request denied, record_id null, approver null.",
-      "headSha": "8b53654d4545988b8880e4f627aa11c593964572",
-      "negativeControl": "Mutant requester (any listed account trusts the launcher's claimed service) -> TestAnAccountProvesOnlyTheServiceItIsListedFor FAIL with three 'granted' replies where denied is required; every pre-existing test passed on that mutant."
+      "criterion": "Line 3 at the review-round head: a pod under any of a service's accounts gets its secrets; an unlisted account, or one listed for another service, gets nothing and no approver.",
+      "surface": "Real compiled broker over HTTP via the real-process harness (local OIDC issuer, real projected pod tokens, token logins, enrollments, cluster Postgres), now through the shared podBroker fixture.",
+      "command": "cd packages/envoy && go test ./cmd/broker -run 'TestOneServicesTwoAccountsEachGetItsSecret|TestAnAccountProvesOnlyTheServiceItIsListedFor' -v -count=1",
+      "observed": "Both PASS (7.49s, 8.59s). Pods A,B granted decision automatic, record/approver null, values read; pod C denied. Cross-service: other-service own pod granted OTHER_KEY; pods under other-service running as A or B, and under example-service running as D, denied SERVICE_KEY and OTHER_KEY (6 replies, grant_id/record_id/approver null).",
+      "headSha": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
+      "negativeControl": "Any-listed-account mutant of requester (outside the checkout): TestAnAccountProvesOnlyTheServiceItIsListedFor FAIL, three granted replies where denied is required."
     }
   ],
-  "environment": "Postgres: Job + ClusterIP Service started from this role per docs/kubernetes.md 'Running a workload in the cluster from a role'; gates create jobs/create services/get services all yes; Ready 4 s after apply on a warm node; reachability answered first try. The Service with the corrected controller-uid selector was admitted; a server-side dry run of the same Service selecting job-name was refused naming the controller-uid rule, confirming the doc correction. Job deleted; kubectl get jobs,pods held nothing of it; kubectl get svc answered NotFound.",
-  "ci": "At 8b53654d: PR Title 40174403106 success; Tests 40174310207 queued; Docs 40174310249 queued; Worker Image 40174310250 in_progress; Legion Envoy and Contracts 40174310285 queued. Not waited on."
+  "environment": "Round 2: fresh Postgres Job + ClusterIP Service (controller-uid selector) per docs/kubernetes.md; gates yes/yes/yes; reachability answered; Job deleted, kubectl get jobs,pods held nothing of it, svc NotFound. Round 1 environment as before.",
+  "ci": "At 3ec1bea3: Tests 40176473240, Legion Envoy and Contracts 40176473247, Docs 40176473279, PR Title 40176482718/40176483283/40176508515 queued; Worker Image 40176473285 pending. Not waited on.",
+  "round": 2,
+  "priorRounds": [
+    {
+      "round": 1,
+      "codeHeadTested": "8b53654d4545988b8880e4f627aa11c593964572",
+      "verdict": "pass",
+      "testCommit": "d677494f626c8824b10a1b943b6b0896254e1af3"
+    }
+  ]
 }
