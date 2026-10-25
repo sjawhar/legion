@@ -1991,15 +1991,21 @@ func (s *Service) evictInstance(_ context.Context, room string, live *crdt.Doc) 
 // (hasOpenLiveWrite) - after which the browser reconnects and a replacement loads with a state of
 // its own. A close by name here closed that replacement under the browser.
 //
-// Whose room is under the name is read from state, not from the document, because a load that
-// starts once the failed instance is gone takes the failed state while the service still holds it
-// (onLoadDocument), and is closed with it, as before. A state the service holds is the one every
-// load under the name takes, so the room under the name is state's until state is forgotten
-// (forgetLocked). The stale-room evictor forgets the state it closed under the gate this check is
-// made under (evictInstance, closeOwned), so once it has closed the failed room this check finds
-// the state forgotten. A close that forgets its state after letting go of the gate - Evict, which
-// only tests call, or ygo's own retirement of an idle room (releaseUnloadedRoom) - leaves a moment
-// in which a fresh load and this close can still meet, as every close by name could.
+// Whose room is under the name is read from state, not from the document, because the load that
+// replaces the failed room can attach to the failed state: ygo's own load takes the state after
+// it has published the room (onLoadDocument), so a load that was already under way when the room
+// failed is refused by the failure (websocket.go's roomFailure check) only if it reaches that
+// check after it, and one that passed it is closed here with the state it took, as before. A
+// state the service holds is the one every load under the name takes, so the room under the name
+// is state's until the state is forgotten (forgetLocked). The stale-room evictor forgets the
+// state it closed under the gate this check is made under (evictInstance, closeOwned), so once it
+// has closed the failed room this check finds the state forgotten.
+//
+// Evict and Quiesce, which only tests and the browser-test harness's own route call
+// (quiesceDocuments), forget their states after letting go of the gate (evictRoom), leaving a
+// moment in which this close can still meet a load that took the state after it, as every close
+// by name could. ygo's own retirement of an idle room forgets no failed
+// state: a state with a failure is in use until its eviction (unusedLocked).
 func (s *Service) evictFailed(room string, state *roomState) error {
 	_, err := s.srv.closeOwned(room,
 		func() bool {

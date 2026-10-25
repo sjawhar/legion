@@ -1027,6 +1027,69 @@ func TestASettlementOfAnEvictedRoomCountsNoFailureAgainstItsReload(t *testing.T)
 	}
 }
 
+// A live write that opens while an eviction's close runs is the last thing to move that room's
+// generation, and its value names no later room's arming either. The eviction invalidates the
+// state before it closes the room (invalidateForEviction) and forgets it after, so a write that
+// opens in between moves the generation with no eviction left to move it again: counted on the
+// state, that value was the one the service's counter had still to hand out, the reload's first
+// arming took it, and a settlement refused after the close counted its refusal against the
+// reload.
+func TestALiveWriteDuringAnEvictionLeavesNoGenerationForTheReload(t *testing.T) {
+	service, artifactID := newTestService(t)
+	service.settle = time.Hour
+	ctx := context.Background()
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("load the room: %v", err)
+	}
+
+	// The eviction's own steps, with the write between them: invalidate, close, forget.
+	evicted := service.invalidateForEviction(artifactID)
+	if evicted == nil {
+		t.Fatal("the service holds no state for the room, so nothing here is tested")
+	}
+	write, err := service.openLiveWrite(ctx, &Ledger{}, artifactID)
+	if err != nil {
+		t.Fatalf("open a live write while the eviction closes the room: %v", err)
+	}
+	evicted.mu.Lock()
+	stale := evicted.roomGeneration
+	evicted.mu.Unlock()
+	service.finishLiveWrite(write)
+	if err := service.evictRoom(artifactID, evicted); err != nil {
+		t.Fatalf("close the room and forget its state: %v", err)
+	}
+
+	if err := service.warmLiveDocument(ctx, artifactID); err != nil {
+		t.Fatalf("reload the room: %v", err)
+	}
+	// Arm the reload's settlement until its generation has reached the write's, or passed it.
+	// Counted on the state, the reload's first arming is the write's own value; drawn from one
+	// counter, it is already past it.
+	reload := service.lockState(artifactID)
+	if reload == evicted {
+		service.unlockState(artifactID, reload)
+		t.Fatal("the reload kept the evicted room's state, so nothing here is tested")
+	}
+	for reload.roomGeneration < stale {
+		armed := reload.roomGeneration
+		service.scheduleSettleLocked(artifactID, reload)
+		if reload.roomGeneration == armed {
+			service.unlockState(artifactID, reload)
+			t.Fatal("no settlement was armed on the reload, so nothing here is tested")
+		}
+	}
+	service.unlockState(artifactID, reload)
+
+	service.retrySettle(artifactID, stale, ErrRoomBehindHead)
+
+	reload = service.lockState(artifactID)
+	failures, failed := reload.settleFailures, reload.failed
+	service.unlockState(artifactID, reload)
+	if failures != 0 || failed != nil {
+		t.Fatalf("a settlement of the room the write left behind counted its refusal against the reload: %d failure(s), failed=%v", failures, failed)
+	}
+}
+
 // A cold write publishes into whatever room loaded while it ran, and holds no room cursor of its
 // own to advance (coldFork): its commit takes its versions into that room's cursor
 // (takeRoomCursors), so the room stands at the head for the whole commit-to-publish window. Left

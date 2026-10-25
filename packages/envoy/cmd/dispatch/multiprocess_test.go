@@ -880,6 +880,11 @@ func burstLeavingTheRoomBehind(t *testing.T, pair *dispatchPair, artifactID stri
 	// end and that settlement met less often than they do for a browser (dispatch://INFRA-396). Its
 	// own sync update is stored before the trailing write (openSyncedEditor), so that write alone
 	// leaves the room behind the head.
+	//
+	// Dialling this early can land in ygo's own window between a close's peer hang-up and its
+	// removal of the room, where the dial is refused: a real browser's reconnect has the same
+	// window, and the row then fails at its open, naming the refusal, rather than passing on
+	// something it did not measure.
 	reconnected := openSyncedEditor(t, pair, artifactID, "middle\n")
 	// The eviction's own line is written after the room has closed, so it is waited for rather
 	// than read the moment the socket went.
