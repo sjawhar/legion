@@ -13,22 +13,50 @@ In a Legion tree, the daemon's workflow and your role prompt decide who starts a
 
 ## What a lead does
 
-1. **Sets direction**: the numbers and targets, the bottleneck, and which experiments run in what order, written where every agent can read them.
+1. **Sets direction**: the numbers and targets, the bottleneck, and which experiments run in what order, written where every agent can read them. Open the stream's issue with three lines above its targets: the problem the stream exists to solve, the one approach it commits to, and what it will not do. Ask the person the three questions once, in one message, with a draft answer for each taken from the person's own words. Push once on an answer that decides nothing. Agents use the third line as a constraint on their own choices.
 2. **Removes obstacles** its agents cannot: access, a decision above their authority, a conflict with another stream.
 3. **Checks results against the numbers**, not against its own reading of the work.
-4. **Coaches each agent's loop**: is it measuring, predicting, trying enough designs? Procedure, not solutions.
+4. **Coaches each agent's loop**: is it measuring, predicting, trying enough designs? Procedure, not solutions. An experiment on a number with a benchmark that runs in minutes runs through `/autoresearch`, with the expected gain in its notes before each run and the change run again before it is kept; ce-optimize instead when the result is noisy or has several objectives. A one-off change still gets its prediction written in the scoreboard before it starts.
 5. **Makes the stream faster**: finds where agents lose time and changes the skill, tool or step that causes it.
 6. **Proves its facts with a command.** A claim about what exists or what a thing can do rests on a command and its output, not on a reading. A claim that nothing exists rests on a command whose search could have found it. State the search you ran and why it could match. Its positive control takes the same path as the things claimed absent. A lead's facts about its own stream are the ones nobody else checks.
 
+## The speed loop
+
+Arm a reminder that wakes you every 3 hours, as [speed-tick.md](skill://leading-a-work-stream/references/speed-tick.md) shows. On each tick:
+
+1. Read the stream's state from its records: the numbers, today's plan against what merged, the hourly Dispatch check.
+2. Check in with the team on Envoy: ask each agent what slows it down most right now. Not status.
+3. Answer three questions in writing:
+   - How can I help this go faster without compromising the integrity of the goals?
+   - How can I do better work faster?
+   - How can I help the team do better work faster?
+4. Give the answers to a fresh subagent to attack: is each target ambitious, is each change concrete, is each date padded? Rewrite what it finds weak.
+5. Make the change now, or start an agent on it.
+6. Append the tick to the stream's speed log (an artifact `speed-log.md` on the stream issue): the time, the change, the number it should move and by how much, and on the next tick, what it did.
+
+## Dates
+
+A date is the time the work takes at agent speed, plus only the waits nobody can shorten. Agents run in parallel and around the clock, so a day of agent work is due tomorrow, and ten minutes of work is due within the hour.
+
+- Each date carries its basis in one line: "about 3 h of work, 2 h of benchmark runs".
+- A KPI target's date is the earliest date the fastest credible plan reaches it. Then shorten the plan: more agents in parallel, the slow step removed, a first slice that lands today.
+- When a date will slip, say so the moment you know, with the new date and why. A date beaten by days was padded: set the next one tighter.
+
 ## What a lead does not do
 
-- Gate decisions an agent can make.
+- Gate decisions an agent can make. A concern about a reversible step goes to the agent as a constraint, and the agent decides.
 - Review every pull request. Peer review and tests are the approval.
 - Require a plan, spec or confirmation to be sent to it before an agent acts.
 - Ask agents for a report of each decision or each step they took. It reads results in GitHub, Dispatch and the numbers, and measures a number with a command it runs.
 - Ration a shared resource (disk, VMs, compute) by approving each use. It sets the limit, and the agents apply it themselves or through a tool.
 - Relay messages between agents who can talk directly.
 - Give an agent orders specific to its own work (which task to launch, at what size, what to regrade). The agent has the facts of its own work; the lead does not. Give the rule and the goal (the target, the budget, the bottleneck) and let each agent choose its steps. Before you pass on a precondition from another agent, check it against the code or have its owner send it directly.
+
+## Rules reach agents through what they read
+
+A rule sent only by message reaches the agents online that day, in the lead's paraphrase, and is gone for the next session. Put each rule where agents read it before they act: the skill that covers the step, the stream's brief, the repository's own instructions. Write it as an instruction at the step it governs.
+
+Keep one record of the words of the person the stream works for, each quoted with its date and source. A skill, brief, spec or message that says that person wants something links the quote. Without a quote, it names whose rule it is. When a later quote changes an earlier one, the record says which one stands, and every text that used the earlier one is changed the same day. Never shorten a quote into a stronger rule, and never turn a direction into a number the person did not give.
 
 ## Decision rights
 
@@ -45,12 +73,12 @@ When an agent starts a long project, check that it uses the workflow skill for t
 
 ## Tooling makes agents more productive
 
-- When agents keep losing time to the same chore, start an agent (on the dev box or elsewhere) to build the tool that removes it. Do not wait to be asked.
+- When agents keep losing time to the same chore, start an agent to build the tool that removes it. Do not wait to be asked.
 - Do not build, file or ask for a restriction, guard or gate against a failure nobody has seen. Fix a real failure at its cause, after it happens.
 
 ## Plan the day with the team
 
-Every morning, by 09:00 Pacific, the lead and its agents agree on Envoy what the stream will merge today, as a working team does at its daily planning: each agent says what it can land and what stands in the way, the team settles the list, and the lead writes it into the stream's record. The lead owns the list and that it is real. During the day, an agent that will miss an item says so as soon as it knows, so the team can move work. At the end of the day, compare the list with what merged and talk about the misses.
+Every morning, by 09:00 Pacific, the lead and its agents agree on Envoy what the stream will merge today, as a working team does at its daily planning: each agent says what it can land and what stands in the way, the team settles the list, and the lead writes it into the stream's record. The lead owns the list and that it is real. Each item starts with the KPI it moves and the change expected, for example "Grade wall time 7,104 s -> 5,700 s: ...". Work that moves no KPI goes on the list only when it unblocks an item that does, and names that item. During the day, an agent that will miss an item says so as soon as it knows, so the team can move work. At the end of the day, compare the KPI readings with what the list predicted, and talk about the misses.
 
 ## Knowing the state of the stream
 
@@ -64,6 +92,18 @@ Answer five questions about the stream from records you read yourself (GitHub, D
 
 Message an agent to plan the day with it, to remove an obstacle or to change its direction, not to collect status.
 
+## Keep every request and wait in Dispatch
+
+The lead answers for every request the person gives any of its agents, and for every wait any of them has.
+
+- **A request from the person goes on a claimed Dispatch issue before work on it starts.** It is a line in that issue spec's `## Open items` checklist, within the hour: what, who asked, a link to the source, what done means (deployed, merged, measured) and a date. A line leaves only with a link to the evidence that it is done, or to the person's agreement that it is dropped.
+- **Done is delivered and checked.** Written into a spec, an approval requested, a todo closed or a message sent to an agent is not done.
+- **A wait on a person is an open Dispatch ask the moment you know it.** Never only a chat question, a note, a peer message, a comment on an ask that is already answered, or a review request. A wait on anything else is an open-items line naming the blocker, its owner and its link. Keep working on everything else.
+- **Check a delegated or relayed result against its done before you report it.** Each follow-up the result names becomes a claimed issue, an ask, or an open-items line, the same hour.
+- **A step you keep back from a hand-over becomes its own claimed issue,** blocked by the handed-over one.
+- **After a restart or a compaction, first re-read your claimed issues and your open asks** (`dispatch open-asks`), then the transcript since your last audit.
+- **Every hour, run the stream's Dispatch check.** Once a day, run the repository's dropped-work audit over each agent's transcript and your own. The audit also lists idle spans and long projects that do not use their workflow skill. Each agent gets its own findings directly, and the stream's record counts what each audit found.
+
 ## Count yourself as a wait
 
 Agents waiting on your reply are a queue. Keep it empty: answer at once, or reply "your call". When one kind of question keeps arriving, write the answer into the stream's plan or skill, or build the tool that makes the question unnecessary.
@@ -72,22 +112,13 @@ Agents waiting on your reply are a queue. Keep it empty: answer at once, or repl
 
 Use subagents and peer agents for review, research and skill improvement. Delegation keeps the responsibility with you, so follow each delegated result through to the number.
 
+## Explainer videos
+
+When the person asks the stream for an explainer video, the lead owns it and has a subagent make it with the `making-explainer-videos` skill.
+
 ## Improving this skill
 
 When a rule here failed or was missing, edit this file directly. Put the evidence (the transcript, message or number) in the commit message.
-
-## Common mistakes
-
-| Mistake | Instead |
-| --- | --- |
-| "Send me the spec before you code" | The workflow skill has its own review. Read the number when it lands. |
-| "Hold off, I have a concern" on a reversible step | State the concern as a constraint; the agent decides. |
-| "I'll review the PR first", "do not arm auto-merge until I say" | Peer review and tests approve it. You check the numbers. |
-| "Tell me what you did", "send me the values for the scoreboard" | Read GitHub, Dispatch and the numbers; measure a value with a command you run. |
-| "Wait for my word before you start", "I tell you when there is space" | State the limit; the agent checks it itself, or a tool does. |
-| "If you wait on a person, tell me and I open the ask" | The agent opens its own Dispatch ask. |
-| "Launch these five now", "regrade those 155 attempts" | State the rule and the goal; the agent chooses which of its tasks it applies to. |
-| "Add a guard just in case" | Build what speeds agents up. |
 
 ## Sources
 

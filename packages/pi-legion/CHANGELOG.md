@@ -7,21 +7,22 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
-- A ninth Legion skill, `leading-a-work-stream`: what a lead of a team of agents does and does not
-  do, who decides which steps, the day's plan with the team, and how a lead reads the stream's
-  state from records rather than reports. It is the dotfiles skill of the same name at its latest
-  text, with names taken out and two additions. A lead proves its facts with a command and its
-  output, and a claim that nothing exists names its search and a positive control on the same
-  path. In a Legion tree the daemon's workflow and the role prompt keep their own sequence. The
-  dotfiles copy goes once a release carries this one.
+- A ninth Legion skill, `leading-a-work-stream`, rebuilt from dotfiles
+  `356f3111d2e01697a996cbbba69aa426cc3047bd`: the current source removes the Common mistakes
+  table and adds dates, the speed loop and `references/speed-tick.md`. The Legion copy removes
+  names and private tool paths, keeps the speed-tick link, and keeps two Legion additions: the
+  workflow-and-role sequence and the rule that a lead proves its stream facts with a command and
+  its output. The dotfiles copy goes once a release carries this one.
 
 - `STRATEGY.md` at the repository root holds Legion's and Dispatch's strategy: purpose, users, key
   metrics, tracks, principles, and the boundaries that need the owner's decision. It replaces
   `docs/design-principles.md`. `legion-architect` and the planner's role prompt
-  (`roles/core/planner.md`) say to read it before a spec or plan, and to check before any question
-  to a person, in order: what `STRATEGY.md` answers, then a standard best-practice solution, and
-  only then an ask with one recommendation, when the answer changes what the tree delivers. A
-  design that crosses one of its boundaries goes to its owner before it is built.
+  (`roles/core/planner.md`) say to read the repository's `STRATEGY.md` when it has one before a
+  spec or plan, and to check before any question to a person, in order: what that file answers,
+  then a standard best-practice solution, and only then an ask with one recommendation, when the
+  answer changes what the tree delivers. A design that crosses a Boundary in that file goes to its
+  owner before it is built. A finding outside the tree, and a to-do only a person can do, is always
+  an ask.
 - `legion-architect`: before it requests approval of the root spec, an architect checks every
   factual claim in the spec against the code, the docs or a command, resolves each finding of the
   fresh-reader check, and requests approval once. `dispatch-writing-specs`, "Approval", says the
