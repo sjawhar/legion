@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T16:44:25Z",
-  "round": 5,
-  "reviewedCodeHead": "ae01882052a9a3c9780d75c22fd4f5cdf61d93d6",
+  "completed": "2026-10-25T17:47:51Z",
+  "round": 6,
+  "reviewedCodeHead": "db7e7cc42766d90b0cc4ca34836f59e1653ba358",
   "base": "687c9e6f2b92b9c0b0e59df6ca026b7bc899304b",
   "decision": "approved",
   "critical": 0,
@@ -14,19 +14,13 @@
     {"round": 1, "codeHead": "7d38337be60f", "decision": "changes_requested", "findings": "e2e-local.sh destroyed a live same-checkout run; stale README; false guard comment. Fixed in 529a9c541aef."},
     {"round": 2, "codeHead": "cb81dabd7aac", "decision": "changes_requested", "findings": "Gate port band inside gVisor's ephemeral range; relay.Close comment. Fixed in c9b95f0c760d."},
     {"round": 3, "codeHead": "c9b95f0c760d", "decision": "changes_requested", "findings": "envoy-go-race red: overlap test's subtests shared one account. Fixed in cf4fb50d1afc."},
-    {"round": 4, "codeHead": "9ca2004f5f5f", "decision": "approved", "findings": "none; recorded kvwatch_test.go:837-840 as a risk, which the architect then had fixed (ae01882052a9), voiding this approval by a push."}
+    {"round": 4, "codeHead": "9ca2004f5f5f", "decision": "approved", "findings": "none; kvwatch restore site recorded as a risk, then fixed by the architect's ruling."},
+    {"round": 5, "codeHead": "ae01882052a9", "decision": "approved", "findings": "none; six body corrections to the sweep table sent to the implementer."}
   ],
-  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. CI head ae01882052a9 is the newest pull_request run; compare to 3bd29e65fae1 is ahead, 2 files, both under .legion/. lint, typecheck, test, pr-title success (one earlier pr-title run cancelled, a later one success). envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, envoy-e2e-local success; dispatch and dispatch-memory still in progress at the read (not required).",
-  "thermonuclear": "Both passes at ae018820: deep-review APPROVE (the keeper, created before the first delete, keeps the account's streams directory non-empty so nats-server's cleanup os.Remove fails harmlessly for both deletes; independent post-condition sweep over 23 delete locations finds no unprotected same-name recreate; go test ./internal/kvwatch/ -run TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache -count=20 ok), code-quality APPROVE (wording only).",
+  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. CI head db7e7cc42766 is the newest pull_request run; compare to 1d4b29cafd8d is ahead, 2 files, both under .legion/. lint, typecheck, test, pr-title success; envoy-infra-go, envoy-smoke, envoy-e2e-local success; envoy-go, envoy-go-race, dispatch, dispatch-memory still in progress at the read (not required; the delta since the last green envoy lanes is comments and one test rename).",
+  "thermonuclear": "Both passes at db7e7cc4: deep-review APPROVE (every claim in the three comments checked against nats-server v2.10.29 stream.go:5279-5293, filestore.go:8757-8781, stream.go:5884-5890 and the guard's code; no active reference to the old test name; go vet of the three packages exit 0), code-quality APPROVE (the two race comments now describe one mechanism; wording note: the guard comment's issue-ownership prose at nats_test.go:618-621 belongs in the issue, not the code).",
   "keyFindings": [],
-  "bodyCorrectionsForImplementer": [
-    "The sweep table puts cmd/listener/main_test.go:4565 under 'never put back', but its caller at :4596 recreates the interest bucket at :4599; it is protected because the notification stream and role bucket stay in the account.",
-    "kvwatch/repair_test.go:114 is a helper whose callers at :156 and :258 recreate through RecreateKeyValue (:159, :260); classify by caller.",
-    "The table omits store/interest_markers_test.go:532 (purgeThenDelete, never recreated) and the t.Cleanup deletes at bus/kv_key_test.go:36,160; its rows total 20, not 23.",
-    "The paragraph saying no raw $JS.API.STREAM.RESTORE subject is sent anywhere is false: kvwatch_test.go:921 sends \"$JS.API.STREAM.RESTORE.\"+stream through conn.Request, and a subject grep finds it.",
-    "Entry 17 says nats-server schedules no streams-directory removal with the keeper present; the cleanup is still scheduled (stream.go:5279-5293) and its os.Remove fails on the non-empty directory.",
-    "The unprotected row cites kvwatch_test.go:837-840; at this head the delete is :851 and the restore :854, protected by the keeper at :816."
-  ],
-  "verifiedProofs": "E2E (implementer) and E2E (tester) lines both present. The fix is test-only in internal/kvwatch, which envoy-go-race does not run; the evidence is the tester's two mutations, the deep-review pass's 20 runs and the nats-server filesystem mechanism.",
-  "threads": "All four threads carry my answer and are resolved; no bot threads; no new thread this round."
+  "verifiedProofs": "E2E (implementer) and E2E (tester) lines both present. I checked the comments' nats-server claims myself in the module cache: the account streams-dir os.Remove goroutine at stream.go:5288-5293 runs on every delete and is a no-op when the directory is not empty; fileStore.Delete renames the stream directory aside and removes it in a goroutine (filestore.go:8758-8767).",
+  "authorship": "b882ed81da45 and 480e4e7a6249 carry legion-reviewer[bot] as author with the implementer's Omp-Session and committer; the architect says this is deliberate and recorded in the body and handoffs.",
+  "threads": "All four threads carry my answer and are resolved; no bot threads; none new this round."
 }
