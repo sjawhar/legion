@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
 # Routes a named OMP profile's model turns straight to Anthropic's own endpoint, keyed by a local
-# file: the key-file alternative to lib/install-model-gateway.sh's Hawk route, for a devbox that has
-# no Hawk gateway at all (lib/install-model-gateway.sh's own header; a devbox reaching Anthropic
-# directly runs this one instead). Mirrors the model-route pattern
-# deploy/kubernetes/operator-route/models-key-file.yml gives Stage 4a's pods: an operator-supplied
-# key, read fresh on every call, never minted and never written into the tree.
+# file: the one model route of the tmux stage proofs, the Stage 4b operator controller and the skill
+# scenario rig. Mirrors the model-route pattern deploy/kubernetes/operator-route/models-key-file.yml
+# gives Stage 4a's pods: an operator-supplied key, read fresh on every call, never minted and never
+# written into the tree.
 #
 #   scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-dir <dir> --key-file <file>
 #
@@ -27,8 +26,7 @@
 # (<key-dir>/anthropic-key), a script with --key-file's resolved path baked into it: anyone
 # holding that script can read the key for as long as --key-file's path still holds it, so the
 # caller must give --key-dir a path its own cleanup removes unconditionally, on every exit, not
-# the evidence directory or a workspace a failing run keeps for debugging (the same rule
-# lib/install-model-gateway.sh's hawk-token already follows for its own minted token file).
+# the evidence directory or a workspace a failing run keeps for debugging.
 #
 # Stdout is one line, the key command's path (under --key-dir); every refusal goes to stderr. It
 # writes:
@@ -36,20 +34,16 @@
 #                            one command
 #   <dest>/anthropic-key.log  one line per invocation and the file read's own failure, if any
 #   <dest>/anthropic-key.calls   one line per call and its outcome, in lib/model-gateway-unserved.sh's
-#                            own record shape, so it and the stage proofs that read a route's
-#                            <key_command>.log/.calls read this route exactly as they read the
-#                            gateway's
+#                            own record shape, which it and the stage proofs read
 #   the profile's agent/models.yml and agent/config.yml (see the heredocs below)
 #
 # No key reaches a pane's own environment or the profile's models.yml, which names only the key
 # command's path (baked in at install time): the key command alone is handed --key-file's path.
 # A pane runs as the operator's own uid, though, so an agent's own bash can still read --key-file
-# directly, or run the key command itself — the same exposure lib/install-model-gateway.sh's
-# hawk-token has, not a widening. Unlike hawk-token there is nothing to mint and no login to lose
-# to a relocked keyring, so there is no preflight budget and no cache: every call is a plain, fast
-# file read, checked for its own permission bits once, here, before any pane exists, so a key file
-# a group or other user can read is refused loudly at install rather than silently leaking the key
-# to them on the first call.
+# directly, or run the key command itself. There is nothing to mint, so there is no preflight
+# budget and no cache: every call is a plain, fast file read, checked for its own permission bits
+# once, here, before any pane exists, so a key file a group or other user can read is refused
+# loudly at install rather than silently leaking the key to them on the first call.
 set -euo pipefail
 
 me=install-key-file-model-route
@@ -112,14 +106,14 @@ done
 [ -n "$have_key_file" ] || refuse "--key-file is required: the file holding the plaintext Anthropic key"
 
 # OMP reads an empty name or "default" as the profile every plain `omp` uses (the same rule as
-# install-model-gateway.sh and install-plugin-profile.sh).
+# install-plugin-profile.sh).
 trimmed=${profile#"${profile%%[![:space:]]*}"}
 trimmed=${trimmed%"${trimmed##*[![:space:]]}"}
 if [ -z "$trimmed" ] || [ "$trimmed" = default ]; then
   refuse "--profile '$profile' is OMP's default profile, the one plain \`omp\` uses; name a dedicated profile"
 fi
 # The profile goes under the run's own home, never the caller's (the same rule as
-# install-model-gateway.sh and install-plugin-profile.sh).
+# install-plugin-profile.sh).
 [ -n "${HOME:-}" ] || refuse "HOME is unset or empty, so --home cannot be checked against it"
 home=$(realpath -m -- "$home")
 [ "$home" != "$(realpath -m -- "$HOME")" ] || refuse "--home $home is your own HOME; give the profile a home of its own (make_omp_home, lib/omp-home.sh)"
@@ -192,26 +186,22 @@ case "${1-}" in
 esac
 # The call's clock starts with its own process: the profile names it `!exec <path>`, so the /bin/sh
 # Oh My Pi starts execs this file, and its process start is that of Oh My Pi's call. Its PPID, the
-# pid the log names, is the Oh My Pi process that ran the call (install-model-gateway.sh's own key
-# command measured this the same way on 18.2.9: a child of the agent's own omp, not the agent's
-# pid).
+# pid the log names, is the Oh My Pi process that ran the call (measured on 18.2.9: a child of the
+# agent's own omp, not the agent's pid).
 TZ=UTC printf '%(%FT%TZ)T invoked by pid %s\n' -1 "$PPID" >>"$log"
 # PWD names the directory Oh My Pi ran the call in, physically.
 cd -P . || exit
 # The caller as the record's agent field names it (lib/model-gateway-unserved.sh's header).
 agent=${LEGION_ROLE:-}${LEGION_ROLE:+${LEGION_GENERATION:+/$LEGION_GENERATION}}
 agent=${agent:--}
-# record OUTCOME DETAIL appends an agent's call to the record, and to the caller's
-# MODEL_GATEWAY_CALLS_FILE when its environment names one. No field is empty: read splits on runs
-# of tabs. The installer's preflight is no agent, so it is not recorded, the same rule
-# install-model-gateway.sh's hawk-token key command follows.
+# record OUTCOME DETAIL appends an agent's call to the record. No field is empty: read splits on
+# runs of tabs. The installer's preflight is no agent, so it is not recorded.
 record() {
   [ -z "$preflight" ] || return 0
   local at line detail=${2//[$'\t\n']/ }
   TZ=UTC printf -v at '%(%FT%TZ)T' -1
   printf -v line '%s\t%s\t%s\t%s\t%s\t%s' "$at" "$PPID" "${PWD//[$'\t\n']/ }" "${agent//[$'\t\n']/ }" "$1" "${detail:--}"
   printf '%s\n' "$line" >>"$record"
-  [ -z "${MODEL_GATEWAY_CALLS_FILE:-}" ] || printf '%s\n' "$line" >>"$MODEL_GATEWAY_CALLS_FILE"
 }
 if key=$(<"$key_file"); then
   detail="empty"
@@ -230,8 +220,7 @@ EOF
 } >"$key_command"
 chmod 0700 "$key_command"
 
-# The preflight read: proves the file is readable before any pane exists, same spirit as
-# install-model-gateway.sh's preflight mint, with nothing to cache and nothing that can time out.
+# The preflight read: proves the file is readable before any pane exists.
 status=0
 key=$("$key_command" --preflight 2>"$key_dir/anthropic-key.preflight") || status=$?
 reason=$(<"$key_dir/anthropic-key.preflight")
@@ -261,7 +250,7 @@ EOF
 cat >"$agent/config.yml" <<EOF
 # Written by scripts/e2e/lib/install-key-file-model-route.sh. Anthropic's own endpoint is the one
 # model route, and Oh My Pi falls back from a failing provider without a word: with the key command
-# failing, install-model-gateway.sh measured a pane answering from
+# failing, a pane was measured answering from
 # amazon-bedrock/us.anthropic.claude-opus-4-8 on the devbox's instance role, and a Stage 3 retro's
 # scout subagent on Bedrock's openai.gpt-oss-120b. enabledModels holds every session's own model to
 # anthropic, so a pane without the key refuses to start. Subagents and retries choose from every

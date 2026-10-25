@@ -117,15 +117,15 @@ has one session read every file of a skill and reports whether each arrived whol
 
 ```bash
 cd packages/pi-legion/scripts/skill-scenarios
-LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic ./rig.sh profile head <checkout>
+LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> ./rig.sh profile head <checkout>
 ./rig.sh batch ask-on-message 5 head base   # starts and stops the scratch Dispatch, Postgres, NATS, listener
 ./rig.sh batch tester-proof 5 head base
 ./rig.sh score
 ```
 
 The scenarios and every input are in the script's header (`./rig.sh` with no arguments prints it),
-and each scenario's scoring rule is on the `score.ts` function that scores it. It needs the model
-gateway and Docker. Its bounded waits, port picks and process stops are
+and each scenario's scoring rule is on the `score.ts` function that scores it. It needs
+`LEGION_E2E_ANTHROPIC_KEY_FILE`, a 0600 file holding a plaintext Anthropic key, and Docker. Its bounded waits, port picks and process stops are
 [`scripts/e2e/lib/rig.sh`](../../../scripts/e2e/README.md#librigsh)'s. Nothing it runs reaches
 production Dispatch, GitHub, Envoy or NATS: it starts nothing with the caller's `DISPATCH_*`,
 `ENVOY_*` or `NATS_*` variables, and `seed.ts` refuses to run while `PLAYWRIGHT_BASE_URL` or

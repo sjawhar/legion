@@ -45,10 +45,13 @@
 # - LEGION_E2E_OPERATOR_CONTEXT (default production) names the admin context.
 # - LEGION_E2E_IMAGE (required) is the worker image, by digest.
 # - LEGION_E2E_MODEL_GATEWAY_URL (required) is the model gateway's Anthropic endpoint, the route the
-#   operator fixture's models.yml and the controller's profile name (lib/model-gateway-url.sh).
+#   operator fixture's models.yml names for the pods (lib/model-gateway-url.sh).
 # - LEGION_E2E_MODEL_GATEWAY_AUDIENCE (required) is the audience the operator's model gateway accepts
 #   on a worker's projected ServiceAccount token, substituted into the run's copy of the operator
 #   route's pod.yml and asserted on every pod.
+# - LEGION_E2E_ANTHROPIC_KEY_FILE (required unless STAGE4B_SKIP_CONTROLLER is set) names a file only
+#   its owner can read holding a plaintext Anthropic key: the operator controller, which runs on the
+#   devbox rather than in a pod, reaches Anthropic with it (lib/install-key-file-model-route.sh).
 # - LEGION_E2E_DISPATCH_URL, LEGION_E2E_ENVOY_URL and LEGION_E2E_NATS_URL (required) are production
 #   Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified
 #   names for them: an https:// URL, an http(s):// URL and a nats://host:port, none with a path. The
@@ -2538,6 +2541,9 @@ cleanup() {
   # one the checks set. Inside this EXIT trap BASH_COMMAND is still the command the trap interrupted,
   # so the warning names the line alone.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # First, before anything slower can hang: the controller's model route key command, which bakes
+  # in the key file's resolved path, never survives this script on any exit.
+  rm -rf "$work/model-gateway-key"
   stop_tree "$shape_pid"
   # The review pair exists only once tree-moved has named the reviewer's session; a run cut before
   # that has nothing to record.
@@ -2853,6 +2859,9 @@ gateway=$(bash "$root/scripts/e2e/lib/model-gateway-url.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_URL is not a model gateway URL the operator route's models.yml can name (the reason is above)"
 gateway_audience=$(bash "$root/scripts/e2e/lib/model-gateway-audience.sh") ||
   fail "LEGION_E2E_MODEL_GATEWAY_AUDIENCE is not a token audience the operator route's pod.yml can carry (the reason is above)"
+key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+[ -n "$skip_controller" ] || [ -n "$key_file" ] ||
+  fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key, the operator controller's model route (or set STAGE4B_SKIP_CONTROLLER for a development run)"
 # The branch-built daemon links no release plugin pair (only a release workflow build does), so a
 # daemon started from this checkout boots in the degraded mode (a Warn and `plugins: none` from
 # `--check-config`) unless the run's legion.yaml names runtime.kubernetes.plugins itself. Stage 4b
@@ -5107,8 +5116,8 @@ else
 make_omp_home "$omp_home"
 bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy" >/dev/null
 bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion" >/dev/null
-bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
-  blocked "the controller's model route could not be installed (lib/install-model-gateway.sh)"
+bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file" >/dev/null ||
+  blocked "the controller's model route could not be installed (lib/install-key-file-model-route.sh)"
 pin=$(<"$root/.omp-pin")
 cat >"$work/controller.yaml" <<EOF
 project: $project

@@ -153,23 +153,15 @@ docker of its own there.
 ## stage2-tmux-supervision.sh
 
 ```sh
-LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about four minutes
-LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/stage2-tmux-supervision.sh           # the same, for a devbox with no Hawk gateway
+LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/stage2-tmux-supervision.sh     # → "stage 2 e2e: PASS", exit 0, in about four minutes
 ```
 
 **Devbox only.** It runs a real Oh My Pi that calls a real model, so it needs `go`, `docker`,
 `jq`, `curl`, `ss`, `tmux`, `socat`, `bun`, `mise` (with the pinned OMP build it installs if
 missing), the `secrets` CLI holding `GEMINI_API_KEY_TESTS` (agent tier: no YubiKey touch), and
-`LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how the agents reach
-Anthropic, independently of which devbox this runs on:
-- `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
-  gateway's Anthropic endpoint (required in this mode;
-  [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), `hawk-token` on `PATH`, their
-  `hawk login`, and the GNOME keyring holding it unlocked (every reboot locks it; the
-  `unlock-keyring` skill).
-- `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode), a 0600 file holding a
-  plaintext Anthropic key, for a devbox with no Hawk gateway at all
-  ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
+`LEGION_E2E_ANTHROPIC_KEY_FILE` (required), a 0600 file holding a plaintext Anthropic key, the one
+way the agents reach Anthropic
+([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
 
 CI runs the unit and integration tests, not this script; what only this
 run proves is OMP's real RPC frames, `--resume`'s same-agent behaviour, the one-word
@@ -200,17 +192,14 @@ What it stands up, all of it the run's own:
   `~/.dotfiles/shims/omp` first, and checks the boot log's resolved binary, the OMP child's
   `/proc/<pid>/exe`, and every command in the pane's first-child chain. That proves the wrapper
   cannot replace the configured build while mise still supplies the tool's activation.
-- **The model route**: Anthropic through the configured route, installed into the profile by
-  [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (`gateway`) or
-  [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (`key-file`) at
-  setup, while the script's shell still holds the operator's HOME and XDG directories. Either
-  route's preflight refuses loudly before any pane exists: a locked keyring by name under
-  `gateway`, an unreadable or empty key file under `key-file`. Every model role of every pane is
+- **The model route**: Anthropic through
+  [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) at setup, while the
+  script's shell still holds the operator's HOME and XDG directories. Its preflight refuses loudly
+  before any pane exists on an unreadable or empty key file. Every model role of every pane is
   `anthropic/claude-opus-4-8`, and `anthropic` is the one provider a pane may use, keyed through
-  `<work>/model-gateway/hawk-token` (`gateway`) or `<work>/model-gateway-key/anthropic-key`
-  (`key-file`), whose log records each call; no Anthropic key reaches a pane either way — only the
-  key command, and only under `gateway` through the operator's hawk login or under `key-file` by
-  reading the file once per call.
+  `<work>/model-gateway-key/anthropic-key`, whose log records each call; no Anthropic key reaches
+  a pane — only the key command, which reads the file fresh on every call. The script removes the
+  key command's directory on every exit.
 - **The provider key**: `provider_keys: {GEMINI_API_KEY: GEMINI_API_KEY_TESTS}`, which proves the
   provider-key path; no pane's model uses it, and the profile disables the Google provider. The
   daemon resolves the secret at boot and writes it as a daemon-held 0600 file; every pane's shim
@@ -277,10 +266,8 @@ Three things the run had to learn about its surface:
 ## stage3-devbox-workflow.sh
 
 ```sh
-LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
+LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
   bash scripts/e2e/stage3-devbox-workflow.sh     # → "stage 3 e2e: PASS", exit 0
-LEGION_E2E_MODEL_ROUTE=key-file LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
-  bash scripts/e2e/stage3-devbox-workflow.sh     # the same, for a devbox with no Hawk gateway
 ```
 
 **Devbox only; CI does not run this script.** It runs real Oh My Pi agents and real GitHub Apps,
@@ -289,16 +276,9 @@ submission on its accepted READY: the repository allows no auto-merge, so the da
 GitHub reports it mergeable, and the proof only reads it (`await_ready_merge`), never merging it by
 hand.
 The run needs `go`, `docker`, `jq`, `curl`, `ss`, `tmux`, `bun`, `mise`, `gh`, `shellcheck`, the
-`secrets` CLI, and `LEGION_E2E_MODEL_ROUTE` (required, `gateway` or `key-file`), which picks how
-the agents reach Anthropic, independently of which devbox this runs on:
-- `gateway`: the operator's model gateway access — `LEGION_E2E_MODEL_GATEWAY_URL` naming the
-  gateway's Anthropic endpoint (required in this mode;
-  [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), `hawk-token` on `PATH`, their
-  `hawk login`, and the GNOME keyring holding it unlocked (every reboot locks it; the
-  `unlock-keyring` skill).
-- `key-file`: `LEGION_E2E_ANTHROPIC_KEY_FILE` (required in this mode), a 0600 file holding a
-  plaintext Anthropic key, for a devbox with no Hawk gateway at all
-  ([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
+`secrets` CLI, and `LEGION_E2E_ANTHROPIC_KEY_FILE` (required), a 0600 file holding a plaintext
+Anthropic key, the one way the agents reach Anthropic
+([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
 
 `SMOKE_UPSTREAM_NATS` (required) names the production Envoy
 NATS the GitHub bridge subscribes on by its fully-qualified name on the operator's tailnet, the
@@ -331,15 +311,13 @@ unless `gh` acts as `sjawhar-agent[bot]` ([`require_proof_human`](#libworkflowsh
 `GH_REVIEW_APP_PRIVATE_KEY_B64` itself through `private_key_command`, both agent tier, and
 [`read_app_logins`](#libworkflowsh) runs the same two commands once, in `lib/app-logins.ts`, to
 read each App's bot login from GitHub, the login every check that names an App compares with. The agents'
-model is Anthropic through the configured route:
-[`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (`gateway`) or
-[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (`key-file`) routes the
-isolated profile there in `prerequisites`, where either route's preflight refuses loudly before any
-pane exists (a locked keyring by name under `gateway`, an unreadable or empty key file under
-`key-file`), and the daemon is given
+model is Anthropic through
+[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh), which routes the
+isolated profile there in `prerequisites`, where its preflight refuses loudly before any pane
+exists on an unreadable or empty key file, and the daemon is given
 no `provider_keys` (the Google provider answered long workflow turns with empty responses, so the
-agents are not Gemini-backed). No YubiKey touch is required under `key-file`, and no key value
-enters the script's shell, a pane, an argv, or the transcript, under either route.
+agents are not Gemini-backed). No YubiKey touch is required, and no key value enters the
+script's shell, a pane, an argv, or the transcript.
 
 The proof human's `gh` has to stay authenticated for the whole run. A full run takes about 70
 minutes, longer than the one hour a GitHub App installation token lives. The devbox shim keeps it
@@ -558,9 +536,9 @@ never cited as the proof; only a full run is.
 Evidence survives every outcome in `STAGE3_EVIDENCE_DIR` (default a fresh
 `/tmp/legion-e2e3-evidence.XXXXXXXX`, printed at exit): `transcript.log` (the whole run), every agent
 transcript, the daemon, Dispatch, listener, and bridge logs, the model route's call record
-(`model-gateway/`: `hawk-token.{log,calls}` under `gateway`, `anthropic-key.{log,calls}` under
-`key-file` — never the key command itself, which under `key-file` lives under its own `--key-dir`,
-removed on every exit), state captures, negative-control outputs, the pane endpoint checks,
+(`model-gateway/anthropic-key.{log,calls}` — never the key command itself, which lives under its
+own `--key-dir`, removed on every exit), state captures, negative-control outputs, the pane
+endpoint checks,
 and the production audit. A passing run's last three checks stop every process, kill the private
 tmux server and remove both containers (`services-stopped`), check the model route
 (`model-turns-through-the-route`), and close every pull request the run still has open on the
@@ -595,7 +573,7 @@ a model key, and still exits 1. The trap still closes the run's pull requests in
 ## stage3-4b13b-acceptance.sh
 
 ```sh
-LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
+LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> SMOKE_UPSTREAM_NATS=nats://<host>.<tailnet>.ts.net:4222 \
 ACCEPT_PG_CONTAINER=<postgres container> ACCEPT_PG_PORT=<its host port> ACCEPT_NATS_BIN=<nats-server> \
   bash scripts/e2e/stage3-4b13b-acceptance.sh     # → "acceptance 4b.13b: PASS at <head>", exit 0
 ```
@@ -603,8 +581,8 @@ ACCEPT_PG_CONTAINER=<postgres container> ACCEPT_PG_PORT=<its host port> ACCEPT_N
 **Devbox only; CI does not run this script.** The live acceptance of LEGION-208 task 4b.13b. It
 stands up the Stage 3 rig from the same `lib/rig.sh` and `lib/workflow.sh`, with the same two
 required inputs and the same proof human as
-[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh) — the Hawk gateway route only, since this
-script has not taken Stage 3's own `LEGION_E2E_MODEL_ROUTE` — so it too runs from the operator's
+[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh), its model route among them, so it too
+runs from the operator's
 own Oh My Pi session and refuses to start in `prerequisites` when `gh` acts as anyone but
 `sjawhar-agent[bot]`. It creates
 no Docker container: the daemon and Dispatch take their own databases in the running Postgres
@@ -637,7 +615,7 @@ so the script opens the transcript on fd 8 and calls `transcript_to /dev/fd/8`
 ## claude-backend-tmux.sh
 
 ```sh
-LEGION_E2E_CLAUDE_KEY_FILE=<file holding an Anthropic API key> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic \
+LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file holding an Anthropic API key> \
   bash scripts/e2e/claude-backend-tmux.sh     # → "claude backend e2e: PASS", exit 0
 ```
 
@@ -664,18 +642,19 @@ pane. The checks:
 - `every-launch-endpoint-checked`: every pane the daemon launched, Oh My Pi or Claude Code, was
   checked by the watcher before it registered.
 
-Inputs. `LEGION_E2E_CLAUDE_KEY_FILE` (required) names a file holding the Anthropic API key the
-Claude Code implementer reaches its model with. `prerequisites` refuses a run without it, naming
-the variable, before anything else, and refuses a key Anthropic's `GET /v1/models` does not accept
-(the key goes by a 0600 header file, never an argv). The run copies the key once into its work
-directory, 0600, and writes the implementer's claim directory (`<state>/claude/<claim token>`, which
-the daemon creates only when missing) before the claim exists: a `settings.json` whose
-`apiKeyHelper` is a command that prints that copy, and whose `model` is `claude-sonnet-5`. So no
-pane's environment carries `ANTHROPIC_API_KEY`, which the watcher checks for every agent process,
-and the key is in no argv and no transcript. `LEGION_E2E_MODEL_GATEWAY_URL` (required) is the Oh My
-Pi agents' route, as in [`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
-([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)). `CLAUDE_E2E_EVIDENCE_DIR` names
-the evidence directory; by default it is a fresh one under `/tmp`.
+Inputs. `LEGION_E2E_ANTHROPIC_KEY_FILE` (required) names one 0600 file holding the Anthropic API
+key every agent of the run reaches its model with. `prerequisites` refuses a run without it,
+naming the variable, before anything else, and refuses a key Anthropic's `GET /v1/models` does not
+accept (the key goes by a 0600 header file, never an argv). For the Claude Code implementer, the
+run copies the key once into its work directory, 0600, and writes the implementer's claim
+directory (`<state>/claude/<claim token>`, which the daemon creates only when missing) before the
+claim exists: a `settings.json` whose `apiKeyHelper` is a command that prints that copy, and whose
+`model` is `claude-sonnet-5`. So no pane's environment carries `ANTHROPIC_API_KEY`, which the
+watcher checks for every agent process, and the key is in no argv and no transcript. The Oh My Pi
+agents reach Anthropic through the same file, as in
+[`stage3-devbox-workflow.sh`](#stage3-devbox-workflowsh)
+([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
+`CLAUDE_E2E_EVIDENCE_DIR` names the evidence directory; by default it is a fresh one under `/tmp`.
 
 The rig is Stage 3's without the GitHub ingress bridge: scratch Postgres, NATS, Envoy listener and
 native Dispatch from [`lib/rig.sh`](#librigsh), the workflow's vocabulary from
@@ -1115,7 +1094,7 @@ two-hour bound).
 
 ```sh
 LEGION_E2E_RUNTIME_CONTEXT=<restricted context> LEGION_E2E_IMAGE=ghcr.io/sjawhar/legion-worker@sha256:<digest> \
-  LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> \
+  LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic LEGION_E2E_MODEL_GATEWAY_AUDIENCE=<gateway audience> LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> \
   LEGION_E2E_DISPATCH_URL=https://<dispatch> LEGION_E2E_ENVOY_URL=http://<listener>:<port> LEGION_E2E_NATS_URL=nats://<nats>:4222 \
   LEGION_E2E_DISPATCH_TOKEN_FILE=<0600 file> LEGION_E2E_ENVOY_TOKEN_SECRET_ID=<secret id> \
   bash scripts/e2e/stage4b-sandbox-tree.sh        # → "stage 4b e2e: PASS", exit 0
@@ -1128,7 +1107,10 @@ LEGION_E2E_PROJECT=S4B2 LEGION_E2E_DAEMON_PORT=13370 LEGION_E2E_WORKER_STREAM_PO
 
 The repository names no production service. `LEGION_E2E_MODEL_GATEWAY_URL` is the model gateway's
 Anthropic endpoint (checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh)), which the
-run writes into its copy of the operator fixture's `models.yml` and the controller's profile.
+run writes into its copy of the operator fixture's `models.yml` for the pods.
+`LEGION_E2E_ANTHROPIC_KEY_FILE` (required) is a 0600 file holding a plaintext Anthropic key, the
+operator controller's own model route on the devbox
+([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
 `LEGION_E2E_DISPATCH_URL`, `LEGION_E2E_ENVOY_URL` and `LEGION_E2E_NATS_URL` are production
 Dispatch, the production Envoy listener and production NATS, by the operator's fully-qualified names
 for them. `prerequisites` refuses a value that is unset, names a bare alias, or carries a path,
@@ -1527,8 +1509,9 @@ profile, launched with `controller-start-tmux.sh`'s `operator_env` line and `OMP
 fresh profile's first launch otherwise sits in the first-run setup wizard), its cwd under `/tmp` —
 registers with a real Envoy listener and NATS. Dispatch, built from the checkout with NATS on and
 its trusted identity header, serves the SPA this checkout builds, and Playwright drives the
-conversation page as the person the header names. The session's model turns go through the model
-gateway on the operator's own hawk login ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+conversation page as the person the header names. The session's model turns go straight to
+Anthropic, keyed from `LEGION_E2E_ANTHROPIC_KEY_FILE`
+([`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)).
 
 The rig serves the checkout's built `packages/dispatch/web/dist` live. Do not run `bun run build:web`
 or `bun run e2e` in this checkout while a run is live: either rewrites that directory under the
@@ -1544,12 +1527,12 @@ before it sends, since the page refuses a send while a turn runs: a stopped answ
 or custom message after it and no background job the model started still owed its result.
 
 ```bash
-LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/dispatch-user-turns.sh     # → "dispatch user turns e2e: PASS", exit 0
+LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/dispatch-user-turns.sh     # → "dispatch user turns e2e: PASS", exit 0
 ```
 
 | input | default | meaning |
 | :--- | :--- | :--- |
-| `LEGION_E2E_MODEL_GATEWAY_URL` | required | the model gateway's Anthropic endpoint; checked by [`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh) |
+| `LEGION_E2E_ANTHROPIC_KEY_FILE` | required | a 0600 file holding a plaintext Anthropic key, read fresh on every call by the key command [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) writes |
 | `DISPATCH_USER_TURNS_OMP` | the pinned build, `.omp-pin`'s mise tool spec (`github:sjawhar/oh-my-pi@<version>`) | another Oh My Pi, as a mise tool spec |
 | `DISPATCH_USER_TURNS_EVIDENCE_DIR` | a fresh `/tmp/legion-e2e-user-turns-evidence.XXXXXXXX` | kept on every outcome and printed at exit: `logs/` (the listener, Dispatch and the SPA build), `checks/` (the page's screenshots, the session's pane at exit, `extension-command-args` and `message-starts.jsonl`) and `session.jsonl`, the session's transcript |
 
@@ -2082,8 +2065,8 @@ no `natives/` directory, and `~/.omp/natives/18.2.2/` was untouched.
 ## lib/model-gateway-url.sh
 
 Prints `LEGION_E2E_MODEL_GATEWAY_URL`, the model gateway's Anthropic endpoint, once it is one a
-stage proof can use. [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (Stage 2 and
-Stage 3) and Stage 4a read the variable through it. The repository carries no default: the operator
+stage proof can use. Stage 4a and Stage 4b read the variable through it, for their pods. The
+repository carries no default: the operator
 sets it to the `baseUrl` of the `anthropic` provider in their own gateway route
 (`~/.omp/agent/models.yml`).
 
@@ -2113,130 +2096,15 @@ The audience is written inside a double-quoted YAML string, so the helper exits 
 is unset or holds a character other than letters, digits and `._:/-` (a quote or a backslash would
 break the pod the daemon loads). Its refusal names the variable on stderr and never prints the value.
 
-## lib/install-model-gateway.sh
-
-Routes a named OMP profile's model turns to the Hawk model gateway (middleman) on the operator's
-own hawk login, the route a devbox's agent sessions use when it is configured for the gateway (`~/.omp/agent/models.yml`:
-`X-Api-Key: !hawk-token`), so the tmux stage proofs' panes reach Anthropic with no provider key.
-Stage 2 and Stage 3 run it under the operator's own `HOME`, before they move any XDG directory of
-their own.
-
-```sh
-export LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
-key_command=$(bash scripts/e2e/lib/install-model-gateway.sh --profile legion-e2e-$$ --home "$work/omp-home" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache")
-# → $work/model-gateway/hawk-token
-```
-
-`LEGION_E2E_MODEL_GATEWAY_URL` is required: the gateway's Anthropic endpoint, the one
-`hawk-token`'s default `HAWK_API_URL` mints keys for, read through
-[`lib/model-gateway-url.sh`](#libmodel-gateway-urlsh).
-
-| flag | meaning |
-| :--- | :--- |
-| `--profile <name>` | the OMP profile to route. Refused when OMP would read it as its default profile (empty, all whitespace, or `default`), and when its `agent/models.yml` or `agent/config.yml` already exists. |
-| `--home <dir>` | the `HOME` Oh My Pi runs under for the profile, whose files then go under `<dir>/.omp/profiles/<name>/agent`: the run's own home from [`make_omp_home`](#libomp-homesh). Refused when it is the caller's own `HOME`, when `HOME` is unset or empty (it could not be compared), and when `<dir>/.omp` does not exist. |
-| `--dest <dir>` | where the key command and its log are written; created `0700`. Refused when it exists and is not an empty directory, and when its path holds a character other than letters, digits, `/`, `.`, `_` or `-`, since it is written into YAML as one `!command` word. |
-| `--cache-dir <dir>` | where the key command keeps the key it minted; created `0700`. Refused when it exists and is not an empty directory, so a key left there is never served. A private directory of the run, never its evidence: the key is a live gateway credential. |
-
-It writes `<dir>/hawk-token`, the key command: `hawk-token` (resolved on `PATH`) run under the
-caller's `HOME`, `DBUS_SESSION_BUS_ADDRESS` and XDG base directories (a variable the caller has unset
-is unset for it), for that one command. It appends one line per invocation, one per mint, one per
-call that got no key and why, and `hawk-token`'s own stderr to `<dir>/hawk-token.log`, and one line
-per call and its outcome to `<dir>/hawk-token.calls`
-([`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads it); stdout carries the key
-alone. The profile's `agent/models.yml` points the `anthropic` provider at
-`LEGION_E2E_MODEL_GATEWAY_URL` with `apiKey` and `X-Api-Key` both `!exec <dir>/hawk-token` (Oh My
-Pi runs a `!command` through `/bin/sh -c`, and `exec` makes the key command the process it started,
-so the call's clock starts when Oh My Pi started it), and its `agent/config.yml` pins every model
-role, the roles Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets
-`enabledModels: [anthropic/*]`, and disables `amazon-bedrock`, `bedrock-mantle`, `google`,
-`ollama`, `llama.cpp` and `lm-studio`. Stdout is the key command's path.
-
-A pane cannot run `hawk-token` itself, which is why the command, and only it, gets the operator's
-environment. Measured in a Go pane at `f1749048` whose profile named `!hawk-token` directly, by
-running `hawk-token` under that OMP process's exact environment: it fails on mise (`No version is
-set for shim: uv`), because the pane's `XDG_CONFIG_HOME` is the daemon's own (LEGION-206 P1) and
-mise's global config is not there; with the operator's XDG directories it fails on the login (`no
-usable hawk login`), because the pane carries no `DBUS_SESSION_BUS_ADDRESS`, the only address the
-keyring client reads (`jeepney/bus.py`, `find_session_bus`); with both it mints. A pane's `HOME` is
-the run's own ([`lib/omp-home.sh`](#libomp-homesh)), where neither mise's global config nor the hawk
-login is, so the command gets the operator's `HOME` too. Panes run as the
-operator's uid and can reach `/run/user/<uid>/bus` anyway, so the command gains nothing a pane
-lacks, and every pane's environment stays as it is.
-
-Oh My Pi falls back from a failing provider without a word, so the profile leaves it nowhere to
-fall. In that same pane, OMP logged `model-config: !command value resolution failed` and answered
-from `amazon-bedrock/us.anthropic.claude-opus-4-8` on the devbox's instance role, and an earlier
-Stage 3 retro's scout subagent ran on Bedrock's `openai.gpt-oss-120b`. `enabledModels` holds each
-session's own model to `anthropic`: a pane whose key command fails refuses to start (`No model
-available matching enabledModels (anthropic/*) with usable credentials`), and the claim fails its
-launch budget. Subagents and retries choose from every enabled provider rather than that list
-(OMP's `resolveModelOverride` reads `getAvailable()`), so every provider a pane can use without the
-gateway is disabled: in a pane's environment with `GEMINI_API_KEY` set, `omp models` lists
-`amazon-bedrock`, `bedrock-mantle`, `google` and `anthropic` when the file sets only the default
-role, and `anthropic` alone with the file as written; the three local servers are ones OMP uses
-with no key. Every role is the one model because the gateway answers `claude-haiku-4-5`, the
-model OMP gave that Stage 3 scout once Bedrock failed it, with `404 model not found`.
-
-Its first mint is the preflight, before any pane exists. It exits 1 naming the cause when
-`hawk-token`, `flock` or `timeout` is not on `PATH`, when `DBUS_SESSION_BUS_ADDRESS` is unset, when
-`lib/model-gateway-url.sh` refuses `LEGION_E2E_MODEL_GATEWAY_URL`, when the keyring is locked
-(`the operator's keyring is locked, so hawk-token cannot read the hawk login: unlock it (the
-unlock-keyring skill) and rerun`), when the key command gets no key (quoting its own reason: the
-outcome and `hawk-token`'s last stderr line), and when `hawk-token` prints anything but one JWT;
-an argument refusal exits 2. The installer runs that one call with
-`--preflight`, which exempts it from the key command's deadline (below): on a machine where
-`hawk-token` has never run, its first-run build takes about a minute in the foreground, and it
-happens here rather than inside a pane's ten-second `!command`. The key is never printed.
-
-The key command mints once and keeps the key in `<cache-dir>/hawk-token.key` (`0600`) until
-300 seconds before its JWT `exp`, or for 300 seconds when the key has none. Each `hawk-token` run
-reads the hawk login from the keyring over the session bus, and the devbox's keyring daemon died
-serving such a read at 09:33Z on 2026-09-24, relocking the keyring mid-run. A Stage 3 run
-invoked the command 29 times, once per pane launch plus the preflight, and each was a mint before
-the cache. Every call inside the window gets the kept key. A key the gateway refuses before then is
-not re-minted: the proof's model turns fail, loudly, which is right for a proof. (A call's parent
-is a helper the Oh My Pi process starts for each call, on 18.2.9 a child of the agent's own `omp`,
-so the record names the agent by the Legion pane's role and generation instead.)
-
-One call mints at a time: a wave of agents that starts as the kept key expires calls the command at
-once, and concurrent mints on a loaded devbox run past `hawk-token`'s 9000 ms budget. A call that
-finds no kept key takes an `flock` on `<cache-dir>/hawk-token.key.lock`, looks at the cache again,
-and mints only when the key is still missing; every other call waits on the lock and serves the key
-the holder kept. The mint runs with the lock's descriptor closed, since `hawk-token` can start a
-detached refresh that would otherwise hold the lock for minutes.
-
-Oh My Pi kills a `!command` 10 s after it starts it, so every call but the preflight gives up at
-9500 ms of a clock that starts with its own process (under load bash can take half a second to
-reach its first line), whether it is waiting on the lock or minting under `timeout`, and logs why.
-A waiter that takes the lock with under 2000 ms left starts no mint: the fastest mint measured on
-the devbox took 2006 ms, and each attempt is another keyring read. A waiter's wait is bounded by
-one mint, since it started no earlier than the call it waits on, so a wave served by a mint that
-succeeds is served inside every caller's ten seconds.
-
-Every agent's call appends one tab-separated line to `<dir>/hawk-token.calls`, and to the caller's
-`MODEL_GATEWAY_CALLS_FILE` when its environment names one: the time, the caller's pid, the
-directory Oh My Pi ran it in, the agent, the outcome, and a detail. The fields, and the values the
-agent and outcome take, are stated once, in the header of
-[`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh), the file that reads them. The
-installer's preflight is no agent's and is left out; a call that gets no key also says why on
-stderr, which is where the installer reads the preflight's reason. The key command tells a spent
-budget from a refused login only by `hawk-token`'s own sentence (`in <spent> ms of a <budget> ms
-budget`, spent at least the budget), since the wrapper exits 1 either way; a `hawk-token` that
-words it otherwise has a spent budget recorded as `failed`, never as a starve. A harness that gives
-each agent its own file can judge one run from that run's directory alone.
-
-The script creates the profile's two files, `<dir>` and `<cache-dir>`, and removes none of them; the
-caller does, with its work directory and `<cache-dir>`.
-
 ## lib/install-key-file-model-route.sh
 
 Routes a named OMP profile's model turns straight to Anthropic's own endpoint, keyed from a local
-file: the key-file alternative to [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)'s
-Hawk route, for a devbox that has no Hawk gateway at all. Mirrors the model-route pattern
+file: the one model route of the tmux proofs (Stage 2, Stage 3, the 4b.13b acceptance, the Claude
+Code backend proof, the Dispatch user-turns proof, the skill-scenario rig's `profile`) and of
+Stage 4b's operator controller. Mirrors the model-route pattern
 [`deploy/kubernetes/operator-route/models-key-file.yml`](../../deploy/kubernetes/operator-route/models-key-file.yml)
 gives Stage 4a's pods: an operator-supplied key, read fresh on every call, never minted and never
-written into the tree.
+written into the tree. Each caller takes the file from `LEGION_E2E_ANTHROPIC_KEY_FILE`.
 
 ```sh
 scripts/e2e/lib/install-key-file-model-route.sh --profile <name> --home <dir> --dest <dir> --key-dir <dir> --key-file <file>
@@ -2255,20 +2123,18 @@ after every outcome. `--key-dir` gets the key command itself
 (`<key-dir>/anthropic-key`): a plain file read, with `--key-file`'s resolved path baked into it, so
 anyone holding that script can read the key for as long as `--key-file`'s path still holds one —
 the caller must give `--key-dir` a path its own cleanup removes unconditionally, on every exit, not
-the evidence directory or a workspace a failing run keeps for debugging, the same rule
-[`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)'s `--cache-dir` already follows for
-its own minted token file. Unlike `hawk-token` there is nothing to mint and no login to lose to a
-relocked keyring, so there is no cache and no budget: every call is a plain, fast file read,
-`served` or `failed` (there is no `timeout` or `killed` here, since nothing is minted or waited
-on). It appends one tab-separated line per call to `<dest>/anthropic-key.calls`, and to the
-caller's `MODEL_GATEWAY_CALLS_FILE` when its environment names one, in exactly the record shape
+the evidence directory or a workspace a failing run keeps for debugging. There is nothing to mint
+and no login to lose, so there is no cache and no budget: every call is a plain, fast file read,
+`served` or `failed`. Only the key command reads the key file. It appends one tab-separated line
+per call to `<dest>/anthropic-key.calls`, in exactly the record shape
 [`lib/model-gateway-unserved.sh`](#libmodel-gateway-unservedsh) reads — the installer's preflight
-(`--preflight`) is no agent's and is left out, the same rule `hawk-token`'s own key command
-follows. The profile's `agent/models.yml` points the `anthropic` provider at
-`https://api.anthropic.com` with `apiKey` and `X-Api-Key` both `!exec <key-dir>/anthropic-key`, and
-its `agent/config.yml` pins every model role to `anthropic/claude-opus-4-8` and disables every
-other provider a pane could reach without the key file, the same shape
-[`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) writes.
+(`--preflight`) is no agent's and is left out. The profile's `agent/models.yml` points the
+`anthropic` provider at `https://api.anthropic.com` with `apiKey` and `X-Api-Key` both
+`!exec <key-dir>/anthropic-key`, and its `agent/config.yml` pins every model role, the roles
+Legion's task agents name included, to `anthropic/claude-opus-4-8`, sets
+`enabledModels: [anthropic/*]`, and disables every other provider a pane could reach without the
+key file: Oh My Pi falls back from a failing provider without a word, and subagents and retries
+choose from every enabled provider, so the profile leaves it nowhere to fall.
 
 The script creates the profile's two directories, `<dest>` and `<key-dir>`, and removes neither;
 the caller does, with its work directory, `<key-dir>` unconditionally and `<dest>` only when it
@@ -2276,14 +2142,13 @@ keeps no evidence.
 
 ## lib/model-gateway-unserved.sh
 
-Says whether the key command [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) or
-[`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) wrote
+Says whether the key command [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)
+wrote
 left an agent without a key, and why. Oh My Pi answers every call that gets no key the same way
 (`No API key found for anthropic.`, exit 1, and for `omp -p` on 18.2.9 no session file at all),
 whatever the cause, so a run cannot say for itself that it never got a model turn.
 
 ```sh
-bash scripts/e2e/lib/model-gateway-unserved.sh --record "$run/model-gateway-calls"                                # a scorer: one agent run
 bash scripts/e2e/lib/model-gateway-unserved.sh --notes "$evidence/model-gateway" "$check_started" "$check"  # a failed stage proof's EXIT trap
 bash scripts/e2e/lib/model-gateway-unserved.sh --fresh "$evidence"                                         # a stage proof's setup
 ```
@@ -2292,15 +2157,8 @@ An agent is a working directory and an agent field together, so a relaunched pan
 generation, is a new agent. An agent's last call decides whether it went without a key: Oh My Pi
 retries a failed key command 30 s later and after a 401.
 
-`--record` scores one agent run from the `MODEL_GATEWAY_CALLS_FILE` a harness named in that
-agent's environment: a file of the run's own, which does not exist before the run, so every line
-in it is that agent's. The skill-scenario rig runs one `omp -p` per run, which keeps its key for
-the life of the process, so a starved run has no model turn and the record agrees with the
-outcome. It exits 0 when the last call was served or the file holds none (no file included), `75`
-(`STARVED, not scored`: rerun it) when that call ran out of time or had its mint killed, and `77`
-(`KEY FAILED, not scored`) when the mint failed otherwise, which a rerun does not fix. A run from a
-checkout whose key command predates the record carries the same signal without the reason: no
-session file at all.
+The record's outcomes are `served` and `failed`; nothing is minted, so no call runs out of time
+or has a mint killed.
 
 `--notes` is a stage proof's diagnostic: the `EXIT` trap runs it once it has decided the run
 failed, guarded so that it never changes the exit status, and not after a hangup, an interrupt or
@@ -2328,16 +2186,14 @@ that run got as far as its key command, and this run must neither overwrite it n
 own. An absent directory, or an empty one it can list (every default), passes. Stage 4b prints its
 verdict line in that refusal, since no trap exists yet to print it.
 
-Every form exits 2 on an argument refusal (a `--record` in a directory that does not exist
-included), and `--record` and `--notes` 1 on a record line they cannot read.
+Both forms exit 2 on an argument refusal, and `--notes` 1 on a record line it cannot read.
 
 ## lib/check-model-route.sh
 
 Proves a tmux stage proof's agents reached the model only through its configured route: every
 agent turn the isolated OMP profile recorded, each subagent's included, was served by the
-`anthropic` provider, the one [`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh) (the
-Hawk gateway) or [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh) (a
-local key file) routes and leaves enabled. Stage 2 runs it last, after `stop`. Stage 3 runs it once
+`anthropic` provider, the one [`lib/install-key-file-model-route.sh`](#libinstall-key-file-model-routesh)
+routes and leaves enabled. Stage 2 runs it last, after `stop`. Stage 3 runs it once
 every agent process has stopped and before it copies the transcripts, then again over the copies,
 which must hold the same turns, sessions and subagents.
 
@@ -2467,8 +2323,7 @@ the key. Panes commit as their App's identity (`JJ_USER` and `JJ_EMAIL`), which 
 signs.
 
 A proof's panes and controller therefore see none of the operator's `~/.gitconfig`, `~/.claude`,
-`~/.codex` or `~/.aws`, which is what a Sandbox pod sees. The gateway key command alone runs under
-the operator's `HOME` ([`lib/install-model-gateway.sh`](#libinstall-model-gatewaysh)).
+`~/.codex` or `~/.aws`, which is what a Sandbox pod sees.
 
 ## lib/leftovers.sh
 

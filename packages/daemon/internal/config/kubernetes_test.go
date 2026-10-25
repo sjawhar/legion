@@ -468,7 +468,7 @@ func TestLoadForValidationRefusesUnderKubernetes(t *testing.T) {
 		},
 		{
 			name: "the removed gateway block",
-			body: kubernetesFile + "    gateway:\n      url: https://middleman.internal.example\n      audience: operator-audience\n      service_account: legion-worker\n      token_expiry_seconds: 600\n",
+			body: kubernetesFile + "    gateway:\n      url: https://model-gateway.internal.example\n      audience: operator-audience\n      service_account: legion-worker\n      token_expiry_seconds: 600\n",
 			want: "runtime.kubernetes.gateway was removed (LEGION-270): configure pods with runtime.kubernetes.pod (docs/kubernetes.md, Operator configuration)",
 		},
 		{
@@ -1269,7 +1269,7 @@ func TestLoadForValidationRefusesTheOperatorRouteWithItsAudienceUnfilled(t *test
 // The Stage 4b proof's configuration (the LEGION-208 Stage 4b plan, decisions 1, 2, 4, 5, 6, 7),
 // with placeholder hosts for Dispatch, the Envoy listener, and NATS: the daemon on the devbox's
 // private address driving namespace legion through the restricted role's kubeconfig and context,
-// with the gate off, a linger of 0.3 hours, and pods routed to middleman by the harnesses'
+// with the gate off, a linger of 0.3 hours, and pods routed to the model gateway by the harnesses'
 // operator pod, the fixture itself. No node selector and no requests: the pool's floor sizes the
 // node.
 func TestLoadForValidationAcceptsTheStage4bProofConfig(t *testing.T) {

@@ -1433,8 +1433,8 @@ A volume may also be an existing network share: [Network shares](#network-shares
 and what each runtime supports.
 
 `provider_keys` names keys of the providers Secret, which every pod mounts, those
-keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is an example of one: the
-Hawk model gateway, keyed by a projected ServiceAccount token, with a `models.yml`, a settings
+keys alone, for the shim to export. `deploy/kubernetes/operator-route/` is an example of one: a
+model gateway keyed by a projected ServiceAccount token, with a `models.yml`, a settings
 overlay, and the pod that mounts them; the operator keeps their own copies of the two files in a
 directory of their own ([Operator configuration](#operator-configuration)), and the Stage 4a and 4b
 proofs run on the example, each with its own copy of its ConfigMap.
@@ -3534,7 +3534,7 @@ providers Secret, of which every pod then mounts those keys alone, for the shim 
 Legion holds no model route: everything a pod's Oh My Pi needs to reach a model — a `models.yml`,
 a settings overlay in `PI_CONFIG_FILES`, a token — is the operator's, through `pod` and
 `provider_keys`. `deploy/kubernetes/operator-route/` is an example of one (the Go live
-harnesses': the Hawk model gateway, keyed by a projected ServiceAccount token). [Operator
+harnesses': a model gateway keyed by a projected ServiceAccount token). [Operator
 configuration](#operator-configuration) is what an operator gives it.
 
 `runtime` is either the scalar `tmux` (the default) or a mapping whose single key selects the
@@ -3767,7 +3767,7 @@ issue's pod (every role container of it alike) and the image probe's.
   `provider_keys` may not name an `AGENT_SECRETS_*` variable; `audience` (default
   `agent-secrets`) and `token_expiry_seconds` (default 3600, at most 3600, the cluster's admission cap)
   shape the one projected token every pod carries for the broker, alone in its volume beside the
-  operator's middleman token. With the block, the worker container mounts that token read-only at
+  operator's model gateway token. With the block, the worker container mounts that token read-only at
   `/var/run/legion/agent-secrets-token/token`, a memory-backed key directory at
   `/var/run/legion/agent-secrets`, and is told `AGENT_SECRETS_URL` and `AGENT_SECRETS_KEY_DIR`; the
   shim generates the pod's key there before it dials, its `hello2` carries the key's thumbprint and

@@ -93,7 +93,7 @@ const block = (): Block => ({
   service_account: "legion-worker",
   env: {
     KUBECONFIG: "/var/run/legion/kubernetes/config/config",
-    HAWK_API_URL: "https://hawk.internal.example",
+    MODEL_GATEWAY_URL: "https://model-gateway.internal.example",
   },
   volumes: [
     {
@@ -167,7 +167,7 @@ const pod = (): Pod => ({
 });
 
 const fullEnv =
-  "KUBECONFIG=/var/run/legion/kubernetes/config/config\nHAWK_API_URL=https://hawk.internal.example\n";
+  "KUBECONFIG=/var/run/legion/kubernetes/config/config\nMODEL_GATEWAY_URL=https://model-gateway.internal.example\n";
 const processes = (env = fullEnv) => `#1 legion\n#10 legion\n${env}#24 sh\n`;
 
 let n = 0;
@@ -366,12 +366,12 @@ describe("deployment-pod-block verdict", () => {
       block(),
       processes("KUBECONFIG=/var/run/legion/kubernetes/config/config\n")
     );
-    expect(v.missing).toEqual(["env HAWK_API_URL on process 10"]);
+    expect(v.missing).toEqual(["env MODEL_GATEWAY_URL on process 10"]);
     const none = verdict(pod(), block(), "#1 legion\n");
     expect(none.process).toBeNull();
     expect(none.missing).toEqual([
       "env KUBECONFIG on any process of the architect container",
-      "env HAWK_API_URL on any process of the architect container",
+      "env MODEL_GATEWAY_URL on any process of the architect container",
     ]);
   });
 
@@ -379,14 +379,14 @@ describe("deployment-pod-block verdict", () => {
     const v = verdict(
       pod(),
       block(),
-      processes("KUBECONFIG=/elsewhere\nHAWK_API_URL=https://hawk.internal.example\n")
+      processes("KUBECONFIG=/elsewhere\nMODEL_GATEWAY_URL=https://model-gateway.internal.example\n")
     );
     expect(v.wrong).toEqual(["env KUBECONFIG on process 10 differs from the block"]);
     expect(JSON.stringify(v)).not.toContain("/elsewhere");
   });
 
   test("the process holding the most of the block's env names is the one judged", () => {
-    const procs = `#1 legion\n#5 sh\nHAWK_API_URL=https://hawk.internal.example\n#10 legion\n${fullEnv}`;
+    const procs = `#1 legion\n#5 sh\nMODEL_GATEWAY_URL=https://model-gateway.internal.example\n#10 legion\n${fullEnv}`;
     expect(verdict(pod(), block(), procs)).toEqual({
       process: { pid: 10, comm: "legion" },
       missing: [],

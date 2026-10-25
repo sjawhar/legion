@@ -25,10 +25,10 @@
 # 1, the carded Send at its retry, and nothing else. Each check prints `== <name>`, what it
 # observed, and `ok <name>`; the first that fails ends the run non-zero, naming it.
 #
-# Run it as `bash scripts/e2e/dispatch-user-turns.sh` from a checkout, devbox only: the session's
-# model is Anthropic through the Hawk model gateway on the operator's own hawk login
-# (lib/install-model-gateway.sh), so LEGION_E2E_MODEL_GATEWAY_URL is required and the keyring must
-# be unlocked. DISPATCH_USER_TURNS_OMP names another Oh My Pi (a mise tool spec such as
+# Run it as `LEGION_E2E_ANTHROPIC_KEY_FILE=<0600 file> bash scripts/e2e/dispatch-user-turns.sh` from
+# a checkout, devbox only: the session's model is Anthropic, keyed from that file, which holds a
+# plaintext Anthropic key (lib/install-key-file-model-route.sh; cleanup removes the key command with
+# the scratch directory). DISPATCH_USER_TURNS_OMP names another Oh My Pi (a mise tool spec such as
 # github:sjawhar/oh-my-pi@<version>) in place of the pinned one. Everything the run creates is its
 # own and goes on any exit: its scratch directory, the isolated profile under the HOME it gives Oh
 # My Pi (make_omp_home, lib/omp-home.sh), its tmux server, its listener and Dispatch, and its
@@ -44,6 +44,12 @@ root=$(cd "$(dirname "$0")/../.." && pwd)
 work=$(mktemp -d "/tmp/legion-e2e-user-turns.$$.XXXXXXXX")
 evidence=${DISPATCH_USER_TURNS_EVIDENCE_DIR:-$(mktemp -d /tmp/legion-e2e-user-turns-evidence.XXXXXXXX)}
 mkdir -p "$evidence/logs" "$evidence/checks"
+key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+[ -n "$key_file" ] || {
+  echo "dispatch user turns e2e: LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key" >&2
+  rmdir "$work"
+  exit 1
+}
 ok=
 listener_pid=
 dispatch_pid=
@@ -239,9 +245,9 @@ until_true 90 "Dispatch to serve, with NATS" sh -c "curl -fsS http://127.0.0.1:$
 # proof is about.
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
 note "plugin $(jq -r '.name + "@" + .version' "$manifest") in OMP profile $profile"
-bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" \
-  --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache" >/dev/null ||
-  fail "the session's model route through the Hawk model gateway could not be installed (the reason is above)"
+bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" \
+  --dest "$work/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file" >/dev/null ||
+  fail "the session's model route through the key file could not be installed (the reason is above)"
 
 # What the slash-command checks send, installed in the profile's agent dir, which the pinned host's
 # discovery reads as the user config dir (packages/coding-agent/src/discovery/builtin.ts,

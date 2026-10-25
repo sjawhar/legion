@@ -57,7 +57,7 @@ the pinned image recorded in the production check. A criterion stated for "a wor
 the production check's, not this recipe's.
 
 Three things the chroot gets wrong, none a defect of the image: you are uid 0 inside it (`unshare -r`), so a test that
-expects a non-root uid fails there (the tester's `install-model-gateway.test.ts` case); the chroot's `sh` is dash, whose
+expects a non-root uid fails there (a case in the test of the tmux proofs' former model-gateway installer); the chroot's `sh` is dash, whose
 `command -v a b` prints only the first name (POSIX takes one operand) — use `bash -c 'type -P a b'`; and
 `/tmp` inside the rootfs is the rootfs's own, so a key written to `/tmp/k` there is gone with the directory.
 

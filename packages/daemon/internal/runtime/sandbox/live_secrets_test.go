@@ -125,7 +125,7 @@ func (r *liveRig) agentSecrets(c *liveClaim, args ...string) (stdout string, cod
 // secrets-two-roles-enrolled: the root and the worker share one pod and ServiceAccount, yet each
 // is enrolled from its own hello under a distinct role-generation slot, holds a private key (0600)
 // and enrollment id, and `agent-secrets self` answers each own id. The pod's projected token for
-// the broker's audience is alone in its volume, and the middleman token is untouched beside it.
+// the broker's audience is alone in its volume, and the model gateway's token is untouched beside it.
 func (r *liveRig) checkSecretsTwoRolesEnrolled() error {
 	root, worker := r.claim("root"), r.claim("worker")
 	for _, c := range []*liveClaim{root, worker} {

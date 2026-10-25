@@ -17,7 +17,7 @@
 # branch before any merge, and the scratch base is deleted at the end.
 #
 # Run it as `bash scripts/e2e/stage3-4b13b-acceptance.sh` from the operator's own Oh My Pi session,
-# with the Stage 3 proof's two required inputs, LEGION_E2E_MODEL_GATEWAY_URL and SMOKE_UPSTREAM_NATS
+# with the Stage 3 proof's two required inputs, LEGION_E2E_ANTHROPIC_KEY_FILE and SMOKE_UPSTREAM_NATS
 # (scripts/e2e/README.md), and three of its own, since it creates no Docker container:
 # ACCEPT_PG_CONTAINER and ACCEPT_PG_PORT name a running Postgres container (user postgres, password
 # ci) in which the daemon and Dispatch take their own databases, and ACCEPT_NATS_BIN a nats-server
@@ -132,6 +132,10 @@ cleanup() {
   # left as the checks set it. The warning names the line alone: inside a trap BASH_COMMAND is the
   # command the trap interrupted, not the cleanup command that failed.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # First, before anything slower can hang or be SIGKILLed mid-teardown: the model route's key
+  # command, which bakes in --key-file's resolved path, must never survive this script on any exit,
+  # and the scratch workspace it sits in is kept for review.
+  rm -rf "$work/model-gateway-key" || true
   if [ -z "${ok:-}" ] && [ -z "$audited" ] && [ -n "$prod_baseline" ]; then
     printf 'production audit after failure:\n' >&2
     production_audit >&2
@@ -152,7 +156,6 @@ cleanup() {
   TMUX_TMPDIR="$work/tmux" tmux -L "legion-$ptoken" kill-server >/dev/null 2>&1 || true
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   collect_transcripts
-  rm -rf "$work/model-gateway-cache" || true
   github_cleanup
   printf "the run's scratch workspace, kept for review, is %s\n" "$work" >&2
   printf "the run's evidence is %s\n" "$evidence" >&2
@@ -578,7 +581,9 @@ until_true_quiet() {
 }
 
 begin prerequisites
-for tool in go psql jq curl ss tmux bun mise secrets gh jj hawk-token; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go psql jq curl ss tmux bun mise secrets gh jj; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+[ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
 [ -x "$nats_bin" ] || fail "no native nats-server at $nats_bin"
 # The suspension waits are bounded by lib/workflow.sh's turn budget, and the lib sourced is ACCEPT_ROOT's.
 [ -n "${phase_seconds:-}" ] || fail "ACCEPT_ROOT's scripts/e2e/lib/workflow.sh ($root) predates phase_seconds: point ACCEPT_ROOT at a checkout that has it"
@@ -598,8 +603,8 @@ printf '%s\n' "$head_commit" >"$evidence/head.txt"
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-  fail "the agents' model route through the Hawk model gateway could not be installed"
+key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
+  fail "the agents' model route through the key file could not be installed (the reason is above)"
 note "the agents' model route keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
@@ -1218,9 +1223,9 @@ for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
 [ -z "$(run_processes)" ] || fail "a proof process remains"
 pass
 
-begin model-turns-through-the-gateway
+begin model-turns-through-the-route
 route=$(bash "$root/scripts/e2e/lib/check-model-route.sh" --sessions "$profile_agent/sessions" \
-  --control "$evidence/model-route-control") || fail "an agent turn left the gateway route"
+  --control "$evidence/model-route-control") || fail "an agent turn left the configured route"
 note "$route"
 collect_transcripts
 pass

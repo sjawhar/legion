@@ -14,6 +14,6 @@ __**a b**__
 
 *a ****b**** c*
 
-*"about *[*#1896*](https://github.com/METR/hawk/pull/1896)*"*.
+*"about *[*#1896*](https://github.com/example/project/pull/1896)*"*.
 
 *a **b** c*

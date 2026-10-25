@@ -11,8 +11,8 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-// The key-file route's own installer: unlike the Hawk gateway route, its key command has no mint
-// and no cache, so there is nothing to fake — every call is a plain read of a caller-supplied file.
+// The key-file route's own installer: its key command has no mint and no cache, so there is
+// nothing to fake — every call is a plain read of a caller-supplied file.
 const lib = import.meta.dir;
 const dir = mkdtempSync(join(tmpdir(), "install-key-file-test."));
 afterAll(() => rmSync(dir, { recursive: true, force: true }));

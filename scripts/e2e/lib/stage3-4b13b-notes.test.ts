@@ -32,8 +32,8 @@ check=setup check_started=2026-09-30T11:00:00Z
 soft_failures="$evidence/soft-failures.txt"
 mkdir -p "$work" "$evidence/model-gateway"
 : >"$soft_failures"
-# The merger starved during merge-held and was never served again.
-printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:10Z 4242 /x merger/1 timeout no-key >"$evidence/model-gateway/hawk-token.calls"
+# The merger got no key during merge-held and was never served again.
+printf '%s\\t%s\\t%s\\t%s\\t%s\\t%s\\n' 2026-09-30T12:00:10Z 4242 /x merger/1 failed no-key >"$evidence/model-gateway/anthropic-key.calls"
 stop_pid() { :; }; run_processes() { :; }; collect_transcripts() { :; }; github_cleanup() { :; }
 first_soft_check=
 first_soft_since=

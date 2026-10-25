@@ -51,7 +51,8 @@
 # scripts/e2e/lib/rig.sh picks, and the kernel assigns each run's daemon stand-in its port.
 #
 # Operator input (no default in this repository):
-#   LEGION_E2E_MODEL_GATEWAY_URL  profile: the model gateway (scripts/e2e/lib/install-model-gateway.sh)
+#   LEGION_E2E_ANTHROPIC_KEY_FILE  profile: a 0600 file holding a plaintext Anthropic key, the
+#                                  profile's model route (scripts/e2e/lib/install-key-file-model-route.sh)
 # Optional:
 #   SKILL_SCENARIOS_WORK      work directory, outside any checkout (default ${TMPDIR:-/tmp}/skill-scenarios)
 #   SKILL_SCENARIOS_PARALLEL  concurrent runs in a batch (default 5)
@@ -59,7 +60,7 @@
 #
 # Each run:
 #   - Its agent is `omp -p` on the Oh My Pi the daemon pins (.omp-pin), in the label's profile
-#     (make_omp_home, install-plugin-profile.sh, install-model-gateway.sh), under a HOME of its own
+#     (make_omp_home, install-plugin-profile.sh, install-key-file-model-route.sh), under a HOME of its own
 #     copied from the label's, with `env -i` and only the variables its pane file names (base_env).
 #     An agent that writes to its HOME (`mise use -g`, say) changes nothing for another run.
 #   - It runs in the tmux session skill-scenarios-<digest>-<run> on the work directory's own tmux
@@ -164,8 +165,11 @@ cmd_profile() {
     fail "install-plugin-profile.sh --package pi-envoy failed; see $P/install.log"
   bash "$co/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$P/home" --dest "$P/pi-legion" >>"$P/install.log" 2>&1 ||
     fail "install-plugin-profile.sh --package pi-legion failed; see $P/install.log"
-  bash "$co/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$P/home" --dest "$P/key" --cache-dir "$P/cache" >>"$P/install.log" 2>&1 ||
-    fail "install-model-gateway.sh failed; see $P/install.log"
+  # The key command lives as long as the label's profile, since every batch's runs name it; it is
+  # under the work directory, outside any checkout, and goes when the label's directory does.
+  [ -n "${LEGION_E2E_ANTHROPIC_KEY_FILE:-}" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
+  bash "$co/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$P/home" --dest "$P/key" --key-dir "$P/key-command" --key-file "$LEGION_E2E_ANTHROPIC_KEY_FILE" >>"$P/install.log" 2>&1 ||
+    fail "install-key-file-model-route.sh failed; see $P/install.log"
   cp "$co/.omp-pin" "$P/pin"
   touch "$P/ready"
   cat "$P/built-from"

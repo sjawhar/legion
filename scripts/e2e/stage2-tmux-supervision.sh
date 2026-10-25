@@ -14,15 +14,10 @@
 # work directory survives a failure, because its logs are the evidence, and goes when the run passed.
 #
 # Inputs: LEGION_E2E_PG_DSN, the Postgres to run against; unset, the run starts its own
-# postgres:16 on tmpfs. LEGION_E2E_MODEL_ROUTE (required, `gateway` or `key-file`) picks how the
-# agents reach Anthropic, independently of which devbox this runs on:
-#   - `gateway`: the operator's own hawk login, through the Hawk model gateway at
-#     LEGION_E2E_MODEL_GATEWAY_URL (required in this mode; lib/install-model-gateway.sh); the
-#     operator's keyring must be unlocked, and no Anthropic key reaches a pane.
-#   - `key-file`: LEGION_E2E_ANTHROPIC_KEY_FILE (required in this mode), a 0600 file holding a
-#     plaintext Anthropic key, read fresh by lib/install-key-file-model-route.sh's key command on
-#     every call; for a devbox with no Hawk gateway at all. No Anthropic key reaches a pane here
-#     either — only the key command, baked in at install time, ever reads the file.
+# postgres:16 on tmpfs. LEGION_E2E_ANTHROPIC_KEY_FILE (required), a 0600 file holding a plaintext
+# Anthropic key, read fresh by lib/install-key-file-model-route.sh's key command on every call: the
+# agents reach Anthropic through it. No Anthropic key reaches a pane — only the key command, baked
+# in at install time, ever reads the file.
 # The provider-key path is proven with GEMINI_API_KEY_TESTS from the secret store (agent tier: no
 # YubiKey touch), which the daemon itself resolves at boot and hands every pane's shim as a
 # daemon-held file (`provider_keys`); the run never reads it.
@@ -136,7 +131,6 @@ cleanup() {
   stop_pid "$listener_pid"
   for p in $(run_processes); do kill -KILL "$p" 2>/dev/null || true; done
   docker rm -f "$nats_container" "$pg_container" >/dev/null 2>&1 || true
-  rm -rf "$work/model-gateway-cache" || true
   if [ -n "${ok:-}" ]; then
     rm -rf "$work" || true
   else
@@ -250,15 +244,11 @@ expect_refusal() {
 
 # ---- setup -----------------------------------------------------------------------------------------
 
-model_route=${LEGION_E2E_MODEL_ROUTE:-}
-case "$model_route" in
-gateway | key-file) ;;
-*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
-esac
+key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+[ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
 for tool in go docker jq curl ss tmux bun mise socat secrets; do
   command -v "$tool" >/dev/null || fail "$tool is required"
 done
-[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 mkdir -p "$state" "$work/xdg" "$work/tmux" "$work/stub"
 make_omp_home "$omp_home"
 # Every daemon of the run starts with the real tmux first on its PATH: the tmux runtime looks tmux
@@ -268,26 +258,12 @@ make_omp_home "$omp_home"
 real_tmux=$(mise which tmux) || fail "mise has no tmux"
 mkdir -p "$work/realbin"
 ln -sfn "$real_tmux" "$work/realbin/tmux"
-# The model route, installed while this shell still holds the operator's HOME and XDG directories
-# (the gateway route's key command runs hawk-token under them; the key-file route's needs none of
-# it, but is installed the same way, here, for one setup step regardless of route). The gateway
-# route's first mint is its preflight: a locked keyring stops the run here, by name. The key-file
-# route's own preflight read stops the run here just as loudly if the file cannot be read.
-case "$model_route" in
-gateway)
-  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-    fail "the agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-  ;;
-key-file)
-  key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
-  [ -n "$key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
-  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
-    fail "the agents' model route through the key file could not be installed (the reason is above)"
-  ;;
-esac
-# The call record (.log/.calls) always sits under $work/model-gateway, beside $key_command itself
-# for the gateway route; the key-file route's own $key_command lives under its own --key-dir
-# instead, which the run's cleanup removes unconditionally, so the record is addressed separately.
+# The model route. Its preflight read stops the run here, by name, if the key file cannot be read.
+key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$work/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$key_file") ||
+  fail "the agents' model route through the key file could not be installed (the reason is above)"
+# The call record (.log/.calls) sits under $work/model-gateway; the key command itself lives under
+# its own --key-dir, which the run's cleanup removes unconditionally, so the record is addressed
+# separately.
 key_record="$work/model-gateway/$(basename "$key_command")"
 export XDG_STATE_HOME=$work/xdg # the legions registry this run writes is its own
 export TMUX_TMPDIR=$work/tmux   # so are the daemons' private tmux servers
