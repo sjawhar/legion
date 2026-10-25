@@ -10,12 +10,17 @@
 #   --arm recover  a pane unregistered while its process runs re-registers itself, with no human
 #                  and no write from this script beyond the one delete.
 #
+# The two numbers every budget below is measured in — the pane's refresh interval and the
+# listener's record lifetime — are read at run time out of the files that define them
+# (packages/envoy-client/src/envoy-settings.ts and packages/envoy/internal/session/registry.go,
+# the same two .github/scripts/check-heartbeat-margin.sh parses), never copied here: a copy would
+# go stale the moment either moves and this smoke would measure against a budget the tree no
+# longer has.
+#
 # Manual only, like scripts/smoke-delivery.sh and scripts/smoke-btw.sh: it needs a live listener
 # and a configured model provider, and is never wired into CI. See scripts/README.md.
 set -euo pipefail
 
-readonly record_lifetime_s=300
-readonly default_heartbeat_ms=100000
 readonly wedge_at=3
 readonly poll_s=15
 readonly fast_poll_s=5
@@ -53,6 +58,30 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 readonly script_dir
 repo_root="$(cd -- "${script_dir}/../../.." && pwd)"
 readonly repo_root
+
+# The refresh interval and the record lifetime, out of the tree rather than out of this file.
+settings_file="${repo_root}/packages/envoy-client/src/envoy-settings.ts"
+registry_file="${repo_root}/packages/envoy/internal/session/registry.go"
+readonly settings_file registry_file
+[[ -r "$settings_file" ]] ||
+  refuse "${settings_file} is not readable: this smoke reads DEFAULT_HEARTBEAT_MS from it"
+[[ -r "$registry_file" ]] ||
+  refuse "${registry_file} is not readable: this smoke reads OpenSessionRegistry's default ttl from it"
+default_heartbeat_ms="$(sed -nE 's/^export const DEFAULT_HEARTBEAT_MS = ([0-9_]+);.*$/\1/p' \
+  "$settings_file" | tr -d _)"
+[[ "$default_heartbeat_ms" =~ ^[0-9]+$ ]] ||
+  refuse "${settings_file} declares no single plain-decimal DEFAULT_HEARTBEAT_MS this smoke can read"
+readonly default_heartbeat_ms
+record_ttl="$(sed -nE 's/^[[:space:]]*opts := sessionRegistryOpts\{.*ttl: ([0-9_]+) \* time\.(Second|Minute).*$/\1 \2/p' \
+  "$registry_file" | tr -d _)"
+[[ "$record_ttl" =~ ^[0-9]+\ (Second|Minute)$ ]] ||
+  refuse "${registry_file} declares no single OpenSessionRegistry default ttl in <n> * time.Second|Minute form this smoke can read"
+if [[ "$record_ttl" == *Minute ]]; then
+  record_lifetime_s=$((${record_ttl% *} * 60))
+else
+  record_lifetime_s="${record_ttl% *}"
+fi
+readonly record_ttl record_lifetime_s
 
 arm=""
 control=0
@@ -103,11 +132,13 @@ fi
 [[ -n "$plugin" ]] || plugin="${repo_root}/packages/pi-envoy/extensions/envoy.ts"
 readonly arm control heartbeat_ms base_rev
 
-# What the pane's refresh interval will be: the plugin's shipping default unless the operator
-# shortened it, which is what every "one refresh interval" budget below is measured in.
+# What the pane's refresh interval will be: DEFAULT_HEARTBEAT_MS as the tree declares it, unless
+# the operator shortened it, which is what every "one refresh interval" budget below is measured
+# in.
 refresh_ms="${heartbeat_ms:-$default_heartbeat_ms}"
 readonly refresh_ms
 readonly refresh_s=$(((refresh_ms + 999) / 1000))
+note "read from the tree: refresh interval ${default_heartbeat_ms} ms (DEFAULT_HEARTBEAT_MS, ${settings_file}), record lifetime ${record_lifetime_s}s (${record_ttl}, OpenSessionRegistry's default ttl, ${registry_file}); this run refreshes every ${refresh_s}s"
 
 arm_label="$arm"
 ((control == 0)) || arm_label="${arm}, control"
