@@ -151,7 +151,9 @@ Dispatch answers a delivery view with:
   each list's `upsert` and the ids it `remove`s), the map entries and counts that changed (`maps`
   and `counts`, null for a key that left), and the fields replaced whole (`set`, which carries
   `window` whenever it moved, never alone);
-- `freshness`, sent to every subscriber only when the freshness verdict changes;
+- `freshness`, the freshness verdict: sent right after a subscription's first answer when Dispatch
+  holds one, so a socket opened or resumed after the verdict changed still gets it, and to every
+  subscriber whenever it changes;
 - `error`, with the code the matching GET route would answer (`INVALID_QUERY`,
   `DELIVERY_NOT_CONFIGURED`) or `INVALID_FRAME`; and
 - `heartbeat`, every 15 seconds. While nothing the view shows changes, the heartbeat is the only

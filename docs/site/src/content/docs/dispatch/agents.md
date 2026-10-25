@@ -55,6 +55,15 @@ on an open issue instead; it is then posted on that issue as a comment that ment
 
 Press `Ctrl+Enter` (`⌘Enter` on a Mac) to send.
 
+A message straight to the agent that Dispatch has not confirmed after 30 seconds says **Still
+sending — Dispatch has not confirmed it yet. It keeps trying, and the message is delivered once.**
+The page keeps sending it under one key, so however many tries reach Dispatch, the agent gets the
+message once. **Stop trying** ends the tries: the message comes back with **Retry**, which sends it
+again under the same key, and **Discard**, which drops it. The send belongs to the agent, not to
+the page you sent it from: it keeps going when you close the row or leave the live view, the row
+and the live view show it alike, and it survives a reload of the tab. While a send is
+unconfirmed, the browser asks you to confirm before you leave or reload the page.
+
 ### Send, Aside, and BTW
 
 How a message reaches the agent depends on its mode:
@@ -124,6 +133,13 @@ filter. **Clear selection** empties it.
 Each send gets a row above the broadcast box: `Queued`, `Sending to N…`, `Sent to N agents`, or
 `Could not send to N` with the reason. A failed row offers **Retry**, which sends the same request
 again, and **Restore draft**, which puts the message and the selection back in the box.
+
+A broadcast is sent the same way: under one key, tried again until Dispatch confirms it, so it is
+made once however many tries reach Dispatch, and kept through a reload of the tab. Once Dispatch
+has not confirmed it for 30 seconds, its row says `Still sending to N agents — Dispatch has not
+confirmed it yet. It keeps trying, and the broadcast is made once.` and offers **Stop trying**. A
+stopped row says `Stopped sending to N agents` and offers **Retry**, which tries the same request
+again under the same key, and **Restore draft**, as a refused one does.
 
 ![A broadcast page listing each recipient, its delivery state, and its reply](/legion/media/dispatch/broadcast.png)
 

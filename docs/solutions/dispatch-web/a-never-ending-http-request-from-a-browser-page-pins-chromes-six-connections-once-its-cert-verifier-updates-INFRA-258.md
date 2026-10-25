@@ -64,20 +64,24 @@ Specs: dispatch://INFRA-258 and dispatch://INFRA-292.
   live socket never takes one of the six slots that ordinary requests need. The event feed and the
   agent live view are subscriptions on that one socket. Server:
   `packages/envoy/internal/dispatch/api/live_socket.go`, `live_events.go`, `live_agent.go`.
-  Page: `packages/dispatch/web/src/api/live-socket.ts`, `event-feed.ts`.
+  Page: `packages/dispatch/web/src/api/live-socket.ts`, `event-feed.ts`. This holds only while the
+  front proxy does not advertise HTTP/2 extended CONNECT (`SETTINGS_ENABLE_CONNECT_PROTOCOL`):
+  a browser that sees it runs the socket inside an HTTP/2 session, and the hang can return.
+  `bun scripts/e2e/lib/h2-settings.ts https://<dispatch>` exits 1 when the proxy advertises it.
 - **A random age set by the server for each connection.** Each socket gets an age between
   `contracts.LiveSocketMinAge` and `LiveSocketMaxAge` (30 and 60 minutes) when it opens, then
   closes with 4001 (`LiveSocketMaxAgeClose`). The page opens a new socket at once and resumes every
   subscription from its cursor, and shows nothing to the user. No connection lives forever, even
   if a later browser pools WebSockets like HTTP.
-- **Deadlines on ordinary requests.** Every GET the page makes is aborted after
-  `REQUEST_DEADLINE_MS` (30 s, `packages/dispatch/web/src/api/client.ts`) and fails with
-  `RequestTimeoutError`, so a request stalled inside the browser fails and is retried instead of
-  hanging the page.
+- **Deadlines on ordinary requests.** A GET the page makes whose response headers have not arrived
+  after `REQUEST_DEADLINE_MS` (30 s, `packages/dispatch/web/src/api/client.ts`) is aborted and
+  fails with `RequestTimeoutError`, so a request stalled inside the browser fails and is retried
+  instead of hanging the page. Once the headers arrive, the body reads without that deadline.
 - **An idempotency key on every send** (`idempotency_key`, with `409 MESSAGE_KEY_REUSED` for a
-  key reused on a different request). The page retries a send to one session under its key until
-  Dispatch confirms it (`sendKeyedAgentMessage`, `packages/dispatch/web/src/features/conversation/send-request.ts`),
-  so a send that timed out is delivered once, never twice.
+  key reused on a different request). The page retries a send to one session, and a broadcast,
+  under its key until Dispatch confirms it (`sendKeyedAgentMessage`,
+  `packages/dispatch/web/src/features/conversation/send-request.ts`), and keeps the send in
+  `sessionStorage` so a reload resumes it, so a send that timed out is delivered once, never twice.
 
 ## The rule
 
