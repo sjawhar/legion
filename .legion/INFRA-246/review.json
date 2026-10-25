@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-246",
-  "completed": "2026-10-25T11:40:00Z",
+  "completed": "2026-10-25T13:05:00Z",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
@@ -10,33 +10,34 @@
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/pi-envoy/extensions/envoy.ts:2299-2301",
-      "description": "The failed-hand-back restore loop, returned to its unconditional form this round, is not bounded to a redundant soft claim. That bound is the reviewer's own round-4 audit and it was wrong; this finding corrects it. Path A, the one that takes a role: a loop under host A removes `X@A`, its unsubscribe fails so the entry lives only in the local `failed` array, and the task is abandoned at its deadline. The process moves to B, which claims X successfully - that claim clears pendingHandBacks and abandonedHolds of X (:1938-1941) but cannot reach the old loop's local array. Another process resumes A and claims X, so A is the newer live holder. The old loop then finishes and restores `X@A` into pendingHandBacks, because its captured `host` is still A. B's next pass wants X, adopts that entry over its own confirmed state (:2281-2285, setting claimedRoleSessionID = A and holdUnconfirmed = true), computes supersedes = A (:2366) and sends the soft claim with previousSessionID = A (:2384). The listener supersedes a holder that matches previous_session_id even when that holder is live - packages/envoy/cmd/listener/api.go:822-825, 'so may the claimant's own predecessor, live or not', applied at packages/envoy/internal/store/kv.go:612-615 - so B takes X from the process now running A, and that role's traffic follows B. Without the resurrected entry B's pass would have soft-claimed with no predecessor, taken the 409 and relinquished (:1658-1693). Path B, underneath it: the loop classifies with the captured `host`, so a hold under a session the process has left since is filed as pending rather than abandoned. That is exactly the case settleEndedHolds' own comment says must go to abandonedHolds, 'since nothing heartbeats that session any more and a later try could take a hold another process made under that id' - the hazard Path A realises, named in the function and defeated by the stale capture. Round 5's topic-only skip blocked Path A while breaking the unconfirmed-adoption case; the revert restores Path A. Two conditions, wrong in opposite directions. `topic === claimedRoleTopic && !holdUnconfirmed` closes Path A and keeps round 5's case fixed, and classifying against the live host rather than the captured one closes Path B - but the reviewer does not assert that pair is sufficient, having now been wrong about this loop once, and the choice between a third targeted condition and a scoped redesign is the architect's."
+      "file": "packages/pi-envoy/AGENTS.md:436, packages/pi-envoy/extensions/envoy.ts:618, :2281",
+      "description": "Three descriptions of the hold model still state the model this round replaced, and one of them states the deleted branch as the rule. (1) packages/pi-envoy/AGENTS.md:436: 'One the listener does not take back is tried again while it is under the host session's own id, which this process heartbeats; under a session it has left it is abandoned to the listener's reaping' - that is exactly the host-dependent branch edit 2 deleted, and the same bullet describes adoption with no same-session requirement ('unless the session the host is then on wants that role, whose hold it is again'), where the code now requires sessionOpen(hold.id) at :2296-2300. This file is the package's engineering guidance and is read by every agent working here, so it tells the next maintainer to restore the branch whose removal is the point of the round. (2) envoy.ts:618 says abandonedHolds holds 'Holds this process gave up under a session it has left', which :2280 ('whatever session it is under') and :2318 (every entry of `failed`) contradict three screens below it: a hand-back that fails under the session this process still runs now lands there too. (3) envoy.ts:2281 says 'the next accepted registration makes it a pending hand-back again', where registerSession re-promotes before issuing the request - the loop at :1601-1604 precedes the client.subscribe call - so it happens at the attempt whether or not the answer arrives; AGENTS.md's own 'any registration of that session by this process, in a pass or not and answered or not' is the accurate statement, so the two documents also disagree. No behaviour is wrong and nothing is hidden: this is documentation. It is carried rather than deferred because the round's stated purpose was an invariant the next reader checks against, the text is newly written this round, and its concrete failure mode is the reintroduction of the branch whose absence closes rounds 5 and 6. Three text edits, no code. If the architect judges an eighth round disproportionate for that, it should say so and the reviewer will approve on its word."
     }
   ],
-  "roundFiveFindingsVerified": [
-    "The revert is exact, computed here: packages/pi-envoy/extensions/envoy.ts hashes to 6dacb75f44afd8732db16ccd229ee1fd4de3ba6b7d5da7d03cb0d2041120247e at both d6884d57 and this head, and jj diff over that path between them is 0 files changed.",
-    "The replacement test case is round 2's and not the skip's: one session, no second pendingHandBacks entry of a topic, no newer claim of the role it hands back, and its assertions are at the fixture listener's surface (handedBack gaining legion-controller@ses_rf_ab then reviewer@ses_rf_ab, reviewer left unheld).",
-    "The check's header now separates dispatch from budgeted completion and shows its work with the tie fixture's own numbers (40000 ms interval, 60000 ms budget, 180000 ms lifetime, dispatch at 120000), so the paragraph and the case that proves it move together."
+  "roundSevenVerified": [
+    "settleEndedHolds(wanted, live) at envoy.ts:2285 takes no host; one caller at :2358 passes two arguments. The captured host is not representable.",
+    "The failed loop abandons unconditionally at :2318, so nothing it writes can be adopted later.",
+    "Adoption is gated on sessionOpen(hold.id) at :2296-2300 and reads neither claimedRoleTopic nor holdUnconfirmed, so the loop no longer reads a variable it writes.",
+    "abandonedHolds is keyed ${topic}@${id} with every reader following: registerSession selects by hold.id and re-promotes under the same key (:1601-1604), observeAbandonedHold looks up and updates by that key (:1871-1893), and the claimed-branch cleanup sweeps every entry of the topic (:1950-1955). The collision it fixes - two failed hand-backs of one role under two sessions, one dropped - is a defect none of the six previous rounds named.",
+    "The writers of claimedRoleSessionID are still :1966, :2005, :2302 and supersedes still has its two sources (:2382, :2394), so the recorded residual at :1957-1966 is narrowed, not widened, and round 7 adds no path."
   ],
   "ciRead": {
-    "codeHead": "fabca81c255be2d6cd75335f98a8b0848326c987",
+    "codeHead": "1363aa8f50571be6128fcc0b4ec202804e2fc158",
     "requiredChecks": ["lint", "typecheck", "test", "pr-title"],
-    "verdict": "all four completed success at the code head; compare fabca81c...e8e18568 is ahead with only .legion/INFRA-246/implement.json and test.json above it. The pi-legion check-run is `failure` there and is NOT in the required set: the reviewer verified the inheritance rather than accepting it, finding the owning workflow `Legion Envoy and Contracts` also failing on main (run at 3ff60972), so it is main's red and not this head's, tracked on dispatch://INFRA-376. One pr-title run is cancelled and superseded by five successes from the workflow's concurrency group. envoy-go, envoy-go-race, envoy-smoke and dispatch-memory were still running; none is required.",
+    "verdict": "all four completed success at the code head. The compare was read as a whole rather than through a boolean: status ahead, ahead_by 2, files present, count 2, exactly .legion/INFRA-246/implement.json and test.json - an `all(startswith(...))` over a missing or capped file list answers true, so the count and the names are the read. broker-multiprocess is failure there and is not required; the reviewer established that it cannot be this branch's from the branch's own delta, 0 files changed under packages/envoy/cmd/broker and packages/envoy/internal/broker, which needs no read of main (dispatch://INFRA-379). pi-legion is green again at this head.",
     "reviewedHead": "the head this round's handoff push makes"
   },
   "threads": {
-    "openedByReviewer": 17,
-    "reviewerRepliesPosted": 17,
-    "unresolvedByReviewer": ["PRRT_kwDORFy7ds6wAaPJ - the revert thread, unresolved because the behaviour it restored carries this round's finding"],
+    "openedByReviewer": 19,
+    "reviewerRepliesPosted": 19,
+    "unresolvedAtThisHead": 0,
     "botThreadsAccepted": []
   },
   "thermonuclear": {
-    "head": "e8e18568",
-    "scope": "the whole pull request, weighted to the round-6 delta 4320e947..e8e18568",
-    "deepReview": "CHANGES - 1 medium, the restored unconditional restore taking a role from a newer live holder",
-    "codeQuality": "APPROVE - no findings",
-    "adjudication": "The medium was carried after the reviewer verified its load-bearing external fact, the listener's supersede-a-live-predecessor rule, in packages/envoy/cmd/listener/api.go and packages/envoy/internal/store/kv.go. The reviewer added Path B, the stale captured host, which the pair did not name. Nothing declined."
-  },
-  "reviewerCorrection": "Round 4's handoff recorded this loop's worst case as 'a redundant soft claim of a role the session already holds', and round 5's review offered reverting as equally acceptable on that basis. Both rest on the same mistake: the audit stopped at the restore and never followed the restored entry into the adoption that turns it into a previousSessionID the listener honours against a live holder. The architect chose the revert partly on that assurance."
+    "head": "d7f2c746",
+    "scope": "the whole pull request, weighted to the round-7 delta 07a84828..d7f2c746",
+    "deepReview": "APPROVE - no correctness or security finding; each of the three invariants checked, the round-6 path reported closed and the recorded residual not widened",
+    "codeQuality": "APPROVE - 1 P3, the hold-lifecycle descriptions",
+    "adjudication": "The P3 was verified in the files and carried as this round's one finding. Nothing declined."
+  }
 }
