@@ -104,5 +104,11 @@
         "scope": "Two routes rather than the architecture-source family's four, both human-only rather than authAny, and the read is a list route rather than a per-project one."
       }
     }
-  ]
+  ],
+  "proofSurfaces": {
+    "note": "Measured in this issue's worker pod on 2026-10-25, for the implementer and the tester to start from rather than rediscover. The pod carries no Postgres, no psql, no browser and no Docker, and `kubectl auth can-i create services` answers `no`, so the cluster-workload path of docs/kubernetes.md is closed and nothing may be submitted to it. Both surfaces run inside the pod without root.",
+    "postgres": "Point apt's state and cache at a writable directory (`apt-get -o Dir::State::Lists=<dir>/lists -o Dir::Cache=<dir>/cache -o Debug::NoLocking=1 update`), take the dependency closure of postgresql-17 and postgresql-client-17 with `apt-get ... install --print-uris -y --no-install-recommends` piped into curl, add postgresql-17-pgvector (migration 0072_embeddings_core.up.sql:30 creates the vector extension and the tests fail without it), unpack each .deb with `dpkg-deb -x <deb> <root>`, then with PATH=<root>/usr/lib/postgresql/17/bin and LD_LIBRARY_PATH=<root>/usr/lib/x86_64-linux-gnu:<root>/usr/lib run `initdb -D <data> -U postgres --auth=trust` and `pg_ctl -D <data> -o '-p 55432 -k /tmp -c listen_addresses=127.0.0.1' -l <log> start`. Proven here: psql answered PostgreSQL 17.11, and `cd packages/envoy && env DISPATCH_TEST_DATABASE_URL='postgres://postgres@127.0.0.1:55432/postgres?sslmode=disable' go test ./internal/dispatch/api/ -run 'TestCreateIssueBy…' -count=1` passed in 2.5 s.",
+    "browser": "`bunx playwright@1.63 install chromium` downloads and runs (the browser lands under the pod's cache directory, which the suite finds). `bun install` at the repository root first. Then, with a database of its own on that Postgres, `cd packages/dispatch && DATABASE_URL='postgres://postgres@127.0.0.1:55432/dispatch_e2e?sslmode=disable' bun run e2e -- --project=chromium e2e/settings.e2e.ts`. Proven here: 7 of 7 passed in 41 s, against the real Go server, a real Postgres and the built SPA.",
+    "browserTestOrder": "Both new browser rows are written and run before any server or web change and must be seen red at the base commit; the tester runs them at that commit itself rather than trusting the implementer's quote, and only then reads them green at the head. Both runs, with their commits, go on the pull request."
+  }
 }
