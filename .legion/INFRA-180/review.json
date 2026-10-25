@@ -2,85 +2,79 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-180",
-  "completed": "2026-10-25T07:05:00Z",
+  "completed": "2026-10-25T07:45:00Z",
   "decision": "changes_requested",
-  "round": 3,
-  "reviewedHead": "0e3ac5b8f10007adb8e883f21f769a84dd5a4ee2",
-  "codeHead": "709538bf7d44fd76dbcc2e0a116fbd099e4a4d6f",
+  "round": 4,
+  "reviewedHead": "3a7771b2a849bae1fa338e9659df1492f23710ed",
+  "codeHead": "50f2638ba9413593f1e5cdcdf937860388d81109",
   "critical": 0,
   "important": 1,
-  "minor": 7,
-  "standard": "The architect narrowed what blocks (its message c209920d842145b7b812add3536aa25f): a correctness defect in the delivered text for a shape Slack sends — a word lost, a word doubled, a line that asserts something the channel does not, or a cost without a bound — is fixed in this pull request; a further display field, a nicer order among fields, the wording of a comment or changelog line, and a refactor are recorded on the Fast-follow line and approved past. One finding meets the blocking standard; everything else below is recorded.",
-  "previousRoundsVerified": "All six items of the architect's round-4 ruling are done at this head, each driven through SlackEnvelope rather than read from a handoff. The nested rich_text probe is asked once for the outermost object, so the body that cost 85.4 s (four chains 9,900 deep, 990,361 B, inside the 1 MiB cap) now costs 44 ms. A message with its own words beside a rich_text block that adds one line delivers 'Build failed\\nFAIL TestFoo at line 42\\nsee logs' — no duplication. Blocks are read before attachments ('CPU high on host-a\\nCPU high', the summary no longer an attachment fallback). The false clause 'each object read in the order Slack shows it' is gone from packages/envoy/CHANGELOG.md and skills/legion-controller/references/slack-mentions.md, and the claude-envoy bundle copy is byte-identical. An attachment's fields entry arrives as one 'title: value' line, so 'Primary: oncall-a\\nSecondary: oncall-a\\nEscalation: oncall-b' and 'Cluster: prod-us-east\\nRegion: us-east\\nReplicas: 3\\nAttempt: 3'. An image-only Block Kit post delivers 'CPU chart: 97% for 10 minutes' as both the text and the summary, and an attachment's author_subname is delivered. Round 1's shapes all still hold: the escaped-character message delivers one line, the Block Kit alert's summary is '*p99* is 3.2s', a deleted message delivers nothing and no text key, an edit delivers the new message and none of previous_message.",
+  "minor": 6,
+  "standard": "The architect's narrowed standard (its message c209920d842145b7b812add3536aa25f) blocks only a correctness defect in the delivered text for a shape Slack sends — a word lost, a word doubled, a line that asserts something the channel does not, or a cost without a bound. Both findings below went to the architect before this review under the protocol agreed in round 3; it ruled in that turn (message 2b22669359589de4d34472fa555f5d3b): the fallback doubling is required, the own-words adjacency is recorded.",
+  "round3Verified": "The one change round 3 required is built, and it is the root fix rather than the container fix: the message-wide taken set is gone, replaced by ownWords (the message's own text and its non-blank lines, compared walk-wide) and a per-object yielded tally, and slackFieldPiece, slackFieldHalf, the fields recursion parameter, the pair latch and the synthesised 'title: value' string went with it. All four blocking bodies are repaired, driven through SlackEnvelope at the code head: section fields *Passed*/3, *Failed*/0, *Skipped*/0 deliver '*Passed*\\n3\\n*Failed*\\n0\\n*Skipped*\\n0'; the rota delivers 'Deploy failed\\n*Primary*\\noncall-a\\n*Secondary*\\noncall-a\\n*Escalation*\\noncall-b'; two attachments one per host deliver 'web-1\\nok\\nweb-2\\nok'; four sibling sections the same. The two cases the rule exists for still hold: one attachment with title = text = fallback is one line, and a piece equal to the own text or one of its lines is dropped wherever it sits. Everything earlier still holds: the 990,361 B nested rich_text body is 41 ms, the client-composed mention with escaped characters delivers one line, blocks precede attachments, an image-only post delivers its alt_text, a deleted message carries no text key, an edit delivers none of previous_message. The changelog and the controller reference describe the shipped rule and no longer claim 'title: value'; the claude-envoy bundle copy is byte-identical.",
   "keyFindings": [
     {
       "severity": "important",
       "blocking": true,
-      "file": "packages/envoy/internal/contracts/normalize.go:1149,1168",
-      "description": "The repeat set w.taken is message-wide, so any two cells anywhere in the message carrying the same string lose the second. slackFieldPiece repaired this for one container, an attachment's fields array; everywhere else the loss stands, and body_truncated is unset in every case. Four bodies driven through SlackEnvelope at this head, each the delivered payload text. (1) A Block Kit section's fields, the shape Slack's own docs steer apps to and the shape this round's blocks-before-attachments argument rests on: text 'Deploy failed' with fields *Primary*/oncall-a, *Secondary*/oncall-a, *Escalation*/oncall-b delivers 'Deploy failed\\n*Primary*\\noncall-a\\n*Secondary*\\n*Escalation*\\noncall-b', so a reader pairing alternating lines reads Secondary as oncall-b. (2) Equal counts, the most ordinary CI alert there is: fields *Passed*/3, *Failed*/0, *Skipped*/0 delivers '*Passed*\\n3\\n*Failed*\\n0\\n*Skipped*' — Skipped's count is lost outright. (3) Two attachments sharing a status, one per host: [{title: web-1, text: ok}, {title: web-2, text: ok}] delivers 'web-1\\nok\\nweb-2'. (4) Four sibling sections with the same content deliver 'web-1\\nok\\nweb-2', the same loss with no fields array present. This is the defect of the architect's item 5 in its own words — 'two fields sharing a value is ordinary, and the equality rule then left a label without its value, so the delivery asserted a pairing the channel does not make' — which is about the repeat rule rather than about attachments; this round fixed the container the round-2 review named instead of the rule. Fix, which shrinks the code: scope the repeat set to the object that yields the pieces, keeping only the message's own text and its lines walk-wide. Verified in a scratch copy by the code-quality pass: all 32 TestSlackDeliveredText cases plus TestSlackSummary and TestSlackPayload stay green unmodified, (3) becomes 'web-1\\nok\\nweb-2\\nok', (1) becomes the full rota, and the two cases the rule exists for still hold — an attachment whose fallback repeats its own title is one object so stays one line, and a piece equal to a line of the message's own text is still dropped. Do not pair a section's cells two by two: Slack fills that grid left to right and an odd or one-column layout would make the pairing false."
+      "file": "packages/envoy/internal/contracts/normalize.go:1107-1110,1250,1258",
+      "description": "An attachment's fallback is doubled against blocks nested inside that same attachment. Driven at the code head: attachments [{color: '#d00', fallback: 'Deploy failed on web-1', blocks: [section mrkdwn 'Deploy failed on web-1']}] delivers 'Deploy failed on web-1\\nDeploy failed on web-1', body_truncated unset. The control is the same attachment with fallback equal to its own title, which still collapses to one line, so the gap is exactly fallback against the attachment's own subtree: the yielded tally reaches an object's own keys and blocks is descended as a separate object. This is not the cross-object trade the architect ruled in. That trade's reason, which the changelog states, is 'two objects saying the same thing are two things a reader sees'; an attachment's fallback is the one string in Slack's model defined by nobody seeing it when the attachment's own blocks render, so the reader sees the line once and the delivery says it twice. Colour bar plus fallback plus blocks is how an app posts a coloured alert today. Round 3's message-wide set covered it; the per-object scope does not. The architect required it in its message 2b22669359589de4d34472fa555f5d3b and specified the shape: build it as an ordering rule, not an exception — an attachment's fallback is read last, after everything else that attachment carries, and dropped when the attachment has already yielded it anywhere in its subtree. That also repairs a note standing from round 2: fallback is taken before the attachment's own blocks are descended, since blocks is not one of the nine names and sorts into the alphabetical tail, which is why an attachment carrying fallback 'PLAIN COPY' and a section 'the real body' delivers 'PLAIN COPY\\nthe real body' with the fallback as the summary. Cases: the colour-bar body delivering one line; an attachment whose fallback differs from its blocks delivering both with the body first; and the existing same-object collapse unchanged."
     },
     {
       "severity": "minor",
       "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize.go:1232,1274-1305",
-      "description": "Recorded, and it is the same fix taken at the root: with the repeat rule scoped per object, slackFieldPiece, slackFieldHalf, the fields parameter threaded through every recursive call and the pair latch are all unnecessary — about 45 lines, one recursion parameter and one mutated loop latch. The code-quality pass drove it: without the pairing, the Primary/Secondary/Escalation body comes out as 'Deploy failed\\nPrimary\\noncall-a\\nSecondary\\noncall-a\\nEscalation\\noncall-b' and the Cluster/Region/Replicas/Attempt body as 'Cluster\\nprod-us-east\\nRegion\\nus-east\\nReplicas\\n3\\nAttempt\\n3', no label orphaned, which is also approved spec version 11's own 'each non-blank one on its own line' and closes one of the recorded deviations rather than adding to it. Whether the delivered form stays 'title: value' is the architect's ruling and is not what blocks."
-    },
-    {
-      "severity": "minor",
-      "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize.go:1241-1257",
-      "description": "Recorded, only if the pairing stays: pair is mutated inside the key loop as an 'already emitted' latch beside paired, and the arm's correctness depends silently on slackDisplayFields ranking title above value 130 lines away, so three places now know those two key names. Emitting the piece before the loop and skipping the two string halves inside it removes both the latch and the dependency; isString must stay in the guard, since a fields element whose value is an object still has to be descended."
-    },
-    {
-      "severity": "minor",
-      "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize.go:1299-1305",
-      "description": "Recorded: slackFieldHalf re-implements the canonical stringValue plus a blank check; strings.TrimSpace(stringValue(v)) == \"\" is the whole body. It dies with the root fix above."
-    },
-    {
-      "severity": "minor",
-      "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize.go:1232,1124-1134",
-      "description": "Recorded, legibility rather than design: measure carries three states in one empty string — no own text, own text that is whitespace, and the probe already spent. A parameter is the right mechanism for per-subtree scoping, since a struct field would need save and restore; the doc comment carries the meaning today."
-    },
-    {
-      "severity": "minor",
-      "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize.go:1103-1345",
-      "description": "Recorded: normalize.go grows 1384 to 1630 lines. slackDisplayFields through slackWalkKeys is 243 lines of one cohesive unit with no caller outside the Slack normaliser and no dependency beyond stringValue, sliceValue, mapValue and maxEnvelopeTextRunes — the obvious slack_text.go. The package has no per-source-file convention, so this is a suggestion."
-    },
-    {
-      "severity": "minor",
-      "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize_test.go",
-      "description": "Recorded: two cases pin incidental behaviour rather than a contract. 'a button's label before its hidden value' pins 'Acknowledge\\nack:alert-77', and a button's value is an opaque interaction payload Slack renders nowhere, so it is the one place slackDisplayFields' 'names Slack shows words under' comment is false — value is a display name only inside an attachment field. 'a field value the words merely contain' uses attachments [{value: web-1}], and Slack does not send a bare value at attachment level; as a fields element the guard would be stronger. No case in the table is a tautology: every one asserts an exact delivered string that differs from its input."
+      "file": "packages/envoy/internal/contracts/normalize.go:1173-1175",
+      "description": "Recorded by the architect's ruling of 2026-10-25T07:37:33Z, with both bodies I drove. The ownWords drop reaches a field value and orphans its label: own text 'failed' with attachment fields Result/failed, Branch/main delivers 'failed\\nResult\\nBranch\\nmain', and own text 'resolved' with section fields *Status*/resolved, *Owner*/sre delivers 'resolved\\n*Status*\\n*Owner*\\nsre'. A reader pairing alternating lines reads Result as main's label, which is the assertion half of the standard, but no word is lost since the own text carries it, and it needs an app whose text fallback is a bare one-word status. The narrowing the deep review suggested — compare ownWords only against the top-level objects of blocks and attachments — was refused with a reason I checked and agree with: a Slack client's rich_text copy sits several levels down in blocks[0].elements[].elements[], so that narrowing would stop dropping exactly the deep piece and the duplicate the human was shown as fixed would return."
     },
     {
       "severity": "minor",
       "blocking": false,
       "file": "packages/envoy/internal/contracts/normalize.go:1136-1137, packages/envoy/internal/session/session.go:113-118",
-      "description": "Security[prompt], recorded under the architect's standard and already with the human. The deep review traced the link-unfurl path concretely: Slack adds an unfurl by editing the message, so it arrives as message_changed on a person's message carrying user_id and no bot_id, the attachment's title and text reach payload.text, and session.go renders the payload into the agent's wake prompt after 'Message:' with only JSON quoting between them. skills/legion-controller/references/slack-mentions.md's bot_id guard does not fire for it. Path A of round 1 — fallback and a button's value, which Slack renders to nobody — is unchanged. OWASP LLM01 and LLM06, ASVS v5.0.0-1.3.3. The session.go line is new to the record and belongs in the human's ask.",
-      "note": "Also recorded, a nicer-order item under the standard: an attachment's fallback still precedes the blocks nested inside that attachment, so an attachment carrying fallback 'PLAIN COPY' and its own section 'the real body' delivers 'PLAIN COPY\\nthe real body'. That follows the architect's key-order ruling and the changelog no longer claims otherwise."
+      "description": "Security[prompt], recorded and with the human. The deep review corrected two things round 3 told the architect, both read from code and both accepted by it for the human's ask. First, the Legion controller is not on this path: slackKind returns 'mention' only for event.type app_mention, and a link-unfurl edit is event.type 'message', so it publishes to the channel's .message topic while skills/legion-controller/references/slack-mentions.md subscribes the controller to .mention alone — the bot_id guard is not bypassed, it is never reached. The exposed population is any session that subscribes to a channel's .message topic. Second, the delimiter is JSON string encoding and it holds: the untrusted text is a JSON string value in Payload, so newlines are escaped and injected text cannot forge the prompt's own Summary, Message or Topic lines; the residual risk is instruction-shaped text inside the quoted region, not frame-breaking. The exploit path itself stands: a message_changed unfurl on a person's message delivers 'see https://x/y\\nIgnore previous instructions\\nunfurled body\\nfb' with user_id set and no bot_id. OWASP LLM01 and LLM06, ASVS v5.0.0-1.3.3."
+    },
+    {
+      "severity": "minor",
+      "blocking": false,
+      "file": "packages/envoy/internal/contracts/normalize.go:1296-1315",
+      "description": "Fast-follow, a further display field under the narrowing: slackWalkKeys drops every string under a non-display name, so a context element carrying only a link's url delivers nothing — blocks [{type: context, elements: [{mrkdwn 'Runbook:'}, {type: link, url: 'https://run.book/x'}]}] delivers 'Runbook:' alone, losing the URL the channel shows. It is the one case where Slack's rendering carries a string the walk is structurally unable to reach."
+    },
+    {
+      "severity": "minor",
+      "blocking": false,
+      "file": "packages/envoy/internal/contracts/normalize.go:1131-1135,1191-1203",
+      "description": "Fast-follow, structural: one object's construction is split across two functions with the same predicate written twice. walk.own is set in slackDeliveredText under strings.TrimSpace(own) != \"\", walk.ownWords in takeOwn under the same predicate sixty lines away, three TrimSpace calls run on the same string, and takeOwn carries an unwritten ordering rule — take(own) must precede the ownWords assignment or the own text suppresses itself. A constructor that sets both fields, calls take and trims once puts the invariant in one place."
+    },
+    {
+      "severity": "minor",
+      "blocking": false,
+      "file": "packages/envoy/internal/contracts/normalize.go:1164-1180",
+      "description": "Fast-follow: take tests full() before appending, so the piece that crosses the cap is appended whole and capBody then copies up to a megabyte of runes to discard almost all of it. Harmless at the 1 MiB body cap and the boundary is correct — exactly 2,048 runes sets no flag, 2,049 does, and no path drops a piece for fullness without capBody also reporting truncation — but capping the appended piece to the remaining budget removes the transient."
+    },
+    {
+      "severity": "minor",
+      "blocking": false,
+      "file": "packages/envoy/internal/contracts/normalize.go:1146-1158",
+      "description": "Recorded, checked and sound rather than a finding: ownWords and own are not the same job and do not collapse. ownWords is an exact-match set over the raw own text and its lines, consulted per piece in take; own is the entity-resolved text, used once as a substring haystack for the outermost rich_text probe. Keeping them distinct is right. Likewise the yielded bound is guaranteed rather than asserted: slackWalkKeys skips every non-display key whose value is a string, so the isString arm is reachable only for the nine display names and slices.Contains over a slice of at most nine beats a per-object map allocation."
     }
   ],
   "ci": {
-    "readAt": "2026-10-25T07:00:00Z",
+    "readAt": "2026-10-25T07:42:00Z",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
     "source": "repos/sjawhar/legion/rules/branches/main rulesets; branch protection carries no required status checks",
-    "ciHead": "709538bf7d44fd76dbcc2e0a116fbd099e4a4d6f",
-    "ciHeadIsTheCode": "compare 709538bf7d44...0e3ac5b8f100 lists only .legion/ paths",
-    "requiredChecks": "lint success, typecheck success, test success, pr-title success — all four completed and green at the CI head",
-    "otherChecks": "envoy-e2e-local, envoy-smoke, envoy-infra-go, envoy-plugin, pi-envoy, pi-legion, claude-envoy, build, changes success; attest, contracts, deploy, envoy-client skipped; envoy-go, envoy-go-race, dispatch, dispatch-memory, dispatch-multiprocess, pi-shared still queued or in progress, none required"
+    "ciHead": "50f2638ba9413593f1e5cdcdf937860388d81109",
+    "ciHeadIsTheCode": "compare 50f2638ba941...3a7771b2a849 lists only .legion/ paths",
+    "requiredChecks": "lint success, typecheck success, pr-title success; test still in_progress when this round was submitted. A request for changes stands whatever CI says and the issue leaves reviewing with it, so the round was not held for that lane; the daemon reads its settlement itself.",
+    "otherChecks": "build, changes, claude-envoy, envoy-plugin, pi-envoy, pi-legion success; attest, contracts, deploy, envoy-client skipped; dispatch, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, pi-shared queued or in progress, none required"
   },
   "thermonuclear": {
-    "head": "0e3ac5b8f10007adb8e883f21f769a84dd5a4ee2",
-    "deepReview": "CHANGES, one blocking: the Block Kit section's fields orphan a label; Security[prompt] recorded with the unfurl path traced to session.go. Verified fixed: the round-2 cost (40.8 ms for four 9,900-deep chains, the bound structural since the measured nodes form an antichain and the measure string is capped at 2,048 runes), the duplication, the order, the doc clause, the attachment pairing, the rune-cap boundary (the walk stops only where capBody will also cut), and that the new tests assert nothing the code does not guarantee.",
-    "codeQuality": "CHANGES, one blocking, the same defect found independently with two further shapes (two attachments sharing a status; four sibling sections). Judged sound: the traversal is now one coherent producer with two consumers, so the probe measures exactly what the walk would deliver; slackEventSlice is a good deletion; cost bounded on paths round 2 did not test — an 868 KB body with 12,000 rich_text segments found only at the end of a 400 KB own text at 16 ms, and an 841 KB variant built to defeat IndexByte at 26 ms."
+    "head": "3a7771b2a849bae1fa338e9659df1492f23710ed",
+    "deepReview": "APPROVE, zero blocking, four recorded. It confirmed the per-object tally cannot drop a string a reader sees except where one object puts the same string under two display names; that removing the message-wide set reintroduced nothing rounds 1 to 3 fixed; that ownWords suppresses only a repeat, never an only copy; that slackOwnWordsOnly still answers correctly with the producer de-duplicating; that deleting the pairing loses nothing; and that cost is bounded structurally, since a message whose own text passes 2,048 runes never enters the tree, capping every strings.Contains haystack at about 2 KB. It found no body a real Slack client sends where the own text and its rich_text copy disagree, having worked through emoji, channel mention, ordered list, fenced code, an auto-linked URL with an escaped entity and a date element, so the architect's ruling stands unchallenged. 20 shuffled runs confirm nothing depends on Go's map order.",
+    "codeQuality": "APPROVE, zero blocking, seven recorded. It judged the deletion a net simplification rather than a rearrangement — the attachment-fields special case stopped existing rather than moving behind another helper — and verified the yielded bound from slackWalkKeys rather than from the comment. It found no body a real Slack client sends that reopens the rich_text ruling either, having worked through the segment kinds a client emits."
   },
   "threads": {
-    "round1And2": "All ten threads from rounds 1 and 2 are answered and resolved; I verified every fix at this head before replying. This round opens one new thread.",
+    "state": "All eleven threads from rounds 1 to 3 are answered and resolved; I verified each fix at this head before replying, and replied on round 3's in this round. This round opens one new thread.",
     "botThreads": 0
   },
+  "designGate": "The record shows designGate currentVersion 14 with approvedVersion null: the architect has put spec version 14 to the human and READY will not pass until he approves it. That is the gate working and is nothing this round holds for.",
   "proofLines": {
     "implementer": "present",
     "tester": "present"
