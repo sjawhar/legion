@@ -209,9 +209,8 @@ test("a send held through a reload is resumed under its key, and delivered once"
       .poll(() =>
         page.evaluate(
           () =>
-            Object.keys(window.sessionStorage).filter((name) =>
-              name.startsWith("dispatch.write:")
-            ).length
+            Object.keys(window.sessionStorage).filter((name) => name.startsWith("dispatch.write:"))
+              .length
         )
       )
       .toBe(0);
@@ -334,9 +333,8 @@ test("a broadcast held through a reload is resumed under its key, and each agent
       .poll(() =>
         page.evaluate(
           () =>
-            Object.keys(window.sessionStorage).filter((name) =>
-              name.startsWith("dispatch.write:")
-            ).length
+            Object.keys(window.sessionStorage).filter((name) => name.startsWith("dispatch.write:"))
+              .length
         )
       )
       .toBe(0);

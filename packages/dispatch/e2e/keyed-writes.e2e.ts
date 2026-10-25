@@ -155,9 +155,8 @@ test("a status change whose answer is lost survives a reload, lands once, and th
       .poll(() =>
         page.evaluate(
           () =>
-            Object.keys(window.sessionStorage).filter((name) =>
-              name.startsWith("dispatch.write:")
-            ).length
+            Object.keys(window.sessionStorage).filter((name) => name.startsWith("dispatch.write:"))
+              .length
         )
       )
       .toBe(0);
