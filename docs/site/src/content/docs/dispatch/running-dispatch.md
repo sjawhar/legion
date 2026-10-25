@@ -205,6 +205,11 @@ Sign in, then open **Settings**:
 - **Projects**: create your first project, with a key such as `CORE` and a name.
 - **Repositories → Projects**: choose which project issues from each GitHub repository land in.
   `DISPATCH_DEFAULT_PROJECT` catches repositories with no mapping; that project must already exist.
+- **Projects → Default assignee**: name the person each project's unowned work lands on, in the
+  projects table's own column. An issue created with no assignee, by an agent on the shared token
+  and under no parent that names one, goes to that person; a project with no default leaves such
+  an issue unassigned. Only a person sets it, here — no agent command or flag does — and the
+  picker's **Unassigned** clears it.
 - **Architecture sources**: point a project at a repository branch holding its architecture
   model. Saving checks that the GitHub App can read it.
 - **Delivery timeline**: name the repository that deploys, its deploy and pull-request-check

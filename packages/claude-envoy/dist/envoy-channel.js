@@ -36742,7 +36742,7 @@ var dispatchToolSpecs = [
       spec: z2.string().describe(`Optional initial primary-document markdown. ${SPEC_WRITING_POINTER}`).optional(),
       labels: z2.array(z2.string({ min: 1, max: 40 }), { max: 20 }).describe("Optional initial labels, at most 20 labels of up to 40 characters.").optional(),
       priority: z2.number({ int: true, min: 0, max: 3 }).describe("Optional coarse priority, a number from 0 to 3: 0 is highest and 3 is lowest.").optional(),
-      assignee: z2.string().describe("Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else unassigned.").optional(),
+      assignee: z2.string().describe("Email of the person who answers this issue's asks (someone who has signed in to Dispatch); defaults to your owner when you act for a person, else the parent's assignee, else the project's default assignee when it still names a person who has signed in, else unassigned.").optional(),
       components: componentsArgument(z2).optional(),
       repo: z2.string().describe("The repository the issue targets, owner/name, mapped to the issue's project in Settings; a child inherits its parent's when unset, and an issue with none on its parent chain takes the project's default.").optional()
     })
@@ -37120,7 +37120,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_whoami",
     example: {},
-    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the default assignee of issues you create), or null under the shared token.",
+    description: "Who Dispatch takes this session for: {session, owner}. owner is the lowercase email of the person whose personal token you run under (the first choice of assignee for issues you create), or null under the shared token, in which case a create with no assignee falls back to the parent's assignee and then to the project's default assignee.",
     arguments: () => ({}),
     strict: true
   }
@@ -41654,7 +41654,7 @@ async function executeDispatchTool(input) {
     const identity = await client2.whoami();
     const owner2 = identity.kind === "agent" ? identity.owner : identity.login.toLowerCase();
     const service = identity.kind === "agent" ? identity.service ?? null : null;
-    const unowned = "no owner, so issues you create without an assignee are unassigned (or inherit their parent's).";
+    const unowned = "no owner, so an issue you create without an assignee takes its parent's assignee, else the project's default assignee, else nobody.";
     return {
       text: owner2 !== null ? `Session ${sessionId} acts for ${owner2}: issues you create without an assignee are assigned to ${owner2}.` : service !== null ? `Session ${sessionId} runs as service ${serviceSubjectLabel(service)}: ${unowned}` : `Session ${sessionId} runs under the shared token: ${unowned}`,
       details: { session: sessionId, owner: owner2, service }

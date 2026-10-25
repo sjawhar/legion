@@ -14,8 +14,10 @@ questions, approve the spec, and review the pull request. Everything happens in
 - **The issue must be in a Dispatch project a Legion daemon runs.** Each daemon runs the projects its
   operator configured; ask your operator which ones.
 - **Assign the issue to the person who will answer for it.** The assignee's Inbox gets the
-  architect's questions and the spec approval for the whole tree. An unassigned issue still runs,
-  but its questions reach nobody's Inbox list and nobody's **Needs you** count until someone takes
+  architect's questions and the spec approval for the whole tree. An issue an agent files without
+  one is not always unassigned: it takes its parent's assignee, else the project's default
+  assignee where a person set one in Settings. An issue that ends up unassigned still runs, but
+  its questions reach nobody's Inbox list and nobody's **Needs you** count until someone takes
   it: they are found through the Inbox's **Assignee** filter, under **Unassigned**, or on the
   issue's own page.
 - **Write the outcome, not the steps.** A title that says what someone can do afterwards, and a spec

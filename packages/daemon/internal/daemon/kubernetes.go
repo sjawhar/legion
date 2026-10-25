@@ -340,7 +340,7 @@ func sandboxOptions(cfg config.Config, k config.Kubernetes, project, dispatchTok
 		ProviderKeys:            providerSecretKeys(cfg.ProviderKeys),
 		LaunchSecrets:           launchSecretNames(cfg, lookup),
 		ProvidersSecrets:        providersSecrets(cfg, lookup),
-		SessionDSNKey:           k.SessionDSNSecret,
+		SessionStore:            k.SessionStore,
 		Setup:                   k.Setup,
 		BootTimeout:             cfg.WorkerBootTimeout,
 		RegistrationIntervals:   cfg.WorkerBootRegistrationDeadlineIntervals,
@@ -382,14 +382,14 @@ func providersSecrets(cfg config.Config, lookup func(string) (string, bool)) []s
 	return nil
 }
 
-// sessionOnVolume is supervise.Deps.SessionOnVolume for cfg: under the Kubernetes runtime's
-// session database (runtime.kubernetes.session_store postgres) a recorded session lived on its
-// issue's volume only when it is a Claude Code transcript, Oh My Pi's being in the table
-// (sandbox.SessionOnIssueVolume), so a lost volume drops the transcripts alone. Nil otherwise,
-// which keeps every session on the volume: a pvc store's, and a tmux pane's, whose volume is
-// never found lost.
+// sessionOnVolume is supervise.Deps.SessionOnVolume for cfg: under either of the Kubernetes
+// runtime's session databases (runtime.kubernetes.session_store postgres or cloudsql-iam) a
+// recorded session lived on its issue's volume only when it is a Claude Code transcript, Oh My
+// Pi's being in the table (sandbox.SessionOnIssueVolume), so a lost volume drops the transcripts
+// alone. Nil otherwise, which keeps every session on the volume: a pvc store's, and a tmux pane's,
+// whose volume is never found lost.
 func sessionOnVolume(cfg config.Config) func(file string) bool {
-	if k := cfg.Runtime.Kubernetes; k == nil || k.SessionDSNSecret == "" {
+	if k := cfg.Runtime.Kubernetes; k == nil || !k.SessionStore.InDatabase() {
 		return nil
 	}
 	return func(file string) bool { return sandbox.SessionOnIssueVolume(true, file) }

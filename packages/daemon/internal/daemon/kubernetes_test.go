@@ -27,6 +27,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/promptrefs"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/runtime/fake"
@@ -1076,7 +1077,7 @@ func TestTheBootLogNamesTheDerivedProbeBudgetOnlyWhenItIsDerived(t *testing.T) {
 	}
 }
 
-// A lost issue volume takes the sessions it kept and no other: under session_store postgres the
+// A lost issue volume takes the sessions it kept and no other: under either session database the
 // machines are told a Claude Code transcript lived on it and an Oh My Pi session, in the table, did
 // not, so the Oh My Pi siblings of a lost Claude transcript resume theirs. Under pvc, and under
 // tmux, every session is kept on the volume (nil).
@@ -1090,10 +1091,19 @@ func TestTheMachinesAreToldWhichSessionsALostVolumeTakes(t *testing.T) {
 	if sessionOnVolume(pvc) != nil {
 		t.Error("a session_store pvc daemon's machines are told of sessions kept off the volume, want every session on it")
 	}
-	postgres := config.Config{Runtime: config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{SessionDSNSecret: "SESSION_DSN"}}}
-	onVolume := sessionOnVolume(postgres)
-	if onVolume == nil || !onVolume(transcript) || onVolume(omp) {
-		t.Fatalf("under session_store postgres the transcript is on the volume: %t, the Oh My Pi session: %t; want true, false",
-			onVolume != nil && onVolume(transcript), onVolume != nil && onVolume(omp))
+	for _, store := range []ompsessions.Store{
+		{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"},
+		{Kind: ompsessions.StoreCloudSQLIAM, Database: ompsessions.Database{
+			Instance: "acme:us-central1:legion", Name: "sessions", User: "legion",
+		}},
+	} {
+		t.Run(string(store.Kind), func(t *testing.T) {
+			cfg := config.Config{Runtime: config.Runtime{Name: "kubernetes", Kubernetes: &config.Kubernetes{SessionStore: store}}}
+			onVolume := sessionOnVolume(cfg)
+			if onVolume == nil || !onVolume(transcript) || onVolume(omp) {
+				t.Fatalf("under session_store %s the transcript is on the volume: %t, the Oh My Pi session: %t; want true, false",
+					store.Kind, onVolume != nil && onVolume(transcript), onVolume != nil && onVolume(omp))
+			}
+		})
 	}
 }

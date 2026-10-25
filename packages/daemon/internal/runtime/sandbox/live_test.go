@@ -52,6 +52,7 @@ import (
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/config"
 	"github.com/sjawhar/legion/daemon/internal/ghrepo"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/stream"
 )
@@ -766,9 +767,10 @@ type liveRig struct {
 	enrollments        map[claim.Token]liveEnrollment
 	grants             map[claim.Token]string
 	requests           map[claim.Token]string
-	// sessionStore is the providers Secret's key every runtime started from now on keeps sessions
-	// in (Options.SessionDSNKey, session_store postgres): set by postgres-resume, "" before it.
-	sessionStore string
+	// sessionStore is where every runtime started from now on keeps its sessions
+	// (Options.SessionStore): the providers Secret key of session_store postgres, set by
+	// postgres-resume, and the volume store before it.
+	sessionStore ompsessions.Store
 }
 
 func TestStage4aSandboxRuntimeLive(t *testing.T) {
@@ -970,7 +972,7 @@ func (r *liveRig) runtimeOptions(address string, ln *stream.Listener) Options {
 		GitHubCredential:      r.tokens.Credential,
 		Conns:                 ln,
 		Log:                   r.log,
-		SessionDSNKey:         r.sessionStore,
+		SessionStore:          r.sessionStore,
 		RepositoryCache:       liveRepositoryCache(),
 		Mapped:                r.mappedRepositories,
 	}

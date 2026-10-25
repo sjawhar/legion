@@ -189,10 +189,22 @@ func NewOAuthProvider(t *testing.T, st *store.Store) *oauth.Provider {
 	return provider
 }
 
-// Req issues method against path on the real broker with an optional body (marshaled to JSON)
-// and headers, returning the decoded status and body bytes. It never asserts a status itself: a
-// caller does that so a mismatch names the actual body.
-func (r *Rig) Req(t *testing.T, method, path string, headers map[string]string, body any) (int, []byte) {
+// request issues method against baseURL+path through client, with an optional body (marshaled to
+// JSON) and headers, and answers the status and the body bytes. It asserts no status itself: a
+// caller does that, so a mismatch names the actual body.
+//
+// It is the one request body in this package: Rig.Req and Client.Req differ in the broker they
+// name, the client they go out on, and at — the process a failure is about, " (at host:port)"
+// for a Client pinned to one of two processes serving one database, and empty for a Rig, which
+// has one broker and so nothing to tell apart.
+func request(
+	t *testing.T,
+	client *http.Client,
+	baseURL, method, path string,
+	headers map[string]string,
+	body any,
+	at string,
+) (int, []byte) {
 	t.Helper()
 	var reader io.Reader
 	if body != nil {
@@ -202,7 +214,7 @@ func (r *Rig) Req(t *testing.T, method, path string, headers map[string]string, 
 		}
 		reader = bytes.NewReader(b)
 	}
-	req, err := http.NewRequest(method, r.URL+path, reader)
+	req, err := http.NewRequest(method, baseURL+path, reader)
 	if err != nil {
 		t.Fatalf("build request: %v", err)
 	}
@@ -212,16 +224,24 @@ func (r *Rig) Req(t *testing.T, method, path string, headers map[string]string, 
 	for k, v := range headers {
 		req.Header.Set(k, v)
 	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
-		t.Fatalf("%s %s: %v", method, path, err)
+		t.Fatalf("%s %s%s: %v", method, path, at, err)
 	}
 	defer resp.Body.Close()
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		t.Fatalf("read response body: %v", err)
+		t.Fatalf("read response body of %s %s%s: %v", method, path, at, err)
 	}
 	return resp.StatusCode, respBody
+}
+
+// Req issues method against path on the real broker with an optional body (marshaled to JSON)
+// and headers, returning the decoded status and body bytes. It never asserts a status itself: a
+// caller does that so a mismatch names the actual body.
+func (r *Rig) Req(t *testing.T, method, path string, headers map[string]string, body any) (int, []byte) {
+	t.Helper()
+	return request(t, http.DefaultClient, r.URL, method, path, headers, body, "")
 }
 
 // UI is Req with the shared UI bearer token every human/operator-facing route requires
@@ -231,31 +251,36 @@ func (r *Rig) UI(t *testing.T, method, path string, body any) (int, []byte) {
 	return r.Req(t, method, path, map[string]string{"Authorization": "Bearer " + UIToken}, body)
 }
 
-// DecideMachineLogin decides the pending machine login whose confirmation code is code, as the
-// operator does on Dispatch's machine-login page: it looks the login up by that code, then approves
-// or denies it naming Operator as the approver. It returns the launcher credential an approval
-// minted, "" for a denial, and fails t on any other answer.
-func (r *Rig) DecideMachineLogin(t *testing.T, code string, approve bool) (credentialID string) {
+// uiCall is the UI-route caller a machine-login decision goes out through: Rig.UI or Client.UI,
+// which differ in the broker they reach and the bearer they carry.
+type uiCall func(t *testing.T, method, path string, body any) (int, []byte)
+
+// decideMachineLogin decides the pending machine login whose confirmation code is code, through
+// ui, as the operator does on Dispatch's machine-login page: it looks the login up by that code,
+// then approves or denies it naming approver as the approver. It returns the launcher credential
+// an approval minted, "" for a denial, and fails t on any other answer. at names the process a
+// failure is about, as request's does.
+func decideMachineLogin(t *testing.T, ui uiCall, approver, code string, approve bool, at string) (credentialID string) {
 	t.Helper()
-	status, body := r.UI(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
+	status, body := ui(t, http.MethodPost, "/v1/machine-logins/lookup", map[string]any{"code": code})
 	if status != http.StatusOK {
-		t.Fatalf("POST /v1/machine-logins/lookup = %d: %s", status, body)
+		t.Fatalf("POST /v1/machine-logins/lookup%s = %d: %s", at, status, body)
 	}
 	var looked struct {
 		RecordID string `json:"record_id"`
 		State    string `json:"state"`
 	}
 	if err := json.Unmarshal(body, &looked); err != nil || looked.State != "pending" || looked.RecordID == "" {
-		t.Fatalf("POST /v1/machine-logins/lookup answered %s (%v), want a pending record", body, err)
+		t.Fatalf("POST /v1/machine-logins/lookup%s answered %s (%v), want a pending record", at, body, err)
 	}
 	action, want := "deny", "denied"
 	if approve {
 		action, want = "approve", "approved"
 	}
-	status, body = r.UI(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/"+action,
-		map[string]any{"approver": r.Operator, "code": code})
+	status, body = ui(t, http.MethodPost, "/v1/credential-requests/"+looked.RecordID+"/"+action,
+		map[string]any{"approver": approver, "code": code})
 	if status != http.StatusOK {
-		t.Fatalf("%s machine login = %d: %s", action, status, body)
+		t.Fatalf("%s %s's machine login%s = %d: %s", action, approver, at, status, body)
 	}
 	var decided struct {
 		State        string  `json:"state"`
@@ -263,12 +288,20 @@ func (r *Rig) DecideMachineLogin(t *testing.T, code string, approve bool) (crede
 	}
 	if err := json.Unmarshal(body, &decided); err != nil || decided.State != want ||
 		approve != (decided.CredentialID != nil && *decided.CredentialID != "") {
-		t.Fatalf("%s machine login answered %s (%v), want state %s and a credential id only for an approval", action, body, err, want)
+		t.Fatalf("%s %s's machine login%s answered %s (%v), want state %s and a credential id only for an approval",
+			action, approver, at, body, err, want)
 	}
 	if decided.CredentialID == nil {
 		return ""
 	}
 	return *decided.CredentialID
+}
+
+// DecideMachineLogin decides the pending machine login whose confirmation code is code, naming
+// this Rig's Operator as the approver.
+func (r *Rig) DecideMachineLogin(t *testing.T, code string, approve bool) (credentialID string) {
+	t.Helper()
+	return decideMachineLogin(t, r.UI, r.Operator, code, approve, "")
 }
 
 // MintPodToken mints a projected service-account token bound to podUID — the shape

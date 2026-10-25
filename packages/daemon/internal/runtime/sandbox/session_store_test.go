@@ -11,8 +11,21 @@ import (
 	corev1 "k8s.io/api/core/v1"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
+	"github.com/sjawhar/legion/daemon/internal/ompsessions"
 	"github.com/sjawhar/legion/daemon/internal/runtime"
 	"github.com/sjawhar/legion/daemon/internal/shim"
+)
+
+// The three session stores as a test names them: the providers Secret key the postgres store's URL
+// lives under, and the Cloud SQL instance, database and IAM login the cloudsql-iam store signs in
+// with.
+var (
+	postgresStore = ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "SESSION_DSN"}
+	cloudSQLStore = ompsessions.Store{Kind: ompsessions.StoreCloudSQLIAM, Database: ompsessions.Database{
+		Instance: "example-project:us-central1:example-instance",
+		Name:     "legion_sessions",
+		User:     "legion-sessions@example-project.iam",
+	}}
 )
 
 // providersItems are the keys pod's providers volume projects, nil when it mounts none.
@@ -25,22 +38,37 @@ func providersItems(pod corev1.PodSpec) []corev1.KeyToPath {
 	return nil
 }
 
-// Under a session database (Options.SessionDSNKey, runtime.kubernetes.session_store postgres) every
-// role's Oh My Pi keeps its session in it: each generation of a workflow role and of the controller
-// starts with OMP_SESSION_STORAGE=sql and OMP_SESSION_SQL_DSN_FILE naming the providers Secret's
-// key, mounted read-only at a file named for that pointer, and the shim reads the providers
-// directory and, seeing the pointer, never exports the URL into Oh My Pi's environment. The image
-// probe mounts the key too, so a Secret that lacks it refuses boot, and tells its Oh My Pi nothing
-// of the store. Without a key no pod carries either variable or the projection.
+// Under a session database (Options.SessionStore) every role's Oh My Pi keeps its session in it:
+// each generation of a workflow role and of the controller starts with OMP_SESSION_STORAGE=sql and
+// OMP_SESSION_SQL_DSN_FILE naming the URL file its store writes. Under postgres that file is the
+// providers Secret's key, mounted read-only at a file named for that pointer, and the shim reads
+// the providers directory and, seeing the pointer, never exports the URL into Oh My Pi's
+// environment; the image probe mounts the key too, so a Secret that lacks it refuses boot. Under
+// cloudsql-iam no pod and no probe mounts a session key at all: the file is the generation's own,
+// written beside the socket each role container's launcher proxies to the instance, and that
+// launcher is told the instance, the database and the login. Under the volume store no pod carries
+// either variable, the projection, or the launcher's flags.
 func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
-	dsnFile := ProvidersDir + "/OMP_SESSION_SQL_DSN"
 	projection := corev1.KeyToPath{Key: "SESSION_DSN", Path: "OMP_SESSION_SQL_DSN"}
-	for _, store := range []string{"postgres", "pvc"} {
-		t.Run(store, func(t *testing.T) {
+	proxyFlags := []string{
+		"--session-instance", cloudSQLStore.Database.Instance,
+		"--session-database", cloudSQLStore.Database.Name,
+		"--session-user", cloudSQLStore.Database.User,
+	}
+	for _, tc := range []struct {
+		store ompsessions.Store
+		// dsnFile is the URL file every generation of this store is pointed at, "" when its
+		// sessions are files; projected is whether the providers volume carries the session key.
+		dsnFile   func(generation uint64) string
+		projected bool
+	}{
+		{store: ompsessions.Store{Kind: ompsessions.StoreVolume}},
+		{store: postgresStore, dsnFile: func(uint64) string { return ProvidersDir + "/OMP_SESSION_SQL_DSN" }, projected: true},
+		{store: cloudSQLStore, dsnFile: func(g uint64) string { return generationDir(g) + "/OMP_SESSION_SQL_DSN" }},
+	} {
+		t.Run(string(tc.store.Kind), func(t *testing.T) {
 			opts := testOptions()
-			if store == "postgres" {
-				opts.SessionDSNKey = "SESSION_DSN"
-			}
+			opts.SessionStore = tc.store
 			r, err := configure(opts)
 			if err != nil {
 				t.Fatal(err)
@@ -49,40 +77,58 @@ func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 				t.Run(name, func(t *testing.T) {
 					worker := workerOf(t, r, spec)
 					env := envOf(worker)
-					items := providersItems(podOf(t, r, spec))
-					if store == "pvc" {
+					pod := podOf(t, r, spec)
+					items := providersItems(pod)
+					if got := slices.Contains(items, projection); got != tc.projected {
+						t.Errorf("the providers volume projects the session key: %t (%v), want %t", got, items, tc.projected)
+					}
+					role := containerNamed(t, pod, string(spec.Role))
+					wantFlags := tc.store.Kind == ompsessions.StoreCloudSQLIAM
+					if got := containsSequence(role.Command, proxyFlags); got != wantFlags {
+						t.Errorf("the role container's launcher carries the session proxy's flags: %t (%q), want %t", got, role.Command, wantFlags)
+					}
+					if tc.dsnFile == nil {
 						if _, set := env["OMP_SESSION_STORAGE"]; set {
 							t.Errorf("OMP_SESSION_STORAGE = %q under pvc, want it left to the pod baseline", env["OMP_SESSION_STORAGE"])
 						}
-						if _, set := env["OMP_SESSION_SQL_DSN_FILE"]; set || slices.Contains(items, projection) {
-							t.Errorf("a pvc pod points at or mounts a session database: %v, %v", env, items)
+						if _, set := env["OMP_SESSION_SQL_DSN_FILE"]; set {
+							t.Errorf("a pvc pod points at a session database: %v", env)
 						}
 						return
 					}
+					dsnFile := tc.dsnFile(spec.Generation)
 					if env["OMP_SESSION_STORAGE"] != "sql" || env["OMP_SESSION_SQL_DSN_FILE"] != dsnFile {
 						t.Errorf("OMP_SESSION_STORAGE = %q, OMP_SESSION_SQL_DSN_FILE = %q; want sql and %s",
 							env["OMP_SESSION_STORAGE"], env["OMP_SESSION_SQL_DSN_FILE"], dsnFile)
 					}
-					if !slices.Contains(items, projection) {
-						t.Errorf("the providers volume projects %v, want %v among them", items, projection)
+					mount := mountHolding(worker, dsnFile)
+					switch tc.store.Kind {
+					case ompsessions.StorePostgres:
+						if mount == nil || mount.Name != providersVolume || !mount.ReadOnly {
+							t.Errorf("%s is held by %+v, want the providers volume read-only", dsnFile, mount)
+						}
+					case ompsessions.StoreCloudSQLIAM:
+						if mount == nil || mount.Name != roleVolume("private", spec.Role) || mount.ReadOnly {
+							t.Errorf("%s is held by %+v, want the role's writable private volume: its launcher writes the URL there", dsnFile, mount)
+						}
 					}
-					if mount := mountHolding(worker, dsnFile); mount == nil || mount.Name != providersVolume || !mount.ReadOnly {
-						t.Errorf("%s is held by %+v, want the providers volume read-only", dsnFile, mount)
-					}
-					if !slices.Contains(worker.Command, "--provider-env-dir") {
+					if !slices.Contains(worker.Command, "--provider-env-dir") && tc.store.Kind == ompsessions.StorePostgres {
 						t.Errorf("the shim is not told the providers directory: %q", worker.Command)
 					}
 				})
 			}
 			probe := r.probeManifest("legion-probe", ImageProbe{Contract: 5}, time.Time{}).Spec.PodTemplate.Spec
-			if got := slices.Contains(providersItems(probe), projection); got != (store == "postgres") {
-				t.Errorf("the probe pod mounts the session database's key: %t, want %t", got, store == "postgres")
+			if got := slices.Contains(providersItems(probe), projection); got != tc.projected {
+				t.Errorf("the probe pod mounts the session database's key: %t, want %t", got, tc.projected)
 			}
 			probeEnv := envOf(containerNamed(t, probe, probeContainer))
 			if probeEnv["OMP_SESSION_STORAGE"] != "" {
 				t.Errorf("the probe pod's Oh My Pi is told a session store: %v", probeEnv)
 			}
-			if store == "postgres" {
+			if _, set := probeEnv["OMP_SESSION_SQL_DSN_FILE"]; set != tc.projected {
+				t.Errorf("the probe pod is told a session pointer: %t (%v), want %t: it is the mounted key's alone", set, probeEnv, tc.projected)
+			}
+			if tc.store.Kind == ompsessions.StorePostgres {
 				// The probe's and every worker's `legion` read the mounted directory as the shim does
 				// (shim.ReadProviderEnv, through each container's own environment): the URL file is
 				// skipped because its pointer is there.
@@ -97,6 +143,16 @@ func TestASessionDatabaseIsWhereEveryRoleKeepsItsSession(t *testing.T) {
 			}
 		})
 	}
+}
+
+// containsSequence reports whether argv carries want as a run of consecutive arguments.
+func containsSequence(argv, want []string) bool {
+	for i := range argv {
+		if i+len(want) <= len(argv) && slices.Equal(argv[i:i+len(want)], want) {
+			return true
+		}
+	}
+	return false
 }
 
 // providersExported is what shim.ReadProviderEnv exports from a providers directory holding the
@@ -117,59 +173,78 @@ func providersExported(t *testing.T, env map[string]string) []string {
 	return exported
 }
 
-// A pod whose providers volume projects another session store than a pod created now would, the
-// one created before the session database was configured above all, holds a move: its next
-// generation would name a URL file the pod does not mount, so the relaunch replaces the pod.
-func TestAPodWithoutTheSessionStoresProjectionHoldsAMove(t *testing.T) {
-	before, err := configure(testOptions())
-	if err != nil {
-		t.Fatal(err)
+// A pod carries its whole session store for its life — the providers volume's projection under
+// postgres, its launchers' proxy flags under cloudsql-iam — so a pod created under any other store
+// than a pod created now would get holds a move, and the relaunch replaces it: its next generation
+// would name a URL file the pod has no way to produce. A change of kind in either direction counts,
+// and so does a changed instance, database or login under the same kind.
+func TestAPodUnderAnotherSessionStoreHoldsAMove(t *testing.T) {
+	runtimeFor := func(store ompsessions.Store) *Runtime {
+		t.Helper()
+		opts := testOptions()
+		opts.SessionStore = store
+		r, err := configure(opts)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return r
 	}
-	opts := testOptions()
-	opts.SessionDSNKey = "SESSION_DSN"
-	after, err := configure(opts)
-	if err != nil {
-		t.Fatal(err)
+	volume := runtimeFor(ompsessions.Store{Kind: ompsessions.StoreVolume})
+	postgres := runtimeFor(postgresStore)
+	otherKey := runtimeFor(ompsessions.Store{Kind: ompsessions.StorePostgres, DSNSecret: "OTHER_SESSION_DSN"})
+	cloudSQL := runtimeFor(cloudSQLStore)
+	moved := func(edit func(*ompsessions.Database)) *Runtime {
+		database := cloudSQLStore.Database
+		edit(&database)
+		return runtimeFor(ompsessions.Store{Kind: ompsessions.StoreCloudSQLIAM, Database: database})
 	}
 	pod := func(r *Runtime) *corev1.Pod { return &corev1.Pod{Spec: podOf(t, r, workerSpec(t))} }
-	for _, tc := range []struct {
-		name  string
+	for name, tc := range map[string]struct {
 		r     *Runtime
 		pod   *corev1.Pod
 		moved bool
 	}{
-		{"a file-store pod under a session database", after, pod(before), true},
-		{"a session-database pod under the file store", before, pod(after), true},
-		{"a session-database pod under the same database", after, pod(after), false},
-		{"a file-store pod under the file store", before, pod(before), false},
+		"a file-store pod under postgres":            {postgres, pod(volume), true},
+		"a postgres pod under the file store":        {volume, pod(postgres), true},
+		"a postgres pod under another key":           {otherKey, pod(postgres), true},
+		"a file-store pod under cloudsql-iam":        {cloudSQL, pod(volume), true},
+		"a cloudsql-iam pod under the file store":    {volume, pod(cloudSQL), true},
+		"a postgres pod under cloudsql-iam":          {cloudSQL, pod(postgres), true},
+		"a cloudsql-iam pod under postgres":          {postgres, pod(cloudSQL), true},
+		"a cloudsql-iam pod under another instance":  {moved(func(d *ompsessions.Database) { d.Instance = "example-project:us-central1:other-instance" }), pod(cloudSQL), true},
+		"a cloudsql-iam pod under another database":  {moved(func(d *ompsessions.Database) { d.Name = "legion_sessions_next" }), pod(cloudSQL), true},
+		"a cloudsql-iam pod under another login":     {moved(func(d *ompsessions.Database) { d.User = "legion-sessions-next@example-project.iam" }), pod(cloudSQL), true},
+		"a postgres pod under the same key":          {postgres, pod(postgres), false},
+		"a cloudsql-iam pod under the same database": {cloudSQL, pod(cloudSQL), false},
+		"a file-store pod under the file store":      {volume, pod(volume), false},
 	} {
-		t.Run(tc.name, func(t *testing.T) {
+		t.Run(name, func(t *testing.T) {
 			moved := tc.r.movedInPod(tc.pod, workerSpec(t).Role)
-			if got := slices.ContainsFunc(moved, func(m movedAddress) bool { return m.where == "the session database URL key" }); got != tc.moved {
+			if got := slices.ContainsFunc(moved, func(m movedAddress) bool { return m.where == "the session store" }); got != tc.moved {
 				t.Errorf("movedInPod = %v, want the session store moved %t", moved, tc.moved)
 			}
 		})
 	}
 }
 
-// A resume under a session database holds the volume to nothing: its session is in the database,
-// so the issue pod's workspace-init does not expect the issue's volume to hold anything (a resume
-// on a new volume provisions the workspace from the issue's pushed branch and continues the
-// session), and the controller's workspace-init looks for no session file. The resume itself still
-// names the session, which the role launcher finds in the table (internal/launcher) and Oh My Pi
-// resumes. Sessions kept as files on the volume hold both as before.
+// A resume under either session database holds the volume to nothing: its session is in the
+// database, so the issue pod's workspace-init does not expect the issue's volume to hold anything
+// (a resume on a new volume provisions the workspace from the issue's pushed branch and continues
+// the session), and the controller's workspace-init looks for no session file. The resume itself
+// still names the session, which the role launcher finds in the table (internal/launcher) and Oh My
+// Pi resumes. Sessions kept as files on the volume hold both as before.
 func TestAResumeUnderASessionDatabaseExpectsNothingOfTheVolume(t *testing.T) {
 	for _, tc := range []struct {
-		store  string
-		key    string
+		store  ompsessions.Store
 		expect bool
 	}{
-		{"postgres", "SESSION_DSN", false},
-		{"pvc", "", true},
+		{postgresStore, false},
+		{cloudSQLStore, false},
+		{ompsessions.Store{Kind: ompsessions.StoreVolume}, true},
 	} {
-		t.Run(tc.store, func(t *testing.T) {
+		t.Run(string(tc.store.Kind), func(t *testing.T) {
 			opts := testOptions()
-			opts.SessionDSNKey = tc.key
+			opts.SessionStore = tc.store
 			r, err := configure(opts)
 			if err != nil {
 				t.Fatal(err)
@@ -204,17 +279,17 @@ func TestAResumeUnderASessionDatabaseExpectsNothingOfTheVolume(t *testing.T) {
 // recorded holds the volume to nothing.
 func TestANewPodUnderASessionDatabaseIsNotHeldToItsIssuesOhMyPiSessions(t *testing.T) {
 	for _, tc := range []struct {
-		store  string
-		key    string
-		expect bool
+		sessions ompsessions.Store
+		expect   bool
 	}{
-		{"postgres", "SESSION_DSN", false},
-		{"pvc", "", true},
+		{postgresStore, false},
+		{cloudSQLStore, false},
+		{ompsessions.Store{Kind: ompsessions.StoreVolume}, true},
 	} {
-		t.Run(tc.store, func(t *testing.T) {
+		t.Run(string(tc.sessions.Kind), func(t *testing.T) {
 			store := newFakeStore()
 			store.sessions[rootSpec(t).Issue] = []string{resumeSession}
-			g := newRig(t, nil, withOptions(func(o *Options) { o.Store, o.SessionDSNKey = store, tc.key }))
+			g := newRig(t, nil, withOptions(func(o *Options) { o.Store, o.SessionStore = store, tc.sessions }))
 			g.spawn(rootSpec(t))
 			pod := g.pod(SandboxName(rootToken))
 			if pod == nil {
@@ -232,41 +307,49 @@ func TestANewPodUnderASessionDatabaseIsNotHeldToItsIssuesOhMyPiSessions(t *testi
 // Claude Code transcript on the issue's volume, which that database holds no session of, and its
 // role launcher stats the file it is asked to resume only while OMP_SESSION_STORAGE is not sql
 // (internal/launcher's sessionWritten), so withholding it is what sends the launcher onto the
-// transcript. Under a session database it is told OMP_SESSION_SQL_DSN_FILE all the same, as an Oh
-// My Pi role of the pod is: the providers volume mounts the database's URL for the whole pod, and
-// the shim exports a providers file into the agent's environment unless its `_FILE` pointer is
-// set, so without the pointer the URL, password and all, would reach Claude Code and every
-// command it runs. An Oh My Pi role of the same deployment is told both under a session database
-// and neither without one.
+// transcript. Under either session database it is told OMP_SESSION_SQL_DSN_FILE all the same, the
+// file its store writes, as an Oh My Pi role of the pod is: under postgres the providers volume
+// mounts the database's URL for the whole pod, and the shim exports a providers file into the
+// agent's environment unless its `_FILE` pointer is set, so without the pointer the URL, password
+// and all, would reach Claude Code and every command it runs. An Oh My Pi role of the same
+// deployment is told both under a session database and neither without one.
 func TestAClaudeWorkerIsToldTheSessionDatabasesURLFileAndNotItsStore(t *testing.T) {
 	for _, tc := range []struct {
-		store string
-		key   string
+		store ompsessions.Store
+		// dsnFile is the URL file every generation of this store is pointed at, nil when its
+		// sessions are files.
+		dsnFile func(generation uint64) string
 	}{
-		{"postgres", "SESSION_DSN"},
-		{"pvc", ""},
+		{store: postgresStore, dsnFile: func(uint64) string { return ProvidersDir + "/OMP_SESSION_SQL_DSN" }},
+		{store: cloudSQLStore, dsnFile: func(g uint64) string { return generationDir(g) + "/OMP_SESSION_SQL_DSN" }},
+		{store: ompsessions.Store{Kind: ompsessions.StoreVolume}},
 	} {
-		t.Run(tc.store, func(t *testing.T) {
+		t.Run(string(tc.store.Kind), func(t *testing.T) {
 			opts := testOptions()
-			opts.SessionDSNKey = tc.key
+			opts.SessionStore = tc.store
 			r, err := configure(opts)
 			if err != nil {
 				t.Fatal(err)
 			}
-			claude := envOf(workerOf(t, r, claudeResumeSpec(t)))
+			spec := claudeResumeSpec(t)
+			claude := envOf(workerOf(t, r, spec))
 			omp := envOf(workerOf(t, r, workerSpec(t)))
 			if value, set := claude["OMP_SESSION_STORAGE"]; set {
 				t.Errorf("a Claude worker is told OMP_SESSION_STORAGE=%q, want it never told", value)
 			}
-			if got, want := claude["OMP_SESSION_SQL_DSN_FILE"], map[bool]string{true: ProvidersDir + "/OMP_SESSION_SQL_DSN"}[tc.key != ""]; got != want {
+			var want string
+			if tc.dsnFile != nil {
+				want = tc.dsnFile(spec.Generation)
+			}
+			if got := claude["OMP_SESSION_SQL_DSN_FILE"]; got != want {
 				t.Errorf("a Claude worker is told OMP_SESSION_SQL_DSN_FILE=%q, want %q", got, want)
 			}
 			for _, name := range sessionStoreVariables {
-				if _, set := omp[name]; set != (tc.key != "") {
-					t.Errorf("an Oh My Pi worker is told %s: %t, want %t", name, set, tc.key != "")
+				if _, set := omp[name]; set != tc.store.InDatabase() {
+					t.Errorf("an Oh My Pi worker is told %s: %t, want %t", name, set, tc.store.InDatabase())
 				}
 			}
-			if tc.key == "" {
+			if tc.store.Kind != ompsessions.StorePostgres {
 				return
 			}
 			for _, pair := range providersExported(t, claude) {
@@ -278,71 +361,75 @@ func TestAClaudeWorkerIsToldTheSessionDatabasesURLFileAndNotItsStore(t *testing.
 	}
 }
 
-// Under a session database an issue pod's workspace-init expects the issue's volume by what the
-// issue's claims recorded, whichever role's launch makes the pod: a Claude Code transcript is on
-// that volume whatever session_store says, so a volume that was lost is workspace-init's loud
+// Under either session database an issue pod's workspace-init expects the issue's volume by what
+// the issue's claims recorded, whichever role's launch makes the pod: a Claude Code transcript is
+// on that volume whatever session_store says, so a volume that was lost is workspace-init's loud
 // refusal rather than a fresh clone that hides the loss from the Claude claim's resume, which
 // would then fail to find its transcript until its budget ran out. An Oh My Pi session is in the
 // table and holds the volume to nothing. A resuming Claude claim expects its own transcript's
 // volume (issuePod.prepare), and a resuming Oh My Pi one nothing of its own.
 func TestAnIssuesTranscriptHoldsItsPodToTheVolumeWhicheverRoleMakesIt(t *testing.T) {
-	opts := testOptions()
-	opts.SessionDSNKey = "SESSION_DSN"
-	r, err := configure(opts)
-	if err != nil {
-		t.Fatal(err)
-	}
-	claude := envOf(containerNamed(t, podOf(t, r, claudeResumeSpec(t)), initContainer))
-	if claude["LEGION_EXPECT_ISSUE_VOLUME"] != "true" {
-		t.Errorf("a resuming Claude claim's workspace-init is told LEGION_EXPECT_ISSUE_VOLUME=%q, want true", claude["LEGION_EXPECT_ISSUE_VOLUME"])
-	}
-	ompResume := workerSpec(t)
-	ompResume.Generation, ompResume.BootToken, ompResume.ResumeSessionFile = 2, "boot-g2", resumeSession
-	if init := envOf(containerNamed(t, podOf(t, r, ompResume), initContainer)); init["LEGION_EXPECT_ISSUE_VOLUME"] != "" {
-		t.Errorf("a resuming Oh My Pi claim's workspace-init is told LEGION_EXPECT_ISSUE_VOLUME=%q, want nothing: its session is in the table", init["LEGION_EXPECT_ISSUE_VOLUME"])
-	}
-	launches := map[string]func(t *testing.T, g *rig) error{
-		"a new Claude role": func(t *testing.T, g *rig) error {
-			g.launcher(workerToken)
-			_, err := g.r.Spawn(g.ctx, claudeWorkerSpec(t))
-			return err
-		},
-		"a new Oh My Pi role": func(t *testing.T, g *rig) error {
-			g.launcher(workerToken)
-			_, err := g.r.Spawn(g.ctx, workerSpec(t))
-			return err
-		},
-		"a resuming Oh My Pi role": func(_ *testing.T, g *rig) error {
-			g.launcher(workerToken)
-			_, err := g.r.Resume(g.ctx, nil, ompResume)
-			return err
-		},
-	}
-	for _, recorded := range []struct {
-		name   string
-		files  []string
-		expect bool
-	}{
-		{"a Claude claim's transcript", []string{resumeSession, claudeTranscript(claim.RoleTester)}, true},
-		{"Oh My Pi sessions alone", []string{resumeSession}, false},
-	} {
-		for name, launch := range launches {
-			t.Run(recorded.name+"/"+name, func(t *testing.T) {
-				store := newFakeStore()
-				store.sessions[workerSpec(t).Issue] = recorded.files
-				g := newRig(t, nil, withOptions(func(o *Options) { o.Store, o.SessionDSNKey = store, "SESSION_DSN" }))
-				if err := launch(t, g); err != nil {
-					t.Fatal(err)
+	for _, sessions := range []ompsessions.Store{postgresStore, cloudSQLStore} {
+		t.Run(string(sessions.Kind), func(t *testing.T) {
+			opts := testOptions()
+			opts.SessionStore = sessions
+			r, err := configure(opts)
+			if err != nil {
+				t.Fatal(err)
+			}
+			claude := envOf(containerNamed(t, podOf(t, r, claudeResumeSpec(t)), initContainer))
+			if claude["LEGION_EXPECT_ISSUE_VOLUME"] != "true" {
+				t.Errorf("a resuming Claude claim's workspace-init is told LEGION_EXPECT_ISSUE_VOLUME=%q, want true", claude["LEGION_EXPECT_ISSUE_VOLUME"])
+			}
+			ompResume := workerSpec(t)
+			ompResume.Generation, ompResume.BootToken, ompResume.ResumeSessionFile = 2, "boot-g2", resumeSession
+			if init := envOf(containerNamed(t, podOf(t, r, ompResume), initContainer)); init["LEGION_EXPECT_ISSUE_VOLUME"] != "" {
+				t.Errorf("a resuming Oh My Pi claim's workspace-init is told LEGION_EXPECT_ISSUE_VOLUME=%q, want nothing: its session is in the table", init["LEGION_EXPECT_ISSUE_VOLUME"])
+			}
+			launches := map[string]func(t *testing.T, g *rig) error{
+				"a new Claude role": func(t *testing.T, g *rig) error {
+					g.launcher(workerToken)
+					_, err := g.r.Spawn(g.ctx, claudeWorkerSpec(t))
+					return err
+				},
+				"a new Oh My Pi role": func(t *testing.T, g *rig) error {
+					g.launcher(workerToken)
+					_, err := g.r.Spawn(g.ctx, workerSpec(t))
+					return err
+				},
+				"a resuming Oh My Pi role": func(_ *testing.T, g *rig) error {
+					g.launcher(workerToken)
+					_, err := g.r.Resume(g.ctx, nil, ompResume)
+					return err
+				},
+			}
+			for _, recorded := range []struct {
+				name   string
+				files  []string
+				expect bool
+			}{
+				{"a Claude claim's transcript", []string{resumeSession, claudeTranscript(claim.RoleTester)}, true},
+				{"Oh My Pi sessions alone", []string{resumeSession}, false},
+			} {
+				for name, launch := range launches {
+					t.Run(recorded.name+"/"+name, func(t *testing.T) {
+						store := newFakeStore()
+						store.sessions[workerSpec(t).Issue] = recorded.files
+						g := newRig(t, nil, withOptions(func(o *Options) { o.Store, o.SessionStore = store, sessions }))
+						if err := launch(t, g); err != nil {
+							t.Fatal(err)
+						}
+						pod := g.pod(SandboxName(workerToken))
+						if pod == nil {
+							t.Fatal("the worker's issue pod was not created")
+						}
+						init := envOf(containerNamed(t, pod.Spec, initContainer))
+						if _, set := init["LEGION_EXPECT_ISSUE_VOLUME"]; set != recorded.expect {
+							t.Errorf("with %q recorded, the new pod's workspace-init expects the issue's volume: %t, want %t", recorded.files, set, recorded.expect)
+						}
+					})
 				}
-				pod := g.pod(SandboxName(workerToken))
-				if pod == nil {
-					t.Fatal("the worker's issue pod was not created")
-				}
-				init := envOf(containerNamed(t, pod.Spec, initContainer))
-				if _, set := init["LEGION_EXPECT_ISSUE_VOLUME"]; set != recorded.expect {
-					t.Errorf("with %q recorded, the new pod's workspace-init expects the issue's volume: %t, want %t", recorded.files, set, recorded.expect)
-				}
-			})
-		}
+			}
+		})
 	}
 }
