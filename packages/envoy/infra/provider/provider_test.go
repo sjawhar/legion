@@ -180,10 +180,13 @@ func TestSchemaServesTheWebhookListenerComponentWithNoSecretInput(t *testing.T) 
 	for name, input := range listener.InputProperties {
 		require.False(t, input.Secret, "%s is not a secret input", name)
 	}
-	// Every input is required but the seed, each webhook's inputs and adopt.
+	// Every input is required but the seed, each webhook's inputs, the opt-in to every
+	// notification topic and adopt.
 	require.ElementsMatch(t, []string{
-		"seedSecretArn", "githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger", "adopt",
+		"seedSecretArn", "githubWebhookSecretArn", "slackSigningSecretArn", "reviewerAppId", "mentionTrigger",
+		"subscribeAllTopics", "adopt",
 	}, optionalInputs(listener.InputProperties, listener.RequiredInputs))
+	require.Equal(t, "boolean", listener.InputProperties["subscribeAllTopics"].Type)
 }
 
 // optionalInputs are the names in properties that required does not list.
