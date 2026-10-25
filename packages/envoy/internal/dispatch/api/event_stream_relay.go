@@ -30,15 +30,16 @@ const (
 	eventRelayRetry = time.Second
 )
 
-// eventStreamRelay is the live source of every open SSE connection on this process: it holds a
-// `listen dispatch_events` connection of its own (migration 0107 notifies on each commit) and
-// publishes every committed event into its events.Stream, whichever process committed it.
+// eventStreamRelay is the live source of every events subscription on this process (the event
+// feed, live_events.go): it holds a `listen dispatch_events` connection of its own (migration 0107
+// notifies on each commit) and publishes every committed event into its events.Stream, whichever
+// process committed it.
 //
 // Two envoy-dispatch processes serve one Postgres. The broker's fan-out reaches only the process
-// that appended the event, so a reader whose connection landed on the other one would see nothing
-// of it until it reconnected. Re-sourcing the live stream from the database carries both
-// processes' events on the one path, and makes the live frame and the replayed frame the same
-// bytes: both come from readEventsAfterID, with an ask event's read-time fields attached.
+// that appended the event, so a page whose socket landed on the other one would see nothing of it
+// until it subscribed again. Re-sourcing the live feed from the database carries both processes'
+// events on the one path, and makes the live frame and the replayed frame the same bytes: both
+// come from readEventsAfterID, with an ask event's read-time fields attached.
 //
 // cursor is the id the relay has published through, and cursorAt the created_at of the event it
 // stands at. events.id is commit order, because events.Broker.Append takes the database-wide
@@ -87,14 +88,14 @@ func newEventStreamRelay(s *server, lifetime context.Context) *eventStreamRelay 
 	}
 }
 
-// subscribe answers one open SSE connection its live feed, starting the relay on the first one:
-// a process nobody streams from opens no listening connection of its own.
+// subscribe answers one events subscription its live feed, starting the relay on the first one: a
+// process nobody subscribes to opens no listening connection of its own.
 //
 // The cursor is read here, before the subscription exists, so it cannot stand ahead of the head
-// the caller resolves next (streamEvents' since): an id the relay had already published past
-// would otherwise reach neither that connection's catch-up (id <= since) nor this subscription. A
-// cursor read that fails starts nothing and is the caller's error; the next connection tries
-// again.
+// the caller resolves next (the subscription's since, live_events.go): an id the relay had already
+// published past would otherwise reach neither that subscription's catch-up (id <= since) nor its
+// relay subscription. A cursor read that fails starts nothing and is the caller's error; the next
+// subscription tries again.
 func (r *eventStreamRelay) subscribe(ctx context.Context) (<-chan model.Event, func(), error) {
 	if err := r.start(ctx); err != nil {
 		return nil, nil, err
@@ -174,12 +175,12 @@ func (r *eventStreamRelay) run(ctx context.Context) {
 	}
 }
 
-// read publishes every committed event after the cursor, in id order, through the same read a
-// reconnect's catch-up uses (readEventsAfterID), and moves the cursor only over the rows it has
-// published - once a page, to the last of them, rather than taking the lock for each of a
+// read publishes every committed event after the cursor, in id order, through the same read an
+// events subscription's catch-up uses (readEventsAfterID), and moves the cursor only over the rows
+// it has published - once a page, to the last of them, rather than taking the lock for each of a
 // thousand. Nothing but this goroutine writes the cursor once the relay has started, and a page
 // is published before the cursor moves over it, so no reader of it can see a row as published
-// that is not. It pages until a short page, as streamEvents does. A log that was reset under the
+// that is not. It pages until a short page, as that catch-up does. A log that was reset under the
 // cursor is answered first, and publishes nothing (resetCursor). false is a read that failed.
 func (r *eventStreamRelay) read(ctx context.Context) bool {
 	tracked := store.WithTransactionTracking(ctx)
@@ -208,7 +209,7 @@ func (r *eventStreamRelay) read(ctx context.Context) bool {
 			last := committed[len(committed)-1]
 			r.advance(last.ID, last.CreatedAt)
 		}
-		if len(committed) < maxSSEReplay {
+		if len(committed) < maxEventReplay {
 			return true
 		}
 	}
@@ -226,13 +227,14 @@ func (r *eventStreamRelay) read(ctx context.Context) bool {
 //
 // A reset is the one thing the relay cannot publish its way out of, because its ids have been
 // reused: the rows it would read as `id > cursor` are not the ones it published, and every open
-// subscription's since (streamEvents) is a position in a log that no longer exists, so no frame
+// subscription's since (live_events.go) is a position in a log that no longer exists, so no frame
 // it sent could mean what its reader would take it to mean. Ending the subscriptions is the
 // honest answer and the one the stream already has for a subscriber it cannot serve in order: it
-// closes the SSE response body, exactly as an overflowed subscriber's is closed (Stream.Publish),
-// and sends each browser through its reconnect-from-last-id, which resolves its position against
-// the log as it now stands. The rows between the old cursor and the new one are published to
-// nobody: a subscription that could have received them is gone, and one opened after this holds a
+// closes each subscriber's channel, exactly as an overflowed subscriber's is closed
+// (Stream.Publish), which ends each events subscription with an ended frame (behind) and sends its
+// page to subscribe again from the last id it applied, a since the subscription clamps to the log
+// as it now stands. The rows between the old cursor and the new one are published to nobody: a
+// subscription that could have received them is gone, and one made after this holds a
 // since the relay's cursor is at or past.
 //
 // The delivery hub answers the same reset by marking its views dirty rather than by dropping

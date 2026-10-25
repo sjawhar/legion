@@ -12,17 +12,17 @@ const brokerEventInsert = "internal/dispatch/events/broker.go"
 
 var eventInsertStatement = regexp.MustCompile(`\binsert into events\b`)
 
-// TestOnlyTheBrokerInsertsEvents enforces what the live event stream rests on: every row of the
+// TestOnlyTheBrokerInsertsEvents enforces what the live event feed rests on: every row of the
 // event log is written by events.Broker.Append, which takes the database-wide commit-order lock
 // before its insert and holds it until the transaction commits. That is why events.id is commit
 // order, and why the relay (event_stream_relay.go) can read `id > cursor` and skip nothing: no
 // row at or below a committed max(id) can still be uncommitted, so no row can appear behind the
-// cursor after the cursor has passed it. The same fact is what lets streamEvents drop a live
-// event at or below its connection's fixed since.
+// cursor after the cursor has passed it. The same fact is what lets an events subscription
+// (live_events.go) drop a live event at or below its fixed since.
 //
 // An insert written anywhere else would take no such lock. Its row could commit after the relay
-// had read past its id, and then reach no open stream at all until the reader reconnected -- a
-// missing comment or ask on an open page, with nothing to show for it in any log.
+// had read past its id, and then reach no open subscription at all until the page subscribed
+// again -- a missing comment or ask on an open page, with nothing to show for it in any log.
 //
 // Its reach is the statement as the module scan can assemble it (TestNoForUpdateOnOwnerTables):
 // string literals and chains of literals and package-level constants, in every non-test Go file

@@ -441,7 +441,7 @@ func main() {
 		Handler:           handler,
 		ReadHeaderTimeout: readHeaderTimeout,
 		IdleTimeout:       idleTimeout,
-		// WriteTimeout remains zero because the event stream is long-lived.
+		// WriteTimeout remains zero because the agent conversation stream is long-lived.
 	}
 	// Bound before serving, so an address that cannot be taken ends the process with 1: a
 	// supervisor must not read a port clash as a clean stop.

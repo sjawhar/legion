@@ -92,13 +92,20 @@ type socketClient struct {
 // open dials the socket, failing the test unless the upgrade succeeds; it reads nothing until read.
 func (rig *liveSocketRig) open(t *testing.T, dialer *gws.Dialer, header http.Header) *socketClient {
 	t.Helper()
-	conn, response, err := dialer.Dial(rig.url, header)
+	return openLiveSocketAt(t, dialer, rig.url, header)
+}
+
+// openLiveSocketAt dials the live socket at url, failing the test unless the upgrade succeeds; it
+// reads nothing until read.
+func openLiveSocketAt(t *testing.T, dialer *gws.Dialer, url string, header http.Header) *socketClient {
+	t.Helper()
+	conn, response, err := dialer.Dial(url, header)
 	if err != nil {
 		status := "no response"
 		if response != nil {
 			status = response.Status
 		}
-		t.Fatalf("open %s: %v (%s)", rig.url, err, status)
+		t.Fatalf("open %s: %v (%s)", url, err, status)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
 	return &socketClient{conn: conn, frames: make(chan []byte, 4096), ended: make(chan struct{})}

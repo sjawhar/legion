@@ -840,9 +840,9 @@ type AskEditEventPayload struct {
 	// since it was opened or last handed back (requested_version below the version it named): it
 	// changes only the version the request names, so like a human's unnamed artifact.version it
 	// wakes nobody (events.Broker.Notify) and reaches no follower (the outbox's follower routes),
-	// while the event log and SSE carry it as they carry every event. The first move after an
-	// opening or a hand-back is not quiet, even when a thread reply left the request waiting on its
-	// agent.
+	// while the event log and the event feed carry it as they carry every event. The first move
+	// after an opening or a hand-back is not quiet, even when a thread reply left the request
+	// waiting on its agent.
 	Quiet bool `json:"quiet,omitempty"`
 }
 

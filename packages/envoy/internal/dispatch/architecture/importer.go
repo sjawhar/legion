@@ -490,7 +490,7 @@ func (i *Importer) recordFailure(ctx context.Context, source model.ArchitectureS
 }
 
 // maxFailureMessage bounds what one failure writes: last_error, the
-// sync_failed payload (and its SSE frame), and thus the Settings row all
+// sync_failed payload (and its event frame), and thus the Settings row all
 // carry the same text, so a model with thousands of problems records the
 // first ones and a count of the rest.
 const maxFailureMessage = 4 << 10

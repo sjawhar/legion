@@ -40,6 +40,7 @@ func newDevSignInRouterWithPeople(t *testing.T, serverURL string, sessions *memo
 	if err != nil {
 		t.Fatalf("build context: %v", err)
 	}
+	standInEventLog(ctx, 0)
 	handler, _ := New(ctx)
 	return handler, people
 }
@@ -110,7 +111,7 @@ func TestDevSignInIssuesTheSessionCookieAndRecordsThePerson(t *testing.T) {
 		t.Fatalf("cookie session = %#v valid=%t, want alice@d.example at generation 3", session, ok)
 	}
 	whoami := whoamiAs(t, handler, cookie)
-	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"kind":"user","login":"alice@d.example"}` {
+	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"event_head":"0","kind":"user","login":"alice@d.example"}` {
 		t.Fatalf("whoami with the minted cookie: %d %s", whoami.Code, whoami.Body.String())
 	}
 	if _, found := people.get("alice@d.example"); !found {
@@ -135,7 +136,7 @@ func TestDevSignInMintsTheLowercasedEmail(t *testing.T) {
 		t.Fatal("sign-in as Alice set no dsession cookie")
 	}
 	whoami := whoamiAs(t, handler, cookie)
-	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"kind":"user","login":"alice@d.example"}` {
+	if whoami.Code != http.StatusOK || strings.TrimSpace(whoami.Body.String()) != `{"event_head":"0","kind":"user","login":"alice@d.example"}` {
 		t.Fatalf("whoami: %d %s, want the lowercased email", whoami.Code, whoami.Body.String())
 	}
 }

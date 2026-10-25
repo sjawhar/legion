@@ -41,26 +41,44 @@ const promptShutdown = 3 * time.Second
 // stream route takes a session uuid.
 const streamedSessionID = "01a0e090-4848-7473-acc5-fc96e6a646d3"
 
-// A deploy stops Dispatch while people have the dashboard open: every tab holds the event stream,
-// and one on an agent's page holds that conversation's stream too. SIGTERM ends each stream, so
-// http.Server.Shutdown returns once the requests in flight have, and the document service settles
-// the document an edit has just left owing a settlement. An edit's settlement runs two seconds
-// after it (docs.Deps.Settle's default), so a signal sent as soon as the edit answers reaches the
-// document service with that settlement still owed, and Shutdown is the one that runs it.
+// A deploy stops Dispatch while people have the dashboard open: every tab holds a live socket
+// subscribed to the event feed, and one on an agent's page holds that conversation's stream too.
+// SIGTERM closes each socket with 1012 and ends each stream, so http.Server.Shutdown returns once
+// the requests in flight have, and the document service settles the document an edit has just left
+// owing a settlement. An edit's settlement runs two seconds after it (docs.Deps.Settle's default),
+// so a signal sent as soon as the edit answers reaches the document service with that settlement
+// still owed, and Shutdown is the one that runs it.
 func TestSIGTERMWithOpenStreamsExitsPromptlyAndSettlesTheOwedDocument(t *testing.T) {
 	database := storetest.Open(t)
 	process := startDispatchProcess(t, database.Pool.Config().ConnString())
 	process.waitHealthy(t)
 	_, artifactID := process.createIssue(t)
 
+	feed := process.openLiveEvents(t)
+	feedEnded := make(chan streamEnd, 1)
+	go func() {
+		for {
+			if _, _, err := feed.ReadMessage(); err != nil {
+				feedEnded <- streamEnd{at: time.Now(), err: err}
+				return
+			}
+		}
+	}()
 	streams := map[string]<-chan streamEnd{
-		"event stream":              process.openStream(t, "/api/v1/events"),
 		"agent conversation stream": process.openStream(t, "/api/v1/agents/"+streamedSessionID+"/stream"),
 	}
 	process.editOwingSettlement(t, database, artifactID)
 
 	signalled := process.Terminate(t)
 	process.waitPromptExit(t, signalled)
+	ended := <-feedEnded
+	t.Logf("the event feed's live socket ended %v after SIGTERM (%v)", ended.at.Sub(signalled), ended.err)
+	// A socket the server closed reads its close frame; one the exiting process cut reads as an
+	// abnormal closure, which the page also reconnects from, but which says the server held the
+	// socket for as long as the process lived.
+	if !gws.IsCloseError(ended.err, gws.CloseServiceRestart) {
+		t.Errorf("the event feed's live socket ended with %v, want the server to close it with 1012", ended.err)
+	}
 	for name, streamEnded := range streams {
 		ended := <-streamEnded
 		t.Logf("the %s ended %v after SIGTERM (%v)", name, ended.at.Sub(signalled), ended.err)
@@ -654,10 +672,46 @@ func (p *dispatchProcess) editOwingSettlement(t *testing.T, database *store.Stor
 	}
 }
 
-// streamEnd is when a stream stopped and the read error that stopped it.
+// streamEnd is when a stream or a socket stopped and the read error that stopped it.
 type streamEnd struct {
 	at  time.Time
 	err error
+}
+
+// openLiveEvents opens GET /ws/live as a signed-in tab does and subscribes it to the event feed,
+// from the head, returning once Dispatch has started the subscription (its events_start frame) with
+// the socket the feed's frames arrive on. The socket closes when the test ends.
+func (p *dispatchProcess) openLiveEvents(t *testing.T) *gws.Conn {
+	t.Helper()
+	conn, response, err := gws.DefaultDialer.Dial("ws://127.0.0.1:"+strconv.Itoa(p.port)+"/ws/live", http.Header{
+		"X-Dispatch-User": {dispatchTestLogin},
+	})
+	if err != nil {
+		status := "no response"
+		if response != nil {
+			status = response.Status
+		}
+		t.Fatalf("open the live socket: %v (%s)", err, status)
+	}
+	t.Cleanup(func() { _ = conn.Close() })
+	if err := conn.WriteJSON(map[string]any{"type": "subscribe", "sub": "events", "view": map[string]string{"kind": "events"}}); err != nil {
+		t.Fatalf("subscribe the live socket to the event feed: %v", err)
+	}
+	_ = conn.SetReadDeadline(time.Now().Add(10 * time.Second))
+	for {
+		var frame struct{ Type, Sub string }
+		if err := conn.ReadJSON(&frame); err != nil {
+			t.Fatalf("read the event feed's events_start: %v\n%s", err, p.Output.String())
+		}
+		if frame.Type == "events_start" && frame.Sub == "events" {
+			break
+		}
+		if frame.Type != "heartbeat" {
+			t.Fatalf("the live socket answered the event feed's subscribe with a %s frame, want its events_start", frame.Type)
+		}
+	}
+	_ = conn.SetReadDeadline(time.Time{})
+	return conn
 }
 
 // openStream opens the server-sent stream at path as a signed-in tab holds it and reads it until it

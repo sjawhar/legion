@@ -21,7 +21,7 @@ const DeployedEventType = "issue.deployed"
 // DeployedEventActor writes every issue.deployed: a system actor, since no person or session caused
 // the deploy the timeline observed. Broker.Notify is false for a system actor, which keeps the event
 // out of inboxes and routed delivery only; the outbox publishes it on the issue's subject as it does
-// every unpublished event, and the SSE stream and the event log carry it, whoever the actor is.
+// every unpublished event, and the event feed and the event log carry it, whoever the actor is.
 var DeployedEventActor = model.Actor{Kind: "system", ID: "delivery-timeline"}
 
 // IssueDeployedEventPayload is an issue.deployed event's payload, mirrored by

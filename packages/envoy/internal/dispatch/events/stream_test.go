@@ -8,11 +8,11 @@ import (
 
 // TestStreamDropsASubscriberThatCannotKeepUp is the overflow contract every reader of a Stream
 // rests on: a subscriber whose channel is full is dropped and its channel closed, rather than
-// waited for. The SSE handler ends its response body when its channel closes, and the browser
-// reconnects from the last id it saw, which replays what it missed. Blocking instead would hold
-// the event stream relay -- one goroutine for the whole process -- behind the slowest reader of
-// any open page, and silently skipping the event would leave that client wrong with no reconnect
-// to repair it.
+// waited for. An events subscription ends with an ended frame when its channel closes, and the
+// page subscribes again from the last id it applied, which replays what it missed. Blocking
+// instead would hold the event stream relay -- one goroutine for the whole process -- behind the
+// slowest reader of any open page, and silently skipping the event would leave that page wrong
+// with no resubscribe to repair it.
 func TestStreamDropsASubscriberThatCannotKeepUp(t *testing.T) {
 	stream := NewStream()
 	subscription, cancel := stream.Subscribe()
@@ -35,9 +35,9 @@ func TestStreamDropsASubscriberThatCannotKeepUp(t *testing.T) {
 	}
 }
 
-// TestStreamCloseAllEndsEverySubscription: the test hook behind POST
-// /api/v1/events/_test/disconnect drops every open SSE connection this way, so an e2e suite can
-// drive a client's reconnect without seeding enough events to trip the replay cap.
+// TestStreamCloseAllEndsEverySubscription: the event stream relay ends every events subscription
+// this way when the event log is reset under its cursor, so each page subscribes again against
+// the log as it now stands.
 func TestStreamCloseAllEndsEverySubscription(t *testing.T) {
 	stream := NewStream()
 	first, cancelFirst := stream.Subscribe()

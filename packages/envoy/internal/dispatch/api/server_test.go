@@ -1,7 +1,6 @@
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"crypto/sha256"
@@ -14,7 +13,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"slices"
-	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -85,9 +83,9 @@ type testServerOptions struct {
 	// deployment with no bucket does.
 	files files.Store
 	// lifetime is the server's Deps.Lifetime, on which Register builds the delivery hub GET
-	// /ws/live serves and the event stream relay every SSE connection reads. Nil is the test's
-	// own context (t.Context()), which ends before the cleanups that wait those goroutines out;
-	// a test that stops the server before it ends (the socket's) passes one it can cancel
+	// /ws/live serves and the event stream relay every events subscription reads. Nil is the
+	// test's own context (t.Context()), which ends before the cleanups that wait those goroutines
+	// out; a test that stops the server before it ends (the socket's) passes one it can cancel
 	// itself. It must end by the test's end, so derive it from t.Context().
 	lifetime context.Context
 	// streamHeartbeat replaces the event streams' and the sockets' fifteen-second heartbeat.
@@ -1227,119 +1225,6 @@ func TestBearerReadRoutesDoNotRequireActor(t *testing.T) {
 	}
 }
 
-func TestSSEReplaysThenStreamsCommittedEvent(t *testing.T) {
-	handler := newTestHandler(t)
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
-		"key": "TEST", "name": "Test project",
-	}, "alice"); response.Code != http.StatusCreated {
-		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
-	}
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-		"project": "TEST", "title": "Issue",
-	}, "alice")
-	issue := decodeBody[struct {
-		Key string `json:"key"`
-	}](t, created)
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
-	}
-
-	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=0", nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	responseChannel := make(chan *http.Response, 1)
-	errorChannel := make(chan error, 1)
-	go func() {
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			errorChannel <- err
-			return
-		}
-		responseChannel <- response
-	}()
-	var stream *http.Response
-	select {
-	case err := <-errorChannel:
-		t.Fatalf("connect SSE: %v", err)
-	case stream = <-responseChannel:
-	case <-time.After(2 * time.Second):
-		t.Fatal("SSE endpoint did not establish a stream")
-	}
-	defer stream.Body.Close()
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status: got %d, want 200", stream.StatusCode)
-	}
-	scanner := bufio.NewScanner(stream.Body)
-	projectReplay := readSSEFrame(t, scanner)
-	if projectReplay[1] != "event: project.created" {
-		t.Fatalf("project replayed SSE frame: %#v", projectReplay)
-	}
-	replayed := readSSEFrame(t, scanner)
-	if replayed[1] != "event: issue.created" || !strings.Contains(replayed[2], `"issue_key":"TEST-1"`) {
-		t.Fatalf("replayed SSE frame: %#v", replayed)
-	}
-
-	updated := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed",
-	}, "alice")
-	if updated.Code != http.StatusOK {
-		t.Fatalf("update issue during SSE: status=%d body=%s", updated.Code, updated.Body.String())
-	}
-	live := readSSEFrame(t, scanner)
-	if live[1] != "event: issue.updated" || !strings.Contains(live[2], `"title":"Renamed"`) {
-		t.Fatalf("live SSE frame: %#v", live)
-	}
-	stream.Body.Close()
-	resumeRequest, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events", nil)
-	if err != nil {
-		t.Fatalf("construct resumed SSE request: %v", err)
-	}
-	resumeRequest.Header.Set("Authorization", "Bearer agent-token")
-	resumeRequest.Header.Set("Last-Event-ID", "2")
-	resumed, err := http.DefaultClient.Do(resumeRequest)
-	if err != nil {
-		t.Fatalf("resume SSE: %v", err)
-	}
-	defer resumed.Body.Close()
-	resumedFrame := readSSEFrame(t, bufio.NewScanner(resumed.Body))
-	if resumedFrame[0] != "id: 3" || resumedFrame[1] != "event: issue.updated" {
-		t.Fatalf("Last-Event-ID replay: %#v", resumedFrame)
-	}
-	staleQueryRequest, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=0", nil)
-	if err != nil {
-		t.Fatalf("construct stale-query SSE request: %v", err)
-	}
-	staleQueryRequest.Header.Set("Authorization", "Bearer agent-token")
-	staleQueryRequest.Header.Set("Last-Event-ID", "2")
-	staleQuery, err := http.DefaultClient.Do(staleQueryRequest)
-	if err != nil {
-		t.Fatalf("resume stale-query SSE: %v", err)
-	}
-	defer staleQuery.Body.Close()
-	staleQueryFrame := readSSEFrame(t, bufio.NewScanner(staleQuery.Body))
-	if staleQueryFrame[0] != "id: 3" || staleQueryFrame[1] != "event: issue.updated" {
-		t.Fatalf("Last-Event-ID with stale since query replay: %#v", staleQueryFrame)
-	}
-}
-
-func readSSEFrame(t *testing.T, scanner *bufio.Scanner) []string {
-	t.Helper()
-	frame := []string{}
-	for scanner.Scan() {
-		line := scanner.Text()
-		if line == "" {
-			return frame
-		}
-		frame = append(frame, line)
-	}
-	t.Fatalf("read SSE frame: %v", scanner.Err())
-	return nil
-}
-
 func TestPerUserIssueStateIsIsolated(t *testing.T) {
 	handler := newTestHandler(t)
 	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
@@ -1855,12 +1740,14 @@ func newCookieServer(t *testing.T) (http.Handler, *store.PgSessionStore, *http.C
 	deps, err := NewDeps(DepsInput{
 		Store: database, Identity: cookieIdentity, AgentTokens: sharedAgentTokens(t, "agent-token"),
 		Docs: documentService, Events: broker,
+		// Mounts GET /ws/live, the event feed's socket, which a revoked cookie is refused too.
+		Lifetime: t.Context(),
 	})
 	if err != nil {
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	handler := http.NewServeMux()
-	Register(handler, deps)
+	t.Cleanup(Register(handler, deps))
 	generation, err := sessions.EnsureSession(context.Background(), "alice@d.example")
 	if err != nil {
 		t.Fatalf("establish alice's session: %v", err)
@@ -1910,21 +1797,21 @@ func TestRevokedCookieIsRejectedAcrossDispatchSurfaces(t *testing.T) {
 	if err := sessions.RevokeSessions(context.Background(), "alice@d.example"); err != nil {
 		t.Fatalf("revoke alice's sessions: %v", err)
 	}
-	for _, target := range []string{"/api/v1/issues/" + issue.Key, "/api/v1/events"} {
-		response := request(http.MethodGet, target, nil)
-		if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
-			t.Fatalf("revoked cookie %s: status=%d body=%s", target, response.Code, response.Body.String())
-		}
+	response := request(http.MethodGet, "/api/v1/issues/"+issue.Key, nil)
+	if response.Code != http.StatusUnauthorized || !strings.Contains(response.Body.String(), `"code":"NO_IDENTITY"`) {
+		t.Fatalf("revoked cookie issue read: status=%d body=%s", response.Code, response.Body.String())
 	}
 	httpServer := httptest.NewServer(handler)
 	t.Cleanup(httpServer.Close)
-	wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + "/ws/doc/" + issue.PrimaryArtifactID
-	connection, response, err := gws.DefaultDialer.Dial(wsURL, http.Header{"Cookie": []string{cookie.Name + "=" + cookie.Value}})
-	if connection != nil {
-		_ = connection.Close()
-	}
-	if err == nil || response == nil || (response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden) {
-		t.Fatalf("revoked cookie websocket: response=%#v err=%v, want rejected handshake", response, err)
+	for _, path := range []string{"/ws/doc/" + issue.PrimaryArtifactID, "/ws/live"} {
+		wsURL := "ws" + strings.TrimPrefix(httpServer.URL, "http") + path
+		connection, response, err := gws.DefaultDialer.Dial(wsURL, http.Header{"Cookie": []string{cookie.Name + "=" + cookie.Value}})
+		if connection != nil {
+			_ = connection.Close()
+		}
+		if err == nil || response == nil || (response.StatusCode != http.StatusUnauthorized && response.StatusCode != http.StatusForbidden) {
+			t.Fatalf("revoked cookie websocket %s: response=%#v err=%v, want rejected handshake", path, response, err)
+		}
 	}
 }
 
@@ -1957,522 +1844,11 @@ func TestArtifactUploadSummaryCreatesNamedVersions(t *testing.T) {
 	}
 }
 
-func TestSSEPagesThroughCappedBacklogWithoutDisconnecting(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
-		"key": "TEST", "name": "Test project",
-	}, "alice"); response.Code != http.StatusCreated {
-		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
-	}
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-		"project": "TEST", "title": "Issue",
-	}, "alice")
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
-	}
-	issue := decodeBody[struct {
-		Key string `json:"key"`
-	}](t, created)
-	if _, err := database.Pool.Exec(context.Background(), `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		select $1, value, 'seeded', jsonb_build_object('kind', 'session', 'id', 'seed'), jsonb_build_object('seq', value), false
-		from generate_series(2, 1006) as value
-	`, issue.Key); err != nil {
-		t.Fatalf("seed replay events: %v", err)
-	}
-	if _, err := database.Pool.Exec(context.Background(), `update issues set last_seq = 1006 where key = $1`, issue.Key); err != nil {
-		t.Fatalf("sync issue last_seq after seeding: %v", err)
-	}
-
-	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=1", nil)
-	if err != nil {
-		t.Fatalf("construct capped SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open capped SSE stream: %v", err)
-	}
-	defer stream.Body.Close()
-	scanner := bufio.NewScanner(stream.Body)
-	// The 1005 seeded events plus the issue creation exceed one capped page
-	// (maxSSEReplay=1000); a single connection pages through all of them without
-	// ever disconnecting: a capped page that ended the stream and forced a client
-	// reconnect would leave a gap where a low id committing between "read this page"
-	// and "a new connection subscribes" could be lost forever.
-	for wantID := 2; wantID <= 1007; wantID++ {
-		frame := readSSEFrame(t, scanner)
-		if frame[0] != fmt.Sprintf("id: %d", wantID) {
-			t.Fatalf("paged replay frame = %#v, want id %d", frame, wantID)
-		}
-	}
-	// The same connection is still open afterward: a live event delivers with no
-	// reconnect required.
-	updated := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed after paging",
-	}, "alice")
-	if updated.Code != http.StatusOK {
-		t.Fatalf("update issue after paged backlog: status=%d body=%s", updated.Code, updated.Body.String())
-	}
-	live := readSSEFrame(t, scanner)
-	if live[1] != "event: issue.updated" || !strings.Contains(live[2], `"title":"Renamed after paging"`) {
-		t.Fatalf("live frame after paged backlog: %#v", live)
-	}
-}
-
-func TestDisconnectAllStreamsHookIsGatedByTestHooksEnabled(t *testing.T) {
-	handler := newTestHandler(t)
-	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/events/_test/disconnect", nil, "alice")
-	if response.Code != http.StatusNotFound {
-		t.Fatalf("disconnect hook without TestHooksEnabled: status=%d, want %d", response.Code, http.StatusNotFound)
-	}
-}
-
 func TestQuiesceDocumentsHookIsGatedByTestHooksEnabled(t *testing.T) {
 	handler := newTestHandler(t)
 	response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/_test/quiesce", nil, "alice")
 	if response.Code != http.StatusNotFound {
 		t.Fatalf("quiesce hook without TestHooksEnabled: status=%d, want %d", response.Code, http.StatusNotFound)
-	}
-}
-
-// TestDisconnectAllStreamsClosesOpenConnections proves the test-only hook drives a
-// client through its reconnect-from-lastId path without seeding thousands of events
-// to trip the replay cap: the same recovery path useEventStream exercises after any
-// real disconnect (dropped connection, server restart, tab sleep).
-func TestDisconnectAllStreamsClosesOpenConnections(t *testing.T) {
-	handler, _ := newTestHandlerWithTestHooks(t)
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
-		"key": "TEST", "name": "Test project",
-	}, "alice"); response.Code != http.StatusCreated {
-		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
-	}
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-		"project": "TEST", "title": "Issue",
-	}, "alice")
-	issue := decodeBody[struct {
-		Key string `json:"key"`
-	}](t, created)
-
-	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events?since=0", nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open SSE stream: %v", err)
-	}
-	defer stream.Body.Close()
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status: got %d, want 200", stream.StatusCode)
-	}
-	scanner := bufio.NewScanner(stream.Body)
-	projectReplay := readSSEFrame(t, scanner)
-	if projectReplay[1] != "event: project.created" {
-		t.Fatalf("project replayed SSE frame: %#v", projectReplay)
-	}
-	replayed := readSSEFrame(t, scanner)
-	if replayed[1] != "event: issue.created" {
-		t.Fatalf("replayed SSE frame: %#v", replayed)
-	}
-
-	disconnect := agentRequest(t, handler, http.MethodPost, "/api/v1/events/_test/disconnect", nil, "agent-token")
-	if disconnect.Code != http.StatusOK {
-		t.Fatalf("disconnect-all hook: status=%d body=%s", disconnect.Code, disconnect.Body.String())
-	}
-
-	streamEnded := make(chan bool, 1)
-	go func() {
-		more := scanner.Scan()
-		streamEnded <- !more
-	}()
-	select {
-	case ended := <-streamEnded:
-		if !ended {
-			t.Fatalf("stream emitted an unexpected line after disconnect-all: %q", scanner.Text())
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("disconnect-all did not close the open SSE stream")
-	}
-
-	// A client reconnecting with Last-Event-ID after this forced close (exactly what
-	// useEventStream's watchdog/error path does) resumes from lastId, not from 0.
-	resumeRequest, err := http.NewRequest(http.MethodGet, httpServer.URL+"/api/v1/events", nil)
-	if err != nil {
-		t.Fatalf("construct resumed SSE request: %v", err)
-	}
-	resumeRequest.Header.Set("Authorization", "Bearer agent-token")
-	resumeRequest.Header.Set("Last-Event-ID", "2")
-	updated := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed after disconnect",
-	}, "alice")
-	if updated.Code != http.StatusOK {
-		t.Fatalf("update issue after disconnect: status=%d body=%s", updated.Code, updated.Body.String())
-	}
-	resumed, err := http.DefaultClient.Do(resumeRequest)
-	if err != nil {
-		t.Fatalf("resume SSE: %v", err)
-	}
-	defer resumed.Body.Close()
-	resumedFrame := readSSEFrame(t, bufio.NewScanner(resumed.Body))
-	if resumedFrame[0] != "id: 3" || resumedFrame[1] != "event: issue.updated" {
-		t.Fatalf("resumed replay after disconnect-all: %#v", resumedFrame)
-	}
-}
-
-func newTestHandlerWithBroker(t *testing.T) (http.Handler, *store.Store, *events.Broker) {
-	t.Helper()
-	database := storetest.Open(t)
-	broker := events.NewBroker()
-	documentService := docs.New(docs.Deps{Store: database, Events: broker, ServerURL: "https://dispatch.example", Settle: 20 * time.Millisecond})
-	t.Cleanup(func() {
-		if err := documentService.Shutdown(context.Background()); err != nil {
-			t.Errorf("shutdown document service: %v", err)
-		}
-	})
-	seedPeople(t, database, "alice", "bob")
-	deps, err := NewDeps(DepsInput{
-		Store:       database,
-		Identity:    headerIdentity(database),
-		AgentTokens: sharedAgentTokens(t, "agent-token"),
-		ServerURL:   "https://dispatch.example",
-		Docs:        documentService,
-		Events:      broker,
-		// The event stream relay runs on this, and the wait below is what keeps its listening
-		// connection from outliving the database the test drops.
-		Lifetime: t.Context(),
-	})
-	if err != nil {
-		t.Fatalf("new API dependencies: %v", err)
-	}
-	mux := http.NewServeMux()
-	t.Cleanup(Register(mux, deps))
-
-	return mux, database, broker
-}
-func TestSSEResumeCursorOrdersConcurrentEventCommits(t *testing.T) {
-	handler, database, broker := newTestHandlerWithBroker(t)
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
-		"key": "TEST", "name": "Test project",
-	}, "alice"); response.Code != http.StatusCreated {
-		t.Fatalf("create project: status=%d body=%s", response.Code, response.Body.String())
-	}
-	created := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-		"project": "TEST", "title": "Issue",
-	}, "alice")
-	issue := decodeBody[struct {
-		Key string `json:"key"`
-	}](t, created)
-	if created.Code != http.StatusCreated {
-		t.Fatalf("create issue: status=%d body=%s", created.Code, created.Body.String())
-	}
-	if response := dispatchRequest(t, handler, http.MethodPost, "/api/v1/projects", map[string]string{
-		"key": "OTHER", "name": "Other project",
-	}, "alice"); response.Code != http.StatusCreated {
-		t.Fatalf("create other project: status=%d body=%s", response.Code, response.Body.String())
-	}
-	otherCreated := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues", map[string]string{
-		"project": "OTHER", "title": "Other issue",
-	}, "alice")
-	other := decodeBody[struct {
-		Key string `json:"key"`
-	}](t, otherCreated)
-	if otherCreated.Code != http.StatusCreated {
-		t.Fatalf("create other issue: status=%d body=%s", otherCreated.Code, otherCreated.Body.String())
-	}
-
-	ctx := context.Background()
-	first, err := database.Pool.Begin(ctx)
-	if err != nil {
-		t.Fatalf("begin first transaction: %v", err)
-	}
-	defer first.Rollback(ctx)
-	low, err := broker.Append(ctx, first, model.Event{
-		IssueKey: new(issue.Key),
-		Type:     "test.concurrent",
-		Actor:    model.Actor{Kind: "session", ID: "seed"},
-		Payload:  map[string]any{},
-	})
-	if err != nil {
-		t.Fatalf("append first event: %v", err)
-	}
-
-	type appendResult struct {
-		event model.Event
-		err   error
-	}
-	started := make(chan struct{})
-	secondResult := make(chan appendResult, 1)
-	go func() {
-		second, err := database.Pool.Begin(ctx)
-		if err != nil {
-			secondResult <- appendResult{err: err}
-			return
-		}
-		defer second.Rollback(ctx)
-		close(started)
-		event, err := broker.Append(ctx, second, model.Event{
-			IssueKey: new(other.Key),
-			Type:     "test.concurrent",
-			Actor:    model.Actor{Kind: "session", ID: "seed"},
-			Payload:  map[string]any{},
-		})
-		if err == nil {
-			err = second.Commit(ctx)
-		}
-		secondResult <- appendResult{event: event, err: err}
-	}()
-	<-started
-	waitForDatabaseLocks(t, first, 1)
-
-	if err := first.Commit(ctx); err != nil {
-		t.Fatalf("commit first event: %v", err)
-	}
-	high := <-secondResult
-	if high.err != nil {
-		t.Fatalf("append second event: %v", high.err)
-	}
-	if high.event.ID <= low.ID {
-		t.Fatalf("event ids did not follow commit order: first=%d second=%d", low.ID, high.event.ID)
-	}
-
-	httpServer := httptest.NewServer(handler)
-	defer httpServer.Close()
-	request, err := http.NewRequest(
-		http.MethodGet,
-		httpServer.URL+"/api/v1/events?since="+fmt.Sprintf("%d", low.ID),
-		nil,
-	)
-	if err != nil {
-		t.Fatalf("construct resumed SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open resumed SSE stream: %v", err)
-	}
-	defer stream.Body.Close()
-	frame := readSSEFrame(t, bufio.NewScanner(stream.Body))
-	if frame[0] != fmt.Sprintf("id: %d", high.event.ID) {
-		t.Fatalf("resume replay = %#v, want committed second event %d", frame, high.event.ID)
-	}
-}
-
-// eventHead is the newest committed event id: what a connection resuming now would pass as since.
-func eventHead(t *testing.T, database *store.Store) int64 {
-	t.Helper()
-	var head int64
-	if err := database.Pool.QueryRow(context.Background(), `select coalesce(max(id), 0) from events`).Scan(&head); err != nil {
-		t.Fatalf("read the event log's head: %v", err)
-	}
-	return head
-}
-
-// sseStreamDeadline bounds a stream a test opens: a frame that never arrives fails the read with
-// the context's error rather than holding the test until the package's own timeout, which would
-// take every other test's result with it.
-const sseStreamDeadline = 30 * time.Second
-
-// openSSEStream opens one event stream as an agent bearer, closed when the test ends, and answers
-// a scanner over its frames. It returns once the handler has answered 200, which it does only
-// after it has subscribed and resolved its since. Its caller closes the httptest server with
-// t.Cleanup rather than defer: Close waits for the handlers still running, and this body closes
-// with the cleanups, after every defer.
-func openSSEStream(t *testing.T, url string) *bufio.Scanner {
-	t.Helper()
-	ctx, cancel := context.WithTimeout(t.Context(), sseStreamDeadline)
-	t.Cleanup(cancel)
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open SSE stream: %v", err)
-	}
-	t.Cleanup(func() { stream.Body.Close() })
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
-	}
-	return bufio.NewScanner(stream.Body)
-}
-
-// sseFrameID is the event id of one frame readSSEFrame read.
-func sseFrameID(t *testing.T, frame []string) int64 {
-	t.Helper()
-	if len(frame) == 0 || !strings.HasPrefix(frame[0], "id: ") {
-		t.Fatalf("SSE frame = %#v, want an id line", frame)
-	}
-	id, err := strconv.ParseInt(strings.TrimPrefix(frame[0], "id: "), 10, 64)
-	if err != nil {
-		t.Fatalf("SSE frame id %q: %v", frame[0], err)
-	}
-	return id
-}
-
-// TestSSEDoesNotResendAnEventAtOrBelowItsSince covers the one id comparison the live loop makes.
-// The relay is one per process and can stand behind a connection opened after it: it then
-// publishes ids that connection's catch-up has already covered, which sentDuringCatchup cannot be
-// asked about, since it holds only the ids above since that catch-up sent. Forwarding them would
-// show a client an event it has already seen.
-//
-// The comparison is safe because since is fixed for the connection, and the commit-order lock
-// events.Broker.Append holds until its transaction commits leaves no uncommitted id at or below a
-// committed max(id). A late-committing lower id -- what the live loop used to carry a rule
-// against -- is now the lock's to prevent and TestOnlyTheBrokerInsertsEvents's to keep.
-func TestSSEDoesNotResendAnEventAtOrBelowItsSince(t *testing.T) {
-	handler, database, _, served := newRegisteredTestServer(t, testServerOptions{})
-	// Long enough that the second connection below opens between a commit and the read that
-	// commit's notification wakes, so the relay really is behind that connection's since.
-	served.eventRelay.coalesce = time.Second
-	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
-
-	// The first connection starts the relay, whose cursor stops at what has committed by now.
-	openSSEStream(t, httpServer.URL+"/api/v1/events")
-	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
-	}
-	since := eventHead(t, database)
-
-	// This connection's catch-up covers everything through since, which the relay has not read
-	// up to yet: what the relay publishes next is this connection's own backlog.
-	scanner := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, since))
-	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed again",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("rename issue again: status=%d body=%s", response.Code, response.Body.String())
-	}
-	if id := sseFrameID(t, readSSEFrame(t, scanner)); id <= since {
-		t.Fatalf("live frame id = %d, want an id above the connection's since %d", id, since)
-	}
-}
-
-// TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce: a catch-up that fills a page keeps
-// paging on the subscription it opened with. An event committing while it pages reaches the
-// client on a later page or live from the relay, whichever sees it first, and sentDuringCatchup is
-// what keeps it from arriving on both. A capped page that ended the stream instead, sending the
-// client to a reconnect, would leave a gap between the last page and the new subscription for that
-// commit to fall into.
-func TestSSECappedCatchupDeliversACommitDuringPagingExactlyOnce(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
-	// Exactly maxSSEReplay committed events, so the first catch-up page fills and a second runs.
-	if _, err := database.Pool.Exec(context.Background(), `
-		insert into events (issue_key, seq, type, actor, payload, notify)
-		select $1, value, 'seeded', jsonb_build_object('kind', 'session', 'id', 'seed'), jsonb_build_object('seq', value), false
-		from generate_series(101, 1100) as value
-	`, issue.Key); err != nil {
-		t.Fatalf("seed capped backlog: %v", err)
-	}
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
-	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events?since=2")
-
-	// Committed while that catch-up is still paging.
-	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
-	}
-	live := eventHead(t, database)
-	seen := map[int64]bool{}
-	for id := int64(0); id != live; {
-		id = sseFrameID(t, readSSEFrame(t, scanner))
-		if seen[id] {
-			t.Fatalf("event %d was delivered twice", id)
-		}
-		seen[id] = true
-		if len(seen) > maxSSEReplay+100 {
-			t.Fatalf("the commit %d made during the catch-up was not delivered in %d frames", live, len(seen))
-		}
-	}
-}
-
-// TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit: a cold connection (no since= and no
-// Last-Event-ID) resolves its own head inside this one handler, after it has subscribed. It is
-// sent nothing already committed, which is the backlog it asked not to get, and everything
-// committing after it, which lands in its subscription however its catch-up went. A client that
-// read its head through a separate request first would lose an event committing between that
-// request and this one: invisible to the catch-up (id <= since) and to a subscription registered
-// only afterwards.
-func TestSSEColdStartSendsNoBacklogAndDeliversTheNextCommit(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
-	backlog := eventHead(t, database)
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
-	scanner := openSSEStream(t, httpServer.URL+"/api/v1/events")
-
-	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("rename issue: status=%d body=%s", response.Code, response.Body.String())
-	}
-	live := eventHead(t, database)
-	for id := int64(0); id != live; {
-		id = sseFrameID(t, readSSEFrame(t, scanner))
-		if id <= backlog {
-			t.Fatalf("cold connection was sent event %d, backlog at or below the head %d it opened on", id, backlog)
-		}
-	}
-}
-
-// TestSSEResumesAfterTheEventLogIsResetBeneathTheReader: the browser suite empties the event log
-// between its scenarios (`truncate ... restart identity cascade`, e2e/seed.ts), so the next row's
-// id is 1 again. The relay notices, ends every open subscription and sends the browser through
-// its reconnect -- and a browser only ever raises its lastEventId, never lowers it
-// (web/src/api/sse.ts), so it comes back asking for a since above the new log's head. Without the
-// handler's clamp, catch-up (`id > since`) matches nothing and the live loop drops every event of
-// the new log for ever, because they all sit at or below that stale since: a reader silent for
-// good, on a connection that stays open and heartbeats, with nothing logged and nothing failed.
-//
-// The assertion is the frame of an event committed after the reset, whose id is below the
-// pre-reset head this connection resumed from. It can reach the reader only through a since the
-// handler clamped to the head it resolved for this connection; an unclamped since drops it, and
-// the only frame this reader then ever sees is a heartbeat.
-func TestSSEResumesAfterTheEventLogIsResetBeneathTheReader(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
-	issue := createInteractionIssue(t, handler, "TEST", "Issue", "A spec")
-	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed before the reset",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("rename issue before the reset: status=%d body=%s", response.Code, response.Body.String())
-	}
-	head := eventHead(t, database)
-	if _, err := database.Pool.Exec(t.Context(), `truncate events restart identity cascade`); err != nil {
-		t.Fatalf("reset the event log: %v", err)
-	}
-
-	httpServer := httptest.NewServer(handler)
-	t.Cleanup(httpServer.Close)
-	// What the browser reconnects with after the relay ended its subscription: the last id it saw,
-	// which the reset has left above the whole new log.
-	scanner := openSSEStream(t, fmt.Sprintf("%s/api/v1/events?since=%d", httpServer.URL, head))
-
-	if response := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+issue.Key, map[string]string{
-		"title": "Renamed after the reset",
-	}, "alice"); response.Code != http.StatusOK {
-		t.Fatalf("rename issue after the reset: status=%d body=%s", response.Code, response.Body.String())
-	}
-	live := eventHead(t, database)
-	if live >= head {
-		t.Fatalf("event %d committed after the reset is not below the pre-reset head %d: the reset reused no id, so this test proves nothing", live, head)
-	}
-	for id := int64(0); id != live; {
-		id = sseFrameID(t, readSSEFrame(t, scanner))
-		if id > live {
-			t.Fatalf("frame id = %d, above the %d committed after the reset", id, live)
-		}
 	}
 }
 

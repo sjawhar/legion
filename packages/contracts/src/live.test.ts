@@ -1,7 +1,10 @@
 import { expect, test } from "bun:test";
 import after from "../fixtures/live/after.json";
 import delta from "../fixtures/live/delta.json";
+import ended from "../fixtures/live/ended.json";
 import error from "../fixtures/live/error.json";
+import event from "../fixtures/live/event.json";
+import eventsStart from "../fixtures/live/events_start.json";
 import heartbeat from "../fixtures/live/heartbeat.json";
 import snapshot from "../fixtures/live/snapshot.json";
 import {
@@ -16,6 +19,7 @@ import {
   type DeliveryLiveRevs,
   type DeliveryLiveSnapshot,
   type DeliveryTimelineResponse,
+  type DispatchEvent,
   type EventsLiveResume,
   LIVE_SOCKET_MAX_AGE_CLOSE,
   LIVE_SOCKET_MAX_AGE_MS,
@@ -34,7 +38,7 @@ import {
   type LiveView,
 } from "./dispatch-api";
 
-// The frames in fixtures/live are written by the Dispatch server's own diff
+// The frames in fixtures/live are written by the Dispatch server's own diff and event feed
 // (TestTheLiveFixturesAreWhatTheDiffWrites, packages/envoy/internal/dispatch/api), so each is what
 // the live socket sends. These tests hold them to the Live* and DeliveryLive* contract key for
 // key: each list below must name every key of its type, or the type check fails, so a key the
@@ -95,6 +99,19 @@ const DELIVERY_RESUME_KEYS = allOf<keyof DeliveryLiveResume>()(["seq", "revs"]);
 const EVENTS_RESUME_KEYS = allOf<keyof EventsLiveResume>()(["since"]);
 const AGENT_EVENTS = allOf<LiveAgentFrame["event"]>()(["responder", "replay", "frame"]);
 const ENDED_REASONS = allOf<LiveEnded["reason"]>()(["behind", "dropped"]);
+/** Every key of the event an event frame carries. */
+const EVENT_KEYS = allOf<keyof DispatchEvent>()([
+  "id",
+  "issue_key",
+  "artifact_id",
+  "project",
+  "seq",
+  "type",
+  "actor",
+  "notify",
+  "created_at",
+  "payload",
+]);
 /** The frames that are not one subscription's: freshness goes to every subscriber of the socket,
  *  heartbeat to the socket itself. */
 const SOCKET_WIDE: Partial<Record<LiveServerFrame["type"], true>> = {
@@ -229,6 +246,25 @@ test("a heartbeat frame carries its type and nothing else", () => {
   expect(keysOf(heartbeat)).toEqual(sorted(SERVER_FRAME_KEYS.heartbeat));
   expect(heartbeat).toEqual({ type: "heartbeat" });
   expect(Object.keys(SERVER_FRAME_KEYS)).toContain(heartbeat.type);
+});
+
+test("an events_start frame names the decimal id its subscription starts after", () => {
+  expect(keysOf(eventsStart)).toEqual(sorted(SERVER_FRAME_KEYS.events_start));
+  expect(eventsStart.type).toBe("events_start");
+  expect(eventsStart.since).toMatch(/^\d+$/);
+});
+
+test("an event frame carries the event's decimal id and the event itself", () => {
+  expect(keysOf(event)).toEqual(sorted(SERVER_FRAME_KEYS.event));
+  expect(event.type).toBe("event");
+  expect(event.id).toBe(String(event.event.id));
+  expect(keysOf(event.event)).toEqual(sorted(EVENT_KEYS));
+});
+
+test("an ended frame names its subscription and why Dispatch ended it", () => {
+  expect(keysOf(ended)).toEqual(sorted(SERVER_FRAME_KEYS.ended));
+  expect(ended.type).toBe("ended");
+  expect(ENDED_REASONS).toContain(ended.reason as LiveEnded["reason"]);
 });
 
 test("every frame names its type, and every frame of one subscription names the subscription", () => {

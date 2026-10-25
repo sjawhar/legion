@@ -97,10 +97,10 @@ type Deps struct {
 	// Lifetime bounds work a handler starts and does not wait for, and every event stream and
 	// live socket: it is the process's own context, cancelled when the server is shutting down,
 	// so a deploy stops a broadcast's remaining deliveries instead of leaving goroutines behind,
-	// and ends each open stream (streamEvents, streamAgentConversation) and closes each live
-	// socket with 1012 so http.Server.Shutdown is not held for its whole budget by a connection
-	// that never goes idle. The delivery hub runs on it, and GET /ws/live is mounted only with
-	// one. Nil means unbounded, which is what a test gets.
+	// and ends each open stream (streamAgentConversation) and closes each live socket with 1012
+	// so http.Server.Shutdown is not held for its whole budget by a connection that never goes
+	// idle. The delivery hub runs on it, and GET /ws/live is mounted only with one. Nil means
+	// unbounded, which is what a test gets.
 	Lifetime         context.Context
 	TestHooksEnabled bool
 	// StreamHeartbeat is how often a server-sent event stream writes a heartbeat and resolves
@@ -255,8 +255,8 @@ type server struct {
 	// liveKinds starts a live socket's subscriptions to the views beside the delivery views, by
 	// kind (live_subscriptions.go); a kind it does not hold is refused.
 	liveKinds map[string]liveKind
-	// eventRelay is the live feed every open SSE connection reads (INFRA-66), on every server
-	// register mounts: it starts its listening connection on the first connection to subscribe.
+	// eventRelay is the live feed every events subscription reads (INFRA-66), on every server
+	// register mounts: it starts its listening connection on the first subscription.
 	eventRelay *eventStreamRelay
 	// warnedUnmatchedRuns holds a warnedProductionRun for each deploy run productionApplies has
 	// warned holds no production job or no configured apply step, so a read that judges a run again
@@ -298,17 +298,15 @@ type queryer interface {
 // the first subscription and runs them until Lifetime ends, and mounts GET /ws/live beside the
 // document websocket, under the same wrappers; a server without one (a test's) has neither, so
 // nothing outlives the test. Every server holds the event stream relay (INFRA-66), which every
-// open SSE connection reads and which starts its own listening connection on the first of them,
+// events subscription reads and which starts its own listening connection on the first of them,
 // also on Lifetime. The returned wait blocks until the hub, every live socket (and every
 // subscription it ran) and the relay have ended. Call it only after Lifetime has been cancelled
 // and before the database pool closes.
 //
 // That wait is for a server given a Deps.Lifetime: it returns once that context is cancelled,
 // which is what ends the relay's goroutines and the hub's. A server built without a Deps.Lifetime
-// runs its relay on context.Background() instead, so nothing ever ends that relay, and the wait
-// this returns blocks for ever once an SSE connection has started it. The delivery hub sets no
-// such trap, since it is built only with a Deps.Lifetime. Give the server a Deps.Lifetime where
-// it is built, or do not call the wait.
+// mounts no GET /ws/live, so no events subscription ever starts its relay, and the wait returns at
+// once.
 func Register(mux *http.ServeMux, deps Deps) func() {
 	s := register(mux, deps)
 	return s.waitBackground
@@ -327,7 +325,8 @@ func (s *server) waitBackground() {
 // register is Register, answering the server it mounted, whose delivery hub and event stream
 // relay a test waits out before its database closes.
 func register(mux *http.ServeMux, deps Deps) *server {
-	s := &server{deps: deps, liveKinds: map[string]liveKind{}}
+	s := &server{deps: deps}
+	s.liveKinds = map[string]liveKind{liveEventsView: {resumes: true, start: s.startEventsView}}
 	s.eventRelay = newEventStreamRelay(s, s.lifetime())
 	if deps.Lifetime != nil {
 		s.deliveryHub = newDeliveryHub(s, deps.Lifetime, deliveryHubClock{})

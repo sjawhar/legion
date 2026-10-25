@@ -13,7 +13,6 @@
 package main
 
 import (
-	"bufio"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -189,55 +188,46 @@ func (p *dispatchProcess) waitForLog(t *testing.T, within time.Duration, parts .
 	}
 }
 
-// ───── server-sent events ───────────────────────────────────────────────────
+// ───── the live socket's event feed ─────────────────────────────────────────
 
-// sseFrame is one server-sent event the stream handler wrote: its type and its data line. Its
-// `id:` line names the event, which the data carries too, so nothing here keeps it.
-type sseFrame struct {
-	event string
-	data  string
+// feedEvent is one event the event feed sent: its type and the event's JSON.
+type feedEvent struct {
+	eventType string
+	data      string
 }
 
-// openEventStream holds GET /api/v1/events open as a dashboard tab does and reports every frame
-// it reads on the returned channel, until the test ends or the connection does. One request, read
-// to the end: a row about a live stream carrying the other process's event has to show that event
-// arriving on the connection the reader already had, never on a reconnect's catch-up.
-func (p *dispatchProcess) openEventStream(t *testing.T) <-chan sseFrame {
+// openEventFeed holds GET /ws/live open as a dashboard tab does, subscribed to the event feed, and
+// reports every event it is sent on the returned channel, until the test ends or the socket does.
+// One subscription, read to the end: a row about the live feed carrying the other process's event
+// has to show that event arriving on the subscription the page already had, never on a
+// resubscribe's catch-up.
+func (p *dispatchProcess) openEventFeed(t *testing.T) <-chan feedEvent {
 	t.Helper()
-	response, err := p.send(http.MethodGet, "/api/v1/events", "")
-	if err != nil {
-		t.Fatalf("open the event stream: %v", err)
-	}
-	if response.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(response.Body)
-		_ = response.Body.Close()
-		t.Fatalf("open the event stream: status %d: %s", response.StatusCode, body)
-	}
-	t.Cleanup(func() { _ = response.Body.Close() })
-	frames := make(chan sseFrame, 256)
+	conn := p.openLiveEvents(t)
+	events := make(chan feedEvent, 256)
 	go func() {
-		defer close(frames)
-		reader := bufio.NewReader(response.Body)
-		var frame sseFrame
+		defer close(events)
 		for {
-			line, err := reader.ReadString('\n')
-			switch trimmed := strings.TrimRight(line, "\r\n"); {
-			case trimmed == "":
-				if frame.data != "" {
-					frames <- frame
-				}
-				frame = sseFrame{}
-			case strings.HasPrefix(trimmed, "event: "):
-				frame.event = strings.TrimPrefix(trimmed, "event: ")
-			case strings.HasPrefix(trimmed, "data: "):
-				frame.data = strings.TrimPrefix(trimmed, "data: ")
+			var frame struct {
+				Type  string          `json:"type"`
+				Event json.RawMessage `json:"event"`
 			}
-			if err != nil {
+			if err := conn.ReadJSON(&frame); err != nil {
 				return
 			}
+			if frame.Type != "event" {
+				continue
+			}
+			var event struct {
+				Type string `json:"type"`
+			}
+			if err := json.Unmarshal(frame.Event, &event); err != nil {
+				return
+			}
+			events <- feedEvent{eventType: event.Type, data: string(frame.Event)}
 		}
 	}()
-	return frames
+	return events
 }
 
 // ───── the API a row drives ─────────────────────────────────────────────────
@@ -299,11 +289,11 @@ func (p *dispatchProcess) documentText(t *testing.T, artifactID string) string {
 	return document.Markdown
 }
 
-// ───── a live stream carries the other process's events ─────────────────────
+// ───── the live feed carries the other process's events ─────────────────────
 
 // A dashboard tab is open on one process and the work happens on the other: the event of an issue
-// created through B's API has to reach the stream A is holding, on the connection it already has.
-// The live source of an open stream is no longer this process's in-memory broker, which hears
+// created through B's API has to reach the event feed A's socket holds, on the subscription it
+// already has. The live source of an open feed is not this process's in-memory broker, which hears
 // only its own writes, but a relay over `listen dispatch_events`, so what either process commits
 // every process publishes.
 func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
@@ -311,21 +301,21 @@ func TestALiveStreamOnOneProcessCarriesTheOtherProcessesEvent(t *testing.T) {
 	project := uniqueProjectKey(t, "XPR")
 	pair.a.createProject(t, project, "Cross process")
 
-	frames := pair.a.openEventStream(t)
+	events := pair.a.openEventFeed(t)
 	key, _ := pair.b.createIssueIn(t, project, "Created on the other process", "spec")
 
 	deadline := time.After(30 * time.Second)
 	for {
 		select {
-		case frame, open := <-frames:
+		case event, open := <-events:
 			if !open {
-				t.Fatalf("the stream A held closed before B's event arrived:\n%s", pair.a.Output.String())
+				t.Fatalf("the feed A held closed before B's event arrived:\n%s", pair.a.Output.String())
 			}
-			if frame.event == "issue.created" && strings.Contains(frame.data, `"`+key+`"`) {
+			if event.eventType == "issue.created" && strings.Contains(event.data, `"`+key+`"`) {
 				return
 			}
 		case <-deadline:
-			t.Fatalf("the stream A held never carried the issue B created (%s):\nA:\n%s\nB:\n%s",
+			t.Fatalf("the feed A held never carried the issue B created (%s):\nA:\n%s\nB:\n%s",
 				key, pair.a.Output.String(), pair.b.Output.String())
 		}
 	}

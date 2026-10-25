@@ -1,14 +1,11 @@
 package api
 
 import (
-	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"net/http/httptest"
-	"strings"
 	"testing"
 )
 
@@ -64,7 +61,8 @@ func TestReadEventsKeepsNonAskPayloadRaw(t *testing.T) {
 }
 
 func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
-	handler, database := newTestHandlerWithStore(t)
+	rig := newLiveSocketRig(t, testServerOptions{}, nil)
+	handler, database := rig.handler, rig.database
 	issue := createInteractionIssue(t, handler, "TEST", "Event response bytes", "A spec")
 	created := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
 		"question": "Which path?",
@@ -184,38 +182,22 @@ func TestEventPayloadsAreServedAsStoredForEveryEventKind(t *testing.T) {
 	}
 	checkServed("HTTP", decodeBody[[]servedEvent](t, response))
 
-	server := httptest.NewServer(handler)
-	defer server.Close()
-	request, err := http.NewRequest(http.MethodGet, fmt.Sprintf("%s/api/v1/events?since=%d", server.URL, firstID-1), nil)
-	if err != nil {
-		t.Fatalf("construct SSE request: %v", err)
-	}
-	request.Header.Set("Authorization", "Bearer agent-token")
-	stream, err := http.DefaultClient.Do(request)
-	if err != nil {
-		t.Fatalf("open SSE stream: %v", err)
-	}
-	defer stream.Body.Close()
-	if stream.StatusCode != http.StatusOK {
-		t.Fatalf("SSE status = %d, want 200", stream.StatusCode)
-	}
-	scanner := bufio.NewScanner(stream.Body)
+	// The event feed's catch-up replays them through the same read, one event frame each.
+	client := rig.dial(t, withBearer("agent-token"))
+	subscribeEvents(t, client, "events", new(firstID-1))
 	frames := make([]servedEvent, 0, len(stored))
 	for read := 0; len(frames) < len(stored); read++ {
 		if read == len(stored)+20 {
-			t.Fatalf("SSE replay held %d of %d inserted events after %d frames", len(frames), len(stored), read)
+			t.Fatalf("the event feed's replay held %d of %d inserted events after %d frames", len(frames), len(stored), read)
 		}
-		frame := readSSEFrame(t, scanner)
-		if len(frame) != 3 || !strings.HasPrefix(frame[2], "data: ") {
-			t.Fatalf("SSE frame = %#v, want id, event and data", frame)
-		}
+		frame := client.event(t, eventFeedWait, "events")
 		var event servedEvent
-		if err := json.Unmarshal([]byte(strings.TrimPrefix(frame[2], "data: ")), &event); err != nil {
-			t.Fatalf("decode SSE frame %#v: %v", frame, err)
+		if err := json.Unmarshal(frame.Event, &event); err != nil {
+			t.Fatalf("decode event frame %+v: %v", frame, err)
 		}
 		if _, ok := stored[event.ID]; ok {
 			frames = append(frames, event)
 		}
 	}
-	checkServed("SSE replay", frames)
+	checkServed("event feed replay", frames)
 }

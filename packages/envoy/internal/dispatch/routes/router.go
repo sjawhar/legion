@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,6 +73,10 @@ type AppContext struct {
 	// and empty otherwise. Only BuildAppContext sets it, from DevSignInOrigin, so no caller can
 	// turn the route on without the origin check.
 	devSignInHost string
+	// eventHead reads the id of the newest committed event, which GET /auth/whoami answers as
+	// event_head: through apiDeps.Store, the database the API reads the event log from, or, for a
+	// context with no Store, nothing, since it has no event log to read (whoami then answers 503).
+	eventHead func(context.Context) (int64, error)
 }
 
 // AppContextOptions is the explicit-injection bundle main.go assembles
@@ -168,6 +173,10 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 	if err != nil {
 		return nil, fmt.Errorf("BuildAppContext: %w", err)
 	}
+	eventHead := func(context.Context) (int64, error) { return 0, errNoEventLog }
+	if database := apiDeps.Store; database != nil {
+		eventHead = func(ctx context.Context) (int64, error) { return api.EventHead(ctx, database) }
+	}
 	return &AppContext{
 		SigningKey:     opts.SigningKey,
 		WebDistDir:     opts.WebDistDir,
@@ -183,8 +192,12 @@ func BuildAppContext(opts AppContextOptions) (*AppContext, error) {
 		InsecureCookie: opts.InsecureCookie,
 		devSignInHost:  devSignInHost,
 		apiDeps:        apiDeps,
+		eventHead:      eventHead,
 	}, nil
 }
+
+// errNoEventLog is what a context built with no Store answers for the event log's head.
+var errNoEventLog = errors.New("this server holds no store, so no event log to read the head of")
 
 // Architecture is the shared architecture importer the HTTP routes use, so the
 // server's five-minute sync ticker drives the same serialized Sync the Refresh
@@ -375,12 +388,28 @@ func (r *router) authLogout(w http.ResponseWriter, req *http.Request) {
 	api.WriteJSON(w, http.StatusOK, map[string]any{"ok": true})
 }
 
+// authWhoami answers the signed-in person and event_head, the decimal id of the newest committed
+// event, read after the sign-in check and before the answer is written. The page starts every read
+// the event feed keeps current only once whoami has answered, and resumes its first events
+// subscription from event_head, so a change committed while it loads is replayed rather than
+// missed. A head that cannot be read is 503 EVENT_HEAD_UNAVAILABLE, never a whoami without it: a
+// page that took a missing head for an older server's answer would start its feed at the server's
+// head and could miss such a change.
 func (r *router) authWhoami(w http.ResponseWriter, req *http.Request) {
 	email, ok := r.login(w, req)
 	if !ok {
 		return
 	}
-	api.WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": email})
+	head, err := r.ctx.eventHead(req.Context())
+	if err != nil {
+		// A read the page's own leaving cut short says nothing of the database.
+		if req.Context().Err() == nil {
+			slog.Warn("dispatch: whoami could not read the event log's head", "error", err)
+		}
+		writeCodeError(w, http.StatusServiceUnavailable, "the event log's head could not be read; ask again", "EVENT_HEAD_UNAVAILABLE")
+		return
+	}
+	api.WriteJSON(w, http.StatusOK, map[string]any{"kind": "user", "login": email, "event_head": strconv.FormatInt(head, 10)})
 }
 
 // apiGithubRest serves the web app's GitHub reads to a person, as the GitHub App.

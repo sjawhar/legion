@@ -156,8 +156,8 @@ type LiveEventsStart struct {
 	Since string `json:"since"`
 }
 
-// LiveEventFrame is one event of the feed: its decimal id and the event's JSON, the bytes the
-// event stream's data line carries.
+// LiveEventFrame is one event of the feed: its decimal id and the event's own JSON encoding, byte
+// for byte what the server-sent event stream this feed replaced carried on its data line.
 type LiveEventFrame struct {
 	Type  string          `json:"type"`
 	Sub   string          `json:"sub"`
@@ -180,6 +180,15 @@ type LiveEnded struct {
 	Type   string `json:"type"`
 	Sub    string `json:"sub"`
 	Reason string `json:"reason"`
+}
+
+// liveEndedBehind is an ended frame's reason for a subscription that fell behind: an events
+// subscription the relay dropped, for a full buffer or a reset log, or one whose read failed.
+const liveEndedBehind = "behind"
+
+// liveEnded is the frame ending sub, for reason.
+func liveEnded(sub, reason string) LiveEnded {
+	return LiveEnded{Type: "ended", Sub: sub, Reason: reason}
 }
 
 // LiveError refuses a frame or a subscription, by the code the matching GET route would answer

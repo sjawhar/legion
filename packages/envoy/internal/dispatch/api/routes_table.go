@@ -171,7 +171,6 @@ func (s *server) routes() []apiRoute {
 		{http.MethodPut, "/api/v1/me/agents/{session_id}/state", authHuman, "Clear an agent's conversation for the caller (cleared_before hides exchanges at or before it), mark it read (read_through only moves forward), and/or mark some of its replies read by id (read_replies, the session's own messages); answers the session's state.", s.putUserAgentState},
 		{http.MethodPut, "/api/v1/me/asks/{id}/snooze", authHuman, "Snooze an inbox row for the caller until snoozed_until.", s.putAskSnooze},
 		{http.MethodDelete, "/api/v1/me/asks/{id}/snooze", authHuman, "Un-snooze an inbox row for the caller.", s.deleteAskSnooze},
-		{http.MethodGet, "/api/v1/events", authAny, "Server-sent event stream; Last-Event-ID or ?since= resumes.", s.streamEvents},
 		{http.MethodGet, "/api/v1/credential-requests", authHuman, "List credential requests the caller may decide (?approver=me only): those naming the caller, a shared secret's and a service's machine login, which anyone signed in decides; null without a configured secrets broker.", s.listCredentialPending},
 		{http.MethodGet, "/api/v1/credential-requests/{id}", authHuman, "Read one credential request's facts; the broker is authoritative.", s.getCredentialRecord},
 		{http.MethodPost, "/api/v1/credential-requests/{id}/approve", authHuman, "Approve a credential request as the caller (a machine login also takes its typed code); the broker decides whether the caller is its approver.", s.approveCredentialRecord},
@@ -184,7 +183,6 @@ func (s *server) routes() []apiRoute {
 	}
 	if s.deps.TestHooksEnabled {
 		routes = append(routes,
-			apiRoute{http.MethodPost, "/api/v1/events/_test/disconnect", authAny, "Test hook: drop every open event stream.", s.disconnectAllStreams},
 			apiRoute{http.MethodPost, "/api/v1/live/_test/disconnect", authAny, "Test hook: close every open live socket with 1012, as a restart does.", s.disconnectLiveSockets},
 			apiRoute{http.MethodPost, "/api/v1/live/_test/rotate", authAny, "Test hook: close every open live socket with 4001 (max age), as its age does.", s.rotateLiveSockets},
 			apiRoute{http.MethodPost, "/api/v1/artifacts/_test/quiesce", authAny, "Test hook: close every live document and finish the settlements in flight.", s.quiesceDocuments},

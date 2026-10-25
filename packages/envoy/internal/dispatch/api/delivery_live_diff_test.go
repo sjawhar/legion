@@ -916,8 +916,9 @@ func TestAListWithARepeatedIDIsRefused(t *testing.T) {
 // contracts' and the dashboard's Bun tests read, to the frames this package writes: a timeline
 // snapshot, the delta of one deploy, a merge and a pull request leaving the window, the snapshot
 // a page subscribing afterwards gets (applying the delta to the first gives its body, but for the
-// freshness a delta never carries), and an error. `go test ./internal/dispatch/api -run
-// TestTheLiveFixturesAreWhatTheDiffWrites -update` rewrites them.
+// freshness a delta never carries), an error, and the event feed's start, one of its events and
+// its end. `go test ./internal/dispatch/api -run TestTheLiveFixturesAreWhatTheDiffWrites -update`
+// rewrites them.
 func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 	heldTo := liveFrom.Add(48 * time.Hour)
 	second := withIssue(livePR(2), "ACME-2", "Second issue")
@@ -946,6 +947,10 @@ func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 	}
 	snapshotAt := heldTo.Add(-time.Minute)
 	delta.Sub, delta.Seq, delta.ChangedAt = "timeline-1", "42", &deployedAt
+	event, err := liveEventFrame("events-1", liveFixtureEvent())
+	if err != nil {
+		t.Fatalf("build the event frame fixture: %v", err)
+	}
 	frames := map[string]any{
 		"snapshot.json":  held.snapshot("timeline-1", 41, &snapshotAt),
 		"delta.json":     delta,
@@ -955,6 +960,9 @@ func TestTheLiveFixturesAreWhatTheDiffWrites(t *testing.T) {
 			Type: "error", Sub: "timeline-1", Code: "DELIVERY_NOT_CONFIGURED",
 			Message: "delivery is not configured; set delivery_settings through PUT /api/v1/settings/delivery",
 		},
+		"events_start.json": liveEventsStart("events-1", 41),
+		"event.json":        event,
+		"ended.json":        liveEnded("events-1", liveEndedBehind),
 	}
 	for name, frame := range frames {
 		got, err := json.MarshalIndent(frame, "", "  ")
