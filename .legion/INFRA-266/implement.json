@@ -1,0 +1,101 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-266",
+  "completed": "2026-10-25T05:35:00Z",
+  "proof": [
+    {
+      "criterion": "An issue created with no assignee named, by a session acting for nobody and under no parent, in a project that names a default, is created with that person.",
+      "surface": "The Inbox and the create API of the built SPA served by the real cmd/dispatch binary against a real PostgreSQL 17, driven in Chromium.",
+      "command": "cd packages/dispatch && DATABASE_URL=<a local Postgres> bun run e2e -- --project=chromium e2e/inbox.e2e.ts -g 'default assignee'",
+      "observed": "1 passed. A person set CORE's default to alice through the human-only route; the shared-token session then created an issue in CORE with no assignee and no parent, and the created issue came back with assignee 'alice'.",
+      "headSha": "2d30e173f5ae672612dc46ed143a15d72e668476",
+      "negativeControl": "The same row against the code before the change (jj new a8e24cc3ae42, then the head's three e2e files restored) fails at the PUT: 404 NOT_FOUND, 'no route for PUT /api/v1/projects/CORE/default-assignee'."
+    },
+    {
+      "criterion": "An issue created under a parent that has nobody, in a project with a default, carries the default.",
+      "surface": "The real Go HTTP handler on a real PostgreSQL 17 (the api package's own harness, migrations and all).",
+      "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<a local Postgres> go test ./internal/dispatch/api/ -run 'TestCreateIssueFallsBackToProjectDefaultAssignee' -count=1 -v",
+      "observed": "PASS. A parent created with an explicit {\"assignee\": null} holds nobody; a child created under it by the shared token comes back with the project's default, 'bob'.",
+      "negativeControl": "TestCreateIssueWithoutProjectDefaultAssigneeStaysUnassigned: the same create in a project that names no default comes back with assignee null.",
+      "headSha": "2d30e173f5ae672612dc46ed143a15d72e668476"
+    },
+    {
+      "criterion": "An explicit assignee, a person creating an issue, and a parent with somebody on it all still win, in that order.",
+      "surface": "The real Go HTTP handler on a real PostgreSQL 17.",
+      "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<a local Postgres> go test ./internal/dispatch/api/ -run 'TestProjectDefaultAssigneeYieldsToEveryEarlierChainStep' -count=1 -v",
+      "observed": "PASS, with a default configured on CORE throughout: a create naming alice gets alice; a create by the human alice gets alice; a create under a parent that holds alice gets alice; and a create naming {\"assignee\": null} gets nobody.",
+      "negativeControl": "The last case is the control for the default itself: with the same default configured, an explicit JSON null still answers nobody rather than the default.",
+      "headSha": "2d30e173f5ae672612dc46ed143a15d72e668476"
+    },
+    {
+      "criterion": "A project with no default creates such an issue with nobody, as today; and a default that has gone stale falls through rather than refusing the create.",
+      "surface": "The real Go HTTP handler on a real PostgreSQL 17, the stale value written by direct SQL as a restore or a hand write would leave it.",
+      "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<a local Postgres> go test ./internal/dispatch/api/ -run 'TestCreateIssueWithoutProjectDefaultAssigneeStaysUnassigned|TestStaleProjectDefaultAssigneeFallsThroughToNobody' -count=1 -v",
+      "observed": "PASS. No default: 201 with assignee null. A default set by direct SQL to an address absent from people: 201 with assignee null, no refusal. Inserting that person into people then gives the next create that person.",
+      "negativeControl": "The same address present in people assigns it, so the fall-through is the staleness and not the route being dead.",
+      "headSha": "2d30e173f5ae672612dc46ed143a15d72e668476"
+    },
+    {
+      "criterion": "A person can set, change and see a project's default on the Settings page, proven by a test in Dispatch's own browser suite that fails against the build before the change.",
+      "surface": "The Settings page of the built SPA served by the real cmd/dispatch binary against a real PostgreSQL 17, in Chromium.",
+      "command": "cd packages/dispatch && DATABASE_URL=<a local Postgres> bun run e2e -- --project=chromium e2e/settings.e2e.ts -g 'default assignee'",
+      "observed": "1 passed. Signed in as alice: the Default assignee of CORE control offers Unassigned, alice and bob once reached; selecting bob sends PUT /api/v1/projects/CORE/default-assignee and the value survives a reload; changing it to alice sticks across another reload; clearing it to Unassigned leaves the list route naming no project. The sentence about a repository with no project mapping is on the page throughout, and Default assignee of OPS reads Unassigned the whole time.",
+      "negativeControl": "The same row against the code before the change fails at 'getByRole(combobox, { name: Default assignee of CORE, exact: true })' — element(s) not found; the whole settings file is 8 of 8 green at the head.",
+      "headSha": "2d30e173f5ae672612dc46ed143a15d72e668476"
+    },
+    {
+      "criterion": "A question an agent opens on an issue it created appears in that person's own Inbox view.",
+      "surface": "The Inbox page of the built SPA served by the real cmd/dispatch binary against a real PostgreSQL 17, in Chromium.",
+      "command": "cd packages/dispatch && DATABASE_URL=<a local Postgres> bun run e2e -- --project=chromium e2e/inbox.e2e.ts -g 'default assignee'",
+      "observed": "1 passed. The shared-token session created the issue in CORE (default alice) and opened an ask on it; signed in as alice, her own Inbox lists that ask.",
+      "negativeControl": "In the same row, the same session's issue in OPS, which names no default, is created with nobody and its ask is absent from alice's own list.",
+      "headSha": "2d30e173f5ae672612dc46ed143a15d72e668476"
+    },
+    {
+      "criterion": "The write of a project's default is an event that wakes nobody, and both routes refuse an agent session.",
+      "surface": "The real Go HTTP handler on a real PostgreSQL 17, reading the event the write appended and the broker's own Notify rule.",
+      "command": "cd packages/envoy && env DISPATCH_TEST_DATABASE_URL=<a local Postgres> go test ./internal/dispatch/api/ ./internal/dispatch/events/ -run 'TestPutProjectDefaultAssigneeAppendsAQuietEvent|TestProjectDefaultAssigneeRoutesRefuseAgentSessions|TestEventNotify' -count=1",
+      "observed": "PASS. The appended settings.project_default_assignee.updated event is owned by the project and notify=false even though its actor is a person; a bearer session gets HUMAN_ONLY from both routes.",
+      "negativeControl": "The same table's rows for a person's other writes on a project stay waking, so the quiet case is this type and not the actor.",
+      "headSha": "2d30e173f5ae672612dc46ed143a15d72e668476"
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/store/migrations/0116_project_default_assignee.up.sql and .census.sql — projects.default_assignee, nullable text with people.email's lowercase check, no foreign key",
+    "packages/envoy/internal/dispatch/api/project_default_assignee.go — the two human-only routes and the quiet event",
+    "packages/envoy/internal/dispatch/api/issue_create.go — the project update's returning yields the default only when it still names a person",
+    "packages/envoy/internal/dispatch/api/issue_assignee.go — defaultAssignee's fifth step and its doc comment",
+    "packages/envoy/internal/dispatch/api/routes_table.go and routes_table_test.go — the two rows and the route count, 132 to 134",
+    "packages/envoy/internal/dispatch/events/broker.go — the new type in the quiet case",
+    "packages/envoy/internal/dispatch/api/project_default_assignee_test.go, issue_assignee_test.go, events_test.go, server_test.go — the Go cases",
+    "packages/contracts/src/dispatch-api.ts — ProjectDefaultAssignee, its input, its event payload and the DispatchEvent arm",
+    "packages/dispatch/web/src/api/{client,queries,sse,types}.ts — the client pair, the query factory and the invalidation",
+    "packages/dispatch/web/src/features/settings/ProjectsSection.tsx — the Default assignee column and the sentence under the table",
+    "packages/dispatch/web/src/features/activity/activity-model.ts and features/issue/event-description.ts — the new union arm's description",
+    "packages/dispatch/web/src/__tests__/{settings,client,sse}.test.* and features/settings/SettingsPage.test.tsx — the unit rows",
+    "packages/dispatch/e2e/{api.ts,settings.e2e.ts,inbox.e2e.ts} — the helper and the two browser rows",
+    "packages/envoy/AGENTS.md, packages/contracts/AGENTS.md, packages/envoy/cmd/dispatch/{AGENTS.md,README.md}, packages/contracts/src/dispatch-tools.ts, packages/envoy-client/src/dispatch-execute.ts, skills/dispatch/references/asks.md, skills/legion-architect/SKILL.md, skills/legion-controller/SKILL.md, skills/legion-controller/references/slack-mentions.md, docs/site/src/content/docs/dispatch/{for-agents,issues-and-projects,running-dispatch}.md, docs/site/src/content/docs/legion/using-legion.md — the prose the new step makes false, the two hand-written route tables and the new control's documentation",
+    "packages/claude-envoy/dist/*.js and packages/claude-envoy/legion/skills/** — what bun run build wrote after the skill edits",
+    "packages/envoy/CHANGELOG.md, packages/contracts/CHANGELOG.md, packages/envoy-client/CHANGELOG.md"
+  ],
+  "trickyParts": [
+    "The staleness check is deliberately not allowedLogin: that helper answers 400 ASSIGNEE_NOT_ALLOWED, and a default left stale by a restore or a direct write must fall through to nobody rather than refuse the create. After the simplify pass it is a scalar subquery in the returning of the update projects … next_number statement the create already runs, so no statement runs under the project row lock that did not run before, and defaultAssignee is a pure function again.",
+    "Both routes are human-only on purpose, for the same reason GET /api/v1/users is: they hand out a person's email address. No agent command, flag or route sets a project's default, and the reason is written at the head of project_default_assignee.go so a later reader does not add one for symmetry with the architecture-source routes.",
+    "The browser rows focus the control before selecting an option, as e2e/issue.e2e.ts:973-977 already does for the issue's own assignee picker: the people list is fetched only once a reader reaches for the control, so the option does not exist until then.",
+    "Adding a Default assignee column to the Projects table made the existing settings row's getByRole('columnheader', { name: 'Default' }) ambiguous with the repository table's own Default column. That one locator is now exact; nothing else about that row changed."
+  ],
+  "deviations": [
+    "The plan's D4 said the staleness check would be one exists query run only when the four earlier chain steps had yielded nobody. The ce-simplify-code pass folded it into the returning of the statement the create already runs, so it costs one primary-key probe on people inside a statement that runs regardless, and no second round trip under the project row lock on any create. The behaviour the plan specified is unchanged: a stale default still falls through to nobody, a project with no default still costs nothing, and the chain's order is untouched.",
+    "The planner's two recorded departures from the spec stand as written: the prose sweep is fourteen source sites plus the generated claude-envoy bundle rather than the spec's five, and the default is written through a per-project human-only PUT and read through a human-only list route rather than through the architecture-source family's authAny shape."
+  ],
+  "openQuestions": [
+    "An issue created from a GitHub reference takes its resolved project's default, with no carve-out. Where a repository has no mapping that project is DISPATCH_DEFAULT_PROJECT, so a default set there reaches that person for every unmapped repository's issues. The Settings page now says so beside the control, as the architect ruled; whoever sets a default there sees the consequence at the moment they set it.",
+    "dispatch issue still cannot say 'nobody' (the tool takes assignee as an optional string with no null). An explicit nobody stays an API capability; no acceptance line asks to change it."
+  ],
+  "discoveredComplexity": [
+    "The DispatchEvent union is read by two exhaustive switches in the web app (features/activity/activity-model.ts and features/issue/event-description.ts, the second ending in `return event satisfies never`), so a new arm is four files, not one.",
+    "This worker pod carries no Postgres, no psql, no browser and no Docker, and kubectl may not create services. Both proof surfaces were built inside the pod from the planner's recipe: PostgreSQL 17 with pgvector unpacked from Debian packages into a user directory on 127.0.0.1:55432, and bunx playwright install chromium. The whole api Go package takes about 14 minutes against it.",
+    "TestIssueRanksStayOrderedPastLowercaseDigitsAndProductionShapedMoves refuses to run here: the image carries only the C.utf8 locale, and the test needs a database whose default collation is not byte order. It is untouched by this change and runs in CI."
+  ]
+}
