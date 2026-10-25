@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-386",
+  "completed": "2026-10-25T15:42:30Z",
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
+  "codeHead": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+  "proof": [
+    {
+      "criterion": "A1-A3, A7, A8: the trap paragraph no longer states the unconditional clean-up; it names the unmeasured sub-case, gives the label re-list and delete, dates its evidence, the bullet drops 'exactly as published above', no paragraph line over 100 characters",
+      "surface": "docs/kubernetes.md as a role reads it, fetched from GitHub at the pushed head from this issue's role container",
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=97e9883bca93f2ed8f6e0a7bb2e52f8c41791453\" -H \"Accept: application/vnd.github.raw\" > k-<head>.md; then plan.md section 4 commands with trap.awk (joined with tr '\\n' ' ') and grep -c / grep -o",
+      "observed": "A1 0; A2 1 for each of the delete command, the get command, 'No run measured', '3600 s', 'cleanup: no Job name was read'; A3 date 4, dispatch://INFRA-232 1, '0.33 s and 0.35 s' 1, '0.318 s and 0.320 s' 1; A7 0; A8 0; A11's grep for 'does not hold'/'always leaves'/'will leave' 0",
+      "headSha": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+      "negativeControl": "the same commands on the page at base ref=371d6c87: A1 1; A2 0 for the first four patterns; A3 date 2 and the others 0; A7 1"
+    },
+    {
+      "criterion": "A4-A6: the block is identical in every non-comment line; only the trap paragraph, the two block comments and the bullet's lead change; the block comments no longer promise a total clean-up",
+      "surface": "the page at the pushed head and the branch's diff against main@origin",
+      "command": "bash code.sh k-<head>.md | sha256sum; jj diff --git --context 0 --from main@origin --to legion/INFRA-386@origin docs/kubernetes.md | awk -f hunks.awk; jj diff --stat --from main@origin --to legion/INFRA-386@origin; bash a6.sh k-371d.md k-<head>.md",
+      "observed": "A4 abe1b4cf246007dcaeb06de73bff62a3b372ee50b0aa8b1b0e8d77dbe076195c (the base value); A5 four hunks, old 3022, 3131, 3155-3165, 3260-3261, all ok, exit 0, stat lists docs/kubernetes.md and .legion/INFRA-386/plan.json only; A6 no NONCOMMENT line, old-closing 0, old-listing 1",
+      "headSha": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+      "negativeControl": "a copy with --ignore-not-found changed at 3020 hashes 66419f5e... and a6.sh prints two NONCOMMENT lines; a copy of the base with line 3200 changed prints 'OUT old 3200-3200' and exits 1; a copy with line 3141 padded past 100 characters gives A8 1"
+    },
+    {
+      "criterion": "A9: no private name enters the change",
+      "surface": "the repository at the head, the diff's added lines, the commit message and PR title, the live PR body",
+      "command": "bash .github/scripts/check-private-names.sh; sweep.sh (patterns read into shell variables from the projected credential's namespace file and the deployment's declaration, never printed) over the added lines of jj diff --git --from main@origin, the title, and gh pr view 2196 --json title,body",
+      "observed": "check-private-names exit 0 (5002 files); sweep: added lines 0, title 0, local body draft 0, live title and body 0 (refusal message quoted with the policy name and the rule text elided)",
+      "headSha": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+      "negativeControl": "a scratch file in $TMPDIR holding the reachability label gives literal 1, one holding the namespace gives whole-word 1"
+    },
+    {
+      "criterion": "A10: the edited block still runs end to end",
+      "surface": "this issue's role container, against the applied cluster, through the role's own bash tool; kubectl auth can-i create jobs / create services / get services each yes",
+      "command": "awk -f block.awk k-<head>.md, fences dropped, three bracketed lines filled from the deployment's declaration at its main (fill.sh), bash -n, 0 unfilled brackets; then the block's own flock ... setsid -f and flock ... cat lines, started 2026-10-25T15:36:57Z",
+      "observed": "run: sequence-run=a34a110a; workload: infra-386-postgres-97rqk; service created; pod condition met (twice); answered; job deleted; trap listing 'No resources found'; sequence: exit 0 at 15:38:26Z; afterwards 0 jobs or services named infra-386-postgres- and kubectl get jobs -l sequence-run=a34a110a 'No resources found'",
+      "headSha": "97e9883bca93f2ed8f6e0a7bb2e52f8c41791453",
+      "negativeControl": "the same filled block with the Job's cpu request \"1\" (2026-10-25T15:38:38Z): create refused by admission naming the four-processor rule (policy and binding names elided), 'cleanup: no Job name was read; deleting by label sequence-run=ac9a4dae', delete and listing found nothing, sequence: exit 1; the new recovery listing kubectl get jobs -l sequence-run=ac9a4dae 'No resources found'; 0 jobs or services named infra-386-postgres- left"
+    }
+  ],
+  "filesChanged": [
+    "docs/kubernetes.md"
+  ],
+  "trickyParts": [
+    "A2 and A3 grep the trap paragraph joined into one line, so the recovery commands may wrap at a space inside their code spans; the get command wraps after '-l'.",
+    "kubectl prints the namespace in its own output ('No resources found in <ns> namespace.', 'deleted from <ns> namespace') and the admission refusal names the binding as well as the policy: every recorded copy elides all three."
+  ],
+  "deviations": [
+    "The docs edit was written by the implementer directly rather than by a deep-worker subagent: one prose file, with the plan's draft text and checks, where the wording is the deliverable.",
+    "The refusal is quoted with its rule message elided as well as the policy name, since the rule message contains the compute class's name as a word and the sweep counts it."
+  ],
+  "openQuestions": [],
+  "discoveredComplexity": []
+}
