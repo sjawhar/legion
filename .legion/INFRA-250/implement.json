@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T10:20:00Z",
+  "completed": "2026-10-25T10:55:00Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2189",
   "proof": [
     {
@@ -68,6 +68,22 @@
       "observed": "Pass at this head. The import walk now reports any import of github.com/testcontainers/testcontainers-go or a package under it, against an allowlist of the three rigs that may have one - internal/testnats (whose container half is behind natslive and invisible to an untagged go list), internal/testpg (pgvector) and internal/tests3 (SeaweedFS) - rather than the modules/nats import alone, so testcontainers.Run(ctx, testnats.Image) with no modules/nats import is a finding. The file walk matches a regexp, exec\\.Command(Context)?\\([^)]*\"docker\"|NewDockerClientWithOpts, rather than the single literal exec.Command(\"docker\", so exec.CommandContext(ctx, \"docker\", ...) is a finding too. packages/envoy/infra stays out of the file walk: its pulumilive lane drives Docker on a host that has a runtime.",
       "headSha": "fab0d3001b78c0d4b2e6cf20a69f8adc3eb5d0da",
       "negativeControl": "Four probes in internal/cistore, each added then removed, each run on its own. testcontainers.Run(ctx, testnats.Image) with no modules/nats import: 'imports' fails naming the package. exec.CommandContext(ctx, \"docker\", ...): 'docker' fails naming the file. exec.Command(\"docker\", ...): same. A modules/nats import: 'imports' fails. The first two passed the guard before this round, which is what the tester reported."
+    },
+    {
+      "criterion": "A4, round 3 - the tester's red test: the guard's file walk must read a hand-driven docker however the call spells its context argument.",
+      "surface": "The guard test itself, and probe files added to a package of the module and then removed.",
+      "command": "cd packages/envoy && go test ./internal/testnats/ -run 'TestTheDockerDriverMatchCatchesEveryContextArgument|TestNoPackageOutsideTestnatsNeedsAContainerRuntime' -count=1 -v ; and the same guard run with each of three probe files in internal/cistore",
+      "observed": "Both pass. dockerDriver's context argument now runs to the end of the line rather than to the first ')', so exec.CommandContext(context.Background(), \"docker\", ...) and exec.CommandContext(t.Context(), \"docker\", ...) are findings, as exec.Command(\"docker\", ...) already was, and exec.Command(\"go\", \"list\", \"./...\") still is not. The tester's case at 93ec5dbfec95 is unmodified: the diff of nats_test.go from e444c7bed66f touches the matcher, the import finding and containerImporters, and no line of that test. Beside it, the import finding named the testcontainers root module whatever the package had actually imported, so a package reaching only testcontainers-go/wait was told it imported a runtime client and pointed at testnats.Start; containerImporters now returns the import it matched on and the message names it.",
+      "headSha": "7d38337be60f7a5ca990b80c8b2eff9fa8ea2ab0",
+      "negativeControl": "Three probes in internal/cistore, each added then removed and run on its own. exec.CommandContext(context.Background(), \"docker\", \"pause\", \"x\"): the 'docker' subtest fails naming the file. exec.CommandContext(t.Context(), \"docker\", \"unpause\", \"x\") inside a real test function: same. An import of github.com/testcontainers/testcontainers-go/wait alone: the 'imports' subtest fails with 'package github.com/sjawhar/envoy/internal/cistore imports github.com/testcontainers/testcontainers-go/wait', the import it has rather than the root module. The first two passed the guard at fab0d3001b78."
+    },
+    {
+      "criterion": "The refusal test added in round 2 executes in CI rather than being skipped - the architect's condition for completing this round.",
+      "surface": "The envoy-e2e-local job of the Legion Envoy and Contracts run at the code head, read step by step rather than by the job's colour.",
+      "command": "gh api repos/sjawhar/legion/actions/jobs/121136562749 --jq '.name, .conclusion, (.steps[] | \"  \\(.number) \\(.name) :: \\(.conclusion)\")'",
+      "observed": "envoy-e2e-local: success, and step 6 'Refusal test for e2e-local.sh': success, with step 7 'Local end-to-end acceptance': success beside it. The refusal test ran; it did not skip. The whole settlement at this head: 14 checks passed, 1 failed, 8 skipped - Tests run 40182513259 success, Docs 40182513228 success, Worker Image 40182513244 success, PR Title 40182593248 success, Legion Envoy and Contracts 40182513233 failure on pi-legion alone. envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, dispatch-multiprocess and dispatch-memory are all success, so every lane this change touches is green.",
+      "headSha": "7d38337be60f7a5ca990b80c8b2eff9fa8ea2ab0",
+      "negativeControl": "A step that never ran would read 'skipped' here, which is the failure this read exists to catch; the two e2e steps read 'success' while the job's own upload-artifact step reads 'skipped', so the field distinguishes them."
     }
   ],
   "filesChanged": [
@@ -88,7 +104,8 @@
     "ROUND 2 - packages/envoy/scripts/e2e-local.sh: wait_for_nats fails when the script's own natsd process is gone, printing its log, and reads the port's greeting only after that log says 'Server is ready'.",
     "ROUND 2 - packages/envoy/internal/testnats/nats_test.go: the guard's import walk takes an allowlist of the three container rigs and the whole testcontainers import prefix, and its file walk a regexp covering exec.CommandContext as well as exec.Command.",
     "ROUND 2 - .github/workflows/envoy-and-contracts.yaml: envoy-e2e-local gains a 'Refusal test for e2e-local.sh' step before its acceptance step.",
-    "ROUND 2 - packages/envoy/scripts/dev-broker.test.sh: its header no longer says e2e-local.test.sh fakes docker, which it stopped doing in round 1."
+    "ROUND 2 - packages/envoy/scripts/dev-broker.test.sh: its header no longer says e2e-local.test.sh fakes docker, which it stopped doing in round 1.",
+    "ROUND 3 - packages/envoy/internal/testnats/nats_test.go: dockerDriver's context argument runs to the end of the line ([^\\n]* in place of [^)]*); containerImporters returns a containerImport{pkg, imported} so the finding names the import that was found rather than the testcontainers root module."
   ],
   "trickyParts": [
     "ReloadOptions refuses an Options whose Port or HTTPPort differs from the one the server was started with ('config reload not supported for HTTPPort: old=-1, new=52544'). Server.Reload therefore builds the new Options from the new configuration text and then restores Host, Port, HTTPPort, HTTPHost, StoreDir, NoSigs, ConfigFile and the JetStream flag from the options the server was started with, and never reads a port back from the running server. TestARefusedReloadAnswersWithTheServersReasonAndKeepsTheOldConfiguration pins it.",
@@ -102,13 +119,16 @@
     "Two CI jobs beyond the plan's T5 and T6 were cleaned up, because the change makes their setup dead: envoy-go-race and dispatch-multiprocess each pre-pulled testnats.Image and envoy-go-race carried TESTCONTAINERS_RYUK_DISABLED for a NATS that now runs in the test process. Leaving a pre-pull step would not have failed the job, but it reads the constant for a container nothing starts.",
     "ROUND 2 - the tester's envoy-go-race red at e8af3445dd29 (TestALoneRunnerMakesAPassOnEveryTick in internal/dispatch/api, a package this change does not touch) was not re-run with gh run rerun: the Legion Envoy and Contracts run carrying it, 40178274414, was superseded by the tester's own pushes and is recorded cancelled, so there is no failed job of a live run to re-run. This round's push starts a fresh run at fab0d3001b78, which is the judgement on it. The finding is raised as dispatch://INFRA-49/ask/59b9feb4-b2b7-4f45-ab00-84e7d0cfd1f9."
   ],
-  "openQuestions": [],
+  "openQuestions": [
+    "pi-legion is red on main itself, not on this branch, and a merge-commit build makes it red here: skills-guard.test.ts:36 reports skills/legion-architect/SKILL.md at 51,256 bytes against the 51,200-byte SPILL_THRESHOLD_BYTES (packages/pi-shared/test/skills-guard.ts:14), 56 bytes over. This branch touches no file under skills/ (jj diff --from c9578e115b5a --to 7d38337be60f -- skills/ is empty) and its base carries that file at 50,986 bytes. main's own run 40181781309 at 4b01e0122f94 has pi-legion completed/failure. A re-run cannot clear a deterministic overrun, and trimming the architect skill is not this pull request's decision, so it is routed to the tree's architect with this evidence. Until main is under the threshold, this pull request's Legion Envoy and Contracts run is red on that one check whatever this branch does."
+  ],
   "discoveredComplexity": [
     "internal/dispatch/pmdoc's failures in a pod are not the plan's section 1.1 cause. A repository-root bun install (needed for scripts/e2e-local.sh anyway) fixed 'Cannot find module @legion/proof-editor'; what fails now are its parse and render linearity tests, which compare wall-clock ratios between input sizes (linear_test.go:216 and :274) and lose on a loaded 2-CPU pod. Same failure on main, so it is residue either way, but the pull request body names the real reason rather than the plan's.",
     "The ce-simplify-code pass found one correctness defect rather than the expected nothing: relay.freeze handed every overlapping freeze its own thaw over one shared gate, so a second thaw panicked the test binary with 'close of closed channel'. No caller freezes twice today, so no test showed it. It is fixed and proved by a negative control.",
     "The guard test's migration allowance lists, written so the guard could land before the call sites moved, are spent and deleted: the guard now reports every importer and every docker-driving file it finds, with packages/envoy/infra's pulumilive lane the one allowance left in the file walk.",
     "ROUND 2 - the pull request body's residue line for internal/dispatch/pmdoc named the wrong cause. It is not a loaded pod: the three linearity tests time work with getrusage through internal/cputest.Process (linear_test.go:372-413), and getrusage advances in 10 ms steps in this gVisor pod, so an input that takes under 10 ms reads 0s and every ratio is '+Inf times the 0s it took'. The tester reproduced it on an idle pod and the package is green in CI's envoy-go-race. The body now says so.",
-    "ROUND 2 - no CI lane ran scripts/e2e-local.test.sh at all, so every case in it - the two this change wrote, the one INFRA-141's reviewer produced, and the tester's new one - locked nothing outside a pod. A test nobody runs is the same family of defect as the one the tester found, so the step was added rather than left as a note."
+    "ROUND 2 - no CI lane ran scripts/e2e-local.test.sh at all, so every case in it - the two this change wrote, the one INFRA-141's reviewer produced, and the tester's new one - locked nothing outside a pod. A test nobody runs is the same family of defect as the one the tester found, so the step was added rather than left as a note.",
+    "ROUND 3 - the round-2 guard widening was itself incomplete in a way its own negative controls missed: every probe I wrote passed the context as a variable (ctx), which the [^)]* match handled, so four green controls hid the shape the module already uses once, exec.CommandContext(context.Background(), ...). The tester's probe differed in exactly the argument I had held constant. A negative control is only as wide as the variation in it."
   ],
-  "round": 2
+  "round": 3
 }
