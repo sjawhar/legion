@@ -1,6 +1,7 @@
 import { PROJECT_NAME_MAX } from "@legion/contracts";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { type FormEvent, type ReactNode, useRef, useState } from "react";
+import type { Mutation } from "@tanstack/react-query";
+import { useMutation, useMutationState, useQuery, useQueryClient } from "@tanstack/react-query";
+import { type FormEvent, type ReactNode, useState } from "react";
 
 import { api, apiErrorMessage } from "../../api/client";
 import { projectDefaultAssigneesQuery, projectsQuery, usersQuery } from "../../api/queries";
@@ -222,7 +223,7 @@ function DefaultAssigneeCell({
   return (
     <>
       <DefaultAssigneeSelect
-        assignee={write.shown === null ? (stored ?? null) : write.shown.assignee}
+        assignee={write.shown === undefined ? (stored ?? null) : write.shown}
         logins={logins}
         onPick={write.submit}
         onReach={onReach}
@@ -242,28 +243,30 @@ function DefaultAssigneeCell({
   );
 }
 
-/** One project's default-assignee saves, one at a time, as `useIssueFieldWrite` does an issue
- *  field's. A pick shows at once; a pick made while a save is out is queued behind it, and only
- *  the newest queued pick is sent when that save settles, so the server ends at the reader's last
- *  choice. Each answer lands in the defaults cache, so the control does not flash back to the old
- *  value; a failure puts the control back at the stored value. The defaults are refetched once
- *  no save for this project is left. */
+/** One project's default-assignee saves. Each pick is sent, in pick order and one at a time per
+ *  project: the mutation scope queues them in the QueryClient's mutation cache, so a save still
+ *  out or waiting when the row unmounts keeps its place, and a pick on a remounted row waits
+ *  behind it. The control shows the newest pick still pending, from whichever mount made it, so
+ *  a remounted row shows the pick in flight; a failed save drops out of that list, so the control
+ *  goes back to the stored value or a newer pending pick. Each answer lands in the defaults
+ *  cache, so the control does not flash back to the old value, and the defaults are refetched
+ *  after each save settles. The server ends at the reader's last pick. */
 function useDefaultAssigneeWrite(project: string): {
   /** This row's refused save, until the next attempt starts. */
   error: Error | null;
   pending: boolean;
-  /** Resends the refused value; a no-op while a save is out. */
+  /** Resends this row's refused value; a no-op unless its last save failed. */
   retry: () => void;
-  /** The pick on screen while a save for it is out or queued; `null` shows the stored value. */
-  shown: { assignee: string | null } | null;
+  /** The newest pick still saving or queued; `undefined` shows the stored value. */
+  shown: string | null | undefined;
   submit: (assignee: string | null) => void;
 } {
   const queryClient = useQueryClient();
-  const guard = useSubmitGuard();
-  const [shown, setShown] = useState<{ assignee: string | null } | null>(null);
-  const queued = useRef<{ assignee: string | null } | null>(null);
   const defaultsKey = projectDefaultAssigneesQuery().queryKey;
+  const mutationKey = ["project-default-assignee", project];
   const mutation = useMutation({
+    mutationKey,
+    scope: { id: `project-default-assignee:${project}` },
     mutationFn: (assignee: string | null) => api.putProjectDefaultAssignee(project, { assignee }),
     // A defaults read already out was asked before this save and could land over its answer.
     onMutate: () => queryClient.cancelQueries({ queryKey: defaultsKey }),
@@ -276,34 +279,29 @@ function useDefaultAssigneeWrite(project: string): {
         return saved.assignee === null ? others : [...others, saved];
       });
     },
+    // Not awaited: the next pick in the scope need not wait for this refetch.
     onSettled: () => {
-      guard.release();
-      const next = queued.current;
-      if (next !== null) {
-        queued.current = null;
-        guard.guard(() => mutation.mutate(next.assignee));
-        return;
-      }
-      setShown(null);
       void queryClient.invalidateQueries({ queryKey: defaultsKey });
     },
+  });
+  // The cache lists mutations in the order they were made, so the last is the newest pick.
+  const pendingPicks = useMutationState<
+    string | null | undefined,
+    Mutation<ProjectDefaultAssignee, Error, string | null>
+  >({
+    filters: { mutationKey, status: "pending" },
+    select: (pending) => pending.state.variables,
   });
   return {
     error: mutation.error,
     pending: mutation.isPending,
     retry: () => {
-      const failed = mutation.variables;
-      if (failed !== undefined && guard.retryLast(mutation)) {
-        setShown({ assignee: failed });
+      if (mutation.isError && mutation.variables !== undefined) {
+        mutation.mutate(mutation.variables);
       }
     },
-    shown,
-    submit: (assignee) => {
-      setShown({ assignee });
-      if (!guard.guard(() => mutation.mutate(assignee))) {
-        queued.current = { assignee };
-      }
-    },
+    shown: pendingPicks.at(-1),
+    submit: mutation.mutate,
   };
 }
 

@@ -493,6 +493,80 @@ test("a default assignee picked while the last pick is saving waits its turn, an
   }
 });
 
+// The saves still out when the reader leaves Settings belong to the app, not to the page: on
+// the way back the row's next pick waits behind them, so it is the one the server keeps.
+test("default assignee picks still saving when Settings is left and reopened go out in pick order, and the last pick is the one kept", async ({
+  browser,
+}, testInfo) => {
+  test.skip(testInfo.project.name !== "chromium", "one browser proves the queue across a remount");
+  await createProject({ key: "CORE", name: "Core" });
+  // Creating OPS as bob and QA as carol makes each a person who has signed in, so both are
+  // options in the control.
+  await createProject({ key: "OPS", name: "Ops" }, "bob");
+  await createProject({ key: "QA", name: "Quality" }, "carol");
+  const context = await asUser(browser, "alice");
+  const page = await context.newPage();
+
+  try {
+    // The first PUT waits until the test lets it through. `wire` records each PUT as it reaches
+    // the network and as its answer comes back.
+    const held = Promise.withResolvers<void>();
+    const wire: string[] = [];
+    await page.route("**/api/v1/projects/CORE/default-assignee", async (route) => {
+      if (route.request().method() !== "PUT") return route.fallback();
+      const { assignee } = route.request().postDataJSON() as { assignee: string | null };
+      const first = wire.length === 0;
+      wire.push(`sent ${assignee}`);
+      if (first) await held.promise;
+      const response = await route.fetch();
+      wire.push(`answered ${assignee}`);
+      return route.fulfill({ response });
+    });
+    await page.goto("/settings");
+    const core = page.getByRole("combobox", { exact: true, name: "Default assignee of CORE" });
+    await expect(core).toBeEnabled();
+    await expect(core).toHaveValue("");
+    await core.focus();
+    await expect(core.locator("option")).toHaveText(["Unassigned", "alice", "bob", "carol"]);
+
+    await core.selectOption("bob");
+    await expect(core).toHaveValue("bob");
+    await expect.poll(() => wire).toEqual(["sent bob"]);
+    await core.selectOption("carol");
+    await expect(core).toHaveValue("carol");
+
+    // Away and back inside the app: Settings unmounts and mounts again, the app stays loaded.
+    const navigation = page.getByRole("navigation", { name: "Navigation" });
+    await navigation.getByRole("link", { name: "Inbox" }).click();
+    await expect(core).toHaveCount(0);
+    await navigation.getByRole("link", { name: "Settings" }).click();
+    await expect(core).toBeEnabled();
+    await core.focus();
+    await expect(core.locator("option")).toHaveText(["Unassigned", "alice", "bob", "carol"]);
+    await core.selectOption("alice");
+    await expect(core).toHaveValue("alice");
+
+    held.resolve();
+    await expect.poll(() => wire.filter((entry) => entry.startsWith("answered")).length).toBe(3);
+    await expect(core).toHaveValue("alice");
+
+    await page.reload();
+    await expect(core).toHaveValue("alice");
+    const defaults = await listProjectDefaultAssignees({ as: "user", login: "alice" });
+    expect(defaults.map((row) => [row.project, row.assignee])).toEqual([["CORE", "alice"]]);
+    expect(wire).toEqual([
+      "sent bob",
+      "answered bob",
+      "sent carol",
+      "answered carol",
+      "sent alice",
+      "answered alice",
+    ]);
+  } finally {
+    await context.close();
+  }
+});
+
 test("a default assignee the page has not read yet is never shown as Unassigned", async ({
   browser,
 }, testInfo) => {
