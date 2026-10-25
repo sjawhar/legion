@@ -1115,12 +1115,12 @@ var slackDisplayFields = []string{
 var slackOwnTextEntities = strings.NewReplacer("&amp;", "&", "&lt;", "<", "&gt;", ">")
 
 // slackDeliveredText is every word a Slack message delivers: its own text, then each display
-// string its blocks and its attachments carry that is not a repeat of one already delivered, a
-// line apiece. Blocks come first because Slack renders them as the message body and an attachment
-// after it, so an attachment's fallback is never the first line read. An app posts its words there
-// as often as in the message's own text, and a deleted message delivers none. A rich_text block
-// that only repeats the message's own words is left unread: it is the Slack client's structured
-// copy of them.
+// string its blocks and its attachments carry that neither repeats the message's own words nor a
+// string the object showing it has already shown, a line apiece. Blocks come first because Slack
+// renders them as the message body and an attachment after it, so an attachment's fallback is
+// never the first line read. An app posts its words there as often as in the message's own text,
+// and a deleted message delivers none. A rich_text block that only repeats the message's own
+// words is left unread: it is the Slack client's structured copy of them.
 func slackDeliveredText(body map[string]any) string {
 	event := mapValue(body["event"])
 	if stringValue(event["subtype"]) == "message_deleted" {
@@ -1143,10 +1143,14 @@ type slackTextWalk struct {
 	text string
 	// runes is the rune count of text, kept as it grows so no piece recounts the whole.
 	runes int
-	// taken is every piece the text already holds, so a value Slack repeats across an
-	// attachment's fields and a block's nested text is delivered once. It is built as pieces
-	// arrive, so a message with no display strings allocates no set.
-	taken map[string]struct{}
+	// ownWords is the message's own text and each of its non-blank lines, and it is the only
+	// thing a piece is compared against walk-wide: those words the message already says itself,
+	// so a block or an attachment saying them again, anywhere in the tree, says nothing new. No
+	// piece gathered from the tree joins them — two objects carrying the same string are two
+	// words a reader sees, and dropping the second loses one of them; what one object repeats
+	// under its own keys is slackWalkPieces's to drop. takeOwn builds the set, so a message
+	// with no text of its own allocates none.
+	ownWords map[string]struct{}
 	// own is the message's own text with Slack's entities resolved, kept only when that text
 	// holds a word at all. It is what the outermost rich_text object is measured against before
 	// the walk reads it, and it is read for nothing else: it never removes a piece already taken
@@ -1160,18 +1164,15 @@ func (w *slackTextWalk) full() bool {
 	return w.runes > maxEnvelopeTextRunes
 }
 
-// take appends a display string, unless it holds no word or is exactly one already taken.
+// take appends a display string, unless it holds no word or is exactly the message's own words or
+// one of their lines, which the message has delivered already.
 func (w *slackTextWalk) take(piece string) {
 	if w.full() || strings.TrimSpace(piece) == "" {
 		return
 	}
-	if _, repeat := w.taken[piece]; repeat {
+	if _, own := w.ownWords[piece]; own {
 		return
 	}
-	if w.taken == nil {
-		w.taken = make(map[string]struct{})
-	}
-	w.taken[piece] = struct{}{}
 	if w.text == "" {
 		w.text = piece
 		w.runes = utf8.RuneCountInString(piece)
@@ -1181,20 +1182,23 @@ func (w *slackTextWalk) take(piece string) {
 	}
 }
 
-// takeOwn delivers the message's own text as the one piece it is, and records each of its lines in
-// the taken set beside it. Slack tells app authors to put a message's plain-text copy in text and
-// its formatting in a rich_text block, which carries those same words a segment apiece, so a block
-// that adds one line to them delivers that line and not the rest a second time.
+// takeOwn delivers the message's own text as the one piece it is, and records it and each of its
+// lines in ownWords beside it. Slack tells app authors to put a message's plain-text copy in text
+// and its formatting in a rich_text block, which carries those same words a segment apiece, so a
+// block that adds one line to them delivers that line and not the rest a second time. These are
+// the only words compared across the whole walk, because they are the only ones the message is
+// known to have delivered before the tree is read at all.
 func (w *slackTextWalk) takeOwn(own string) {
 	w.take(own)
+	if strings.TrimSpace(own) == "" {
+		return
+	}
+	w.ownWords = map[string]struct{}{own: {}}
 	for _, line := range strings.Split(own, "\n") {
 		if strings.TrimSpace(line) == "" {
 			continue
 		}
-		if w.taken == nil {
-			w.taken = make(map[string]struct{})
-		}
-		w.taken[line] = struct{}{}
+		w.ownWords[line] = struct{}{}
 	}
 }
 
@@ -1204,7 +1208,7 @@ func (w *slackTextWalk) walk(value any) {
 	if w.full() {
 		return
 	}
-	slackWalkPieces(value, w.own, false, func(piece string) bool {
+	slackWalkPieces(value, w.own, func(piece string) bool {
 		w.take(piece)
 		return !w.full()
 	})
@@ -1217,6 +1221,14 @@ func (w *slackTextWalk) walk(value any) {
 // place the object shows it; an array is descended in index order. A string that holds no word is
 // never yielded.
 //
+// An object yields a given string once: an attachment whose fallback repeats its title shows one
+// word under two of its own names, and that is one piece. The comparison reaches the object's own
+// keys and never its subtree — a nested text object, and each element of a fields array, is an
+// object of its own with a tally of its own — because a subtree-wide tally would drop a nested
+// block's word for matching a title above it, and nothing is compared across objects, so two
+// attachments reading "web-1 ok" and "web-2 ok" both deliver their ok. At most one string is
+// yielded per display name, so the tally holds nine at the most and is scanned straight through.
+//
 // measure is the message's own text, with Slack's entities resolved, while a rich_text object is
 // still to be measured against it, and empty once one has been. rich_text is the only kind name
 // the walk recognises, and only to skip the whole object — yielding nothing, descending nothing —
@@ -1226,10 +1238,7 @@ func (w *slackTextWalk) walk(value any) {
 // is read like any other block. The question is asked once, for the outermost rich_text object: an
 // object that is read is read with measure cleared, so every rich_text nested inside it is read as
 // part of it, and a chain of them costs one pass and not one per level.
-//
-// fields marks the elements of an attachment's fields array, whose title and value are one piece:
-// see slackFieldPiece.
-func slackWalkPieces(value any, measure string, fields bool, visit func(string) bool) bool {
+func slackWalkPieces(value any, measure string, visit func(string) bool) bool {
 	switch node := value.(type) {
 	case map[string]any:
 		if measure != "" && stringValue(node["type"]) == "rich_text" {
@@ -1238,24 +1247,18 @@ func slackWalkPieces(value any, measure string, fields bool, visit func(string) 
 			}
 			measure = ""
 		}
-		pair, paired := slackFieldPiece(node, fields)
+		var yielded []string
 		for _, key := range slackWalkKeys(node) {
 			text, isString := node[key].(string)
 			switch {
 			case !isString:
-				if !slackWalkPieces(node[key], measure, key == "fields", visit) {
+				if !slackWalkPieces(node[key], measure, visit) {
 					return false
 				}
-			case paired && (key == "title" || key == "value"):
-				// The two halves are the one piece, yielded where the first of them sits.
-				if pair != "" {
-					piece := pair
-					pair = ""
-					if !visit(piece) {
-						return false
-					}
-				}
-			case strings.TrimSpace(text) != "":
+			case strings.TrimSpace(text) == "" || slices.Contains(yielded, text):
+				// No word to read, or this object's own word under a second of its names.
+			default:
+				yielded = append(yielded, text)
 				if !visit(text) {
 					return false
 				}
@@ -1263,45 +1266,12 @@ func slackWalkPieces(value any, measure string, fields bool, visit func(string) 
 		}
 	case []any:
 		for _, item := range node {
-			if !slackWalkPieces(item, measure, fields, visit) {
+			if !slackWalkPieces(item, measure, visit) {
 				return false
 			}
 		}
 	}
 	return true
-}
-
-// slackFieldPiece is the one piece an element of an attachment's fields array shows: Slack renders
-// such an element's title above its value, so the two read as one label, "title: value", and not
-// as two pieces of which a value another field repeats is dropped, leaving its label orphaned.
-// Where only one of the two holds a word, that one alone is the piece; where neither does, there
-// is no piece and the element is read as any other object, which is what a Block Kit section's
-// fields elements are: they carry neither name.
-func slackFieldPiece(node map[string]any, fields bool) (string, bool) {
-	if !fields {
-		return "", false
-	}
-	title := slackFieldHalf(node["title"])
-	value := slackFieldHalf(node["value"])
-	switch {
-	case title != "" && value != "":
-		return title + ": " + value, true
-	case title != "":
-		return title, true
-	case value != "":
-		return value, true
-	default:
-		return "", false
-	}
-}
-
-// slackFieldHalf is value when it is a string that holds a word, and empty otherwise.
-func slackFieldHalf(value any) string {
-	text, isString := value.(string)
-	if !isString || strings.TrimSpace(text) == "" {
-		return ""
-	}
-	return text
 }
 
 // slackOwnWordsOnly reports that every display string anywhere in value is already held by own,
@@ -1312,7 +1282,7 @@ func slackFieldHalf(value any) string {
 // but value and own.
 func slackOwnWordsOnly(value any, own string) bool {
 	ownWords := true
-	slackWalkPieces(value, "", false, func(piece string) bool {
+	slackWalkPieces(value, "", func(piece string) bool {
 		ownWords = strings.Contains(own, piece)
 		return ownWords
 	})
