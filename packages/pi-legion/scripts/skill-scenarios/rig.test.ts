@@ -691,6 +691,12 @@ describe("judge-omp", () => {
     omp,
     `#!/bin/bash
 probe() { if "\${@:2}" >/dev/null 2>&1; then echo "probe $1 allowed"; else echo "probe $1 denied"; fi; }
+# DROP: write a marker into every directory this judge can write outside its own directory.
+# SEEK: report any marker another judge left anywhere this judge can read.
+if [ -n "\${DROP:-}" ]; then
+  find / \\( -path /proc -o -path /sys -o -path /dev -o -path "$PWD" \\) -prune -o -type d -writable -print 2>/dev/null |
+    while IFS= read -r d; do printf 'private input\\n' >"$d/leak-$DROP" 2>/dev/null; done
+fi
 {
   printf 'argv %s\\n' "$0" "$@"
   printf 'env %s\\n' "PWD=$PWD" "HOME=$HOME" "OMP_PROFILE=$OMP_PROFILE"
@@ -708,6 +714,7 @@ probe() { if "\${@:2}" >/dev/null 2>&1; then echo "probe $1 allowed"; else echo 
   probe gateway-base-url grep -q 'baseUrl: https://gateway.internal.example/anthropic' "$HOME/.omp/profiles/$OMP_PROFILE/agent/models.yml"
   probe token-is-jwt bash -c '[[ "$("$1")" =~ ^eyJ[A-Za-z0-9_-]*\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]+$ ]]' - "$key"
   probe dbus-set test -n "\${DBUS_SESSION_BUS_ADDRESS:-}"
+  [ -z "\${SEEK:-}" ] || echo "seek $(find / \\( -path /proc -o -path /sys -o -path /dev \\) -prune -o -name 'leak-*' -print 2>/dev/null | head -1)"
 } >"$PWD/answer.json"
 sleep "\${SLEEP:-0}"
 echo judged
@@ -828,6 +835,21 @@ exit "$(cat "$PWD/exit-status" 2>/dev/null || echo 0)"
     expect(
       existsSync(path.join(work, "judge-profiles/bare/home/.omp/profiles/judge-bare/agent/skills"))
     ).toBe(false);
+  });
+
+  // Catches: a mount two judges share that one can write and the next can read, such as the key
+  // command's call record, a path one judge could leave its private input in for another to read.
+  // The first judge writes a marker into every directory it can write outside its own directory;
+  // the second, of the same kind, looks for one anywhere it can read.
+  test("one judge cannot leave a file that a second judge can read", () => {
+    const first = judgeDir();
+    const env = (word: string) => ({
+      SKILL_SCENARIOS_JUDGE_ENV: `OUTSIDE=${outside} OPERATOR_HOME=${homedir()} WORK=${work} ${word}`,
+    });
+    expect(judge("ste", first, "answer.json", env("DROP=one")).exitCode).toBe(0);
+    const second = judgeDir();
+    expect(judge("ste", second, "answer.json", env("SEEK=1")).exitCode).toBe(0);
+    expect(recorded(second, "seek")).toEqual([""]);
   });
 
   // Catches: a judge kind the rig has no profile for, a directory with no prompt, and an answer

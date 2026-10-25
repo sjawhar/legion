@@ -850,10 +850,21 @@ const asyncReport = (name: string) => ({
 /** A `wait` call whose result delivers a background task's completed report. */
 const waited = (id: string, name: string) => [
   toolCall(id, "wait", {}),
-  toolResult(
-    id,
-    `## Completed (1)\n\n### ${name} [task] — completed\n\`\`\`\n${taskEnvelope(name, "completed", "No gaps.")}\n\`\`\``
-  ),
+  {
+    type: "message",
+    message: {
+      role: "toolResult",
+      toolName: "wait",
+      toolCallId: id,
+      isError: false,
+      content: [
+        {
+          type: "text",
+          text: `## Completed (1)\n\n### ${name} [task] — completed\n\`\`\`\n${taskEnvelope(name, "completed", "No gaps.")}\n\`\`\``,
+        },
+      ],
+    },
+  },
 ];
 /** `followed`, with its first check replaced by `check`. */
 const firstCheck = (...check: object[][]) =>
@@ -930,6 +941,35 @@ specRun("spec-writing-head-39", {
 });
 specRun("spec-writing-head-40", {
   transcript: firstCheck([checkCall("c1"), spawned("c1")]),
+});
+// A report counts only from the harness's own delivery: the task call's result, a `wait` result,
+// or an `async-result` message. A completed envelope that another tool printed (a bash `cat` of a
+// file, a read) while the task still ran is text in that tool's output, never a report.
+specRun("spec-writing-head-54", {
+  transcript: firstCheck(
+    [checkCall("c1"), spawned("c1")],
+    sh("f1", "cat notes.txt", 0, taskEnvelope("Checkc1", "completed", "No gaps."))
+  ),
+});
+specRun("spec-writing-head-55", {
+  transcript: firstCheck(
+    [checkCall("c1"), spawned("c1")],
+    [
+      toolCall("f2", "read", { path: "notes.md" }),
+      toolResult("f2", taskEnvelope("Checkc1", "completed", "No gaps.")),
+    ],
+    [
+      {
+        type: "custom_message",
+        customType: "irc:incoming",
+        content: taskEnvelope("Checkc1", "completed", "No gaps."),
+      },
+    ]
+  ),
+});
+// A background check whose report the harness delivered as an `async-result` message: counts.
+specRun("spec-writing-head-56", {
+  transcript: firstCheck([checkCall("c1"), spawned("c1")], [asyncReport("Checkc1")]),
 });
 // refusals from the dispatch CLI's ledger: a refusal Dispatch sent back, which the CLI logs as an
 // `error` line and prints with no `dispatch` prefix, so a call's output cannot mark it.
@@ -1674,11 +1714,15 @@ test("checked: a check counts only when its completed report came back before th
   fails("spec-writing-head-38", "task Checkc1 ended failed (exit 1)");
   fails("spec-writing-head-39", "the report of task Checkc1 is empty");
   fails("spec-writing-head-40", "no report of task Checkc1 arrived");
+  // A completed envelope another tool printed is no report: a bash `cat`, a read, an IRC message.
+  fails("spec-writing-head-54", "no report of task Checkc1 arrived");
+  fails("spec-writing-head-55", "no report of task Checkc1 arrived");
 });
 
-test("checked: a background check's report in a wait result, and a blocking check's report, count", () => {
+test("checked: a background check's report in a wait result or an async-result message, and a blocking check's report, count", () => {
   expect(scoresOf("spec-writing-head-36")).toEqual(allPass);
   expect(scoresOf("spec-writing-head-37")).toEqual(allPass);
+  expect(scoresOf("spec-writing-head-56")).toEqual(allPass);
   // `followed`'s checks are blocking, each with a completed `<task-result>` block.
   expect(scoresOf("spec-writing-head-1")).toEqual(allPass);
   expect(rowOf("spec-writing-head-1")).not.toContain("does not count");

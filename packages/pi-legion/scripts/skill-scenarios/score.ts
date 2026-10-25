@@ -1311,11 +1311,12 @@ function taskNames(step: Step, own: Outcome | undefined): string[] {
 }
 /** What a spec-only check came to before the spec write whose assistant message is entry `before`:
  * its tasks' reports, or why it does not count. Every task the call started must have ended
- * `completed` with a report that is not empty, in an entry before the write: the call's own result
- * (an envelope, or else a blocking result's `details.results` entry, as Oh My Pi records one), or a
- * later entry that delivers a background task's envelope (a `wait` result, an `async-result`
- * message). A report that arrives after the write is no report for it. A task call the tool failed
- * (`isError`) checked nothing. */
+ * `completed` with a report that is not empty, in an entry before the write. A report counts only
+ * from Oh My Pi's own delivery of it: the call's own result (an envelope, or else a blocking result's
+ * `details.results` entry), a `wait` tool's result, or an `async-result` message. An envelope in any
+ * other tool's output (a `bash` that prints a file, a `read`) or any other message is text, never a
+ * report: an agent can print a completed envelope while its task still runs. A report that arrives
+ * after the write is no report for it. A task call the tool failed (`isError`) checked nothing. */
 function checkOutcome(
   entries: SessionEntry[],
   step: Step,
@@ -1332,9 +1333,9 @@ function checkOutcome(
     const text =
       index === own.index
         ? own.text
-        : entry.type === "custom_message"
+        : entry.type === "custom_message" && entry.customType === "async-result"
           ? strings(entry.content).join("")
-          : entry.message?.role === "toolResult"
+          : entry.message?.role === "toolResult" && entry.message.toolName === "wait"
             ? (entry.message.content ?? []).map((part) => part.text ?? "").join("")
             : "";
     for (const [, attributes = "", body = ""] of text.matchAll(TASK_RESULT))
