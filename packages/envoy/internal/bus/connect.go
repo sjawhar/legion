@@ -89,9 +89,11 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 	// the list this client was configured with, never from the connection: nc.ConnectedUrl() is
 	// empty while reconnecting. The line goes through the package-level slog, like every other bus
 	// line, because a listener process test fails if a bus line stops being Go's text format
-	// (cmd/listener/startup_test.go:598-612 names the deployed metric filters). No field can carry
-	// the credential: options never sees it, since nkeyCredential is applied to the options value
-	// afterwards (connect.go, connectWithContext) and holds a public key and a signer only.
+	// (cmd/listener/startup_test.go:598-612 names the deployed metric filters). Each server is
+	// written without its userinfo (natsURLWithoutUserinfo), because nats.go authenticates with a
+	// URL's userinfo, a token or a user and password, when the URL carries one. The nkey credential
+	// never reaches a line: options never sees it, since nkeyCredential is applied to the options
+	// value afterwards (connect.go, connectWithContext) and holds a public key and a signer only.
 	opts.ReconnectErrCB = func(_ *nats.Conn, err error) {
 		if !throttle.allow() {
 			return
@@ -100,16 +102,23 @@ func options(name string, urls []string, reconnectCB func(*nats.Conn), closedCB 
 		if err != nil {
 			text = err.Error()
 		}
+		servers := make([]string, len(urls))
+		for i, raw := range urls {
+			servers[i] = natsURLWithoutUserinfo(raw)
+		}
 		slog.Warn("envoy nats reconnect attempt failed",
 			slog.String("name", name),
-			slog.String("servers", strings.Join(urls, ",")),
+			slog.String("servers", strings.Join(servers, ",")),
 			slog.String("error", text))
 	}
 	opts.ReconnectedCB = func(nc *nats.Conn) {
 		// Each outage reports its own first failed attempt at once, rather than staying silent for
 		// what is left of the previous outage's minute.
 		throttle.reset()
-		slog.Info("envoy nats reconnected", slog.String("name", name), slog.String("url", nc.ConnectedUrl()))
+		// ConnectedUrl is the server's URL.String(), userinfo and all, and a server nats.go
+		// discovered inherits the configured URL's (nats.go v1.50.0 nats.go:2025-2027);
+		// ConnectedUrlRedacted keeps a token, which is a user name alone.
+		slog.Info("envoy nats reconnected", slog.String("name", name), slog.String("url", natsURLWithoutUserinfo(nc.ConnectedUrl())))
 		if reconnectCB != nil {
 			reconnectCB(nc)
 		}
