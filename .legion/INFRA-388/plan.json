@@ -1,0 +1,88 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-388",
+  "completed": "2026-10-25T15:35:30Z",
+  "planDocument": "dispatch://INFRA-388/artifact/plan-md (plan.md on the issue; the full plan, tasks 1-11, acceptance table, evidence per role, values for the root)",
+  "summary": "The Legion daemon wakes an open production check once per successful Apply job of a configured deploy workflow's run on the default branch whose step finished after the pull request's GitHub merged_at. legion.yaml gains projects.<KEY>.deploys [{repo, workflow, step}]; Envoy's workflow_run 'completed' envelope becomes intake.WorkflowRunCompleted; the engine queues a check_compare row carrying a deploy object (no new outbox kind, no migration) per open check of that repository; the executor reads, as the implement App, the pull request (merged_at), the run attempt (path, head_branch, head_repository, event) and its jobs (steps), and applies intake.CheckWake cause 'deploy run' under event id check-wake:<issue>:<checkID>:deploy run:<run>:<attempt>:<job id>. The existing wake rule (one pending cause while a look is open) is unchanged.",
+  "decisions": [
+    {"decision": "Configuration", "detail": "projects.<KEY>.deploys: list of {repo: owner/name, workflow: .github/workflows/<file>.y(a)ml, step: non-empty}; duplicate repo+workflow refused; mirrored in api settings (no daemon API version bump, api/version.go:292-296)."},
+    {"decision": "Workflow identity", "detail": "workflow is the run's top-level file (workflow_run.path); a workflow_call caller is a different run and is matched only when configured."},
+    {"decision": "Trigger", "detail": "Envoy's workflow_run completed envelope (notifications.github.<o>.<r>.workflow.<file>.completed), whatever the run's conclusion."},
+    {"decision": "After the merge", "detail": "A job of that attempt (run_attempt equal) whose step named `step` concluded success with completed_at strictly after the pull request's merged_at; both GitHub timestamps; no tree comparison and no applied-commit annotation read."},
+    {"decision": "Run checks", "detail": "The executor re-reads the run attempt: path equals the configured workflow, head_branch equals the issue's recorded default branch, head_repository equals the check's repository, event is neither pull_request nor pull_request_target; 404 wakes nothing; other failures retry."},
+    {"decision": "Identity", "detail": "One CheckWake per check and Apply job (event id includes run, attempt and job id); the same run delivered twice adds no look; two Apply jobs give two wakes, the second kept for the next look; a re-run attempt has new job ids and wakes again."},
+    {"decision": "Coalescing", "detail": "Existing rule unchanged: while a look is open or the issue runs again, the first cause is kept and later ones ignored; the next look starts after every ignored deploy completed, so none goes unseen."},
+    {"decision": "Row", "detail": "record.CheckCompare gains Deploy *DeployRun (exactly one of Build and Deploy); avoids a new outbox kind because open PRs #2188, #2173, #2163, #2150, #2131 each add migration 0051 and several rewrite outbox_kind_check."},
+    {"decision": "Wake kind", "detail": "'deploy run'; detail '<repo> <workflow> run <id> attempt <n>, job <job name>: <step> succeeded at <RFC 3339>'; task wording 'the deploy workflow's run: <detail>'."},
+    {"decision": "Proof surface", "detail": "Throwaway liveproof driver (task 11): the daemon run with its real intake consumer, store and outbox over real Postgres and NATS JetStream, GitHub reads answered by api.github.com through a local proxy that runs `gh api --include` (no token handled), on real sjawhar/legion release.yaml runs and a real merged pull request. testnats gains LEGION_TEST_NATS_URL/LEGION_TEST_NATS_MONITOR_URL so a pod without Docker can run it (task 8)."}
+  ],
+  "tasks": [
+    "1 config: stage3.go Deploy/Project.Deploys/readDeploys + config_test.go",
+    "2 settings: api/settings.go ProjectSettings.Deploys + settings_test.go + state goldens carrying settings",
+    "3 intake: facts.go WorkflowRunCompleted, decode.go kind workflow action completed; Envoy golden workflow-run-completed (packages/envoy/scripts/fixtures/github, golden_test.go, packages/contracts/fixtures/github-envelopes) decoded in intake_test.go",
+    "4 engine: workflow Config.Deploys, check.go deployRunCompleted queuing check_compare deploy rows, wakeDeployRun + wokenBy; daemon/workflow.go passes the project's deploys; workflow/check_test.go",
+    "5 row: record/outbox.go CheckCompare.Deploy + validation + outbox_test.go",
+    "6 executor: daemon/outbox.go checkDeployRun + outbox_check_test.go",
+    "7 rig regression lock: daemon/check_wake_test.go cases a-g with a source=github workflow envelope",
+    "8 testnats external server override",
+    "9 docs/prompts: AGENTS.md, skills/legion-worker/references/merge-gate.md (+ claude-envoy regenerated), prompts/go/implementer.md, docs/site concepts.md, running-legion.md, how-it-fits.md, api/state.go, contracts legion-api.ts",
+    "10 ce-simplify-code once after the proof",
+    "11 throwaway liveproof driver (never committed), output in a PR comment"
+  ],
+  "acceptance": [
+    {"criterion": "An open check gets a new look at each successful Apply after its merge, and the log names the run", "proof": "task 11 case (1)", "lock": "task 7a, workflow Deploy tests"},
+    {"criterion": "Two applies give two looks", "proof": "task 11 with a second real run after look 2 is ended pending", "lock": "tasks 7b, 7g, 6"},
+    {"criterion": "The same run seen twice gives one", "proof": "task 11 case (2)", "lock": "tasks 7c, 6"},
+    {"criterion": "An apply while a look is open is kept for the next look", "proof": "task 11 publishing the second run while look 2 is open", "lock": "task 7d, task 4"},
+    {"criterion": "An older run that applies a tree carrying the merge wakes it", "proof": "task 11 with a run whose head_sha predates the merge and whose step finished after merged_at, where release.yaml's history has one; otherwise the rig case alone, said so on the PR", "lock": "task 7e"},
+    {"criterion": "A preview-only run, an apply that finished before the merge, and a run of another workflow give none", "proof": "task 11 case (3) and another workflow's run", "lock": "tasks 7f, 6, 4"},
+    {"criterion": "The existing issue.deployed and build wakes keep their behaviour", "proof": "existing check-wake rig tests and TestACheckCompare* unchanged", "lock": "go test ./internal/daemon -run 'TestADispatchStart|TestAnIssueDeployed|TestACheckCompare' and ./internal/workflow"},
+    {"criterion": "Configuration refuses a malformed deploy", "proof": "legion start --check-config on valid and malformed files", "lock": "task 1"}
+  ],
+  "forRoot": {
+    "agentInfraValue": "INFRA's legion.yaml (agent-infra legion/main.go projectConfig and legion/Pulumi.prod.yaml INFRA entry): projects.INFRA.deploys = [{repo: theorem-labs/agent-infra, workflow: .github/workflows/envoy.yaml, step: Apply}]",
+    "ordering": "A daemon older than this change refuses projects.INFRA.deploys at boot (readProject refuses unknown keys): the value lands with or after INFRA's image moves to the first legion release from main carrying this pull request, checked first with that release's `legion start --check-config`.",
+    "liveA4": "The root proves a real agent-infra apply waking an open check after rollout; it needs legion-envoy delivering workflow_run for agent-infra and the implement App's installation granting Actions read there, neither readable from this tree (the review App's theorem-labs token is refused /actions/runs, 403, 2026-10-25)."
+  },
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the implementer's push, PR body template, proof rules (references/pr-body.md) and the task-11 live proof as the E2E (implementer) line",
+      "ce-simplify-code: the one simplify pass over the diff after the proof (pr-body.md), re-running task 11 if it applies anything"
+    ],
+    "test": [
+      "legion-worker: the tester's rules in references/pr-body.md — verify the implementer's task-11 proof, drive task 11 independently with break attempts, read CI for static checks, test.json implementerProof/failures/proof"
+    ],
+    "review": [
+      "legion-worker: references/merge-gate.md reviewer order (CI read, handoff push, one review per round naming the head) and the thermonuclear pair; judge decisions 4-7 against the root spec text"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "The wake unit (per Apply, per run, per attempt) and the trigger timing were unresolved.", "answer": "Decision 6: one wake per successful Apply job (event id includes the job id), so two applies give two looks in one run or two; the same run delivered twice adds none; a re-run attempt has new jobs and wakes again. Decision 3: triggered at the attempt's workflow_run completed, recorded as spec departure 1."},
+      {"finding": "The one pending-cause slot means later deploys during an open look are ignored, and their fact ids are recorded as processed.", "answer": "Decision 7: kept unchanged and lossless — the next look starts only after every ignored deploy completed, so it sees them; spec A4 asks exactly that an apply during a look is kept for the next look. Tests 4 and 7d cover deploy behind build/issue.deployed and the reverse."},
+      {"finding": "The draft compared the Apply time with the check's OpenedAt (daemon clock) instead of the merge time.", "answer": "Decision 4: step completed_at strictly after the pull request's merged_at, both GitHub timestamps read in the same row (GET /pulls/{n}); equal times wake nothing (task 6 test)."},
+      {"finding": "Falling back to run.head_sha when the applied-commit annotation is missing is not supported by agent-infra's workflow.", "answer": "Dropped: no tree comparison and no annotation read (decision 4). The look itself reads applied-commit per agent-infra's instructions."},
+      {"finding": "The merge-containment guard was an extra condition the root's per-Apply promise does not state.", "answer": "Dropped: any successful Apply after merged_at wakes, whichever run, as the root says (decision 4)."},
+      {"finding": "The new legion.yaml key needs a rollout order, since older daemons refuse unknown project keys.", "answer": "Named for the root in plan.md 'For the root' and forRoot.ordering: the value lands with or after INFRA's image moves to the first release carrying this change, validated with that release's --check-config."},
+      {"finding": "Annotations are addressed by check-run id, not job id, and are paginated.", "answer": "Moot: the plan reads no annotations."},
+      {"finding": "'workflow' is ambiguous for reusable workflows reached through workflow_call.", "answer": "Decision 2: the run's top-level file (workflow_run.path); a caller is matched only when configured; agent-infra's deploys are top-level envoy.yaml runs. Rig test 7f covers a run of another file."},
+      {"finding": "Per-check reads (run, jobs, annotations) multiply cost and may exceed the 30 s row timeout.", "answer": "Decision 10: three core reads per open check per completed run (pull request, run attempt, jobs; jobs read across pages), no annotations; same budgets and timeout as check_compare; task 6 tests two job pages."},
+      {"finding": "Acceptance must exercise the real GitHub intake boundary with a source=github workflow envelope, not a direct fact or the Dispatch-sourced publish helper.", "answer": "Task 3 pins the envelope with Envoy's own normalizer golden; task 7 publishes source=github envelopes through the durable consumer; task 11 does the same against real GitHub reads."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 2},
+  "specDepartures": [
+    {
+      "spec": "Root spec 'Legion's deploy wake': the daemon wakes the check each time an Apply step of an envoy.yaml run on main succeeds after the merge.",
+      "plan": "Each successful Apply job's wake is applied when its run attempt's workflow_run completed webhook arrives, not when the step itself finishes (decision 3).",
+      "evidence": "One workflow_run webhook per attempt carries the workflow path the engine filters on (packages/envoy/internal/contracts/normalize.go:833-852); Envoy's job envelope carries no path (normalize.go:853-870) and would need a GitHub read for every default-branch job; agent-infra's check instructions read a run once it has a conclusion (legion/instructions/infra.md on agent-infra#151, lines 216-224).",
+      "outcome": {"kind": "unchanged"}
+    }
+  ],
+  "risks": [
+    "Envoy drops a workflow_run whose pull_requests list is non-empty (normalize.go:42-44); a squash merge's push run on main carries none (measured 0 on sjawhar/legion run 40203304600).",
+    "A rollback to a daemon older than this change fails a pending check_compare row carrying deploy under its strict decoder until the row is removed.",
+    "Concurrent PRs touch workflow/check.go (#2173, #2160), intake/decode.go (#2188, #2175, #2163, #2131) and config/stage3.go (#2025); conflicts resolve by forward merge."
+  ]
+}
