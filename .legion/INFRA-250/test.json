@@ -2,28 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T14:37:07Z",
-  "round": 7,
-  "headSha": "0d5a4bb4ea42b0efab7d4a775690c7624736a98f",
-  "mergeState": "CONFLICTING / DIRTY at edec49e289ab, read first. There is no CI here, and none can start: no pull_request workflow runs while GitHub shows the conflict. gh api 'repos/sjawhar/legion/actions/runs?head_sha=0d5a4bb4ea42b0efab7d4a775690c7624736a98f' returns total_count 0.",
+  "completed": "2026-10-25T15:53:50Z",
+  "round": 8,
+  "headSha": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
+  "mergeState": "MERGEABLE (BLOCKED only on review) at 67b4eec79930, read first. CI runs exist at this code head.",
+  "rebaseCheck": "rebase re-check 0d5a4bb4ea42 → 9ca2004f5f5f: fingerprint 530f09cb140042c966a4958557ad930dfad36484f1697dc1a9bcb27ec73f85ce at both heads, unchanged. Computed with the unchanged-diff check (jj diff from fork_point(\"main\"@origin | <head>) over '~(.legion | docs/solutions)', --context 0, @@ and index lines dropped, sha256). Round 7's verification of the branch's own content carries over. This round re-ran the bare gates, the acceptance script, and the A1 measurement the merge's new tests change.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I verified the round's four changes in a git archive of 0d5a4bb4ea42; details are in roundContent. All of them hold, but nothing in CI has judged them, and envoy-go-race, the lane that settles the race, has no run at this head."
+    "how": "Fingerprint recomputed: unchanged. In a git archive of 9ca2004f5f5f I ran the A1 suite, the acceptance script and the refusal test; results are in proof. The narrowed A1 claim holds on both halves. In the whole-module run 'rootless Docker not found' appears once, in cmd/listener's TestDispatchMentionResolvesASessionTheCacheHasNotRefilled, from testpg.URL (internal/testpg/testpg.go:46-52), reached from #2191's dispatch_resolution_test.go:149 because DISPATCH_TEST_DATABASE_URL is unset. Every one of cmd/listener's other 183 top-level tests passes in the pod. No NATS container is started anywhere."
   },
-  "roundContent": {
-    "accountsContract": "A throwaway test copied the overlap test's shape. It asked testnats.URL in the parent and then in subtests 'widen' and 'narrow'. The parent got account t1, widen t2 (and t2 again on a second call), narrow t3. Narrow saw 0 streams on entry even though widen had just created one. So each subtest has an account of its own, and the delete-then-create in narrow runs against an account with nothing in it. In this pod, without -race, TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn passes 30/30 and TestRewatchOntoARecreatedBucketRefillsTheCache passes 30/30. That says nothing about the -race configuration, which this pod cannot run (no C compiler, dispatch://INFRA-257).",
-    "sweep": "Pattern set 1, the server's answer: 'error creating store|creating store for stream|streamStoreFailed|streamCreateErrorCode' matches only internal/testnats (the retry and its own tests). Pattern set 2, the call shape: every test file with a DeleteStream/DeleteKeyValue (cmd/listener/main_test.go, internal/bus/kv_key_test.go, stream_config_test.go, internal/cistore/burst_test.go, internal/kvwatch/end_test.go, kvwatch_test.go, repair_test.go, internal/store/interest_markers_test.go, kv_test.go), with every create, add, ensure, open or recreate that follows in the same test. Every recreate of a deleted name goes through testnats.RecreateKeyValue, except the overlap test, where the delete now runs in a fresh account. The remaining hits are deletes with no recreate of that name in that test: cmd/listener main_test.go:4565 ends the interest watcher and its store.Open belongs to the next test; kv_test.go:2041 deletes the role bucket and its CreateKeyValue at 2069 is a different test; burst_test.go:940, end_test.go:227 and repair_test.go:186/221/264 delete without recreating; kv_key_test.go deletes only in t.Cleanup. Only internal/testnats/nats.go calls Delete outside a test file. There is no third site.",
-    "startGateLock": "TestEveryGatePortLiesJustBelowThisMachinesEphemeralRange fails when StartGate takes a fixed 20000-20999 band: 'a gate took port 20220, want one of the 1000 ports below 16000, the first port of this machine's ephemeral range (/proc/sys/net/ipv4/ip_local_port_range holds \"16000 65535\\n\")'. Limit: a StartGate that ignores the file and always uses the fallback (gatePorts(\"\")) passes it in this pod, because gVisor's low bound, 16000, equals fallbackEphemeralLow. It fails only on a machine whose range starts elsewhere, such as CI's Ubuntu (32768). With no injection seam, by the architect's ruling, CI is where that mutation is caught.",
-    "bandTable": "Each break fails the table: expected gVisor band 15500 ('want 1000 from 15500'); code band at low-500 ('15500-16499, which reaches the range starting at 16000'); floor check removed ('want a refusal'); refusal message no longer naming the low bound ('does not name the range's first port, 1024'). Restored, internal/testnats passes whole (ok 9.9 s)."
-  },
-  "failed": 1,
-  "failures": [
+  "failed": 0,
+  "failures": [],
+  "proof": [
     {
-      "criterion": "The pull request is mergeable and CI judges its code head; in particular envoy-go-race at this head settles the stream-store race this round fixes.",
-      "evidence": "GitHub: CONFLICTING / DIRTY (gh pr view 2189 --json mergeable,mergeStateStatus at 14:34Z). No workflow run exists for 0d5a4bb4ea42, and none can start while the conflict stands. Cause: sjawhar/legion#2191 (INFRA-249) merged at 13:34:32Z as 523592465. It edits packages/envoy/scripts/e2e-local.sh, as forecast in round 1 (test.json at c6d89ddb45e1). `git merge-tree --write-tree 687c9e6f2b92 edec49e289ab` reports 'CONFLICT (content): Merge conflict in packages/envoy/scripts/e2e-local.sh', one hunk in the evidence-file rm -f list. main adds \"$registry_session_response_file\" \"$registry_missing_response_file\" to that list. This branch adds \"$nats_log_file\", \"$nats_binary\" and `rm -rf \"$nats_store_dir\"`. The resolution keeps both. After the merge, e2e-local.sh also runs #2191's registry checks against the in-process natsd, and the merge brings main's cmd/broker vet break (dispatch://INFRA-379) into envoy-go, so the next round re-drives the script and reads envoy-go-race at the merged head."
+      "criterion": "A1, narrowed: every NATS container dependency is removed, so every package that failed only for want of a NATS server passes in a pod, and no failure or skip has a NATS server as its reason. Not claimed: that no package of this module panics for a container in a pod. That is false at this head because of a Postgres container, which is out of scope and routed to the controller.",
+      "surface": "The whole packages/envoy Go suite in this INFRA-250 worker pod (gVisor, 2 CPUs, go1.27.1, no container runtime), at the merged head.",
+      "command": "cd packages/envoy && go vet ./... ; DISPATCH_TEST_NO_CONTAINERS=1 go list ./... | grep -v /integration | xargs go test -count=1 -json ; go test ./internal/integration/ -timeout 300s -count=1 ; then go test ./cmd/listener/ -count=1 -skip '^(<the 4 tests of dispatch_resolution_test.go>)$' -json",
+      "observed": "vet exit 0. 69 ok, 5 FAIL; integration ok 97.8 s. 'rootless Docker not found' appears once, in cmd/listener / TestDispatchMentionResolvesASessionTheCacheHasNotRefilled, via testpg.URL. That panic ends the cmd/listener binary, which is why cmd/listener is one of the 5. With the 4 testpg-backed tests of dispatch_resolution_test.go skipped, cmd/listener passes 183 of 183 top-level tests (ok 181.6 s), with 0 rootless panics. The other four FAILs are the named residue: cmd/agent-secrets, cmd/agent-secrets-helper and internal/broker/helper (SO_PEERPIDFD and TTY prompts under gVisor), and internal/dispatch/pmdoc (getrusage's 10 ms steps). internal/dispatch/files passed in this batch.",
+      "headSha": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
+      "negativeControl": "Without the skip, the same cmd/listener run dies on the first testpg-backed test; with only that one skipped it dies on the next (TestDispatchBroadcastResolvesSessionsTheCacheHasNotRefilled). The panic is Postgres's, in exactly that file, and in no NATS test."
+    },
+    {
+      "criterion": "Bare gates at the merged head: CI green, envoy-go-race included, which is the lane that settles round 7's stream-store race fix.",
+      "surface": "GitHub Actions at 9ca2004f5f5f.",
+      "command": "gh run list --commit 9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb ; gh run view 40206938033 --json jobs ; job logs 121209965645 (envoy-go-race) and 121209965661 (envoy-go)",
+      "observed": "envoy-go-race success: `go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/`, every package ok, internal/bus ok 207.0 s. That is one green run of the configuration that failed at c9b95f0c, and one run does not prove a race gone; the cause fix (a fresh account per subtest) is proved separately, in round 7. envoy-go success: cmd/broker ok 58.0 s, so main's break is repaired through this merge; cmd/listener ok 165.1 s; internal/bus ok; internal/testnats ok; the natslive and integration steps success. Also success: broker-multiprocess, envoy-infra-go, envoy-smoke, envoy-e2e-local, dispatch-multiprocess, dispatch-memory, pi-legion, Tests, Worker Image, Docs. The dispatch job was still running when I read.",
+      "headSha": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
+      "negativeControl": "At c9b95f0c (round 6) envoy-go-race failed TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn/narrow with 'nats: error creating store for stream' (review round 2, job 121177536920)."
+    },
+    {
+      "criterion": "A3 after the merge: e2e-local.sh runs the real listener against its own natsd, including #2191's registry checks, and its refusals still hold.",
+      "surface": "The acceptance script and its refusal test, in a git archive of the merged head in this pod.",
+      "command": "cd packages/envoy && bash scripts/e2e-local.sh ; jq . out/e2e/registry-session-response.json ; cat out/e2e/registry-missing-response.json ; grep Version out/e2e/nats.log ; bash scripts/e2e-local.test.sh ; set -m; bash scripts/e2e-local.sh & kill -INT",
+      "observed": "Exit 0, PASS, 35 files in out/e2e. registry-session-response.json is the live session row (session_id ses_e2e_local, machine_id e2e-local, title 'Envoy local acceptance', capabilities [], three topics). registry-missing-response.json is exactly {\"error\":\"no live session ses_e2e_local_never_registered\"}; the script requires status 404 there and passed. nats.log: 'Starting nats-server … Version: 2.10.29', from the natsd the script built. e2e-local.test.sh: all five cases PASS. SIGINT mid-run: exit 130, lock free.",
+      "headSha": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
+      "negativeControl": "The test file's foreign-NATS case: with a stand-in greeter on the port the driver is told to use, the driver refuses with its own natsd's 'address already in use'; PASS here means that refusal fired."
     }
   ],
   "observations": [
-    "The PR body is about 46.5k characters; this round's line is kept short and the evidence lives here."
+    "The 4 testpg-backed tests in cmd/listener/dispatch_resolution_test.go do not honour DISPATCH_TEST_NO_CONTAINERS, so in a pod the first one panics the cmd/listener binary and hides whatever tests follow. That is #2191's, ruled out of scope by the architect and routed to the controller as a sibling. It is not fixed here.",
+    "internal/dispatch/files passed in this batch. Round 7's implementer saw it fail in a batch and pass alone. Two observations do not decide whether it is load-dependent."
   ]
 }
