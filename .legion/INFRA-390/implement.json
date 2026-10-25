@@ -1,0 +1,71 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-390",
+  "completed": "2026-10-25T18:33:00Z",
+  "round": 2,
+  "pullRequest": "https://github.com/sjawhar/legion/pull/2202",
+  "headSha": "7216dc39df77e97b74cb4cc8ae99d9b33a601ceb",
+  "roundChanges": [
+    "Forward-merged main twice (c16fc690, then 4ceb3aa9, which landed during the round): one conflict each in packages/envoy/CHANGELOG.md [Unreleased], both entries kept; merge fingerprints unchanged (PR comments 6401406913, 6401492614).",
+    "821c825d (architect's decision 18:10Z): fakeGitHub gains missingBranchStatus; TestRefMissingBranchIsErrNoBranch asserts ErrNoBranch and no SHA for GitHub's 404 and 422 answers; Ref's doc comment now says a missing branch is 422 and an invisible repository 404. No behaviour change in client.go.",
+    "b4cff8e1: the retro's github-api learning updated to say the 422 gap was found and fixed.",
+    "scratch/infra-390-large-head re-created at 2026-10-25T18:15:18Z on the same commit 43aeb35d for this round's live proofs; retro deletes it again."
+  ],
+  "proof": [
+    {
+      "criterion": "Architect 18:10Z: Ref under the SHA media type answers GitHub's 422 for a missing branch as ErrNoBranch, and a test fails if that mapping is removed",
+      "surface": "githubapp's fake GitHub (httptest) answering the commits route with GitHub's real 422 body for a missing branch; the same 422 was observed from real GitHub by the tester's live run",
+      "command": "cd packages/envoy && go test -count=1 -v -run 'TestRef' ./internal/dispatch/githubapp/",
+      "observed": "TestRefMissingBranchIsErrNoBranch/404_not_found PASS, TestRefMissingBranchIsErrNoBranch/422_no_commit_found PASS; every other TestRef* PASS",
+      "headSha": "7216dc39df77e97b74cb4cc8ae99d9b33a601ceb",
+      "negativeControl": "go test -overlay $TMPDIR/infra390-mut/overlay.json (client.go with only the condition changed to `status == http.StatusNotFound`, diff-verified one line): 422_no_commit_found FAILs 'missing branch answered 422: err=GET .../commits/gone: status 422: {\"message\":\"No commit found for SHA: gone\",...}, want ErrNoBranch'; 404_not_found still PASS."
+    },
+    {
+      "criterion": "Root A3: Client.Ref returns the head SHA on a real branch whose GET /repos/{owner}/{repo}/commits/{branch} answer is over 1 MiB; the code before the change fails on the same branch with the 1048576-byte error",
+      "surface": "GitHub itself: sjawhar/legion scratch/infra-390-large-head (commit 43aeb35d1676fb2df9d8f36b3afb218368404d8d), implement App installation token from $GH_CONFIG_DIR/hosts.yml (legion-implementer[bot])",
+      "command": "cd packages/envoy && DISPATCH_REAL_GITHUB_REPO=sjawhar/legion DISPATCH_REAL_GITHUB_BRANCH=scratch/infra-390-large-head DISPATCH_REAL_GITHUB_HOSTS_FILE=\"$GH_CONFIG_DIR/hosts.yml\" go test -count=1 -v -run '^TestRealGitHubRefReadsALargeHead$|^TestRef' ./internal/dispatch/githubapp/",
+      "observed": "PASS: '1239400 bytes of JSON, sha 43aeb35d...'; 'Ref(sjawhar/legion@scratch/infra-390-large-head) = 43aeb35d1676fb2df9d8f36b3afb218368404d8d', equal to gh api -H 'Accept: application/vnd.github.sha'",
+      "headSha": "7216dc39df77e97b74cb4cc8ae99d9b33a601ceb",
+      "negativeControl": "go test -overlay $TMPDIR/infra390/negctl/overlay.json (client.go and deliveries.go at 83f63201; main changed neither): TestRealGitHubRefReadsALargeHead FAILs 'Ref: GET https://api.github.com/repos/sjawhar/legion/commits/scratch%2Finfra-390-large-head: GitHub response body exceeds the 1048576-byte limit'; TestRefReadsTheHeadOfALargeCommit fails the same way."
+    },
+    {
+      "criterion": "A Dispatch test boots the App config from a plain PEM and from base64 of the same PEM; a malformed value still fails with a clear error. The plain-PEM case fails on the code before the change.",
+      "surface": "the real envoy-dispatch binary (go build ./cmd/dispatch at the head, main's broker change included) over the in-pod Postgres 17 + pgvector, run-server.sh's environment, DISPATCH_NATS_DISABLED=1",
+      "command": "bash $TMPDIR/infra390/boot-proof.sh $TMPDIR/infra390/dispatch-head head; go test -count=1 -v -run 'TestEverySettingReachesItsReader/DISPATCH_APP_PEM_B64$|TestDevSignInRefusesAnAppKeyThatReachesGitHub' ./cmd/dispatch",
+      "observed": "plain PEM and base64: 'dispatch: loaded github app ... source=env', /healthz 200; armour around garbage: exit 1 'DISPATCH_APP_PEM_B64: plain PEM: not a PKCS1 or PKCS8 private key'; not-base64!: exit 1 'DISPATCH_APP_PEM_B64: illegal base64 data at input byte 3'; settings table 8 rows PASS",
+      "headSha": "7216dc39df77e97b74cb4cc8ae99d9b33a601ceb",
+      "negativeControl": "app.go at 83f63201 via -overlay: base binary with the plain PEM exits 1 'DISPATCH_APP_PEM_B64: illegal base64 data at input byte 0' (base64 boots); the settings rows a_plain_PEM, a_PKCS8_plain_PEM, base64_of_no_key, PEM_armour_around_garbage FAIL."
+    },
+    {
+      "criterion": "Dispatch's browser suite boots the real server from a plain PEM and drives an App-signed architecture source save and import through Ref's media type",
+      "surface": "Dispatch browser suite (Playwright Chromium, production SPA bundle) through packages/dispatch/e2e/run-server.sh against the in-pod Postgres",
+      "command": "cd packages/dispatch && PLAYWRIGHT_BROWSERS_PATH=$TMPDIR/pw-browsers DATABASE_URL='postgres://postgres@127.0.0.1:5439/dispatch_e2e?sslmode=disable' bunx playwright test --config e2e/playwright.config.ts architecture.e2e.ts settings.e2e.ts --project chromium --reporter=line",
+      "observed": "16 passed (1.1m); the server logged 'dispatch: loaded github app ... source=env' from run-server.sh's plain PEM",
+      "headSha": "7216dc39df77e97b74cb4cc8ae99d9b33a601ceb",
+      "negativeControl": "round 1 at bf2c8c89 (non-test code unchanged since in the files this PR touches): with app.go restored to 83f63201 the web server exits at boot 'DISPATCH_APP_PEM_B64: illegal base64 data at input byte 0' and Playwright reports 'Process from config.webServer was not able to start. Exit code: 1'."
+    },
+    {
+      "criterion": "No regression in the importer and API that consume the migrated fakes, on the merged tree",
+      "surface": "Postgres-backed Go suites against the in-pod Postgres (dispatch_test)",
+      "command": "cd packages/envoy && go test -count=1 -timeout 50m -v ./internal/dispatch/architecture/ ./internal/dispatch/githubapp/ ./internal/dispatch/auth/ ./cmd/dispatch/ ; go test -count=1 -v -run 'Architecture|IssueComponents|Source' ./internal/dispatch/api/",
+      "observed": "ok for all five packages; only SKIP is TestRealGitHubRefReadsALargeHead (no env in that run); the fake-consuming tests PASS",
+      "headSha": "7216dc39df77e97b74cb4cc8ae99d9b33a601ceb",
+      "negativeControl": "without DISPATCH_TEST_DATABASE_URL those tests SKIP and prove nothing; this run shows them PASS, none SKIP."
+    }
+  ],
+  "filesChanged": [
+    "packages/envoy/internal/dispatch/githubapp/client.go (Ref doc comment only, this round)",
+    "packages/envoy/internal/dispatch/githubapp/client_test.go",
+    "packages/envoy/CHANGELOG.md (merge resolutions)",
+    "docs/solutions/github-api/a-capped-github-read-asks-for-the-smallest-media-type-validates-the-answer-and-every-fake-answers-by-accept-INFRA-390.md"
+  ],
+  "trickyParts": [
+    "main moved during the round; the second forward merge was needed minutes after the first. Read GitHub's mergeable state after the push, not only before.",
+    "Proof rig unchanged from round 1: $TMPDIR/rig390/env.sh, Postgres on 127.0.0.1:5439, scripts $TMPDIR/infra390/proofs.sh and boot-proof.sh, overlays under $TMPDIR/infra390/negctl, negkey and $TMPDIR/infra390-mut."
+  ],
+  "deviations": [
+    "No second ce-simplify-code pass: pr-body.md runs it once per pull request, in the first implementing round."
+  ],
+  "openQuestions": []
+}
