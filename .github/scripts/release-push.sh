@@ -4,8 +4,8 @@
 # The workflows split each release into a build job, which runs the
 # dependencies' code and holds no credential, and a publish job, which holds
 # the credentials and runs no dependency code. `version` and `no-credential`
-# are the build job's; `tag`, `release`, `push-main` and `push-tag` the
-# publish job's; `tagged` and `handed` serve both.
+# are the build job's; `tag`, `release`, `restart`, `push-main` and `push-tag`
+# the publish job's; `tagged` and `handed` serve both.
 #
 # version:   the one version step every build job calls: print the release
 #            this checkout gets, as the three lines `version=`, `tag=` and
@@ -22,10 +22,36 @@
 #            `empty` (no commit in the paths) and `none` (no version-bumping
 #            commit: a ::notice and a job-summary line) both give skip=true.
 #            --expect <X.Y.Z> is for a publish job checking what its build job
-#            handed it: when the tags now give another version, or nothing to
-#            release, another run took the tag first, and the error says to
-#            re-run the whole run. Every log line, notice and error goes to
-#            stderr, so stdout is the three lines or, on any failure, nothing.
+#            handed it. When the tags now give another version, or nothing to
+#            release, another run took the tag first: a ::notice says so, and
+#            the command exits 3 when nothing of this checkout is left to
+#            release (the tags give nothing to release, or another run tagged
+#            this checkout itself) or 4 when the tags give a version for
+#            commits no release holds yet, which a new run must build. No other
+#            outcome exits 3 or 4. Every log line, notice and error goes to
+#            stderr, so stdout holds the three lines on exit 0 and nothing
+#            otherwise.
+# restart:   what a publish job runs when `version --expect` exited 4: see to
+#            it that a run of <workflow-file> on this run's branch
+#            ($GITHUB_REF_NAME, which is main for every publish job) releases
+#            this checkout, with $GH_TOKEN for gh. The branch is fetched right
+#            after the runs are listed, so every listed run's commit is here. A
+#            run of the workflow on the branch with a higher run number than
+#            $GITHUB_RUN_NUMBER, not finished, whose commit holds HEAD, is
+#            left to release it: it publishes a release holding HEAD, loses in
+#            turn and runs this itself, or fails where a person sees it. A
+#            ::notice names it and nothing is started. Only a later run counts,
+#            so two runs of one commit never each leave the release to the
+#            other. Otherwise a workflow_dispatch of <workflow-file> on the
+#            branch with lost_races=<lost-races>+1 starts a run, which decides
+#            the version again from the tags as they are then, and a ::notice
+#            names the run URL gh printed. <lost-races> is how many runs
+#            before this one each lost their version and started the next, a
+#            count from 0 to 99 (anything else exits 2, starting nothing). At 3
+#            nothing is started and the command fails with an ::error:: naming
+#            the command a person runs: each loss means another run published
+#            in between, so a chain that long means something keeps moving the
+#            tags.
 # tag:       commit the version bump and create the release tag on that
 #            un-rebased commit, so the tag always describes exactly the source
 #            the artifacts were built and published from; pushes nothing
@@ -149,7 +175,7 @@
 #            credential wired into a build job by mistake.
 set -euo pipefail
 
-command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh no-credential}
+command=${1:?usage: release-push.sh version <tag-prefix> [--package-dir <dir>] [--first-npm <npm package>] [--expect <X.Y.Z>] [--patch-path <path>]... -- <paths>... | release-push.sh restart <workflow-file> <lost-races> | release-push.sh tag <package-dir> <commit-message> <tag> | release-push.sh tagged <tag-prefix> [<package-dir>] | release-push.sh release [--notes <text>] [--upload-to-published] <tag> <title> <asset>... | release-push.sh push-main <package-dir> <version> | release-push.sh push-tag <tag> | release-push.sh handed <tag-prefix> <version> <dir> <file>... | release-push.sh no-credential}
 
 # is_plain_version <value>: true when <value> is X.Y.Z, each field a number
 # without leading zeros (release-bump.sh does arithmetic on the fields, where a
@@ -309,11 +335,11 @@ case "$command" in
       esac
     done
     # The remaining arguments are the paths release-bump.sh reads commits for.
-    summary_line=''
+    summary_line='' on_head=false
     tag=$(pushed_tag "$prefix" "$package_dir")
     if [ -n "$tag" ]; then
       version=${tag#"$prefix"}
-      skip=false
+      skip=false on_head=true
       log="Releasing $tag, already pushed for this checkout"
     else
       prev_tag=$(git for-each-ref --count=1 --sort=-v:refname --format='%(refname:strip=2)' "refs/tags/$prefix*")
@@ -329,8 +355,13 @@ case "$command" in
       fi
       # release-bump.sh refuses a previous version that is not X.Y.Z (the
       # newest tag's name is whatever its pusher chose); that failure is this
-      # command's, with nothing on stdout.
-      next=$("$(dirname "${BASH_SOURCE[0]}")/release-bump.sh" "$prev_version" "$range" "${bump_args[@]}" -- "$@")
+      # command's, with nothing on stdout. Its status passes through, except a 3
+      # or 4 (a sed it pipes into exits 4 on an I/O error), which --expect's
+      # caller would read as another run's tag: that is a 1.
+      next=$("$(dirname "${BASH_SOURCE[0]}")/release-bump.sh" "$prev_version" "$range" "${bump_args[@]}" -- "$@") || {
+        status=$?
+        case $status in 3 | 4) exit 1 ;; *) exit "$status" ;; esac
+      }
       since=${prev_tag:-the beginning}
       case $next in
         empty)
@@ -351,8 +382,18 @@ case "$command" in
     if [ -n "$expect" ]; then
       if $skip; then result='nothing to release'; else result=$version; fi
       if [ "$result" != "$expect" ]; then
-        echo "::error::release-push.sh version: the build job handed v$expect; the tags now give $result: another run took the tag first. Re-run the whole run (gh run rerun ${GITHUB_RUN_ID:-<run id>}), not only the failed jobs: the build job must compute the version again" >&2
-        exit 1
+        # The tags moved since the build job read them: another run took the
+        # tag first. The caller acts on which of the two statuses this is.
+        lead="release-push.sh version: the build job handed v$expect"
+        if $skip; then
+          echo "::notice title=Nothing left to release::$lead; the tags now give nothing to release: another run took the tag first, and nothing of this checkout is left to release" >&2
+          exit 3
+        elif $on_head; then
+          echo "::notice title=Released by another run::$lead; another run took the tag first and released this checkout as $tag" >&2
+          exit 3
+        fi
+        echo "::notice title=Version taken by another run::$lead; the tags now give $version: another run took the tag first, and this checkout holds commits no release holds yet, so a new run must compute the version again and build them" >&2
+        exit 4
       fi
     fi
     # release-bump.sh's answer is checked once more right before it goes to $GITHUB_OUTPUT.
@@ -365,6 +406,50 @@ case "$command" in
       printf '%s\n' "$summary_line" >> "$GITHUB_STEP_SUMMARY"
     fi
     printf 'version=%s\ntag=%s\nskip=%s\n' "$version" "$tag" "$skip"
+    ;;
+  restart)
+    usage='usage: release-push.sh restart <workflow-file> <lost-races>'
+    if [ $# -ne 3 ]; then
+      echo "::error::release-push.sh restart: $usage" >&2
+      exit 2
+    fi
+    workflow=$2 lost=$3
+    if [ -z "${GITHUB_REPOSITORY:-}" ] || [ -z "${GITHUB_REF_NAME:-}" ] ||
+      ! [[ ${GITHUB_RUN_NUMBER:-} =~ ^[1-9][0-9]*$ ]]; then
+      echo "::error::release-push.sh restart: needs \$GITHUB_REPOSITORY, \$GITHUB_REF_NAME and \$GITHUB_RUN_NUMBER as GitHub Actions sets them" >&2
+      exit 2
+    fi
+    branch=$GITHUB_REF_NAME
+    by_hand="gh workflow run $workflow --repo $GITHUB_REPOSITORY --ref $branch"
+    # The count goes into arithmetic below, where bash would run a[$(…)].
+    if ! [[ $lost =~ ^(0|[1-9][0-9]?)$ ]]; then
+      echo "::error title=No release run started::release-push.sh restart: lost_races $(quote_all "$lost") is not a count from 0 to 99; start a run by hand: $by_hand" >&2
+      exit 2
+    fi
+    head=$(git rev-parse HEAD)
+    # Each in a command substitution, so a gh or jq failure fails the command.
+    runs=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow "$workflow" --branch "$branch" \
+      --limit 50 --json databaseId,number,headSha,status)
+    later=$(jq -r --argjson self "$GITHUB_RUN_NUMBER" \
+      '.[] | select(.status != "completed" and .number > $self) | "\(.databaseId) \(.headSha)"' <<< "$runs")
+    # The branch is fetched after the list, so every run the list names has its commit here; a
+    # commit still missing counts as not holding HEAD, and a run is started.
+    git fetch -q origin "refs/heads/$branch"
+    while read -r id sha; do
+      [[ $id =~ ^[0-9]+$ && $sha =~ ^[0-9a-f]{40}$ ]] || continue
+      if git merge-base --is-ancestor "$head" "$sha" 2>/dev/null; then
+        echo "::notice title=No release run started::another run took this run's version first; run ${GITHUB_SERVER_URL:-https://github.com}/$GITHUB_REPOSITORY/actions/runs/$id, started later and not finished, is on $branch at $sha, which holds this commit: it releases this commit, or fails where a person sees it" >&2
+        exit 0
+      fi
+    done <<< "$later"
+    if [ "$lost" -ge 3 ]; then
+      echo "::error title=No release run started::release-push.sh restart: this run and the $lost before it each lost their version to another run; start a run by hand once releases stop landing: $by_hand" >&2
+      exit 1
+    fi
+    next=$((lost + 1))
+    # gh prints the new run's URL: gh 2.102.0 on ubuntu-24.04 did on 2026-10-25.
+    started=$(gh workflow run "$workflow" --repo "$GITHUB_REPOSITORY" --ref "$branch" -f "lost_races=$next")
+    echo "::notice title=Release run started::another run took this run's version first, so a new run on $branch, ${started:-the newest run of $workflow}, releases this commit (lost_races $next)" >&2
     ;;
   release)
     shift
