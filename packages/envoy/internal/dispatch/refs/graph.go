@@ -43,9 +43,94 @@ type Query struct {
 // opens read the same exclusion.
 var AskBacklinkExclusions = []string{"replies_to"}
 
+// inboundArm is one arm of graph_edges whose to side can be a given node kind: the edge kind
+// the arm emits, and the SQL listing the arm's to_id for each id of $1. Each arm reads the
+// index named beside it, which is why BacklinkCounts reads the arms rather than the view: every
+// arm of graph_edges computes the address it compares (`k.id::text`, `project_key || '/' || id`,
+// an artifact's ref_key through a join), so a `to_id = any(...)` predicate over the view is a
+// filter on each arm rather than an index condition, and the view costs every reader a plan over
+// all fifteen arms however few of them its node kind can have.
+type inboundArm struct {
+	kind string
+	sql  string
+}
+
+// mentionsArm is the arm every node kind has: the edges derived from text, which refs stores
+// addressed exactly as the view reads them. Index refs_to (to_kind, to_id).
+const mentionsArm = `select to_id from refs where to_kind = $2 and to_id = any($1)`
+
+// inboundArms is, per node kind, every structural arm of graph_edges whose to side is that
+// kind, read off the view's own definition (migration 0094, which re-states 0038's arms). A
+// node kind absent from the map is refused rather than counted low, so an arm added to the view
+// for a new kind fails loudly here; store's equivalence test compares every kind's count with
+// the view's.
+//
+// Each arm selects only the address it is keyed on, so the joins the view makes for an edge's
+// created_at are left out: components.snapshot_id, component_depends' two component keys and
+// issue_component_members.issue_key are each a not-null foreign key to a primary key, which
+// neither drops a row nor doubles one.
+var inboundArms = map[string][]inboundArm{
+	"issue": {
+		// Index issues_parent_key, partial on parent_key is not null.
+		{"child_of", `select parent_key as to_id from issues where parent_key is not null and parent_key = any($1)`},
+		// Index issue_links_target (target_key, kind).
+		{"blocked_by", `select target_key as to_id from issue_links where kind = 'blocked_by' and target_key = any($1)`},
+		// Index artifacts_issue_key, partial on issue_key is not null.
+		{"attached_to", `select issue_key as to_id from artifacts where issue_key is not null and issue_key = any($1)`},
+	},
+	"artifact": {
+		// An ask's block or anchor artifact. Indexes artifacts_ref_key_key, asks_anchor_artifact.
+		{"anchored_to", `select a.ref_key as to_id from artifacts a
+			join asks k on coalesce(k.block_artifact_id, (k.anchor->>'artifact_id')::uuid) = a.id
+			where a.ref_key = any($1)`},
+		// A comment's anchor artifact. Indexes artifacts_ref_key_key, comments_anchor_artifact.
+		{"anchored_to", `select a.ref_key as to_id from artifacts a
+			join comments c on (c.anchor->>'artifact_id')::uuid = a.id
+			where a.ref_key = any($1)`},
+		// A project document's own asks. Indexes artifacts_ref_key_key, asks_artifact_id.
+		{"owned_by", `select a.ref_key as to_id from artifacts a
+			join asks k on k.artifact_id = a.id
+			where a.ref_key = any($1)`},
+		// A project document's own comments. Indexes artifacts_ref_key_key, comments_artifact_id.
+		{"owned_by", `select a.ref_key as to_id from artifacts a
+			join comments c on c.artifact_id = a.id
+			where a.ref_key = any($1)`},
+	},
+	"ask": {
+		// The ask's clarification thread. Index comments_ask_id_text.
+		{"replies_to", `select ask_id::text as to_id from comments where ask_id is not null and ask_id::text = any($1)`},
+	},
+	"comment": {
+		// A comment's replies. Index comments_reply_to_text.
+		{"replies_to", `select reply_to::text as to_id from comments where reply_to is not null and reply_to::text = any($1)`},
+	},
+	"message": {
+		// A message's replies. Index messages_in_reply_to_text.
+		{"replies_to", `select in_reply_to::text as to_id from messages where in_reply_to is not null and in_reply_to::text = any($1)`},
+	},
+	"session": {
+		// The asks a session follows. Index ask_followers_session_id (migration 0116).
+		{"followed_by", `select session_id as to_id from ask_followers where session_id = any($1)`},
+	},
+	"component": {
+		// A component's children. Index components_parent_node.
+		{"part_of", `select project_key || '/' || parent as to_id from components
+			where parent is not null and project_key || '/' || parent = any($1)`},
+		// The components that depend on it. Index component_depends_to_node.
+		{"depends_on", `select project_key || '/' || to_id as to_id from component_depends
+			where project_key || '/' || to_id = any($1)`},
+		// The issues that name it explicitly. Index issue_component_members_node.
+		{"affects", `select project_key || '/' || component_id as to_id from issue_component_members
+			where project_key || '/' || component_id = any($1)`},
+	},
+}
+
 // BacklinkCounts is how many edges point at each of ids, in one grouped query: the number a
 // list carries beside a row, counted the same way the rows behind it are listed. A node with no
-// inbound edge is absent from the result; the caller decides what zero means.
+// inbound edge is absent from the result; the caller decides what zero means. It unions the
+// arms of graph_edges that can point at toKind, each read through its own index, rather than
+// the view, which no index can serve; the counts are the view's, which store's equivalence test
+// holds it to.
 func BacklinkCounts(
 	ctx context.Context,
 	q Queryer,
@@ -57,13 +142,25 @@ func BacklinkCounts(
 	if len(ids) == 0 {
 		return counts, nil
 	}
-	sql := `select to_id, count(*)::int from graph_edges where to_kind = $1 and to_id = any($2)`
-	args := []any{toKind, ids}
+	arms, addressable := inboundArms[toKind]
+	if !addressable {
+		return nil, fmt.Errorf("count %s backlinks: graph node kind %q is not addressable", toKind, toKind)
+	}
+	args := []any{ids, toKind}
+	mentions := mentionsArm
 	if len(excludeKinds) > 0 {
 		args = append(args, excludeKinds)
-		sql += " and not (kind = any($3))"
+		mentions += ` and not (kind = any($3))`
 	}
-	rows, err := q.Query(ctx, sql+" group by to_id", args...)
+	parts := []string{mentions}
+	for _, arm := range arms {
+		if slices.Contains(excludeKinds, arm.kind) {
+			continue
+		}
+		parts = append(parts, arm.sql)
+	}
+	sql := `select to_id, count(*)::int from (` + strings.Join(parts, " union all ") + `) edge group by to_id`
+	rows, err := q.Query(ctx, sql, args...)
 	if err != nil {
 		return nil, fmt.Errorf("count %s backlinks: %w", toKind, err)
 	}

@@ -663,6 +663,14 @@ image and confirms the stop before it reads the schema, and when the schema has 
 the previous image runs against, it refuses to start that image again and exits `1` for a forward
 recovery.
 
+Migration `0116_ask_followers_session` adds the index `ask_followers_session_id` on
+`ask_followers (session_id)`, the one inbound arm of `graph_edges` that had none: the table's primary
+key leads with `ask_id`. `refs.BacklinkCounts` counts a node's inbound edges by reading the view's
+arms that can point at its kind, each through its own index, rather than the view. `create index`
+holds `SHARE` on `ask_followers` while it builds, which waits out an open write of a follower and
+holds off a new one for that moment; reads are not held. The table holds about 1,200 rows. Its
+census answers `0`.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success

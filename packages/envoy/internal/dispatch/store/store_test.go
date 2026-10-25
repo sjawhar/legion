@@ -201,6 +201,7 @@ func TestMigrateCreatesEmptySchemaAndIsIdempotent(t *testing.T) {
 		"asks_anchor_artifact",
 		"comments_anchor_artifact",
 		"ask_followers_ask_id_text",
+		"ask_followers_session_id",
 		"events_ask_answered_by_user",
 		"comments_ask_replies_by_user",
 	}
