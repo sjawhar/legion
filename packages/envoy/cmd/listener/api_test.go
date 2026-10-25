@@ -119,7 +119,7 @@ func TestSendHandler_StampsSenderAndReturnsRecipient(t *testing.T) {
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(string(requestBody)))
 
-	sendHandler(state).ServeHTTP(recorder, request)
+	sendHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("send status = %d, body = %s", recorder.Code, recorder.Body.String())
@@ -177,7 +177,7 @@ func TestDispatchClientSendUsesListenerWireContract(t *testing.T) {
 	state := &listenerDeps{client: publisher, registry: registry, sessions: sessions}
 
 	var wire string
-	handler := sendHandler(state)
+	handler := sendHandler(state, logging.New("test"))
 	listener := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, err := io.ReadAll(r.Body)
 		if err != nil {
@@ -242,7 +242,7 @@ func TestSendHandlerRefusesTargetThatDoesNotAdvertiseFrameMode(t *testing.T) {
 		t.Fatalf("register target session: %v", err)
 	}
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
-	handler := sendHandler(state)
+	handler := sendHandler(state, logging.New("test"))
 	steerFrame := `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"steer"}}`
 
 	for name, requestJSON := range map[string]string{
@@ -294,7 +294,7 @@ func TestSendHandlerAllowsAdvertisedFrameModeAndUntaggedSends(t *testing.T) {
 		t.Fatalf("register target session: %v", err)
 	}
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
-	handler := sendHandler(state)
+	handler := sendHandler(state, logging.New("test"))
 	btwFrame := `{"event":{"id":0,"issue_key":"CORE-1"},"delivery":{"attempt":1,"mode":"btw"}}`
 
 	for name, requestJSON := range map[string]string{
@@ -346,7 +346,7 @@ func TestSendHandlerRefusesUnreadableOrAmbiguousDeliveryFrames(t *testing.T) {
 		t.Fatalf("register target session: %v", err)
 	}
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
-	handler := sendHandler(state)
+	handler := sendHandler(state, logging.New("test"))
 
 	for name, payload := range map[string]string{
 		"delivery present with no mode key at all":  `{"delivery":{}}`,
@@ -405,7 +405,7 @@ func TestSendHandlerRefusesAModeThatIsNotADeliveryMode(t *testing.T) {
 		`{"target_session":"ses_target","message":"Can this ship?","payload":%s}`,
 		mustJSONString(t, `{"delivery":{"attempt":1,"mode":"agentstream"}}`),
 	)
-	sendHandler(state).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(requestJSON)))
+	sendHandler(state, logging.New("test")).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(requestJSON)))
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (body: %s)", rr.Code, rr.Body.String())
@@ -446,7 +446,7 @@ func TestSendHandlerRefusesUnadvertisedModeFromDerivedPayload(t *testing.T) {
 		`{"target_session":"ses_target","source":"dispatch","message":%s}`,
 		mustJSONString(t, string(frame)),
 	)
-	sendHandler(state).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(request)))
+	sendHandler(state, logging.New("test")).ServeHTTP(rr, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(request)))
 
 	if rr.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (body: %s)", rr.Code, rr.Body.String())
@@ -476,7 +476,7 @@ func TestDispatchClientSendFrameModeIsGuardedEndToEnd(t *testing.T) {
 		t.Fatalf("register target session: %v", err)
 	}
 	state := &listenerDeps{client: publisher, registry: registry, sessions: sessions}
-	handler := sendHandler(state)
+	handler := sendHandler(state, logging.New("test"))
 	payloadBytes, err := os.ReadFile("../../../contracts/fixtures/dispatch-targeted-delivery.json")
 	if err != nil {
 		t.Fatalf("read targeted delivery fixture: %v", err)
@@ -538,9 +538,9 @@ func TestMessageHandlersRejectInvalidEnums(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 			if tc.path == "/v1/messages/send" {
-				sendHandler(state).ServeHTTP(recorder, request)
+				sendHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 			} else {
-				publishHandler(state).ServeHTTP(recorder, request)
+				publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 			}
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
@@ -585,9 +585,9 @@ func TestMessageHandlersRejectBlankMessage(t *testing.T) {
 			recorder := httptest.NewRecorder()
 			request := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 			if tc.path == "/v1/messages/send" {
-				sendHandler(state).ServeHTTP(recorder, request)
+				sendHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 			} else {
-				publishHandler(state).ServeHTTP(recorder, request)
+				publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 			}
 
 			if recorder.Code != http.StatusBadRequest {
@@ -624,7 +624,7 @@ func TestRoleHolderNotFoundResponsesIdentifyState(t *testing.T) {
 				)
 			},
 			handler: func(d *listenerDeps) http.Handler {
-				return publishHandler(d)
+				return publishHandler(d, logging.New("test"))
 			},
 		},
 		{
@@ -1074,7 +1074,7 @@ func TestPublishHandler_ReportsRoleHolderOnlyWhenLive(t *testing.T) {
 		t.Fatalf("set holder: %v", err)
 	}
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
-	handler := publishHandler(state)
+	handler := publishHandler(state, logging.New("test"))
 
 	t.Run("unheld role returns 404 without publishing", func(t *testing.T) {
 		roleProbe, err := client.Conn.SubscribeSync("notifications.role.unheld")
@@ -1828,7 +1828,7 @@ func TestSendHandler_StampsInterestSenderWithoutSessionEntry(t *testing.T) {
 		"target_session":"ses_target",
 		"message":"review this"
 	}`))
-	sendHandler(state).ServeHTTP(recorder, request)
+	sendHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
@@ -1862,7 +1862,7 @@ func TestPublishHandler_SuppliedPayloadWins(t *testing.T) {
 	}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(string(requestBody)))
-	publishHandler(state).ServeHTTP(recorder, request)
+	publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
@@ -1880,7 +1880,7 @@ func TestPublishHandlerPreservesAllOptionalMessageFields(t *testing.T) {
 	client := setupPublishTestClient(t)
 	state := &listenerDeps{client: client}
 	recorder := httptest.NewRecorder()
-	publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(
+	publishHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(
 		http.MethodPost,
 		"/v1/messages/publish",
 		strings.NewReader(`{
@@ -1920,10 +1920,10 @@ func TestMessageHandlersAnswerAMessageNATSCannotTakeWholeWith413(t *testing.T) {
 		handler http.Handler
 		body    map[string]string
 	}{
-		{"/v1/messages/publish", publishHandler(state), map[string]string{
+		{"/v1/messages/publish", publishHandler(state, logging.New("test")), map[string]string{
 			"topic": "notifications.github.example-org.example-repo.pr.1", "message": message,
 		}},
-		{"/v1/messages/send", sendHandler(state), map[string]string{"target_session": "ses_target", "message": message}},
+		{"/v1/messages/send", sendHandler(state, logging.New("test")), map[string]string{"target_session": "ses_target", "message": message}},
 	} {
 		t.Run(tc.path, func(t *testing.T) {
 			body, err := json.Marshal(tc.body)
@@ -2030,7 +2030,7 @@ func TestPublishHandler_DedupeKeySelection(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			recorder := httptest.NewRecorder()
-			publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(tc.body)))
+			publishHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(tc.body)))
 			if recorder.Code != http.StatusOK {
 				t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 			}
@@ -2069,7 +2069,7 @@ func TestPublishHandler_RejectsDedupeKeyWithIdempotencyKey(t *testing.T) {
 		t.Fatalf("flush: %v", err)
 	}
 	recorder := httptest.NewRecorder()
-	publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
+	publishHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
 	if recorder.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -2107,7 +2107,7 @@ func TestPublishHandler_RejectsReservedDedupeKeyPrefix(t *testing.T) {
 				t.Fatalf("flush: %v", err)
 			}
 			recorder := httptest.NewRecorder()
-			publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"`+roleForwardDedupePrefix+`publish.abc"}`)))
+			publishHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello","dedupe_key":"`+roleForwardDedupePrefix+`publish.abc"}`)))
 			if recorder.Code != http.StatusBadRequest {
 				t.Fatalf("status = %d, want 400; body = %s", recorder.Code, recorder.Body.String())
 			}
@@ -2142,7 +2142,7 @@ func TestPublishHandler_RefusesAChosenKeyOnADispatchEnvelope(t *testing.T) {
 	}
 	publish := func(body string) *httptest.ResponseRecorder {
 		recorder := httptest.NewRecorder()
-		publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(body)))
+		publishHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(body)))
 		return recorder
 	}
 
@@ -2182,7 +2182,7 @@ func TestSendHandler_IgnoresDedupeKeyBesideIdempotencyKey(t *testing.T) {
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"ses_target": 1})
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
 	recorder := httptest.NewRecorder()
-	sendHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{"target_session":"ses_target","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
+	sendHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(`{"target_session":"ses_target","message":"hello","dedupe_key":"publish.abc","idempotency_key":"k1"}`)))
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200; body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -2232,7 +2232,7 @@ func TestSendHandler_ReportsAJetStreamDuplicate(t *testing.T) {
 	send := func(t *testing.T, body string) sendResponse {
 		t.Helper()
 		recorder := httptest.NewRecorder()
-		sendHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(body)))
+		sendHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/send", strings.NewReader(body)))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("status = %d, body = %s", recorder.Code, recorder.Body.String())
 		}
@@ -2296,9 +2296,9 @@ func TestMessageHandlersRejectPresentEmptyOptionalFields(t *testing.T) {
 			rr := httptest.NewRecorder()
 			req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 			if tc.path == "/v1/messages/send" {
-				sendHandler(deps).ServeHTTP(rr, req)
+				sendHandler(deps, logging.New("test")).ServeHTTP(rr, req)
 			} else {
-				publishHandler(deps).ServeHTTP(rr, req)
+				publishHandler(deps, logging.New("test")).ServeHTTP(rr, req)
 			}
 			var response apiError
 			_ = json.NewDecoder(rr.Body).Decode(&response)
@@ -2320,9 +2320,9 @@ func TestMessageHandlersUseFirstNonEmptyLine(t *testing.T) {
 		rr := httptest.NewRecorder()
 		req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(tc.body))
 		if tc.path == "/v1/messages/send" {
-			sendHandler(state).ServeHTTP(rr, req)
+			sendHandler(state, logging.New("test")).ServeHTTP(rr, req)
 		} else {
-			publishHandler(state).ServeHTTP(rr, req)
+			publishHandler(state, logging.New("test")).ServeHTTP(rr, req)
 		}
 		var envelope contracts.Envelope
 		_ = json.NewDecoder(rr.Body).Decode(&envelope)

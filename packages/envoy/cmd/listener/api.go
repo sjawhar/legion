@@ -231,16 +231,18 @@ func writeJSONError(w http.ResponseWriter, status int, message string, expected 
 // take whole, or a session id or role whose KV key would make a subject too long (bus.ErrTooLarge),
 // is a 413, and any other refusal, a topic or key NATS does not accept in a subject
 // (bus.ErrInvalidSubject) or a key outside nats.go's key alphabet (bus.ErrInvalidKey: `ses:bad`), a
-// 400. Any other failure is status with message.
-func writeNATSError(w http.ResponseWriter, err error, status int, message string) {
+// 400. Any other failure is status with message. It returns the status it wrote: a caller that
+// also records the answer (requestRecord below) reads this one classification back instead of
+// repeating it, so no record can disagree with the response that was sent.
+func writeNATSError(w http.ResponseWriter, err error, status int, message string) int {
 	switch {
 	case errors.Is(err, bus.ErrTooLarge):
-		writeJSONError(w, http.StatusRequestEntityTooLarge, err.Error())
+		status, message = http.StatusRequestEntityTooLarge, err.Error()
 	case errors.Is(err, bus.ErrRefused):
-		writeJSONError(w, http.StatusBadRequest, err.Error())
-	default:
-		writeJSONError(w, status, message)
+		status, message = http.StatusBadRequest, err.Error()
 	}
+	writeJSONError(w, status, message)
+	return status
 }
 
 // busUnansweredPrefix opens the body of every answer this listener gives a request the message bus
@@ -255,12 +257,13 @@ const busUnansweredPrefix = "envoy: the message bus did not answer"
 // where retrying can help: bus.ErrTooLarge and bus.ErrInvalidSubject both satisfy
 // errors.Is(err, bus.ErrRefused) - a refusal NATS repeats however often the same bytes are sent -
 // and writeNATSError answers those as the 413 and the 400 they are, so this one guard keeps the
-// header off exactly those two and off nothing else.
-func writeBusUnavailable(w http.ResponseWriter, err error) {
+// header off exactly those two and off nothing else. The status writeNATSError settled on is
+// passed back for the record's sake, as that function's own comment explains.
+func writeBusUnavailable(w http.ResponseWriter, err error) int {
 	if !errors.Is(err, bus.ErrRefused) {
 		w.Header().Set("Retry-After", "1")
 	}
-	writeNATSError(w, err, http.StatusServiceUnavailable, fmt.Sprintf("%s: %s", busUnansweredPrefix, err))
+	return writeNATSError(w, err, http.StatusServiceUnavailable, fmt.Sprintf("%s: %s", busUnansweredPrefix, err))
 }
 
 func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderResult) {
@@ -304,6 +307,126 @@ func writeRoleHolderError(w http.ResponseWriter, role string, result roleHolderR
 		}
 	}
 	writeJSON(w, http.StatusNotFound, response)
+}
+
+// requestOutcome is what became of one inbound send or publish, in the fixed vocabulary those two
+// records are read with: an operator's log filter matches these strings, so a route gets one word
+// per answer and never a second spelling of the same one.
+type requestOutcome string
+
+const (
+	outcomeAccepted       requestOutcome = "accepted"
+	outcomeInvalidRequest requestOutcome = "invalid_request"
+	outcomeTooLarge       requestOutcome = "too_large"
+	outcomeBusUnavailable requestOutcome = "bus_unavailable"
+	// outcomeNoLiveSession and outcomeCapabilityRefused belong to the send route alone: the store
+	// said the target's key is gone, or the target is live but will not take this delivery mode.
+	outcomeNoLiveSession     requestOutcome = "no_live_session"
+	outcomeCapabilityRefused requestOutcome = "capability_refused"
+	// outcomeRoleUnclaimed and outcomeRoleLapsed belong to the publish route alone. Both answer
+	// 404 and neither is outcomeNoLiveSession: the request named a role, not a session, and the
+	// two say different things about the claim behind it.
+	outcomeRoleUnclaimed requestOutcome = "role_unclaimed"
+	outcomeRoleLapsed    requestOutcome = "role_lapsed"
+)
+
+// requestRecord is this listener's record of one inbound send or publish, and the only way either
+// handler answers one. Until it existed the log held what arrived from the bus and nothing of what
+// was asked of this listener, so a send that timed out left no server-side trace at all and "never
+// attempted", "attempted and lost" and "attempted and refused" could not be told apart afterwards.
+// A request refused before it reaches the bus is the one message no other system holds -- nothing
+// was published, so no "listener received" line (delivery.go) and no stream entry will ever name
+// it -- which is why the record carries the same short payload summary that arrival line carries:
+// the message stays identifiable from this one line.
+//
+// Every return path of sendHandler and publishHandler answers through one of the methods below,
+// which write the response and the record together. A status answered with no record, or a record
+// whose outcome has drifted from the status actually written, is therefore not expressible.
+//
+// Two refusals are deliberately outside this record, because neither reaches a handler: a request
+// the API auth wrapper refuses with 401 before the route is entered (apiauth.go), and a caller the
+// starting gate turns away while the routes are still opening, which writes its own "request
+// refused while starting" line (main.go).
+type requestRecord struct {
+	logger *logging.Logger
+	// line is the record's message, "listener send" or "listener publish", and laneKey the name
+	// of the destination field that route is addressed by, "target_session" or "topic". lane is
+	// that destination, empty until the body has been decoded far enough to know it.
+	line    string
+	laneKey string
+	lane    string
+	// item is the envelope the handler built, taken by pointer rather than copied, and nil on a
+	// request refused before the envelope exists (an undecodable body): that request still gets
+	// its line, with the envelope's four fields empty rather than no line at all.
+	item   *contracts.Envelope
+	holder string
+}
+
+// accept writes the handler's 200 and records the request as accepted.
+func (rec *requestRecord) accept(w http.ResponseWriter, value interface{}) {
+	writeJSON(w, http.StatusOK, value)
+	rec.write(http.StatusOK, outcomeAccepted)
+}
+
+// refuse writes exactly the named refusal writeJSONError writes, and records it under outcome.
+func (rec *requestRecord) refuse(w http.ResponseWriter, status int, outcome requestOutcome, message string, expected ...string) {
+	writeJSONError(w, status, message, expected...)
+	rec.write(status, outcome)
+}
+
+// refuseBusUnavailable answers a bus that did not serve the request and records the outcome the
+// status it wrote implies: 413 is the caller's own oversized message, 400 the subject or key NATS
+// will not take however often it is sent, and anything else the bus not answering. The status is
+// read back from the write rather than classified a second time here, so the pair cannot drift.
+func (rec *requestRecord) refuseBusUnavailable(w http.ResponseWriter, err error) {
+	status := writeBusUnavailable(w, err)
+	outcome := outcomeBusUnavailable
+	switch status {
+	case http.StatusRequestEntityTooLarge:
+		outcome = outcomeTooLarge
+	case http.StatusBadRequest:
+		outcome = outcomeInvalidRequest
+	}
+	rec.write(status, outcome)
+}
+
+// refuseRoleHolder answers the publish route's two role-holder refusals. A lapsed holder is the
+// session the claim named, which the answer's own body names as well, so the record carries it;
+// an unclaimed role has no holder to carry.
+func (rec *requestRecord) refuseRoleHolder(w http.ResponseWriter, role string, result roleHolderResult) {
+	writeRoleHolderError(w, role, result)
+	outcome := outcomeRoleUnclaimed
+	if result.state == roleHolderLapsed {
+		outcome = outcomeRoleLapsed
+	}
+	rec.holder = result.holder
+	rec.write(http.StatusNotFound, outcome)
+}
+
+// write emits the one line, INFO for a request this listener took and WARN for one it refused.
+func (rec *requestRecord) write(status int, outcome requestOutcome) {
+	var eventID, source, sourceSession, payloadSummary string
+	if rec.item != nil {
+		eventID, source = rec.item.EventID, rec.item.Source
+		sourceSession, payloadSummary = rec.item.SourceSession, rec.item.PayloadSummary
+	}
+	attrs := make([]slog.Attr, 0, 8)
+	attrs = append(attrs,
+		slog.String(rec.laneKey, rec.lane),
+		slog.String("event_id", eventID),
+		slog.String("source", source),
+		slog.String("source_session", sourceSession),
+		slog.String("payload_summary", payloadSummary),
+		slog.String("outcome", string(outcome)),
+		slog.Int("status", status))
+	if rec.holder != "" {
+		attrs = append(attrs, slog.String("holder", rec.holder))
+	}
+	level := slog.LevelWarn
+	if outcome == outcomeAccepted {
+		level = slog.LevelInfo
+	}
+	rec.logger.LogEvent(level, rec.line, attrs...)
 }
 
 func validateMessageBody(body messageBody) (string, string) {
@@ -522,11 +645,13 @@ const sendSessionReadTimeout = 1 * time.Second
 // sendHandler publishes a direct message only while the session store itself, not merely this
 // listener's cache of it, holds the target's entry: a 404 here is a sender's cue to route around
 // the pane, so only the store's word that the key is gone earns one, and a store or a bus that did
-// not answer earns the 503 that asks the sender to try the same route again.
-func sendHandler(d *listenerDeps) http.HandlerFunc {
+// not answer earns the 503 that asks the sender to try the same route again. Every one of those
+// answers is written through record, so this route's one line per request is written with it.
+func sendHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		record := &requestRecord{logger: logger, line: "listener send", laneKey: "target_session"}
 		if r.Method != http.MethodPost {
-			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			record.refuse(w, http.StatusMethodNotAllowed, outcomeInvalidRequest, "method not allowed")
 			return
 		}
 		// Every bus read and the publish below share one deadline derived from the caller's own, so
@@ -541,21 +666,22 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 			TargetSession string `json:"target_session"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid json")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "invalid json")
 			return
 		}
 		body = request.messageBody
 		targetSession = strings.TrimSpace(request.TargetSession)
+		record.lane = targetSession
 		if targetSession == "" {
-			writeJSONError(w, http.StatusBadRequest, "target_session is required", "target_session")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "target_session is required", "target_session")
 			return
 		}
 		if strings.TrimSpace(body.Message) == "" {
-			writeJSONError(w, http.StatusBadRequest, "message is required", "message")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "message is required", "message")
 			return
 		}
 		if message, field := validateMessageBody(body); message != "" {
-			writeJSONError(w, http.StatusBadRequest, message, field)
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, message, field)
 			return
 		}
 		dedupeKey := "agent." + targetSession + "." + id.New()
@@ -563,8 +689,9 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 			dedupeKey = "agent." + targetSession + "." + body.IdempotencyKey
 		}
 		item := messageEnvelope(body, contracts.AgentSubject(targetSession), dedupeKey)
+		record.item = &item
 		if err := item.Validate(); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, err.Error())
 			return
 		}
 		// The cache alone cannot say a session is gone: it trails the bucket it follows, and is
@@ -574,11 +701,11 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 		// that did not answer is the 503 below, which asks it to try again instead.
 		target, err := liveSessionEntry(ctx, d.sessions, targetSession, sendSessionReadTimeout, registered)
 		if errors.Is(err, nats.ErrKeyNotFound) {
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("no live session %s", targetSession))
+			record.refuse(w, http.StatusNotFound, outcomeNoLiveSession, fmt.Sprintf("no live session %s", targetSession))
 			return
 		}
 		if err != nil {
-			writeBusUnavailable(w, err)
+			record.refuseBusUnavailable(w, err)
 			return
 		}
 		var itemPayload *string
@@ -587,13 +714,13 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 		}
 		mode, deliveryErr := frameDeliveryMode(itemPayload)
 		if deliveryErr != nil {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf(
+			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, fmt.Sprintf(
 				"session %s (%s) sent a delivery mode that cannot be read unambiguously", targetSession, target.Title,
 			))
 			return
 		}
 		if mode != "" && !hasCapability(target.Capabilities, mode) {
-			writeJSONError(w, http.StatusForbidden, fmt.Sprintf(
+			record.refuse(w, http.StatusForbidden, outcomeCapabilityRefused, fmt.Sprintf(
 				"session %s (%s) does not advertise %s", targetSession, target.Title, mode,
 			))
 			return
@@ -601,10 +728,10 @@ func sendHandler(d *listenerDeps) http.HandlerFunc {
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
 		duplicate, err := d.client.PublishReportingDuplicateWithin(ctx, item)
 		if err != nil {
-			writeBusUnavailable(w, err)
+			record.refuseBusUnavailable(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, sendResponse{
+		record.accept(w, sendResponse{
 			Envelope: item, Recipient: targetSession, Duplicate: duplicate,
 		})
 	}
@@ -640,11 +767,13 @@ func deleteSessionHandler(sessions *session.SessionRegistry) http.HandlerFunc {
 // sequential (dispatch-<event id>), so a caller that chose one could make a
 // host drop the real event it names. Dispatch itself never needs this route's
 // key: its outbox publishes to the bus directly and its sends go through
-// /v1/messages/send, whose key is the listener's.
-func publishHandler(d *listenerDeps) http.HandlerFunc {
+// /v1/messages/send, whose key is the listener's. Like the send route, it answers through record,
+// which writes this route's one line per request with the answer.
+func publishHandler(d *listenerDeps, logger *logging.Logger) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		record := &requestRecord{logger: logger, line: "listener publish", laneKey: "topic"}
 		if r.Method != http.MethodPost {
-			writeJSONError(w, http.StatusMethodNotAllowed, "method not allowed")
+			record.refuse(w, http.StatusMethodNotAllowed, outcomeInvalidRequest, "method not allowed")
 			return
 		}
 		// The role-holder read and the publish below take the same deadline a send's do, derived
@@ -657,39 +786,42 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 			Topic string `json:"topic"`
 		}
 		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-			writeJSONError(w, http.StatusBadRequest, "invalid json")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "invalid json")
 			return
 		}
+		// The topic is recorded as the envelope will carry it, untrimmed, so a request refused for
+		// the spelling of its topic records the spelling that was refused.
+		record.lane = request.Topic
 		if strings.TrimSpace(request.Topic) == "" {
-			writeJSONError(w, http.StatusBadRequest, "topic is required", "topic")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "topic is required", "topic")
 			return
 		}
 		if strings.TrimSpace(request.Message) == "" {
-			writeJSONError(w, http.StatusBadRequest, "message is required", "message")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "message is required", "message")
 			return
 		}
 		if !strings.HasPrefix(request.Topic, bus.NotificationTopicPrefix) {
-			writeJSONError(w, http.StatusBadRequest, "topic must begin with "+bus.NotificationTopicPrefix, "topic")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "topic must begin with "+bus.NotificationTopicPrefix, "topic")
 			return
 		}
 		if strings.HasPrefix(request.Topic, contracts.AgentTopicPrefix) {
-			writeJSONError(w, http.StatusBadRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "cannot publish to agent topics; use /v1/messages/send for direct agent messages")
 			return
 		}
 		if message, field := validateMessageBody(request.messageBody); message != "" {
-			writeJSONError(w, http.StatusBadRequest, message, field)
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, message, field)
 			return
 		}
 		if request.DedupeKey != "" && request.IdempotencyKey != "" {
-			writeJSONError(w, http.StatusBadRequest, "dedupe_key and idempotency_key are mutually exclusive", "dedupe_key", "idempotency_key")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "dedupe_key and idempotency_key are mutually exclusive", "dedupe_key", "idempotency_key")
 			return
 		}
 		if strings.HasPrefix(request.DedupeKey, roleForwardDedupePrefix) {
-			writeJSONError(w, http.StatusBadRequest, "dedupe_key must not begin with the reserved prefix "+roleForwardDedupePrefix, "dedupe_key")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "dedupe_key must not begin with the reserved prefix "+roleForwardDedupePrefix, "dedupe_key")
 			return
 		}
 		if request.DedupeKey != "" && request.Source == "dispatch" {
-			writeJSONError(w, http.StatusBadRequest, "dedupe_key cannot be chosen for a dispatch envelope", "dedupe_key")
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, "dedupe_key cannot be chosen for a dispatch envelope", "dedupe_key")
 			return
 		}
 		dedupeKey := "publish." + id.New()
@@ -700,8 +832,9 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 			dedupeKey = "publish." + request.IdempotencyKey
 		}
 		item := messageEnvelope(request.messageBody, request.Topic, dedupeKey)
+		record.item = &item
 		if err := item.Validate(); err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
+			record.refuse(w, http.StatusBadRequest, outcomeInvalidRequest, err.Error())
 			return
 		}
 		result := roleHolderResult{state: roleHolderLive}
@@ -712,20 +845,23 @@ func publishHandler(d *listenerDeps) http.HandlerFunc {
 				// A role holder read that did not answer says nothing about the role: the claim is
 				// not resolved, so the caller is asked to try again rather than told the role has
 				// no live holder.
-				writeBusUnavailable(w, err)
+				record.refuseBusUnavailable(w, err)
 				return
 			}
 			if result.state != roleHolderLive {
-				writeRoleHolderError(w, role, result)
+				record.refuseRoleHolder(w, role, result)
 				return
 			}
+			// The lane resolved: the session this role topic reaches is on the record from here
+			// on, which nothing else in the line names.
+			record.holder = result.holder
 		}
 		item.Sender = senderStamp(d.registry, d.sessions, item.SourceSession)
 		if err := d.client.PublishWithin(ctx, item); err != nil {
-			writeBusUnavailable(w, err)
+			record.refuseBusUnavailable(w, err)
 			return
 		}
-		writeJSON(w, http.StatusOK, publishResponse{Envelope: item, Holder: result.holder})
+		record.accept(w, publishResponse{Envelope: item, Holder: result.holder})
 	}
 }
 
@@ -1193,8 +1329,8 @@ func registerV1Routes(v1 *http.ServeMux, d *listenerDeps, machineID string, logg
 	v1.Handle("/v1/interests/", adminInterestsHandler(d.registry))
 	v1.Handle("/v1/sessions", sessionsHandler(d.registry, d.sessions))
 	v1.Handle("/v1/sessions/", deleteSessionHandler(d.sessions))
-	v1.HandleFunc("/v1/messages/send", sendHandler(d))
-	v1.HandleFunc("/v1/messages/publish", publishHandler(d))
+	v1.HandleFunc("/v1/messages/send", sendHandler(d, logger))
+	v1.HandleFunc("/v1/messages/publish", publishHandler(d, logger))
 	v1.HandleFunc("/v1", func(w http.ResponseWriter, r *http.Request) {
 		writeJSONError(w, http.StatusNotFound, "not found")
 	})

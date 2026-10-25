@@ -219,7 +219,7 @@ func TestPublishHandler_RejectsAgentTopics(t *testing.T) {
 	// minimal non-nil deps (with nil inner fields) is enough to test the
 	// rejection path without NATS.
 	state := &listenerDeps{}
-	handler := publishHandler(state)
+	handler := publishHandler(state, logging.New("test"))
 
 	cases := []struct {
 		name       string
@@ -261,7 +261,7 @@ func TestPublishHandler_RejectsAgentTopics(t *testing.T) {
 
 func TestPublishHandler_MethodNotAllowed(t *testing.T) {
 	state := &listenerDeps{}
-	handler := publishHandler(state)
+	handler := publishHandler(state, logging.New("test"))
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(http.MethodGet, "/v1/messages/publish", nil)
@@ -276,7 +276,7 @@ func TestPublishHandler_RejectsInvalidSource(t *testing.T) {
 	// Validation runs before deps.client is used, so nil inner fields
 	// are enough for rejection-path tests.
 	state := &listenerDeps{}
-	handler := publishHandler(state)
+	handler := publishHandler(state, logging.New("test"))
 
 	rr := httptest.NewRecorder()
 	req := httptest.NewRequest(
@@ -392,7 +392,7 @@ func TestPublishHandlerDeliversAnAdHocTopicToItsSubscriber(t *testing.T) {
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"deploy complete","source_session":"ses_publisher","idempotency_key":"adhoc-1"}`))
 	request.Header.Set("Content-Type", "application/json")
 	started := time.Now()
-	publishHandler(state).ServeHTTP(recorder, request)
+	publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("publish to an ad-hoc topic: status %d, body %s", recorder.Code, recorder.Body.String())
 	}
@@ -445,7 +445,7 @@ func TestPublishHandlerRefusesATopicOutsideNotifications(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"hello"}`))
 		request.Header.Set("Content-Type", "application/json")
-		publishHandler(state).ServeHTTP(recorder, request)
+		publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 		return recorder
 	}
 
@@ -526,7 +526,7 @@ func TestPublishHandlerReturnsWithinDeadline(t *testing.T) {
 		recorder := httptest.NewRecorder()
 		request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+topic+`","message":"ping","source":"agent"}`))
 		request.Header.Set("Content-Type", "application/json")
-		publishHandler(state).ServeHTTP(recorder, request)
+		publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 		response <- recorder
 	}()
 
@@ -606,7 +606,7 @@ func TestPublishHandler_RoleLanesUseCoreNATSWithoutDurableTransit(t *testing.T) 
 	}
 
 	state := &listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions}
-	handler := publishHandler(state)
+	handler := publishHandler(state, logging.New("test"))
 	publishRole := func(topic, source string) contracts.Envelope {
 		t.Helper()
 		recorder := httptest.NewRecorder()
@@ -725,7 +725,7 @@ func TestPublishHandler_RoleFreshDeafHolderEmitsReceiptTimeout(t *testing.T) {
 	state := &listenerDeps{client: harness.client, registry: harness.registry, sessions: harness.sessions}
 	recorder := httptest.NewRecorder()
 	request := httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"deaf role event","payload":"{\"type\":\"worker-queued\"}","source":"agent"}`))
-	publishHandler(state).ServeHTTP(recorder, request)
+	publishHandler(state, logging.New("test")).ServeHTTP(recorder, request)
 	if recorder.Code != http.StatusOK {
 		t.Fatalf("publish role event: status = %d, body = %s", recorder.Code, recorder.Body.String())
 	}
@@ -794,7 +794,7 @@ func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t 
 	publish := func(what string) contracts.Envelope {
 		t.Helper()
 		recorder := httptest.NewRecorder()
-		publishHandler(state).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"re-sent role event","payload":"{\"type\":\"worker-queued\"}","source":"agent","dedupe_key":"publish.resend-1"}`)))
+		publishHandler(state, logging.New("test")).ServeHTTP(recorder, httptest.NewRequest(http.MethodPost, "/v1/messages/publish", strings.NewReader(`{"topic":"`+roleTopic+`","message":"re-sent role event","payload":"{\"type\":\"worker-queued\"}","source":"agent","dedupe_key":"publish.resend-1"}`)))
 		if recorder.Code != http.StatusOK {
 			t.Fatalf("%s: status = %d, body = %s", what, recorder.Code, recorder.Body.String())
 		}
@@ -852,7 +852,7 @@ func TestPublishHandler_ExplicitDedupeKeyForwardsAgainAfterReceiptTimeoutOnly(t 
 func TestPublishHandler_SourceFieldWithNATS(t *testing.T) {
 	client := setupPublishTestClient(t)
 	state := &listenerDeps{client: client}
-	handler := publishHandler(state)
+	handler := publishHandler(state, logging.New("test"))
 
 	cases := []struct {
 		name       string
@@ -932,7 +932,7 @@ func TestSendHandler_RejectsUnknownTarget(t *testing.T) {
 		"/v1/messages/send",
 		strings.NewReader(`{"target_session":"ses_missing","message":"hello"}`),
 	)
-	sendHandler(state).ServeHTTP(rr, req)
+	sendHandler(state, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusNotFound {
 		t.Fatalf("expected 404, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -957,7 +957,7 @@ func TestSendHandler_RejectsEmptyTargetSession(t *testing.T) {
 		"/v1/messages/send",
 		strings.NewReader(`{"target_session":"","message":"hello"}`),
 	)
-	sendHandler(state).ServeHTTP(rr, req)
+	sendHandler(state, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -985,7 +985,7 @@ func TestSendHandler_RejectsInvalidSource(t *testing.T) {
 		"/v1/messages/send",
 		strings.NewReader(`{"source":"invalid","target_session":"ses_target","message":"hello"}`),
 	)
-	sendHandler(state).ServeHTTP(rr, req)
+	sendHandler(state, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -1016,7 +1016,7 @@ func TestSendHandler_AcceptsHumanSource(t *testing.T) {
 		"/v1/messages/send",
 		strings.NewReader(`{"source":"human","target_session":"ses_target","message":"hello"}`),
 	)
-	sendHandler(state).ServeHTTP(rr, req)
+	sendHandler(state, logging.New("test")).ServeHTTP(rr, req)
 
 	if rr.Code != http.StatusOK {
 		t.Fatalf("expected 200, got %d (body: %s)", rr.Code, rr.Body.String())
@@ -1712,7 +1712,7 @@ func TestIdempotencyKey_Send(t *testing.T) {
 	client := setupPublishTestClient(t)
 	registry, sessions := setupSessionsTest(t, nil, map[string]int{"tgt1": 1})
 	state := &listenerDeps{client: client, registry: registry, sessions: sessions}
-	handler := sendHandler(state)
+	handler := sendHandler(state, logging.New("test"))
 
 	request := `{"source_session":"src1","target_session":"tgt1","message":"hello","idempotency_key":"retry-abc"}`
 	send := func() contracts.Envelope {
@@ -1744,7 +1744,7 @@ func TestIdempotencyKey_Send(t *testing.T) {
 func TestIdempotencyKey_Publish(t *testing.T) {
 	client := setupPublishTestClient(t)
 	state := &listenerDeps{client: client}
-	handler := publishHandler(state)
+	handler := publishHandler(state, logging.New("test"))
 
 	// Test: same idempotency_key produces same DedupeKey
 	rr1 := httptest.NewRecorder()
@@ -1784,7 +1784,7 @@ func TestIdempotencyKey_Publish(t *testing.T) {
 func TestIdempotencyKey_BackwardsCompat(t *testing.T) {
 	client := setupPublishTestClient(t)
 	state := &listenerDeps{client: client}
-	handler := publishHandler(state)
+	handler := publishHandler(state, logging.New("test"))
 
 	// Test: no idempotency_key produces different DedupeKeys (existing behavior)
 	rr1 := httptest.NewRecorder()
