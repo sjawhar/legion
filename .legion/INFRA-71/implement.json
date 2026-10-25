@@ -2,45 +2,35 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-71",
-  "completed": "2026-10-24T22:25:00Z",
-  "round": "generation 3, opened after the merge reopened and re-admitted this root so its live children keep an architect; no code change in this repository, and none invented",
-  "note": "This phase changes nothing in the tree. The deliverable merged at 7bf2759c6e1768cac003c18368530a731016285e and closed the issue at 2026-10-24T19:37:08Z; the plan at version 7 records that this generation has no code change here, and the architect instructed in as many words that a change to docs/kubernetes.md now would be unreviewed work on a merged deliverable. I examined whether anything is genuinely outstanding in sjawhar/legion and found nothing, which is the whole of what the proofs below establish.",
+  "completed": "2026-10-25T23:31:00Z",
+  "round": "generation 4, re-admitted 2026-10-25T23:13:11Z after a park; plan at dispatch://INFRA-71/artifact/plan-md version 11 proposes no change in sjawhar/legion",
+  "note": "This phase changes nothing in the tree, as plan v11 section 5.3 says: the implementer completes with no change and with its handoff pushed, and the daemon records that completion without advancing the issue, because this generation has no pull request (engine.go:498-501 on main, per the plan). The root then rests in implementing while dispatch://INFRA-383 finishes. This file supersedes the generation-3 implement handoff.",
   "proof": [
     {
-      "criterion": "Nothing of this generation is in the tree, and the deliverable this issue owns is on main — so there is nothing here to implement.",
-      "surface": "The issue branch and GitHub's record of the pull request.",
-      "command": "jj diff --from 'fork_point(main@origin | @)' --name-only ; gh pr view 2092 --json state,mergedAt,mergeCommit ; gh api repos/sjawhar/legion/commits/7bf2759c…/check-runs?per_page=100",
-      "observed": "The branch differs from its fork point in exactly one path, `.legion/INFRA-71/plan.json`, this generation's planner handoff; no source file of this generation exists. Pull request #2092 is `MERGED`, merged 2026-10-24T19:37:08Z at `7bf2759c6e17`, and that merge commit's own 53 check runs are every one success or skipped.",
-      "headSha": "aff5d0002957dac77aeb22392df2874417ed929c",
-      "negativeControl": "The emptiness is measured rather than assumed: the same diff command that listed nine paths in the previous generation lists one now, and it is the planner's own file. Had any code change been left in the working copy or on the branch, it would appear there."
+      "criterion": "Nothing of this generation is a product change, and the deliverable this issue owns is on main.",
+      "surface": "The issue branch after `jj git fetch`, and GitHub's record of the branch's pull requests.",
+      "command": "jj diff --from 'fork_point(main@origin | @)' --to @ --name-only ; gh pr view 2092 --repo sjawhar/legion --json state,mergedAt,mergeCommit ; gh pr list --repo sjawhar/legion --head legion/INFRA-71 --state all --json number,state  (run 2026-10-25T23:29:51Z)",
+      "observed": "The branch differs from its fork point (the merge commit 7bf2759c6e17) in exactly two paths, `.legion/INFRA-71/implement.json` and `.legion/INFRA-71/plan.json`, both phase handoffs; no source, documentation or test file. Pull request #2092 is `MERGED`, merged 2026-10-24T19:37:08Z at `7bf2759c6e1768cac003c18368530a731016285e`, and it is the only pull request ever opened from `legion/INFRA-71`, so this generation has none.",
+      "headSha": "c61745b4632bb4b4f1cedccfc7ce0eb7996f0de5",
+      "negativeControl": "The emptiness is measured, not assumed: the same diff command listed nine paths in the generation that produced #2092. A product change left on the branch or in the working copy would appear in that list, and a second pull request would appear in the `gh pr list` result."
     },
     {
-      "criterion": "The two items the pull request left open are discharged, and neither is work for this repository now.",
-      "surface": "GitHub's check runs, and the Dispatch issue the guard half moved to.",
-      "command": "gh api check-runs at the merge commit and at the last branch code head 35faab4e ; dispatch read --issue INFRA-199",
-      "observed": "The merge commit is wholly green (53 runs, none unsuccessful), which is the fact that matters for the branch's two outstanding lanes. Read precisely, and differing from what I was told: at the branch's last code head `35faab4e` the `envoy-go-race` and `dispatch` lanes still read `failure` (completed 18:09:21Z and 18:37:29Z) with no later success recorded at that head — the re-run I owed was superseded by the merge rather than completed, and the green that discharges both is the merge commit's own. dispatch://INFRA-199, which took the pinned-tool guard, is `done`.",
-      "headSha": "aff5d0002957dac77aeb22392df2874417ed929c",
-      "negativeControl": "I checked the head I was told about as well as the one that settles it, and report the difference rather than the summary: a claim that a lane 'passed on re-run' is false of that head, while 'the merge commit is green' is true and is what a reader needs. Nothing about the merged content depends on which of the two it is."
-    },
-    {
-      "criterion": "What remains of this issue is owned elsewhere, so an implementing phase here has nothing to take.",
-      "surface": "The plan document's own list, read against the issue record.",
-      "command": "the plan handoff at .legion/INFRA-71/plan.json and the record from the legion tool's read_record",
-      "observed": "The outstanding work is dispatch://INFRA-206 (the declarations a person applies, in the deployment's repository), dispatch://INFRA-221, and the production check on the merge commit, which is mine but is not this phase: the record shows one look taken, none open, and the bound wake at 2026-11-07T19:37Z. Acceptance item 4's declaration test belongs to the declarations repository. The section's known gaps are banked on dispatch://INFRA-215 and dispatch://INFRA-232.",
-      "headSha": "aff5d0002957dac77aeb22392df2874417ed929c",
-      "negativeControl": "The temptation this phase exists to refuse is to improve the merged section because a phase was started. Each candidate improvement I hold — the manifests as heredocs inside the block, the `create services` yes / `get services` no cell, the timing-dependent transcript quoted as a signature — is already filed, and writing any of them now would put unreviewed work above a merged deliverable."
+      "criterion": "What remains of this issue is owned elsewhere, so this implementing phase has nothing to take.",
+      "surface": "The issue record from the `legion` tool's `read_record`, and Dispatch's record of the last child.",
+      "command": "legion read_record INFRA-71 ; dispatch read --issue INFRA-383  (2026-10-25T23:29Z)",
+      "observed": "The record shows generation 4, phase `implementing`, design gate approved at version 33, and the production check on #2092 at merge commit 7bf2759c open with 1 look taken, `lookOpen: false`, next wake the bound 2026-11-07T19:37:10Z. dispatch://INFRA-383 (theorem-labs/agent-infra) reads Dispatch status `todo`, unclaimed, with no pull request linked; its work is its own implementer's under this tree's architect, not this phase's.",
+      "headSha": "c61745b4632bb4b4f1cedccfc7ce0eb7996f0de5",
+      "negativeControl": "Had the check had a look open, the record would show `lookOpen: true` and that look would be work for this session now; it shows false, so the check is not this phase's to run. Plan v11 section 4 explains why no look can start while the root is in the workflow (check.go:391-406 on main)."
     }
   ],
   "filesChanged": [
-    "None. This handoff is the only file this phase writes."
+    "None outside this handoff: .legion/INFRA-71/implement.json is the only file this phase writes."
   ],
   "deviations": [
-    "No code change, on the plan at version 7 and the architect's instruction; the phase completes with the tree untouched."
+    "None from plan v11: no code change, no pull request, an empty completion with this handoff pushed."
   ],
   "openQuestions": [
-    "The production check on 7bf2759c is open and separate: look 1 reported `pending` because the project's daemon still renders the pre-merge sentence of the withheld `network` row and started before the merge. It wakes on the deploy's event, and nothing in this phase touches it."
+    "The production check on 7bf2759c stays open and is this implementer's: it can take a look only after a human sets dispatch://INFRA-71 to done, which the architect asks for once dispatch://INFRA-383 is done (plan v11 section 4, steps 1-3)."
   ],
-  "discoveredComplexity": [
-    "A root that closes while its children run is reopened and re-admitted, which restarts the workflow and opens phases with nothing in them. The failure mode that creates is a phase producing a change because a phase was started; the remedy used here is the one the issue spent the day teaching — report what is true rather than manufacture work."
-  ]
+  "discoveredComplexity": []
 }
