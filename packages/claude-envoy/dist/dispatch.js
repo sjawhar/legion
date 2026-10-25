@@ -17022,6 +17022,9 @@ async function resolveOwnerArguments(tool, input, cwd, env, exec, dashboardUrls,
   const issue2 = `${repo2}#${legionIssue}`;
   return { args: { ...args, issue: issue2 }, ref, owner: { kind: "issue", issue: issue2 } };
 }
+
+class DocumentNotFoundError extends Error {
+}
 function artifactByReference(artifacts, artifactReference, owner, canonical) {
   const bySlug = artifacts.find((candidate) => candidate.slug === artifactReference);
   if (canonical && bySlug !== undefined)
@@ -17042,7 +17045,7 @@ function artifactByReference(artifacts, artifactReference, owner, canonical) {
   }
   const [artifact] = byName;
   if (artifact === undefined) {
-    throw new Error(documentReferenceProblem(artifactReference, artifacts, owner));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference, artifacts, owner));
   }
   return artifact;
 }
@@ -17073,9 +17076,24 @@ async function resolveArtifact(client, owner, artifactReference, { canonical = f
     artifact = artifactByReference(issue2.artifacts, artifactReference, "issue", canonical);
   }
   if (!artifact) {
-    throw new Error(documentReferenceProblem(artifactReference ?? "spec", issue2.artifacts, "issue"));
+    throw new DocumentNotFoundError(documentReferenceProblem(artifactReference ?? "spec", issue2.artifacts, "issue"));
   }
   return { owner, issue: issue2, artifact };
+}
+async function documentTargets(client, resolution) {
+  const refDocument = resolution.ref?.kind === "artifact" ? resolution.ref.id : resolution.ref?.artifact;
+  const owner = resolution.owner?.kind === "issue" ? { kind: "issue", issue: await resolveExistingIssue(client, resolution.owner.issue) } : resolution.owner;
+  return {
+    owner,
+    documentOwner: () => {
+      if (owner === null)
+        throw new Error("issue or project is required");
+      return owner;
+    },
+    resolveDocument: (documentOwner, reference) => resolveArtifact(client, documentOwner, reference, {
+      canonical: reference !== undefined && reference === refDocument
+    })
+  };
 }
 var documentHintLimit = 8;
 function documentReferenceProblem(reference, documents, owner, use) {
@@ -17550,13 +17568,11 @@ ${text}`,
 }
 var BLOCK_OPENING_CHARS = 60;
 async function listDocumentBlocks(client, artifact) {
-  const before = await client.docRead(artifact.id);
-  const blocks = await client.artifactBlocks(artifact.id);
-  const after = await client.docRead(artifact.id);
-  if (before.token !== after.token || before.markdown !== after.markdown) {
+  const live = await liveBlocks(client, artifact);
+  if (live === undefined) {
     throw new Error(`${artifact.name} changed while dispatch doc-read --blocks read it, so the opening words could name the wrong text; nothing is listed. Run it again.`);
   }
-  const bytes = new TextEncoder().encode(before.markdown);
+  const { bytes, blocks } = live;
   const decoder = new TextDecoder;
   const lines = [
     `Blocks of ${artifact.name}, in document order, each indented under the block holding it: id, type, (token; anchored comments and asks), opening words. A table lists its rows by the index delete_row takes and its cells by the row and the column delete_column takes.`
@@ -17587,7 +17603,15 @@ async function listDocumentBlocks(client, artifact) {
     holders.push(block);
   }
   return { text: lines.join(`
-`), token: before.token };
+`), token: live.token };
+}
+async function liveBlocks(client, artifact) {
+  const before = await client.docRead(artifact.id);
+  const blocks = await client.artifactBlocks(artifact.id);
+  const after = await client.docRead(artifact.id);
+  if (before.token !== after.token || before.markdown !== after.markdown)
+    return;
+  return { bytes: new TextEncoder().encode(before.markdown), token: before.token, blocks };
 }
 async function refuseOpenDecisionBlocks(client, tool, resolved) {
   const artifact = resolved.artifact;
@@ -17779,14 +17803,7 @@ async function executeDispatchTool(input) {
   const args = checked.args;
   const actor = toolActor(await resolveOrigin(env, exec, input.cwd), input);
   const client = dispatchClient();
-  const refDocument = ownerArguments.ref?.kind === "artifact" ? ownerArguments.ref.id : ownerArguments.ref?.artifact;
-  const resolveDocument = (documentOwner2, reference) => resolveArtifact(client, documentOwner2, reference, {
-    canonical: reference !== undefined && reference === refDocument
-  });
-  const owner = ownerArguments.owner?.kind === "issue" ? {
-    kind: "issue",
-    issue: await resolveExistingIssue(client, ownerArguments.owner.issue)
-  } : ownerArguments.owner;
+  const { owner, documentOwner, resolveDocument } = await documentTargets(client, ownerArguments);
   const issueArgument = optionalString(input.args, "issue");
   const refText = optionalString(ownerArguments.args, "ref");
   if (input.tool !== "dispatch_ask" && owner?.kind === "issue" && issueArgument !== undefined && refText !== undefined && ownerArguments.ref?.owner.kind === "issue" && owner.issue !== ownerArguments.ref.owner.issue) {
@@ -17798,11 +17815,6 @@ async function executeDispatchTool(input) {
     if (owner?.kind !== "issue")
       throw new Error("issue is required");
     return owner.issue;
-  };
-  const documentOwner = () => {
-    if (owner === null)
-      throw new Error("issue or project is required");
-    return owner;
   };
   const postWithPictures = (text, limit, owner2, upload) => textWithPictures(input.tool, text, pictures, limit, owner2, upload, actor);
   const writePictures = (resolved, text, limit) => {
