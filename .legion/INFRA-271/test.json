@@ -2,80 +2,41 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-271",
-  "completed": "2026-10-25T09:14:25Z",
-  "round": 3,
-  "headTested": "2e7c99eb5ad54fbea5ce098ae10f5518a1a96ca3",
+  "completed": "2026-10-25T10:39:21Z",
+  "round": 4,
+  "headTested": "3f368461f61ceeb93c3e2d4f1f758702bfbb2337",
+  "scope": "34b2b7a9 changes no code path: docs/kubernetes.md's start-refusal sentence, the Close/Drain comments in sessionproxy.go, and CI's race step. Round 3's real-surface proofs stand for the unchanged behaviour. This round checks the three changed claims against the code and the race step's ability to fail.",
   "implementerProof": {
     "verdict": "verified",
-    "how": "I drove both review fixes on my own harnesses at 2e7c99eb, with the round-2 code as the negative control (sessionproxy.go, launcher.go and launcher_test.go restored from 12217616 in the working copy, then put back). The pre-fix code wedged: the stop never answered and the black-hole start never answered (10 s read deadlines ran out). The fixed code answered the stop in 1.01 s and the black-hole start in 2.01 s, both in their named forms. See proof[0] and proof[1]."
+    "how": "Checked each of the three claims against the code and ran the new race step's added packages at this head. I also showed that step can fail on them: a canary race, and a race injected into the proxy itself (then reverted)."
   },
   "failed": 0,
   "failures": [],
-  "testsAdded": [
-    {
-      "commit": "ae763462358553d555472b09b43bff5075925ef3",
-      "test": "packages/daemon/internal/sessionproxy/close_race_test.go, TestALateDialDuringCloseIsClosedNotCopied",
-      "why": "No test pinned track's `closing` check, the code that makes Close's drain bound absolute. With the check disabled (`if false && p.closing`), the implementer's sessionproxy and launcher suites both still passed. A connection whose upstream dial lands after Close has begun is then copied for until the drain runs out, and one landing after the force-close escapes it and holds Close forever. The new test passes at head (5 runs; 5 more under -race) and fails under that mutation (`the upstream's connection is still open`). It is a regression lock on correct code, not a red test: the code is right."
-    }
-  ],
   "proof": [
     {
-      "criterion": "Close drains, then forces (review finding 2): off PID 1, a socket holder outside the child's process group cannot veto the stop, and a write already under way gets its drain.",
-      "surface": "the real launcher (Run, not PID 1) with its proxy in front of a real PostgreSQL 16.2, driven by the stand-in daemon",
-      "command": "throwaway TestT3OffPIDOneHeldConnectionDoesNotWedge: the child starts two setsid'd psql holders on its generation's socket (stdio fully redirected): a parked `select pg_sleep(600)`, and 1 s later an in-flight `select 7 from pg_sleep(0.8)`, then the daemon's LauncherStop at grace 2 s",
-      "observed": "at 2e7c99eb: the stop answered after 1.01 s and generation 1's exit was reported. The in-flight holder got `7`, exit 0, inside the drain. The parked holder got `server closed the connection unexpectedly … connection to server was lost`, exit 2. The launcher logged `sessionproxy: closed 1 connections to … still open after 1s`, and generation 2 started straight after.",
-      "headSha": "2e7c99eb5ad54fbea5ce098ae10f5518a1a96ca3",
-      "negativeControl": "the same run on the round-2 code (restored from 12217616): the stop never answered (`read … i/o timeout` at the rig's 10 s deadline) and the launcher did not leave after its context ended — the reviewer's wedge, reproduced"
+      "criterion": "CI's race step now covers internal/sessionproxy and internal/launcher, and it can fail.",
+      "surface": "the race step's command for the added packages, run in this pod with cgo through zig 0.17.0 and with the database and PID-namespace prerequisites CI's job has (LEGION_TEST_PG_DSN against a PostgreSQL here; sudo via an unshare -r shim)",
+      "command": "CGO_ENABLED=1 CC=$TMPDIR/t271/bin/zcc go test -count=1 -race ./internal/sessionproxy/ ./internal/launcher/ (from packages/daemon, at 3f368461)",
+      "observed": "ok for both packages, no DATA RACE. The step sits in the Go daemon job whose env sets LEGION_TEST_PG_DSN (pr-and-main.yaml), so in CI the database tests run under -race rather than skipping.",
+      "headSha": "3f368461f61ceeb93c3e2d4f1f758702bfbb2337",
+      "negativeControl": "two checks, both run at this head. (1) A canary race module with the same toolchain: `WARNING: DATA RACE`, FAIL. (2) The lock removed from Proxy.untrack (temporary, reverted): `go test -race ./internal/sessionproxy/` printed `WARNING: DATA RACE` ×4 in (*Proxy).untrack and FAILED TestProxyCarriesBytesBothWays, TestEachConnectionDialsItsOwnUpstream, TestCloseEndsTheProxy and TestCancellingTheContextLeavesAStartedProxyServingUntilClose. So the step fails on a real race in the code it now covers."
     },
     {
-      "criterion": "The bounded proof dial (review finding 1): a Start against an instance that never answers is refused in its named form while the command loop stays free, so a Stop queued behind it is read and obeyed.",
-      "surface": "the real launcher with a dialer aimed at a black-hole address (10.255.255.1:5432, measured to hang until timeout in this pod)",
-      "command": "throwaway TestT3ProofDialAgainstABlackHole (StopGrace 4 s): LauncherStart, then LauncherStop for the same generation",
-      "observed": "at 2e7c99eb: the start answered after 2.01 s (= StopGrace/2), OK=false, `the session database proxy for generation 1: sessionproxy: dial example-project:us-central1:example-instance: no answer within 2s: dial tcp 10.255.255.1:5432: i/o timeout`. No child ran and the private directory held 0 entries. The Stop behind it was answered 2 ms later, OK.",
-      "headSha": "2e7c99eb5ad54fbea5ce098ae10f5518a1a96ca3",
-      "negativeControl": "the same run on the round-2 code: the start never answered within the rig's 10 s read deadline"
+      "criterion": "docs/kubernetes.md:701-705 states what each start refusal names.",
+      "surface": "the launcher's error strings (internal/launcher/launcher.go)",
+      "command": "read writeFiles, startSession and sessionWritten",
+      "observed": "Clearing the private directory: `read the private directory: …` names the directory, and `clear %s from the private directory: …` names the entry. Making the generation's directory: `make credential directory for generation %d` names the generation. Writing a file: `write credential %s for generation %d` names the file and the generation, and `write the session database URL for generation %d` names the generation and the file by its role. The proxy: `the session database proxy for generation %d: sessionproxy: dial <instance>: …` names the generation and the instance (round 1 and round 3 live refusals). The resume lookup: `resume session %s: …` names the session file in each of its four refusals. Each line of the new sentence matches.",
+      "headSha": "3f368461f61ceeb93c3e2d4f1f758702bfbb2337",
+      "negativeControl": "the old sentence's 'names the generation and the instance' is false for the directory, file and resume refusals above, none of which carries the instance"
     },
     {
-      "criterion": "The one bound left unfixed: a resume lookup that cannot reach the table runs its 30 s, and a Stop sent behind the Start is still read, never lost.",
-      "surface": "the real launcher, a proxy whose proof dial passes and whose later dials fail, ResumeFile set under OMP_SESSION_STORAGE=sql",
-      "command": "throwaway TestT3SlowResumeLookupThenQueuedStop: LauncherStart and LauncherStop sent back to back",
-      "observed": "after 30 s the start was refused (`resume session /nowhere/session.jsonl: connect to Postgres at …/g1:5432: failed to connect …`) with no child run, and the Stop was answered in the same instant, OK. The daemon's stopIssuedChild bounds its Stop at bootTimeout + terminationGrace (relaunch.go), which covers this 30 s, so a late-connecting launcher can make the daemon's start wait time out but cannot wedge it.",
-      "headSha": "2e7c99eb5ad54fbea5ce098ae10f5518a1a96ca3",
-      "negativeControl": "the start was refused rather than starting a fresh agent against a session the table could not confirm"
-    },
-    {
-      "criterion": "Race coverage of the new concurrent code (the architect's gap).",
-      "surface": "go test -race over internal/sessionproxy and internal/launcher in this pod: CGO through zig 0.17.0 (`uv pip install ziglang` under $TMPDIR, wrapped as CC), the PID-namespace tests through `unshare -r`, the database tests against a PostgreSQL in this pod",
-      "command": "CGO_ENABLED=1 CC=$TMPDIR/t271/bin/zcc LEGION_TEST_PG_DSN=… PATH=$TMPDIR/t271/bin:$PATH go test -race -count=3 ./internal/sessionproxy/ ./internal/launcher/ (from packages/daemon), and once more with -v -count=1",
-      "observed": "ok for both packages ×3 with no DATA RACE; the -v run counted 47 PASS, 0 SKIP, 0 FAIL, including my throwaway PID-1, off-PID-1 and black-hole harnesses. The new close_race_test passes under -race ×5. No CI workflow change was needed.",
-      "headSha": "2e7c99eb5ad54fbea5ce098ae10f5518a1a96ca3",
-      "negativeControl": "the same toolchain on a deliberate canary (two goroutines incrementing one int) printed `WARNING: DATA RACE` and FAILED, so the detector was live"
-    },
-    {
-      "criterion": "Round 2's container-shutdown behaviour still holds after the drain change.",
-      "surface": "the real launcher as PID 1 of a PID namespace, a real SIGTERM from outside, a real PostgreSQL behind the proxy",
-      "command": "round 2's throwaway TestT2CooperativeChildWritesDuringGrace, TestT2WedgedChildAndHeldConnection, TestT2WedgedChildAndTermIgnoringHolder",
-      "observed": "cooperative: exit 40 ms after SIGTERM, 1 row written during the grace. Wedged with a held connection: exit at 1.01 s (grace 1 s), 1 row. Wedged with a TERM-ignoring holder: exit at 1.01 s, 1 row. In each case, after exit the socket was refused and the generation's directory was gone.",
-      "headSha": "2e7c99eb5ad54fbea5ce098ae10f5518a1a96ca3",
-      "negativeControl": "round 2's: the pre-fix code wrote 0 rows (`No such file or directory`)"
-    },
-    {
-      "criterion": "The instance rule is the connector's (review finding 4), and the configuration still cannot express a password.",
-      "surface": "`legion start --check-config` of the binary built at 2e7c99eb",
-      "command": "legion start --check-config on 11 session_database.instance values",
-      "observed": "Accepted: project:region:instance; example.com:project:region:instance (domain-scoped); an uppercase project; a slash in the name (both are what the connector's ParseConnName takes). Refused, naming both accepted forms: a leading space, a space inside a segment, a trailing tab, a no-break space, five segments, two segments, an empty segment.",
-      "headSha": "2e7c99eb5ad54fbea5ce098ae10f5518a1a96ca3",
-      "negativeControl": "the round-1 note's leading-whitespace instance, accepted at 5c6e2b34, is now refused"
-    },
-    {
-      "criterion": "No password, the real agent, the resume, and a refusal in a live pod with no grant (re-run at this head).",
-      "surface": "the real launcher starting the worker image's Oh My Pi v18.8.9 against a real PostgreSQL 16.2; the real `legion launcher` binary built at 2e7c99eb with the real connector and this pod's identity",
-      "command": "round 1's throwaway TestT271RealAgentWritesAndResumes and TestT271RealBinaryRefusesWithoutGrant",
-      "observed": "the agent answered ALPHA and wrote its row through the socket; a resume of an absent session was refused with no child; the resumed generation answered ALPHA from its own conversation and the row's mtime_ms moved 1792919507750 → 1792919513222. The real binary refused its generation after 0.56 s with the connector's 403, ran no child and left 0 entries.",
-      "headSha": "2e7c99eb5ad54fbea5ce098ae10f5518a1a96ca3",
-      "negativeControl": "the absent-session resume was refused"
+      "criterion": "The Close and Drain comments are true of the code, including the case the old wording hid.",
+      "surface": "sessionproxy.go's Close and serve, the connector's Dial (cloud.google.com/go/cloudsqlconn v1.25.4), and close_race_test.go",
+      "command": "read Close (cancel, then drain timer, then closeConns, then <-drained) and the connector's dial path; ran TestALateDialDuringCloseIsClosedNotCopied",
+      "observed": "Close cancels the serving context first and then waits on inFlight. A pair already copying is bounded by the drain's force-close, but a serve still inside a dial is only bounded by that dial returning, so a dial that ignores cancellation holds Close until it returns. A dial that ignores its context was driven in round 3's throwaway: with the dial held 100 ms into Close, Close returned at 108-119 ms, i.e. only once the dial was released. TestALateDialDuringCloseIsClosedNotCopied (the same dialer, released as soon as Close marks closing) passes ×3 at this head. The connector honours cancellation: its default dialFunc is x/net proxy.Dial, which dials through net.Dialer.DialContext(ctx), and its TLS step is tlsConn.HandshakeContext(ctx) (dialer.go:233, :636).",
+      "headSha": "3f368461f61ceeb93c3e2d4f1f758702bfbb2337",
+      "negativeControl": "the old wording ('never waits on a client longer than Drain') is contradicted by that run: Close's return followed the dial's release, not the drain or the cancellation"
     }
   ],
-  "budgetCheck": "The daemon's start wait is `starting = deadline + terminationGrace` (relaunch.go). `deadline` is the fixed launcher-connection deadline, start + bootTimeout, by which the launcher must already be connected, and --stop-grace is terminationGrace (manifest.go:478). So when the wait begins at least one full grace remains, and StopGrace/2 for the proof fits inside it. That holds less any time recordAddresses, or a stop of a stale earlier generation, takes before the Start is sent. A stale generation means a connected launcher, which is normally early, so this narrows only an edge case.",
-  "ci": "At 2e7c99eb when this round ended: Tests run 40178311946, typecheck success, lint and test in progress; Docs 40178311914 and Worker Image 40178311964 success; PR Title runs completed success with 40178403769 pending; Legion Envoy and Contracts 40178311907 queued. Not waited on. My test commit ae763462 starts a new run at its own head."
+  "ci": "At 3f368461 when this round ended: Tests run 40185462879 (lint, typecheck, test, including the extended race step) queued; PR Title 40185462856 success, 40185487379 in progress; Docs 40185462875 and Worker Image 40185462863 in progress; Legion Envoy and Contracts 40185462893 queued. Not waited on; the reviewer reads the required checks before approval."
 }
