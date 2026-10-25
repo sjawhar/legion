@@ -3,7 +3,7 @@ import { type MutationKey, QueryClient } from "@tanstack/react-query";
 import { waitFor } from "@testing-library/react";
 
 import { ApiError, api, RequestTimeoutError } from "../../api/client";
-import type { Comment, Message } from "../../api/types";
+import type { Comment, Message, MessageDelivery } from "../../api/types";
 import { HeldSends, stoppable } from "./held-sends";
 import { KEYED_SEND_ATTEMPT_MS, SendStoppedError, type SentRequest } from "./send-request";
 
@@ -73,7 +73,27 @@ const agentSend: SentRequest = {
 
 const agentKey: MutationKey = ["agent-send", "planner-session"];
 
-const sentMessage = { body: "Status please", id: "message-1" } as Message;
+/** Attempt `number` of the planner's message, in `state`. */
+function plannerAttempt(number: number, state: "failed" | "pending" | "sent"): MessageDelivery {
+  return {
+    attempt: number,
+    created_at: "2026-10-25T00:00:00Z",
+    delivery: "steer",
+    envelope_id: null,
+    error: null,
+    message_id: "message-1",
+    reply_id: null,
+    session_id: "planner-session",
+    state,
+  };
+}
+
+/** Dispatch's answer to the planner's message, sent. */
+const sentMessage = {
+  body: "Status please",
+  deliveries: [plannerAttempt(1, "sent")],
+  id: "message-1",
+} as Message;
 
 /** Lets every promise the store chained run as far as it goes without the clock moving. */
 async function settle(): Promise<void> {
@@ -170,6 +190,53 @@ test("a 409 or 400 stops the retries and refuses", async () => {
         expect(store.discard(agentKey)).toBe(true);
       }
     });
+  } finally {
+    createAgentMessage.mockRestore();
+  }
+});
+
+// Dispatch answers a repeat of a keyed send whose message's one attempt is still pending with
+// that attempt pending: another request is sending it, or a sender that died - a crashed process
+// - still holds its claim, and Dispatch resumes the attempt for the first repeat after the claim
+// lapses (a minute). Taken as landed, that answer would leave a message stored and never on its
+// way, so the send keeps asking under its key until the attempt settles. A message with more than
+// one attempt was retried from its card, which Dispatch never resumes, so its answer lands as is.
+test("a 2xx whose one attempt is still pending is asked again under the key until it settles", async () => {
+  const answer = (...deliveries: MessageDelivery[]) => ({ ...sentMessage, deliveries });
+  const createAgentMessage = spyOn(api, "createAgentMessage")
+    .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+    .mockResolvedValueOnce(answer(plannerAttempt(1, "pending")))
+    .mockResolvedValueOnce(answer(plannerAttempt(1, "pending")))
+    .mockResolvedValueOnce(answer(plannerAttempt(1, "sent")))
+    .mockResolvedValueOnce(answer(plannerAttempt(1, "failed"), plannerAttempt(2, "pending")));
+  const store = new HeldSends(new QueryClient({ defaultOptions: { mutations: { retry: false } } }));
+
+  try {
+    await onFakeClock(async () => {
+      store.send(agentKey, agentSend);
+      await settle();
+      for (const [index, wait] of [1_000, 2_000, 4_000].entries()) {
+        expect(store.get(agentKey)?.status).toBe("sending");
+        jest.advanceTimersByTime(wait);
+        await settle();
+        expect(createAgentMessage).toHaveBeenCalledTimes(index + 2);
+      }
+      expect(store.get(agentKey)).toBeUndefined();
+
+      store.send(agentKey, { ...agentSend, sendKey: "send-2" });
+      await settle();
+      expect(store.get(agentKey)).toBeUndefined();
+      jest.advanceTimersByTime(30 * 60_000);
+      await settle();
+      expect(createAgentMessage).toHaveBeenCalledTimes(5);
+    });
+    expect(createAgentMessage.mock.calls.map(([, input]) => input.idempotency_key)).toEqual([
+      "send-1",
+      "send-1",
+      "send-1",
+      "send-1",
+      "send-2",
+    ]);
   } finally {
     createAgentMessage.mockRestore();
   }

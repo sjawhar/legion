@@ -328,7 +328,7 @@ async function pressSend(field: HTMLElement): Promise<void> {
 }
 
 test("a token-only direct-session draft cannot submit an empty message, and Send says why", async () => {
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({} as never);
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
   const { view } = renderComposer({ owner: { kind: "session", sessionId: "A" } });
 
   try {
@@ -350,7 +350,7 @@ test("a token-only direct-session draft cannot submit an empty message, and Send
 });
 
 test("a direct-session reply inherits its thread delivery", async () => {
-  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue({} as never);
+  const createAgentMessage = spyOn(api, "createAgentMessage").mockResolvedValue(createdMessage);
   const { view } = renderComposer({
     owner: { kind: "session", sessionId: "A" },
     replyTo: {

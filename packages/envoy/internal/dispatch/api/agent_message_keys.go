@@ -22,7 +22,10 @@ import (
 // A request whose key is held is answered from the database before anything else, so it never
 // fails because the listener is down: the same request is answered 200 with the message the key
 // made, and another request under the key is refused 409 MESSAGE_KEY_REUSED. Before a repeat is
-// answered, the message is put on its way when nothing else will (sendHeldMessageOn).
+// answered, the message is put on its way when nothing else will (sendHeldMessageOn). A repeat
+// that finds the message's one attempt pending under a live claim is answered with it pending, and
+// the page asks again until it settles: the first repeat after a dead sender's claim lapses
+// resumes it.
 
 // errAgentMessageKeyHeld is createStoredMessage's answer when the key row already exists: another
 // request of this person's committed the same key first, its own transaction rolled back, and the

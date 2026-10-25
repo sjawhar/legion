@@ -63,8 +63,10 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   (`SEND_DEADLINE_MS` in `send-request.ts`, 30 s), and it is not a refusal: a comment that
   mentions agents can take the server longer. A send to one session is distinct: it has an
   `idempotency_key` minted with the request, each attempt is bounded by
-  `KEYED_SEND_ATTEMPT_MS` (15 s), and a transport failure, timeout, 5xx, or 429 retries under
-  that same key after 1 s, 2 s, 4 s, and so on up to 30 s; another 4xx is its refusal. The
+  `KEYED_SEND_ATTEMPT_MS` (15 s), and a transport failure, timeout, 5xx, 429, or a 2xx whose
+  message's one attempt is still pending (another request is sending it, or a sender that died
+  holds its claim, which Dispatch resumes for the first repeat after the claim lapses) retries
+  under that same key after 1 s, 2 s, 4 s, and so on up to 30 s; another 4xx is its refusal. The
   held-send store keeps that keyed send under the session's `agentSendKey`, so the Agents row and
   the live view share it across navigation. Past the send deadline it says that Dispatch has not
   confirmed the message and it keeps trying; **Stop trying** ends retries only between attempts,

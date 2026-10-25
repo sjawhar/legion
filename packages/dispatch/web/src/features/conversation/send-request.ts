@@ -266,12 +266,13 @@ export class SendStoppedError extends Error {
 /**
  * Sends `input` to session `sessionId` under `key` until Dispatch decides it. Each attempt is held
  * to `KEYED_SEND_ATTEMPT_MS`, and one that ends without Dispatch's verdict - the fetch failed, the
- * attempt timed out, a 5xx, a 429 - is made again under the same key after 1 s, 2 s, 4 s … never
- * more than 30 s apart, so however many of them reach Dispatch, it makes the message once. Resolves
- * with the message on Dispatch's 2xx; rejects with any other 4xx, its refusal. `signal` stops the
- * trying between attempts - a wait ends at once, an attempt in flight is let finish, since it may
- * already have reached Dispatch and its answer is still the send's - and the send then rejects
- * with `SendStoppedError`.
+ * attempt timed out, a 5xx, a 429, or a 2xx whose message's one attempt is still pending - is made
+ * again under the same key after 1 s, 2 s, 4 s … never more than 30 s apart, so however many of
+ * them reach Dispatch, it makes the message once and sends it once.
+ * Resolves with the message on any other 2xx; rejects with any other 4xx, its refusal. `signal`
+ * stops the trying between attempts - a wait ends at once, an attempt in flight is let finish,
+ * since it may already have reached Dispatch and its answer is still the send's - and the send then
+ * rejects with `SendStoppedError`.
  */
 export async function sendKeyedAgentMessage(
   sessionId: string,
@@ -283,7 +284,16 @@ export async function sendKeyedAgentMessage(
   let backoff = KEYED_SEND_FIRST_BACKOFF_MS;
   for (;;) {
     try {
-      return await api.createAgentMessage(sessionId, keyed, { deadlineMs: KEYED_SEND_ATTEMPT_MS });
+      const message = await api.createAgentMessage(sessionId, keyed, {
+        deadlineMs: KEYED_SEND_ATTEMPT_MS,
+      });
+      // A message whose one attempt is still pending is stored but not yet on its way. Dispatch
+      // answers a repeat so while another request is sending that attempt, or while a sender that
+      // died - a crashed process - still holds its claim, and resumes the attempt for the first
+      // repeat after that claim lapses (a minute). It never resumes an attempt of a message
+      // retried from its card, which has more than one, so that answer lands as it is.
+      const [only, ...more] = message.deliveries;
+      if (only?.state !== "pending" || more.length > 0) return message;
     } catch (error) {
       if (error instanceof ApiError && error.status !== 429 && error.status < 500) throw error;
     }
