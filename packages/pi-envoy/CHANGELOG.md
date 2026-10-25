@@ -73,6 +73,11 @@
   holds only what the person settled, ask in stages, "density is the problem, not length", and
   "sections follow the topic". `src/skills-guard.test.ts` fails the build when the three skills
   reach 2,000 words.
+- `dispatch-writing-specs` after a fresh-agent dry run on a real issue's messages (INFRA-140): the
+  Design gives a value for each limit, size and time; a choice the person's messages favour is
+  settled; each design choice no source states is a decision entry; the fresh reader gets the whole
+  spec pasted before every spec write; an ask block names a requirement by what it is; unbuilt
+  acceptance checks never delay approval; and text is about the design, never the person.
 - `dispatch-writing-specs`, "Approval": after a person approves a spec, an agent makes a new version
   only for a change to scope, acceptance, cost, risk or a decision the person made, and puts all
   such changes into one version. Any other fix goes in the plan or a comment, so the person is not

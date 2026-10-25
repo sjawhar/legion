@@ -85,6 +85,9 @@
   request approval with `dispatch request-approval`." (INFRA-140). The notice for a typed-block
   opening stored as text cites the `dispatch-writing-specs` skill, "Questions". A test holds each
   skill section a notice cites to a heading of that skill.
+- `dispatch read` names each message, comment and ask on an issue's event log by its
+  `dispatch://KEY/message|comment|ask/<id>` reference, after the event type. A message had no other
+  address there, so an agent that read the log could not open or link one (INFRA-140).
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions say what an Oh My Pi session keeps:
   unsubscribe keeps the subscriptions another plugin holds for the session's role, and a move to a
   different role is refused while any are held. A host without such subscriptions behaves as

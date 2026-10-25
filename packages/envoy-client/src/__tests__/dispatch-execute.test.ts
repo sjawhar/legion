@@ -8318,6 +8318,77 @@ describe("executeDispatchTool", () => {
     });
   });
 
+  // A message has no other address in the log: its event line carries the reference that reads it.
+  test("names each message, comment and ask on the log by its dispatch reference", async () => {
+    const messageId = "652aec73-6214-46c0-a230-3b21a0466990";
+    const commentId = "0f050a24-7f30-47f7-953c-8dd0597615c8";
+    const askId = "f44e6e26-794f-44db-a64f-2d1847da392f";
+    const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {
+      const target = new URL(String(url));
+      if (target.pathname === "/api/v1/issues/DSP-42") {
+        return response({
+          key: "DSP-42",
+          title: "Dispatch issue",
+          status: "open",
+          route: null,
+          open_asks: [],
+          children: [],
+          last_seq: 4,
+        });
+      }
+      if (target.pathname === "/api/v1/issues/DSP-42/events") {
+        return response([
+          {
+            seq: 2,
+            type: "message.created",
+            issue_key: "DSP-42",
+            actor: { kind: "user", id: "alice" },
+            created_at: "2026-09-09T00:02:00Z",
+            payload: { id: messageId, body: "Ship it." },
+          },
+          {
+            seq: 3,
+            type: "comment.created",
+            issue_key: "DSP-42",
+            actor: { kind: "user", id: "alice" },
+            created_at: "2026-09-09T00:03:00Z",
+            payload: { id: commentId, body: "Fix this." },
+          },
+          {
+            seq: 4,
+            type: "ask.opened",
+            issue_key: "DSP-42",
+            actor: { kind: "session", id: "s1" },
+            created_at: "2026-09-09T00:04:00Z",
+            payload: { id: askId, question: "Which store?" },
+          },
+        ]);
+      }
+      throw new Error(`unexpected request: ${target.pathname}`);
+    };
+
+    const result = await executeDispatchTool({
+      tool: "dispatch_read",
+      args: { ref: "dispatch://DSP-42/log" },
+      cwd: "/workspace",
+      host: "omp",
+      config,
+      env: {},
+      exec: repoExec("owner/repo"),
+      fetchImpl: fetchImpl as typeof fetch,
+    });
+
+    expect(result.text).toBe(
+      [
+        "Key: DSP-42",
+        "Events:",
+        `- #2 message.created dispatch://DSP-42/message/${messageId} · user alice · 2026-09-09T00:02:00Z · Ship it.`,
+        `- #3 comment.created dispatch://DSP-42/comment/${commentId} · user alice · 2026-09-09T00:03:00Z · Fix this.`,
+        `- #4 ask.opened dispatch://DSP-42/ask/${askId} · session s1 · 2026-09-09T00:04:00Z · Which store?`,
+      ].join("\n")
+    );
+  });
+
   test("reads an issue from its dashboard URL on the configured server", async () => {
     const requested: string[] = [];
     const fetchImpl = async (url: RequestInfo | URL): Promise<Response> => {

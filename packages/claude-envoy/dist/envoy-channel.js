@@ -41180,9 +41180,18 @@ function actorText(actor) {
   }
   return `${actor.kind} ${actor.id} (as ${serviceSubjectLabel(service)})`;
 }
+function eventRef(event) {
+  const payload = event.payload;
+  const id = typeof payload === "object" && payload !== null && "id" in payload ? payload.id : undefined;
+  if (typeof id !== "string" || id === "" || event.issue_key === null)
+    return;
+  const kind = event.type.startsWith("message.") ? "message" : event.type.startsWith("comment.") || event.type.startsWith("suggestion.") ? "comment" : event.type.startsWith("ask.") ? "ask" : undefined;
+  return kind === undefined ? undefined : `dispatch://${event.issue_key}/${kind}/${id}`;
+}
 function eventLine(event) {
   const head = eventHead(event);
-  return `- #${event.seq} ${event.type} \xB7 ${actorText(event.actor)} \xB7 ${event.created_at}${head === undefined || head === "" ? "" : ` \xB7 ${head}`}`;
+  const ref = eventRef(event);
+  return `- #${event.seq} ${event.type}${ref === undefined ? "" : ` ${ref}`} \xB7 ${actorText(event.actor)} \xB7 ${event.created_at}${head === undefined || head === "" ? "" : ` \xB7 ${head}`}`;
 }
 function childrenSummary(issue2) {
   return [
