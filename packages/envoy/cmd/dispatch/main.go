@@ -435,7 +435,7 @@ func main() {
 		slog.Info("dispatch delivery: no NATS client — intake is idle; the reconcile alone still runs")
 	}
 
-	routesHandler, waitDelivery := routes.New(appCtx)
+	routesHandler, waitBackground := routes.New(appCtx)
 	handler := dispatchHandler(routesHandler, database, natsClient, fileStore, buildCommit)
 	server := &http.Server{
 		Handler:           handler,
@@ -451,7 +451,7 @@ func main() {
 		slog.Error("dispatch: listen", "addr", boot.ListenAddr, "error", err)
 		os.Exit(1)
 	}
-	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitDelivery); err != nil {
+	if err := serveUntilStopped(ctx, cancel, server, listener, boot.ListenAddr, documentService, database.Pool, waitBackground); err != nil {
 		slog.Error("dispatch: serve", "error", err)
 		os.Exit(1)
 	}

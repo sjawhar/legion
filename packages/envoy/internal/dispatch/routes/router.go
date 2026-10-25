@@ -235,8 +235,9 @@ type pendingState struct {
 	expiresAt time.Time
 }
 
-// New returns an http.Handler that serves all dispatch routes, and a wait that returns once the
-// delivery hub and its sockets have ended after the process lifetime is cancelled.
+// New returns an http.Handler that serves all dispatch routes, and a wait (waitBackground) that
+// returns once the delivery hub, every live socket and their subscriptions, and the event stream
+// relay have ended after the process lifetime is cancelled.
 func New(ctx *AppContext) (http.Handler, func()) {
 	r := &router{ctx: ctx, pendingStates: make(map[string]pendingState), retainedHeld: semaphore.NewWeighted(maxRetainedBytesHeld)}
 	mux := http.NewServeMux()
@@ -245,13 +246,13 @@ func New(ctx *AppContext) (http.Handler, func()) {
 	mux.HandleFunc("POST /auth/logout", r.authLogout)
 	mux.HandleFunc("GET /auth/whoami", r.authWhoami)
 	mux.HandleFunc(githubapi.Prefix, r.apiGithubRest)
-	waitDelivery := api.Register(mux, r.ctx.apiDeps)
+	waitBackground := api.Register(mux, r.ctx.apiDeps)
 	mux.HandleFunc("/", r.staticHandler)
 	if ctx.devSignInHost == "" {
-		return r.enforceCookieOrigin(mux), waitDelivery
+		return r.enforceCookieOrigin(mux), waitBackground
 	}
 	mux.HandleFunc("GET /auth/_dev/signin", r.authDevSignIn)
-	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux)), waitDelivery
+	return requireHost(ctx.devSignInHost, r.enforceCookieOrigin(mux)), waitBackground
 }
 
 // ───── auth ─────────────────────────────────────────────────────────────────

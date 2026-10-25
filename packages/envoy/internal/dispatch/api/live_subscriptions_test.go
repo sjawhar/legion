@@ -450,9 +450,9 @@ func awaitReturn(t *testing.T, returned <-chan error) error {
 	}
 }
 
-// contextBoundSubscription is a subscription written to liveKind.start's word, as the events and
-// agent views may be: its goroutine ends only when the context start gave it ends, and its stop
-// waits for that goroutine and cancels nothing of its own, since that context ends with the socket.
+// contextBoundSubscription relies on the socket's context alone, as a test of the socket's end: its
+// goroutine ends only when the context start gave it ends, and its stop waits for that goroutine
+// and cancels nothing of its own. No real view's stop is written so; each cancels its own context.
 type contextBoundSubscription struct{ done chan struct{} }
 
 func (s *contextBoundSubscription) stop() { <-s.done }
