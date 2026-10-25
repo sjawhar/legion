@@ -36629,9 +36629,10 @@ function documentOwnerValidation(requireArtifact, alwaysRequireArtifact = false)
     message: alwaysRequireArtifact ? "Exactly one of issue and project is required; artifact or ref must name the document." : "Exactly one of issue and project is required; with project, artifact names the document."
   };
 }
+var documentEditOwner = documentOwnerValidation(true);
 var documentEditValidation = {
   check: (value) => {
-    if (!documentOwnerValidation(true, true).check(value))
+    if (!documentEditOwner.check(value))
       return false;
     const input = value;
     if (input.precondition === undefined)
@@ -36641,7 +36642,7 @@ var documentEditValidation = {
     const precondition = input.precondition;
     return typeof precondition.document === "string" !== Array.isArray(precondition.blocks);
   },
-  message: "Exactly one of issue and project is required; artifact or ref must name the document. A precondition selects exactly one of document or blocks."
+  message: `${documentEditOwner.message} A precondition selects exactly one of document or blocks.`
 };
 var commentOwner = documentOwnerValidation(true);
 var commentValidation = {
@@ -36780,7 +36781,7 @@ var dispatchToolSpecs = [
   {
     name: "dispatch_claim",
     example: { issue: "DSP-1" },
-    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, so also move the issue to in_progress with " + "dispatch issue-update when you start. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
+    description: "Claim a Dispatch issue before you start implementing it, so no other session takes the same work, " + "and release it when you stop. Pass the issue alone to claim it, or --release to give it up. " + "Your claim records your own session and shows on every read of the issue: the dashboard header, the " + "issue list and board, dispatch read, and dispatch issues. Claiming is refused with 409 ISSUE_CLAIMED " + "when another session holds the issue and is still running; the refusal names that session, so talk to " + "it instead of working the same issue in parallel. When a human holds the claim the refusal names the " + "person, not a session: there is nothing running to message, so ask them on the issue rather than " + "taking it. 409 CLAIM_CONTENDED means the issue changed " + "hands twice while your call ran, so nothing was applied and nobody's liveness was checked: read " + "the issue and decide again. A claim whose session is no longer running may be " + "taken: the takeover is recorded on the issue and the session that lost it is told. A claim is not the " + "issue's status \u2014 claiming moves nothing, and the result names who moves the status: you, with " + "dispatch issue-update, or Legion's daemon on an issue it runs, where a status written by anyone " + "else is undone. A claim is released by its holder or any human, and by " + "any agent once the holder's session is no longer running. " + ISSUE_REFERENCE,
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE),
       release: z2.boolean().describe("Give up your claim instead of taking it; the issue's status does not change.").optional()
@@ -36957,7 +36958,7 @@ var dispatchToolSpecs = [
     arguments: (z2) => ({
       issue: z2.string().describe(ISSUE_REFERENCE).optional(),
       project: z2.string().describe("Project key owning the document.").optional(),
-      artifact: z2.string().describe("Project document artifact id, slug, or filename; optional when ref names it.").optional(),
+      artifact: z2.string().describe("Optional project document artifact id, slug, or filename; primary document by default for an issue.").optional(),
       ref: z2.string().describe("Optional dispatch:// issue or document reference.").optional(),
       ops: z2.array(z2.object({
         op: z2.enum(DOC_EDIT_OPS).describe("Edit operation."),
@@ -40196,7 +40197,7 @@ function renderAdvice(tool, key, advice, opts) {
   if (advice.decision_blocks === 0 && opts.isPrimarySpec === true && (tool === "dispatch_issue" || tool === "dispatch_artifact")) {
     lines.push('This spec holds no ask blocks, so nothing here reaches a human\'s inbox. Want human feedback? See the `dispatch` skill, "Decision blocks".');
   }
-  if (advice.issue_status === "triage" && tool !== "dispatch_issue" && !(tool === "dispatch_issue_update" && opts.setsStatus === true) && !triageAdviceShown.has(key)) {
+  if (advice.issue_status === "triage" && advice.legion_managed_status !== true && tool !== "dispatch_issue" && !(tool === "dispatch_issue_update" && opts.setsStatus === true) && !triageAdviceShown.has(key)) {
     triageAdviceShown.add(key);
     lines.push(`${key} is still in triage \u2014 nobody can see its development status. See the \`dispatch\` skill, "Issue status is yours to move".`);
   }
@@ -40353,6 +40354,7 @@ function componentsChange(input, after) {
   }
 }
 var architectureComponentsAction = 'Review the `dispatch` skill, "Architecture components", to attach it to the parts it changes or mark it as non-architectural with a reason.';
+var LEGION_OWNS_STATUS = "Legion's daemon moves this issue's status on an issue it runs, so leave it alone \u2014 a status written here is undone.";
 async function architectureGuidance(client, project, components) {
   if (components.mode === "none" || components.ids.length > 0)
     return;
@@ -40670,8 +40672,8 @@ function innerRefProblem(tool, ref, refText) {
   if (tool === "dispatch_read" || tool === "dispatch_ask")
     return;
   const owner = refOwnerName(ref);
-  const documentTool = tool === "dispatch_suggest" || tool === "dispatch_doc_edit";
-  const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${documentTool ? " and artifact <the document's slug>" : ""}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
+  const suggestTool = tool === "dispatch_suggest";
+  const ownerArguments = ref.owner.kind === "issue" ? `issue ${ref.owner.issue}${suggestTool ? " and artifact <the document's slug>" : ""}` : `project ${ref.owner.project} and artifact ${ref.artifact}`;
   const fix = tool === "dispatch_comment" && ref.kind === "ask" ? `reply under it with reply_to_ask ${ref.id} and ${ownerArguments}` : tool === "dispatch_comment" && ref.kind === "comment" ? `reply in its thread with reply_to ${ref.id} and ${ownerArguments}` : `read it with dispatch read, or name ${owner} with ${ownerArguments}`;
   const item = ref.kind === "ask" ? "an ask" : ref.kind === "log" ? "the event log" : ref.kind === "children" ? "the children" : `a ${ref.kind}`;
   return `ref ${refText} names ${item} on ${owner}; dispatch ${commandName(tool)} would act on ${owner} and drop the ${ref.kind}: ${fix}`;
@@ -41857,14 +41859,17 @@ async function executeDispatchTool(input) {
         throw refusalWithCode(error48);
       }
       const held = after.claim;
+      const legionManaged = after.legion_managed_status === true;
       let text;
       if (release) {
-        text = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status} \u2014 move it yourself if that is no longer where the work is.`;
+        const released = `${issueKey}: claim released; nobody is working it now. Its status is still ${after.status}`;
+        text = legionManaged ? `${released}; ${LEGION_OWNS_STATUS}` : `${released} \u2014 move it yourself if that is no longer where the work is.`;
       } else {
         if (held === null) {
           throw new Error(`Dispatch claimed ${issueKey} but answered with no claim`);
         }
-        text = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
+        const claimed = `${issueKey}: claimed by you since ${held.at}. Its status is ${after.status}`;
+        text = legionManaged ? `${claimed}; ${LEGION_OWNS_STATUS} Release the claim when you stop.` : `${claimed}; a claim moves nothing, so move it to in_progress with dispatch issue-update when you start, and release the claim when you stop.`;
       }
       return {
         text: `${text}${await notSubscribed(issueTopic(issueKey), input.subscriptions)}`,
@@ -42222,7 +42227,7 @@ ${await followsAsk(askOwner, input.subscriptions)}`,
       };
     }
     case "dispatch_doc_edit": {
-      const resolved = await resolveDocument(documentOwner(), stringArg(args, "artifact"));
+      const resolved = await resolveDocument(documentOwner(), optionalString(args, "artifact"));
       const ops = args.ops;
       const summary = optionalString(args, "summary");
       const { precondition: rawPrecondition } = args;

@@ -27,12 +27,12 @@ dispatch claim --issue LEGION-234 --release   # I have stopped; it is free
 
 ## Issue status is yours to move
 
-- Move it as a person moves a card, root and owned children: `in_progress`, `testing`, `needs_review`, then `done` once driven in production. A merge is not `done`. An issue left in `triage` while work runs is a defect. Waiting for the deploy lane is not a status and is never announced.
+- Move it as a person moves a card, root and owned children: `in_progress`, `testing`, `needs_review`, then `done` once driven in production. A merge is not `done`. An issue left in `triage` while work runs is a defect. Waiting for the deploy lane is not a status and is never announced. Never the status of an issue with the `legion` label or under one: the daemon writes those, and a status you write there is undone.
 - `--status done` needs `--reason`. Dispatch posts it as a message, then closes. If the close fails after the post, read the status first. A retry points its reason at the posted message.
 - Clears differ: `--clear-priority`, `--parent ''` / `--route ''` / `--repo ''`, `--clear-external-links` / `--clear-blocked-by`. See `dispatch issue-update --help`.
 - Repository: own `--repo`, else nearest ancestor's, else the project default, else none. Unmapped is `REPO_NOT_MAPPED`. `dispatch read` shows `Repository:`. `Repository: unknown (…)` is an older server: a `--repo` write there fails.
 - Link the delivering PR with `--external-link` when you open it.
-- `… is still in triage …` on a write: move the status once work starts.
+- `… is still in triage …` on a write: move the status once work starts. It never appears on an issue with the `legion` label or under one, since the daemon moves those out of triage itself.
 
 ## Priority is yours to set
 
