@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"net/http"
 	"net/url"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -1296,19 +1297,20 @@ func (r *outbox) checkBound(ctx context.Context, row record.OutboxRow) error {
 	return nil
 }
 
-// checkCompare is a build compared against an issue's open production check (record.CheckCompare):
-// whether the build — the commit a daemon boot or a Dispatch start reported itself built from —
-// contains the check's merge commit, read from GitHub as the implement App, the App that merged
-// it. A check closed since, or whose last look has started, is compared with nothing, and so is
-// one a later merge replaced since the row was queued (NamedBy). A check that recorded no
-// merge commit (an upgrade-opened one, record.ProductionCheck.MergeSHA) has it read from its pull
-// request first and recorded (recordMergeCommit), so this compare and every later one has it.
-// GitHub's compare of the merge with the build answering `identical` or `ahead` says the merge is
-// an ancestor of the build, so the build carries it: intake.CheckWake wakes the look the row was
-// queued for, once per check (record.ProductionCheck.ID), build and cause. `behind` or `diverged`
-// is a build without the merge, and a commit GitHub does not know (404) is one it cannot place;
-// neither wakes anything, each logged. Any other failure retries on the row's backoff, a rate
-// limit as every GitHub row's (noteLimit, deferral).
+// checkCompare is a build or a deploy run compared against an issue's open production check
+// (record.CheckCompare), read from GitHub as the implement App, the App that merged the check's
+// pull request. A check closed since, or whose last look has started, is compared with nothing,
+// and so is one a later merge replaced since the row was queued (NamedBy). A row carrying a deploy
+// run is checkDeployRun's from there. For a build — the commit a daemon boot or a Dispatch start
+// reported itself built from — the question is whether it contains the check's merge commit. A
+// check that recorded no merge commit (an upgrade-opened one, record.ProductionCheck.MergeSHA) has
+// it read from its pull request first and recorded (recordMergeCommit), so this compare and every
+// later one has it. GitHub's compare of the merge with the build answering `identical` or `ahead`
+// says the merge is an ancestor of the build, so the build carries it: intake.CheckWake wakes the
+// look the row was queued for, once per check (record.ProductionCheck.ID), build and cause.
+// `behind` or `diverged` is a build without the merge, and a commit GitHub does not know (404) is
+// one it cannot place; neither wakes anything, each logged. Any other failure retries on the row's
+// backoff, a rate limit as every GitHub row's (noteLimit, deferral).
 func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload record.CheckCompare) error {
 	ctx, cancel := context.WithTimeout(ctx, checkCompareTimeout)
 	defer cancel()
@@ -1318,12 +1320,12 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 	}
 	if check == nil || !check.Open() || check.Last {
 		r.log.Info("outbox check compare finished without acting: the check is closed or its last look has started",
-			"row", row.ID, "issue", row.Issue, "cause", payload.Cause, "build", payload.Build)
+			"row", row.ID, "issue", row.Issue, "cause", payload.Cause, "build", payload.Build, "deploy", payload.Deploy)
 		return nil
 	}
 	if !check.NamedBy(payload.OpenedAt) {
 		r.log.Info("outbox check compare finished without acting: the check it names was replaced by a later merge",
-			"row", row.ID, "issue", row.Issue, "cause", payload.Cause, "build", payload.Build, "check", check.OpenedAt, "named", payload.OpenedAt)
+			"row", row.ID, "issue", row.Issue, "cause", payload.Cause, "build", payload.Build, "deploy", payload.Deploy, "check", check.OpenedAt, "named", payload.OpenedAt)
 		return nil
 	}
 	if r.tokens == nil {
@@ -1338,6 +1340,9 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 		return fmt.Errorf("mint implement App token: %w", err)
 	}
 	github := githubrest.Client{Token: lease.Token, API: githubrest.RepositoryAPI(r.githubAPI, repository)}
+	if payload.Deploy != nil {
+		return r.checkDeployRun(ctx, row, payload, check, github)
+	}
 	if check.MergeSHA == "" {
 		var pull struct {
 			MergeCommitSHA string `json:"merge_commit_sha"`
@@ -1382,6 +1387,157 @@ func (r *outbox) checkCompare(ctx context.Context, row record.OutboxRow, payload
 	}
 	r.log.Info("outbox check compare found the merge in the build; the check is woken", "row", row.ID, "issue", row.Issue,
 		"mergeCommit", check.MergeSHA, "build", payload.Build, "status", compare.Status, "cause", payload.Cause, "look", payload.Look)
+	return nil
+}
+
+// deployJob is one job of a deploy run attempt as GitHub lists it (GET
+// /actions/runs/{run}/attempts/{attempt}/jobs): the attempt it ran in, its name, and its steps,
+// each with its conclusion and when it finished, GitHub's own clock.
+type deployJob struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	RunAttempt int    `json:"run_attempt"`
+	Steps      []struct {
+		Name        string    `json:"name"`
+		Conclusion  string    `json:"conclusion"`
+		CompletedAt time.Time `json:"completed_at"`
+	} `json:"steps"`
+}
+
+// checkDeployRun is checkCompare for a deploy run (record.CheckCompare.Deploy): whether the run
+// attempt deployed after the check's pull request merged. The pull request is read for its
+// merged_at, the cutoff, and its merge commit, recorded when the check has none (recordMergeCommit)
+// as a build compare records it. The run attempt is read from GitHub rather than trusted from the
+// envelope the row was queued from, which anyone holding an Envoy bearer can publish: a run of
+// another workflow file, branch or head repository, or one a pull request triggered (whose head is
+// the pull request's, never production's), wakes nothing, and neither does a run GitHub does not
+// know (404); each is logged. The attempt's jobs are read across every page. A job of this attempt
+// whose step named by the deploy concluded `success` strictly after merged_at is a deploy after
+// the merge — both times are GitHub's, read in this row, so no daemon clock is compared. Each such
+// job, in order of its step's completion, applies intake.CheckWake under an event of the check,
+// the run, the attempt and the job: the same run read again (a second delivery, a second row) is a
+// duplicate, and two applying jobs are two wakes, the second kept for the next look by the
+// workflow's wake rule. A run with no such job wakes nothing, logged with why. Any other failure
+// retries on the row's backoff, a rate limit as every GitHub row's.
+func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, payload record.CheckCompare, check *record.ProductionCheck, github githubrest.Client) error {
+	deploy := *payload.Deploy
+	var pull struct {
+		MergedAt       *time.Time `json:"merged_at"`
+		MergeCommitSHA string     `json:"merge_commit_sha"`
+	}
+	if err := github.Get(ctx, fmt.Sprintf("/pulls/%d", check.Number), &pull); err != nil {
+		return fmt.Errorf("read pull request #%d for %s's production check: %w", check.Number, row.Issue, err)
+	}
+	// The check opened at the merge, so a pull request GitHub names no merge time for is an answer
+	// to read again later rather than one to compare against.
+	if pull.MergedAt == nil {
+		return fmt.Errorf("pull request #%d of %s names no merge time for %s's production check", check.Number, check.Repo, row.Issue)
+	}
+	if check.MergeSHA == "" {
+		if pull.MergeCommitSHA == "" {
+			return fmt.Errorf("pull request #%d of %s names no merge commit for %s's production check", check.Number, check.Repo, row.Issue)
+		}
+		if err := r.recordMergeCommit(ctx, row.Issue, pull.MergeCommitSHA); err != nil {
+			return err
+		}
+		check.MergeSHA = pull.MergeCommitSHA
+		r.log.Info("outbox check compare recorded the merge commit its check opened without", "row", row.ID, "issue", row.Issue,
+			"pullRequest", check.Number, "mergeCommit", check.MergeSHA)
+	}
+	merged := *pull.MergedAt
+	attempt := fmt.Sprintf("/actions/runs/%d/attempts/%d", deploy.Run, deploy.Attempt)
+	var run struct {
+		Path           string `json:"path"`
+		HeadBranch     string `json:"head_branch"`
+		Event          string `json:"event"`
+		HTMLURL        string `json:"html_url"`
+		HeadRepository struct {
+			FullName string `json:"full_name"`
+		} `json:"head_repository"`
+	}
+	err := github.Get(ctx, attempt, &run)
+	var answer *githubrest.Answer
+	if errors.As(err, &answer) && answer.Status == http.StatusNotFound {
+		r.log.Info("outbox check compare finished without acting: GitHub does not know the deploy run", "row", row.ID, "issue", row.Issue,
+			"run", deploy.Run, "attempt", deploy.Attempt, "workflow", deploy.Workflow, "cause", payload.Cause)
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("read attempt %d of deploy run %d for %s's production check: %w", deploy.Attempt, deploy.Run, row.Issue, err)
+	}
+	var why string
+	switch {
+	case run.Path != deploy.Workflow:
+		why = fmt.Sprintf("the run is of workflow %q, not %q", run.Path, deploy.Workflow)
+	case run.HeadBranch != deploy.Branch:
+		why = fmt.Sprintf("the run is on branch %q, not the default branch %q", run.HeadBranch, deploy.Branch)
+	case !strings.EqualFold(run.HeadRepository.FullName, check.Repo):
+		why = fmt.Sprintf("the run's head repository is %q, not %s", run.HeadRepository.FullName, check.Repo)
+	case run.Event == "pull_request" || run.Event == "pull_request_target":
+		why = fmt.Sprintf("a %s event triggered the run", run.Event)
+	}
+	if why != "" {
+		r.log.Info("outbox check compare finished without acting: the run is not a deploy of the default branch", "row", row.ID, "issue", row.Issue,
+			"run", deploy.Run, "attempt", deploy.Attempt, "url", run.HTMLURL, "why", why)
+		return nil
+	}
+	jobs, err := githubrest.GetListPages[deployJob](ctx, github, attempt+"/jobs", "jobs")
+	if err != nil {
+		return fmt.Errorf("read the jobs of attempt %d of deploy run %d for %s's production check: %w", deploy.Attempt, deploy.Run, row.Issue, err)
+	}
+	type applied struct {
+		job deployJob
+		at  time.Time
+	}
+	var deployed []applied
+	var stepSeen, succeeded bool
+	for _, job := range jobs {
+		// GitHub lists an attempt's jobs with those an earlier attempt ran and this one kept; they
+		// deployed in that attempt, whose own row woke the check for them.
+		if job.RunAttempt != deploy.Attempt {
+			continue
+		}
+		for _, step := range job.Steps {
+			if step.Name != deploy.Step {
+				continue
+			}
+			stepSeen = true
+			if step.Conclusion != "success" {
+				continue
+			}
+			succeeded = true
+			if step.CompletedAt.After(merged) {
+				deployed = append(deployed, applied{job: job, at: step.CompletedAt})
+				break
+			}
+		}
+	}
+	if len(deployed) == 0 {
+		switch {
+		case !stepSeen:
+			why = fmt.Sprintf("no job of the attempt has a step named %q", deploy.Step)
+		case !succeeded:
+			why = fmt.Sprintf("step %q succeeded in no job of the attempt", deploy.Step)
+		default:
+			why = fmt.Sprintf("step %q succeeded only at or before the merge", deploy.Step)
+		}
+		r.log.Info("outbox check compare finished without acting: the run did not deploy after the merge", "row", row.ID, "issue", row.Issue,
+			"run", deploy.Run, "attempt", deploy.Attempt, "url", run.HTMLURL, "mergedAt", merged, "jobs", len(jobs), "why", why)
+		return nil
+	}
+	slices.SortStableFunc(deployed, func(a, b applied) int { return a.at.Compare(b.at) })
+	for _, d := range deployed {
+		detail := fmt.Sprintf("%s %s run %d attempt %d, job %s: %s succeeded at %s", check.Repo, deploy.Workflow, deploy.Run, deploy.Attempt,
+			d.job.Name, deploy.Step, d.at.UTC().Format(time.RFC3339))
+		event := fmt.Sprintf("check-wake:%s:%s:%s:%d:%d:%d", row.Issue, check.ID(), payload.Cause, deploy.Run, deploy.Attempt, d.job.ID)
+		fact := intake.CheckWake{Issue: row.Issue, Look: payload.Look, Cause: payload.Cause, Detail: detail, OpenedAt: check.OpenedAt}
+		if _, err := intake.ApplyFact(ctx, r.pool, "outbox", event, fact, r.handlers...); err != nil {
+			return fmt.Errorf("wake %s's production check on %s: %w", row.Issue, detail, err)
+		}
+		r.log.Info("outbox check compare found a deploy after the merge; the check is woken", "row", row.ID, "issue", row.Issue,
+			"run", deploy.Run, "attempt", deploy.Attempt, "job", d.job.ID, "jobName", d.job.Name, "url", run.HTMLURL, "detail", detail,
+			"cause", payload.Cause, "look", payload.Look)
+	}
 	return nil
 }
 
