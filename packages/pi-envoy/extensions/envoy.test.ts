@@ -159,6 +159,9 @@ const natsState = {
   connectionsClosed: false,
   /** Hands each connect, once recorded, to nats.js itself, for a row that watches what it dials. */
   realConnect: false,
+  /** A connect a test parks on, so a pass can be abandoned at its deadline while its connection
+   *  is still being made and what its late continuation writes can be watched. */
+  heldConnect: undefined as Promise<void> | undefined,
   drainHangs: false,
   drainStarted: false,
 };
@@ -192,6 +195,8 @@ mock.module("nats", () => ({
     }
     natsState.connectedNames.push(name);
     natsState.connects.push({ servers, authenticated: authenticator !== undefined });
+    // Parked only where a test asks for it: every other connect answers at once, as before.
+    if (natsState.heldConnect !== undefined) await natsState.heldConnect;
     if (natsState.realConnect) {
       return realConnect(options as unknown as Parameters<typeof realConnect>[0]);
     }
@@ -905,6 +910,35 @@ function responseWithRegistration(
     dir: body.dir,
     topics: body.topics,
   });
+}
+
+/**
+ * Runs `body` with the Envoy timings it names, and restores whatever the process had. The
+ * extension factory reads them when it runs (`envoySettings`), so a test sets them before its
+ * own `envoyExtension(...)` call; every test in this file shares one process, so none may leak.
+ */
+async function withEnvoyTimings<T>(
+  timings: { readonly heartbeatMs?: number; readonly passDeadlineMs?: number },
+  body: () => Promise<T>
+): Promise<T> {
+  const before = [
+    ["ENVOY_HEARTBEAT_MS", process.env.ENVOY_HEARTBEAT_MS],
+    ["ENVOY_PASS_DEADLINE_MS", process.env.ENVOY_PASS_DEADLINE_MS],
+  ] as const;
+  if (timings.heartbeatMs !== undefined) {
+    process.env.ENVOY_HEARTBEAT_MS = String(timings.heartbeatMs);
+  }
+  if (timings.passDeadlineMs !== undefined) {
+    process.env.ENVOY_PASS_DEADLINE_MS = String(timings.passDeadlineMs);
+  }
+  try {
+    return await body();
+  } finally {
+    for (const [name, value] of before) {
+      if (value === undefined) delete process.env[name];
+      else process.env[name] = value;
+    }
+  }
 }
 
 const UNASKED_WAIT_NUDGE =
@@ -8057,6 +8091,357 @@ describe("envoy OMP extension", () => {
     expect(registrations).toBe(3);
     expect(hookCalls).toBe(1);
     expect(notifications).toEqual([]);
+  });
+
+  test("a pass stuck on a listener call that never answers still lets later ticks refresh the registration", async () => {
+    // The registration refresh is the last step of a pass. A listener socket that neither answers
+    // nor errors used to hold every later pass behind it for the life of the process: the pane's
+    // registry record then lapsed while it ran on, and every other agent was told there was no
+    // live session for it. The refresh has to keep going, tick after tick, not recover once.
+    // The ticks are hand-driven, but the age the refresh is decided on is read from the real
+    // clock (`Date.now() - registeredAt`), so the waits between them are real waits.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 5000 }, async () => {
+      let wedgePass = false;
+      const answered = Promise.withResolvers<void>();
+      let registrations = 0;
+      globalThis.fetch = async (input, init) => {
+        if (new URL(input.toString()).pathname === "/v1/interests/subscribe") {
+          // The call the pass awaits, as a socket that is accepted and never answered leaves it:
+          // nothing resolves it, and the request's abort signal goes unread.
+          if (wedgePass) {
+            wedgePass = false;
+            await answered.promise;
+          } else {
+            registrations += 1;
+          }
+        }
+        return responseWithRegistration(input, init, {});
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?heartbeat-wedged-pass");
+      const fixture = createPi();
+      const intervals: (() => void)[] = [];
+      const context: SessionContext = {
+        ...sessionContext("ses_wedged_pass"),
+        setInterval: (callback) => intervals.push(callback),
+      };
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, context);
+      expect(registrations).toBe(1);
+
+      wedgePass = true;
+      intervals[0]?.();
+      // The pass is still inside that call, so its own registration never reached the listener.
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(registrations).toBe(1);
+
+      // Two refresh intervals with nothing accepted: the tick posts the registration itself.
+      intervals[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(registrations).toBe(2);
+
+      // And the tick after it does too: the refresh resumes, it does not recover once.
+      intervals[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(registrations).toBe(3);
+
+      // Answer at last, so the pass settles and leaves no deadline timer behind.
+      answered.resolve();
+      for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
+    });
+  });
+
+  test("a role move that never settles still lets the next tick refresh the registration", async () => {
+    // What a wedged envoy_role_set or a wedged Legion claim leaves behind: the role-move queue is
+    // held, and the heartbeat's pass awaits its own move inside it. Without the move's deadline
+    // and the tick's own refresh, the session's registry record lapses while the pane runs on,
+    // and the listener reaps the very role claim the move was about.
+    // Real waits between hand-driven ticks: the refresh is decided on a real-clock age.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 5000 }, async () => {
+      const role = "legion-controller";
+      let wedgeRoleRead = false;
+      const answered = Promise.withResolvers<void>();
+      let registrations = 0;
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input.toString());
+        if (url.pathname === `/v1/roles/${role}`) {
+          if (wedgeRoleRead) {
+            wedgeRoleRead = false;
+            await answered.promise;
+          }
+          return response({ role, holder: "ses_wedged_move", last_seen: 1 });
+        }
+        if (url.pathname === "/v1/roles/set") {
+          return response({
+            session_id: "ses_wedged_move",
+            machine_id: "test",
+            dir: "/tmp/envoy-omp-test",
+            topics: [`notifications.role.${role}`],
+          });
+        }
+        if (url.pathname === "/v1/interests/subscribe") registrations += 1;
+        return responseWithRegistration(input, init, {});
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?heartbeat-wedged-move");
+      const fixture = createPi();
+      const intervals: (() => void)[] = [];
+      const context: SessionContext = {
+        ...sessionContext("ses_wedged_move"),
+        setInterval: (callback) => intervals.push(callback),
+      };
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, context);
+      await fixture.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role });
+      expect(registrations).toBe(1);
+
+      // This tick registers, then parks in the role move its pass awaits.
+      wedgeRoleRead = true;
+      intervals[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(registrations).toBe(2);
+
+      // The move is still in flight, and the next tick refreshes the registration regardless.
+      intervals[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 60));
+      expect(registrations).toBe(3);
+
+      answered.resolve();
+      for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
+    });
+  });
+
+  test("a whole stall says so once in the pane and once in the log, and a healthy tick says nothing", async () => {
+    // A stall lasts as long as the wedged call does, and every tick inside it meets the same
+    // symptom. One line per episode is what a registry outage gets; a line per tick would bury
+    // the pane and the log under a notice the agent can do nothing about.
+    // Real waits between hand-driven ticks: the refresh is decided on a real-clock age.
+    await withEnvoyTimings({ heartbeatMs: 25, passDeadlineMs: 5000 }, async () => {
+      let wedgePass = false;
+      const answered = Promise.withResolvers<void>();
+      globalThis.fetch = async (input, init) => {
+        if (new URL(input.toString()).pathname === "/v1/interests/subscribe" && wedgePass) {
+          wedgePass = false;
+          await answered.promise;
+        }
+        return responseWithRegistration(input, init, {});
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?heartbeat-stall-said-once");
+      const warnings: string[] = [];
+      const stopSink = logger.registerLogSink((entry) => {
+        if (entry.level === "warn") warnings.push(entry.message);
+      });
+      try {
+        const fixture = createPi();
+        const intervals: (() => void)[] = [];
+        const notifications: string[] = [];
+        const context: SessionContext = {
+          ...sessionContext("ses_stall_once"),
+          setInterval: (callback) => intervals.push(callback),
+          ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+        };
+        envoyExtension(fixture.pi);
+        await fixture.handlers.get("session_start")?.({}, context);
+
+        // A healthy tick before any stall is silent.
+        intervals[0]?.();
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        expect(notifications).toEqual([]);
+
+        wedgePass = true;
+        intervals[0]?.();
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        // Three ticks of the one stall, each refreshing the registration on its own.
+        for (let tick = 0; tick < 3; tick += 1) {
+          intervals[0]?.();
+          await new Promise((resolve) => setTimeout(resolve, 60));
+        }
+        expect(notifications.filter((message) => message.includes("has stalled"))).toHaveLength(1);
+        expect(notifications).toHaveLength(1);
+        expect(
+          warnings.filter(
+            (message) =>
+              message === "envoy: reconcile pass stalled; registration refreshed on its own"
+          )
+        ).toHaveLength(1);
+
+        // The pass settles: the episode is over, and the tick after it is silent again.
+        answered.resolve();
+        for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
+        intervals[0]?.();
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        expect(notifications).toHaveLength(1);
+        expect(
+          warnings.filter(
+            (message) =>
+              message === "envoy: reconcile pass stalled; registration refreshed on its own"
+          )
+        ).toHaveLength(1);
+      } finally {
+        stopSink();
+      }
+    });
+  });
+
+  test("the first healthy tick after a stall re-asserts the role once as a re-registration", async () => {
+    // The listener reaps a role claim whose holder left the session registry, so a stall that
+    // lasted long enough to risk that is an outage like a failed registration: the next healthy
+    // tick must fire the regain hook, which is what re-runs a Legion worker's daemon ready call.
+    // Once, not once per tick: each extra regain is another claims/ready round-trip.
+    // The wait is real: the queue abandons its task on a real timer, read at the task's start.
+    await withEnvoyTimings({ passDeadlineMs: 200 }, async () => {
+      const role = "legion-controller";
+      let wedgeRegistration = false;
+      const answered = Promise.withResolvers<void>();
+      const roleClaims: unknown[] = [];
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input.toString());
+        if (url.pathname === `/v1/roles/${role}`) {
+          return response({ role, holder: "ses_stall_regain", last_seen: 1 });
+        }
+        if (url.pathname === "/v1/roles/set") {
+          roleClaims.push(JSON.parse(init?.body?.toString() ?? "{}"));
+          return response({
+            session_id: "ses_stall_regain",
+            machine_id: "test",
+            dir: "/tmp/envoy-omp-test",
+            topics: [`notifications.role.${role}`],
+          });
+        }
+        if (url.pathname === "/v1/interests/subscribe" && wedgeRegistration) {
+          wedgeRegistration = false;
+          await answered.promise;
+        }
+        return responseWithRegistration(input, init, {});
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?heartbeat-stall-regain");
+      const regained: { readonly role: string; readonly reason: string }[] = [];
+      const hooked = Promise.withResolvers<void>();
+      onEnvoyRoleRegained(async (regainedRole: string, reason: string) => {
+        regained.push({ role: regainedRole, reason });
+        hooked.resolve();
+      });
+      const fixture = createPi();
+      const intervals: (() => void)[] = [];
+      const context: SessionContext = {
+        ...sessionContext("ses_stall_regain"),
+        setInterval: (callback) => intervals.push(callback),
+      };
+      envoyExtension(fixture.pi);
+      await fixture.handlers.get("session_start")?.({}, context);
+      await fixture.tools.find((tool) => tool.name === "envoy_role_set")?.execute("", { role });
+
+      // This tick's pass parks in its registration and is abandoned at its deadline.
+      wedgeRegistration = true;
+      intervals[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 300));
+      expect(regained).toEqual([]);
+
+      intervals[0]?.();
+      await hooked.promise;
+      expect(regained).toEqual([{ role, reason: "reregistered" }]);
+
+      // The tick after it owes nothing, and the claim never needed re-sending.
+      intervals[0]?.();
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(regained).toHaveLength(1);
+      expect(roleClaims).toEqual([{ session_id: "ses_stall_regain", role }]);
+
+      answered.resolve();
+      for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
+    });
+  });
+
+  test("a task that answers after its deadline writes nothing over what a newer one settled", async () => {
+    // An abandoned task cannot be cancelled, only fenced. When its call finally answers it must
+    // not record a role claim the listener has since given elsewhere, must not reopen a subject a
+    // newer pass closed, and must not take over the stream control of the session the host is on
+    // now — a viewer watching that session would go deaf, and the pane would believe it holds a
+    // role nothing recorded.
+    await withEnvoyTimings({ passDeadlineMs: 200 }, async () => {
+      const roleClaims: unknown[] = [];
+      let wedgeClaim = false;
+      const claimAnswered = Promise.withResolvers<void>();
+      globalThis.fetch = async (input, init) => {
+        const url = new URL(input.toString());
+        if (url.pathname === "/v1/roles/set") {
+          const body = JSON.parse(init?.body?.toString() ?? "{}") as {
+            readonly session_id: string;
+            readonly role: string;
+          };
+          roleClaims.push(body);
+          if (wedgeClaim) {
+            wedgeClaim = false;
+            await claimAnswered.promise;
+          }
+          return response({
+            session_id: body.session_id,
+            machine_id: "test",
+            dir: "/tmp/envoy-omp-test",
+            topics: [`notifications.role.${body.role}`],
+          });
+        }
+        return responseWithRegistration(input, init, {});
+      };
+      const { default: envoyExtension } = await import("./envoy.ts?abandoned-writes-nothing");
+      const fixture = createPi();
+      const connected = Promise.withResolvers<void>();
+      try {
+        // The first session's pass parks here, with its connection half made.
+        natsState.heldConnect = connected.promise;
+        envoyExtension(fixture.pi);
+        await fixture.handlers.get("session_start")?.({}, sessionContext("ses_fenced_a"));
+        natsState.heldConnect = undefined;
+
+        // A newer pass, for the session the host is on now, settles in full.
+        const moved = sessionContext("ses_fenced_b");
+        await fixture.handlers.get("session_switch")?.({ reason: "new" }, moved);
+        expect(natsState.controls.get("notifications.agent.ses_fenced_b")?.active()).toBe(true);
+        expect(natsState.controls.get("agentstream.ses_fenced_b.control")?.active()).toBe(true);
+
+        // The abandoned pass's connection is made at last.
+        connected.resolve();
+        for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
+        expect(natsState.controls.has("notifications.agent.ses_fenced_a")).toBe(false);
+        expect(natsState.controls.has("agentstream.ses_fenced_a.control")).toBe(false);
+        expect(natsState.controls.get("notifications.agent.ses_fenced_b")?.active()).toBe(true);
+        expect(natsState.controls.get("agentstream.ses_fenced_b.control")?.active()).toBe(true);
+
+        // A role move abandoned while its claim is in flight, and a newer move that settles.
+        const roleTool = fixture.tools.find((tool) => tool.name === "envoy_role_set");
+        if (roleTool === undefined) throw new Error("envoy_role_set was not registered");
+        wedgeClaim = true;
+        expect((await roleTool.execute("", { role: "release-captain" })).isError).toBe(true);
+        expect((await roleTool.execute("", { role: "reviewer" })).isError).toBeFalsy();
+
+        claimAnswered.resolve();
+        for (let step = 0; step < 20; step += 1) await new Promise((r) => setImmediate(r));
+        // The listener did hear the abandoned claim; this process recorded nothing of it.
+        expect(roleClaims).toEqual([
+          { session_id: "ses_fenced_b", role: "release-captain" },
+          { session_id: "ses_fenced_b", role: "reviewer" },
+        ]);
+        expect(fixture.entries.filter((entry) => entry.customType === "envoy-role-claim")).toEqual([
+          { type: "custom", customType: "envoy-role-claim", data: { role: "reviewer" } },
+        ]);
+        await expect(
+          subscribeLegionNotice(
+            "ses_fenced_b",
+            "notifications.legion.ACME.fenced",
+            moved,
+            "release-captain"
+          )
+        ).rejects.toThrow("does not hold role");
+        await subscribeLegionNotice(
+          "ses_fenced_b",
+          "notifications.legion.ACME.fenced",
+          moved,
+          "reviewer"
+        );
+      } finally {
+        natsState.heldConnect = undefined;
+        connected.resolve();
+        claimAnswered.resolve();
+      }
+    });
   });
 
   test("a failed role read does not make the next healthy heartbeat report a regain", async () => {
