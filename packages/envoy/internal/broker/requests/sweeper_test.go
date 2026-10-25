@@ -3,6 +3,7 @@ package requests
 import (
 	"context"
 	"crypto/ecdsa"
+	"crypto/sha256"
 	"errors"
 	"slices"
 	"sync"
@@ -129,6 +130,41 @@ func TestSweeperTickExpiresPendingRequestsAndMachineLogins(t *testing.T) {
 	var devices int
 	if err := m.Store.Pool.QueryRow(ctx, `select count(*) from oauth_device_codes where signature=$1`, "device-"+t.Name()).Scan(&devices); err != nil || devices != 0 {
 		t.Fatalf("spent device codes after the tick = %d (%v), want 0", devices, err)
+	}
+}
+
+// TestSweeperTickDeletesExpiredBrowserSessions pins that one Tick deletes a browser session whose
+// expiry has passed and keeps a live one signed in.
+func TestSweeperTickDeletesExpiredBrowserSessions(t *testing.T) {
+	m, _, _, _ := newFixture(t)
+	ctx := context.Background()
+	expired, live := sha256.Sum256([]byte("expired "+t.Name())), sha256.Sum256([]byte("live "+t.Name()))
+	if err := m.Store.CreateBrowserSession(ctx, expired, "ada@example.com", time.Now().Add(-time.Minute)); err != nil {
+		t.Fatalf("create the expired session: %v", err)
+	}
+	if err := m.Store.CreateBrowserSession(ctx, live, "ada@example.com", time.Now().Add(time.Hour)); err != nil {
+		t.Fatalf("create the live session: %v", err)
+	}
+
+	sweeper := &Sweeper{Enrollments: &enroll.Service{Store: m.Store}, Machine: m, MachineLogins: &machine.Service{Store: m.Store}, OAuth: oauthstore.New(m.Store.Pool), Interval: time.Hour}
+	sweeper.Tick(ctx)
+
+	rowOf := func(hash [sha256.Size]byte) bool {
+		t.Helper()
+		var present bool
+		if err := m.Store.Pool.QueryRow(ctx, `select exists (select 1 from browser_sessions where secret_hash = $1)`, hash[:]).Scan(&present); err != nil {
+			t.Fatalf("read browser_sessions: %v", err)
+		}
+		return present
+	}
+	if rowOf(expired) {
+		t.Fatal("the expired browser session's row is still there after the tick")
+	}
+	if !rowOf(live) {
+		t.Fatal("the tick deleted the live browser session")
+	}
+	if login, _, err := m.Store.BrowserSession(ctx, live, time.Now()); err != nil || login != "ada@example.com" {
+		t.Fatalf("the live session after the tick = %q, %v; want ada@example.com", login, err)
 	}
 }
 

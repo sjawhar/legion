@@ -8,6 +8,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
@@ -821,5 +822,151 @@ func TestLoadRefusesAHalfConfiguredGitHubIssuer(t *testing.T) {
 	cfg, err := Load(env(validEnv()))
 	if err != nil || cfg.ExchangeGitHubIssuer != "" || cfg.ExchangeGitHubAudience != "" {
 		t.Fatalf("Load with neither half = (%q, %q, %v), want no GitHub issuer and no error", cfg.ExchangeGitHubIssuer, cfg.ExchangeGitHubAudience, err)
+	}
+}
+
+// signInSecret is the client secret the sign-in tests' secret file holds; no error Load answers
+// may carry it.
+const signInSecret = "do-not-print-this-client-secret"
+
+// withSignIn is validEnv with all four of the sign-in client's settings, its secret in a file of
+// t's own holding signInSecret between blank lines and spaces, which Load trims.
+func withSignIn(t *testing.T) map[string]string {
+	t.Helper()
+	secretFile := t.TempDir() + "/client-secret"
+	if err := os.WriteFile(secretFile, []byte("\n  "+signInSecret+"  \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	e := validEnv()
+	e["BROKER_SIGNIN_ISSUER"] = "https://accounts.example.com"
+	e["BROKER_SIGNIN_CLIENT_ID"] = "broker-client"
+	e["BROKER_SIGNIN_CLIENT_SECRET_FILE"] = secretFile
+	e["BROKER_SIGNIN_DOMAIN"] = "example.com"
+	return e
+}
+
+// signInSettings are the four sign-in settings set together or not at all.
+var signInSettings = []string{"BROKER_SIGNIN_ISSUER", "BROKER_SIGNIN_CLIENT_ID", "BROKER_SIGNIN_CLIENT_SECRET_FILE", "BROKER_SIGNIN_DOMAIN"}
+
+// TestLoadReadsTheSignInClient pins the sign-in client with all four settings: each value as
+// given, the secret read from its file and trimmed, a session of 86400 seconds by default and of
+// BROKER_SIGNIN_SESSION_SECONDS when set, and an http issuer accepted on a loopback host.
+func TestLoadReadsTheSignInClient(t *testing.T) {
+	cfg, err := Load(env(withSignIn(t)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := SignIn{Issuer: "https://accounts.example.com", ClientID: "broker-client", ClientSecret: signInSecret, Domain: "example.com", SessionLifetime: 86400 * time.Second}
+	if cfg.SignIn == nil || *cfg.SignIn != want {
+		t.Fatalf("SignIn = %+v, want %+v", cfg.SignIn, want)
+	}
+	e := withSignIn(t)
+	e["BROKER_SIGNIN_SESSION_SECONDS"] = "600"
+	if cfg, err := Load(env(e)); err != nil || cfg.SignIn == nil || cfg.SignIn.SessionLifetime != 10*time.Minute {
+		t.Fatalf("Load(BROKER_SIGNIN_SESSION_SECONDS=600) = (%+v, %v), want a 10-minute session", cfg.SignIn, err)
+	}
+	for _, issuer := range []string{"http://127.0.0.1:5556", "http://localhost:5556/dex", "http://[::1]:5556"} {
+		e := withSignIn(t)
+		e["BROKER_SIGNIN_ISSUER"] = issuer
+		if cfg, err := Load(env(e)); err != nil || cfg.SignIn == nil || cfg.SignIn.Issuer != issuer {
+			t.Errorf("Load(BROKER_SIGNIN_ISSUER=%q) = (%+v, %v), want sign-in on with that issuer", issuer, cfg.SignIn, err)
+		}
+	}
+}
+
+// TestLoadLeavesSignInOffWhenUnset pins that a broker with none of the sign-in settings boots
+// with sign-in off.
+func TestLoadLeavesSignInOffWhenUnset(t *testing.T) {
+	cfg, err := Load(env(validEnv()))
+	if err != nil || cfg.SignIn != nil {
+		t.Fatalf("Load with no sign-in settings = (%+v, %v), want sign-in off and no error", cfg.SignIn, err)
+	}
+}
+
+// TestLoadRefusesAPartialSignIn pins the all-or-none rule over every partial set of the four
+// settings: each refuses, naming every setting it lacks.
+func TestLoadRefusesAPartialSignIn(t *testing.T) {
+	for mask := 1; mask < 1<<len(signInSettings)-1; mask++ {
+		e := withSignIn(t)
+		var missing []string
+		for i, name := range signInSettings {
+			if mask&(1<<i) == 0 {
+				delete(e, name)
+				missing = append(missing, name)
+			}
+		}
+		_, err := Load(env(e))
+		if err == nil {
+			t.Errorf("Load without %v = nil error, want a refusal naming them", missing)
+			continue
+		}
+		_, named, _ := strings.Cut(err.Error(), "missing ")
+		if named != strings.Join(missing, ", ") {
+			t.Errorf("Load without %v = %v, want a refusal naming exactly those as missing", missing, err)
+		}
+		if strings.Contains(err.Error(), signInSecret) {
+			t.Errorf("Load without %v = %v, which carries the client secret", missing, err)
+		}
+	}
+}
+
+// TestLoadRefusesASignInSessionOutOfRange pins BROKER_SIGNIN_SESSION_SECONDS's range, 1 to 86400,
+// and its refusal while sign-in is off, where it would set nothing.
+func TestLoadRefusesASignInSessionOutOfRange(t *testing.T) {
+	for _, bad := range []string{"86401", "0", "-1", "a day"} {
+		e := withSignIn(t)
+		e["BROKER_SIGNIN_SESSION_SECONDS"] = bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SIGNIN_SESSION_SECONDS") || strings.Contains(err.Error(), signInSecret) {
+			t.Errorf("BROKER_SIGNIN_SESSION_SECONDS = %q: err = %v, want a refusal naming the variable", bad, err)
+		}
+	}
+	e := validEnv()
+	e["BROKER_SIGNIN_SESSION_SECONDS"] = "3600"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SIGNIN_SESSION_SECONDS") {
+		t.Fatalf("BROKER_SIGNIN_SESSION_SECONDS with sign-in off: err = %v, want a refusal naming it", err)
+	}
+}
+
+// TestLoadRefusesAnUnusableSignInSecretFile pins that a secret file that cannot be read, or holds
+// only blank space, refuses naming BROKER_SIGNIN_CLIENT_SECRET_FILE, never falling back to
+// another source.
+func TestLoadRefusesAnUnusableSignInSecretFile(t *testing.T) {
+	dir := t.TempDir()
+	blank := dir + "/blank"
+	if err := os.WriteFile(blank, []byte(" \n\t\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	for name, path := range map[string]string{"absent": dir + "/absent", "a directory": dir, "blank": blank} {
+		e := withSignIn(t)
+		e["BROKER_SIGNIN_CLIENT_SECRET_FILE"] = path
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SIGNIN_CLIENT_SECRET_FILE") {
+			t.Errorf("a secret file that is %s: err = %v, want a refusal naming BROKER_SIGNIN_CLIENT_SECRET_FILE", name, err)
+		}
+	}
+}
+
+// TestLoadRefusesThePlainSignInSecret pins that the secret is never taken from the environment:
+// BROKER_SIGNIN_CLIENT_SECRET refuses, naming the _FILE form, whether or not the file is set too,
+// and the refusal does not carry its value.
+func TestLoadRefusesThePlainSignInSecret(t *testing.T) {
+	for name, e := range map[string]map[string]string{"with the file": withSignIn(t), "alone": validEnv()} {
+		e["BROKER_SIGNIN_CLIENT_SECRET"] = signInSecret
+		_, err := Load(env(e))
+		if err == nil || !strings.HasPrefix(err.Error(), "BROKER_SIGNIN_CLIENT_SECRET ") || !strings.Contains(err.Error(), "BROKER_SIGNIN_CLIENT_SECRET_FILE") || strings.Contains(err.Error(), signInSecret) {
+			t.Errorf("BROKER_SIGNIN_CLIENT_SECRET %s: err = %v, want a refusal naming it and BROKER_SIGNIN_CLIENT_SECRET_FILE, without its value", name, err)
+		}
+	}
+}
+
+// TestLoadRefusesASignInIssuerThatIsNotHTTPS pins that the issuer, which a sign-in's code
+// exchange sends the client secret to, is an absolute https URL, with http allowed only to a
+// loopback host.
+func TestLoadRefusesASignInIssuerThatIsNotHTTPS(t *testing.T) {
+	for _, bad := range []string{"http://accounts.example.com", "http://10.0.0.1:5556", "http://127.0.0.1.example.com", "accounts.example.com", "ftp://accounts.example.com", "https://"} {
+		e := withSignIn(t)
+		e["BROKER_SIGNIN_ISSUER"] = bad
+		if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SIGNIN_ISSUER") || strings.Contains(err.Error(), signInSecret) {
+			t.Errorf("BROKER_SIGNIN_ISSUER = %q: err = %v, want a refusal naming it", bad, err)
+		}
 	}
 }

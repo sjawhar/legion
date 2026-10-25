@@ -18,6 +18,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/jackc/pgx/v5/pgconn"
@@ -73,6 +74,18 @@ type Config struct {
 	// given twice, since each account names one caller. Keyed by account, each answering its
 	// caller. Unset, no caller reaches those routes.
 	APIAccounts map[string]string
+	// BROKER_SIGNIN_ISSUER, BROKER_SIGNIN_CLIENT_ID, BROKER_SIGNIN_CLIENT_SECRET_FILE,
+	// BROKER_SIGNIN_DOMAIN, BROKER_SIGNIN_SESSION_SECONDS: the broker's own OpenID Connect client,
+	// through which a person signs in to the broker's approval page to approve a secret request:
+	// the provider's issuer (an absolute https URL, or http only to a loopback host, for a run on
+	// one machine), the client's id, a file holding the client's secret (read at startup and
+	// trimmed; no variable carries the secret itself, so BROKER_SIGNIN_CLIENT_SECRET is refused),
+	// the Google Workspace domain a person's ID token must name in its hd claim, and how many
+	// seconds a sign-in lasts (an absolute expiry nothing extends, at most 86400, 24 hours, the
+	// default). The first four are set together or not at all: a partial set refuses to start,
+	// naming the ones missing. Unset, sign-in is off (nil) and no person can approve a secret
+	// request, and BROKER_SIGNIN_SESSION_SECONDS is refused, since it would set nothing.
+	SignIn *SignIn
 	// BROKER_SECRETS_STORE: which secret store the agent secrets live in: aws-secrets-manager (the
 	// default when unset, AWS Secrets Manager with the agent-secrets key in AWS KMS) or
 	// gcp-secret-manager (Google Cloud Secret Manager with the agent-secrets key in Cloud KMS, read
@@ -200,6 +213,22 @@ type Config struct {
 	TrustedProxyHeader string
 }
 
+// SignIn is the broker's own OpenID Connect client, through which a person signs in to its
+// approval page.
+type SignIn struct {
+	// Issuer is the provider's issuer URL, whose discovery document the sign-in reads.
+	Issuer string
+	// ClientID is the broker's client at Issuer.
+	ClientID string
+	// ClientSecret is that client's secret, read from BROKER_SIGNIN_CLIENT_SECRET_FILE. No error
+	// Load answers carries it.
+	ClientSecret string
+	// Domain is the Google Workspace domain a signing-in person's ID token names in its hd claim.
+	Domain string
+	// SessionLifetime is how long a sign-in's session lasts from the moment it is made.
+	SessionLifetime time.Duration
+}
+
 // noUIToken is why BROKER_UI_TOKEN and its file are gone: the routes it authenticated take the
 // caller's own Kubernetes ServiceAccount token now.
 const noUIToken = "the broker's approval routes take the calling service's own Kubernetes ServiceAccount token, verified against BROKER_K8S_OIDC_ISSUER, so list that account in BROKER_API_ACCOUNTS instead of sharing a bearer with Dispatch's server"
@@ -241,6 +270,7 @@ var removedVars = []struct{ name, reason string }{
 	{"BROKER_RULES_RELOAD_SECONDS", noRulesFile},
 	{"BROKER_MAX_GRANT_SECONDS", noGrantCap},
 	{"BROKER_MINT_TARGETS", noMintTargets},
+	{"BROKER_SIGNIN_CLIENT_SECRET", "the broker reads its sign-in client's secret only from the file BROKER_SIGNIN_CLIENT_SECRET_FILE names, so the secret is never in its environment"},
 }
 
 // serviceAccountPattern is a Kubernetes service account's subject, the one a pod's projected token
@@ -597,6 +627,7 @@ func Load(getenv func(string) string) (Config, error) {
 			return Config{}, err
 		}
 	}
+	var sessionSeconds int
 	ints := []struct {
 		name     string
 		dst      *int
@@ -608,6 +639,7 @@ func Load(getenv func(string) string) (Config, error) {
 		{"BROKER_ACCESS_TOKEN_SECONDS", &cfg.AccessTokenSeconds, 900, 1, 3600},
 		{"BROKER_LAUNCHER_CREDENTIAL_SECONDS", &cfg.LauncherCredentialSeconds, 2592000, 1, 2592000},
 		{"BROKER_SWEEP_SECONDS", &cfg.SweepSeconds, 5, 1, 60},
+		{"BROKER_SIGNIN_SESSION_SECONDS", &sessionSeconds, 86400, 1, 86400},
 	}
 	for _, i := range ints {
 		raw := getenv(i.name)
@@ -621,24 +653,92 @@ func Load(getenv func(string) string) (Config, error) {
 		}
 		*i.dst = n
 	}
+	if cfg.SignIn, err = parseSignIn(getenv, time.Duration(sessionSeconds)*time.Second); err != nil {
+		return Config{}, err
+	}
 	return cfg, nil
+}
+
+// parseSignIn reads the broker's sign-in client, its session lasting sessionLifetime, the
+// BROKER_SIGNIN_SESSION_SECONDS Load read. It answers nil, sign-in off, when none of the client's
+// four settings is set, and refuses: some of them set and not all, naming each one missing;
+// BROKER_SIGNIN_SESSION_SECONDS set while sign-in is off, since it would set nothing; an issuer
+// that is not an absolute https URL, or http to a loopback host; and an unreadable or blank secret
+// file. No refusal carries the secret.
+func parseSignIn(getenv func(string) string, sessionLifetime time.Duration) (*SignIn, error) {
+	settings := []struct{ name, value string }{
+		{"BROKER_SIGNIN_ISSUER", strings.TrimSpace(getenv("BROKER_SIGNIN_ISSUER"))},
+		{"BROKER_SIGNIN_CLIENT_ID", strings.TrimSpace(getenv("BROKER_SIGNIN_CLIENT_ID"))},
+		{"BROKER_SIGNIN_CLIENT_SECRET_FILE", getenv("BROKER_SIGNIN_CLIENT_SECRET_FILE")},
+		{"BROKER_SIGNIN_DOMAIN", strings.TrimSpace(getenv("BROKER_SIGNIN_DOMAIN"))},
+	}
+	var names, missing []string
+	for _, s := range settings {
+		names = append(names, s.name)
+		if strings.TrimSpace(s.value) == "" {
+			missing = append(missing, s.name)
+		}
+	}
+	if len(missing) == len(settings) {
+		if getenv("BROKER_SIGNIN_SESSION_SECONDS") != "" {
+			return nil, fmt.Errorf("BROKER_SIGNIN_SESSION_SECONDS is set while sign-in is off, so it would set nothing; set %s with it, or unset it", strings.Join(names, ", "))
+		}
+		return nil, nil
+	}
+	if len(missing) > 0 {
+		return nil, fmt.Errorf("sign-in needs %s set together, or none of them; missing %s", strings.Join(names, ", "), strings.Join(missing, ", "))
+	}
+	signIn := &SignIn{Issuer: settings[0].value, ClientID: settings[1].value, Domain: settings[3].value, SessionLifetime: sessionLifetime}
+	if !signInIssuerOK(signIn.Issuer) {
+		return nil, fmt.Errorf("BROKER_SIGNIN_ISSUER must be an absolute https URL, or http to a loopback host, got %q", signIn.Issuer)
+	}
+	var err error
+	if signIn.ClientSecret, err = secretFile(settings[2].name, settings[2].value); err != nil {
+		return nil, err
+	}
+	return signIn, nil
+}
+
+// signInIssuerOK reports whether issuer is an absolute https URL, or an http one whose host is
+// localhost or a loopback address: a sign-in's code exchange sends the client secret to it, which
+// only a local run may send in plain text, to its own machine.
+func signInIssuerOK(issuer string) bool {
+	parsed, err := url.Parse(issuer)
+	if err != nil || parsed.Host == "" {
+		return false
+	}
+	switch parsed.Scheme {
+	case "https":
+		return true
+	case "http":
+		host := parsed.Hostname()
+		ip := net.ParseIP(host)
+		return host == "localhost" || ip != nil && ip.IsLoopback()
+	}
+	return false
 }
 
 // secretValue reads NAME_FILE (trimmed contents) ahead of NAME; a set-but-unreadable or blank
 // file is an error naming both, never a fallback.
 func secretValue(getenv func(string) string, name string) (string, error) {
 	if path := getenv(name + "_FILE"); path != "" {
-		data, err := os.ReadFile(path)
-		if err != nil {
-			return "", fmt.Errorf("%s_FILE names %s, which could not be read: %w", name, path, err)
-		}
-		value := strings.TrimSpace(string(data))
-		if value == "" {
-			return "", fmt.Errorf("%s_FILE names %s, which is empty", name, path)
-		}
-		return value, nil
+		return secretFile(name+"_FILE", path)
 	}
 	return getenv(name), nil
+}
+
+// secretFile reads the trimmed contents of path, the file the variable setting names; an
+// unreadable or blank file is an error naming setting and path, never what the file holds.
+func secretFile(setting, path string) (string, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return "", fmt.Errorf("%s names %s, which could not be read: %w", setting, path, err)
+	}
+	value := strings.TrimSpace(string(data))
+	if value == "" {
+		return "", fmt.Errorf("%s names %s, which is empty", setting, path)
+	}
+	return value, nil
 }
 
 func orDefault(v, d string) string {
