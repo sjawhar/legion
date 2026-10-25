@@ -1647,6 +1647,35 @@ async function run(rigFile: string): Promise<void> {
         after.model === before.model && effortText(after.effort) === effortText(before.effort),
         `the resumed session is at ${after.model}, ${effortText(after.effort)}, was ${before.model}, ${effortText(before.effort)}`
       );
+      // The page stays open across the relaunch, as a person's does when a session is relaunched
+      // under it: a change the resumed session makes at its own terminal shows within 20 s with
+      // no reload (A1), as it did before the relaunch.
+      const held = concrete(after.effort).find((level) => level !== effortLevel(after.effort));
+      if (held === undefined)
+        fail(`/effort offers no other level than ${effortText(after.effort)}`);
+      await resumed.request({ level: held, type: "set_thinking_level" });
+      const { tookMs: heldTookMs } = await page
+        .headerUntil(
+          `${held} on the page held open across the relaunch`,
+          SHOWN_WITHIN_MS,
+          (h) => h.thinking === held
+        )
+        .catch(async (error: unknown) => {
+          // Tells a page that missed the report from a session that never made it.
+          await page.reload();
+          const reloaded = await page.headerUntil(
+            `${held} after a reload`,
+            60_000,
+            (h) => h.thinking === held
+          );
+          return fail(
+            `${error instanceof Error ? error.message : String(error)}; after a reload the header shows ${reloaded.header.thinking}: the resumed session reported it and the page held open across the relaunch never applied it`
+          );
+        });
+      note(
+        `on the page held open across the relaunch, RPC set_thinking_level ${held}: the header showed it ${heldTookMs} ms after the RPC answer`
+      );
+      await resumed.request({ level: effortLevel(after.effort), type: "set_thinking_level" });
       await page.reload();
       const { header } = await page.headerUntil(
         `${before.model} and ${effortLevel(before.effort)}`,
