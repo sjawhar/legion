@@ -58,14 +58,36 @@ says which), its first line exactly `Clear defect from <your role token>`. It pr
 - the evidence comment, `dispatch://<REPORT KEY>/comment/<id>`
 
 The controller files it for Legion and replies under your evidence comment with the issue it filed.
-You file nothing, and you wait for nothing. When the report issue does not exist or is closed, put
-the evidence in the message itself. A production check's `Production:` line then names the defect
-as sent to the controller.
+You file nothing, and you wait for nothing. A production check's `Production:` line then names the
+defect as sent to the controller.
+
+### When no controller takes it
+
+The controller topic is a live wake: a message published while no controller runs reaches nobody,
+and no controller reads it later. `envoy_publish`'s own answer tells you whether one took it. A
+publish to a role answers with its live `holder`. With no live controller it fails instead, with
+`no holder for role legion-<project>-controller` or a holder that lapsed, and the listener delivers
+nothing (`packages/envoy/cmd/listener`, the test "unheld role returns 404 without publishing").
+
+- **Your evidence comment is on the report issue:** do nothing more. The comment is the record,
+  and the controller files each `Clear defect from` comment nobody answered at its next start
+  (`skill://legion-controller/references/finding-asks.md`, "Catch up at every start").
+- **The evidence is in your message alone** (the report issue is missing or closed) **and the
+  publish failed:** open the finding as a `dispatch ask` on your own issue, as [What the ask
+  says](#what-the-ask-says) spells it, with `File it for Legion` first and recommended. Your issue's
+  assignee sees it, and its answer comes back to your session. Send the controller that answer
+  with the defect once a publish to it names a holder.
+- **Your own issue is closed too** (Dispatch refuses the ask `409 ISSUE_CLOSED`, as on a production
+  check): post the evidence as a comment on the pull request. Name it in the `Production:` line as
+  taken by no controller, and say so in your summary. Do not create or reopen the report issue
+  yourself: that is the controller's.
+
+Name what you did, the ask or the comment, in your summary.
 
 ## Where it goes
 
-An ask goes on the controller's report issue, always: the issue the deployment instructions name
-for Legion's reports, else the project's `Legion daily report`, which
+An ask goes on the controller's report issue whenever it is open: the issue the deployment
+instructions name for Legion's reports, else the project's `Legion daily report`, which
 `dispatch search --query '"Legion daily report"' --project <PROJECT>` finds. It stays open in
 `icebox`, so the ask stays answerable whatever happens to the issue it came from; once an issue
 closes, Dispatch takes its open asks out of the Inbox and refuses their answers
@@ -77,8 +99,11 @@ done`, and Dispatch refuses the ask with `409 ISSUE_CLOSED`), do not create or r
 (the controller does): send the finding to the controller as text, with `envoy_publish` to the
 controller topic your `Legion addressing` line names (`expects_reply: none`), holding the problem,
 the issue it came from, the evidence and the decision it needs. The controller creates or reopens
-the report issue and opens the ask. A production check's `Production:` line then names the finding
-as sent to the controller.
+the report issue and opens the ask. When that publish fails because no controller holds the role,
+open the ask on your own issue instead, as [When no controller takes
+it](#when-no-controller-takes-it) says for a clear defect. When your issue is closed, post it on
+the pull request. A production check's `Production:` line then names the finding as sent to the
+controller, or names the ask or comment you left.
 
 ## What the ask says
 

@@ -427,8 +427,8 @@ this issue's active phase. Do not add pipeline labels, run a controller loop, or
 completion protocol — this is the whole contract.
 
 A reviewer's phase ends with its completion, not with its review. A round's order (read CI, push
-the handoff with any prose fix of its own, review that head, complete) is in
-`skill://legion-worker/references/merge-gate.md`.
+the handoff with any prose fix of its own, wait for that head's checks to be green when it carries
+a prose fix, review that head, complete) is in `skill://legion-worker/references/merge-gate.md`.
 
 **A refused completion is information, not a retry loop.** The daemon attributes your report to
 the run whose task you took, and answers with what it found. What each answer carries, and what to

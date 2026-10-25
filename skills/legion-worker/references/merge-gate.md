@@ -97,7 +97,9 @@ it, and any other change to the head voids it.
   under the base branch's required checks until someone reads them. A red there is a
   `REQUEST_CHANGES` when the code is at fault, and your own commit to fix when your prose broke
   it. The architect reads your prose commits at its acceptance (*The architect's acceptance*,
-  below), and that read is no new round.
+  below), and that read is no new round. A round after a READY refusal is the one exception. Its
+  approval needs the tester's `E2E` line to name the head with only `.legion/` changed since. So
+  there you fix no prose yourself, and you name each prose finding in a `REQUEST_CHANGES`.
 
 A reviewer's phase ends with its completion, not with its review. Every round writes a handoff
 and takes this order: read CI as above; write, commit and push the handoff; submit the review of
