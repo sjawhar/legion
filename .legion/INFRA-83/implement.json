@@ -2,51 +2,50 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-83",
-  "completed": "2026-10-25T00:20:00Z",
-  "round": 13,
+  "completed": "2026-10-25T01:20:00Z",
+  "round": 14,
   "proof": [
     {
-      "criterion": "No surviving text in the change claims READY reads a head's checks, including the one that had been promoted into a published contract",
-      "surface": "`api/ready.go`'s already-merged note and every copy of it: the contracts fixture, the contracts doc comment, the golden, `handoff_test.go`'s constant and three strings in `pi-legion/src/tools.test.ts`.",
-      "command": "`grep -rn \"head's checks or handoffs\" .` over the whole tree, before and after; `gofmt -l packages/daemon/internal`; `go -C packages/daemon build ./... && go vet ./...`; `go -C packages/daemon test -count=1 ./internal/{api,record,workflow,prompts}/...`; `cd packages/pi-legion && bun test`; `bunx biome check .`; `cd packages/claude-envoy && bun run check-dist`.",
-      "observed": "The note now reads `pull request #%d is already merged, so READY was published without reading its head's handoffs`, and the `handoffs` half is kept because the already-merged path really does skip `headCarries`. After the change the literal returns nothing anywhere outside `.jj` and `.legion/`; the single remaining hit is `.legion/INFRA-83/review.json`, the review quoting the old wording, which is another role's artifact and which retro removes from the head that merges. gofmt silent; build, vet and all four daemon packages ok; pi-legion 493 pass, 8 skip, 0 fail; biome exit 0; check-dist prints `dist/ and legion/ match a fresh build`.",
-      "headSha": "bc3445181971dbb3ecdee92f14b5cb08187c7241",
-      "negativeControl": "The copies were found by searching the repository for the literal rather than by working through the review's list, which is the round's own lesson about enumerating from the source that defines the set: the search returned exactly the seven the review named and one more, the review's own quotation, which is the only kind of hit that should remain."
+      "criterion": "No comment in the daemon still says READY reads the required set",
+      "surface": "`readRequiredChecks`'s doc comment in `packages/daemon/internal/daemon/required_checks.go`, and every call site of `requiredchecks.Required`.",
+      "command": "`grep -rn 'requiredchecks.Required' --include=*.go packages/daemon` excluding tests and the package itself; `gofmt -l packages/daemon/internal`; `go -C packages/daemon build ./... && go vet ./...`; `go -C packages/daemon test -count=1 ./internal/{api,record,workflow,prompts,classify,requiredchecks}/...`.",
+      "observed": "The parenthetical read `(requiredchecks.Required, the reader READY uses)`, which after this change tells its reader that READY uses a reader READY no longer has - deliverable two surviving as a sentence inside the daemon, in the comment describing the very read the change removes from READY. It now reads `(requiredchecks.Required, which this pass is the only reader of)`. That is derived rather than asserted: the grep returns exactly one non-test call site in the tree, `required_checks.go:205`, inside this pass, with the other two hits being doc references in `intake/facts.go` and `classify/required.go`. gofmt silent; build, vet and all six packages ok.",
+      "headSha": "dbd39906ae732b477899ef196bd52e855c029762",
+      "negativeControl": "The replacement clause is checkable by the same command that justified it: if another caller of `requiredchecks.Required` is ever added, `which this pass is the only reader of` becomes false and the grep says so in one line - unlike the sentence it replaces, which no command could have falsified, since it named a role rather than a call site. The reviewer had put this on the fast-follow line; no fast-follow could take it, because retro commits only `docs/solutions/` and the handoff removal, so a false clause in Go is fixed in a round or ships."
     },
     {
-      "criterion": "The doc promises a telling only where one exists",
-      "surface": "`rememberWait`'s doc comment in `packages/daemon/internal/daemon/auto_merge.go`.",
-      "command": "Read against `permanentRefusal` (`outbox.go:411`), `Lagging.Stalled` (`ghautomerge.go:276`) and `removal()`'s `Disappeared` answer (`removal.go:147`); `go vet ./...` and the package tests above.",
-      "observed": "The sentence the previous round added said a disagreement's single telling is finishRefused's, once it has stood past LagBound or GitHub has named the removal. Neither half holds for a `Disappeared`: it is no `Lagging`, so `permanentRefusal` never ends the row, and if GitHub's timeline never names the removal, `Submit` answers `Disappeared` on every run and nobody is told at all. The doc now states each kind separately - a `Lagging`'s telling is `merge-stalled` past `LagBound`; a `Disappeared`'s is `merge-removed` if GitHub names what took the arm away, and nothing otherwise, the outbox's own warning line being the only signal - so the same commit that moved that type into silence now names the silence.",
-      "headSha": "bc3445181971dbb3ecdee92f14b5cb08187c7241",
-      "negativeControl": "The claim was checked against the code that would have to produce the telling rather than against the sentence's plausibility: `permanentRefusal` tests `errors.As(err, &lagging) && lagging.Stalled(now)` and nothing else, so there is no path by which an unnamed `Disappeared` ends a row. The risk bullet the reviewer added records the resulting silence as a cost of the fix rather than leaving it in a doc comment."
+      "criterion": "The base is reintegrated and what the merge did to this branch is attributed rather than inferred",
+      "surface": "GitHub's mergeability for #2121 and the branch's diff against its fork point, with a per-file comparison of that diff before and after.",
+      "command": "`gh api repos/sjawhar/legion/pulls/2121 --jq '[.mergeable,.mergeable_state]'` and `compare/main...legion/INFRA-83` before and after; the fingerprint at both heads; `jj new legion/INFRA-83 \"main\"@origin`; a per-file hash of the two branch diffs.",
+      "observed": "Before: CONFLICTING / DIRTY at bd45b54a, the head the review approved, 63 ahead and 6 behind - found by reading mergeable, since a conflicting head raises no signal at all. After: mergeable, at dbd39906ae732b477899ef196bd52e855c029762, fetched back from GitHub. The fingerprint changed, adf0b132... -> 06f9532e..., and the per-file comparison names exactly two files moved: required_checks.go, this round's clause, and packages/pi-legion/CHANGELOG.md, the one conflicted file, where both sides added bullets at the head of the same Changed list and both are kept whole. The merge itself altered no line of this branch's diff; had the round carried only the merge, the fingerprint would have been unchanged.",
+      "headSha": "dbd39906ae732b477899ef196bd52e855c029762",
+      "negativeControl": "The per-file comparison is the control for the fingerprint: a changed fingerprint says something moved and never what, which is the gap that let a restored paragraph through in round 6. Naming the two files turns `changed` into an attribution a reader can re-derive, and it is what distinguishes this round from a new round of change."
     },
     {
-      "criterion": "The pull request body stops growing toward the limit that would break the record itself",
-      "surface": "The live body and the archive comment that now carries its long evidence.",
-      "command": "`wc -c` on the body before and after; the growth measured across six observations this session (19,711 at round 8 through 35,068 at round 13); `gh pr comment` for the archive; the body re-read from the forge after the PATCH.",
-      "observed": "Growth measured at 3,771 characters a round, leaving 3.5 rounds to `pr-body.md`'s ~48,000 guideline and 8.2 to GitHub's 65,536, at which the body PATCH itself fails - so the step that breaks is the ability to update the record mid-round. Rounds 9-12's `E2E (implementer)` evidence moved into one Legion-footer comment that names the head of every block in its own text, with each round's verdict and code head kept inline. The body went 35,068 -> 26,366, which buys back about 2.3 rounds rather than only slowing the rate.",
-      "headSha": "bc3445181971dbb3ecdee92f14b5cb08187c7241",
-      "negativeControl": "The obvious link target was rejected for a reason that can be checked: `.legion/INFRA-83/implement.json` is removed by retro's last commit and READY refuses a head still carrying it, so a pointer there is guaranteed to break at the merge - precisely when the body starts being read from outside the tree, since the `Production:` line is written after the close. A pull-request comment survives both."
+      "criterion": "The merge undid no deletion, altered no text of main's, and the controls that did not run are named",
+      "surface": "The merged tree, and the five instruction files the merge touched.",
+      "command": "The deletion-survival sweep over every removed line of 40 characters or more from the pre-merge diff against the fork point (492), each hit read; a word-level diff of each instruction file the merge touched against `jj file show -r main@origin`; `cd packages/pi-legion && bun test src/skills-guard.test.ts`; `check-dist`; `bunx biome check .`; `.github/scripts/check-private-names.sh`.",
+      "observed": "52 of the 492 survive, all in the families accounted for in every earlier round: the trailer paragraph in the reference this branch moved it to and in prompts/go/worker-common.md, which always had its own copy; the deleted `**CI:**` template line only in its dated docs/solutions record; one merge-gate.md sentence kept on purpose; one re-wrapped tester bullet. No deletion of this branch's came back. The merge touched five instruction files, all dispatch://INFRA-227's - skills/legion-controller/SKILL.md, its references/backlog-stewardship.md, prompts/roles/controller-root.md and the two bundle copies - and each is byte-identical to main@origin, 0 differing lines, so the merge took main's text whole and this branch alters none of it. The skills guard is 11 pass, 0 fail; check-dist prints `dist/ and legion/ match a fresh build`; biome exit 0; private names clean over 4,882 files.",
+      "headSha": "dbd39906ae732b477899ef196bd52e855c029762",
+      "negativeControl": "The guard's five-way control was NOT re-run this round, and that is stated rather than implied: the merge reached none of the five pinned texts, which the merge's own file list shows, so there was nothing for it to be a control of. Saying which instrument did not fire is the half of a proof that usually goes missing."
     }
   ],
-  "whyOneSentenceBecameFive": "The stale note is a contract value rather than prose: it is the string `HandoffCompleteResponse.note` carries, so it is pinned by the published fixture `contracts/fixtures/daemon-api/handoff-complete.json`, by `state_golden_test.go`, by `handoff_test.go`'s constant and by three assertions in `pi-legion/src/tools.test.ts`, and described by the doc comment in `contracts/src/legion-api.ts`. Prose drifts in one place; a contract value drifts in as many places as pin it, and each pin makes the wrong sentence look more confirmed. This change also promoted it: deleting the only other note the route could answer left this the one note the response carries.",
+  "sizeLineRemoved": "The body's `Size` line named a figure for four rounds and was wrong at the end of three of them, every time by a push that followed the read. The claim it carried - re-read at this head - cannot be true, because the line is written before the push that changes it. So the figure is removed rather than corrected a fourth time, and the command stands in its place, answering for whatever head the reader is on. A sentence that cannot be true at the moment it is read is removed, not re-measured.",
   "filesChanged": [
-    "packages/daemon/internal/api/ready.go — the already-merged note drops `checks or`",
-    "packages/contracts/fixtures/daemon-api/handoff-complete.json, packages/daemon/internal/api/state_golden_test.go, packages/daemon/internal/api/handoff_test.go, packages/pi-legion/src/tools.test.ts — the same literal, moved with it",
-    "packages/contracts/src/legion-api.ts — the doc comment no longer says the head `was published unread`",
-    "packages/daemon/internal/daemon/auto_merge.go — rememberWait's doc states each disagreement kind's telling, and the silence where there is none",
-    "The pull request body: rounds 9-12's evidence archived to a comment, Size and the Verification head re-derived, round 13's block added"
+    "packages/daemon/internal/daemon/required_checks.go — the parenthetical names the daemon's own pass",
+    "packages/pi-legion/CHANGELOG.md — the conflicted file, both sides' bullets kept whole",
+    "The forward merge `merge: resolve conflict against \"main\"@origin`, which brought 62 files of main's in and altered no line of this branch's diff",
+    "The pull request body: the Size figure dropped, the Verification head and the Threads stamp re-derived, round 14's E2E block added"
   ],
   "trickyParts": [
-    "A pointer by line number drifts inside the very commit that fixes what it points at - the reviewer's `Look at first` did it twice, the second time in the commit that fixed the finding it named. Symbols survive what line numbers do not, and that line now cites symbols.",
-    "The archive comment names the head of every block in its own text. A comment that outlives the branch and does not say which commit it is about is the shelf-life defect with a longer fuse, which is the whole reason the link had to leave `.legion/`."
+    "The clause fix and the conflict resolution are carried by the merge commit itself rather than by a commit above it. That is visible in the diff and intentional - the round's two items are small and the merge was forced mid-round - but a reader comparing the merge against its parents should expect two files of this branch's own in it.",
+    "The architect's instruction said the body item costs no head move; the merge did move the head, so the round is both. The body's own account says which of the two moved the fingerprint."
   ],
   "deviations": [],
   "openQuestions": [],
   "discoveredComplexity": [
-    "mergeable was read before pushing: true, and the push is a plain fast-forward.",
-    "No CI verdict is stated for this head. The last observation with a time on it is the reviewer's at the previous code head 434f974106d9d24ff24756d37f1d6f02a9f2d254.",
-    "The fast-follow line carries the reviewer's additions: `waitingOnGitHub`'s name and placement (the property arguably belongs on the types in `ghautomerge` beside `Routine()`), every rendering of `merge-waiting`'s remedy omitting a branch GitHub requires to be up to date with its base, `required_checks.go:69`'s comment, and `handoff_test.go`'s no-read proof checking only the check-runs and status suffixes while the docs now claim `rules/branches` is unread too."
+    "This is the third time the branch has gone conflicting with nothing announcing it, and the second time it was the approved head that stopped merging. The approval at bd45b54a now stands against a head that cannot merge, so the next approval names dbd39906ae732b477899ef196bd52e855c029762.",
+    "No CI verdict is stated for this head. The last observation with a time on it is the reviewer's at the previous code head bc3445181971dbb3ecdee92f14b5cb08187c7241.",
+    "Not taken, on the architect's instruction: code-quality's re-expression of `waitingOnGitHub` over `routineWait`. The allowlist is silent by default, which is the property the design wanted, and a second package in that predicate is a change of design rather than a repair."
   ]
 }
