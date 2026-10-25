@@ -1,15 +1,16 @@
 # shellcheck shell=bash disable=SC2154,SC2034 # the variables below are the caller's (listed below)
-# stage4a-sandbox-runtime.sh's LEGION_E2E_POD_REACHABILITY=bridge mode: a reverse tunnel from the
-# devbox to a scratch pod+Service of the run's own, for a cluster whose pods cannot reach the
-# devbox at all (no tailnet bridge, no routable private address — GKE's pattern, unlike AWS's
-# directly-reachable private address). Pods dial the Service; the Service's one pod runs a chisel
-# reverse-tunnel server (mirror.gcr.io/jpillora/chisel, pulled through the mirror and pinned by
-# digest per AGENTS.md); the devbox reaches that pod's control port only through `kubectl
-# port-forward` (never exposed by the Service, never by the cluster network at all), and a chisel
-# client built from the pinned source on the devbox asks the server, over that port-forward, to
-# open two reverse listeners — one per forwarded port — that proxy back through the tunnel to
-# 127.0.0.1 on the devbox, where the harness's own worker-stream listener and scratch session
-# Postgres already bind (stage4a-sandbox-runtime.sh's bind_host).
+# A reverse tunnel from the devbox to a scratch pod+Service of the run's own, for a cluster whose
+# pods cannot reach the devbox at all (no tailnet bridge, no routable private address — GKE's
+# pattern, unlike AWS's directly-reachable private address). Shared by two callers:
+# stage4a-sandbox-runtime.sh's LEGION_E2E_POD_REACHABILITY=bridge mode (two ports: the worker
+# stream and the session database) and claude-backend-sandbox.sh (five ports: the daemon API, the
+# worker stream, Dispatch, the Envoy listener and NATS). Pods dial the Service; the Service's one
+# pod runs a chisel reverse-tunnel server (mirror.gcr.io/jpillora/chisel, pulled through the mirror
+# and pinned by digest per AGENTS.md); the devbox reaches that pod's control port only through
+# `kubectl port-forward` (never exposed by the Service, never by the cluster network at all), and a
+# chisel client built from the pinned source on the devbox asks the server, over that
+# port-forward, to open one reverse listener per port the caller names, each proxying back through
+# the tunnel to 127.0.0.1 on the devbox, where the caller's own services already bind.
 #
 # Every object bridge_start creates carries the run's legion.dev/project label (run_label, the
 # same one lib/namespace-rig.sh's teardown owns), and bridge_stop deletes them by their one exact
@@ -25,21 +26,26 @@
 # exiting (its own retry budget exhausted) — two earlier runs died outright to this exact drop,
 # live, 2026-10-17, before this fix.
 #
-# Sourced after lib/namespace-rig.sh (stage4a-sandbox-runtime.sh sources both), whose `op` this
-# file reuses for every operator-context read and write. The caller sets (beside begin/note/fail/
-# pass and namespace-rig.sh's own variables, op included):
+# Sourced after lib/namespace-rig.sh (both callers source both), whose `op` this file reuses for
+# every operator-context read and write. The caller sets (beside begin/note/fail/pass and
+# namespace-rig.sh's own variables, op included):
 #   root         the checkout root, for the pinned chisel client's `go install`
 #   operator     the admin kubectl context; bridge_stop and every read here use it alone
 #   work         the run's scratch directory (the chisel client binary, logs, never printed)
 #   bridge_name  the bridge pod and Service's shared name, deterministic from the project alone
-#                (stage4a-sandbox-runtime.sh sets it once, beside its other object names, so the
-#                cluster-DNS host pods would dial is known before bridge_start ever runs)
+#                (the caller sets it once, beside its other object names, so the cluster-DNS host
+#                pods would dial is known before bridge_start ever runs)
+# defines:
+#   kill_harness stops whatever the caller's run drives; the watchdog calls it before
+#                kill -TERM "$$" on both of its fatal paths. The watchdog runs under the caller's
+#                errexit, so an undefined kill_harness would end the watchdog before it signals.
 # and calls:
-#   bridge_start <stream-port> <session-db-port>
-#     stands the bridge up or fails loudly; on success sets bridge_started. The cluster-DNS name
-#     pods dial (stream_port.sessiondb_port) is deterministic from bridge_name alone — the caller
-#     already computes it the same way, before calling bridge_start — so this file need not hand
-#     it back.
+#   bridge_start <port>...
+#     stands the bridge up for one or more ports, each a Service port named p<port> and a reverse
+#     listener to 127.0.0.1:<port> on the devbox, or fails loudly; on success sets
+#     bridge_started. The cluster-DNS name pods dial is deterministic from bridge_name alone — the
+#     caller already computes it the same way, before calling bridge_start — so this file need not
+#     hand it back.
 #   bridge_stop
 #     idempotent and safe to call whether or not bridge_start ever ran: stops the watchdog, the
 #     chisel client and the port-forward, then deletes the bridge's auth Secret, pod and Service by
@@ -91,7 +97,14 @@ bridge_portforward_start() {
 # watchdog, in that order, and fails loudly (via the caller's fail) the moment any of them does not
 # come up within its own bound. It never retries a failed step itself.
 bridge_start() {
-  local stream_port=$1 sessiondb_port=$2
+  [ "$#" -gt 0 ] || fail "bridge_start needs at least one port to forward"
+  local port container_ports='' service_ports='' forwards=() listed=''
+  for port in "$@"; do
+    container_ports+=$'\n'"        - {containerPort: $port}"
+    service_ports+=$'\n'"    - {name: p$port, port: $port, targetPort: $port}"
+    forwards+=("R:0.0.0.0:$port:127.0.0.1:$port")
+    listed+="${listed:+, }:$port"
+  done
 
   # Set before any create attempt, not after the pod/Service succeed: confirmed live, 2026-10-17,
   # a failure partway through (the Secret created, the Pod/Service not, or the reverse) left
@@ -160,9 +173,7 @@ spec:
         - name: AUTH
           valueFrom: {secretKeyRef: {name: "$bridge_name-auth", key: AUTH}}
       ports:
-        - {containerPort: $bridge_control_port}
-        - {containerPort: $stream_port}
-        - {containerPort: $sessiondb_port}
+        - {containerPort: $bridge_control_port}$container_ports
       securityContext: {allowPrivilegeEscalation: false, readOnlyRootFilesystem: true, capabilities: {drop: ["ALL"]}}
       resources: {requests: {cpu: "50m", memory: "32Mi"}, limits: {cpu: "250m", memory: "64Mi"}}
 ---
@@ -173,9 +184,7 @@ metadata:
   labels: {legion.dev/project: "$run_label"}
 spec:
   selector: {legion.dev/bridge: "$bridge_name"}
-  ports:
-    - {name: stream, port: $stream_port, targetPort: $stream_port}
-    - {name: sessiondb, port: $sessiondb_port, targetPort: $sessiondb_port}
+  ports:$service_ports
 YAML
   # 240s, not 120s: confirmed live, 2026-10-17, this cluster's own autopilot-default-resources-
   # mutator admission webhook adjusts the chisel container's cpu on create, and bringing up the
@@ -184,9 +193,9 @@ YAML
   # timeout's own diagnostic read it).
   op wait "pod/$bridge_name" --for=condition=Ready --timeout=240s >/dev/null ||
     fail "the bridge pod $bridge_name did not become Ready within 240s: $(op get pod "$bridge_name" -o wide 2>&1)"
-  note "[operator] bridge pod/Service $bridge_name: chisel server on :$bridge_control_port (control, never exposed by the Service), reverse-forwarding :$stream_port and :$sessiondb_port, label legion.dev/project=$run_label"
+  note "[operator] bridge pod/Service $bridge_name: chisel server on :$bridge_control_port (control, never exposed by the Service), reverse-forwarding $listed, label legion.dev/project=$run_label"
 
-  bridge_local_control_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$stream_port" "$sessiondb_port") ||
+  bridge_local_control_port=$(bash "$root/scripts/e2e/lib/free-port.sh" "$@") ||
     fail "no free devbox port for the bridge's kubectl port-forward"
   bridge_portforward_start ||
     fail "the bridge's kubectl port-forward never came up: $(cat "$work/bridge-portforward-$bridge_portforward_attempt.log")"
@@ -199,8 +208,7 @@ YAML
   # another process's argv; only its owner or root can read its environment) — chisel reads it
   # from there natively when `--auth` is omitted, the same env var name the server's Secret uses.
   AUTH="$auth_user:$auth_token" "$chisel_bin" client --max-retry-count 30 --max-retry-interval 2s "http://127.0.0.1:$bridge_local_control_port" \
-    "R:0.0.0.0:$stream_port:127.0.0.1:$stream_port" \
-    "R:0.0.0.0:$sessiondb_port:127.0.0.1:$sessiondb_port" \
+    "${forwards[@]}" \
     >"$work/bridge-chisel-client.log" 2>&1 &
   bridge_client_pid=$!
 
@@ -209,15 +217,19 @@ YAML
     kill -0 "$bridge_client_pid" 2>/dev/null ||
       fail "the chisel client exited before the tunnel came up: $(cat "$work/bridge-chisel-client.log")"
     log=$(op logs "$bridge_name" 2>&1) || true
-    if grep -q "tun: proxy#R:$stream_port=>" <<<"$log" && grep -q "tun: proxy#R:$sessiondb_port=>" <<<"$log"; then
-      ready=1
-      break
-    fi
+    ready=1
+    for port in "$@"; do
+      grep -q "tun: proxy#R:$port=>" <<<"$log" || {
+        ready=
+        break
+      }
+    done
+    [ -z "$ready" ] || break
     sleep 1
   done
   [ -n "$ready" ] ||
-    fail "the bridge's reverse listeners for :$stream_port and :$sessiondb_port never came up within 30s; bridge pod log: $log; chisel client log: $(cat "$work/bridge-chisel-client.log")"
-  note "[harness] chisel client (pid $bridge_client_pid, max-retry-count 30, max-retry-interval 2s): reverse listeners for :$stream_port and :$sessiondb_port confirmed in the bridge pod's log"
+    fail "the bridge's reverse listeners for $listed never came up within 30s; bridge pod log: $log; chisel client log: $(cat "$work/bridge-chisel-client.log")"
+  note "[harness] chisel client (pid $bridge_client_pid, max-retry-count 30, max-retry-interval 2s): reverse listeners for $listed confirmed in the bridge pod's log"
 
   # The watchdog owns every port-forward restart from here: kubectl port-forward never retries
   # itself, but a dropped one is not necessarily a dead bridge — the chisel client, auth and
