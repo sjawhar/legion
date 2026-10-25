@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-195",
-  "completed": "2026-10-25T16:16:35Z",
+  "completed": "2026-10-25T23:31:16Z",
   "planDocument": "dispatch://INFRA-195/artifact/plan-md",
   "requiredSkills": {
     "implement": [
@@ -11,7 +11,7 @@
       "dispatch: the production check's record and any finding ask are written with the dispatch command."
     ],
     "test": [
-      "legion-worker: the tester's proof rules and E2E (tester) line (references/pr-body.md), re-running the plan's browser suite rows and pod rig, and opening a finding ask (references/findings.md)."
+      "legion-worker: the tester's proof rules and E2E (tester) line (references/pr-body.md), re-running the plan's browser rows (11a-11d included) and the pod rig (check 14's three steps), reading CI on the pushed head for the webkit and firefox rows, and opening a finding ask (references/findings.md)."
     ],
     "review": [
       "legion-worker: review rounds, thread dispositions and approval of the head (references/merge-gate.md, references/review-threads.md, references/pr-body.md for what a proof must show).",
@@ -67,12 +67,36 @@
       {
         "finding": "F12: The draft names no documentation or changelog work, although the feature changes the published live-view behavior, plugin wire protocol, host requirements, and live-proof procedure.",
         "answer": "Tasks 3, 4, 6, 7 list the docs: pi-envoy AGENTS.md and CHANGELOG.md, contracts CHANGELOG.md, envoy CHANGELOG.md (the SPA ships with Dispatch), packages/dispatch/AGENTS.md, docs/site agents.md live view section, scripts/e2e/README.md (index row and a section on how the rig differs from dispatch-user-turns.sh)."
+      },
+      {
+        "finding": "G2-1: The clock-skew risk did not state the ordering guarantee the seq seed gives, and the contract promises unconditional cross-process monotonicity.",
+        "answer": "Decision 3a states the condition 1000*(t1-t0) > N, accepts the limit (persisting the counter would add a write per frame), has the contract's seq doc name that basis, and cites the injected-clock test agent-stream.test.ts:579-623 as the deterministic check. 'Every frame' corrected to every settings and commands frame."
+      },
+      {
+        "finding": "G2-2: Row 11d left unresolved whether a held step survives a reported value that changes that picker.",
+        "answer": "Amended decision 8: a held step survives the switch's end unless the session reports a new value for that picker, which drops it (SessionSettings.tsx:95-97,114,126; unit tests AgentConversationPage.test.tsx:898-904 and 1038-1079). Row 11d names its values: model switch a->b, thinking stays auto, Enter then sends /effort for the step."
+      },
+      {
+        "finding": "G2-3: Rig check 14 did not isolate publishState on a real surface and its evidence followed a reload.",
+        "answer": "Check 14 has three steps on one held-open page: the switch stays; numbering (RPC set_thinking_level after a first-watch barrier); arming (relaunch with --resume --model <other>, page follows with no RPC change). Screenshot before any reload. Negative control: a throwaway rig run with publishState removed fails step 3 only; the tester's red run is cited for numbering."
+      },
+      {
+        "finding": "G2-4: selectOption does not drive a native popup; the arrow-key claim ignored macOS.",
+        "answer": "Decision 6a labels the path accurately: selectOption fires change outside a key's task, which is what a pointer or native-popup pick delivers; Playwright cannot drive a native popup; macOS arrows open the popup and step nothing (AgentMessageComposer.tsx:118-126). Same as the issue picker's own spec."
+      },
+      {
+        "finding": "G2-5: Task 8 asked the implementer to record CI results for a head not yet pushed.",
+        "answer": "The implementer records --list for webkit and firefox and does not wait; the tester reads CI on the pushed head and records the webkit and firefox results by run id."
+      },
+      {
+        "finding": "G2-6: The simplify instruction asked for a second pass and its range excluded 9f93e30b.",
+        "answer": "Dropped: the simplify pass runs once per pull request and ran at 5ac927eb -> 04c4a43b (pr-body.md)."
       }
     ]
   },
   "planReview": {
     "verdict": "approved",
-    "rounds": 3
+    "rounds": 2
   },
   "specDepartures": [
     {
@@ -87,5 +111,12 @@
         ]
       }
     }
-  ]
+  ],
+  "generation": 2,
+  "planDocumentVersion": 2,
+  "amendment": "Generation 2 amendment appended to dispatch://INFRA-195/artifact/plan-md (version 2). The plan of generation 1 stands; the amendment adds decision 3a (frame seq monotonic across a session's processes, and publishState on arming), decision 6a (the header pickers' keyboard-step rule) and amended decision 8 (pending switch holds pickers with aria-disabled), rig check 14 amended to three steps on one held-open page with a first-watch barrier, browser rows 11a-11d in a new e2e/keyboard-session-pickers.e2e.ts run in chromium, iphone, webkit and firefox, and Task 8 for the implementer. The fixes 9f93e30b and 0683c7f0 are kept; the implementer adds the rows, the rig step, the contract doc clause, config and docs, then proves at the new head.",
+  "planReviewGeneration1": {
+    "verdict": "approved",
+    "rounds": 3
+  }
 }
