@@ -168,6 +168,13 @@ const CheckoutFileSchema = z.looseObject({
   dispatch: DispatchSectionSchema.optional(),
 });
 
+// The session's switch for AskGate, read apart from the rest of the file (`askgateSetting`), so a
+// section that does not parse never fails the Dispatch or Envoy read.
+const AskgateSectionSchema = z.strictObject({ enabled: z.boolean().optional() });
+
+/** AskGate on or off for a session, and why a section that could not be read leaves it on. */
+export type AskgateSetting = { readonly enabled: boolean; readonly error: string | null };
+
 type EnvoyFile = z.infer<typeof EnvoyFileSchema>;
 
 /** A `dispatch` section as written. */
@@ -186,6 +193,8 @@ export type CheckoutEnvoyConfig =
       readonly dispatch: DispatchFileSettings;
       /** Set when the file holds an `envoy` section, which a checkout cannot write. */
       readonly envoyError: string | null;
+      /** Set when the file holds an `askgate` section, which only the session's file sets. */
+      readonly askgateError: string | null;
     }
   | { readonly kind: "invalid"; readonly path: string; readonly error: string };
 
@@ -574,6 +583,9 @@ export function readEnvoyConfig(
       envoyError: Object.hasOwn(checkoutFile.settings, "envoy")
         ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}`
         : null,
+      askgateError: Object.hasOwn(checkoutFile.settings, "askgate")
+        ? `askgate in ${checkoutPath} is not read; set it in ${filePath}`
+        : null,
     };
   }
   const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
@@ -605,4 +617,51 @@ export function readEnvoyConfig(
         : null,
     warnings,
   };
+}
+
+/**
+ * AskGate's switch in the session's envoy.json at `filePath`, read now. No file, no `askgate`
+ * section, or `enabled: true` leaves it on; `enabled: false` turns it off. A section that does
+ * not parse, or a file that cannot be read or is not JSON, leaves it on with an `error` that names
+ * the file and `askgate.enabled`.
+ */
+export function askgateSetting(filePath: string): AskgateSetting {
+  const stayOn = (reason: string): AskgateSetting => ({
+    enabled: true,
+    error: `${reason}; AskGate stays on`,
+  });
+  let raw: string;
+  try {
+    raw = readFileSync(filePath, "utf-8");
+  } catch (error) {
+    if (hasErrnoCode(error, "ENOENT") || hasErrnoCode(error, "ENOTDIR")) {
+      return { enabled: true, error: null };
+    }
+    return stayOn(
+      `${filePath}: could not be read (${messageFor(error)}); askgate.enabled is not read`
+    );
+  }
+  let parsedJson: unknown;
+  try {
+    parsedJson = JSON.parse(raw);
+  } catch {
+    const position = jsonErrorPosition(raw);
+    const at = position === undefined ? "" : ` at ${position}`;
+    return stayOn(`${filePath}: invalid JSON${at}; askgate.enabled is not read`);
+  }
+  if (typeof parsedJson !== "object" || parsedJson === null || !("askgate" in parsedJson)) {
+    return { enabled: true, error: null };
+  }
+  const parsed = z.object({ askgate: AskgateSectionSchema }).safeParse(parsedJson);
+  if (!parsed.success) {
+    // An unknown key is named as the other sections name one, and then the one key the section
+    // takes; any other issue is the switch's type.
+    const unknownKey = parsed.error.issues[0]?.code === "unrecognized_keys";
+    return stayOn(
+      unknownKey
+        ? `${describeSchemaIssue(filePath, parsed.error)}; the one askgate key is askgate.enabled, true or false`
+        : `${filePath}: askgate.enabled must be true or false`
+    );
+  }
+  return { enabled: parsed.data.askgate.enabled ?? true, error: null };
 }

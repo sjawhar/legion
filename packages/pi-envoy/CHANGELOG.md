@@ -2,6 +2,36 @@
 
 ## [Unreleased]
 
+### Added
+
+- AskGate reviews each Dispatch write of a session's main agent before the write posts, and sends
+  back a write that breaks its rules with the reason and the fix. It runs in each session with
+  Dispatch on. `{"askgate":{"enabled":false}}` in the session's envoy.json turns it off.
+  `OMP_ASKGATE=warn|block` sets the mode, and else the session's `experiments` entry does
+  (`block` when there is none). The gate asks the `askgate` model role, else the `default` role,
+  and refuses the write when neither is set. A switch that does not parse, and a gate that does
+  not load, are said at session start. A gate that does not load (a host module, an
+  `OMP_ASKGATE_TIMEOUT_MS` that is no positive integer, a handler time limit too short for a
+  verdict) refuses each write it would review, in both modes, naming the error and the switch.
+- AskGate reviews an upload of a markdown document (`dispatch artifact` with inline text, a
+  `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that ends in `.md`) against
+  its rule on the person's words alone. A name or path read from a file (`--name-file`) is decided
+  from the dry run, and one that holds an expansion is refused. For `--path` it reads the file from
+  the directory the `dispatch` command resolves it in. Its rules now also send back a fact the
+  reader does not need and text longer than its decision needs, and a claim about what the person
+  said is sourced only by a link to where they wrote it.
+- AskGate's rules check: a second model call judges only the new asks a Dispatch write opens
+  against two rules. A new ask is a `dispatch ask`, an ask block that a `doc-edit` inserts or a
+  block that it retypes into an ask, and an ask block in an issue spec or in a markdown upload. One
+  rule refuses an ask whose own recommendation is to change nothing. The other refuses an ask for a
+  step the person must do with their own hands when the agent did not try its own access first. A
+  match refuses the call in `warn` mode as well as in `block` mode. `--advisor-rebuttal '<line>'`
+  on a command, `"advisor_rebuttal": "<line>"` in a device's JSON, or the third attempt on the same
+  target sends the call anyway. The `advisor-gate` entry gains `rule`, `ruleAsk`, `ruleQuote`,
+  `ruleOutcome`, `ruleModel`, `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut` and
+  `target`, and `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors
+  and the refusals the agent overrode.
+
 ### Fixed
 
 - The run-end self-check's prompt counts as PROCEEDING a wait for a message, an answer or an event

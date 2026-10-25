@@ -7,6 +7,19 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- The skill-scenario rig has an `askgate` scenario. It seeds an issue whose one
+  comment is the person's and gives a plain session one of eight prompts, which
+  `SKILL_SCENARIOS_ASKGATE_CASE` names: `facts`, `link` or `upload` for AskGate's review of the
+  call, and `nochange`, `nochange-rebuttal`, `nochange-block`, `untried` or `tried` for its rules
+  check (an ask whose own recommendation changes nothing, the same ask with `--advisor-rebuttal` or
+  inserted as an ask block with `dispatch doc-edit`, and an ask for a `gh api` read the agent did
+  not run, or ran first and quotes the error of). `SKILL_SCENARIOS_ASKGATE_MODE` (`warn` or `block`)
+  sets the run's `OMP_ASKGATE`; unset, AskGate runs in block mode. An askgate run's directory is
+  `askgate-<case>-<label>-<n>`, so the batches of the cases keep their own runs, and `rig.sh score
+  askgate` counts each case and label on its own. `score.ts` reads AskGate's verdicts, the rule a
+  refusal names and each call's mode from the transcript. `rig.sh profile` takes
+  `--envoy-json <file>` and merges that object into the envoy.json the label's sessions read, so a
+  label can turn AskGate off.
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,

@@ -5,6 +5,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -438,10 +441,37 @@ func TestWriteAdviceReportsIssueStatusAtWriteTime(t *testing.T) {
 	}
 }
 
+// decisionBlockInsert is a row of testdata/decision-block-inserts.json: markdown an edit inserts,
+// and the ids of the ask blocks the server adds for it, in document order. pi-envoy's AskGate
+// counts a write's new asks with the same table (packages/pi-envoy/extensions/askgate/new-asks.ts),
+// so its reading of inserted markdown is held to the server's.
+type decisionBlockInsert struct {
+	Name     string   `json:"name"`
+	Markdown string   `json:"markdown"`
+	Asks     []string `json:"asks"`
+}
+
+func readDecisionBlockInserts(t *testing.T) []decisionBlockInsert {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join("testdata", "decision-block-inserts.json"))
+	if err != nil {
+		t.Fatalf("read the decision-block table: %v", err)
+	}
+	var rows []decisionBlockInsert
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("decode the decision-block table: %v", err)
+	}
+	if len(rows) == 0 {
+		t.Fatal("the decision-block table holds no row")
+	}
+	return rows
+}
+
 // An edit's advice counts the ask blocks the edit added, as the server's parser reads the document
 // it wrote: an opener is a block inside a blockquote or a list item, or behind more than three
 // colons, and quoted in code it is text - in a fence at the top level, in a fence in a list item,
-// or in indented code. A block the edit moved or reworded was already there.
+// or in indented code. A block the edit moved or reworded was already there. The inserts are the
+// shared table's rows (decisionBlockInsert), and each one's ask blocks are the ids it names.
 func TestDocumentEditAdviceCountsTheAskBlocksTheEditAdded(t *testing.T) {
 	handler := newTestHandler(t)
 	createAdviceProject(t, handler, "ADDED")
@@ -451,24 +481,19 @@ func TestDocumentEditAdviceCountsTheAskBlocksTheEditAdded(t *testing.T) {
 			return []map[string]any{{"op": "insert", "markdown": markdown, "after": "end"}}
 		}
 	}
-	for _, test := range []struct {
+	type addedCase struct {
 		name  string
 		ops   func(t *testing.T, artifactID string) []map[string]any
 		added int
-	}{
-		{name: "a block at the top level", ops: insert(":::ask{#window}\nWhich deployment window?\n:::"), added: 1},
-		{name: "a block in a blockquote", ops: insert("> :::ask{#window}\n> Which deployment window?\n> :::"), added: 1},
-		{name: "a block on a list item's first line", ops: insert("- :::ask{#window}\n  Which deployment window?\n  :::"), added: 1},
-		{name: "a block opened with four colons", ops: insert("::::ask{#window}\nWhich deployment window?\n::::"), added: 1},
-		{name: "a block after a fence a list item's end closes", ops: insert("- Example:\n\n  ```md\n  code\n\n:::ask{#window}\nWhich deployment window?\n:::"), added: 1},
-		{name: "a block after a tilde fence a longer run closes", ops: insert("~~~md\n:::ask{#example}\n:::\n~~~~\n\n:::ask{#window}\nWhich deployment window?\n:::"), added: 1},
-		{name: "two blocks", ops: insert(":::ask{#window}\nWhich deployment window?\n:::\n\n> :::ask{#region}\n> Which region?\n> :::"), added: 2},
-		{name: "a fenced example at the top level", ops: insert("Example:\n\n```md\n:::ask{#example}\nWhich?\n:::\n```"), added: 0},
-		{name: "a fenced example four columns into a nested list item", ops: insert("- Format notes:\n  - Example:\n\n    ```md\n    :::ask{#example}\n    Which?\n    :::\n    ```"), added: 0},
-		{name: "a fenced example four columns into item 10", ops: insert("10. Example:\n\n    ```md\n    :::ask{#example}\n    Which?\n    :::\n    ```"), added: 0},
-		{name: "a fence opened on a list item's first line", ops: insert("- ```md\n  :::ask{#example}\n  Which?\n  :::\n  ```"), added: 0},
-		{name: "an indented-code example", ops: insert("Example:\n\n    :::ask{#example}\n    Which?\n    :::"), added: 0},
-		{name: "plain text", ops: insert("A plain revision."), added: 0},
+		// asks is the ids of the ask blocks the edit adds, or nil where the case cannot name them
+		// before the edit (a retyped paragraph keeps the id the server gave it).
+		asks []string
+	}
+	var cases []addedCase
+	for _, row := range readDecisionBlockInserts(t) {
+		cases = append(cases, addedCase{name: row.Name, ops: insert(row.Markdown), added: len(row.Asks), asks: row.Asks})
+	}
+	for _, test := range append(cases, []addedCase{
 		{name: "a retype into an ask block", ops: func(t *testing.T, artifactID string) []map[string]any {
 			blocks := decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+artifactID+"/blocks", nil, "alice"))
 			for _, block := range blocks {
@@ -485,7 +510,7 @@ func TestDocumentEditAdviceCountsTheAskBlocksTheEditAdded(t *testing.T) {
 		{name: "a reworded ask block", ops: func(*testing.T, string) []map[string]any {
 			return []map[string]any{{"op": "replace", "find": "Which transport?", "with": "Which wire transport?"}}
 		}, added: 0},
-	} {
+	}...) {
 		// Unguarded and under a document precondition, which applies the batch on its own path.
 		for _, guarded := range []bool{false, true} {
 			t.Run(fmt.Sprintf("%s, guarded=%t", test.name, guarded), func(t *testing.T) {
@@ -503,6 +528,20 @@ func TestDocumentEditAdviceCountsTheAskBlocksTheEditAdded(t *testing.T) {
 				}
 				if advice.DecisionBlocks != nil || advice.IssueStatus != "triage" {
 					t.Fatalf("edit advice = %#v, want the issue's status and no decision_blocks", advice)
+				}
+				if test.asks == nil {
+					return
+				}
+				// The spec's own decision block stands first, and the insert lands at its end.
+				want := append([]string{"decision"}, test.asks...)
+				var asks []string
+				for _, block := range decodeBody[[]model.ArtifactBlock](t, dispatchRequest(t, handler, http.MethodGet, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/blocks", nil, "alice")) {
+					if block.Type == "ask" {
+						asks = append(asks, block.ID)
+					}
+				}
+				if !slices.Equal(asks, want) {
+					t.Fatalf("ask blocks after the edit = %q, want %q", asks, want)
 				}
 			})
 		}

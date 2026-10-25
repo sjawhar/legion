@@ -213,11 +213,18 @@ session's commands, or null when that is unset or empty. `sessionSettings(file, 
 notice the session shows at its start: the file's error (`<error>: Dispatch and Envoy are off`),
 the missing file's notice, the missing-file text for a section still off when a variable turned
 the other on, or a section's own error (`Dispatch is off: <error>`, `Envoy is off: <error>`), then
-what a checkout's files hold that the session does not read (its `envoy` section, the file's own
+what a checkout's files hold that the session does not read (its `envoy` section, its `askgate`
+section as `askgate in <checkout file> is not read; set it in <session file>`, the file's own
 error while `DISPATCH_URL` replaces it, or its `.opencode/envoy.json`), then, for a session that
 opens a NATS connection (`nats` not `false`), that an Envoy that is on takes no inbound messages:
 `Envoy's inbound messages are off: <inbound.off>; the Envoy tools still work`. A file that turns a
 section off, or holds no section for it, says nothing.
+`askgateSetting(file)` reads the session file's top-level `askgate` section now, on its own, so a
+section that does not parse never fails the Dispatch or Envoy read: `{"askgate":{"enabled":false}}`
+turns AskGate off (`{ enabled: false, error: null }`); no file, no section or `enabled: true`
+leaves it on. A section that does not parse, or a file that cannot be read or is not JSON, leaves
+it on with an `error` naming the file and `askgate.enabled` and ending `AskGate stays on`. A
+checkout's `.envoy/envoy.json` cannot set it.
 `sessionDispatchSettings(file, env, { cwd })` reads
 Dispatch alone, now: `{ dispatch, warnings, missing }`, Dispatch's resolution beside the files the
 read found and did not read and the missing-file record, for a command, which says the `warnings`

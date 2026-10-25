@@ -18938,6 +18938,7 @@ var CheckoutFileSchema = exports_external.looseObject({
   $schema: exports_external.string().optional(),
   dispatch: DispatchSectionSchema.optional()
 });
+var AskgateSectionSchema = exports_external.strictObject({ enabled: exports_external.boolean().optional() });
 function offWithNotice(notice) {
   return { enabled: false, notice, error: null };
 }
@@ -19146,7 +19147,8 @@ function readEnvoyConfig(filePath, env, options) {
       kind: "valid",
       path: checkoutPath,
       dispatch: checkoutFile.settings.dispatch ?? {},
-      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null
+      envoyError: Object.hasOwn(checkoutFile.settings, "envoy") ? `${checkoutPath}: envoy is not read from a checkout's envoy.json; put it in ${filePath}` : null,
+      askgateError: Object.hasOwn(checkoutFile.settings, "askgate") ? `askgate in ${checkoutPath} is not read; set it in ${filePath}` : null
     };
   }
   const oldCheckout = path.resolve(options.cwd, ".opencode", "envoy.json");
@@ -19419,6 +19421,9 @@ function startNotice(config2, dispatch, envoy, nats) {
   }
   if (checkout?.kind === "valid" && checkout.envoyError !== null)
     parts.push(checkout.envoyError);
+  if (checkout?.kind === "valid" && checkout.askgateError !== null) {
+    parts.push(checkout.askgateError);
+  }
   if (checkout?.kind === "invalid" && (dispatch.enabled || dispatch.error !== checkout.error)) {
     parts.push(`${checkout.error}; not read while DISPATCH_URL is set`);
   }

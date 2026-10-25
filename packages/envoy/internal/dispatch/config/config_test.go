@@ -53,6 +53,28 @@ func TestLoadMergesUserAndCheckout(t *testing.T) {
 	}
 }
 
+// The server ignores the session's askgate section: it is the plugin's switch alone.
+func TestLoadIgnoresTheAskgateSection(t *testing.T) {
+	load := func(body string) string {
+		home := t.TempDir()
+		mustWrite(t, userFile(home), body)
+		cfg, err := Load(environment(nil), LoadOptions{CWD: t.TempDir(), HomeDir: home})
+		if err != nil {
+			t.Fatalf("load: %v", err)
+		}
+		if cfg.Dispatch == nil {
+			t.Fatalf("missing dispatch block")
+		}
+		return cfg.Dispatch.ServerURL
+	}
+	dispatch := `"dispatch": {"enabled": true, "serverUrl": "https://user.dispatch.example"}`
+	with := load(`{` + dispatch + `, "askgate": {"enabled": false}}`)
+	without := load(`{` + dispatch + `}`)
+	if with != without || with != "https://user.dispatch.example" {
+		t.Errorf("serverUrl with askgate %q, without %q", with, without)
+	}
+}
+
 func TestLoadReadsTheUserFileUnderXDGConfigHome(t *testing.T) {
 	home := t.TempDir()
 	configHome := t.TempDir()

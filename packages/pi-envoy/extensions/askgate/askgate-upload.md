@@ -1,0 +1,1 @@
+This call uploads a markdown document. Its `content` is the document's text, cut to its first 64 KB. Judge this upload against content failure 10 alone. Every other failure is a non-finding for it, because a plan or a report is long by nature.

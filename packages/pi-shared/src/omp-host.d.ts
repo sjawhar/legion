@@ -69,7 +69,10 @@ declare module "@oh-my-pi/pi-coding-agent" {
 
 declare module "@oh-my-pi/pi-coding-agent/config/settings" {
   /** The host's live settings object; the `cfg*` accessors read it. */
-  export class Settings {}
+  export class Settings {
+    /** The configured selector of a model role (`modelRoles.<role>`), or undefined when it is unset. */
+    getModelRole(role: string): string | undefined;
+  }
   export const settings: Settings;
 }
 
@@ -77,6 +80,134 @@ declare module "@oh-my-pi/pi-coding-agent/extensibility/settings" {
   import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
   export const cfgDisabledExtensions: { get(settings: Settings): string[] };
   export const cfgSkills: { get(settings: Settings): Record<string, unknown> };
+  /** `extensionHandlers.toolCallTimeoutMs`: the runner's ceiling for one `tool_call` handler. */
+  export const cfgExtensionHandlersToolCallTimeoutMs: { get(settings: Settings): number };
+}
+
+/** The runner's default handler ceiling, used when `extensionHandlers.toolCallTimeoutMs` is unusable. */
+declare module "@oh-my-pi/pi-coding-agent/extensibility/extensions/runner" {
+  export const EXTENSION_HANDLER_TIMEOUT_MS: number;
+}
+
+declare module "@oh-my-pi/pi-coding-agent/config/model-settings" {
+  import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+  export const cfgDisabledProviders: { get(settings: Settings): string[] };
+}
+
+declare module "@oh-my-pi/pi-coding-agent/config/model-resolver" {
+  import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+  import type { Model } from "@oh-my-pi/pi-ai";
+  export interface ModelLookupRegistry {
+    getAvailable(): Model[];
+  }
+  /** The first model `modelPatterns` names, as a model role's value is resolved. */
+  export function resolveModelOverride(
+    modelPatterns: string[],
+    modelRegistry: ModelLookupRegistry,
+    settings?: Settings
+  ): { readonly model?: Model };
+}
+
+declare module "@oh-my-pi/pi-coding-agent/session/settings" {
+  import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+  /** The `retry.*` settings; only the two the fallback walk reads are declared. */
+  export const cfgRetry: {
+    get(settings: Settings): { readonly enabled: boolean; readonly modelFallback: boolean };
+  };
+}
+
+/** The host's model fallback chains (`retry.fallbackChains`), resolved as a turn's recovery resolves them. */
+declare module "@oh-my-pi/pi-coding-agent/session/retry-fallback-chains" {
+  import type { Settings } from "@oh-my-pi/pi-coding-agent/config/settings";
+  import type { Model } from "@oh-my-pi/pi-ai";
+  export interface RetryFallbackModelLookup {
+    find(provider: string, id: string): Model | undefined;
+    hasProvider(provider: string): boolean;
+  }
+  export interface RetryFallbackResolutionContext {
+    chains: Record<string, string[]>;
+    getModelRole(role: string): string | undefined;
+    modelLookup: RetryFallbackModelLookup;
+  }
+  export function getRetryFallbackChains(settings: Settings): Record<string, string[]>;
+  /** The chain key (a model role or a model selector) whose chain follows `currentSelector`. */
+  export function resolveRetryFallbackChainKey(
+    context: RetryFallbackResolutionContext,
+    currentSelector: string,
+    currentModel?: Model | null,
+    roleHint?: string
+  ): string | undefined;
+  export function findRetryFallbackCandidates(
+    context: RetryFallbackResolutionContext,
+    chainKey: string,
+    currentSelector: string,
+    currentModel?: Model | null,
+    options?: { readonly allowMissingPrimary?: boolean; readonly wrapAround?: boolean }
+  ): { readonly raw: string; readonly provider: string; readonly id: string }[];
+}
+
+declare module "@oh-my-pi/pi-coding-agent/session/session-context" {
+  /** One entry of a session's tree; the context build reads it, so its shape is opaque here. */
+  export interface SessionEntry {
+    readonly id: string;
+    readonly type: string;
+  }
+  /** The messages the session's model sees on the branch that ends at `leafId`. */
+  export function buildSessionContext(
+    entries: SessionEntry[],
+    leafId?: string | null
+  ): { readonly messages: readonly unknown[] };
+}
+
+/** The host's model client: one-shot completions, as an extension calls a model of its own. */
+declare module "@oh-my-pi/pi-ai" {
+  export type Api = string;
+  export interface Model<TApi extends Api = Api> {
+    readonly provider: string;
+    readonly id: string;
+    readonly api: TApi;
+  }
+  /** Resolves a request's API key when it is sent (`ModelRegistry.resolver`). */
+  export type ApiKeyResolver = (context: never) => unknown;
+  export interface AssistantMessage {
+    readonly content: readonly { readonly type: string; readonly text?: string }[];
+    readonly usage: {
+      readonly input: number;
+      readonly output: number;
+      readonly cacheRead: number;
+      readonly cacheWrite: number;
+      readonly cost: { readonly total: number };
+    };
+    readonly stopReason: string;
+    readonly errorMessage?: string;
+  }
+  export function completeSimple<TApi extends Api>(
+    model: Model<TApi>,
+    context: {
+      readonly systemPrompt?: string[];
+      readonly messages: { role: "user"; content: string; timestamp: number }[];
+    },
+    options?: {
+      readonly apiKey?: string | ApiKeyResolver;
+      readonly sessionId?: string;
+      readonly reasoning?: string;
+      readonly cacheRetention?: "none" | "short" | "long";
+      readonly maxTokens?: number;
+      readonly temperature?: number;
+      readonly signal?: AbortSignal;
+      /** Receives every completed result, including results retried by the thinking-loop guard. */
+      readonly onAttempt?: (message: AssistantMessage) => void;
+    }
+  ): Promise<AssistantMessage>;
+  /** Runs a one-shot completion again after a transient provider failure. */
+  export function retryTransientCompletion(
+    run: (attempt: number) => Promise<AssistantMessage>,
+    options?: {
+      readonly maxAttempts?: number;
+      readonly provider?: string;
+      readonly signal?: AbortSignal;
+    }
+  ): Promise<AssistantMessage>;
 }
 
 declare module "@oh-my-pi/pi-coding-agent/extensibility/extensions/loader" {

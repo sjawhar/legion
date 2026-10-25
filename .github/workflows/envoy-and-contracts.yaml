@@ -304,7 +304,8 @@ jobs:
               - 'skills/**'
               - 'scripts/pi-plugin-prepack.sh'
             # The Envoy plugin: its own sources, the workspace packages its bundle inlines, and the
-            # Oh My Pi pin its real-binary test runs (extensions/dispatch-first-omp.test.ts),
+            # Oh My Pi pin its real-binary tests run (extensions/dispatch-first-omp.test.ts and
+            # extensions/askgate/askgate-omp.test.ts),
             # installed through the mise install-jj leaves. Every skill and every daemon prompt:
             # src/skills-guard.test.ts stages its four skills through the prepack script and resolves
             # their skill:// links across all of skills/, and its native-tool-name rule scans every
@@ -317,6 +318,9 @@ jobs:
               - 'packages/pi-shared/**'
               - 'packages/envoy-client/**'
               - 'packages/contracts/**'
+              # The Go copy its tests hold the TypeScript to: extensions/askgate/new-asks.test.ts
+              # reads the Dispatch server's decision-block table, which the Go API test reads too.
+              - 'packages/envoy/internal/dispatch/api/testdata/**'
               - 'package.json'
               - 'bun.lock'
               - *bun_toolchain
@@ -529,9 +533,10 @@ jobs:
       # Only for the mise it leaves at ~/.local/bin/mise, which install-omp installs the pin through:
       # nothing in this package drives jj.
       - uses: ./.github/actions/install-jj
-      # extensions/dispatch-first-omp.test.ts runs the pinned Oh My Pi against stand-ins
-      # (packages/pi-shared/test/omp-harness.ts) and refuses on GitHub Actions without one. The pin
-      # is read from .omp-pin, the repository's one copy of it (.github/actions/install-omp).
+      # extensions/dispatch-first-omp.test.ts and extensions/askgate/askgate-omp.test.ts run the
+      # pinned Oh My Pi against stand-ins (packages/pi-shared/test/omp-harness.ts) and refuse on
+      # GitHub Actions without one. The pin is read from .omp-pin, the repository's one copy of it
+      # (.github/actions/install-omp).
       - uses: ./.github/actions/install-omp
       - run: bun install --frozen-lockfile
       - name: Build contracts for pi-envoy

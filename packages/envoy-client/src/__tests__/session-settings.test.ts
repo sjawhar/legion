@@ -144,6 +144,17 @@ describe("sessionSettings", () => {
     );
   });
 
+  test("a checkout's askgate section is said", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), { dispatch: dispatchOn });
+    const cwd = tempDir();
+    const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), {
+      askgate: { enabled: false },
+    });
+    const settings = sessionSettings({ path: file, error: null }, {}, { cwd });
+    expect(settings.dispatch.enabled).toBe(true);
+    expect(settings.notice).toContain(`askgate in ${checkout} is not read; set it in ${file}`);
+  });
+
   test("a checkout's file that cannot be used is Dispatch's error, or said as not read while DISPATCH_URL replaces it", () => {
     const file = writeFile(path.join(tempDir(), "envoy.json"), {
       dispatch: dispatchOn,

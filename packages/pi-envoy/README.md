@@ -203,3 +203,112 @@ EOF
 Lifecycle and scope decisions between Legion roles go through `envoy_publish` to the owning
 architect's role topic; Dispatch is for durable questions to the human and the shared
 document, not for coordination between roles.
+
+## AskGate
+
+AskGate reviews each Dispatch write of a session's main agent before the write posts. The charter
+check, one model call, judges the write against the rules in `extensions/askgate/rules.md` and
+answers `allow` or `revise`. A `revise` answer carries the reason and the fix. The gate reviews
+these calls:
+
+- `dispatch ask`, `dispatch message`, `dispatch edit-ask`, `dispatch comment`, `dispatch doc-edit`
+  and `dispatch request-approval`
+- `dispatch issue` with `--spec` or `--spec-file`
+- `dispatch artifact` when it uploads a markdown document: inline text (`--content`,
+  `--content-file`), a `--path` file whose name ends in `.md` or `.markdown`, or a `--name` that
+  ends in `.md`
+
+The gate reads the arguments from the command's own `--dry-run`. An upload that reads its name or
+path from a file (`--name-file`, `--path-file`) is decided from the name and path the dry run
+prints. An upload whose name or path holds an expansion (`"$NAME"`) is refused, as any write the
+gate cannot read is. For an upload given with `--path`, the gate reads that file from the directory
+the `dispatch` command resolves it in and reviews its text, as for `--content-file`. The gate
+judges an upload against content failure 10 alone: a plan or a report is long by nature. An upload
+of any other file is not reviewed. A `task` subagent is not reviewed.
+
+**The switch.** AskGate runs in each session that has Dispatch on, unless the session's envoy.json
+turns it off. Write this top-level section beside `dispatch`:
+
+```json
+{ "askgate": { "enabled": false } }
+```
+
+No section, or `enabled: true`, keeps it on. A checkout's `.envoy/envoy.json` cannot set it. A
+section that does not parse keeps AskGate on, and the start notice names the file.
+
+**The modes.** In `block` mode a write that the gate sends back does not post. In `warn` mode the
+write posts, and the reason comes back to the agent as context. A match of the rules check (below)
+refuses the write in both modes. `OMP_ASKGATE=warn` or `OMP_ASKGATE=block` sets the mode. AskGate
+ignores any other value, `off` included, and the first review shows one notice that names
+`askgate.enabled` as the switch. With no such variable, the session's latest `experiments` entry
+decides: its `askgate_block` arm off is `warn`. Every other session uses `block`.
+
+**The rules check.** A call that opens a new ask for the person gets a second model call. That
+call knows two rules (`extensions/askgate/rule-check.md`) and judges only the new asks:
+
+- No change: the ask's own recommendation is to change nothing, such as to keep things as they
+  are, to take no action or to keep the current design.
+- Untried access: the ask asks the person to do a step with their own hands (run a command,
+  change a setting, grant access, sign in), or says that only the person can do the step. The
+  rule matches only when neither the ask nor the transcript shows that the agent tried the step
+  with the access it has or can request. A step that needs the person's security key, a sign-in
+  to their own account in a browser, a payment or their own decision does not match. An ask that
+  also asks the person to choose between options with different outcomes does not match.
+
+A new ask is a `dispatch ask`, an ask block that a `dispatch doc-edit` inserts, a block that it
+retypes into an ask, an ask block in a `dispatch issue` spec, or an ask block in a markdown
+upload whose `#id` the document does not already hold.
+
+A match refuses the call in `warn` mode and in `block` mode, so no part of the call posts. The
+refusal names the matching asks, each with its rule and the words that match. It says what to do
+instead and how to send the call anyway. The agent sends the call anyway in one of three ways:
+
+- `--advisor-rebuttal '<line>'` on a `dispatch` command.
+- `"advisor_rebuttal": "<line>"` in a device's JSON.
+- The third attempt on the same target: after the gate sends back two calls in a row on one
+  target, it sends the third without review.
+
+A rebuttal sends the call with no review by either check, and the entry records the line. A rules
+call that ends in an error, a timeout or an answer that does not parse refuses nothing: the
+charter check decides. After three such rules calls in a row, AskGate logs one warning, and a
+session with a UI also shows a notice.
+
+**The model.** Both checks ask the session's `askgate` model role (`modelRoles.askgate`). When that
+role is not set, they ask the `default` role. A model that answers with an error passes the request
+to the next model of that role's `retry.fallbackChains` chain, on the same provider. When neither
+role resolves, the gate refuses the write in both modes and names the two roles. A session whose
+main model is on another provider than the gate's model is not reviewed: its transcript stays on
+that provider.
+
+`OMP_ASKGATE_TIMEOUT_MS` sets the review's time limit (90 s, less than the host's limit for one
+`tool_call` handler). `OMP_ASKGATE_DUMP` names a file that gets the two prompts of each model call.
+
+**The record.** Every gated call writes one `advisor-gate` entry into the session's transcript.
+Every entry but an `unreadable` one carries `target`, the call's target in readable form: the tool
+name, then each of `issue`, `ask`, `artifact`, `project` and `in_reply_to` that the input carries,
+as `dispatch_ask issue=ACME-1`. The third attempt (`outcome: "breaker"`) counts the calls on one
+such target. A call that opens a new ask adds the fields of the rules check:
+
+- `rule`: `no_change` or `untried_access`, the rule that the first matching ask broke. The gate
+  sets it exactly when the rules check refused the call.
+- `ruleAsk`: the number of that ask in the rules request, from 1.
+- `ruleQuote`: the words of that ask that the rules call quoted.
+- `ruleOutcome`: how the rules call ended: `match`, `none`, `error`, `timeout`, `no-verdict`,
+  `abandoned` or `shutdown`. The gate sets it on each gated call that opens a new ask and reached
+  the model call.
+- `ruleModel`: the `provider/id` that answered the rules call.
+- `ruleLatencyMs`: the time of the rules check, its document read included.
+- `ruleTextMissing`: `true` when the gate could not read the text of an ask and judged the ask
+  without it.
+- `ruleError`: the error text for `error` (the provider's, or the check's own when it fails before
+  a model answers), `timeout` for a timeout, and `no-verdict` for an answer that does not parse.
+- `ruleAsksCut`: how many asks the request left out or cut. The gate caps the list of asks at
+  32 KiB, and each ask at 8 KiB.
+
+`decision` is `revise` on a rules refusal in `warn` mode too. The gate refused a call exactly when
+`decision` is `revise` and one of these is true: `verdictMode` is `block`, `outcome` is
+`unreadable`, `no-model-role` or `load-failed`, or `rule` is set. To find the refusals that the agent overrode,
+join each rules refusal to the next entry with the same `target`. The agent overrode the refusal
+when that entry's `outcome` is `rebuttal` or `breaker`. `scripts/askgate-report.ts` reports what
+the entries sent back and what they cost, the outcomes and errors of the rules check, and the
+rules refusals that the agent overrode.

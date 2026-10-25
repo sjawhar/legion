@@ -15,6 +15,8 @@
 
 ### Changed
 
+- The logged start notice names an `askgate` section in a checkout's `.envoy/envoy.json` as not
+  read, and names the session's file to set it in.
 - The `envoy_unsubscribe` and `envoy_role_set` descriptions name the role-bound subscriptions an
   Oh My Pi session keeps; OpenCode holds none, so the tools behave as before.
 - The plugin reads one envoy.json with a `dispatch` and an `envoy` section (LEGION-707):

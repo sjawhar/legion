@@ -17,6 +17,7 @@ import * as path from "node:path";
 import { type DispatchConfigResolution, dispatchSettings } from "../dispatch-config";
 import type * as EnvoyConfigModule from "../envoy-config";
 import {
+  askgateSetting,
   type EnvoyConfig,
   type EnvoyHarness,
   envoyConfigPath,
@@ -587,7 +588,13 @@ describe("readEnvoyConfig", () => {
       path: file,
       dispatch: own.dispatch,
       envoy: own.envoy,
-      checkout: { kind: "valid", path: checkout, dispatch: { enabled: false }, envoyError: null },
+      checkout: {
+        kind: "valid",
+        path: checkout,
+        dispatch: { enabled: false },
+        envoyError: null,
+        askgateError: null,
+      },
       missing: null,
       warnings: [],
     });
@@ -604,6 +611,21 @@ describe("readEnvoyConfig", () => {
         path: checkout,
         dispatch: { enabled: false },
         envoyError: `${checkout}: envoy is not read from a checkout's envoy.json; put it in ${file}`,
+      },
+    });
+  });
+
+  test("a checkout's askgate section is named as not read", () => {
+    const cwd = tempDir();
+    const file = writeFile(path.join(tempDir(), "envoy.json"), {});
+    const checkout = writeFile(path.join(cwd, ".envoy", "envoy.json"), {
+      askgate: { enabled: false },
+    });
+    expect(readEnvoyConfig(file, { HOME: tempDir() }, { cwd })).toMatchObject({
+      checkout: {
+        kind: "valid",
+        envoyError: null,
+        askgateError: `askgate in ${checkout} is not read; set it in ${file}`,
       },
     });
   });
@@ -1501,5 +1523,71 @@ describe("a checkout's .envoy/envoy.json", () => {
       url: "http://localhost:8766",
       token: "environment-token",
     });
+  });
+});
+
+describe("askgateSetting", () => {
+  test("is on with no file, no section, or enabled: true, and off with enabled: false", () => {
+    const dir = tempDir();
+    expect(askgateSetting(path.join(dir, "none.json"))).toEqual({ enabled: true, error: null });
+    const file = path.join(dir, "envoy.json");
+    writeFile(file, { dispatch: { enabled: true } });
+    expect(askgateSetting(file)).toEqual({ enabled: true, error: null });
+    writeFile(file, { askgate: { enabled: true } });
+    expect(askgateSetting(file)).toEqual({ enabled: true, error: null });
+    writeFile(file, { askgate: { enabled: false } });
+    expect(askgateSetting(file)).toEqual({ enabled: false, error: null });
+  });
+
+  test("a section that does not parse leaves it on and names the file and the key", () => {
+    const file = path.join(tempDir(), "envoy.json");
+    writeFile(file, { askgate: { enabled: "no" } });
+    expect(askgateSetting(file)).toEqual({
+      enabled: true,
+      error: `${file}: askgate.enabled must be true or false; AskGate stays on`,
+    });
+    writeFile(file, { askgate: { on: false } });
+    expect(askgateSetting(file)).toEqual({
+      enabled: true,
+      error: `${file}: unrecognized askgate key(s): askgate.on; the one askgate key is askgate.enabled, true or false; AskGate stays on`,
+    });
+    for (const section of [false, null]) {
+      writeFile(file, { askgate: section });
+      expect(askgateSetting(file)).toEqual({
+        enabled: true,
+        error: `${file}: askgate.enabled must be true or false; AskGate stays on`,
+      });
+    }
+  });
+
+  test("a file that cannot be read or is not JSON leaves it on", () => {
+    const file = writeFile(path.join(tempDir(), "envoy.json"), "{");
+    expect(askgateSetting(file)).toEqual({
+      enabled: true,
+      error: `${file}: invalid JSON at line 1, column 2; askgate.enabled is not read; AskGate stays on`,
+    });
+    const dir = tempDir();
+    const unreadable = askgateSetting(dir);
+    expect(unreadable.enabled).toBe(true);
+    expect(unreadable.error).toStartWith(`${dir}: could not be read (`);
+    expect(unreadable.error).toEndWith("askgate.enabled is not read; AskGate stays on");
+  });
+
+  test("the section never changes Dispatch's settings", () => {
+    const env = { HOME: tempDir() };
+    const cwd = tempDir();
+    const dispatch = { enabled: true, serverUrl: "https://dispatch.example", token: "t" };
+    const read = (askgate?: unknown) => {
+      const file = writeFile(
+        path.join(tempDir(), "envoy.json"),
+        askgate === undefined ? { dispatch } : { dispatch, askgate }
+      );
+      return dispatchSettings(env, readEnvoyConfig(file, env, { cwd }));
+    };
+    const plain = read();
+    expect(plain.enabled).toBe(true);
+    for (const askgate of [{ enabled: false }, { enabled: "no" }, { on: false }]) {
+      expect(read(askgate)).toEqual(plain);
+    }
   });
 });

@@ -334,6 +334,8 @@ const configVariables = [
   "NATS_NKEY_SEED_FILE",
 ] as const;
 const originalConfigVariables = configVariables.map((name) => [name, process.env[name]] as const);
+/** The envoy.json every test starts with: no Dispatch or Envoy section, and AskGate off. */
+const ASKGATE_OFF = { askgate: { enabled: false } };
 let configDirectory = "";
 
 beforeEach(() => {
@@ -358,12 +360,14 @@ beforeEach(() => {
   process.env.DISPATCH_STATE_DIR = mkdtempSync(join(tmpdir(), "envoy-dispatch-state-"));
   delete process.env.DISPATCH_SESSION_ID;
   // The extension picks its envoy.json when its module loads, and each test loads it fresh: a file
-  // that holds no section, so Dispatch and Envoy come from the variables the test sets and never
-  // from the caller's own envoy.json or Oh My Pi profile.
+  // that holds no Dispatch or Envoy section, so Dispatch and Envoy come from the variables the test
+  // sets and never from the caller's own envoy.json or Oh My Pi profile. It turns AskGate off: the
+  // gate loads Oh My Pi modules this workspace does not install, and its handlers would take the
+  // fixture's one slot per event (`createPi`). The tests in "AskGate" turn it back on.
   for (const name of configVariables) delete process.env[name];
   configDirectory = mkdtempSync(join(tmpdir(), "envoy-config-"));
   process.env.ENVOY_CONFIG_FILE = join(configDirectory, "envoy.json");
-  writeFileSync(process.env.ENVOY_CONFIG_FILE, "{}\n");
+  writeFileSync(process.env.ENVOY_CONFIG_FILE, `${JSON.stringify(ASKGATE_OFF)}\n`);
 });
 
 afterEach(async () => {
@@ -3738,6 +3742,218 @@ describe("envoy OMP extension", () => {
         "envoy: XDG_CONFIG_HOME is relative/config, which is not an absolute path: Dispatch and Envoy are off",
       ]);
       expect(natsState.connectedNames).toEqual([]);
+    });
+  });
+
+  // AskGate's switch is read here, at load (extensions/askgate/): Dispatch on and the session's
+  // envoy.json's `askgate.enabled` not false bind the gate. Oh My Pi's modules the gate loads are not
+  // installed in this workspace, so each test stands them in with a model that answers `revise`.
+  describe("AskGate", () => {
+    const REVISE =
+      '{"decision":"revise","reason":"failure 7 (content gate): \\"see the message above\\" points at nothing"}';
+    const MODEL = { provider: "anthropic", id: "claude-fable-5-1", api: "anthropic-messages" };
+    const completions: unknown[] = [];
+    const standInHost = () => {
+      completions.length = 0;
+      mock.module("@oh-my-pi/pi-ai", () => ({
+        completeSimple: async (model: unknown) => {
+          completions.push(model);
+          return {
+            content: [{ type: "text", text: REVISE }],
+            usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cost: { total: 0 } },
+            stopReason: "stop",
+          };
+        },
+        retryTransientCompletion: (run: () => Promise<unknown>) => run(),
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/session/session-context", () => ({
+        buildSessionContext: () => ({ messages: [] }),
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/config/settings", () => ({
+        settings: { getModelRole: () => undefined },
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/config/model-settings", () => ({
+        cfgDisabledProviders: { get: () => [] },
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/config/model-resolver", () => ({
+        resolveModelOverride: () => ({}),
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/extensibility/extensions/runner", () => ({
+        EXTENSION_HANDLER_TIMEOUT_MS: 30_000,
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/extensibility/settings", () => ({
+        cfgDisabledExtensions: { get: () => [] },
+        cfgSkills: { get: () => ({}) },
+        cfgExtensionHandlersToolCallTimeoutMs: { get: () => 120_000 },
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/session/retry-fallback-chains", () => ({
+        getRetryFallbackChains: () => ({}),
+        resolveRetryFallbackChainKey: () => undefined,
+        findRetryFallbackCandidates: () => [],
+      }));
+      mock.module("@oh-my-pi/pi-coding-agent/session/settings", () => ({
+        cfgRetry: { get: () => ({ enabled: false, modelFallback: false }) },
+      }));
+    };
+    /** A stand-in `dispatch` whose --dry-run prints its flags as JSON, first on PATH for the call. */
+    const standInDispatch = () => {
+      const bin = join(configDirectory, "bin");
+      mkdirSync(bin);
+      writeFileSync(
+        join(bin, "dispatch"),
+        `#!${process.execPath}
+const [command, ...rest] = process.argv.slice(2);
+if (!rest.includes("--dry-run")) process.exit(3);
+const args = {};
+for (let i = 0; i < rest.length; i++) {
+	if (rest[i] === "--dry-run") continue;
+	args[rest[i].slice(2)] = rest[++i];
+}
+console.log(JSON.stringify(args));
+`,
+        { mode: 0o755 }
+      );
+      process.env.PATH = `${bin}:${process.env.PATH ?? ""}`;
+    };
+    /** The context a main agent's tool call carries, on the gate's provider with the askgate role set. */
+    const gateContext = (notifications: string[]): SessionContext =>
+      ({
+        ...sessionContext("ses_askgate"),
+        agent: { kind: "main" },
+        cwd: configDirectory,
+        getSystemPrompt: () => ["PRIMARY"],
+        model: MODEL,
+        models: { resolve: (spec: string) => (spec === "@askgate" ? MODEL : undefined) },
+        modelRegistry: { resolver: () => "standin-key" },
+        sessionManager: {
+          ...topLevelSession,
+          getSessionId: () => "ses_askgate",
+          getLeafId: () => null,
+        },
+        ui: { ...sessionContext().ui, notify: (message) => notifications.push(message) },
+      }) as SessionContext;
+    const ASK = "dispatch ask --issue DSP-1 --question Ready?";
+
+    test("(a) with Dispatch on and no askgate section, a dispatch ask reaches the gate's model and a revise blocks it", async () => {
+      writeFileSync(process.env.ENVOY_CONFIG_FILE ?? "", "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-on");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      const result = (await fixture.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+        context
+      )) as { block?: boolean; reason?: string } | undefined;
+
+      // The charter call, and the rules call the `dispatch ask` opens beside it.
+      expect(completions).toEqual([MODEL, MODEL]);
+      expect(result?.block).toBe(true);
+      expect(result?.reason).toContain("see the message above");
+      expect(fixture.entries).toMatchObject([
+        {
+          customType: "advisor-gate",
+          data: { tool: "dispatch_ask", outcome: "verdict", decision: "revise" },
+        },
+      ]);
+      expect(notifications).toEqual([]);
+    });
+
+    test("(b) with askgate.enabled false the gate does not bind: the dispatch ask runs and no model is asked", async () => {
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-off");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+      standInDispatch();
+
+      const result = await fixture.handlers.get("tool_call")?.(
+        { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+        context
+      );
+
+      expect(result).toBeUndefined();
+      expect(completions).toEqual([]);
+      expect(fixture.entries.filter((entry) => entry.customType === "advisor-gate")).toEqual([]);
+    });
+
+    test("a switch that does not parse leaves the gate on and is said at session start", async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      writeFileSync(file, `${JSON.stringify({ askgate: { enabled: "no" } })}\n`);
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      standInHost();
+      const { default: envoyExtension } = await import("./envoy.ts?askgate-unparsable");
+      const fixture = createPi();
+      envoyExtension(fixture.pi);
+      const notifications: string[] = [];
+      const context = gateContext(notifications);
+      await fixture.handlers.get("session_start")?.({}, context);
+
+      expect(notifications).toEqual([
+        `envoy: ${file}: askgate.enabled must be true or false; AskGate stays on`,
+      ]);
+      const result = (await fixture.handlers.get("tool_call")?.(
+        { toolName: "dispatch_ask", toolCallId: "call-device", input: { issue: "DSP-1" } },
+        context
+      )) as { block?: boolean } | undefined;
+      expect(result?.block).toBe(true);
+      expect(completions).toEqual([MODEL, MODEL]);
+    });
+
+    test("a gate that does not load is said at session start and refuses each write it would review, so a load failure is no off switch", async () => {
+      const file = process.env.ENVOY_CONFIG_FILE ?? "";
+      writeFileSync(file, "{}\n");
+      process.env.DISPATCH_URL = "http://dispatch.test";
+      process.env.DISPATCH_TOKEN = "dispatch-token";
+      process.env.OMP_ASKGATE_TIMEOUT_MS = "soon";
+      try {
+        standInHost();
+        const { default: envoyExtension } = await import("./envoy.ts?askgate-load-fails");
+        const fixture = createPi();
+        envoyExtension(fixture.pi);
+        const notifications: string[] = [];
+        const context = gateContext(notifications);
+        await fixture.handlers.get("session_start")?.({}, context);
+        standInDispatch();
+
+        expect(notifications).toEqual([
+          `envoy: AskGate did not load, so it refuses each Dispatch write it would review: OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon". To turn AskGate off for this session, set askgate.enabled to false in ${file}.`,
+        ]);
+        const refused = (await fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId: "call-ask", input: { command: ASK } },
+          context
+        )) as { block?: boolean; reason?: string } | undefined;
+        expect(refused?.block).toBe(true);
+        expect(refused?.reason).toContain(
+          'OMP_ASKGATE_TIMEOUT_MS must be a positive integer, got "soon"'
+        );
+        expect(refused?.reason).toContain(`askgate.enabled to false in ${file}`);
+        const other = await fixture.handlers.get("tool_call")?.(
+          { toolName: "bash", toolCallId: "call-ls", input: { command: "ls -la" } },
+          context
+        );
+        expect(other).toBeUndefined();
+        expect(completions).toEqual([]);
+        expect(fixture.entries).toMatchObject([
+          {
+            customType: "advisor-gate",
+            data: { tool: "dispatch_ask", outcome: "load-failed", decision: "revise" },
+          },
+        ]);
+      } finally {
+        delete process.env.OMP_ASKGATE_TIMEOUT_MS;
+      }
     });
   });
 
