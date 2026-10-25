@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-234",
-  "completed": "2026-10-25T07:35:00Z",
+  "completed": "2026-10-25T07:45:00Z",
   "proof": [
     {
       "criterion": "A1: a role applying the Service exactly as the section publishes it gets a Service (spec finding 5); and the evidence bullet's account of the reachability check is what a run observes",
@@ -43,6 +43,14 @@
       "observed": "One hunk, the INFRA-71 bullet only: the Job half (87 s / 10 s, the reason for two waits) is stated as a 2026-10-24 measurement with no qualifier; 'not run again since' now covers the credential-less gate, the deliberate breakages of the Job manifest's enforced rules, and the reachability block's three synthetic cases. Each run log shows its Job created and run through both waits on 2026-10-25 (1 hit each), so the Job half did run again; no 2026-10-25 record contains a credential-less gate, a Job-rule breakage or a synthetic reachability case (the tester's dry-run variants were of the Service), so those three stand as not re-run. The bullet's mention of the unbroken Job manifest's server-side dry run is dropped: the 2026-10-25 runs put the same manifest through admission for real.",
       "headSha": "9d6c255bf78efaa4a67f62ef8d50caed0dd1b76b",
       "negativeControl": "The approved head b5b5f61a headed the whole bullet 'not run again since' while listing the Job half, which both run logs show being applied and run on 2026-10-25."
+    },
+    {
+      "criterion": "Round 4 (review at 7eaf61ab): every entry left under the INFRA-71 bullet's 'not run again since' appears in none of the five 2026-10-25 runs, and every entry that appears in one is outside it",
+      "surface": "The evidence passage at head b7b742bf read entry by entry against the five 2026-10-25 run records: the implementer's run logs (infra-234-postgres-1c9d92, infra-234-postgres-af1ede) and the tester's records of infra-234-postgres-8a6d92, infra-234-postgres-e7ad30 and infra-234-postgres-3022f9 in test.json at 52ec0249 and 5245de2a",
+      "command": "For each entry of the round-3 list, a search of the five records: grep -c -i -E 'TimeoutError|localhost:8080' run1/out.log run2/out.log; grep of test.json at 52ec0249, 5245de2a and 7eaf61ab for TimeoutError, dropped, localhost:8080, a credential-less run and a Job-rule breakage; grep -E 'answered|ConnectionRefusedError' run1/out.log run2/out.log; then jj -R \"$LEGION_WORKSPACE\" diff --git -r b7b742bf docs/kubernetes.md",
+      "observed": "Entry by entry: (1) credential-less gate: in no record (0 hits for localhost:8080; every run had the projected credential) -> stays. (2) deliberate breakages of the Job manifest's enforced rules: in no record (the tester's dry-run variants were all of the Service) -> stays. (3) reachability block against a listener: 1c9d92 printed `answered` -> leaves. (4) a port that refuses and then listens: af1ede (ConnectionRefusedError 07:02:23.891, answered 07:02:25.947), e7ad30 and 3022f9 (each a refusal then an answer, per the tester) -> leaves. (5) an address whose packets are dropped: no TimeoutError in any record -> stays. The bullet now dates the Job half and cases (3) and (4) to 2026-10-24 with no qualifier, and puts only (1), (2) and (5) under 'not run again since'. One hunk, that bullet only.",
+      "headSha": "b7b742bf7d40e2b43a07151e73ef6b6b7fd173fc",
+      "negativeControl": "At 9d6c255b the qualifier still covered cases (3) and (4), which the records above show running on 2026-10-25; round 3 had judged the list against the Job half alone rather than entry by entry."
     }
   ],
   "filesChanged": [
@@ -50,6 +58,7 @@
     "AGENTS.md"
   ],
   "trickyParts": [
+    "Round 4 method, at the architect's direction: the five 2026-10-25 records and the bullet's list were taken together and each entry decided against the records, not against the previous wording; any entry present in a run leaves the qualifier, any entry absent from all stays.",
     "Round 1 wrote that the check answered 'on its first try', which the published block cannot show since it prints nothing per attempt; the tester measured a refused first attempt. Round 2 corrects the bullet and re-drove the sequence with one print per attempt: refused at 07:02:23.891, answered at 07:02:25.947, the listener 1.1 s after Ready.",
     "The published Job's pod lingers Terminating for seconds after `kubectl delete job` (background cascade), so the closing listing cannot show 'nothing of it' at once; the page says what the listing shows.",
     "Round 3 came from the retro's fresh-eyes read: the INFRA-71 bullet's 'not run again since' covered the Job half, which the bullet above it records running again on 2026-10-25. All three evidence defects in this pull request were plausible on their own and contradicted by a neighbouring line or a run log."
