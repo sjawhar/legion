@@ -1,0 +1,64 @@
+{
+  "schemaVersion": 1,
+  "phase": "plan",
+  "issue": "INFRA-158",
+  "completed": "2026-10-25T16:22:34Z",
+  "plan": "dispatch://INFRA-158/artifact/plan-md",
+  "summary": "Closing an issue withdraws every open ask of the issue (asks.issue_key = key, state open) with a new server-only resolution kind `withdrawn` naming the closer, writes the blocks' state (and their copies') into the live documents before closed_at is set, and runs a final owner-verified sweep after SetIssueClosed so no block reads open; reopening restores exactly the withdrawn asks and writes their blocks back to open, so no version is cut; an idempotent repair pass at boot and every 10 minutes withdraws asks left open on closed issues (attributed to the latest issue.closed actor, dated at the pass) and restores withdrawn asks on open issues; the SPA card on a closed issue's current document shows the row's record; contracts add `withdrawn` and read `legion-daemon:<PROJECT>` whole.",
+  "tasks": [
+    "1 contracts: AskResolution kind and event zod enum add withdrawn; resolve input stays retracted|resolved; actor-label reads legion-daemon:<PROJECT> whole",
+    "2 docs service: WriteIssueAskStates (own blocks + copiedAskSources copies, optional markUnindexed, owner-verified) and SettleIssueDocuments (synchronous pre-close settlement, no tx)",
+    "3 patchIssue close/reopen: pre-close settle, Docs.Join, LockOwners before first append, doc writes before events, ask events before status event, load after after ask events, ledger.Commit, SetIssueClosed, final sweep; update pinned tests; new api tests",
+    "4 repair pass: exported entry in api, wired in cmd/dispatch/main.go at boot and every 10 minutes; both directions; per-issue tx under the issue row; no invented closer",
+    "5 SPA: actor.ts withdrawn wording, Withdrawn badge, AskBlockCard record on closed current document only (not VersionView), EventBody uses describeAskResolution; new e2e close-withdraws-asks.e2e.ts failing at base, passing at head",
+    "6 docs and changelogs: packages/envoy/AGENTS.md, packages/envoy/cmd/dispatch/README.md, packages/dispatch/AGENTS.md:750, skills/legion-controller/SKILL.md:315, skills/dispatch/references/asks.md, regenerated packages/claude-envoy/legion copy, CHANGELOGs envoy/contracts/pi-envoy/pi-legion(/claude-envoy)",
+    "7 implementer proof on dispatch:local with the INFRA-42/INFRA-43 Postgres harness: three closes, branch CLI dispatch read and doc-read, reopen, repair on restart, browser spec base/head"
+  ],
+  "verification": [
+    "cd packages/envoy && DISPATCH_TEST_DATABASE_URL=<url> go test ./internal/dispatch/... ./cmd/dispatch/...",
+    "bun test packages/contracts",
+    "cd packages/dispatch && bun test && bun run e2e -- close-withdraws-asks.e2e.ts issue.e2e.ts ask-blocks.e2e.ts approval.e2e.ts",
+    "bunx biome check packages/contracts packages/dispatch && bunx tsc --noEmit"
+  ],
+  "productionCheck": "dispatch-production-check.sh --commit <merged sha> --page /issues/INFRA-116 --route /api/v1/issues/INFRA-116 --route /api/v1/issues/INFRA-116/asks; then GET each of the 12 measured closed issues' asks?state=all and confirm the 20 ask ids read resolution.kind withdrawn with the recorded closer (7 people, 4 sessions, legion-daemon:INFRA for INFRA-73) and open_asks empty; close and reopen a scratch issue holding one ask.",
+  "residuals": [
+    "Two-process deployments: a browser on the other process's room keeps writing into a closed issue's document until that room reloads, since SetIssueClosed reaches only its own process's rooms (pre-existing, issue_patch.go:469-471); a block written that way is indexed at the next reopen.",
+    "dispatch://INFRA-352 (in progress elsewhere) changes room closed-state handling in docs/service.go; whichever lands second adapts."
+  ],
+  "requiredSkills": {
+    "implement": [
+      "legion-worker: the implementer's phase rules, PR body template, proof on a production-like surface, simplify pass and production check after the close",
+      "ce-simplify-code: the simplify pass pr-body.md requires on the settled diff",
+      "dispatch: the agent-facing ask rules the change alters (skills/dispatch/references/asks.md, resolve-ask) and how the CLI reads asks, which the proof drives"
+    ],
+    "test": [
+      "legion-worker: the tester drives the changed surface for real (browser suite on the real Go server, branch CLI on dispatch:local), tries to break it, and reads CI for static checks",
+      "dispatch: how an agent reads an issue, an ask and a document with the dispatch CLI, the surfaces the acceptance names"
+    ],
+    "review": [
+      "legion-worker: merge-gate review rules, review threads and approval of the head by SHA",
+      "dispatch: judging the changed agent-facing ask contract and skill text against the dispatch skill's rules"
+    ]
+  },
+  "gapAnalysis": {
+    "findings": [
+      {"finding": "F1: live writes on closed issues meet closed-owner and closed-room guards; warm/cold path dependence.", "answer": "Decision 4: close, reopen and repair hold the issue row and run their document writes owner-verified (withOwnerVerified, honoured by allowInject docs/websocket.go:351-373); the close's in-transaction writes precede the status UPDATE; ordinary edits/answers/resolutions keep 409 ISSUE_CLOSED. Task 2 tests a resident room flagged closed and a non-resident document."},
+      {"finding": "F2: Docs.Join requires the ledger commit protocol and lock order; no settlement wait under locks; multi-issue repair locking.", "answer": "Decision 7: Docs.Join, deferred Discard, ledger.Commit before SetIssueClosed (still WithoutCancel). Decision 5: pre-close settlement runs with no transaction or lock. Lock order in Risks; the repair runs one transaction per issue under its row."},
+      {"finding": "F3: event order and last_seq in the PATCH response; daemon reads LastSeq through GET.", "answer": "Decision 6 and Task 3: LockOwners before the first append, document writes before events, ask events before the status event, after loaded once ask and ledger events are in; test compares response last_seq with GET and expected_sequence success/ISSUE_CHANGED."},
+      {"finding": "F4: unindexed blocks in the settle window get no record; state-only marking incomplete.", "answer": "Decision 5: synchronous pre-close settlement indexes them so the close withdraws them with a record; a final owner-verified sweep after SetIssueClosed marks any block settlement did not index (failure, concurrent edit) state=resolved, which a reopen's settlement indexes as an open ask with its author. Tests with a 1-hour settle delay, a failing settlement hook and a browser edit after the fork."},
+      {"finding": "F5: copy classification: answered-source copies, same-id unrelated blocks, live-only copies, earlier-wording rule.", "answer": "Decision 2: only own blocks and blocks copiedAskSources classifies as copies of the withdrawn asks, classified over the live fork before the rows change; answered/resolved-source copies and unrelated blocks untouched; Task 2 tests each."},
+      {"finding": "F6: no-version claim unsupported; spec requires earlier versions unchanged, not no later version.", "answer": "Decision 3: stored versions never rewritten (version hashes tested); a fully settled document writes no version across close+reopen; real pending text is versioned by the existing protocol (pre-close settlement)."},
+      {"finding": "F7: lifecycle writes credit the closer/reopener as pending authors.", "answer": "Decision 9: credited like resolveAsk/answerAsk credit their block-state writes; existing pending authors never cleared."},
+      {"finding": "F8: approval carry reads rows; restored approval requests must keep version, requested_version, hand-back and turn; no review from the close.", "answer": "Decision 8: withdrawal writes only the resolution; reopen sets only state/resolution; tests assert no ask.answered/artifact.approved/changes_requested/review rows and the restored request's id, approval, requested_version and waiting_on."},
+      {"finding": "F9: rolling deploy and boot-pass failure policy.", "answer": "Decision 10: the repair runs at boot and every 10 minutes, both directions, per-issue transaction re-reading under the issue row; tests for two concurrent runs, idempotence and restore direction."},
+      {"finding": "F10: no fallback system closer.", "answer": "Decision 10: actor of the latest issue.closed event with all its fields; an issue with none is logged and skipped."},
+      {"finding": "F11: version view must not show a later withdrawal.", "answer": "Decision 12: the record shows only on a closed issue's current document (ProofDocument); VersionView keeps reading its own attributes; browser spec checks a saved version."},
+      {"finding": "F12: legion-daemon:INFRA renders as session:legion-d….", "answer": "Decision 11: actor-label reads a session id beginning legion-daemon: whole; INFRA-73's closing actor read from production is exactly {kind:session,id:legion-daemon:INFRA}."},
+      {"finding": "F13: older-client compatibility claim too broad.", "answer": "Decision 14: old close callers valid; envoy-client falls back to the raw payload; an SPA bundle loaded before the deploy needs a reload."},
+      {"finding": "F14: acceptance matrix missing.", "answer": "Plan's acceptance matrix maps each acceptance clause to its check and surface (Go API, Playwright on the real Go server, branch CLI on dispatch:local, production check)."},
+      {"finding": "F15: documentation deliverables missing.", "answer": "Task 6 lists envoy AGENTS.md, dispatch README, dispatch AGENTS.md, controller and dispatch skill text with the claude-envoy copy, and CHANGELOG entries."}
+    ]
+  },
+  "planReview": {"verdict": "approved", "rounds": 3},
+  "specDepartures": []
+}
