@@ -7,9 +7,12 @@ package embed
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strconv"
 	"strings"
 	"unicode/utf8"
+
+	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const (
@@ -49,6 +52,24 @@ func EstimateTokens(texts []string) int {
 	return total / charsPerToken
 }
 
+// boundBatch checks one Embed call's texts against a place's batch limit and returns them each
+// truncated to maxInputChars runes (text.HeadRunes), the form both clients send. No texts comes
+// back as nil, nil: a caller answers that call with no vectors and no error, before any other
+// check.
+func boundBatch(texts []string, limit int) ([]string, error) {
+	if len(texts) == 0 {
+		return nil, nil
+	}
+	if len(texts) > limit {
+		return nil, fmt.Errorf("embed: %d texts exceeds the %d-text batch limit", len(texts), limit)
+	}
+	bounded := make([]string, len(texts))
+	for i, t := range texts {
+		bounded[i] = text.HeadRunes(t, maxInputChars)
+	}
+	return bounded, nil
+}
+
 // InputType is Cohere's asymmetric embedding mode: a stored document is embedded differently
 // from the query that will later search for it. Its values are Bedrock's names for the two
 // modes; AzureClient maps them to Azure's own.
@@ -83,6 +104,26 @@ type Embedder interface {
 	Identity() string
 	// Limits reports this embedder's own batch limit and background token budget.
 	Limits() Limits
+}
+
+// The places meaning search reaches Cohere Embed v4, as an embedder identity names them
+// (IdentityPlace) and as DISPATCH_EMBEDDER selects them.
+const (
+	PlaceBedrock = "bedrock"
+	PlaceAzure   = "azure"
+)
+
+// azureIdentityPrefix begins every AzureClient identity, "azure:<endpoint host>/<deployment>".
+const azureIdentityPrefix = PlaceAzure + ":"
+
+// IdentityPlace names the place and the model an embedder identity records: AzureClient's is
+// "azure:<endpoint host>/<deployment>", whose model is the deployment; any other is a
+// BedrockClient's, whose identity is the Bedrock model id itself.
+func IdentityPlace(identity string) (place, model string) {
+	if rest, ok := strings.CutPrefix(identity, azureIdentityPrefix); ok {
+		return PlaceAzure, rest[strings.LastIndex(rest, "/")+1:]
+	}
+	return PlaceBedrock, identity
 }
 
 // IsThrottled reports whether err is the model service signaling "too many requests, back off"

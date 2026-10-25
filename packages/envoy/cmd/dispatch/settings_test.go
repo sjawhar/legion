@@ -1165,10 +1165,10 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			})
 		},
 		"DISPATCH_EMBEDDER": func(t *testing.T) {
-			if boot := resolveWith(t, nil); boot.Embedder.Place != embedderBedrock {
+			if boot := resolveWith(t, nil); boot.Embedder.Place != embed.PlaceBedrock {
 				t.Errorf("unset: Embedder.Place = %q, want bedrock", boot.Embedder.Place)
 			}
-			if boot := resolveWith(t, map[string]string{"DISPATCH_EMBEDDER": "bedrock"}); boot.Embedder.Place != embedderBedrock {
+			if boot := resolveWith(t, map[string]string{"DISPATCH_EMBEDDER": "bedrock"}); boot.Embedder.Place != embed.PlaceBedrock {
 				t.Errorf("bedrock: Embedder.Place = %q", boot.Embedder.Place)
 			}
 			refusedWith(t, map[string]string{"DISPATCH_EMBEDDER": "cohere"}, `DISPATCH_EMBEDDER="cohere" (expected bedrock or azure)`)

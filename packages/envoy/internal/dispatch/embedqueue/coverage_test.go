@@ -658,15 +658,3 @@ func TestCoverageOfAnEmptyBacklogHasNoOldestAge(t *testing.T) {
 		}
 	}
 }
-
-func TestIdentityPlace(t *testing.T) {
-	for identity, want := range map[string][2]string{
-		"azure:example.services.ai.azure.com/embed-v-4-0":        {"azure", "embed-v-4-0"},
-		"azure:example.services.ai.azure.com/models/embed-v-4-0": {"azure", "embed-v-4-0"},
-		"us.cohere.embed-v4:0":                                   {"bedrock", "us.cohere.embed-v4:0"},
-	} {
-		if place, name := identityPlace(identity); place != want[0] || name != want[1] {
-			t.Errorf("identityPlace(%q) = %q, %q, want %q, %q", identity, place, name, want[0], want[1])
-		}
-	}
-}

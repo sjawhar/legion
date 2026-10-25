@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sjawhar/envoy/internal/dispatch/embed"
 	"github.com/sjawhar/envoy/internal/dispatch/model"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
 )
@@ -21,12 +22,6 @@ const (
 	// is its own short transaction, so a pass over a large database never holds locks a live
 	// write would wait behind for longer than one small statement takes.
 	coverageStatementRows = 500
-)
-
-// The places an embedder identity names (identityPlace).
-const (
-	placeBedrock = "bedrock"
-	placeAzure   = "azure"
 )
 
 // coverageSource is one kind of item meaning search ranks: its FROM clause (from, plus where when
@@ -292,7 +287,7 @@ var coverageQuery = func() string {
 func Coverage(ctx context.Context, database *store.Store, identity string) (model.SearchCoverage, error) {
 	var report model.SearchCoverage
 	if identity != "" {
-		place, name := identityPlace(identity)
+		place, name := embed.IdentityPlace(identity)
 		report.Identity, report.Place, report.Model = &identity, &place, &name
 	}
 	kinds := map[string]*model.SearchCoverageCounts{
@@ -328,7 +323,7 @@ func Coverage(ctx context.Context, database *store.Store, identity string) (mode
 	if err := rows.Err(); err != nil {
 		return model.SearchCoverage{}, fmt.Errorf("search coverage: %w", err)
 	}
-	for _, counts := range []model.SearchCoverageCounts{report.Kinds.Issue, report.Kinds.Document, report.Kinds.Comment, report.Kinds.Ask, report.Kinds.Message} {
+	for _, counts := range kinds {
 		report.Total.Items += counts.Items
 		report.Total.Current += counts.Current
 		report.Total.Lacking += counts.Lacking
@@ -338,14 +333,4 @@ func Coverage(ctx context.Context, database *store.Store, identity string) (mode
 		}
 	}
 	return report, nil
-}
-
-// identityPlace names the place and the model an embedder identity records: embed.AzureClient's
-// is "azure:<endpoint host>/<deployment>", whose model is the deployment; any other is a Bedrock
-// client's, whose identity is the Bedrock model id itself.
-func identityPlace(identity string) (place, name string) {
-	if rest, ok := strings.CutPrefix(identity, "azure:"); ok {
-		return placeAzure, rest[strings.LastIndex(rest, "/")+1:]
-	}
-	return placeBedrock, identity
 }

@@ -224,10 +224,14 @@ type dispatchSettings struct {
 // azureEmbedEndpoint is unset. When enabled, exactly one of key (azureEmbedKeySecret) and keyless
 // (azureTenantId with azureClientId) is set, and audience is the keyless form's token audience.
 type dispatchAzure struct {
-	enabled, key, keyless bool
-	tokensPerMinute       int
-	audience              string
+	key, keyless    bool
+	tokensPerMinute int
+	audience        string
 }
+
+// enabled reports whether azureEmbedEndpoint turned the Azure embedder on: one credential form is
+// then set.
+func (a dispatchAzure) enabled() bool { return a.key || a.keyless }
 
 // newDispatchAzure validates the Azure embedder's inputs: the endpoint turns it on and needs the
 // quota and exactly one credential form; no other Azure input is taken without the endpoint. The
@@ -273,7 +277,7 @@ func newDispatchAzure(args *DispatchArgs) (dispatchAzure, error) {
 	if args.AzureEmbedKeySecret == nil && !keyless {
 		return dispatchAzure{}, errors.New("azureEmbedEndpoint needs one credential: azureEmbedKeySecret, or azureTenantId with azureClientId")
 	}
-	azure := dispatchAzure{enabled: true, key: !keyless, keyless: keyless, tokensPerMinute: *args.AzureEmbedTokensPerMinute}
+	azure := dispatchAzure{key: !keyless, keyless: keyless, tokensPerMinute: *args.AzureEmbedTokensPerMinute}
 	if keyless {
 		azure.audience = defaultAzureFederationAudience
 		if args.AzureFederationAudience != nil {

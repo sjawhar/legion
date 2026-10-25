@@ -1,6 +1,7 @@
 package embed
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -70,10 +71,7 @@ func NewEntraTokenSource(cfg EntraConfig) (*EntraTokenSource, error) {
 	if cfg.TenantID == "" || cfg.ClientID == "" || cfg.TokenFile == "" {
 		return nil, errors.New("embed: entra sign-in needs a tenant id, a client id and a token file")
 	}
-	authority := cfg.Authority
-	if authority == "" {
-		authority = entraDefaultAuthority
-	}
+	authority := cmp.Or(cfg.Authority, entraDefaultAuthority)
 	base, err := url.Parse(authority)
 	if err != nil {
 		return nil, fmt.Errorf("embed: entra authority: %w", err)
@@ -81,10 +79,7 @@ func NewEntraTokenSource(cfg EntraConfig) (*EntraTokenSource, error) {
 	if !base.IsAbs() || base.Host == "" {
 		return nil, errors.New("embed: entra authority must be an absolute URL with a host")
 	}
-	client := cfg.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client := cmp.Or(cfg.HTTPClient, http.DefaultClient)
 	return &EntraTokenSource{
 		tokenURL:  strings.TrimRight(authority, "/") + "/" + url.PathEscape(cfg.TenantID) + "/oauth2/v2.0/token",
 		clientID:  cfg.ClientID,

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cmp"
 	"context"
 	"errors"
 	"fmt"
@@ -13,10 +14,6 @@ import (
 )
 
 const (
-	// embedderBedrock and embedderAzure are DISPATCH_EMBEDDER's values: the places meaning search
-	// reaches Cohere Embed v4. Unset is embedderBedrock.
-	embedderBedrock = "bedrock"
-	embedderAzure   = "azure"
 	// defaultAzureDeployment is DISPATCH_AZURE_EMBED_DEPLOYMENT when it is unset.
 	defaultAzureDeployment = "embed-v-4-0"
 	// azureSettingPrefix begins the name of every setting only DISPATCH_EMBEDDER=azure reads.
@@ -28,9 +25,9 @@ const (
 )
 
 // embedderConfig is where meaning search embeds text, as resolveEmbedder checked it. Place is
-// embedderBedrock or embedderAzure; the rest is Azure's alone, empty under Bedrock. Under Azure
-// exactly one credential is set: AzureKey, or the keyless trio AzureTenantID, AzureClientID and
-// AzureTokenFile, all three.
+// embed.PlaceBedrock (DISPATCH_EMBEDDER unset or bedrock) or embed.PlaceAzure; the rest is Azure's
+// alone, empty under Bedrock. Under Azure exactly one credential is set: AzureKey, or the keyless
+// trio AzureTenantID, AzureClientID and AzureTokenFile, all three.
 type embedderConfig struct {
 	Place                string
 	AzureEndpoint        string
@@ -51,7 +48,7 @@ type embedderConfig struct {
 // nothing, so a model service or a sign-in that is down never refuses boot.
 func resolveEmbedder(env settingValues) (embedderConfig, error) {
 	switch place := strings.TrimSpace(env.get("DISPATCH_EMBEDDER")); place {
-	case "", embedderBedrock:
+	case "", embed.PlaceBedrock:
 		if set := azureSettingsSet(env); len(set) > 0 {
 			chosen := "DISPATCH_EMBEDDER is bedrock"
 			if place == "" {
@@ -59,8 +56,8 @@ func resolveEmbedder(env settingValues) (embedderConfig, error) {
 			}
 			return embedderConfig{}, fmt.Errorf("%s set, but %s: the DISPATCH_AZURE_* settings are read only with DISPATCH_EMBEDDER=azure", strings.Join(set, ", "), chosen)
 		}
-		return embedderConfig{Place: embedderBedrock}, nil
-	case embedderAzure:
+		return embedderConfig{Place: embed.PlaceBedrock}, nil
+	case embed.PlaceAzure:
 		return resolveAzureEmbedder(env)
 	default:
 		return embedderConfig{}, fmt.Errorf("DISPATCH_EMBEDDER=%q (expected bedrock or azure)", place)
@@ -90,7 +87,7 @@ func azureSettingsSet(env settingValues) []string {
 
 // resolveAzureEmbedder is resolveEmbedder for DISPATCH_EMBEDDER=azure.
 func resolveAzureEmbedder(env settingValues) (embedderConfig, error) {
-	cfg := embedderConfig{Place: embedderAzure, AzureDeployment: defaultAzureDeployment}
+	cfg := embedderConfig{Place: embed.PlaceAzure}
 	endpoint := strings.TrimSpace(env.get("DISPATCH_AZURE_EMBED_ENDPOINT"))
 	if endpoint == "" {
 		return embedderConfig{}, errors.New("DISPATCH_AZURE_EMBED_ENDPOINT is required when DISPATCH_EMBEDDER is azure")
@@ -100,9 +97,7 @@ func resolveAzureEmbedder(env settingValues) (embedderConfig, error) {
 		return embedderConfig{}, fmt.Errorf("DISPATCH_AZURE_EMBED_ENDPOINT=%q (expected an absolute https URL with a host and no query or fragment, the base URL the embeddings route is appended to)", endpoint)
 	}
 	cfg.AzureEndpoint = endpoint
-	if deployment := strings.TrimSpace(env.get("DISPATCH_AZURE_EMBED_DEPLOYMENT")); deployment != "" {
-		cfg.AzureDeployment = deployment
-	}
+	cfg.AzureDeployment = cmp.Or(strings.TrimSpace(env.get("DISPATCH_AZURE_EMBED_DEPLOYMENT")), defaultAzureDeployment)
 	quota := strings.TrimSpace(env.get("DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE"))
 	if quota == "" {
 		return embedderConfig{}, errors.New("DISPATCH_AZURE_EMBED_TOKENS_PER_MINUTE is required when DISPATCH_EMBEDDER is azure: the deployment's tokens-per-minute quota")
@@ -150,7 +145,7 @@ func resolveAzureEmbedder(env settingValues) (embedderConfig, error) {
 // a shape that check missed; it calls nothing, so Azure or Entra being down fails an embedding
 // later, never the boot. The Azure line it logs names the place and the identity, never the key.
 func newEmbedder(ctx context.Context, cfg embedderConfig) (embed.Embedder, error) {
-	if cfg.Place != embedderAzure {
+	if cfg.Place != embed.PlaceAzure {
 		client, err := embed.NewBedrock(ctx)
 		if err != nil {
 			slog.Warn("dispatch: meaning search unavailable", "error", err)
@@ -181,6 +176,6 @@ func newEmbedder(ctx context.Context, cfg embedderConfig) (embed.Embedder, error
 	if err != nil {
 		return nil, err
 	}
-	slog.Info("dispatch: meaning search embeds through Azure AI Foundry", "place", embedderAzure, "identity", client.Identity(), "credential", credential)
+	slog.Info("dispatch: meaning search embeds through Azure AI Foundry", "place", embed.PlaceAzure, "identity", client.Identity(), "credential", credential)
 	return client, nil
 }

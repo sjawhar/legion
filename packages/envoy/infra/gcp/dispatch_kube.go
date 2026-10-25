@@ -463,7 +463,7 @@ func newDispatchKubernetes(ctx *pulumi.Context, comp *Dispatch, name string, arg
 		// run time (GKE SecretSync), so the Deployment does not wait on it.
 		appEnv = append(appEnv, valueEnv("DISPATCH_APP_CLIENT_ID", s.appClientID), valueEnv("DISPATCH_APP_ID", s.appID), secretEnv("DISPATCH_APP_PEM_B64", s.appKeySecretName, s.appKeySecretKey))
 	}
-	if s.azure.enabled {
+	if s.azure.enabled() {
 		// Meaning search embeds on Azure AI Foundry. The endpoint, and the deployment when given,
 		// are Inputs, rendered once they resolve, with a seed refused then.
 		appEnv = append(appEnv, valueEnv("DISPATCH_EMBEDDER", "azure"),

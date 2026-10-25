@@ -167,7 +167,7 @@ func TestResolveBootConfigRefusesEveryEmbedderShapeItCannotUse(t *testing.T) {
 // search is off with the warning it always logged, never a refusal; with one, the Bedrock client.
 func TestNewEmbedderBuildsBedrockWhenNothingNewIsSet(t *testing.T) {
 	boot := resolveWith(t, nil)
-	if boot.Embedder != (embedderConfig{Place: embedderBedrock}) {
+	if boot.Embedder != (embedderConfig{Place: embed.PlaceBedrock}) {
 		t.Fatalf("Embedder = %+v, want Bedrock and nothing else", boot.Embedder)
 	}
 	if explicit := resolveWith(t, map[string]string{"DISPATCH_EMBEDDER": " bedrock "}); explicit.Embedder != boot.Embedder {

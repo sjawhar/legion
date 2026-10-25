@@ -2,6 +2,7 @@ package embed
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,8 +12,6 @@ import (
 	"net/url"
 	"strings"
 	"time"
-
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 // The route and api-version AzureClient posts to, held here alone because INFRA-399's live probe
@@ -92,17 +91,14 @@ func NewAzure(cfg AzureConfig) (*AzureClient, error) {
 	if (cfg.APIKey == "") == (cfg.Tokens == nil) {
 		return nil, errors.New("embed: azure needs exactly one credential: an API key or a token source")
 	}
-	client := cfg.HTTPClient
-	if client == nil {
-		client = http.DefaultClient
-	}
+	client := cmp.Or(cfg.HTTPClient, http.DefaultClient)
 	target := *endpoint
 	target.Path = strings.TrimRight(endpoint.Path, "/") + azureEmbeddingsRoute
 	target.RawPath = ""
 	target.RawQuery = url.Values{"api-version": {azureAPIVersion}}.Encode()
 	return &AzureClient{
 		url:        target.String(),
-		identity:   "azure:" + strings.ToLower(endpoint.Host) + "/" + cfg.Deployment,
+		identity:   azureIdentityPrefix + strings.ToLower(endpoint.Host) + "/" + cfg.Deployment,
 		deployment: cfg.Deployment,
 		limits: Limits{
 			MaxBatchTexts: azureMaxBatchTexts,
@@ -161,19 +157,13 @@ func azureInputType(inputType InputType) (string, error) {
 // IsThrottled; any other failure names the HTTP status and Azure's error code, never the texts
 // or the credential.
 func (c *AzureClient) Embed(ctx context.Context, texts []string, inputType InputType) ([][]float32, error) {
-	if len(texts) == 0 {
-		return nil, nil
-	}
-	if len(texts) > azureMaxBatchTexts {
-		return nil, fmt.Errorf("embed: %d texts exceeds the %d-text batch limit", len(texts), azureMaxBatchTexts)
+	bounded, err := boundBatch(texts, azureMaxBatchTexts)
+	if err != nil || bounded == nil {
+		return nil, err
 	}
 	azureType, err := azureInputType(inputType)
 	if err != nil {
 		return nil, err
-	}
-	bounded := make([]string, len(texts))
-	for i, t := range texts {
-		bounded[i] = text.HeadRunes(t, maxInputChars)
 	}
 	body, err := json.Marshal(azureEmbedRequest{
 		Model:          c.deployment,

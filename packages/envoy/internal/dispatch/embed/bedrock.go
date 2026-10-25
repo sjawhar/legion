@@ -13,7 +13,6 @@ import (
 	"github.com/aws/smithy-go/logging"
 
 	"github.com/sjawhar/envoy/internal/dispatch/files"
-	"github.com/sjawhar/envoy/internal/dispatch/text"
 )
 
 const (
@@ -122,15 +121,9 @@ type bedrockEmbedResponse struct {
 // Embed calls Bedrock once for up to BedrockMaxBatchTexts texts; a caller with more batches it
 // itself (embedqueue does, one batch at a time). A throttle comes back marked for IsThrottled.
 func (c *BedrockClient) Embed(ctx context.Context, texts []string, inputType InputType) ([][]float32, error) {
-	if len(texts) == 0 {
-		return nil, nil
-	}
-	if len(texts) > BedrockMaxBatchTexts {
-		return nil, fmt.Errorf("embed: %d texts exceeds the %d-text batch limit", len(texts), BedrockMaxBatchTexts)
-	}
-	bounded := make([]string, len(texts))
-	for i, t := range texts {
-		bounded[i] = text.HeadRunes(t, maxInputChars)
+	bounded, err := boundBatch(texts, BedrockMaxBatchTexts)
+	if err != nil || bounded == nil {
+		return nil, err
 	}
 	body, err := json.Marshal(bedrockEmbedRequest{
 		InputType:       inputType,
