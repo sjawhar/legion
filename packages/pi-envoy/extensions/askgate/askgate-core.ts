@@ -187,6 +187,17 @@ const SHUTDOWN_WAIT_MS = 1_500;
 // shuts down, and a session the host kills leaves its own behind, so each gated call that takes a
 // snapshot first removes every snapshot directory older than this.
 const SNAPSHOT_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+/**
+ * The outcomes of a call the gate let through without a verdict, the gate's own failure or a stop
+ * it took: no review stands behind the bytes, so the command the agent wrote runs as written.
+ */
+const UNREVIEWED_OUTCOMES: ReadonlyArray<GateEntry["outcome"]> = [
+  "error",
+  "timeout",
+  "no-verdict",
+  "abandoned",
+  "shutdown",
+];
 export const GATE_CONTEXT_MAX_BYTES = 256 * 1024;
 const GATE_ARGS_MAX_BYTES = 64 * 1024;
 const GATE_REASON_MAX_BYTES = 2 * 1024;
@@ -2415,7 +2426,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       const started = deps.now();
       let base: Base | undefined;
       let decision: Decision;
-      // A `dispatch` command with its override flag removed, which runs whatever the gate decides.
+      // A `dispatch` command with its override flag removed, which runs whatever the gate decides,
+      // and, once a file operand is rewritten, the command that names the snapshot.
+      let withoutRebuttal: Input | undefined;
       let revised: Input | undefined;
       // OMP_ASKGATE when it is a mode; else this session's latest experiments entry, read per call
       // because one binding serves every session the process switches to.
@@ -2447,8 +2460,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
                 effect: "none",
               };
           } else {
-            if (scoped.rebuttal !== undefined)
-              revised = { ...event.input, command: scoped.command };
+            if (scoped.rebuttal !== undefined) {
+              withoutRebuttal = { ...event.input, command: scoped.command };
+              revised = withoutRebuttal;
+            }
             base = { ...identity(event, mode), tool: scoped.tool, path: scoped.label };
             const run = await readArgs(scoped, event.input, ctx, event.toolCallId);
             if ("command" in run && run.command !== undefined)
@@ -2509,9 +2524,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       } catch (error) {
         // Fail open: the runner turns a thrown handler into a refusal. A throw here is the
         // gate's own (the dump, the render, the dry-run's spawn), not a missing
-        // verdict, so it does not count toward the halt.
+        // verdict, so it does not count toward the halt. The snapshot stays until the call ends,
+        // since the command may still name it.
         decision = pass("error", { reason: messageOf(error) });
-        releaseSnapshots(event.toolCallId);
       }
       // Settled once and recorded once, each on its own, so neither failing can repeat the other.
       try {
@@ -2523,6 +2538,10 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         releaseSnapshots(event.toolCallId);
         revised = undefined;
       }
+      // No verdict came back, so nothing proves the snapshot's bytes are the reviewed bytes, and a
+      // gate that failed must break no valid write: the agent's own command runs instead of the
+      // one naming a snapshot it never saw (its override flag still removed, which the CLI needs).
+      if (UNREVIEWED_OUTCOMES.includes(decision.fields.outcome)) revised = withoutRebuttal;
       // The first gated call says once that the OMP_ASKGATE it ignored is not the switch.
       if (ignoredModeNotice !== undefined) {
         const notice = ignoredModeNotice;

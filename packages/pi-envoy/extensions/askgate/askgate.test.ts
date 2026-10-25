@@ -2291,6 +2291,46 @@ console.log(JSON.stringify(args, null, 2));
       expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ question: reviewed });
       expect(g.calls[0]?.user).toContain(JSON.stringify(reviewed));
     });
+    // A gate that fails must break no valid write: the rewritten command names a snapshot the
+    // agent never saw, so an outcome without a verdict hands the agent's own command back.
+    const FAILED_REVIEW: Array<[string, Parameters<typeof bind>[0]]> = [
+      [
+        "a dry run that throws",
+        {
+          dryRun: async () => {
+            throw new Error("spawn failed");
+          },
+        },
+      ],
+      [
+        "a model that errors",
+        { complete: async () => ({ text: "", error: "500 from the provider" }) },
+      ],
+      ["an answer with no verdict", { complete: async () => ({ text: "I am not sure." }) }],
+    ];
+    for (const [form, options] of FAILED_REVIEW)
+      test(`a review that fails returns the agent's own command, which still posts: ${form}`, async () => {
+        const source = path.join(work, "failed-review.md");
+        const posted = path.join(work, "failed-review-posted.json");
+        const text = "Which branch should the release build from?\n";
+        fs.writeFileSync(source, text);
+        const command = "dispatch ask --issue DSP-1 --question-file failed-review.md";
+        const g = bind({ env: STUB, cwd: work, ...options });
+
+        const result = await g.bash("failed", command);
+
+        expect(result?.input).toBeUndefined();
+        expect(g.entries.map((e) => [e.decision, e.outcome])).toEqual([
+          ["allow", form === "an answer with no verdict" ? "no-verdict" : "error"],
+        ]);
+        const run = Bun.spawnSync(["bash", "-c", command], {
+          cwd: work,
+          env: { ...process.env, ...STUB, ASKGATE_POSTED: posted },
+        });
+        expect(run.exitCode).toBe(0);
+        expect(JSON.parse(fs.readFileSync(posted, "utf8"))).toMatchObject({ question: text });
+      });
+
     test("a snapshot is released when the tool reports its result", async () => {
       const source = path.join(work, "release-snapshot.md");
       fs.writeFileSync(source, "Release this snapshot after posting.\n");
