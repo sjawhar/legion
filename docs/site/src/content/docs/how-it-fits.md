@@ -129,8 +129,10 @@ only where an event goes; what to do about it is the coordinator's and the agent
 7. The daemon submits the pull request for merge, and it lands under the repository's own rules.
    The merge closes the issue: it is Done.
 8. After the close, once the deploy carries the merge, the implementer drives the change in
-   production and records what it observed on the pull request; Dispatch's `issue.deployed` event
-   is what wakes it for that look.
+   production and records what it observed on the pull request. Dispatch's `issue.deployed` event
+   wakes it for that look, as does each run of the repository's deploy workflow on its default
+   branch whose deploy step succeeded after the merge, when the project's `legion.yaml` names that
+   workflow.
 
 Read on in [Legion](/legion/legion/), [Dispatch](/legion/dispatch/) and the
 [Secrets Broker](/legion/broker/).
