@@ -438,13 +438,16 @@ func TestCreateAskOnIssueKeepsSuggestionsWhenWriteAdviceFails(t *testing.T) {
 	})
 }
 
-// The deployment's own allowance is the documented one: register builds &server{deps: deps}
-// (server.go) and sets suggestionTimeout on no server, so the zero value is what production runs,
-// and cmd/dispatch/README.md and CHANGELOG.md promise a filed issue or ask waits at most 300 ms
-// on its suggestions. The literal, not the constant, is the pin.
+// The deployment's own allowance is the documented one: cmd/dispatch/README.md and CHANGELOG.md
+// promise a filed issue or ask waits at most 300 ms on its suggestions, and the literal, not the
+// constant, is the pin. It reads the server register mounts, which is the only one a deployment
+// ever runs: a server built here by hand would still carry the zero value after register had been
+// given a suggestionTimeout of its own, and that drift — measured at 5 s, where filing an ask
+// took 5.046 s and no test in the package reddened — is what the field this change added makes
+// possible (INFRA-56).
 func TestTheDeploymentsSuggestionAllowanceIsTheDocumentedBound(t *testing.T) {
-	if got := (&server{}).suggestionAllowance(); got != 300*time.Millisecond {
-		t.Fatalf("a server the deployment builds allows %s for its suggestions, want 300ms as cmd/dispatch/README.md and CHANGELOG.md promise", got)
+	if got := register(http.NewServeMux(), Deps{}).suggestionAllowance(); got != 300*time.Millisecond {
+		t.Fatalf("the server a deployment runs allows %s for its suggestions, want 300ms as cmd/dispatch/README.md and CHANGELOG.md promise", got)
 	}
 }
 
