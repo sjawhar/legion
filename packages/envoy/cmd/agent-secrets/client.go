@@ -146,7 +146,9 @@ type SecretDecision struct {
 
 // RequestResult is POST /v1/requests's exact response shape. LifetimeSeconds is the lifetime the
 // broker gave the request's grant, nil for until its session ends; a broker from before
-// lifetime_seconds sends no such field, and it decodes as nil.
+// lifetime_seconds sends no such field, and it decodes as nil. ApproveURL is the record's page on
+// the broker, where its approver signs in and decides it, while the request is pending; nil once
+// it is not, and from a broker from before that page.
 type RequestResult struct {
 	RequestID       string           `json:"request_id"`
 	State           string           `json:"state"`
@@ -156,6 +158,7 @@ type RequestResult struct {
 	Approver        *string          `json:"approver"`
 	LifetimeSeconds *int             `json:"lifetime_seconds"`
 	Coalesced       bool             `json:"coalesced,omitempty"`
+	ApproveURL      *string          `json:"approve_url"`
 }
 
 // createRequestBody is POST /v1/requests's exact shape in the broker's HTTP API: a signed
@@ -201,14 +204,15 @@ type requestDecision struct {
 	At time.Time `json:"at"`
 }
 
-// RequestStatus is GET /v1/requests/{id}'s exact response shape.
+// RequestStatus is GET /v1/requests/{id}'s exact response shape. ApproveURL is as RequestResult's.
 type RequestStatus struct {
-	State     string           `json:"state"`
-	GrantID   *string          `json:"grant_id"`
-	RecordID  *string          `json:"record_id"`
-	Approver  *string          `json:"approver"`
-	DecidedAt *time.Time       `json:"decided_at"`
-	Decision  *requestDecision `json:"decision"`
+	State      string           `json:"state"`
+	GrantID    *string          `json:"grant_id"`
+	RecordID   *string          `json:"record_id"`
+	Approver   *string          `json:"approver"`
+	DecidedAt  *time.Time       `json:"decided_at"`
+	Decision   *requestDecision `json:"decision"`
+	ApproveURL *string          `json:"approve_url"`
 }
 
 func (c *client) GetRequest(ctx context.Context, signer Signer, id string) (RequestStatus, []byte, error) {

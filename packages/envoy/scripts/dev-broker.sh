@@ -15,9 +15,15 @@
 # script starts cmd/dev-oidc-issuer, the Go tests' local issuer (internal/oidc/oidctest) served on
 # a loopback port, which keeps two tokens in WORK_DIR and rewrites each before it lapses, as a
 # kubelet does a pod's projected token: account-token, for API_ACCOUNT, the caller "dispatch" the
-# broker lists, which agent-secrets-devrelay presents in Dispatch's place; and exchange-token, for
-# EXCHANGE_ACCOUNT's pod, which the broker's exchange takes for a Dispatch access token. The
-# broker trusts that issuer for both.
+# broker lists, which agent-secrets-devrelay presents in Dispatch's place to decide a machine
+# login; and exchange-token, for EXCHANGE_ACCOUNT's pod, which the broker's exchange takes for a
+# Dispatch access token. The broker trusts that issuer for both.
+#
+# A secret request is approved on the broker's own page, <broker>/approve/<record>, by a person
+# signed in to the broker (BROKER_SIGNIN_*). The same issuer process stands in for that person's
+# identity provider: it serves the broker's sign-in client, whose secret this script generates
+# into WORK_DIR, and signs a person in as the request's login_hint (the approver) with no page to
+# fill in, so a browser on this machine approves a secret request on that page.
 #
 # Each invocation creates and drops its own isolated Postgres database (named from this run's own
 # WORK_DIR, below) and binds an OS-assigned ephemeral port (BROKER_LISTEN_ADDR=127.0.0.1:0), so two
@@ -82,6 +88,12 @@ EXCHANGE_ACCOUNT="system:serviceaccount:example-ns:example-worker"
 EXCHANGE_PROJECT="EXAMPLE"
 ACCOUNT_TOKEN_FILE="$WORK_DIR/account-token"
 EXCHANGE_TOKEN_FILE="$WORK_DIR/exchange-token"
+# The broker's own sign-in client at that issuer (BROKER_SIGNIN_*), through which a person signs in
+# to the broker's approval page, the file holding its secret (generated below), and the domain
+# every signed-in person's hd claim names, the approver's own.
+SIGNIN_CLIENT_ID="dev-broker"
+SIGNIN_SECRET_FILE="$WORK_DIR/signin-client-secret"
+SIGNIN_DOMAIN="example.com"
 # This instance's own database, named from WORK_DIR's mktemp-generated random suffix (already
 # unique per invocation). Postgres unquoted identifiers fold to lowercase anyway, but lowercase
 # explicitly rather than rely on that.
@@ -176,14 +188,25 @@ EOF
 chmod 600 "$FAKE_SECRETS_FILE"
 echo "$APPROVER_LOGIN" >"$OPERATOR_FILE"
 
+# --- The broker's sign-in client's secret, which the issuer and the broker each read from this
+# file (neither takes it on its command line or in its environment). Written under umask 077, so
+# it is never readable by anyone else, even for a moment. ---
+( umask 077 && od -An -N32 -tx1 /dev/urandom | tr -d ' \n' >"$SIGNIN_SECRET_FILE" )
+
 # --- Start the local issuer, teed like the broker below. It writes both token files before it
 # logs its URL, so once that line is in ISSUER_LOG the files are there for devrelay and a pod to
-# read, and the URL is the issuer the broker discovers at boot. ---
+# read, and the URL is the issuer the broker discovers at boot, for ServiceAccount tokens and for
+# a person's sign-in alike. A sign-in that names no login_hint (a shared secret's, whose approver
+# is anyone signed in) signs in as APPROVER_LOGIN. ---
 echo "dev-broker: starting dev-oidc-issuer..." >&2
 : >"$ISSUER_LOG"
 "$ISSUER_BIN" \
   --token "$BROKER_AUDIENCE=$API_ACCOUNT=$ACCOUNT_TOKEN_FILE" \
   --token "$EXCHANGE_AUDIENCE=$EXCHANGE_ACCOUNT=$EXCHANGE_TOKEN_FILE" \
+  --sign-in-client "$SIGNIN_CLIENT_ID" \
+  --sign-in-client-secret-file "$SIGNIN_SECRET_FILE" \
+  --sign-in-domain "$SIGNIN_DOMAIN" \
+  --sign-in-default "$APPROVER_LOGIN" \
   > >(trap '' TERM INT; exec tee -a "$ISSUER_LOG" >&2) 2>&1 &
 ISSUER_PID=$!
 ISSUER_URL=""
@@ -226,6 +249,10 @@ BROKER_LISTEN_ADDR="$LISTEN_ADDR" \
 BROKER_K8S_OIDC_ISSUER="$ISSUER_URL" \
 BROKER_K8S_OIDC_AUDIENCE="$BROKER_AUDIENCE" \
 BROKER_API_ACCOUNTS="dispatch=$API_ACCOUNT" \
+BROKER_SIGNIN_ISSUER="$ISSUER_URL" \
+BROKER_SIGNIN_CLIENT_ID="$SIGNIN_CLIENT_ID" \
+BROKER_SIGNIN_CLIENT_SECRET_FILE="$SIGNIN_SECRET_FILE" \
+BROKER_SIGNIN_DOMAIN="$SIGNIN_DOMAIN" \
 BROKER_EXCHANGE_K8S_AUDIENCE="$EXCHANGE_AUDIENCE" \
 BROKER_EXCHANGE_ACCOUNTS="$EXCHANGE_ACCOUNT=$EXCHANGE_PROJECT=$APPROVER_LOGIN" \
 "$BROKER_BIN" > >(trap '' TERM INT; exec tee -a "$BROKER_LOG" >&2) 2>&1 &
@@ -293,9 +320,10 @@ dev-broker: ready.
 
   binaries:            $BIN_DIR  (broker, dev-oidc-issuer, agent-secrets, agent-secrets-helper, agent-secrets-devrelay)
   fake secrets file:   $FAKE_SECRETS_FILE  (each secret's tags and value, for confirming a released grant)
-  approver login:      $APPROVER_LOGIN (the login a decision names as the deciding human)
+  approver login:      $APPROVER_LOGIN (whom the issuer signs in to approve a secret, and whom devrelay names deciding a machine login)
   database:            $DISPLAY_URL  (this instance's own; created and dropped by this script)
   token issuer:        $ISSUER_URL  (dev-oidc-issuer, logging to $ISSUER_LOG)
+  sign-in:             $ISSUER_URL  (the broker's client $SIGNIN_CLIENT_ID, hd $SIGNIN_DOMAIN; secret in $SIGNIN_SECRET_FILE)
   caller token:        $ACCOUNT_TOKEN_FILE  ($API_ACCOUNT, the caller "dispatch")
   exchange token:      $EXCHANGE_TOKEN_FILE  ($EXCHANGE_ACCOUNT's pod, audience $EXCHANGE_AUDIENCE)
 
@@ -305,13 +333,19 @@ dev-broker: ready.
   Drive it with agent-secrets and agent-secrets-helper in another shell;
   press Ctrl-C here to stop the broker and its issuer.
 
+  To approve a pending request for DEMO_API_KEY, open the approve_url agent-secrets prints for
+  it (${PUBLIC_URL}/approve/<record>) in a browser: the broker sends you to sign in at
+  dev-oidc-issuer, which signs you in as the request's approver ($APPROVER_LOGIN) with no page to
+  fill in, and brings you back to the record's page, where you Approve or Deny it.
+
   The broker lists the caller token's account as its caller "dispatch" (BROKER_API_ACCOUNTS) and
   trusts dev-oidc-issuer's ServiceAccount tokens (BROKER_K8S_OIDC_ISSUER); the issuer rewrites
   each token file before its token lapses. agent-secrets-devrelay presents the caller token
-  (AGENT_SECRETS_ACCOUNT_TOKEN_FILE) to approve or deny a record or a machine login as Dispatch's
-  server does. The RFC 8693 token exchange (POST /v1/oauth/token) takes the exchange token as a
-  pod's subject token, with a DPoP proof of the caller's own key and a session name of its
-  choosing, and mints an access token that writes $EXCHANGE_PROJECT for $APPROVER_LOGIN.
+  (AGENT_SECRETS_ACCOUNT_TOKEN_FILE) to approve or deny a machine login by its code
+  (machine-approve) as Dispatch's server does. The RFC 8693 token exchange (POST /v1/oauth/token)
+  takes the exchange token as a pod's subject token, with a DPoP proof of the caller's own key and
+  a session name of its choosing, and mints an access token that writes $EXCHANGE_PROJECT for
+  $APPROVER_LOGIN.
 EOF
 
 wait "$BROKER_PID"

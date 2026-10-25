@@ -1,12 +1,13 @@
 // packages/envoy/cmd/agent-secrets-devrelay/main_test.go
 //
 // This test mounts the real broker handlers (api.Register) on a real Postgres test store — no
-// fakes — and drives the devrelay binary's own run() function directly (in-process, exactly the
-// argv a subprocess would receive) for both decisions the dev stack needs a human for: the typed-
-// code machine login that enrolls a box, and the approval of that box's secret request. The
-// machine and requester sides (signed request objects, launcher and session proofs) are built
-// directly with record.Sign, proof.SignLauncher and proof.Sign — the calls agent-secrets and its
-// helper make — since devrelay only ever plays the approving human's relay.
+// fakes — and walks the dev stack's two decisions a human makes: devrelay's own run() function
+// (in-process, exactly the argv a subprocess would receive) relays the typed-code machine login
+// that enrolls a box, and the box's secret request is approved by the operator signed in to the
+// broker's own approval page (brokertest.Decide), which no relay can stand in for. The machine
+// and requester sides (signed request objects, launcher and session proofs) are built directly
+// with record.Sign, proof.SignLauncher and proof.Sign — the calls agent-secrets and its helper
+// make.
 package main
 
 import (
@@ -52,9 +53,10 @@ const (
 )
 
 // newDevrelayTestServer is a live broker HTTP server (real handlers, real Postgres) holding one
-// human-tier secret the box's operator owns and so approves, as scripts/dev-broker.sh does. It
-// answers its URL and the ServiceAccount token devrelay calls it with.
-func newDevrelayTestServer(t *testing.T) (brokerURL, callerToken string) {
+// human-tier secret the box's operator owns and so approves, as scripts/dev-broker.sh does, with
+// its approval page signing people in at a local issuer. It answers its URL, the ServiceAccount
+// token devrelay calls it with, and that issuer.
+func newDevrelayTestServer(t *testing.T) (brokerURL, callerToken string, issuer *oidctest.Issuer) {
 	t.Helper()
 	st := storetest.Open(t)
 	local := secrets.NewLocal(policytest.Secret("AGENT_SECRETS_PROOF_APPROVAL", testApprover, policy.TierHuman, testValue))
@@ -74,7 +76,7 @@ func newDevrelayTestServer(t *testing.T) (brokerURL, callerToken string) {
 	reqMachine.Chain = requests.NewChainVerifier(st, srv.URL, time.Minute)
 	// devrelay calls the broker as the listed caller does in production: with its own projected
 	// ServiceAccount token, verified against a local OIDC issuer standing in for the cluster's.
-	issuer := oidctest.New(t)
+	issuer = oidctest.New(t)
 	issuerKey := issuer.PublishKey(t, "signing-key")
 	accountTokens, err := oidc.New(context.Background(), issuer.URL(), dispatchAudience)
 	if err != nil {
@@ -94,11 +96,14 @@ func newDevrelayTestServer(t *testing.T) (brokerURL, callerToken string) {
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
+		// People sign in to the approval page at the same local issuer, which stands in for every
+		// provider.
+		Approval: brokertest.NewApprovalPage(t, brokertest.SignIn(issuer, issuerKey), srv.URL, st, reqMachine),
 	})
 	// The caller's token lives well inside the hour one may, as a projected token does.
 	callerClaims := issuer.Claims(dispatchAccount, dispatchAudience)
 	callerClaims["iat"] = time.Now().Add(-5 * time.Second).Unix()
-	return srv.URL, issuer.Mint(t, issuerKey, callerClaims)
+	return srv.URL, issuer.Mint(t, issuerKey, callerClaims), issuer
 }
 
 // req issues method against base+path with an optional JSON body and headers, returning the
@@ -185,7 +190,7 @@ func TestATokenFileItCannotUseSendsNothing(t *testing.T) {
 		{empty, "the account token file " + empty + " is empty"},
 	} {
 		var stdout, stderr bytes.Buffer
-		code := run([]string{"approve", "--record", "record-1", "--broker", broker.URL, "--account-token-file", tc.file, "--login", testApprover}, &stdout, &stderr)
+		code := run([]string{"machine-approve", "--code", "KQ7M-X4PZ", "--broker", broker.URL, "--account-token-file", tc.file, "--login", testApprover}, &stdout, &stderr)
 		if code != 1 || !strings.Contains(stderr.String(), tc.says) {
 			t.Errorf("--account-token-file %s: exit %d, stderr %q; want 1 saying %q", tc.file, code, stderr.String(), tc.says)
 		}
@@ -197,11 +202,11 @@ func TestATokenFileItCannotUseSendsNothing(t *testing.T) {
 
 // TestDevStackEnrollsRequestsApprovesAndReleases runs the dev stack's whole story end to end: a
 // machine logs in and devrelay approves its typed code by the operator's login, the resulting
-// launcher credential enrolls a box, the box asks for an approval-required secret, devrelay
-// approves that record by the same login through the broker's UI route Dispatch relays to, and
+// launcher credential enrolls a box, the box asks for an approval-required secret, the operator
+// signs in to the broker's own page and approves that record there (no relay can decide it), and
 // the grant releases the fake secrets store's value.
 func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
-	brokerURL, callerToken := newDevrelayTestServer(t)
+	brokerURL, callerToken, issuer := newDevrelayTestServer(t)
 
 	// --- enroll: a machine login approved by devrelay, then a box enrollment on its credential ---
 	machineKey := newKey(t)
@@ -273,20 +278,31 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 		t.Fatalf("POST /v1/requests = %d: %s", status, body)
 	}
 	var created struct {
-		State    string  `json:"state"`
-		RecordID *string `json:"record_id"`
+		RequestID  string  `json:"request_id"`
+		State      string  `json:"state"`
+		RecordID   *string `json:"record_id"`
+		ApproveURL string  `json:"approve_url"`
 	}
 	if err := json.Unmarshal(body, &created); err != nil || created.State != "pending" || created.RecordID == nil {
 		t.Fatalf("create response = %s (%v), want a pending request with a record_id", body, err)
 	}
+	if page := brokerURL + "/approve/" + *created.RecordID; created.ApproveURL != page {
+		t.Fatalf("create response approve_url = %q, want the record's page %s", created.ApproveURL, page)
+	}
 
-	// --- approve: devrelay decides the record by the operator's login ---
-	approved := devrelay[struct {
+	// --- approve: the operator signs in to the broker's page and approves the record there ---
+	brokertest.Decide(t, brokerURL, issuer, testApprover, *created.RecordID, true)
+	statusProof, err := proof.Sign(sessionKey, enrolled.EnrollmentID, http.MethodGet, brokerURL+"/v1/requests/"+created.RequestID, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	status, body = req(t, http.MethodGet, brokerURL+"/v1/requests/"+created.RequestID, map[string]string{"Proof": statusProof}, nil)
+	var approved struct {
 		State   string  `json:"state"`
 		GrantID *string `json:"grant_id"`
-	}](t, brokerURL, callerToken, "approve", "--record", *created.RecordID)
-	if approved.State != "approved" || approved.GrantID == nil {
-		t.Fatalf("approve output = %+v, want state=approved with a grant_id", approved)
+	}
+	if err := json.Unmarshal(body, &approved); err != nil || status != http.StatusOK || approved.State != "granted" || approved.GrantID == nil {
+		t.Fatalf("GET /v1/requests/{id} after the page's approval = %d %s (%v), want state=granted with a grant_id", status, body, err)
 	}
 
 	// --- release: the grant's value is the fake secrets store's ---

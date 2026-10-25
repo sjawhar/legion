@@ -76,8 +76,9 @@ func helperSocket() (sock string, named bool) {
 }
 
 // approveURL is AGENT_SECRETS_APPROVE_URL, Dispatch's origin, without a trailing slash: the base
-// of the pages `machine login` and a pending exec form name for a person to decide on. Empty
-// when unset.
+// of the machine-login page (/credentials/machine) where `machine login` sends a person to type
+// its code. A secret request is not approved there: a pending one names the page on the secrets
+// broker its answer carries as approve_url. Empty when unset.
 func approveURL() string {
 	return strings.TrimSuffix(os.Getenv("AGENT_SECRETS_APPROVE_URL"), "/")
 }
