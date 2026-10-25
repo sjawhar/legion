@@ -405,7 +405,8 @@ earlier release running** (a Kubernetes Deployment's `strategy: Recreate`, never
 because of its API rather than its schema. Its page keys every write with an `Idempotency-Key`
 header (Keyed writes, below) and sends a broadcast without the body field `idempotency_key`, which
 an earlier process requires, `400 BROADCAST_INPUT`, so a broadcast that reaches an earlier process
-while the release rolls is refused. A tab opened before the deploy needs a reload either way: the
+while the release rolls is refused; and an earlier process serves no `GET /ws/live`, so a page of
+this release it answers gets no live updates. A tab opened before the deploy needs a reload either way: the
 event feed it reads, `GET /api/v1/events`, is gone, so it shows `Live updates unavailable`, and
 its broadcasts still carry the body field, which this release refuses as an unknown field,
 `400 INVALID_JSON` (`packages/envoy/CHANGELOG.md`).
