@@ -104,6 +104,9 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 		{name: "a newer version a registration recorded on the gate", awaiting: record.Awaiting{GateVersion: 3},
 			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 4},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 4, AskID: "ask-approval", WaitingOn: "agent"}}},
+		{name: "a second changes request at the version an earlier one answered", awaiting: record.Awaiting{GateVersion: 3},
+			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: new(3), ToldChangesReason: "name the rollback path"},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("and name who runs the restore")}}},
 		{name: "a person's reply on the approval request", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
 				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyID: "reply-1", LastReplyBy: alice}}}},
@@ -134,9 +137,11 @@ func TestCatchUpAwaitingAppliesAPersonsAnswerMissedAtBoot(t *testing.T) {
 // handing the turn to the agent, and an approval request a session's reply moved to the agent.
 func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 	gate := &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3}
+	told := 3
 	for _, tc := range []struct {
 		name     string
 		awaiting record.Awaiting
+		gate     *record.DesignGate
 		client   awaitingDispatch
 	}{
 		{name: "an ask still waiting on the person", awaiting: record.Awaiting{Ask: "ask-root"},
@@ -150,10 +155,13 @@ func TestCatchUpAwaitingLeavesARootNoPersonAnswered(t *testing.T) {
 		{name: "an approval request a session's reply moved to the agent", awaiting: record.Awaiting{GateVersion: 3},
 			client: awaitingDispatch{approval: dispatch.Approval{State: "awaiting", LatestVersion: 3, AskID: "ask-approval", WaitingOn: "agent"},
 				asks: map[string]dispatch.Ask{"ask-approval": {ID: "ask-approval", IssueKey: "CAPTURE-ROOT", Kind: "approval", State: "open", WaitingOn: "agent", LastReplyID: "reply-1", LastReplyBy: architectSession}}}},
+		{name: "the changes request that answered an earlier wait", awaiting: record.Awaiting{GateVersion: 3},
+			gate:   &record.DesignGate{ArtifactID: "artifact-root", LatestVersion: 3, ToldChangesVersion: &told, ToldChangesReason: "name the rollback path"},
+			client: awaitingDispatch{approval: dispatch.Approval{State: "changes_requested", LatestVersion: 3, Version: new(3), Reason: new("name the rollback path")}}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			var waitGate *record.DesignGate
-			if tc.awaiting.GateVersion != 0 {
+			waitGate := tc.gate
+			if waitGate == nil && tc.awaiting.GateVersion != 0 {
 				waitGate = gate
 			}
 			got := catchUpRoot(t, tc.awaiting, waitGate, &tc.client)
@@ -220,5 +228,73 @@ func TestCatchUpAwaitingSkipsARootItCannotReadAndStillFailsWhenDispatchIsDown(t 
 	}
 	if err := w.catchUpAwaiting(context.Background()); !dispatch.Unreachable(err) {
 		t.Fatalf("catch up with Dispatch down = %v, want an unreachable error the boot retries", err)
+	}
+}
+
+// Three waits at one version in one generation, each answered only by a changes request whose
+// live event was lost, recover one after another at boot, also when the third repeats the first's
+// wording: each is a new act of a person. Re-reading the review that answered the last wait, with
+// no new act since, answers nothing.
+func TestCatchUpAwaitingRecoversSuccessiveReviewsAtOneVersion(t *testing.T) {
+	pool := isolatedOutboxPool(t)
+	records := record.NewStore()
+	ctx := context.Background()
+	root := record.Issue{Key: "CAPTURE-ROOT", Tree: "CAPTURE-ROOT", Project: "CAPTURE", Title: "root", Phase: phase.AwaitingPerson,
+		Generation: 1, Status: "in_progress", Rank: "A", HandedOver: true, Repo: "acme/widgets", DefaultBranch: "main", GitHubRepo: "acme/widgets",
+		Awaiting: &record.Awaiting{GateVersion: 4}}
+	if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+		if err := records.PutIssue(ctx, tx, root); err != nil {
+			return err
+		}
+		return records.PutGate(ctx, tx, record.DesignGate{Issue: root.Key, ArtifactID: "artifact-root", LatestVersion: 4})
+	}); err != nil {
+		t.Fatalf("seed awaiting root: %v", err)
+	}
+	engine := workflow.New(records, workflow.Config{Project: "CAPTURE", Repositories: testRepositories, Clock: func() time.Time { return time.Date(2026, 10, 23, 18, 0, 0, 0, time.UTC) }}, quietLogger())
+	client := &awaitingDispatch{issue: dispatch.Issue{Key: root.Key, LastSeq: 7}}
+	w := &workflowRuntime{pool: pool, records: records, dispatch: client, dispatchProject: "CAPTURE", handlers: []intake.Handler{engine}}
+	read := func() record.Issue {
+		t.Helper()
+		var got *record.Issue
+		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error {
+			var err error
+			got, err = records.Issue(ctx, tx, root.Key)
+			return err
+		}); err != nil || got == nil {
+			t.Fatalf("read root: %v", err)
+		}
+		return *got
+	}
+	// waitAgain stands for the root's resume and its architect's hand-back: a fresh, unanswered
+	// wait on the same version.
+	waitAgain := func() {
+		t.Helper()
+		again := read()
+		again.Awaiting = &record.Awaiting{GateVersion: 4}
+		if err := pgx.BeginFunc(ctx, pool, func(tx pgx.Tx) error { return records.PutIssue(ctx, tx, again) }); err != nil {
+			t.Fatalf("start the next wait: %v", err)
+		}
+	}
+	review := func(reason string) {
+		client.approval = dispatch.Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: &reason}
+	}
+	catchUp := func() {
+		t.Helper()
+		if err := w.catchUpAwaiting(ctx); err != nil {
+			t.Fatalf("catch up: %v", err)
+		}
+	}
+
+	for i, reason := range []string{"name the rollback path", "name the operator", "name the rollback path"} {
+		review(reason)
+		catchUp()
+		if got := read(); !got.Answered() {
+			t.Fatalf("wait %d, answered only by %q, = %#v after the catch-up, want it answered", i+1, reason, got)
+		}
+		waitAgain()
+	}
+	catchUp()
+	if got := read(); got.Answered() {
+		t.Fatalf("a wait no new review answered = %#v after the catch-up, want it still unanswered", got)
 	}
 }
