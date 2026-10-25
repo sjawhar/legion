@@ -169,8 +169,10 @@ you to retry or discard.
 Now and then Dispatch makes a change but its answer is lost on the way back. The change is made;
 the page says so (for example **The issue “…” was made, but Dispatch lost its answer, so it may
 take a moment to appear.**) and clears the form, so pressing again makes nothing twice. A new agent
-token made that way has lost its value with the answer, so the page offers **Revoke it and mint
-another**.
+token made that way has lost its value with the answer. The page looks for the tokens of that
+label made since you pressed **New token** and offers to revoke it and mint another in its place;
+if it finds more than one, you pick which, and every revoke asks you to confirm first, since
+agents using it stop working at once.
 
 ### The tabs
 
