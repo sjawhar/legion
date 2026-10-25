@@ -382,8 +382,15 @@ replacement room's load then runs the settlement the failure dropped, which the 
 `doc_settlements_pending` row still names.
 
 Successful Dispatch writes on an issue may return top-level `advice` with the issue status, the
-count of session-authored messages/comments/asks since the last human event, and the calling
-session's two oldest open asks; issue creation and Markdown artifact uploads also report the
+count of the calling session's own messages/comments/asks since the last human event, the calling
+session's two oldest open asks, and `legion_managed_status`: whether the Legion daemon owns the
+issue's status, because the issue carries the `legion` label in any case or sits under one that
+does. The client prints no "still in triage" advice on such an issue, because Legion moves it out
+of triage itself and a status a session writes there is undone. That field is resolved only where
+it decides a line - a session's write on an issue whose status is `triage` - and is absent on a
+write past triage and on one whose actor is not a session, which runs no advice query at all and
+still gets the triage advice, true for a reader who may move the status.
+Issue creation and Markdown artifact uploads also report the
 document's `decision_blocks` count and, when it holds any, its `unparsed_openers`
 (`{count, examples}`): typed block openings (`:::name{`) in its text outside code, written inside a
 line or escaped, each example quoting the opening with a little of the text before it. A writer who
@@ -397,11 +404,28 @@ transaction after its event is appended, so it includes that write. A stored doc
 blocks and unparsed openers are read from one parse of the canonical Markdown after the write
 transaction commits (`readDocumentBlocks`). Advice queries run
 behind a savepoint with a 500 ms
-timeout that is restored before the savepoint is released: one failure is logged and omits
-`advice` without preventing the write from committing. The consecutive-write query materializes
-the last-human fence so its `max(id)` runs once, and relies on the `events (issue_key, seq)` unique
-index's issue prefix and commit-ordered event ids; the open-ask query relies on the
-`asks_open (issue_key) where state = 'open'` partial index.
+timeout that is restored before the savepoint is released: a failure of either session-scoped
+query is logged and omits `advice` without preventing the write from committing, while the
+`legion_managed_status` walk, which takes a savepoint of its own inside that one, is logged and
+omits that field alone, keeping the advice already assembled. That matters most on an issue
+creation, where `computeAndPersistSuggestions` runs only once the advice survives (`if advice
+!= nil`, `issue_create.go`), after it: a fatal advice failure there means LEGION-550's
+suggestions are never computed and no row is ever written, so what the walk's tolerance saves is
+the whole of that offer rather than a copy of something already stored. An ask is the other way
+round - `asks.go` computes its suggestions first and falls back to a suggestions-only advice, so
+they survive a fatal advice failure there. The consecutive-write query counts only the
+calling actor's own events (it runs for a session caller alone; any other actor reports zero with no
+query) and materializes the last-human fence so its `max(id)` runs once, and relies on the
+`events (issue_key, seq)` unique index's issue prefix and commit-ordered event ids; the open-ask
+query relies on the `asks_open (issue_key) where state = 'open'` partial index; the
+`legion_managed_status` query is `legionManagedStatus`
+(`internal/dispatch/api/issue_parent.go`), which both claim routes read too through the
+savepoint wrapper `claimLegionManagedStatus` (`internal/dispatch/api/issue_claim.go`), one
+recursive walk up the issue's parent chain bounded
+by `parentDepthCap`, each step a primary-key lookup on `issues (key)` (the `issues_parent_key`
+index serves the opposite direction and this walk never reads it), and it runs on a triage issue
+alone, so an ordinary write on an ordinary issue gains no query. A chain deeper than the cap
+answers "not managed" there and the line prints.
 
 Quote-anchored asks and comments retain their inline mark and quote cache, plus the stable `block_id`
 of the lowest block containing the complete quote. A quote that spans top-level siblings stays
@@ -1819,7 +1843,7 @@ from and that ask's document.
 - Issues carry a nullable coarse priority (`P0` highest through `P3` lowest) alongside their server-generated fractional `rank`. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `priority` as `0` through `3` or null; each priority write emits `issue.updated`. Issue and pinned lists sort by lifecycle status, then rank, then creation time, then key; priority is a badge and a filter, never a sort key, so the List and the Board (whose columns keep the list's order) show the same order. `PATCH /api/v1/issues/{key}` accepts neighboring issue keys as `rank.before` and/or `rank.after`, validates they share the project, and serializes rank allocation per project; it locks both neighbours together with every other issue row the PATCH names, in one key order, then rewrites only that issue's order key.
 - Every issue has a nullable `parent_key` (`graph_edges.child_of` is a live view over it). `POST /api/v1/issues` validates a supplied `parent` exists in the same project (`400 PARENT_INPUT`) and leaves the new issue at most `parentDepthCap` (32) links below its root (`409 PARENT_INPUT`), and `PATCH /api/v1/issues/{key}` accepts a tri-state `parent`: absent leaves it, `null` clears it, a key reparents. Parent changes, and creates with a parent, take the project's dependency advisory lock, serializing with blocker writes; a parent change then locks the issue, its old parent and the proposed parent together in one key order, as a status write locks the issue and its parent (`409 PARENT_CONTENDED` when a concurrent reparent moves the parent at both attempts). Plain, depth-capped reads refuse a missing, self, or foreign-project parent (`400 PARENT_INPUT`), a parent cycle (`409 PARENT_INPUT`), a parent that would put the deepest issue under the moved one more than 32 links below its root (`409 PARENT_INPUT`), or a wait cycle through parent and `blocked_by` edges (`409 DEPENDENCY_CYCLE`); unrelated row activity adds no refusal. A reparent of a closed issue is `409 ISSUE_CLOSED` (a closed issue takes only `rank`, `components`, a reopening `status` — any status but `done` — and an `external_links` write that adds no new URL, so a link can move to the issue that replaced it; every other field, `priority` included, waits for the reopen). An actual parent change appends `child.removed` to the old parent and `child.added` to the new one (`{child_key}`, all owners in one `LockOwners` with the issue's own event) — both always notify, like `child.status`. Issue-detail `children` rows are one recursive-CTE query (`loadChildren`): each direct child carries `subtree_done` / `subtree_total` (the child itself included, every status; done = `status='done'`), `active_at` (the subtree's newest `updated_at`), and its own `external_links`, still ordered by key.
 - Every issue has a nullable `assignee`: the **lowercase** email of the person who answers its asks (`issues.assignee`, migration `0034`, indexed on open issues). Both identity implementations name a person by lowercase email, so `model.CanonicalLogin` (`strings.ToLower(strings.TrimSpace(login))`) is the stored form and plain `=` compares it; the SPA lowercases the `/auth/whoami` viewer once and compares exact. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` accept `assignee` (the PATCH's `json.RawMessage` tri-state: absent leaves it, `null` clears, a string is canonicalised and must name a row of `people` (migration `0068`: everyone who has signed in) — else `400 ASSIGNEE_NOT_ALLOWED` naming the email; a non-string is `400 INVALID_ISSUE`). Any authenticated actor may set it; the event's actor is who assigned it, and the whole issue rides in `issue.created` / `issue.updated`, so there is no `assigned_by`. Absent on create, the default is the first match of: a human actor's email; a personal token's `Owner`; the parent's assignee (which may be null); null — so the shared token's parentless issues are unassigned and a daemon status PATCH (no `assignee` key) never touches it. `GET /api/v1/users` (human-only) returns everyone in `people`, sorted by email, as `{users: [{login}]}` — the picker's options; `GET /api/v1/whoami` (any auth) returns `{kind: "user", login}` (the person's lowercase email) for a cookie/header caller or `{kind: "agent", owner}` for a bearer (`owner` is the personal token's owner by lowercase email, null under the shared token) — what `dispatch whoami` reports. Issue reads (`GET /issues/{key}`, summaries, pinned) carry `assignee`, and so does the `issue` on every inbox row.
-- Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON — and `issues.claimed_at`, migration `0045`, both set or both null by `issues_claim_complete`). It is on every issue read (`Issue.claim`, `IssueSummary.claim`, so the detail, the listing and the board rows all carry it) and is neither the `route` (where messages go) nor the `assignee` (the human who answers the asks). The whole rule lives in `api/issue_claim.go`. `POST /api/v1/issues/{key}/claim` (any authenticated actor) claims it: the claimant is the request's own actor, the same identity every other write carries — a human's login from their signed cookie (a body naming a session is ignored for a cookie caller), or, for a bearer, the session the caller declares in `actor`, since a token proves its owner or service subject and not which session it runs. A bearer can therefore name another session here exactly as on any other write; what makes a claim trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model picks it, and that there is no second parameter for claiming on someone's behalf. The body rejects unknown fields, so an invented one is refused rather than ignored. It succeeds when the issue is unclaimed, when this actor already holds it (idempotent: the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener's session store no longer holds a record of (`fetchHolderLiveness` reads that one session's record by id, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place — decides from it under the issue's row lock), which records the takeover. Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message; a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all. `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force — a refusal on the release route never offers one. An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`. A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows: nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`. `DELETE /api/v1/issues/{key}/claim` releases it: the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op. Both answer the issue. Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it), because humans may track work by the status; closing an issue is the one write that clears a claim, in the same `PATCH` (`issue_patch.go`) that closes it. `issue.claimed` and `issue.released` carry `IssueClaimEventPayload {key, status, repo, resolved_repo, claim, previous_claim?, reason}` (`repo` and `resolved_repo` as on every issue event); the outbox publishes both to the previous claimant's own `notifications.agent.<session_id>` topic (`publishPreviousClaimant`), whatever the issue's route and regardless of `notify`, so a session learns it no longer holds the work.
+- Every issue has a nullable claim: the session that intends to implement it (`issues.claimed_by` — the actor JSON — and `issues.claimed_at`, migration `0045`, both set or both null by `issues_claim_complete`). It is on every issue read (`Issue.claim`, `IssueSummary.claim`, so the detail, the listing and the board rows all carry it) and is neither the `route` (where messages go) nor the `assignee` (the human who answers the asks). The whole rule lives in `api/issue_claim.go`. `POST /api/v1/issues/{key}/claim` (any authenticated actor) claims it: the claimant is the request's own actor, the same identity every other write carries — a human's login from their signed cookie (a body naming a session is ignored for a cookie caller), or, for a bearer, the session the caller declares in `actor`, since a token proves its owner or service subject and not which session it runs. A bearer can therefore name another session here exactly as on any other write; what makes a claim trustworthy is that `dispatch claim` fills `actor` from the host's own runtime, so no model picks it, and that there is no second parameter for claiming on someone's behalf. The body rejects unknown fields, so an invented one is refused rather than ignored. It succeeds when the issue is unclaimed, when this actor already holds it (idempotent: the claim keeps its original time and appends no event), and when the holder is a session the Envoy listener's session store no longer holds a record of (`fetchHolderLiveness` reads that one session's record by id, with no transaction or pooled connection held, and `claimBlockedBy` — the whole taking rule, in one place — decides from it under the issue's row lock), which records the takeover. Against a live holder it answers `409 ISSUE_CLAIMED` with the claim in the body and the holder's session, live title and claim time in the message; a human's claim, which has no session to be running and none to message, is refused with the person's login and no liveness lookup at all. `{"force": true}` takes either anyway and is human-only (`403 HUMAN_ONLY` for a bearer), and only this route has that force — a refusal on the release route never offers one. An unreachable or unconfigured listener is `503 ENVOY_UNAVAILABLE` rather than a guess at whether a session ended, and a closed issue is `409 ISSUE_CLOSED`. A holder that changes twice while one request runs is `409 CLAIM_CONTENDED` carrying the claim the row shows: nothing was applied, and nothing about that holder's liveness was established, so it is never `ISSUE_CLAIMED`. `DELETE /api/v1/issues/{key}/claim` releases it: the holder, any human, or anyone once the holding session is gone; releasing an unclaimed issue is a 200 no-op. Both answer `claimAnswer`: the issue flat, with `legion_managed_status` — whether Legion owns its status, the walk `claimLegionManagedStatus` runs under the issue's row lock before the claim is written — beside it, omitted when that walk failed or timed out, which costs the field and never the claim. Claiming and releasing never move the status, and no status write ever claims (a move to `done` is the one that touches a claim, clearing it), because humans may track work by the status; closing an issue is the one write that clears a claim, in the same `PATCH` (`issue_patch.go`) that closes it. `issue.claimed` and `issue.released` carry `IssueClaimEventPayload {key, status, repo, resolved_repo, claim, previous_claim?, reason}` (`repo` and `resolved_repo` as on every issue event); the outbox publishes both to the previous claimant's own `notifications.agent.<session_id>` topic (`publishPreviousClaimant`), whatever the issue's route and regardless of `notify`, so a session learns it no longer holds the work.
 - Every issue has a nullable `repo`: its own repository, `owner/name` (`issues.repo`, migration `0113`), which must be a mapping of its project; the composite foreign key `issues_repo_mapped_to_project` to `repo_projects (repo, project)` makes that a database invariant. `POST /api/v1/issues` and `PATCH /api/v1/issues/{key}` take it (`api/issue_repo.go`: absent leaves it, `null` clears it, a string is canonicalised as a mapping's path is; not `owner/name` is `400 INVALID_ISSUE`, not mapped `400 REPO_NOT_MAPPED`, checked under a key-share lock on the mapping row so the mapping cannot move or go before the write commits; a closed issue refuses it, `409 ISSUE_CLOSED`). Every issue read and every issue event carries `repo` and `resolved_repo`, resolved on read by `issueRepoLateral`: the nearest issue on the parent chain (itself first) whose own `repo` is set, else the project's default mapping (`repo_projects.is_default`, at most one per project by the partial unique index `repo_projects_default_per_project`), else null. The walk keeps a depth counter and stops at `parentDepthCap` (32) links, the most any issue sits below its root, so it costs at most 33 steps per issue; a chain still going at the cap (a loop, or one a direct database write or an earlier release's API built) fails the read (500) rather than answer with the default. An earlier release's API could build a chain of any depth, so migration `0113` refuses to apply while any issue sits more than 32 links below its root or in a parent loop: its census counts them for the pre-deploy gate, and the migration, holding `repo_projects` and `issues` in ACCESS EXCLUSIVE from before its count to its commit so no earlier release's write commits in between, names up to 20 and the repair (`PATCH` an ancestor with `{"parent": null}` on the release still running). Only this release's API holds the cap after that, under the project's dependency lock; nothing in the database does. So no server of the earlier release may serve once `0113` applies, whether left serving or started again by a rollback: stop it, or scale it to zero, before this release boots (a Recreate rollout, never a rolling one), and recover a failed deploy forward (`cmd/dispatch/README.md`, "Database migrations"; the auto-deployer refuses such a rollback, `deploy/README.md`). A chain built anyway, by an earlier release or by direct SQL, fails every read of its issues (500). The API repairs an acyclic one: `PATCH` an ancestor that still reads (its `GET` answers 200) with `{"parent": null}`. The `PATCH` reads the issue it changes first (`issue_patch.go`), so a parent loop none of whose members reads, which only direct SQL can write, needs a database repair (`update issues set parent_key = null` on one member). A mapping's `PUT` takes `default` and moves the project's default in one transaction; a mapping that issues name is neither deleted nor moved to another project (`409 REPO_PROJECT_IN_USE`, counted under the mapping's row lock); and a moved mapping emits `settings.repo_project.updated` on the project it left (`deleted: true`) as well as the one it joined. Every writer of a mapping, the `PUT`, the `DELETE` and the boot seed of `DISPATCH_REPO_PROJECTS` (`api.SeedRepoProjects`), takes `lockRepoProjectWrite`'s locks in one order: an advisory lock on the repository, the event owners of every project it touches, then the row. So two writes to one repository serialize, even while it has no row yet, and the seed's own additions are announced like any other.
 
 - Open asks accept `PATCH /api/v1/asks/{id}` from their asking session or any human. Each edit carries the full current ask, prior mutable fields, and its editor in an `ask.edited` event; `edited_at` is nullable until the first edit. Ask anchors are set on creation and are not editable through this route. `GET /api/v1/asks/{id}` returns `edits`, every rewording read back from those events oldest first (`{previous, edited_by, at}`), and `answers`, every user-authored answer read back from `ask.answered` events oldest first, with settlement's restoration of the same `answer.at` collapsed. A human answer must carry the `edited_at` revision it reviewed; a mismatch returns `409 ASK_EDITED` without closing the ask. The answerer changes an answered question with `expected_answer_at` naming the current answer's `at`: a stale value or an open ask is `409 ASK_ANSWER_CHANGED`, another person is `403 NOT_ANSWERER`, and an approval is `409 ASK_APPROVAL_REVIEW`. The change appends another `ask.answered` whose payload adds `previous_answer`, so its asker and followers receive it through the first answer's route. `GET /api/v1/me/answers` lists the caller's answer events and ask replies, newest first, through migration 0082's partial indexes.
@@ -2383,9 +2407,37 @@ one else. The two ERROR lines, `policy.RefusedMessage` with a `Reason*` constant
 `policy.LoadFailedMessage`, are what the deployment's alarms filter on, so neither changes without
 the alarm, and a failed reload keeps the last set; a reload cut short because `NewCurrent`'s
 context ended (the broker shutting down) is no failed load and logs nothing. `Set.Version`, the
-SHA-256 of every served secret's name, owner, tier and source (its ARN, its Secret Manager
-resource name, or `gcp-token:<service account>` for a minted secret: `policy.Secret.Source`), is recorded on every request, and a
-live grant is re-checked once it has moved, and always while any granted name is a service's,
+SHA-256 of every served secret's name, owner, tier, source, max grant and GitHub owners, is
+recorded on every request. A kind source is `mint:<kind>:<store source>` (`policy.KindSource`, read
+back by `policy.ParseKindSource`). A grant ends for good when a release finds its secret's kind
+changed (a moved source) or its lifetime over the current max-grant (`Machine.endGrant`); a change
+reverted before any release finds it leaves the grant as it was, and to end a grant, revoke it.
+`policy.Kinds`, `ValidKind`,
+`ParseMaxGrant` and `ParseGitHubOwners` are the one statement of which kinds exist, what a max grant
+is and how a `github-owners` list reads (logins separated by white space, as `BROKER_SERVICES`
+separates its entries, a form an AWS tag value and a Secret Manager annotation both hold; a comma
+is refused `ErrGitHubOwnersComma`), and `policy.GitHubOwnersFor` (with `KindNeedsGitHubOwners`)
+the one statement of which kind needs owners, which the loader, `policytest.KindSecret` and
+`agent-secrets secret` create and retag all apply. A `github-app` secret whose `github-owners`
+names no account is refused `github-owners-missing`, and one whose list holds a comma
+`github-owners-malformed`.
+`Secret.MaxGrant` is a `time.Duration` (0: none) and `Secret.GitHubOwners` the lowercased, sorted,
+single-spaced list as one string, so a `Secret` compares equal to an unchanged reread of itself.
+`Values` takes one policy snapshot for its re-check and passes the same snapshot's owners to the
+minter in a `secrets.MintRequest`, and `secrets.GitHubApp.Mint` asks GitHub for no token for an
+installation on an account they do not list, nor for a record with no positive installation id.
+Once its reads are done, `Values` checks every name whose frozen source is a stored one against the
+policy as it stands then (`recheckStoredSources`): a retag to a kind reread during the reads ends
+the grant for good, and one the policy no longer serves pauses it, so a release never returns what
+the secret stores once it is a kind. A minter's error names an upstream status by its number and a
+failed call by its class (`transportFailure`), never Go's transport text, the reason phrase or the
+body, and a Google `error_subtype` only when it is `invalid_rapt` or `rapt_required`
+(`googleReauthSubtypes`), else `unknown`.
+`policy.TagRollbackGuard` and `RollbackGuardValue` (`mint-service-account: kind-secret`) are what
+`agent-secrets secret` writes beside every kind, so a broker of legion-envoy-v13.19.0 to the
+release before kinds refuses the secret (`mint-target-malformed`) rather than serve its stored key;
+this broker never reads the tag (`TestTheRollbackGuardIsRefusedByEarlierBrokersAndIgnoredHere`).
+A live grant is re-checked once the version moves, and always while any granted name is a service's,
 since the version does not cover `BROKER_SERVICES`' accounts (`stillAllowed`, `anyServiceOwned`); the record line, the column and
 the API field that carry it keep the name `rules_version`, since records are content-addressed and
 stored bodies must still parse. `policy.NewSet` is the one place a `Version` is computed, ascending
@@ -2413,7 +2465,10 @@ refuses - is `policy.ErrNameInvalid` before any store call,
 before the writer lock and before a miss-path reread token (`Loader.secretName`, which
 `Current.CheckName` answers from and both `LoadOne` and its callers' pre-checks ask). The public
 `POST /v1/secrets/{name}/reread` (`rereadSecret`, which any caller may send right after a write) is
-`RefreshOne` over HTTP, answering `{name, served, reason}`, `400 SECRET_NAME_INVALID` for such a
+`RefreshOne` over HTTP, answering `{name, served, reason, kind}` (`kind`: the kind the broker serves
+the secret as, `Secret.Kind`, absent for a stored secret; nothing else of the tags, since the route
+is public), which `agent-secrets secret retag` compares with the kind it wrote and exits 1 on a
+mismatch (`rereadRetag`: a stale metadata read still serves the old kind), `400 SECRET_NAME_INVALID` for such a
 name and `503 REQUEST_ENDED`, with no `broker: reread secret failed` line, for a reread whose own
 request ended first; the public `GET /v1/settings`
 answers the store (`store`: `secrets.StoreAWS` or `secrets.StoreGCP`), the prefix and, per store,
@@ -2570,18 +2625,40 @@ bytes after Ctrl-Z in one write, signal keys inside a paste, a paste that begins
 ignored SIGTSTP wrappers, quiet-window stops, refusal draining, shell history and terminal
 restoration.
 
-AWS `create` writes on the settings' key with both tags
-and no `ClientRequestToken` (the SDK sets one); `retag` describes the secret and sends both tags in
-one `TagResource`, so an IAM condition on the request's tags sees both, and on `AccessDenied` for a
-secret held shared, or a retag to `--owner shared`, adds that a shared secret's owner and tier are
+`secret.go` builds the one tag map a write sends (`optionalTags`), owner and tier plus `kind`,
+`github-owners` and `max-grant` when the command names them, and the rollback guard beside a kind,
+under the broker's own rules (`policy.ValidKind`, `policy.ParseGitHubOwners`, `policy.ParseMaxGrant`),
+and each backend writes a map it does not read into (`create(tags)`, `setTags`, `removeTags`).
+AWS `create` writes on the settings' key with those tags and no `ClientRequestToken` (the SDK sets
+one). A `retag` is one write: it either sets tags or removes them, never both, and refuses `none`
+beside another change before any read or write, so a refused call never leaves it half applied.
+Either reads the secret's tags once (`currentTags`, a `heldTags` with GCP's etag) and builds from
+them the tags the secret will hold once the write lands (`after`), and applies the github-owners
+rule to those once (`checkGitHubOwnersFor`), as create applies it to its flags, so neither writes a
+`github-app` secret without owners. Each writes against that read: GCP sends the held annotations,
+changed, with the held etag, so a concurrent writer's change refuses the write
+(`errTagsChanged`); AWS's tag calls take no condition, so its `setTags` and `removeTags` read the
+tags back (`awsBackend.raceCheck`) and, when another writer left a kind/owners pair the broker
+refuses, restore the tags read and answer `errTagsChanged` too, and the retag exits 1 naming the
+race. A retag on AWS is safe only with one writer at a time. The retag form lives in
+`secret_retag.go`.
+One that sets tags sends owner and tier in one `TagResource`, plus `kind`
+(with the rollback guard), `github-owners` and `max-grant` when the command sets them, so an IAM
+condition on the request's tags sees them;
+one that removes tags (`--kind none`, which also removes the rollback guard, `--github-owners
+none`, `--max-grant none`) is one `UntagResource` of those keys. On
+`AccessDenied` for a retag that sets tags on a
+secret held shared, or a retag to `--owner shared`, it adds that a shared secret's owner and tier are
 an administrator's to change (a person's own secret may be made shared where their access allows
 the retag; only an existing shared secret's tags are reserved); `delete` schedules a 30-day
 recovery window, never forced, and prints `DeleteSecret`'s own `DeletionDate`. GCP `create` creates
-the secret with automatic replication under the broker's `kms_key_name` and both tags as
-annotations (owner and tier are annotations, never labels, so they carry no GCP label naming
-rules), then adds the value as its first version; `set` adds a version to a secret already held;
-`retag` sends both annotations in one `UpdateSecret` (field mask `annotations`), so a partial
-update can never leave one stale; `delete` sets `expire_time` to now plus 30 days in one
+the secret with automatic replication under the broker's `kms_key_name` and owner, tier and any
+named kind, `github-owners`, max grant and the rollback guard beside a kind as annotations (never
+labels, so they carry no GCP label naming rules),
+then adds the value as its first version; `set` adds a version to a secret already held;
+`retag` writes the same change into the annotations it read in one
+`UpdateSecret` (field mask `annotations`, with that read's etag), preserving every annotation it
+does not change; `delete` sets `expire_time` to now plus 30 days in one
 `UpdateSecret` (field mask `expire_time`) and prints it - GCP has no separate recovery window the
 way AWS does: the secret and every version stay readable and restorable until that moment, and GCP
 deletes them for good once it passes, with no further restore - and `restore` clears `expire_time`
@@ -2874,10 +2951,8 @@ entries, each name `record.ValidService`'s form, not `shared` and given once, an
 to one name, never a namespace's `default` account (every pod there that names no account runs as
 it) — any other entry is refused naming it, and an account given twice names both; unset,
 `Config.ServiceAccounts` is nil and no service is registered),
-`BROKER_MINT_TARGETS` (optional; whitespace-separated `<NAME>=<service account email>=<owner email>`
-entries, keyed by name in `Config.MintTargets`: the minted secrets served, each only with that
-account in its `mint-service-account` tag, that owner and the human tier; refused under any store
-but `gcp-secret-manager` and beside `BROKER_FAKE_SECRETS_FILE`; unset, no minted secret is served),
+`BROKER_MINT_TARGETS` (removed; startup refuses it because a secret's `kind` tag now selects what
+the broker mints),
 `BROKER_SERVICE_LOGINS` (optional; whitespace-separated `<service>=system:serviceaccount:<namespace>:<name>`
 entries, the ServiceAccounts that log in as a service with their own token, each account given
 once and named exactly, keyed by account in `Config.ServiceLogins`; read by the same parser as
@@ -3103,8 +3178,8 @@ folded into an ordinary `deny` decision — no request row is written either, ma
 time" wording; a name needing approval that names a *different* approver than an
 already-approval-needing name in the same request is refused `400 MIXED_APPROVERS`; the grant lasts
 the request object's `lifetime_seconds` (`record.ValidLifetime`: 1 to the int32 the column holds;
-refused on a machine login; a request naming a minted secret must sign at most 3600, else
-`400 MINT_REQUIRES_LIFETIME` before anything is written), or, when it names none, until its session ends (`grants.expires_at`
+refused on a machine login; a secret with `max-grant` refuses a missing or longer lifetime as
+`400 GRANT_REQUIRES_LIFETIME` before anything is written), or, when it names none, until its session ends (`grants.expires_at`
 null, migration 0013; `requests.grantUnexpired` is the one liveness test). Reuse matches the
 lifetime, except that a no-lifetime request takes the live grant of a request written before
 migration 0013 was applied (`requests.writtenBeforeMigration13`: lifetime 43200 and `created_at`
@@ -3150,21 +3225,28 @@ reads it as pending only then; a decided record's terminal event names the decis
 cancelled with no cancelled event on its record, the shape an ended enrollment's requests had
 before `endEnrollment` wrote one, reads as `cancelled` from its request row. A machine login is
 pending while it carries no terminal event, and `PendingForApprover` lists a service's (approver
-`anyone`) for every approver. `Values` releases a
-live grant's values, each read from the secret its request froze (its source: the ARN, or the
-Secret Manager resource name), or, for a minted secret's `gcp-token:<account>` source, minted for
-that account (`Machine.MintToken`, lasting the shorter of an hour and the grant's remaining life)
-once `Current.StillMinted` finds the store still serving it so (held 30 s per name), re-checking the
-enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the policy version moved
-since the grant was decided, or any granted name is a service's (`anyServiceOwned`: the version does
-not cover `BROKER_SERVICES`' accounts) — that the current policy still allows every granted name
+`anyone`) for every approver. `Values` releases a live grant's values, each read from the secret
+its request froze (its source: the ARN, or the Secret Manager resource name). A kind source is
+`mint:<kind>:<source>`: `Machine.release` parses it (`policy.ParseKindSource`; a malformed one is
+`policy.ErrKindSourceMalformed`), reads `<source>` through the store's own `Read`, and passes that
+value to `Machine.Minters[kind]`. It never returns the stored value. A minter's failure is
+`requests.ErrMintFailed`, `502 MINT_FAILED` carrying the minter's own message (never an upstream's text), and one ERROR line
+for the operator, `broker: mint failed` (`requests.MintFailedMessage`) with the name, the kind and
+`class=` `stored-value`, `refused` or `upstream` (`secrets.MintErrorClass`). The usual re-check
+then verifies the enrollment, the grant, its whole approval chain (`VerifyChain`), and — when the
+policy version moved since the grant was decided, or any granted name is a service's
+(`anyServiceOwned`: the version does not cover `BROKER_SERVICES`' accounts) — that the current
+policy still allows every granted name
 (`stillAllowed`: a name the policy no longer serves, denies, or now wants approved that was granted
 automatically, or that it now wants approved by someone the request's `decided_by` login is not,
 all refuse, so an approved grant outlives an owner change only while its approver may still
 approve the secret, or once the new tags give its session the secret without asking; a name
 withheld from the session that its request got automatically is judged as an approval by
 `decided_by`, since a live grant of it was approved after the withhold by someone the withheld name
-let approve it); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
+let approve it), and that no granted name's `max-grant` is now shorter than the request's lifetime
+(`overMaxGrant`, which ends the grant for good, `GRANT_NOT_LIVE`, as a moved source does, through
+`Machine.endGrant`; `currentPolicyAdmits` refuses approving such a
+pending request `NOT_APPROVER`); a source missing from the secrets store is `404 SECRET_NOT_IN_STORE`, and so is one
 scheduled for deletion, which Secrets Manager keeps until its recovery window passes and answers
 `GetSecretValue` for with `InvalidRequestException` rather than `ResourceNotFoundException`
 (`secrets.AWS.Read` reads both as `ErrNotFound`, `secrets.GCP.Read` reads `NOT_FOUND` and a disabled or destroyed latest version's `FAILED_PRECONDITION` the same way, and `secrets.Local` answers each as it does).
@@ -3419,10 +3501,17 @@ slot to pin before merge, and moves no tag. `release_build` holds no secret: it 
 version with `release-push.sh version` and builds and checks the agent-secrets binaries
 (`agent-secrets --version` on the linux/amd64 binary; `go version -m` on all six for the recorded
 `buildversion.tag`). `release_publish` moves `:latest`, confirms the version against the tags
-inside its concurrency group (`release-push.sh version --expect`, which fails when another run
-took the tag first; the remedy is re-running the whole run, not `--failed`), checks the hand-over
+inside its concurrency group (`release-push.sh version --expect`; `queue: max`, so every run's job
+waits its turn instead of being cancelled when another joins the queue), checks the hand-over
 (`release-push.sh handed`), tags with `release-push.sh push-tag` (the deploy key reaches only that
-step's `env`), attests the `agent-secrets-*.tar.gz` archives and creates the GitHub release.
+step's `env`), attests the `agent-secrets-*.tar.gz` archives and creates the GitHub release. When
+another run took the version first, `release_publish` publishes nothing and stays green: nothing
+more is needed when a release holds the commit or nothing since the newest release bumps the
+version, a later run on `main` that holds the commit and has not finished releases it (or fails
+where a person sees it), and otherwise `release-push.sh restart` starts a new run on `main` (`gh
+workflow run`, with `actions: write`), which decides the version again and releases the commit. A
+chain stops at its third started run: if that run loses too and no later run holds the commit, it
+fails with the command to start one by hand.
 
 The image's attestation is what says which run built a digest: a branch dispatch pushes an
 `envoy:<sha>` tag too, and its certificate names `refs/heads/<branch>`. Accept a digest only when a

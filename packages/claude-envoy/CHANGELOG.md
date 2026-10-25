@@ -2,6 +2,22 @@
 
 ## [Unreleased]
 
+### Added
+
+- The `dispatch` command (`dist/dispatch.js`) moves an issue on its project's board:
+  `dispatch issue-update --issue <KEY> --before <OTHER>` puts it above that issue,
+  `--after <OTHER>` below, and both together land it between them, printed as `rank -> before KEY`
+  or `rank -> after KEY`. The bundled tool descriptions carry the two arguments, and the plugin's
+  own copy of the `legion-controller` skill carries the corrected backlog rule, since `dist/` and
+  `legion/` were regenerated (INFRA-188).
+
+### Changed
+
+- The plugin declares daemon API contract 36 in `package.json`'s `legion.daemonApiVersion`
+  (INFRA-229): `GET /legion/v1/state` carries `state` on an issue's pull request, its `open`,
+  `merged` or `closed`, always emitted, so the MCP server's strict state reader admits the field
+  and nothing this plugin reads or writes moved; a session of it registers with a daemon at 36.
+
 ### Fixed
 
 - The session title's tmux query runs `tmux -u`, so its tab-separated answer no longer depends on

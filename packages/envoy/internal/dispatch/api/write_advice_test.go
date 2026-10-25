@@ -29,6 +29,7 @@ type testWriteAdvice struct {
 	YourOpenAsks            []testAdviceAsk `json:"your_open_asks"`
 	DecisionBlocks          *int            `json:"decision_blocks"`
 	DecisionBlocksAdded     *int            `json:"decision_blocks_added"`
+	LegionManagedStatus     *bool           `json:"legion_managed_status"`
 	UnparsedOpeners         *struct {
 		Count    int      `json:"count"`
 		Examples []string `json:"examples"`
@@ -305,6 +306,53 @@ func TestWriteAdviceCountsSessionWritesSinceLastHumanEvent(t *testing.T) {
 	}
 }
 
+// Each session hears its own consecutive-write count, not the issue's: the client renders the
+// number as "You've sent N messages on KEY with no human response", so a second session's writes
+// must not inflate the first session's count, and a human event resets both.
+func TestWriteAdviceCountsOnlyTheCallingSessionsOwnWrites(t *testing.T) {
+	handler := newTestHandler(t)
+	createAdviceProject(t, handler, "OWN")
+	spec := "# Own writes\n"
+	issue := createAdviceIssue(t, handler, "OWN", "Own writes", &spec)
+	path := "/api/v1/issues/" + issue.Key + "/messages"
+	first := adviceSessionActor("session-first")
+	second := adviceSessionActor("session-second")
+
+	post := func(actor any, body string) int {
+		t.Helper()
+		response := sessionRequest(t, handler, http.MethodPost, path, map[string]any{
+			"body": body, "actor": actor,
+		})
+		return adviceFromResponse(t, response.Code, response.Body.String()).SessionWritesSinceHuman
+	}
+
+	if got := post(first, "first one"); got != 1 {
+		t.Fatalf("first session's first message count = %d, want 1", got)
+	}
+	if got := post(second, "second one"); got != 1 {
+		t.Fatalf("second session's first message count = %d, want 1", got)
+	}
+	if got := post(second, "second two"); got != 2 {
+		t.Fatalf("second session's second message count = %d, want 2", got)
+	}
+	if got := post(first, "first two"); got != 2 {
+		t.Fatalf("first session's second message count = %d, want 2", got)
+	}
+
+	human := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/comments", map[string]string{
+		"body": "human response",
+	}, "alice")
+	if human.Code != http.StatusCreated {
+		t.Fatalf("human comment: status=%d body=%s", human.Code, human.Body.String())
+	}
+	if got := post(first, "first after human"); got != 1 {
+		t.Fatalf("first session's count after human event = %d, want 1", got)
+	}
+	if got := post(second, "second after human"); got != 1 {
+		t.Fatalf("second session's count after human event = %d, want 1", got)
+	}
+}
+
 func appendAdviceSystemEvent(t *testing.T, database *store.Store, issueKey string) {
 	t.Helper()
 	tx, err := database.Pool.Begin(context.Background())
@@ -435,6 +483,134 @@ func TestWriteAdviceReportsIssueStatusAtWriteTime(t *testing.T) {
 	inProgress := sessionRequest(t, handler, http.MethodPost, path, map[string]any{"body": "in-progress write", "actor": actor})
 	if advice := adviceFromResponse(t, inProgress.Code, inProgress.Body.String()); advice.IssueStatus != "in_progress" {
 		t.Fatalf("post-patch message status = %q", advice.IssueStatus)
+	}
+}
+
+// rawAdviceFields reads a write response's advice as raw JSON, so a test can tell a field that
+// was omitted from one that came back false, which a decode into testWriteAdvice cannot.
+func rawAdviceFields(t *testing.T, what, responseBody string) map[string]json.RawMessage {
+	t.Helper()
+	var envelope map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(responseBody), &envelope); err != nil {
+		t.Fatalf("decode %s: %v body=%s", what, err, responseBody)
+	}
+	var rawAdvice map[string]json.RawMessage
+	if err := json.Unmarshal(envelope["advice"], &rawAdvice); err != nil {
+		t.Fatalf("decode %s advice: %v body=%s", what, err, responseBody)
+	}
+	return rawAdvice
+}
+
+// A Legion child issue sits in triage until its daemon releases it, so a write there has to say
+// who owns the status: the client prints no triage line on such an issue rather than telling the
+// session to do the one thing the daemon undoes. The answer is the claim routes' own helper, so
+// it reads the label in whatever case it was typed and the issue's parents' labels too, and it is
+// resolved only where it decides that line - a session's write on an issue still in triage.
+func TestWriteAdviceAnswersWhoOwnsTheIssuesStatus(t *testing.T) {
+	handler := newTestHandler(t)
+	actor := adviceSessionActor("session-owner")
+
+	parent := labelledIssueKey(t, handler, "OWNED", "Split the billing worker", []string{"legion"}, "")
+	child := labelledIssueKey(t, handler, "OWNED", "Draft an invoice renderer", nil, parent)
+	for _, want := range []struct {
+		name    string
+		key     string
+		managed bool
+	}{
+		{"the legion label", labelledIssueKey(t, handler, "OWNED", "Rotate the certificates", []string{"legion"}, ""), true},
+		{"the label as Legion", labelledIssueKey(t, handler, "OWNED", "Back up the volume", []string{"Legion"}, ""), true},
+		{"a child under a labelled parent", child, true},
+		// Two links below the label: the answer is the recursive walk's, not a parent lookup's.
+		{"a grandchild under a labelled root", labelledIssueKey(t, handler, "OWNED", "Number the invoices", nil, child), true},
+		// A third case: the match is on lower(label), not on the two spellings above.
+		{"the label as LEGION", labelledIssueKey(t, handler, "OWNED", "Drain the queue", []string{"LEGION"}, ""), true},
+		{"no such label on it or above it", labelledIssueKey(t, handler, "OWNED", "Tidy the checklist", []string{"infra"}, ""), false},
+	} {
+		t.Run(want.name, func(t *testing.T) {
+			written := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+want.key+"/messages", map[string]any{
+				"body": "session write", "actor": actor,
+			})
+			advice := adviceFromResponse(t, written.Code, written.Body.String())
+			if advice.LegionManagedStatus == nil || *advice.LegionManagedStatus != want.managed {
+				t.Fatalf("advice legion_managed_status = %#v, want %v", advice.LegionManagedStatus, want.managed)
+			}
+		})
+	}
+
+	// A human's write is answered before the savepoint and runs no advice query, so it must omit
+	// the field rather than claim Legion does not own the status.
+	human := dispatchRequest(t, handler, http.MethodPost, "/api/v1/issues/"+parent+"/messages", map[string]any{
+		"body": "human write",
+	}, "alice")
+	if human.Code != http.StatusCreated {
+		t.Fatalf("human message: status=%d body=%s", human.Code, human.Body.String())
+	}
+	if _, asked := rawAdviceFields(t, "a human write", human.Body.String())["legion_managed_status"]; asked {
+		t.Fatalf("human write advice carried legion_managed_status: %s", human.Body.String())
+	}
+}
+
+// The walk runs where its answer is used and nowhere else: an issue past triage prints no triage
+// line whatever the answer would be, so an ordinary write on an ordinary issue gains no query.
+func TestWriteAdviceLeavesWhoOwnsTheStatusUnaskedPastTriage(t *testing.T) {
+	handler := newTestHandler(t)
+	key := labelledIssueKey(t, handler, "PAST", "Already under way", []string{"legion"}, "")
+	moved := dispatchRequest(t, handler, http.MethodPatch, "/api/v1/issues/"+key, map[string]string{
+		"status": "in_progress",
+	}, "alice")
+	if moved.Code != http.StatusOK {
+		t.Fatalf("move the issue out of triage: status=%d body=%s", moved.Code, moved.Body.String())
+	}
+
+	written := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+key+"/messages", map[string]any{
+		"body": "session write", "actor": adviceSessionActor("session-past-triage"),
+	})
+	if advice := adviceFromResponse(t, written.Code, written.Body.String()); advice.IssueStatus != "in_progress" {
+		t.Fatalf("advice issue_status = %q, want in_progress", advice.IssueStatus)
+	}
+	if _, asked := rawAdviceFields(t, "a write past triage", written.Body.String())["legion_managed_status"]; asked {
+		t.Fatalf("a write past triage asked who owns the status: %s", written.Body.String())
+	}
+}
+
+// The walk is the last advice query and the only one whose failure the advice survives: every
+// issue is created in triage, so it runs for every session-authored `dispatch issue`, and
+// dropping the whole advice for it would drop the two queries already answered - and, on a
+// creation, every suggestion that creation would have offered, since issue_create.go computes
+// and persists them only once the advice survives, after it. A failed walk costs its own field
+// alone.
+func TestWriteAdviceKeepsItsFieldsWhenTheLegionWalkFails(t *testing.T) {
+	handler, _ := newFailingAdviceHandler(t, "legion_managed_status", 0)
+	createAdviceProject(t, handler, "WALK")
+	spec := "# Walk failure\n"
+	issue := createAdviceIssue(t, handler, "WALK", "Failed label walk", &spec)
+	actor := adviceSessionActor("session-walk")
+
+	asked := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/asks", map[string]any{
+		"question": "Which transport?", "actor": actor,
+	})
+	if asked.Code != http.StatusCreated {
+		t.Fatalf("create ask: status=%d body=%s", asked.Code, asked.Body.String())
+	}
+	askID := decodeBody[struct {
+		ID string `json:"id"`
+	}](t, asked).ID
+
+	written := sessionRequest(t, handler, http.MethodPost, "/api/v1/issues/"+issue.Key+"/messages", map[string]any{
+		"body": "the walk is not the advice", "actor": actor,
+	})
+	advice := adviceFromResponse(t, written.Code, written.Body.String())
+	if advice.IssueStatus != "triage" {
+		t.Fatalf("advice issue_status = %q, want triage: %s", advice.IssueStatus, written.Body.String())
+	}
+	if advice.SessionWritesSinceHuman != 2 {
+		t.Fatalf("advice session_writes_since_human = %d, want 2: %s", advice.SessionWritesSinceHuman, written.Body.String())
+	}
+	if len(advice.YourOpenAsks) != 1 || advice.YourOpenAsks[0].ID != askID {
+		t.Fatalf("advice your_open_asks = %#v, want the open ask %q", advice.YourOpenAsks, askID)
+	}
+	if _, answered := rawAdviceFields(t, "a write whose walk failed", written.Body.String())["legion_managed_status"]; answered {
+		t.Fatalf("a failed walk must omit legion_managed_status rather than answer it: %s", written.Body.String())
 	}
 }
 
@@ -594,7 +770,7 @@ func TestWriteAdviceStaysBoundedOnLongIssueHistory(t *testing.T) {
 	if _, err := tx.Exec(context.Background(), `
 		insert into events (issue_key, seq, type, actor, payload, notify)
 		select $1, $2 + ordinal, 'message.created',
-		       '{"kind":"session","id":"bulk-session"}'::jsonb, '{}'::jsonb, false
+		       '{"kind":"session","id":"session-performance"}'::jsonb, '{}'::jsonb, false
 		from generate_series(1, $3) ordinal
 	`, issue.Key, lastSeq, seededEvents); err != nil {
 		t.Fatalf("seed events: %v", err)
@@ -623,7 +799,7 @@ func TestWriteAdviceStaysBoundedOnLongIssueHistory(t *testing.T) {
 }
 
 func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
-	handler, database := newFailingAdviceHandler(t, "session_writes_since_human")
+	handler, database := newFailingAdviceHandler(t, "session_writes_since_human", 0)
 	createAdviceProject(t, handler, "FAIL")
 	spec := "# Failure isolation\n"
 	issue := createAdviceIssue(t, handler, "FAIL", "Advice failure", &spec)
@@ -655,15 +831,19 @@ func TestWriteAdviceFailureDoesNotAbortWrite(t *testing.T) {
 		t.Fatalf("committed messages = %d, want 1", messages)
 	}
 }
+
+// Only a session's write runs the issue-advice queries, so only a session's document edit can
+// meet one that fails; what it keeps is the document's own block count.
 func TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails(t *testing.T) {
-	handler, _ := newFailingAdviceHandler(t, "session_writes_since_human")
+	handler, _ := newFailingAdviceHandler(t, "session_writes_since_human", 0)
 	createAdviceProject(t, handler, "COUNT")
 	spec := "# Count-only advice\n"
 	issue := createAdviceIssue(t, handler, "COUNT", "Failed issue advice", &spec)
 
-	edited := dispatchRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
-		"ops": []map[string]string{{"op": "insert", "markdown": ":::ask{#window}\nWhich deployment window?\n:::", "after": "end"}},
-	}, "alice")
+	edited := sessionRequest(t, handler, http.MethodPost, "/api/v1/artifacts/"+issue.PrimaryArtifactID+"/edits", map[string]any{
+		"ops":   []map[string]string{{"op": "insert", "markdown": ":::ask{#window}\nWhich deployment window?\n:::", "after": "end"}},
+		"actor": adviceSessionActor("session-count-only"),
+	})
 	advice := adviceFromResponse(t, edited.Code, edited.Body.String())
 	if advice.DecisionBlocksAdded == nil || *advice.DecisionBlocksAdded != 1 {
 		t.Fatalf("edit advice = %#v, want one added decision block: %s", advice, edited.Body.String())
@@ -681,7 +861,7 @@ func TestDocumentEditAdviceKeepsCountWhenIssueAdviceFails(t *testing.T) {
 	}
 }
 
-func newFailingAdviceHandler(t *testing.T, query string) (http.Handler, *store.Store) {
+func newFailingAdviceHandler(t *testing.T, query string, suggestionTimeout time.Duration) (http.Handler, *store.Store) {
 	t.Helper()
 	database := storetest.Open(t)
 	broker := events.NewBroker()
@@ -706,7 +886,8 @@ func newFailingAdviceHandler(t *testing.T, query string) (http.Handler, *store.S
 		t.Fatalf("new API dependencies: %v", err)
 	}
 	s := &server{
-		deps: deps,
+		deps:              deps,
+		suggestionTimeout: suggestionTimeout,
 		adviceQueryHook: func(ctx context.Context, tx pgx.Tx, got string) error {
 			if got != query {
 				return nil

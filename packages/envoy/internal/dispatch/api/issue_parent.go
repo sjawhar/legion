@@ -38,12 +38,57 @@ func parseIssueParent(raw json.RawMessage) (parent *string, provided bool, err e
 // parentDepthCap is the most links an issue may sit below its root: a create or reparent that
 // would put an issue deeper is refused (refuseParentTooDeep), so it bounds every recursive issue
 // walk — the ancestor walk, the children subtree walk, the components and repository laterals'
-// owner searches, and the architecture tree's containment walks — like refs.Closure's depth cap:
-// the queries terminate even if a raced reparent ever commits a cycle. parentDepthCapSQL is the
-// same number spliced into the walks built as SQL text.
+// owner searches, the architecture tree's containment walks, and the legion-label walk below
+// (legionManagedStatusSQL) — like refs.Closure's depth cap: the queries terminate even if a
+// raced reparent ever commits a cycle. parentDepthCapSQL is the same number spliced into the
+// walks built as SQL text.
 const parentDepthCap = 32
 
 var parentDepthCapSQL = strconv.Itoa(parentDepthCap)
+
+// legionLabel is the label that hands an issue's status to the Legion daemon. The daemon holds
+// its own copy of the spelling (packages/daemon/internal/dispatch/types.go, LegionLabel): the two
+// are separate constants in separate Go modules that have to be changed together, not one shared
+// value. packages/envoy otherwise knows nothing about Legion, so this is the one Legion-specific
+// rule Dispatch itself carries.
+const legionLabel = "legion"
+
+// legionManagedStatusSQL answers whether the Legion daemon owns the status of the issue keyed by
+// $1: whether that issue, or any issue on its parent chain, carries the legion label. It lives
+// here because it is one more parent-chain walk bounded by parentDepthCap, like the ones above.
+// Labels keep the case they were typed in and are only de-duplicated case-insensitively, so
+// `Legion` is a real stored value and the match is on lower(label). The walk starts at the issue
+// itself, so one query answers both its own labels and its ancestors'. A chain deeper than the
+// cap answers false. A claim never reaches that case - loadIssue refuses such a chain before this
+// runs - but a write's advice does (computeWriteAdvice, write_advice.go), and there it means the
+// issue is treated as one Legion does not run: the "still in triage" line prints. A chain that
+// deep needs a reparent that refuseParentTooDeep would have refused.
+var legionManagedStatusSQL = `
+	with recursive chain as (
+		select i.parent_key, i.labels, 0 as depth
+		from issues i where i.key = $1
+		union
+		select p.parent_key, p.labels, c.depth + 1
+		from issues p join chain c on p.key = c.parent_key
+		where c.depth < ` + parentDepthCapSQL + `
+	)
+	select exists (
+		select 1 from chain c, unnest(c.labels) as label where lower(label) = '` + legionLabel + `'
+	)`
+
+// legionManagedStatus runs legionManagedStatusSQL inside the caller's transaction. That keeps the
+// issue's own row as the caller locked it, and nothing more: an ancestor's labels, and a reparent
+// above the issue, are read as they stand and are not held still by any lock the caller takes. The
+// answer is advisory in both callers, so a chain that moves under the walk costs a sentence of
+// guidance and never a write. Both claim routes (issue_claim.go) and a session's write advice
+// (write_advice.go) read it.
+func legionManagedStatus(ctx context.Context, tx pgx.Tx, key string) (bool, error) {
+	var managed bool
+	if err := tx.QueryRow(ctx, legionManagedStatusSQL, key).Scan(&managed); err != nil {
+		return false, fmt.Errorf("resolve whether Legion manages the status of %s: %w", key, err)
+	}
+	return managed, nil
+}
 
 func normalizeIssueBlockers(targets []string) ([]string, error) {
 	if len(targets) > contracts.MaxIssueBlockers {
