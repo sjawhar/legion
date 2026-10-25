@@ -270,13 +270,16 @@ What each part is for:
 - **`worker_backends`** (optional) runs a role on Claude Code instead of Oh My Pi:
   `worker_backends: {implementer: claude}`. Each key is an issue role, each value `omp` (the
   default) or `claude`. Claude Code runs the phase workers (`planner`, `implementer`, `tester`,
-  `reviewer`, `merger`) and only under `runtime: tmux`, since the worker image carries no Claude
-  Code; the loader refuses `claude` for the architect and under Kubernetes, naming why, and refuses
-  any other value. The controller always runs on Oh My Pi. A tmux daemon running a Claude Code role
-  resolves `claude` from `LEGION_CLAUDE_PATH` (else `PATH`), the `bun` its MCP server runs on from
-  `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
-  `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. The repository's
-  `docs/deployment.md` ("Phase workers on Claude Code") covers the rest.
+  `reviewer`, `merger`) under either runtime; the loader refuses `claude` for the architect, naming
+  why, and refuses any other value. The controller always runs on Oh My Pi. A tmux daemon running a
+  Claude Code role resolves `claude` from `LEGION_CLAUDE_PATH` (else `PATH`), the `bun` its MCP
+  server runs on from `LEGION_BUN_PATH` (else `PATH`), and a built `packages/claude-envoy` from
+  `LEGION_CLAUDE_PLUGIN_DIR`, and refuses to boot without any of them. A Kubernetes daemon
+  resolves none of the three: the worker image carries Claude Code and the plugin at fixed paths,
+  and such a role's pod runs `legion claude-bridge -- claude -p …` in place of Oh My Pi. Give that
+  role its model route yourself, as you do Oh My Pi's: `ANTHROPIC_API_KEY` through `provider_keys`,
+  and `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` in `runtime.kubernetes.pod.env`. The repository's
+  `docs/deployment.md` ("Phase workers on Claude Code") and `docs/kubernetes.md` cover the rest.
 
 The loader refuses any key it does not know, naming it, and refuses `omp_invocation` and
 `omp_launch_prefix` under Kubernetes, since every pod runs the image's Oh My Pi.

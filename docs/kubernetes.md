@@ -10,7 +10,8 @@ The Go coordinator (`packages/daemon`, LEGION-208) runs each process as an Agent
 ## Worker image
 
 Every Legion agent process under `runtime: kubernetes` — architect, planner, implementer, tester, reviewer,
-merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It carries:
+merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public), on Oh My Pi or, for a
+phase worker `worker_backends` puts on `claude`, on Claude Code. It carries:
 
 - the pinned OMP fork build the daemon's default `omp_invocation` names — resolved at build time with the
   same `mise x github:sjawhar/oh-my-pi@<pin>` mechanism a tmux host uses, from the single pin source
@@ -37,6 +38,24 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   probe refuses an image whose Envoy plugin does. A human debugging inside a pod with a bare `omp` has
   the CodeGraph tool and the repository's extensions but no Legion or Envoy tools unless it passes
   `--extension /opt/legion/pi-envoy --extension /opt/legion/pi-legion`;
+- Claude Code (`@anthropic-ai/claude-code`), pinned by the committed lockfile at
+  `packages/daemon/docker/claude-code` and installed with `npm ci --ignore-scripts --omit=dev` into
+  `/opt/claude-code`, with `/usr/local/bin/claude` linked to the platform package's own binary
+  (`node_modules/@anthropic-ai/claude-code-linux-x64/claude`, a self-contained ELF; with scripts
+  off, the npm package's own `bin` stub stays a stub, so the link skips it), and `@sjawhar/claude-envoy`
+  from the same commit at `/opt/legion/claude-envoy` — the plugin root a phase worker on the
+  `claude` backend loads: its `dist/envoy-channel.js` is that worker's one MCP server, holding the
+  `legion` tool, its claim, the Envoy tools and the phase reminder's hook endpoint, and its
+  `legion/` is the generated Legion plugin (the skills, the task agents and the reminder's hooks)
+  Claude Code loads as a second `--plugin-dir`. claude-envoy ships as its committed build, which
+  the image's `plugin` stage holds to a fresh one (`bun run check-dist` on the Bun `.bun-version`
+  pins) rather than to a pack: no workflow releases that package, so the image is where a
+  Kubernetes deployment gets it. Both are in every image, whatever a deployment's `worker_backends`
+  names — one image serves both harnesses, so every build fetches Claude Code and every probe
+  checks it (`claude --version` in the publish gate, `claude` at that absolute path, and
+  `legion probe-image --claude-root /opt/legion/claude-envoy`, which holds the root's channel
+  server, its generated plugin manifest and its declared `legion.daemonApiVersion` to the daemon's
+  contract exactly as the Oh My Pi lane holds pi-legion's);
 - `@bopstack/pi-codegraph` (from npm, pinned), the one plugin linked into the OMP profile `legion`
   (`OMP_PROFILE=legion`; plugins resolve to `/home/legion/.omp/profiles/legion/plugins/node_modules`),
   backed by the CodeGraph CLI (`@colbymchenry/codegraph`, pinned) at `/opt/codegraph/bin` (`PATH`) — the
@@ -175,8 +194,12 @@ The daemon refuses to serve unless its OMP exposes `pi.agents` and actually load
 requiring the commit the workflow built, and the plugin's `dispatch` shim
 (`/opt/legion/pi-envoy/bin/dispatch --help`, which needs its bundled `dist/dispatch.js` and the
 image's Bun), then `legion probe-image`: the same two probes, run by the
-daemon's own code, plus a third only the image runs — the session-storage probe, which prints
-`session-storage=probed` on the OK line ([The image guard](#the-image-guard)) — with the Legion plugin held to
+daemon's own code, plus two only the image runs — the session-storage probe, which prints
+`session-storage=probed` on the OK line ([The image guard](#the-image-guard)), and, under
+`--claude-root /opt/legion/claude-envoy`, the Claude lane: `claude --version`, that root's built
+channel server (`dist/envoy-channel.js`) and generated Legion plugin
+(`legion/.claude-plugin/plugin.json`), and the root's own declared `legion.daemonApiVersion`, each
+refusal naming a build of the image from this daemon's commit — with the Legion plugin held to
 the daemon API contract (`legion.daemonApiVersion`), the Envoy plugin's interface held to the one the
 Legion plugin speaks, and every task agent and skill Legion's prompts
 name (`task(agent="…")`, `skill://…`) resolved by name through the same launch (the Legion plugin ships
@@ -189,8 +212,8 @@ leaves those agents' models unresolved (`--skip-agent-models`). It then checks e
 the capability table (`packages/daemon/internal/capabilities`) against the image, as a worker's Oh My Pi
 would find each — `omp setup python --check`, the `chromium` on `PATH` (or the browser a
 `PUPPETEER_EXECUTABLE_PATH` in the pod's env names) run with `--version`, the three language servers on `PATH`, the CodeGraph CLI with its plugin enabled in the
-profile's lock, and `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq`, `ssh-keygen` and `flock` on `PATH` with `go version`
-running — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
+profile's lock, `go`, `curl`, `wget`, `python3`, `node`, `bun`, `uv`, `kubectl`, `jq`, `ssh-keygen` and `flock` on `PATH` with `go version`
+running, and the `claude` the `claude-code` row reports — and prints the table, one `probe-image: capability <name>: <status> (<detail>)` line per
 row, before the OK line:
 `probe-image: OK (/opt/omp/bin/omp) session-storage=probed extensions=discovered agent-models=skipped capabilities=checked model-fallback=on daemon-api-version=<N>`
 (`model-fallback=on` is Oh My Pi's own default for `retry.modelFallback`: the build runs under no operator overlay, where a probe pod reads the operator's value; the mark reads `unread` when the probe could not read `retry.modelFallback` under the pod's Oh My Pi settings — the probe pod's log says why — and the daemon's report shows the row open).
@@ -593,6 +616,19 @@ just after the history and before the task, and after the task the stored branch
 process lost in that turn resumes with the notice already there. With the plugin before the
 re-send, the `length` case's stored branch had lost it; with the plugin before the id, so did the
 case of a second recreation. A `task` subagent is never told.
+
+A role on Claude Code is outside all of this. Its conversation is Claude Code's own transcript,
+under the role's `CLAUDE_CONFIG_DIR` on the issue's volume, never a row of Oh My Pi's table, so
+its generation is told neither session variable and its launcher stats that file as a `pvc` launch
+does; a replacement pod continues it with `--resume <session id>`, the id read from the recorded
+path. Two consequences hold whatever `session_store` says: `legion sessions import` refuses such a
+transcript, naming it (that one-off copy fills Oh My Pi's table, which holds no session of a
+transcript), and a Claude claim with a session to resume expects the issue's volume
+(`LEGION_EXPECT_ISSUE_VOLUME`), so a lost volume is `workspace-init`'s loud refusal rather than a
+quiet fresh agent. The recreated-workspace notice reaches it too: its own MCP server
+(`packages/claude-envoy`) reads `LEGION_WORKSPACE_RECREATED` at start and writes the same text
+into the session over the bridge's inbox, once per launch, recorded beside the phase reminder's
+state so a restarted server does not repeat it.
 
 The variables are a generation's, but the URL file's mount is the pod's. A pod whose providers
 volume projects another session store than a pod created now would — one created before
@@ -1128,6 +1164,17 @@ moved address) still replaces a pod on another image as the section above says. 
 child before Oh My Pi starts; the launcher reports it gone, the daemon charges it as a launch
 failure, and the claim is retried until the budget ends it in a `worker-died`.
 
+A role on Claude Code installs nothing. That install is `@sjawhar/pi-legion` and
+`@sjawhar/pi-envoy` from npm, and a phase worker `worker_backends` puts on `claude` loads neither:
+its plugin is the image's own `/opt/legion/claude-envoy`, which no workflow releases. So a
+stale-plugin relaunch of such a claim carries no install at all (`stalePluginInstall`,
+`packages/daemon/internal/daemon/specs.go`); the claim still relaunches, and comes up on the
+image's plugin, which the image probe already held to the daemon's contract. A plugin-contract
+change for a Claude Code role is answered by a new image, never by an install, and
+`legion start --check-config` says so after its plugin line, naming each role this deployment runs
+on Claude Code: `Claude Code runs <roles>, whose plugin is the worker image's: a plugin-contract
+change for such a role is answered by a new image, not by an install.`
+
 The pair the install uses is `runtime.kubernetes.plugins: { pi_legion: <exact version | absolute
 tarball path | http(s) URL>, pi_envoy: <same> }` (both keys together; a dist-tag or version range
 is refused), or, when that key is absent, the pair a release build links into the binary — a
@@ -1438,6 +1485,22 @@ overlay, and the pod that mounts them; the operator keeps their own copies of th
 directory of their own ([Operator configuration](#operator-configuration)), and the Stage 4a and 4b
 proofs run on the example, each with its own copy of its ConfigMap.
 
+**A Claude Code role's model route is the operator's too.** A phase worker `worker_backends` puts
+on `claude` runs Claude Code in its pod, and Claude Code reads its route from its own environment:
+`ANTHROPIC_API_KEY`, and `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` for a gateway. Legion adds no
+key and no settings file for it. The credential goes in `provider_keys`
+(`ANTHROPIC_API_KEY: <the providers Secret's key>`), which the shim exports into the agent's
+environment and nowhere else; the other two, which are not credentials, go in
+`runtime.kubernetes.pod.env`. The split is `pod.env`'s own rule: it refuses a credential-shaped
+name outright (`sets ANTHROPIC_API_KEY, a credential-shaped name: a credential comes from a
+Secret, …`), which is why the key takes the `provider_keys` route. A provider key reaches every
+role's child under this runtime, Oh My Pi's included — that is this runtime's standing rule for
+every provider key, not something a Claude Code role changes: `--provider-env-dir` already exports
+every configured key into the child of every role. Oh My Pi's own model configuration (a profile
+overlay such as `deploy/kubernetes/operator-route/models.yml`) reaches Claude Code not at all, so
+a deployment that routes Oh My Pi through a gateway gives Claude Code those two variables of its
+own.
+
 `setup` is the deployment's setup command, an argv run in every role's container — each workflow
 role's in an issue pod, and the controller's under `controller: daemon` — before each start of
 that role's Oh My Pi: a fresh role's, a resumed one's and a replaced pod's alike, since a relaunch
@@ -1476,9 +1539,13 @@ container's first start the `update` finds no such marketplace, so the role's lo
 
 Under `runtime: kubernetes` it also requires `daemon_url`, `envoy_url`, `nats_urls`,
 `envoy_token_file`, `operator_token_file`, `dispatch_url`, `github_apps` and `projects`. It refuses
-`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. It refuses a
-`worker_backends` entry that puts a role on `claude` too, since the worker image carries no Claude
-Code (`worker_backends.<role> is claude, which runs only under runtime: tmux`). Every
+`omp_invocation` and `omp_launch_prefix`: every pod runs the worker image's Oh My Pi. A
+`worker_backends` entry that puts a phase worker on `claude` is accepted here as it is under tmux:
+the worker image carries Claude Code and the claude-envoy plugin, and such a role's pod runs
+`legion claude-bridge -- claude -p …` in place of Oh My Pi (the refusal that named
+`runtime: tmux` is gone; the loader still refuses the architect, whom no harness but Oh My Pi
+runs). What an operator supplies for such a role is its model route (`provider_keys` and
+`pod.env`, above). Every
 address a pod is handed must be one a pod can reach, so `daemon_url`, `envoy_url`, `dispatch_url`
 and each `nats_urls` entry may be neither loopback nor the unspecified address, and neither may the
 worker-stream host a pod dials: `advertise_host` when the file sets one, `bind` otherwise. `bind`
@@ -1670,8 +1737,9 @@ subscription never delivers).
 ### The deployment's capability report
 
 `packages/daemon/internal/capabilities` is the one list of what a Legion worker can do (LEGION-578:
-every worker is a full agent), 20 rows, each checked at one site. The image rows (`eval-js`,
-`eval-python`, `browser`, `lsp`, `codegraph`, `skills`, `toolchain`) are `legion probe-image`'s
+every worker is a full agent), 21 rows, each checked at one site. The image rows (`eval-js`,
+`eval-python`, `browser`, `lsp`, `codegraph`, `skills`, `toolchain`, `claude-code`) are
+`legion probe-image`'s
 ([The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), `present` once
 the probe passed; the live rows (`subagents`, `web-search`, `mcp`, `repository-extensions`,
 `dispatch-envoy-tools`, `github`) are proved by each session at its start, which measures them

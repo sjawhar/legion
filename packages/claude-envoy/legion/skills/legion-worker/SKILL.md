@@ -430,10 +430,13 @@ Report completion to the architect: call the `legion` tool with `op: "handoff_co
 `summary`: two sentences for the architect. The tool is your only way to the daemon
 (`handoff_complete`; `read_record`, your issue's record, which is what "re-read your issue
 record" means; and `request_backward_move`), and nothing of yours runs `legion` from bash. The
-tool call is what the extension's phase stall records, and a turn that ends with the phase still
-open gets one reminder (two when the first is answered with the tool call written as text again);
-do not complete again on a reminder when your first completion was accepted — it stands, and a
-second is refused because the issue has already left your phase.
+tool call is what the phase reminder records, and a turn that ends with the phase still open is
+followed by a reminder — at the end of every turn, for as long as the phase stays open. Answer it
+by completing, or, when you are waiting on something, with a line starting WAITING naming what you
+wait on: that buys a quiet wait, and then the reminder comes again. Reminders that change nothing
+are counted, and a run of them tells your architect. Do not complete again on a reminder when your
+first completion was accepted — it stands, and a second is refused because the issue has already
+left your phase.
 
 This publishes your phase's completion to the architect's role and clears the daemon's
 record of this issue's active phase. Do not add pipeline labels, run a controller loop, or

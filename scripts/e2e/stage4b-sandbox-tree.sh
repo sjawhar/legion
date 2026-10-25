@@ -2417,11 +2417,13 @@ fixture_markers() {
 # assignment (the daemon's task, a user message) its worker answered with the legion tool's
 # handoff_complete, the calls that got no result, how many results succeeded, and whether the phase
 # stall recorded `closed` after the call that succeeded (the extension records it inside the call,
-# before Oh My Pi writes the result); and how many phase-stall follow-ups came after the session's
+# before Oh My Pi writes the result); and how many phase reminders came after the session's
 # last successful completion. It is the 4b.13b acceptance's stall check
 # (stage3-4b13b-acceptance.sh, phase-stall-follow-up) for a pod's session: a worker
 # stopped while its handoff_complete call runs leaves that call with no result and no `closed`
-# (LEGION-283), and a worker resumed from such a session may report the phase again.
+# (LEGION-283), and a worker resumed from such a session may report the phase again. The reminder
+# comes at the end of every turn a phase stays open through, and none at all once it is closed,
+# which is what the count after the last success reads.
 completion_verdict() {
   jq -R -s -c --arg followup "Your turn ended with your Legion phase still open" '
     [split("\n")[] | fromjson?] | to_entries
@@ -2453,7 +2455,7 @@ completion_verdict() {
 }
 # completions_answered FILE: every assignment its worker answered with handoff_complete got a
 # result for each call, exactly one success (the report, made once), and `closed` after the call
-# that succeeded, and no phase-stall follow-up came after the last success.
+# that succeeded, and no phase reminder came after the last success.
 completions_answered() {
   completion_verdict <"$1" | jq -e '(.segments | length) > 0
     and all(.segments[]; (.unanswered | length) == 0 and .succeeded == 1 and .closed)

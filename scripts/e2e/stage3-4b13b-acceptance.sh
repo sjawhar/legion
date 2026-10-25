@@ -6,8 +6,8 @@
 # lib/workflow.sh, and drives real agents through:
 #   - prompts.New rewriting a stale Go prompt part at boot and leaving identical ones untouched;
 #   - the refused root stop naming `legion claims close` only for a tree no workflow issue backs;
-#   - the phase-stall follow-up: a planner whose turn ends with its phase open gets the one
-#     follow-up, and the tool's handoff_complete closes the stall, with no follow-up after it;
+#   - the phase reminder: a planner whose turn ends with its phase open is reminded, and the
+#     tool's handoff_complete closes the phase, with no reminder after it;
 #   - park_child / rerun_child with their refusals, and the Dispatch writes' actor;
 #   - phase-finished carrying the worker's summary and verdict;
 #   - the daemon posting the merger's READY packet (direct, and stored across a refused gate), and
@@ -417,7 +417,8 @@ role_unheld() { ! envoy_role_holder "$1" >/dev/null 2>&1; }
 role_held_by() { [ "$(envoy_role_holder "$1" 2>/dev/null)" = "$2" ]; }
 token_session() { claim_json "$1" | jq -er '.session // empty | select(. != "")'; }
 
-# The follow-up the phase stall sends (packages/pi-legion/src/phase-stall.ts FOLLOW_UP).
+# The reminder the phase stall sends (packages/pi-shared/src/phase-stall.ts REMINDER), which now
+# comes at the end of every turn a phase stays open through; this check reads the first of them.
 followup_needle="Your turn ended with your Legion phase still open"
 
 # tool_outcomes FILE: every tool result in an OMP session file, joined to the call that produced it.
@@ -807,8 +808,8 @@ pass
 begin phase-stall-follow-up
 db_value "select coalesce(handoff_commit, '') || '|' || coalesce(summary, '') from phases where issue = '$root1' and role = 'planner'" >"$evidence/phase-stall-planner-row-before-follow-up.txt" || true
 note "planner phase row before the follow-up: '$(cat "$evidence/phase-stall-planner-row-before-follow-up.txt")' (no row, or an empty handoff: nothing completed)"
-# The planner's turn ended with its phase open, so the phase stall's follow-up fires; the rig's
-# instructions let it answer WAITING. Once the follow-up is in its session, it is given 60 s to
+# The planner's turn ended with its phase open, so the reminder comes; the rig's
+# instructions let it answer WAITING. Once the reminder is in its session, it is given 60 s to
 # complete on its own, then told to.
 followup_seen() { grep -qF -- "$followup_needle" "$(root1_planner_file)"; }
 until_true 600 "the phase stall's follow-up to reach $root1's planner" followup_seen

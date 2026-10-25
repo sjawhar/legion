@@ -54,12 +54,16 @@ github_apps:
   review:
     app_id: "100002"
     private_key_command: cat ./review-app.pem
-# worker_backends:                     # runtime: tmux only: a phase worker's role (planner, implementer,
-#   implementer: claude                # tester, reviewer, merger) on omp, the default, or claude: Claude Code
-#                                      # in its pane under `legion claude-bridge`, which needs LEGION_CLAUDE_PLUGIN_DIR
-#                                      # (and LEGION_CLAUDE_PATH, LEGION_BUN_PATH, else PATH) in the daemon's
-#                                      # environment. Under runtime: kubernetes, as in this file, the loader
-#                                      # refuses claude: the worker image carries no Claude Code.
+# worker_backends:                     # a phase worker's role (planner, implementer, tester, reviewer,
+#   implementer: claude                # merger) on omp, the default, or claude: Claude Code under
+#                                      # `legion claude-bridge`, which runs under either runtime. In a pod,
+#                                      # as in this file, it runs out of the worker image, which carries
+#                                      # Claude Code and the claude-envoy plugin; under runtime: tmux it
+#                                      # needs LEGION_CLAUDE_PLUGIN_DIR (and LEGION_CLAUDE_PATH,
+#                                      # LEGION_BUN_PATH, else PATH) in the daemon's environment. Legion
+#                                      # holds no model route for it either: put ANTHROPIC_API_KEY in
+#                                      # provider_keys (pod.env refuses a credential-shaped name) and
+#                                      # ANTHROPIC_BASE_URL and ANTHROPIC_MODEL in runtime.kubernetes.pod.env.
 
 runtime:
   kubernetes:

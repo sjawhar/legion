@@ -93,6 +93,38 @@
 
 ### Added
 
+- The Legion phase reminder runs on Claude Code (INFRA-220). A phase worker in a Legion pane whose
+  turn ends with its phase still open — no successful `handoff_complete` since its assignment — is
+  reminded at the end of every turn, for as long as that phase stays open, as an Oh My Pi worker
+  is. The machine is `@legion/pi-shared`'s, one copy for both harnesses; this plugin is its Claude
+  Code host (`src/legion-phase-hook.ts`), driven by Claude Code's own hooks: five `mcp_tool`
+  entries generated into the Legion plugin's `legion/hooks/hooks.json` (`Stop`, `StopFailure`,
+  `PostToolUse`, `PostToolUseFailure`, `UserPromptSubmit`) call the new `legion_phase_hook` tool on
+  the pane's `legion` MCP server. The first reminder of a run comes back as the `Stop` hook's
+  `{"decision":"block","reason":…}`, which Claude Code turns into one more turn of the same
+  session; every later one is written into the session over the bridge's inbox from a timer, so the
+  turn boundary the daemon reads stays intact. A WAITING reply buys a quiet wait, the count of
+  unanswered reminders resets on any tool call or inbound turn, and a run of them tells the issue's
+  architect over this server's own Envoy client. The record — the phase, the count and the
+  architect notice's key — is `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json`, written
+  before each hook answers and read again when Claude Code restarts the server inside the same
+  `claude` process; a file the Go bridge wrote reads as an open phase with no reminder yet. The
+  four `LEGION_STALL_*` numbers come from the worker's environment. The hook entries are the Legion
+  plugin's alone: a plain `@sjawhar/claude-envoy` install registers no `legion` server, so
+  `hooks/hooks.json` carries none of them. `package.json`'s `legion.daemonApiVersion` is 36.
+- A Claude Code phase worker whose launcher recreated its workspace is told so, once per launch,
+  over the same inbox the reminders use, as an Oh My Pi worker is
+  (`LEGION_WORKSPACE_RECREATED`): it reconciles against its committed handoff before new work
+  rather than finding the workspace quietly empty. Whether the notice has been sent rides in the
+  same state file, so a restarted server does not repeat it.
+- The Legion worker image carries this package's committed build at `/opt/legion/claude-envoy`, so
+  a phase worker a deployment puts on Claude Code now runs under `runtime: kubernetes` as well as
+  tmux: its pod's command is `legion claude-bridge -- claude -p …`, its one MCP server is that
+  root's `dist/envoy-channel.js` and its plugins are that root and its generated `legion/`. No
+  workflow releases this package, so the image is a Kubernetes deployment's only source of it, and
+  a plugin-contract change for such a role is answered by a new image rather than by an install
+  (`docs/kubernetes.md`).
+
 - A Claude Code session registers with a title, so Dispatch's Agents page names it instead of
   showing its session id: `ENVOY_SESSION_TITLE`; else a name and the session id's first eight
   characters. Inside tmux the name is `session:window` for a window whose `automatic-rename` is

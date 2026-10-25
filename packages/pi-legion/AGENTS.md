@@ -36,7 +36,7 @@ remedy does; `.github/scripts/check-plugin-names.sh` allowlists it for that reas
   @sjawhar/pi-envoy at interface version <expected>, found version <found> from <the publisher's
   URL>; install the @sjawhar/pi-envoy released with this @sjawhar/pi-legion`.
 
-`session_start` runs it after the subagent check, the session title and the phase-stall restore, for
+`session_start` runs it after the subagent check, the session title and the phase reminder's restore, for
 every Legion session kind (`root`, `worker`, `controller`), and on a refusal writes the sentence with
 `logger.error` and exits the process (`exitProcess(1)`, the path a refused boot registration takes),
 which the daemon counts as a launch failure. A `not-legion` session has returned before the check
@@ -344,7 +344,7 @@ generated (`titleSource: "auto"`) is replaced; any other title is a person's (a 
 its own title model never replaces the Legion title. A `task` subagent and a session with no Legion
 environment get no title from this extension.
 
-## Phase workers' completion and the phase-stall follow-up
+## Phase workers' completion and the endless phase reminder
 
 A worker's phase ends through the `legion` tool's `handoff_complete`, never shell text:
 `src/tools.ts` carries it for every session but the root architect's (a phase worker, and a
@@ -390,8 +390,8 @@ per-command grant mint, so the role prompts and skills alone say who runs what. 
 a tool.
 
 In a phase-worker session (planner, implementer, tester, reviewer, merger: never an architect, the
-controller, a session with no Legion environment, or a `task` subagent), `src/phase-stall.ts`
-tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
+controller, a session with no Legion environment, or a `task` subagent), the phase-stall machine
+`@legion/pi-shared/phase-stall` tracks the phase: the daemon's assignment (a user message) opens it, the tool's successful
 `handoff_complete` closes it. A person's direct message the Envoy extension sent in as the user's
 own turn is a user message too (for a `/skill:`, the host's `skill-prompt` custom message), and
 counts as an Envoy delivery rather than an assignment: the Envoy extension records each turn it
@@ -411,27 +411,60 @@ host without `sendUserInput` a turn is found by its text and forgotten at the ru
 `agent_end`, which the host then runs as a turn of its own, matches nothing: it counts as an
 assignment, which opens even a closed phase, and the dashboard shows it twice. One sent in after
 that `agent_end` starts a fresh record and is matched. When a run is about to settle (`session_stop`) with the phase still
-open, the extension returns one follow-up (`{continue: true, additionalContext}`), which the host sends
-as the next turn of the same session: run `handoff_complete`, or reply with a WAITING line. A final
-message holding a tool call written as text is told so. One follow-up per stall, except that a
-follow-up for a text call answered by a text call again gets one more (state `text-call`), so a stall
-sends at most two; a WAITING reply or the stall's last follow-up stays quiet until the next Envoy
-delivery or assignment. The state is appended to the
+open, the worker is reminded — and reminded again at the end of every turn for as long as the
+phase stays open (`@legion/pi-shared/phase-reminder`): run `handoff_complete`, or reply with a
+line starting WAITING. A final message holding a tool call written as text is told so first. The
+first reminder of a run is the host's own continuation (`{continue: true, additionalContext}`),
+one more turn of the same session; every one after it comes from a timer as a steered
+`legion-phase-reminder` message that starts a turn (`pi.sendMessage`), so the run settles and the
+daemon sees the turn end and can deliver a queued task. A WAITING reply buys
+`LEGION_STALL_WAITING_MS` of quiet and then the same reminder. The host's timer cannot be
+cancelled, so a generation counter, bumped by everything that makes an armed timer stale (a turn
+starting, a settle, a session change, the phase closing, a reminder going out), is the whole
+defence against two timers reminding twice.
+
+A count of reminders the worker has done nothing about climbs by one per delivered reminder and
+drops to zero as soon as anything happens — a real tool call in the settling message, the daemon's
+assignment, an Envoy delivery. At `LEGION_STALL_ARCHITECT_AFTER` the session tells the architect
+that owns the issue over Envoy (its own while its architect claim is live, else the tree's), once
+per run of reminders: the notice carries the issue, role, phase, the count and the head of the
+worker's last message under one idempotency key, minted at the first attempt and kept until the
+count resets, so a listener that holds no architect session yet is tried again by the next
+reminder. A reminder is dropped when the daemon's record says this role no longer works this phase
+(the `read_record` state, bounded at 5 s and failing open, since an unreachable daemon is exactly
+when a stalled worker must still be nudged). A worker the daemon relaunched into an open phase is
+reminded from a timer `LEGION_STALL_RESUME_MS` after its claim boots, since nothing else would
+wake it.
+
+Four variables tune it, read from the worker's own environment (`@legion/pi-shared/stall-limits`;
+the daemon passes on whichever its own environment holds, to a pane and to a pod alike):
+`LEGION_STALL_REMINDER_MS` (300000), `LEGION_STALL_WAITING_MS` (900000), `LEGION_STALL_RESUME_MS`
+(120000) and `LEGION_STALL_ARCHITECT_AFTER` (3, clamped to 2 or more, so the continuation reminder
+alone can never reach it). A value that is not an integer of that minimum is one `warn` and the
+default.
+
+The state, the count and whether the architect was told are appended to the
 transcript (`legion-phase-stall` entries) and restored at `session_start`, so a worker relaunched with
-`--resume` keeps it. `extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
+`--resume` keeps them. The machine, the runner and the four numbers live once, in
+`@legion/pi-shared` (`phase-stall.ts`, `phase-reminder.ts`, `stall-limits.ts`): this entry is the
+Oh My Pi host, and `packages/claude-envoy/src/legion-phase-hook.ts` is the Claude Code one, driven
+by Claude Code's own hooks over a state file (`packages/claude-envoy/AGENTS.md`).
+`extensions/legion-phase-stall-omp.test.ts` proves it on the pinned Oh My Pi
 (`LEGION_TEST_OMP`) through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`),
-which hands both plugin entries to the Oh My Pi child by path.
+which hands both plugin entries to the Oh My Pi child by path: every turn reminded, the WAITING
+wait, the count's resets, the architect notice and its retry, and nothing sent once the phase is
+closed.
 
 ## Where to look
 
 | Task | Location | Notes |
 | --- | --- | --- |
 | OMP extension entry | `extensions/legion.ts` | The one entry; ships as `dist/legion.js` in `@sjawhar/pi-legion`. Inert without `LEGION_TREE`/`LEGION_ROLE`/`LEGION_CONTROLLER` in the environment; in a Legion session it refuses to run without the Envoy plugin's interface (the section above). The Envoy entry is `../pi-envoy/extensions/envoy.ts` (`packages/pi-envoy/AGENTS.md`) |
-| Legion lifecycle modules | `src/` | Classification (`classify.ts`) and the claim session (`claim-session.ts`, an adapter over `@legion/pi-shared/legion-claim-core`; see Daemon contract), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`: the phase ops' schema fields, description template and executor are `@legion/pi-shared/legion-phase-ops`, beside which it serves the architect's and the controller's operations; its description, which `tools.test.ts` pins word for word, states no sentence on `read_record` or `request_backward_move`; every operation that writes mints its grant on `/grants` in-process and posts it with the request; nothing is written to the pane, and no tool call is wrapped or refused), the phase stall (`phase-stall.ts`) |
+| Legion lifecycle modules | `src/` | Classification (`classify.ts`) and the claim session (`claim-session.ts`, an adapter over `@legion/pi-shared/legion-claim-core`; see Daemon contract), jj attribution (`jj-attribution.ts`: the `JJ_CONFIG` overlay that adds the `Omp-Session` trailer; the commit identity itself is not the extension's — the daemon puts `JJ_USER`/`JJ_EMAIL` and the Git author/committer variables on the pane, and worker boot writes no jj config), the session title (`session-title.ts`; see Session titles), the `legion` tool (`tools.ts`: the phase ops' schema fields, description template and executor are `@legion/pi-shared/legion-phase-ops`, beside which it serves the architect's and the controller's operations; its description, which `tools.test.ts` pins word for word, states no sentence on `read_record` or `request_backward_move`; every operation that writes mints its grant on `/grants` in-process and posts it with the request; nothing is written to the pane, and no tool call is wrapped or refused), and the recreated-workspace notice's Oh My Pi half (`workspace-recreated.ts`: how this host saves the notice in a session and tells its own copies apart; the notice itself is `@legion/pi-shared/workspace-recreated`, which the Claude Code host sends too). The phase-stall machine is not here: both harnesses run `@legion/pi-shared`'s (the section above) |
 | Controller session | `src/controller-session.ts` | Owns the controller's identity, the transcript a session navigation compares to decide whether to claim again, the claim and reclaim hooks, and grant minting: it reads the daemon's project, registers on `claims/register` with the controller capability, claims the controller role, and mints with the registration's secret (see Daemon contract). The `legion` tool's `set_status` mints through it (`mintGrant`) and posts the grant with its request. |
-| Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`, and the Legion modules claude-envoy's MCP server shares with this entry: the daemon client (`daemon-client`), the claim boot (`legion-claim-core`), the `legion` tool's phase ops (`legion-phase-ops`), the handoff-commit lookup (`handoff-commit`) and the stale git lock note (`git-lock`); inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
+| Shared modules and the interface | `../pi-shared/` | `@legion/pi-shared`: the interface this entry reads (`interface`), the role-claim bridge, the injected-user-turn record, the subagent check, the host types and `toolSuccess`/`toolFailure`, and the Legion modules claude-envoy's MCP server shares with this entry: the daemon client (`daemon-client`), the claim boot (`legion-claim-core`), the `legion` tool's phase ops (`legion-phase-ops`), the handoff-commit lookup (`handoff-commit`), the stale git lock note (`git-lock`), the recreated-workspace notice (`workspace-recreated`) and the endless phase reminder — its state machine (`phase-stall`), its runner (`phase-reminder`) and the four `LEGION_STALL_*` numbers (`stall-limits`); inlined into `dist/legion.js` by `bun build`. See `packages/pi-shared/AGENTS.md` |
 | Extension unit tests | `extensions/legion.test.ts` | Mocked Pi and NATS surface; every test starts from no `LEGION_*`/`ENVOY_*`/`DISPATCH_*` environment and sets only what it declares, except `ENVOY_CONFIG_FILE`, which the file points at an envoy.json that holds no section before it imports the Envoy entry (the entry picks its file at module load) and `beforeEach` sets again, with `OMP_PROFILE` and `PI_CODING_AGENT_DIR` unset, so no caller's envoy.json reaches a pane; each stubs `fetch` itself, and `afterEach` resets the process-wide interface (`resetEnvoyPluginInterfaceForTests`) so one test's bound Envoy instance or bootstrapped session never reaches the next. Pins the three Envoy-plugin refusals, that `/legion-claim-controller` answers the sentence without exiting, and that `register_gate`'s lookup reads the envoy.json the Envoy entry chose |
-| Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The two omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the phase stall, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
+| Both entries in one process | `extensions/legion-role-claim.test.ts`, `extensions/legion-phase-stall-omp.test.ts`, `extensions/legion-role-tools-omp.test.ts` | Test-only; the shipped sources never import the sibling. `legion-role-claim.test.ts` loads `../pi-envoy/extensions/envoy.ts` by relative path: the role claim through the interface with Legion initialised first. The two omp tests run through the harness's `runLegionPane` (`@legion/pi-shared/test/omp-harness`), which names both entries by path for the Oh My Pi child: the endless phase reminder, and no role refused a tool, on the pinned Oh My Pi (`LEGION_TEST_OMP`) |
 | Shipped agents | `agents/`, `src/shipped-agents.test.ts` | The task agents Legion's prompts dispatch (`oracle`; the reviewer's pair `thermonuclear-deep-review` and `thermonuclear-code-quality`; `deep-worker`; the planner's `plan-gap-analyst` and `plan-reviewer`); each declares the name of its file and its model only as role aliases |
 | Daemon contract pin | `src/daemon-api-version.test.ts` | Pins `legion.daemonApiVersion` to `packages/contracts/fixtures/daemon-api/version.json`, which the daemon's golden test writes |
 | Capability report | `src/capability-report.ts`, `src/capability-report.test.ts` | The six live capability checks a claim session runs at boot and sends with `claims/ready` (see Daemon contract): `measureCapabilities` over a `CapabilityHost` that wraps every Oh My Pi import and the two child commands (`dispatch read --issue <issue>`, `gh api graphql {viewer{login}}`), with the budgets (8 s a check, 10 s the report) and each row's detail strings; `ompCapabilityHost` is the production host, string-literal `import()` only. The test fakes the host; `extensions/legion.test.ts` substitutes one through `setLegionCapabilityHostForTests` |
@@ -453,3 +486,4 @@ which hands both plugin entries to the Oh My Pi child by path.
 
 `bunx tsc --noEmit`, `bun test`, `bunx biome check extensions/ src/`, each from this directory;
 `LEGION_TEST_OMP=<omp> bun test extensions/legion-phase-stall-omp.test.ts extensions/legion-role-tools-omp.test.ts` for the real binary.
+The phase reminder's own unit tests live beside the machine, in `packages/pi-shared` (`bun test` there).

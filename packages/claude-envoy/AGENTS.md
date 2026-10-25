@@ -46,8 +46,75 @@ Dispatch asks stay on Dispatch.
 | Send CLI parsing | `src/send-arguments.ts` | Validates destination and message arguments. |
 | Manual channel smoke | `scripts/smoke-channel.sh` | Real smoke, unattended (answers every startup dialog, captures the pane); documented and deliberately excluded from CI. |
 | Manual `/clear` smoke | `scripts/smoke-clear-rebind.sh` | Real `/clear` against the live listener with the build in `CLAUDE_PLUGIN_DIR` (default: this package); checks the registry entry moves to the new id without the old direct subject. Sends no prompt to the model; excluded from CI. |
-| Legion phase worker on Claude Code | `src/legion-claim.ts`, `src/legion-tool.ts`, `src/legion-inbox.ts` | Active only when `legion claude-bridge` launched the pane (`LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, `CLAUDE_CONFIG_DIR` set). The claim waits for the session transcript, then boots through the claim boot `@sjawhar/pi-legion` shares (`bootLegionClaim`, `@legion/pi-shared/legion-claim-core`): registers with the daemon, claims the issue's Envoy role soft and calls ready, again on every `onRoleRegained`. The `legion` MCP tool is the phase ops `@sjawhar/pi-legion`'s tool serves too (`@legion/pi-shared/legion-phase-ops`: one schema, one executor, and the shared description template with its `read_record` and `request_backward_move` sentences, naming `mcp__legion__envoy_publish`). With `LEGION_CLAUDE_INBOX` set, deliveries go to the bridge's socket instead of channel notifications. `package.json` `legion.daemonApiVersion` is pinned by `tests/daemon-api-version.test.ts`. |
-| Generated Legion plugin | `legion/`, `scripts/build.ts` | Never edit by hand: `scripts/build.ts` stages pi-legion's skills and converts `packages/pi-legion/agents` (tool names mapped to Claude Code's, `glob`/`grep`/`todo` dropped). `scripts/build.ts --check` and `tests/legion-plugin-fresh.test.ts` fail on drift. `tests/legion-pane-mcp.test.ts` runs a Legion pane's server end to end against stand-ins. |
+| Legion phase worker on Claude Code | `src/legion-claim.ts`, `src/legion-tool.ts`, `src/legion-inbox.ts`, `src/legion-phase-hook.ts` | Active only when `legion claude-bridge` launched the pane (`LEGION_BOOT_TOKEN_FILE`, `LEGION_DAEMON_URL`, `CLAUDE_CONFIG_DIR` set). The claim waits for the session transcript, then boots through the claim boot `@sjawhar/pi-legion` shares (`bootLegionClaim`, `@legion/pi-shared/legion-claim-core`): registers with the daemon, claims the issue's Envoy role soft and calls ready, again on every `onRoleRegained`. The `legion` MCP tool is the phase ops `@sjawhar/pi-legion`'s tool serves too (`@legion/pi-shared/legion-phase-ops`: one schema, one executor, and the shared description template with its `read_record` and `request_backward_move` sentences, naming `mcp__legion__envoy_publish`). `src/legion-phase-hook.ts` is the endless phase reminder's Claude Code host (the section below). With `LEGION_CLAUDE_INBOX` set, deliveries go to the bridge's socket instead of channel notifications. `package.json` `legion.daemonApiVersion` is pinned by `tests/daemon-api-version.test.ts`. |
+| Generated Legion plugin | `legion/`, `scripts/build.ts` | Never edit by hand: `scripts/build.ts` stages pi-legion's skills, converts `packages/pi-legion/agents` (tool names mapped to Claude Code's, `glob`/`grep`/`todo` dropped) and writes the phase reminder's five hook entries (`LEGION_HOOKS` → `legion/hooks/hooks.json`, the section below). `scripts/build.ts --check` and `tests/legion-plugin-fresh.test.ts` fail on drift. `tests/legion-pane-mcp.test.ts` runs a Legion pane's server end to end against stand-ins. |
+
+## The Legion phase reminder
+
+A Legion phase worker whose turn ends with its phase still open — no successful `handoff_complete`
+since the daemon's assignment — is reminded at the end of every turn, for as long as the phase
+stays open. The machine is not this package's: `@legion/pi-shared` holds it once for both
+harnesses (`phase-stall.ts`, the states and the count; `phase-reminder.ts`, the runner that
+delivers each reminder, tells the architect and reads the daemon's record; `stall-limits.ts`, the
+four numbers), `@sjawhar/pi-legion` drives it from Oh My Pi's session hooks
+(`packages/pi-legion/AGENTS.md`), and `src/legion-phase-hook.ts` drives it here, from Claude
+Code's own hooks. Nothing of the machine is re-decided in this package. `legion claude-bridge` is
+transport and holds no copy of it (`packages/daemon/internal/claudebridge`).
+
+**The hooks.** `scripts/build.ts`'s `LEGION_HOOKS` generates five entries into
+`legion/hooks/hooks.json`, each an `mcp_tool` hook on the server `legion` — the pane's own MCP
+server, which `--mcp-config` registers under that bare name
+(`packages/daemon/internal/claudelaunch`) — calling the tool `legion_phase_hook` that
+`src/envoy-channel-server.ts` registers from `phaseHookToolDefinition()`. Claude Code substitutes
+each `${…}` as a string, which the endpoint parses. `Stop` (30 s, since its answer waits on the
+runner's record check, which bounds its own daemon read at 5 s) carries `${last_assistant_message}`
+and `${stop_hook_active}`; `StopFailure` (10 s) the last message; `PostToolUse` and
+`PostToolUseFailure` (10 s) `${tool_name}` and `${agent_id}`; `UserPromptSubmit` (10 s)
+`${prompt}`. They belong to the generated `legion/` plugin alone, never to `hooks/hooks.json`:
+this package is also installed as a plain Claude Code plugin, where no `legion` server exists and
+every entry would be a hook error on every turn. A Legion pane loads both plugin directories, so
+its worker gets them.
+
+**What each hook does.** The endpoint answers `{}` unless it has something to say, and answers
+every hook with `{}` for a session that holds no claim yet (the bridge's seeding `/rename` turn)
+or whose role is `architect` — the same gate `phaseWorkerSession` applies in pi-legion. `Stop`
+settles the machine: the first reminder of a run comes back as
+`{"decision":"block","reason":<the reminder>}`, which Claude Code turns into one more turn of the
+same session; every later one is written into the session over the bridge's inbox from a timer,
+because a line written while a turn runs is appended to that turn and the run would never settle
+for the daemon. `StopFailure` (the turn ended on an API error, and Claude Code ignores whatever
+the hook returns) records and arms that timer instead. `PostToolUse` and `PostToolUseFailure` are
+the worker working, which puts the count back to zero; a non-empty `${agent_id}` is a subagent's
+call and is ignored. `UserPromptSubmit` is this server's only sight of an inbound turn — the
+daemon's task reaches Claude Code's stdin from the bridge, never this process — so it declares the
+turn, drops the armed timer, and classifies the prompt: the reminder it last wrote is itself and
+changes nothing, a line this server wrote (an Envoy delivery, the recreated-workspace notice) is
+an inbound event, and anything else is an assignment. The tool is visible to the model, and a call
+it does not recognise is answered with `PHASE_HOOK_REFUSAL` and records nothing, so the model
+cannot zero its own count.
+
+**The state file.** This host has no transcript entry to record in, so the record is
+`<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json` (`phaseStallFile`), written whole
+through a temporary file in the same directory renamed into place, before the hook answers. It
+carries the shared entry — `state` (`closed`, `open`, `waiting`), `count`, `reported` and the
+architect notice's `reportKey` — and one key only this host keeps, `recreatedNoticeSent`. A
+missing file is a fresh session; an unreadable one, one that is not JSON, or one holding no state
+this build knows is one `warn` and a fresh start. A file the build now in the pods wrote holds
+`{"state":"quiet"}` or `{"state":"text-call"}`, which read as an open phase with no reminder yet,
+so a session carried across the cutover is reminded rather than left alone. Claude Code may
+restart this server inside the same `claude` process, which is why the count is on disk and not
+in memory alone.
+
+**Its inputs.** The four numbers come from the worker's own environment, which the daemon fills
+from its own under both runtimes: `LEGION_STALL_REMINDER_MS` (300000, how long after a settle a
+later reminder waits), `LEGION_STALL_WAITING_MS` (900000, what a reply starting WAITING buys),
+`LEGION_STALL_RESUME_MS` (120000, the reminder for a worker relaunched into an open phase) and
+`LEGION_STALL_ARCHITECT_AFTER` (3 unanswered reminders before the architect is told over Envoy,
+through this server's own listener client). A worker whose launcher recreated its workspace is
+told so over the same inbox, once per launch, as an Oh My Pi worker is
+(`LEGION_WORKSPACE_RECREATED`, `@legion/pi-shared/workspace-recreated`). `tests/legion-phase-hook.test.ts`
+drives the endpoint over a real state file, and `tests/legion-pane-mcp.test.ts` proves the tool is
+on a Legion pane's server.
 
 ## Critical conventions
 
