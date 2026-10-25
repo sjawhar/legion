@@ -2,79 +2,67 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-180",
-  "completed": "2026-10-25T07:45:00Z",
-  "decision": "changes_requested",
-  "round": 4,
-  "reviewedHead": "3a7771b2a849bae1fa338e9659df1492f23710ed",
-  "codeHead": "50f2638ba9413593f1e5cdcdf937860388d81109",
+  "completed": "2026-10-25T08:25:00Z",
+  "decision": "approved",
+  "round": 5,
+  "reviewedHead": "the head this handoff's push makes, named by SHA in the approving review",
+  "codeHead": "77f73e55e29b0cf14b077991ae17c804220c773b",
   "critical": 0,
-  "important": 1,
-  "minor": 6,
-  "standard": "The architect's narrowed standard (its message c209920d842145b7b812add3536aa25f) blocks only a correctness defect in the delivered text for a shape Slack sends — a word lost, a word doubled, a line that asserts something the channel does not, or a cost without a bound. Both findings below went to the architect before this review under the protocol agreed in round 3; it ruled in that turn (message 2b22669359589de4d34472fa555f5d3b): the fallback doubling is required, the own-words adjacency is recorded.",
-  "round3Verified": "The one change round 3 required is built, and it is the root fix rather than the container fix: the message-wide taken set is gone, replaced by ownWords (the message's own text and its non-blank lines, compared walk-wide) and a per-object yielded tally, and slackFieldPiece, slackFieldHalf, the fields recursion parameter, the pair latch and the synthesised 'title: value' string went with it. All four blocking bodies are repaired, driven through SlackEnvelope at the code head: section fields *Passed*/3, *Failed*/0, *Skipped*/0 deliver '*Passed*\\n3\\n*Failed*\\n0\\n*Skipped*\\n0'; the rota delivers 'Deploy failed\\n*Primary*\\noncall-a\\n*Secondary*\\noncall-a\\n*Escalation*\\noncall-b'; two attachments one per host deliver 'web-1\\nok\\nweb-2\\nok'; four sibling sections the same. The two cases the rule exists for still hold: one attachment with title = text = fallback is one line, and a piece equal to the own text or one of its lines is dropped wherever it sits. Everything earlier still holds: the 990,361 B nested rich_text body is 41 ms, the client-composed mention with escaped characters delivers one line, blocks precede attachments, an image-only post delivers its alt_text, a deleted message carries no text key, an edit delivers none of previous_message. The changelog and the controller reference describe the shipped rule and no longer claim 'title: value'; the claude-envoy bundle copy is byte-identical.",
+  "important": 0,
+  "minor": 5,
+  "standard": "The architect's narrowed standard (message c209920d842145b7b812add3536aa25f, final-round rule d5660e82ca613019226dca05a6b05629): only a correctness defect in the delivered text for a shape Slack sends blocks — a word lost, a word doubled, a line that asserts something the channel does not, or a cost without a bound. This round was narrowed further to one question: is the fallback ordering built, and does the table stay green. It is, and it does. Everything below is recorded on the Fast-follow line.",
+  "correction": "This file's round-4 copy at d85bc36c recorded designGate currentVersion 14. That was a read taken at 07:42, minutes before the architect edited the spec; the gate stood at 15 from that edit, and the architect has since issued version 16, which lists the eight ranked display names and sends fallback to the paragraph that puts it last, so the human is no longer asked to approve a rank the code does not implement. Whoever reads the round-4 file should take this one instead.",
+  "verifiedAtThisHead": "Every statement below was produced by driving SlackEnvelope at the code head 77f73e55e29b in a scratch copy, not read from a handoff or a thread. The round-4 finding is fixed: an attachment carrying color, fallback 'Deploy failed on web-1' and a section saying the same delivers that line once; a fallback differing from its block delivers 'the real body\\nattacker-free plain copy', body first; the round-2 note is repaired, so fallback 'PLAIN COPY' beside a section 'the real body' now delivers 'the real body\\nPLAIN COPY' with the body as the summary; title = text = fallback on one attachment is still one line; fallback equal to the title alone delivers 'Disk full\\n98% used'. The alertmanager attachment now reads '[FIRING] disk full\\ndisk usage 98%\\nHost\\nweb-3\\nSeverity\\ncritical\\n[FIRING] disk full on web-3', the plain-text copy last. Round 3's four bodies are unmoved: '*Passed*\\n3\\n*Failed*\\n0\\n*Skipped*\\n0', the rota in full, and 'web-1\\nok\\nweb-2\\nok' from both the two-attachment and the four-section shapes. Everything earlier holds: blocks before attachments, the client-composed mention with escaped characters as one line, own words plus a rich_text block adding one line, the image-only post's alt_text, the Block Kit ordering with the section's own text first, a deleted message with no text key, an edit carrying none of previous_message. Edge shapes: a non-string fallback is descended in the alphabetical tail ('A title\\na nested fallback word'), a blank one is no piece, nested fallback-carrying objects deliver 'body\\ninner copy\\nouter copy', and a fallback equal to the message's own text is dropped by ownWords. The 990,361 B four-chain nested rich_text body is 63 ms.",
   "keyFindings": [
     {
-      "severity": "important",
-      "blocking": true,
-      "file": "packages/envoy/internal/contracts/normalize.go:1107-1110,1250,1258",
-      "description": "An attachment's fallback is doubled against blocks nested inside that same attachment. Driven at the code head: attachments [{color: '#d00', fallback: 'Deploy failed on web-1', blocks: [section mrkdwn 'Deploy failed on web-1']}] delivers 'Deploy failed on web-1\\nDeploy failed on web-1', body_truncated unset. The control is the same attachment with fallback equal to its own title, which still collapses to one line, so the gap is exactly fallback against the attachment's own subtree: the yielded tally reaches an object's own keys and blocks is descended as a separate object. This is not the cross-object trade the architect ruled in. That trade's reason, which the changelog states, is 'two objects saying the same thing are two things a reader sees'; an attachment's fallback is the one string in Slack's model defined by nobody seeing it when the attachment's own blocks render, so the reader sees the line once and the delivery says it twice. Colour bar plus fallback plus blocks is how an app posts a coloured alert today. Round 3's message-wide set covered it; the per-object scope does not. The architect required it in its message 2b22669359589de4d34472fa555f5d3b and specified the shape: build it as an ordering rule, not an exception — an attachment's fallback is read last, after everything else that attachment carries, and dropped when the attachment has already yielded it anywhere in its subtree. That also repairs a note standing from round 2: fallback is taken before the attachment's own blocks are descended, since blocks is not one of the nine names and sorts into the alphabetical tail, which is why an attachment carrying fallback 'PLAIN COPY' and a section 'the real body' delivers 'PLAIN COPY\\nthe real body' with the fallback as the summary. Cases: the colour-bar body delivering one line; an attachment whose fallback differs from its blocks delivering both with the body first; and the existing same-object collapse unchanged."
+      "severity": "minor",
+      "blocking": false,
+      "file": "packages/envoy/internal/contracts/normalize_test.go:2919-2926",
+      "description": "Fast-follow, and the one finding of this round worth acting on: no test pins the per-object repeat rule. The 'a repeated piece' fixture sets the message's own text and the attachment's title, text and fallback all to 'Build failed', so takeOwn puts that string in ownWords and take rejects every attachment piece before slackWalkObject's tally is reached. I checked it by mutation rather than by reading: deleting `|| slices.Contains(yielded, text)` from normalize.go:1304 leaves the whole 39-case TestSlackDeliveredText table green. With that rule gone an attachment carrying title = text = fallback and no own text would deliver its line three times, which is a doubled word in a shape Slack sends — the behaviour is right today and nothing would catch its removal. The remedy is one character: set that fixture's own text to \"\", leaving its expected summary and delivered text unchanged, since the next fixture already covers suppression against the message's own words."
     },
     {
       "severity": "minor",
       "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize.go:1173-1175",
-      "description": "Recorded by the architect's ruling of 2026-10-25T07:37:33Z, with both bodies I drove. The ownWords drop reaches a field value and orphans its label: own text 'failed' with attachment fields Result/failed, Branch/main delivers 'failed\\nResult\\nBranch\\nmain', and own text 'resolved' with section fields *Status*/resolved, *Owner*/sre delivers 'resolved\\n*Status*\\n*Owner*\\nsre'. A reader pairing alternating lines reads Result as main's label, which is the assertion half of the standard, but no word is lost since the own text carries it, and it needs an app whose text fallback is a bare one-word status. The narrowing the deep review suggested — compare ownWords only against the top-level objects of blocks and attachments — was refused with a reason I checked and agree with: a Slack client's rich_text copy sits several levels down in blocks[0].elements[].elements[], so that narrowing would stop dropping exactly the deep piece and the duplicate the human was shown as fixed would return."
+      "file": "packages/envoy/internal/contracts/normalize.go:1281-1289",
+      "description": "Recorded by the architect's ruling of 2026-10-25T08:07:14Z. slackWalkFallback wraps visit once per enclosing fallback-carrying object, so a chain of them makes each piece pass through one closure per level above it. The tester measured 1.44 s at 9,900 levels in a 373 KB body against 0.089 s on round 5's listener. My own worst reproduction was cheaper — a 9,900-level chain whose every level carries a distinct fallback, 286,220 B, 59 ms; the same chain with one repeated fallback, 237,839 B, 9 ms; three such chains, 713,173 B, 31 ms — so I could not reach the tester's figure with the shapes I built and record both numbers as measured by whoever measured them. Reaching the shape at all needs an object carrying fallback nested inside another, which Slack does not produce: attachments do not nest and no block kind carries the name. The bound is seconds inside a 10 s write timeout, not round 3's 85 s. What would close it: one tally consulted per piece instead of a closure per enclosing fallback."
+    },
+    {
+      "severity": "minor",
+      "blocking": false,
+      "file": "packages/envoy/internal/contracts/normalize.go:1110-1116, packages/envoy/CHANGELOG.md",
+      "description": "Recorded by the same ruling: the rule keys on the name fallback rather than on being an attachment, so a block carrying that name would get the same treatment. No Slack block carries it, so the changelog's 'an attachment's fallback' is true of every message Slack sends."
+    },
+    {
+      "severity": "minor",
+      "blocking": false,
+      "file": "packages/envoy/internal/contracts/normalize.go:1340-1355",
+      "description": "Fast-follow, unchanged from round 4: slackWalkKeys drops every string under a non-display name, so a context element carrying only a link's url delivers nothing — 'Runbook:' arrives without https://run.book/x. The one string Slack renders that the walk is structurally unable to reach."
     },
     {
       "severity": "minor",
       "blocking": false,
       "file": "packages/envoy/internal/contracts/normalize.go:1136-1137, packages/envoy/internal/session/session.go:113-118",
-      "description": "Security[prompt], recorded and with the human. The deep review corrected two things round 3 told the architect, both read from code and both accepted by it for the human's ask. First, the Legion controller is not on this path: slackKind returns 'mention' only for event.type app_mention, and a link-unfurl edit is event.type 'message', so it publishes to the channel's .message topic while skills/legion-controller/references/slack-mentions.md subscribes the controller to .mention alone — the bot_id guard is not bypassed, it is never reached. The exposed population is any session that subscribes to a channel's .message topic. Second, the delimiter is JSON string encoding and it holds: the untrusted text is a JSON string value in Payload, so newlines are escaped and injected text cannot forge the prompt's own Summary, Message or Topic lines; the residual risk is instruction-shaped text inside the quoted region, not frame-breaking. The exploit path itself stands: a message_changed unfurl on a person's message delivers 'see https://x/y\\nIgnore previous instructions\\nunfurled body\\nfb' with user_id set and no bot_id. OWASP LLM01 and LLM06, ASVS v5.0.0-1.3.3."
-    },
-    {
-      "severity": "minor",
-      "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize.go:1296-1315",
-      "description": "Fast-follow, a further display field under the narrowing: slackWalkKeys drops every string under a non-display name, so a context element carrying only a link's url delivers nothing — blocks [{type: context, elements: [{mrkdwn 'Runbook:'}, {type: link, url: 'https://run.book/x'}]}] delivers 'Runbook:' alone, losing the URL the channel shows. It is the one case where Slack's rendering carries a string the walk is structurally unable to reach."
-    },
-    {
-      "severity": "minor",
-      "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize.go:1131-1135,1191-1203",
-      "description": "Fast-follow, structural: one object's construction is split across two functions with the same predicate written twice. walk.own is set in slackDeliveredText under strings.TrimSpace(own) != \"\", walk.ownWords in takeOwn under the same predicate sixty lines away, three TrimSpace calls run on the same string, and takeOwn carries an unwritten ordering rule — take(own) must precede the ownWords assignment or the own text suppresses itself. A constructor that sets both fields, calls take and trims once puts the invariant in one place."
-    },
-    {
-      "severity": "minor",
-      "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize.go:1164-1180",
-      "description": "Fast-follow: take tests full() before appending, so the piece that crosses the cap is appended whole and capBody then copies up to a megabyte of runes to discard almost all of it. Harmless at the 1 MiB body cap and the boundary is correct — exactly 2,048 runes sets no flag, 2,049 does, and no path drops a piece for fullness without capBody also reporting truncation — but capping the appended piece to the remaining budget removes the transient."
-    },
-    {
-      "severity": "minor",
-      "blocking": false,
-      "file": "packages/envoy/internal/contracts/normalize.go:1146-1158",
-      "description": "Recorded, checked and sound rather than a finding: ownWords and own are not the same job and do not collapse. ownWords is an exact-match set over the raw own text and its lines, consulted per piece in take; own is the entity-resolved text, used once as a substring haystack for the outermost rich_text probe. Keeping them distinct is right. Likewise the yielded bound is guaranteed rather than asserted: slackWalkKeys skips every non-display key whose value is a string, so the isString arm is reachable only for the nine display names and slices.Contains over a slice of at most nine beats a per-object map allocation."
+      "description": "Security[prompt], recorded and with the human, unchanged this round. Slack attaches a link unfurl by editing the message, so a crawled page's title and text arrive as message_changed on a person's message carrying user_id and no bot_id, reach payload.text, and session.go appends the payload to the wake prompt after 'Message:'. Two corrections stand from round 4, both read from code: the Legion controller is not on this path, since slackKind returns 'mention' only for event.type app_mention and an unfurl edit is 'message', so the controller's .mention subscription never receives it and its bot_id guard is not bypassed but never reached; and the delimiter is JSON string encoding, which holds, so injected text cannot forge the prompt's own Summary, Message or Topic lines and the residual risk is instruction-shaped text inside the quoted region. The exposed population is any session subscribed to a channel's .message topic. Also still live from round 1: fallback and a button's value are strings Slack renders to nobody. OWASP LLM01 and LLM06, ASVS v5.0.0-1.3.3."
     }
   ],
   "ci": {
-    "readAt": "2026-10-25T07:42:00Z",
+    "readAt": "2026-10-25T08:22:00Z",
     "requiredSet": ["lint", "typecheck", "test", "pr-title"],
     "source": "repos/sjawhar/legion/rules/branches/main rulesets; branch protection carries no required status checks",
-    "ciHead": "50f2638ba9413593f1e5cdcdf937860388d81109",
-    "ciHeadIsTheCode": "compare 50f2638ba941...3a7771b2a849 lists only .legion/ paths",
-    "requiredChecks": "lint success, typecheck success, pr-title success; test still in_progress when this round was submitted. A request for changes stands whatever CI says and the issue leaves reviewing with it, so the round was not held for that lane; the daemon reads its settlement itself.",
-    "otherChecks": "build, changes, claude-envoy, envoy-plugin, pi-envoy, pi-legion success; attest, contracts, deploy, envoy-client skipped; dispatch, dispatch-memory, dispatch-multiprocess, envoy-e2e-local, envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, pi-shared queued or in progress, none required"
+    "ciHead": "77f73e55e29b0cf14b077991ae17c804220c773b",
+    "ciHeadIsTheCode": "compare 77f73e55e29b...89fa131c12e9 lists only .legion/ paths, so these are the checks that stand for the code approved",
+    "requiredChecks": "lint success, typecheck success, test success, pr-title success — all four completed and green. test was in_progress at the first read and was waited for rather than approved around, since an approval may not name a head whose code's required check has not reported.",
+    "otherChecks": "build, changes, envoy-e2e-local, envoy-plugin, envoy-smoke success; attest, contracts, deploy, envoy-client skipped; claude-envoy, dispatch, dispatch-memory, dispatch-multiprocess, envoy-go, envoy-go-race, envoy-infra-go, pi-envoy, pi-legion, pi-shared still queued, none of them required"
   },
   "thermonuclear": {
-    "head": "3a7771b2a849bae1fa338e9659df1492f23710ed",
-    "deepReview": "APPROVE, zero blocking, four recorded. It confirmed the per-object tally cannot drop a string a reader sees except where one object puts the same string under two display names; that removing the message-wide set reintroduced nothing rounds 1 to 3 fixed; that ownWords suppresses only a repeat, never an only copy; that slackOwnWordsOnly still answers correctly with the producer de-duplicating; that deleting the pairing loses nothing; and that cost is bounded structurally, since a message whose own text passes 2,048 runes never enters the tree, capping every strings.Contains haystack at about 2 KB. It found no body a real Slack client sends where the own text and its rich_text copy disagree, having worked through emoji, channel mention, ordered list, fenced code, an auto-linked URL with an escaped entity and a date element, so the architect's ruling stands unchallenged. 20 shuffled runs confirm nothing depends on Go's map order.",
-    "codeQuality": "APPROVE, zero blocking, seven recorded. It judged the deletion a net simplification rather than a rearrangement — the attachment-fields special case stopped existing rather than moving behind another helper — and verified the yielded bound from slackWalkKeys rather than from the comment. It found no body a real Slack client sends that reopens the rich_text ruling either, having worked through the segment kinds a client emits."
+    "head": "89fa131c12e92538d7418d8e807c0dd2edec30c0",
+    "deepReview": "APPROVE, zero findings of any class. It verified that said is a fresh local per call supplied only to this object's own subtree, so a sibling outside it cannot set it and a nested fallback's own yield still reaches enclosing wrappers; that early termination is preserved, since the wrapper returns the downstream result unchanged and 'said || visit(fallback)' never swallows a false; that the eight-name rank and the per-object tally are otherwise untouched and a non-string fallback enters the alphabetical tail; that slackOwnWordsOnly still answers correctly under deferral; that the cap still distinguishes an exact fit from a truncation; and that message_changed, message_deleted, files, attachment_count, thread_broadcast and app_mention are unmoved, with previous_message never walked. It also traced the consumers — session.go, envoy-client's delivery renderer, pi-envoy and claude-envoy — and found the dedupe key, topics and routing unchanged.",
+    "codeQuality": "APPROVE, no blocking finding, one recorded: the masked repeat fixture above. It judged the split into slackWalkPieces, slackWalkFallback and slackWalkObject a real decomposition rather than a special case given a function, the visitor wrapper the right mechanism for the subtree question (a walk-wide tally would add shared state and per-piece bookkeeping to objects carrying no fallback), and the lone slackFallbackField constant clear, since the ranked names and the deferred fallback have different ordering and different duplicate scopes."
   },
   "threads": {
-    "state": "All eleven threads from rounds 1 to 3 are answered and resolved; I verified each fix at this head before replying, and replied on round 3's in this round. This round opens one new thread.",
-    "botThreads": 0
+    "state": "All twelve threads of rounds 1 to 4 are answered and resolved, verified in gh api graphql rather than from the PR body's Threads section. I verified each fix by driving the code before replying, and replied on round 4's in this round. No finding stands on any of them."
   },
-  "designGate": "The record shows designGate currentVersion 14 with approvedVersion null: the architect has put spec version 14 to the human and READY will not pass until he approves it. That is the gate working and is nothing this round holds for.",
+  "designGate": "currentVersion 15 with approvedVersion null at the time of this read, with version 16 issued by the architect to remove the contradiction between the spec's ranking of fallback and the code's. READY is held until the human approves; this approval waits on none of it and says nothing about it.",
   "proofLines": {
     "implementer": "present",
     "tester": "present"
