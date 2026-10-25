@@ -2860,7 +2860,7 @@ kubectl -n <namespace> auth can-i create services  # may it give one a name on t
 kubectl -n <namespace> auth can-i get services     # `kubectl apply` reads the live object before it creates one
 ```
 
-The third is not a duplicate of the second. The sequence writes each object with `kubectl apply`,
+The third is not a duplicate of the second. The sequence writes its Service with `kubectl apply`,
 which is client-side by default and reads the object it is about to create before it creates it,
 so a role that may create a Service but not read one gets `Error from server (Forbidden): error
 when retrieving current configuration of: … cannot get resource "services"` and never reaches the
@@ -2947,31 +2947,40 @@ it is marked where it stands:
 
 Name the workload for the issue **and for the run**, as everything else on this cluster is named
 for what owns it (`issue-legion-<project>-<issue key lowercased>`,
-`legion-<project>-<issue key lowercased>` above):
-`<issue key lowercased>-<what it is>-<six random characters>`, built once at the top of the
-sequence and substituted into both manifests, for instance `infra-71-postgres-9f2c1a`. The issue
-key carries its project, so the name cannot collide with another project's; the suffix is what
-keeps it from colliding with anything else, and both halves are needed.
+`legion-<project>-<issue key lowercased>` above). The issue is the name's prefix,
+`<issue key lowercased>-<what it is>-`, which the Job's manifest carries as
+`metadata.generateName`; the run is the API server's part, five random characters it appends at
+each create, answering with the whole name — for instance `infra-71-postgres-` followed by five
+such characters — which the sequence reads from that answer and writes into its Service. The issue
+key carries its project, so the name cannot collide with another project's. The rest is the
+server's for a reason: a name a role picks itself can be one that something else in the namespace
+already holds or will declare, and a Service takes its Job's name, so the Job's name is taken among
+the Services too, and the first anyone knows of it is another stack's apply failing
+`AlreadyExists`. A name the API server generates is not one any declaration chose: it exists from
+the create that made it. `kubectl apply` refuses `generateName` before it sends anything
+(`error: from <prefix>: cannot use generate name with apply`), which is why the sequence creates its
+Job with `kubectl create` and applies only its Service.
 
-A bare `postgres`, or even `infra-71-postgres`, is a name something else is using. Six roles
-share one issue and one identity, so a second role submitting that name is refused — this
-identity may not patch a Job (`kubectl auth can-i patch jobs` answers `no`) — while everything
-after the apply acts on the *first* role's workload: both waits select its pod, the reachability
-check reaches its database, and the trap's `kubectl delete job` takes it and its Service away
-mid-test. And a role that re-runs the sequence after any failure meets a worse version of the
-same thing, because a pod keeps its `job-name` label while it terminates: measured here, the
-second run's `--for=create` returned 0 in **1 s on the previous run's dying pod**, and the Ready
-wait reported `condition met` for one pod and `NotFound` for the other while the workload that
-would actually serve was still `Pending`. A reader who took that Ready at its word would run the
-reachability check against a workload that is not up and be sent, by the bullet above, to the
-one failure this section says announces nothing. A fresh suffix each run is what removes the
-whole class: the selector cannot match a corpse that never carried it.
+A name a role reuses is a name something else is using, as was measured here before the server
+named the run. A bare `postgres`, or even `infra-71-postgres`, is shared by six roles of one issue
+under one identity, and every step after the Job's acts on whatever holds that name: both waits
+select its pod, the reachability check reaches its database, and the trap's `kubectl delete job`
+takes it and its Service away mid-test. And a role that re-ran the sequence after any failure met a
+worse version of the same thing, because a pod keeps its `job-name` label while it terminates:
+measured here, the second run's `--for=create` returned 0 in **1 s on the previous run's dying
+pod**, and the Ready wait reported `condition met` for one pod and `NotFound` for the other while
+the workload that would actually serve was still `Pending`. A reader who took that Ready at its
+word would run the reachability check against a workload that is not up and be sent, by the bullet
+above, to the one failure this section says announces nothing. A suffix new at each create, which
+the server makes, is what removes the whole class: the selector cannot match a corpse that never
+carried it.
 
-The Job's manifest is the first of the two the sequence below writes, under this run's name. The
-name on the network is the second, a Service, held to a cluster-internal address: no node port, no
-load balancer, no external address and no external name. It is admitted only while the Job it
-fronts owns it, so removing the Job removes it too and leaves nothing for a person to sweep —
-which is why its `ownerReferences` carries the Job's own uid, read back after the Job is created.
+The Job's manifest is the first of the two the sequence below writes, under the name the API server
+gives it. The name on the network is the second, a Service, held to a cluster-internal address: no
+node port, no load balancer, no external address and no external name. It is admitted only while
+the Job it fronts owns it, so removing the Job removes it too and leaves nothing for a person to
+sweep — which is why its `ownerReferences` carries the Job's own uid, read from the create's own
+answer.
 It selects its pods by that same uid and by nothing else: the namespace's admission requires a
 Service's selector to be exactly `batch.kubernetes.io/controller-uid` at the uid of the Job that
 owns it, because a rule checking a submission sees only the object submitted and cannot look a
@@ -2996,8 +3005,7 @@ sequence=$(mktemp "${TMPDIR:-/tmp}/sequence.XXXXXX")              # not the chec
 cat > "$sequence" <<'SEQUENCE'
 set -euo pipefail
 echo "sequence: process $$; a deliberate stop is: kill -TERM -- -$$"
-workload="<issue key lowercased>-postgres-$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
-echo "workload: $workload"                     # the name the recovery line below needs
+workload=""                                    # the Job's create sets it; the trap reads it
 dir=$(mktemp -d "${TMPDIR:-/tmp}/workload.XXXXXX")
 password=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
 
@@ -3005,6 +3013,12 @@ cleanup() {
   status=$?
   trap - EXIT INT TERM HUP
   set +e
+  if [ -z "$workload" ]; then                  # no name read from a create: nothing to remove
+    echo "cleanup: no Job name was read; nothing removed"
+    rm -rf "$dir"
+    echo "sequence: exit $status"
+    exit "$status"
+  fi
   if [ "$status" -ne 0 ]; then                 # what the readings below send a role to look at
     kubectl get pods -l job-name="$workload" --show-labels
     kubectl logs -l job-name="$workload" --tail=20
@@ -3032,7 +3046,7 @@ cat > "$dir/job.yaml" <<YAML
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: $workload
+  generateName: <issue key lowercased>-postgres-   # the API server adds five characters
 spec:
   activeDeadlineSeconds: 3600           # on the Job, at most 43200
   ttlSecondsAfterFinished: 3600         # at most 86400
@@ -3061,8 +3075,9 @@ spec:
         - name: data
           emptyDir: {}                    # dies with the pod, by design
 YAML
-kubectl apply -f "$dir/job.yaml"
-uid=$(kubectl get job "$workload" -o jsonpath='{.metadata.uid}')   # what the Service must name
+created=$(kubectl create -o jsonpath='{.metadata.name} {.metadata.uid}' -f "$dir/job.yaml")
+workload=${created% *} uid=${created#* }       # the name it was given, and what the Service must name
+echo "workload: $workload"                     # the name the recovery line below needs
 
 cat > "$dir/service.yaml" <<YAML
 apiVersion: v1
@@ -3129,7 +3144,13 @@ without `blockOwnerDeletion`, holds nothing back, so the foreground delete does 
 lists the Job, the Service and the pods by this run's name, which prints nothing and `No resources
 found`; and exits with the status it began with, or 1 when a clean-up step failed after a run that
 had succeeded, printing it last as `sequence: exit <status>`, since the call that waits for a
-detached sequence prints its output and not its status.
+detached sequence prints its output and not its status. A trap that runs before the sequence has
+read its Job's name from the create's answer — the create refused, or a stop that landed first —
+has no name to act on: it prints `cleanup: no Job name was read; nothing removed` and its status,
+and removes nothing. After a refused create that is all there was; a stop that landed while the
+create was in flight, or between its answer and the line that reads it, can have left a Job the
+trap never learned the name of, which the listing under the recovery lines below finds by its
+issue key.
 
 **A timeout of the role's own bash tool is what the detaching is for.** The tool ends a call that
 runs past its timeout by signalling the command and every process under it and killing them almost
@@ -3155,7 +3176,7 @@ during the Ready wait ran it 76 s later, when the wait returned, and `SIGINT` se
 during a check that was being refused ran it 58 s later, when the check gave up. A `SIGKILL`, or
 the role's pod going away, runs no trap: the Job's two deadlines bound what is left, and a role
 that stopped that way — or that ran the sequence in its tool's foreground and saw the call time
-out — removes it with the name the sequence printed first:
+out — removes it with the name the sequence printed once its Job was created:
 
 ```sh
 kubectl delete job <the printed workload name> --cascade=foreground
@@ -3221,8 +3242,9 @@ dispatch://INFRA-206's declarations on 2026-10-25 turned two of the gate's three
 to `yes`. So each bullet below carries the date of the run behind it, and a reader runs the three
 gate commands itself rather than trusting the answers recorded here:
 
-- *Executed from a role container on 2026-10-25, for dispatch://INFRA-215, with the sequence
-  exactly as published above, through the role's own bash tool*: the block taken from this page
+- *Executed from a role container on 2026-10-25, for dispatch://INFRA-215, with the sequence as
+  published then (before dispatch://INFRA-232 moved the Job to a generated name), through the
+  role's own bash tool*: the block taken from this page
   with only its three bracketed lines filled in and pasted into a tool call, each run under its own
   suffix, and a fixture changing one line of it where named. As published: `answered`, the trap's
   listing empty, `sequence: exit 0`, the call returning 92 s after it started. With the Service's
@@ -3242,7 +3264,7 @@ gate commands itself rather than trusting the answers recorded here:
   after the runs.
 - *Executed from a role container on 2026-10-25, for dispatch://INFRA-215, with the sequence run
   in the foreground of a process of its own, before it detached*: the steps from the Job to the
-  trap were then as they are above. The three gate commands answering `yes`, and `get endpoints`,
+  trap were as published then. The three gate commands answering `yes`, and `get endpoints`,
   `get endpointslices` and `patch jobs` answering `no`; `POD_NAMESPACE` unset, and none of `psql`,
   `redis-cli`, `sqlite3`, `nc` and `dig` on the `PATH`. Ready 79 s after the submission on a cold
   machine, `answered` 2 s later, the trap's foreground delete in 6 s and the Service wait at once.
