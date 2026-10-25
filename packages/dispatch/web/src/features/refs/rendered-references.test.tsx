@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, describe, expect, spyOn, test } from "bun:test";
 import { DISPATCH_TEXT_REFERENCES } from "@legion/contracts";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { cleanup, render, waitFor, within } from "@testing-library/react";
+import { cleanup, render, renderHook, waitFor, within } from "@testing-library/react";
 import type { Window as HappyDOMWindow } from "happy-dom";
 import type { ReactNode } from "react";
 
@@ -10,7 +10,8 @@ import type { IssueDetails, MessageRead } from "../../api/types";
 import { MarkdownBody } from "./MarkdownBody";
 import { MarkdownPreview } from "./MarkdownPreview";
 import { warmMarkdownRenderer } from "./markdown-engine";
-import { issueQuery, referenceQuestionsQuery, referenceTitle } from "./reference-target";
+import { issueQuery, referenceQuestionsQuery, useReferenceTarget } from "./reference-target";
+import type { DispatchReferenceRoute } from "./routes";
 
 /**
  * The renderers' half of the shared text table (`DISPATCH_TEXT_REFERENCES`, which the server's
@@ -50,6 +51,14 @@ function appQueryClient(): QueryClient {
 
 function withClient(queryClient: QueryClient, children: ReactNode): ReactNode {
   return <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>;
+}
+
+function renderTarget(queryClient: QueryClient, route: DispatchReferenceRoute) {
+  return renderHook(() => useReferenceTarget(route), {
+    wrapper: ({ children }: { children: ReactNode }) => (
+      <QueryClientProvider client={queryClient}>{children}</QueryClientProvider>
+    ),
+  });
 }
 
 /** Every reference a rendered element links or, in a preview, shows as link-styled text: its
@@ -263,28 +272,63 @@ describe("bare references", () => {
   });
 });
 
-describe("referenceTitle", () => {
-  test("reads a title from the cache by the rule the links draw with", () => {
+describe("useReferenceTarget", () => {
+  test("reads a cached issue as its key and title, asking nothing more", async () => {
+    const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
     const queryClient = appQueryClient();
     queryClient.setQueryData(issueQuery("CORE-12").queryKey, issueNamed("CORE-12"));
-    expect(referenceTitle(queryClient, { key: "CORE-12", kind: "issue" })).toMatchObject({
-      title: "CORE-12 Title of CORE-12",
-      titleKey: "CORE-12",
-    });
-    // Nothing cached is no title yet; the caller shows what was written.
-    expect(referenceTitle(queryClient, { key: "CORE-13", kind: "issue" }).title).toBeUndefined();
+    const view = renderTarget(queryClient, { key: "CORE-12", kind: "issue" });
+    try {
+      await waitFor(() =>
+        expect(view.result.current).toMatchObject({
+          title: "CORE-12 Title of CORE-12",
+          titleKey: "CORE-12",
+        })
+      );
+      expect(getIssue).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      getIssue.mockRestore();
+    }
   });
 
-  test("a message reads as its text's headline, its whole text the description once cut", () => {
+  test("an issue that does not exist has no title; the caller shows what was written", async () => {
+    const getIssue = spyOn(api, "getIssue").mockRejectedValue(notFound());
+    const view = renderTarget(appQueryClient(), { key: "CORE-13", kind: "issue" });
+    try {
+      await waitFor(() => expect(getIssue).toHaveBeenCalledTimes(1));
+      // Long enough for a retry the shared rule would make at its `retryDelay` of 0.
+      await Bun.sleep(50);
+      expect(getIssue).toHaveBeenCalledTimes(1);
+      expect(view.result.current.title).toBeUndefined();
+      expect(view.result.current.titleKey).toBeUndefined();
+    } finally {
+      view.unmount();
+      getIssue.mockRestore();
+    }
+  });
+
+  test("a message reads as its text's headline, its whole text the description once cut", async () => {
+    const getMessage = spyOn(api, "getMessage").mockRejectedValue(notFound());
     const queryClient = appQueryClient();
     const body = `**Deploy** finished on every region, with the canary held for an hour before the rest`;
     queryClient.setQueryData(["issue", "CORE-1", "message", "m1"], {
       message: { author: { id: "s1", kind: "session" }, body, id: "m1" },
       replies: [],
     } as unknown as MessageRead);
-    const target = referenceTitle(queryClient, { id: "m1", key: "CORE-1", kind: "message" });
-    expect(target.title).toBe("Deploy finished on every region, with the canary held for an…");
-    expect(target.titleKey).toBeUndefined();
-    expect(target.description).toBe(body);
+    const view = renderTarget(queryClient, { id: "m1", key: "CORE-1", kind: "message" });
+    try {
+      await waitFor(() =>
+        expect(view.result.current.title).toBe(
+          "Deploy finished on every region, with the canary held for an…"
+        )
+      );
+      expect(view.result.current.titleKey).toBeUndefined();
+      expect(view.result.current.description).toBe(body);
+      expect(getMessage).not.toHaveBeenCalled();
+    } finally {
+      view.unmount();
+      getMessage.mockRestore();
+    }
   });
 });

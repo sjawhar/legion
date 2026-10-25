@@ -1,11 +1,18 @@
-import { expect, test } from "bun:test";
+import { expect, spyOn, test } from "bun:test";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, waitFor, within } from "@testing-library/react";
+import { act, fireEvent, render, waitFor, within } from "@testing-library/react";
+import { MemoryRouter, useLocation } from "react-router-dom";
 
 import { fakeDocumentRuntime } from "../../__tests__/document-runtime";
+import { api } from "../../api/client";
 import type { CreateEditor } from "./editor";
+import { scanEditorReferences } from "./editor-references";
 import { DocumentRuntime } from "./runtime";
 import { VersionView } from "./VersionView";
+
+function CurrentRoute() {
+  return <div data-testid="current-route">{useLocation().pathname}</div>;
+}
 
 function createQueryClient(): QueryClient {
   return new QueryClient({
@@ -44,19 +51,22 @@ function renderVersionView({
     throw new Error("VersionView test runtime must provide a block schema.");
   }
   const view = render(
-    <QueryClientProvider client={queryClient}>
-      <DocumentRuntime.Provider value={runtime.runtime}>
-        <VersionView
-          artifactId="artifact-1"
-          asks={[]}
-          blockSchema={blockSchema}
-          createdAt="2026-09-09T00:00:00Z"
-          highlight={highlight}
-          owner={undefined}
-          version={1}
-        />
-      </DocumentRuntime.Provider>
-    </QueryClientProvider>
+    <MemoryRouter>
+      <QueryClientProvider client={queryClient}>
+        <DocumentRuntime.Provider value={runtime.runtime}>
+          <CurrentRoute />
+          <VersionView
+            artifactId="artifact-1"
+            asks={[]}
+            blockSchema={blockSchema}
+            createdAt="2026-09-09T00:00:00Z"
+            highlight={highlight}
+            owner={undefined}
+            version={1}
+          />
+        </DocumentRuntime.Provider>
+      </QueryClientProvider>
+    </MemoryRouter>
   );
   return { ...runtime, blockSchema, view };
 }
@@ -139,6 +149,51 @@ test("VersionView shows the parser's error instead of an empty document when a v
     expect(editors[0]?.destroyed).toBe(true);
     expect(within(view.container).getByRole("heading").textContent).toMatch(/^Version 1 · /);
   } finally {
+    view.unmount();
+  }
+});
+
+test("VersionView resolves its editor's reference keys and follows a dispatch:// link in-app", async () => {
+  const getIssue = spyOn(api, "getIssue").mockResolvedValue({
+    artifacts: [],
+    key: "CORE-2",
+    status: "in_progress",
+    title: "Ship the release",
+  } as never);
+  const { editors, view } = renderVersionView({
+    highlight: undefined,
+    markdown: "See dispatch://CORE-2 and [my words](dispatch://CORE-2).",
+  });
+
+  try {
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("no editor");
+    expect(editor.options.references?.scan).toBe(scanEditorReferences);
+    act(() => editor.options.references?.onKeys(["dispatch://CORE-2"]));
+
+    await waitFor(() =>
+      expect(editor.referenceTargets.at(-1)).toEqual(
+        new Map([
+          [
+            "dispatch://CORE-2",
+            { href: "dispatch://CORE-2", title: "CORE-2 Ship the release", titleKey: "CORE-2" },
+          ],
+        ])
+      )
+    );
+
+    // A link mark as the read-only editor draws it: its href sanitized, its target kept aside.
+    act(() => {
+      editor.root.innerHTML =
+        '<p>See <a href="" data-dispatch-href="dispatch://CORE-2">my words</a></p>';
+    });
+    const link = editor.root.querySelector("a");
+    if (link === null) throw new Error("link missing");
+    fireEvent.click(link);
+    expect(within(view.container).getByTestId("current-route").textContent).toBe("/issues/CORE-2");
+  } finally {
+    getIssue.mockRestore();
     view.unmount();
   }
 });

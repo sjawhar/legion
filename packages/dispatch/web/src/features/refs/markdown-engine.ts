@@ -237,13 +237,6 @@ export function useMarkdownHeadline(
   return headline;
 }
 
-/** `useMarkdownHeadline` outside React, for a caller that draws no component of its own (the
- *  document editor's reference titles): the headline once the engine has loaded on the page
- *  (`warmMarkdownRenderer`), `undefined` before. */
-export function markdownHeadline(markdown: string, max: number): MarkdownHeadline | undefined {
-  return readyEngine === undefined ? undefined : headlineWith(readyEngine, markdown, max);
-}
-
 /** The headline of markdown read by engine, or of its literal text without one. */
 function headlineWith(
   engine: MarkdownEngine | undefined,

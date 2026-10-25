@@ -11,7 +11,7 @@ import type {
   IssueDetails,
   MessageRead,
 } from "../../api/types";
-import { type MarkdownHeadline, markdownHeadline, useMarkdownHeadline } from "./markdown-engine";
+import { type MarkdownHeadline, useMarkdownHeadline } from "./markdown-engine";
 import {
   type DispatchReferenceRoute,
   isProjectRoute,
@@ -319,51 +319,6 @@ export function useReferenceData(route: DispatchReferenceRoute | undefined): Ref
   };
 }
 
-/** `useReferenceData` from what the query cache holds now, fetching nothing. */
-function cachedReferenceData(
-  queryClient: QueryClient,
-  route: DispatchReferenceRoute
-): ReferenceData {
-  const records = referenceRecords(route);
-  const { agentArtifact, askId, commentId, document, issueKey, message, version } = records;
-  const issue =
-    issueKey === undefined || message !== undefined
-      ? undefined
-      : queryClient.getQueryData(issueQuery(issueKey).queryKey);
-  const artifact = namedArtifact(
-    route,
-    records,
-    issue,
-    document === undefined
-      ? undefined
-      : queryClient.getQueryData(projectArtifactQuery(document.project, document.slug).queryKey),
-    agentArtifact === undefined
-      ? undefined
-      : queryClient.getQueryData(
-          agentArtifactQuery(agentArtifact.session, agentArtifact.slug).queryKey
-        )
-  );
-  return {
-    issue,
-    artifact,
-    markdown:
-      artifact?.kind === "doc"
-        ? documentMarkdown(
-            queryClient.getQueryData(artifactTextQuery(artifact.id, version).queryKey)
-          )
-        : undefined,
-    ask: askId === undefined ? undefined : queryClient.getQueryData(askQuery(askId).queryKey),
-    comment:
-      commentId === undefined
-        ? undefined
-        : queryClient.getQueryData(commentQuery(commentId).queryKey),
-    message:
-      message === undefined
-        ? undefined
-        : queryClient.getQueryData(messageQuery(message.key, message.id).queryKey),
-  };
-}
-
 /** The text a reference's title is a headline of: an ask's question, a comment's or a message's
  *  body; `undefined` for any other target and while it loads. */
 function authoredText(route: DispatchReferenceRoute, data: ReferenceData): string | undefined {
@@ -426,32 +381,13 @@ const NO_TARGET: ReferenceTarget = {
 };
 
 /**
- * A reference's target as the query cache holds it now, by the title rule `useReferenceTarget`
- * draws with, for a caller outside React (the document editor's reference titles). It fetches
- * nothing: a target whose records are not cached yet, and an ask, comment or message before the
- * Markdown engine has loaded on the page (`warmMarkdownRenderer`), have no title yet.
- */
-export function referenceTitle(
-  queryClient: QueryClient,
-  route: DispatchReferenceRoute
-): ReferenceTarget {
-  const data = cachedReferenceData(queryClient, route);
-  const authored = authoredText(route, data);
-  return referenceTargetOf(
-    route,
-    data,
-    authored === undefined ? undefined : markdownHeadline(authored, TITLE_HEADLINE_MAX)
-  );
-}
-
-/**
- * Every query behind a resolved reference title, shared by the Unfurl card and the inline
- * `RefLink` markdown/document rendering so both draw from one fetch path, by the title rule
- * `referenceTitle` shares. An issue reads as its key then its title (`titleKey` names the key, as
- * `features/project/IssueList.tsx` sets it in semibold); a document as its name; an ask, comment
- * or message (whether issue-scoped or nested under a project document's `item`) as its own text
- * rather than the owning issue's title or document. A title drawn from text its author wrote (the
- * question, the comment, the message) is that Markdown projected to plain words and cut
+ * Every query behind a resolved reference title, shared by the Unfurl card, the inline `RefLink`
+ * markdown/document rendering and the document editor's reference titles, so all draw from one
+ * fetch path by one title rule. An issue reads as its key then its title (`titleKey` names the
+ * key, as `features/project/IssueList.tsx` sets it in semibold); a document as its name; an ask,
+ * comment or message (whether issue-scoped or nested under a project document's `item`) as its own
+ * text rather than the owning issue's title or document. A title drawn from text its author wrote
+ * (the question, the comment, the message) is that Markdown projected to plain words and cut
  * (`useMarkdownHeadline`): a link's text can hold no formatting, so a `**Blocking:**` question
  * titles its link `Blocking: …`, never `**Blocking:** …`. The description is the target's own
  * Markdown, for the caller to render formatted: a document's text, and an ask's, comment's or

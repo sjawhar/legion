@@ -1,5 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { type ReactNode, useContext, useEffect, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import type { Doc } from "yjs";
 
 import { api } from "../../api/client";
@@ -10,6 +11,11 @@ import { AskBlockCard } from "./AskBlockCard";
 import { type AskBlockHost, installTypedBlocks } from "./ask-block";
 import { colorForLogin } from "./connection";
 import { createDoc, type EditorHandle } from "./editor";
+import {
+  EditorReferenceTargets,
+  followEditorDispatchLink,
+  useEditorReferences,
+} from "./editor-references";
 import type { Highlight } from "./highlight";
 import { embedHighlight } from "./highlight";
 import { DocumentRuntime } from "./runtime";
@@ -40,6 +46,8 @@ export function VersionView({
   const [highlightMissing, setHighlightMissing] = useState(false);
   const [renderError, setRenderError] = useState<string | undefined>(undefined);
   const { createEditor } = useContext(DocumentRuntime);
+  const { binding: referenceBinding, keys: referenceKeys } = useEditorReferences();
+  const navigate = useNavigate();
   const versionQuery = useQuery({
     queryKey: ["artifact", artifactId, "version", version],
     queryFn: () => api.getArtifactVersion(artifactId, version),
@@ -78,6 +86,7 @@ export function VersionView({
         blockSchema,
         heatMapMode: "hidden",
         readOnly: true,
+        references: referenceBinding.references,
         user: { color: colorForLogin(user.login), name: user.login },
         ydoc: doc,
       });
@@ -87,6 +96,7 @@ export function VersionView({
         return;
       }
       installTypedBlocks(editor.view, blockSchema, setAskBlockHosts);
+      referenceBinding.bind(editor);
       const embedded = highlight === undefined ? undefined : embedHighlight(markdown, highlight);
       editor.setMarkdown(embedded ?? markdown);
       setHighlightMissing(highlight !== undefined && embedded === undefined);
@@ -108,8 +118,9 @@ export function VersionView({
       mounted = false;
       handle?.destroy();
       ydoc?.destroy();
+      referenceBinding.bind(undefined);
     };
-  }, [blockSchema, createEditor, highlight, markdown, userQuery.data]);
+  }, [blockSchema, createEditor, highlight, markdown, referenceBinding, userQuery.data]);
 
   if (versionQuery.isPending) {
     return <p>Loading version…</p>;
@@ -135,8 +146,20 @@ export function VersionView({
       {renderError === undefined ? null : (
         <p role="alert">This version could not be rendered: {renderError}</p>
       )}
-      <article aria-label="Document" className="dispatch-doc" data-read-only="true">
+      {/* biome-ignore lint/a11y/useKeyWithClickEvents: dispatch:// link clicks bubble here, as
+      they do in the live document. */}
+      <article
+        aria-label="Document"
+        className="dispatch-doc"
+        data-read-only="true"
+        onClick={(event) => followEditorDispatchLink(event, navigate)}
+      >
         <div ref={root} />
+        <EditorReferenceTargets
+          artifactId={artifactId}
+          keys={referenceKeys}
+          onTargets={referenceBinding.setTargets}
+        />
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (

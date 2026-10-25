@@ -9,12 +9,14 @@ import {
   createQueryClient,
   renderProofDocument,
 } from "../../__tests__/proof-document";
-import { api } from "../../api/client";
+import { ApiError, api } from "../../api/client";
 import type { IssueDetails } from "../../api/types";
 import { heldSends } from "../conversation/held-sends";
 import { marginComposeSendKey } from "../margin/margin-context";
+import { warmMarkdownRenderer } from "../refs/markdown-engine";
 import { appKeymap } from "../shell/keymap";
 import { colorForLogin } from "./connection";
+import { scanEditorReferences } from "./editor-references";
 
 answerTextReadsWithTheSeededText();
 
@@ -684,4 +686,64 @@ test("Ctrl+Alt+M comments on the selection while the editor has focus, and nowhe
     view.unmount();
   }
   expect(appKeymap.describe().some((entry) => entry.id === "comment-on-selection")).toBe(false);
+});
+
+test("ProofDocument resolves the live editor's reference keys and follows a drawn title in-app", async () => {
+  await warmMarkdownRenderer();
+  const spies = [
+    spyOn(api, "getIssue").mockImplementation(async (key: string) => {
+      if (key === "CORE-2") {
+        return { artifacts: [], key, status: "in_progress", title: "Ship the release" } as never;
+      }
+      throw new ApiError(404, { code: "NOT_FOUND", error: "not found" });
+    }),
+    spyOn(api, "getReferenceQuestions").mockResolvedValue({
+      document: "dispatch://CORE-1/spec",
+      questions: [{ ask: "dispatch://CORE-1/ask/ask-2", block_id: "q2" }],
+    }),
+    spyOn(api, "getAsk").mockResolvedValue({ ask: { question: "Which **way**?" } } as never),
+  ];
+  const { editors, sync, view } = renderProofDocument();
+
+  try {
+    await sync();
+    await waitFor(() => expect(editors).toHaveLength(1));
+    const editor = editors[0];
+    if (editor === undefined) throw new Error("no editor");
+    expect(editor.options.references?.scan).toBe(scanEditorReferences);
+    // The editor reports the keys its scanner found in the document.
+    act(() => editor.options.references?.onKeys(["#nope", "#q2", "CORE-2", "CORE-404"]));
+
+    await waitFor(() =>
+      expect(editor.referenceTargets.at(-1)).toEqual(
+        new Map([
+          [
+            "#q2",
+            { href: "dispatch://CORE-1/ask/ask-2", title: "Which way?", titleKey: undefined },
+          ],
+          [
+            "CORE-2",
+            { href: "dispatch://CORE-2", title: "CORE-2 Ship the release", titleKey: "CORE-2" },
+          ],
+          ["CORE-404", null],
+        ])
+      )
+    );
+    expect(spies[1]).toHaveBeenCalledWith({ id: artifact.id, kind: "artifact" });
+
+    // What the editor draws for a resolved candidate: a link carrying the target.
+    act(() => {
+      editor.root.innerHTML =
+        '<p>See <a class="dispatch-reference" data-dispatch-href="dispatch://CORE-2" role="link"><strong>CORE-2</strong> Ship the release</a></p>';
+    });
+    const title = editor.root.querySelector("strong");
+    if (title === null) throw new Error("title missing");
+    fireEvent.click(title);
+    expect(within(view.container).getByTestId("current-route").textContent).toBe("/issues/CORE-2");
+  } finally {
+    for (const spy of spies) {
+      spy.mockRestore();
+    }
+    view.unmount();
+  }
 });

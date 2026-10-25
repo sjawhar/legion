@@ -36,12 +36,7 @@ import {
 } from "../artifacts/ArtifactUpload";
 import { useMargin } from "../margin/margin-context";
 import type { MarginOwner } from "../margin/useMarginItems";
-import {
-  buildIssuePath,
-  buildProjectPath,
-  buildReferencePath,
-  parseDispatchReference,
-} from "../refs/routes";
+import { buildIssuePath, buildProjectPath } from "../refs/routes";
 import { importWhenOnline } from "../shell/DeploymentResilience";
 import { useKeymap, useKeymapScope } from "../shell/keymap";
 import { AskBlockCard } from "./AskBlockCard";
@@ -50,6 +45,11 @@ import type { ConnectionState, DocumentConnection } from "./connection";
 import { colorForLogin } from "./connection";
 import type { EditorHandle } from "./editor";
 import { bindRemoteMarks } from "./editor";
+import {
+  EditorReferenceTargets,
+  followEditorDispatchLink,
+  useEditorReferences,
+} from "./editor-references";
 import type { Highlight } from "./highlight";
 import {
   blockOffsets,
@@ -157,16 +157,6 @@ function setSearchHighlights(root: HTMLElement, query: string): void {
   CSS.highlights.set("dispatch-search", new Highlight(...ranges));
 }
 
-/** A rendered link mark's `dispatch://` target, if any. `@legion/proof-editor`'s Markdown
- * serializer sanitizes a `dispatch://` href to `""` (Milkdown's link sanitizer only allows
- * http/https/mailto/tel/ftp — a document strangers can edit should never render an
- * attacker-chosen non-http scheme as a clickable href) and tags the anchor with
- * `data-dispatch-href` carrying the original target instead. */
-function dispatchHrefOf(anchor: Element): string | null {
-  const href = anchor.getAttribute("data-dispatch-href") ?? anchor.getAttribute("href");
-  return href?.startsWith("dispatch://") ? href : null;
-}
-
 export function ProofDocument({
   artifact,
   highlight,
@@ -181,6 +171,7 @@ export function ProofDocument({
 }: ProofDocumentProps): ReactNode {
   const root = useRef<HTMLDivElement>(null);
   const editorRef = useRef<EditorHandle | undefined>(undefined);
+  const { binding: referenceBinding, keys: referenceKeys } = useEditorReferences();
   const isClosedRef = useRef(isClosed);
   const schemaReadOnlyRef = useRef(false);
   const userRef = useRef(user);
@@ -407,6 +398,7 @@ export function ProofDocument({
       if (editorRef.current === editor) {
         editorRef.current = undefined;
       }
+      referenceBinding.bind(undefined);
       disposeEditorBindings = undefined;
       editor = undefined;
       document = undefined;
@@ -596,6 +588,7 @@ export function ProofDocument({
                   name: userRef.current.login,
                 },
                 blockSchema,
+                references: referenceBinding.references,
                 ydoc: connection.doc,
               })
                 .then((handle) => {
@@ -607,6 +600,7 @@ export function ProofDocument({
                   }
                   editor = handle;
                   editorRef.current = handle;
+                  referenceBinding.bind(handle);
                   disposeEditorBindings = bindEditor(handle, connection);
                 })
                 .catch(reportLoadFailure);
@@ -624,7 +618,7 @@ export function ProofDocument({
       readmitRef.current = undefined;
       teardown();
     };
-  }, [artifact.id, blockSchema, createEditor, loadTransport, queryClient]);
+  }, [artifact.id, blockSchema, createEditor, loadTransport, queryClient, referenceBinding]);
 
   // A blocked admission is admitted again by the next successful read of the document's text: the
   // refetch a repair upload's or a rebuild's invalidation makes, or any other. Each successful read
@@ -760,28 +754,14 @@ export function ProofDocument({
         className="dispatch-doc relative"
         data-read-only={isClosed || schemaReadOnly}
         hidden={version !== undefined || repairError !== undefined || rebuildError !== undefined}
-        onClick={(event) => {
-          // A modifier click (open in new tab/window) or a drag-selection that happens to end
-          // on the link should reach the browser/editor's own handling, not steal the click.
-          const modified = event.ctrlKey || event.metaKey || event.shiftKey || event.altKey;
-          if (event.button !== 0 || modified) {
-            return;
-          }
-          const selection = window.getSelection();
-          if (selection !== null && !selection.isCollapsed) {
-            return;
-          }
-          const anchor = (event.target as HTMLElement).closest<HTMLAnchorElement>("a");
-          const href = anchor === null ? null : dispatchHrefOf(anchor);
-          const route = href === null ? undefined : parseDispatchReference(href);
-          if (route === undefined) {
-            return;
-          }
-          event.preventDefault();
-          navigate(buildReferencePath(route));
-        }}
+        onClick={(event) => followEditorDispatchLink(event, navigate)}
       >
         <div ref={root} />
+        <EditorReferenceTargets
+          artifactId={artifact.id}
+          keys={referenceKeys}
+          onTargets={referenceBinding.setTargets}
+        />
         {askBlockHosts.map((host) => {
           const blockId = String(host.node.attrs.blockId);
           return (
