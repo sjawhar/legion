@@ -126,7 +126,9 @@
 //     judges only the asks it adds. A retype whose read fails sets `ruleTextMissing` and is judged
 //     without its text; an upload whose read fails judges only the openers that carry no id, which
 //     no stored version can hold, and sets `ruleAsksPartial` for the openers it left out, so a
-//     re-upload of an unchanged document is never refused for an ask block it already held.
+//     re-upload of an unchanged document is never refused for an ask block it already held. When
+//     every opener of that upload carries an id, no model call is made: `ruleOutcome` reads
+//     `unjudged` with `ruleAsksPartial`, the charter decides alone, and the call is recorded.
 //     The system prompt is rule-check-system.md and rule-check.md, and the request
 //     (rule-check-request.md) carries the same escaped system prompt and transcript, then every
 //     new ask in an `<ask>` tag of its own, each given an equal share of a 32 KiB list and at most
@@ -346,7 +348,10 @@ export interface GateEntry {
   ruleAsk?: number;
   /** The words of that ask the rules call quoted. */
   ruleQuote?: string;
-  /** How the rules check ended, on each call that opens a new ask and reached the model call. */
+  /**
+   * How the rules check ended, on each call that opens a new ask and reached the model call, and
+   * `unjudged` on an upload whose read failed with every opener carrying an id: no model call.
+   */
   ruleOutcome?: RuleOutcome;
   /** The provider's error text, `timeout` or `no-verdict`, on a rules call that gave no verdict. */
   ruleError?: string;
@@ -362,7 +367,8 @@ export interface GateEntry {
   ruleAsksCut?: number;
   /**
    * An upload whose stored version the gate could not read: the rules call judged only the
-   * openers that carry no id, the ones no stored version can already hold.
+   * openers that carry no id, the ones no stored version can already hold, or, with
+   * `ruleOutcome` `unjudged`, none of them.
    */
   ruleAsksPartial?: true;
   /** Why this decision reached no Dispatch decision record (`decision-record.ts`); the call itself was unaffected. */

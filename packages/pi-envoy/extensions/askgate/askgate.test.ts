@@ -3731,6 +3731,7 @@ describe("rules check", () => {
     expect(check?.textMissing).toBe(false);
   });
   test("an unchanged document re-uploaded when the de-duplication read fails is not refused", async () => {
+    let walks = 0;
     const check = await checkRules(
       {
         toolName: "dispatch_artifact",
@@ -3740,16 +3741,117 @@ describe("rules check", () => {
       {
         ...noDispatch,
         // The rule the stored ask block would match, were it judged as an ask this upload adds.
-        walk: async () => ({
-          answer: {
-            kind: "answer" as const,
-            text: rulesAnswer([{ ask: 1, rule: "no_change", quote: "Which deployment window?" }]),
-          },
-          called: {},
-        }),
+        walk: async () => {
+          walks += 1;
+          return {
+            answer: {
+              kind: "answer" as const,
+              text: rulesAnswer([{ ask: 1, rule: "no_change", quote: "Which deployment window?" }]),
+            },
+            called: {},
+          };
+        },
       }
     );
+    // Its one opener carries an id the stored version may hold, so no model judges it and nothing
+    // matches; the check says it judged none of the call's asks rather than staying silent.
+    expect(walks).toBe(0);
+    expect(check).toMatchObject({
+      outcome: "unjudged",
+      asksPartial: true,
+      matches: [],
+      names: [],
+      promptBytes: 0,
+    });
+    expect(check?.model).toBeUndefined();
+    expect(check?.error).toBeUndefined();
+  });
+  test("an upload whose de-duplication read fails with an id on every opener, a new one among them, answers unjudged with no model call", async () => {
+    // A document downloaded from Dispatch, every stored block already carrying an id, and a new
+    // ask the agent wrote with one of its own: the stored version could not hold `#new`, but with
+    // the read failed nothing says so, and a judged list emptied by the id filter is no clean call.
+    let walks = 0;
+    let clock = 0;
+    const check = await checkRules(
+      {
+        toolName: "dispatch_artifact",
+        tool: "dispatch artifact",
+        input: {
+          issue: "X-1",
+          name: "brief.md",
+          content: `${BRIEF}\n:::ask{#new}\nShould I change the cache path? Recommendation: keep it as it is.\n:::\n`,
+        },
+      },
+      {
+        // The read takes 7 ms of the clock, and that is all the check spends.
+        now: () => clock,
+        dispatchClient: () => {
+          clock += 7;
+          return undefined;
+        },
+        walk: async () => {
+          walks += 1;
+          return { answer: { kind: "answer" as const, text: RULES_NONE }, called: {} };
+        },
+      }
+    );
+    expect(walks).toBe(0);
+    expect(check).toMatchObject({ outcome: "unjudged", asksPartial: true, latencyMs: 7 });
+    expect(check?.textMissing).toBe(false);
+  });
+  test("a re-upload whose stored version holds every opener opens no new ask, and the check answers nothing", async () => {
+    // The other fact behind an empty judged list: the read answered, and every ask is already held.
+    let walks = 0;
+    const check = await checkRules(
+      {
+        toolName: "dispatch_artifact",
+        tool: "dispatch artifact",
+        input: { issue: "X-1", name: "brief.md", content: BRIEF },
+      },
+      {
+        walk: async () => {
+          walks += 1;
+          return { answer: { kind: "answer" as const, text: RULES_NONE }, called: {} };
+        },
+      }
+    );
+    expect(walks).toBe(0);
     expect(check).toBeUndefined();
+  });
+  test("an upload whose de-duplication read fails with an id on every opener goes out in block mode, no rules model asked, its entry unjudged", async () => {
+    const content =
+      ":::ask{#window}\nWhich deployment window?\n:::\n\n:::ask{#new}\nShould I change the cache path? Recommendation: keep it as it is.\n:::\n";
+    // The rules answer would refuse the new ask, were the rules model asked; the session has no
+    // Dispatch, so the read of the stored version fails.
+    const g = bind({
+      env: { OMP_ASKGATE: "block" },
+      complete: bySystem(ALLOW, NO_CHANGE),
+      dryRun: async () => ({
+        exitCode: 0,
+        stdout: JSON.stringify({ issue: "X-1", name: "brief.md", content }),
+        stderr: "",
+        timedOut: false,
+      }),
+    });
+    const result = await g.bash(
+      "t1",
+      "dispatch artifact --issue X-1 --name brief.md --content-file brief.md"
+    );
+    expect(result?.block).toBeUndefined();
+    expect(g.calls.filter(isRules)).toHaveLength(0);
+    expect(g.calls.filter(isCharter)).toHaveLength(1);
+    expect(g.entries).toMatchObject([
+      {
+        tool: "dispatch_artifact",
+        decision: "allow",
+        verdictMode: "block",
+        ruleOutcome: "unjudged",
+        ruleAsksPartial: true,
+      },
+    ]);
+    expect(typeof g.entries[0]?.ruleLatencyMs).toBe("number");
+    for (const field of ["rule", "ruleModel", "ruleError", "ruleTextMissing"] as const)
+      expect(g.entries[0]?.[field]).toBeUndefined();
   });
   test("a doc-edit whose document read fails still judges every ask it inserts", async () => {
     const check = await checkRules(
@@ -3949,6 +4051,83 @@ describe("the Dispatch decision record (A5)", () => {
     expect(g.entries[0]?.ruleTextMissing).toBeUndefined();
     expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
       { tool: "dispatch_artifact", ruleAsksPartial: true, ruleTextMissing: false },
+    ]);
+  });
+
+  /** A `dispatch artifact` upload of `content` as brief.md on X-1, as its dry run prints it. */
+  const uploadOf = (content: string) => async () => ({
+    exitCode: 0,
+    stdout: JSON.stringify({ issue: "X-1", name: "brief.md", content }),
+    stderr: "",
+    timedOut: false,
+  });
+  const UPLOAD = "dispatch artifact --issue X-1 --name brief.md --content-file brief.md";
+
+  test("an upload whose de-duplication read fails with an id on every opener is recorded as unjudged", async () => {
+    // Every opener carries an id, `#new` among them; this Dispatch answers the record's two calls
+    // alone, so the read fails and no ask is judged. The call goes out, and the record says so.
+    const content =
+      ":::ask{#window}\nWhich deployment window?\n:::\n\n:::ask{#new}\nShould I change the cache path? Recommendation: keep it as it is.\n:::\n";
+    const dispatch = recordingDispatch();
+    const g = bind({
+      complete: bySystem(ALLOW, MATCHED),
+      env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+      dispatch: dispatch.session,
+      dryRun: uploadOf(content),
+    });
+    expect(await g.bash("t1", UPLOAD)).toBeUndefined();
+    expect(g.calls.filter(isRules)).toHaveLength(0);
+    expect(g.entries).toMatchObject([
+      { tool: "dispatch_artifact", ruleOutcome: "unjudged", ruleAsksPartial: true },
+    ]);
+    expect(g.entries[0]?.recordError).toBeUndefined();
+    expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
+      {
+        tool: "dispatch_artifact",
+        rule: null,
+        ruleOutcome: "unjudged",
+        ruleError: null,
+        ruleAsksPartial: true,
+        decision: "allow",
+      },
+    ]);
+  });
+
+  test("a call that opens no new ask writes no rules fields and no record", async () => {
+    // A comment opens no ask, and a re-upload whose stored version the gate read holds every
+    // opener it carries: neither is a rules decision. A record written here would reach this
+    // Dispatch, which answers only the reads, and come back as recordError.
+    const stored = ":::ask{#window}\nWhich deployment window?\n:::\n";
+    const served = dispatchServing([
+      { id: "doc-brief", name: "brief.md", slug: "brief", markdown: stored },
+    ]);
+    const g = bind({
+      complete: bySystem(ALLOW, MATCHED),
+      env: { OMP_ASKGATE_RECORD_PROJECT: "INFRA" },
+      dispatch: served.session,
+      dryRun: uploadOf(stored),
+    });
+    await g.device("c1", "dispatch_comment", COMMENT);
+    expect(await g.bash("t1", UPLOAD)).toBeUndefined();
+    expect(g.calls.filter(isRules)).toHaveLength(0);
+    expect(g.entries.map((entry) => entry.tool)).toEqual(["dispatch_comment", "dispatch_artifact"]);
+    for (const entry of g.entries) {
+      for (const field of [
+        "ruleOutcome",
+        "ruleLatencyMs",
+        "ruleAsksPartial",
+        "ruleAsksCut",
+        "ruleTextMissing",
+        "recordError",
+      ] as const)
+        expect(entry[field]).toBeUndefined();
+    }
+    // Only the upload's read of its stored version reached Dispatch: no record was posted.
+    expect(served.requests).toEqual([
+      "/api/v1/issues/X-1",
+      "/api/v1/artifacts/doc-brief/text",
+      "/api/v1/artifacts/doc-brief/blocks",
+      "/api/v1/artifacts/doc-brief/text",
     ]);
   });
 });

@@ -5,7 +5,8 @@
 // other session can read.
 //
 // What it records: every gated call whose rules check ran, which is every entry carrying a
-// `ruleOutcome` — the refusals and the denominator of the error rate — and every call the agent
+// `ruleOutcome` — the refusals, the denominator of the error rate, and an upload that went out
+// with none of its asks judged (`unjudged`) — and every call the agent
 // sent anyway, whose `outcome` is `rebuttal` or `breaker`: the gate answers those before any model
 // call, so no rules check judged them and their `ruleOutcome` is null, and the record's `target`
 // is what pairs each with the refusal it overrode. A call that is neither (no new ask, an
@@ -100,7 +101,10 @@ export interface DecisionRecord {
   ruleError: string | null;
   ruleTextMissing: boolean;
   ruleAsksCut: number;
-  /** The call was judged on part of its asks: an upload whose stored version could not be read. */
+  /**
+   * The call was judged on part of its asks, or on none with `ruleOutcome` `unjudged`: an upload
+   * whose stored version could not be read.
+   */
   ruleAsksPartial: boolean;
   decision: string;
   outcome: string;

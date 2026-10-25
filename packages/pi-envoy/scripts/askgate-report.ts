@@ -31,7 +31,7 @@ export interface GateRecord {
   text: string | null;
   /** The rule the first matching new ask broke: set exactly when the rules check refused the call. */
   rule: string | null;
-  /** How the rules call ended: `match`, `none`, `error`, `timeout`, `no-verdict`, … */
+  /** How the rules check ended: `match`, `none`, `error`, `timeout`, `no-verdict`, `unjudged`, … */
   ruleOutcome: string | null;
   /** The provider's error text, `timeout` or `no-verdict`. */
   ruleError: string | null;
@@ -262,6 +262,8 @@ const RULE_OUTCOMES: readonly RuleOutcome[] = [
   "no-verdict",
   "abandoned",
   "shutdown",
+  // No model call: an upload whose stored version could not be read, every opener carrying an id.
+  "unjudged",
 ];
 /** How many of the commonest rules error texts the report prints. */
 const ERROR_TEXTS_SHOWN = 5;
@@ -677,6 +679,11 @@ export interface DecisionCounts {
    * the gate could not read, so the asks that version may already hold went unjudged.
    */
   partial: number;
+  /**
+   * Rules calls that judged none of their asks (`ruleOutcome` `unjudged`), a part of `partial`:
+   * the upload went out with no rule check of the asks it may add, and no model was asked.
+   */
+  unjudged: number;
 }
 
 /** One day's decisions over one Dispatch project, as both output modes print them. */
@@ -716,6 +723,7 @@ function countDecisions(
     ).length,
     cut: calls.filter((record) => record.ruleAsksCut > 0).length,
     partial: calls.filter((record) => record.ruleAsksPartial).length,
+    unjudged: calls.filter((record) => record.ruleOutcome === "unjudged").length,
   };
 }
 
@@ -756,6 +764,7 @@ export function formatDispatchReport(report: DispatchReport): string[] {
     "A document that could not be read, and a line that is not a record, are counted below: the decisions they held are missing from every other count.",
     "A rules call with asks cut is one whose request did not carry every new ask of the call whole: the check judged clipped text.",
     "A rules call judged on part of its asks is an upload whose stored version the gate could not read: it judged the asks no stored version can hold and left the rest alone.",
+    "A rules call that judged none of its asks is one of those whose every ask carries an id the stored version may hold: no model was asked, and the upload went out unjudged.",
     `project: ${report.project}`,
     `since: ${report.since}`,
     `documents: ${report.documents}`,
@@ -773,6 +782,7 @@ export function formatDispatchReport(report: DispatchReport): string[] {
     `rules errors: ${bySource(report, (c) => c.errors)}`,
     `rules calls with asks cut: ${bySource(report, (c) => c.cut)}`,
     `rules calls judged on part of their asks: ${bySource(report, (c) => c.partial)}`,
+    `rules calls that judged none of their asks: ${bySource(report, (c) => c.unjudged)}`,
     `rules error rate: ${share(report.total.errors, report.total.calls)} (pod ` +
       `${share(report.pod.errors, report.pod.calls)}, machine ` +
       `${share(report.machine.errors, report.machine.calls)})`,

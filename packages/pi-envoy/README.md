@@ -328,9 +328,11 @@ such target. A call that opens a new ask adds the fields of the rules check:
   sets it exactly when the rules check refused the call.
 - `ruleAsk`: the number of that ask in the rules request, from 1.
 - `ruleQuote`: the words of that ask that the rules call quoted.
-- `ruleOutcome`: how the rules call ended: `match`, `none`, `error`, `timeout`, `no-verdict`,
-  `abandoned` or `shutdown`. The gate sets it on each gated call that opens a new ask and reached
-  the model call.
+- `ruleOutcome`: how the rules check ended: `match`, `none`, `error`, `timeout`, `no-verdict`,
+  `abandoned`, `shutdown` or `unjudged`. The gate sets it on each gated call that opens a new ask
+  and reached the model call. `unjudged` is the one with no model call: an upload whose stored
+  version the gate could not read and whose every ask block carries an `#id`, so it judged none
+  of the call's asks. The call is not refused for it; the charter check decides alone.
 - `ruleModel`: the `provider/id` that answered the rules call.
 - `ruleLatencyMs`: the time of the rules check, its document read included. `charterLatencyMs` is
   the charter check's own time on the same clock; the two calls run side by side, so each says
@@ -343,8 +345,9 @@ such target. A call that opens a new ask adds the fields of the rules check:
 - `ruleAsksCut`: how many asks the request cut. The request lists every new ask, and caps the
   list at 32 KiB: each ask's text gets an equal share of it, at most 8 KiB, and an ask cut to its
   share keeps its start and its end, where the rules read. An ask's `#id` is cut to 128 bytes.
-- `ruleAsksPartial`: `true` when the call was judged on part of its asks: the gate could not read
-  the document an upload replaces, so the ask blocks carrying an `#id` were left out of the check.
+- `ruleAsksPartial`: `true` when the call was judged on part of its asks, or on none of them
+  (`ruleOutcome: "unjudged"`): the gate could not read the document an upload replaces, so the ask
+  blocks carrying an `#id` were left out of the check.
 
 `decision` is `revise` on a rules refusal in `warn` mode too. The gate refused a call exactly when
 `decision` is `revise` and one of these is true: `verdictMode` is `block`, `outcome` is
@@ -379,6 +382,6 @@ document of the session's own, `askgate-decisions-<session id>.md`.
 
 `scripts/askgate-report.ts --dispatch-project <KEY> --since <RFC 3339> [--json]` reads those
 documents and prints the day's refusals by rule, the refusals the agent overrode, the calls
-judged on part of their asks, and the rules-call error rate, each split by `source`, with the
-documents and lines it could not read counted beside them. The same script's `--sessions <dir>`
-mode still reports the entries on disk.
+judged on part of their asks and those that judged none, and the rules-call error rate, each split
+by `source`, with the documents and lines it could not read counted beside them. The same script's
+`--sessions <dir>` mode still reports the entries on disk.

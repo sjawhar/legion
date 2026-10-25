@@ -43,7 +43,9 @@
   a rules refusal named there. An upload's ask block is new only while the version it replaces
   does not already hold it, and when that version cannot be read the blocks carrying an `#id` are
   left out of the check (`ruleAsksPartial`), so a re-upload of an unchanged document is never
-  refused for an ask block it already held. The
+  refused for an ask block it already held. When every block of such an upload carries an `#id`,
+  the rules check asks no model and refuses nothing, but it is not silent: `ruleOutcome` reads
+  `unjudged`, with `ruleAsksPartial`, and the decision record and the report count it. The
   `advisor-gate` entry gains `rule`, `ruleAsk`, `ruleQuote`, `ruleOutcome`, `ruleModel`,
   `ruleLatencyMs`, `ruleTextMissing`, `ruleError`, `ruleAsksCut`, `ruleAsksPartial` and
   `target`, and `scripts/askgate-report.ts` reports the rules check's matches, outcomes and errors

@@ -55,7 +55,11 @@ const RULES: Record<RuleName, { label: string; fix: string }> = {
 /** One new ask the rules call names: its number in the request, the rule it matches, and the words that match. */
 export type RuleMatch = { ask: number; rule: RuleName; quote: string };
 
-/** How the rules check ended, recorded as `ruleOutcome`. */
+/**
+ * How the rules check ended, recorded as `ruleOutcome`. `unjudged` is the one no model call made:
+ * an upload whose stored version could not be read and whose every opener carries an `#id`, so the
+ * check left every ask of the call unjudged — never a judgement that nothing matched.
+ */
 export type RuleOutcome =
   | "match"
   | "none"
@@ -63,7 +67,8 @@ export type RuleOutcome =
   | "timeout"
   | "no-verdict"
   | "abandoned"
-  | "shutdown";
+  | "shutdown"
+  | "unjudged";
 
 /** Every attempt's spend, as the gate passes it around. */
 type RuleUsage = {
@@ -150,7 +155,7 @@ export interface RulesCheck {
   asksCut: number;
   /**
    * An upload whose stored version could not be read: the call was judged on part of its asks,
-   * the openers no stored version could already hold.
+   * the openers no stored version could already hold, or on none of them (`unjudged`).
    */
   asksPartial: boolean;
   usage?: RuleUsage;
@@ -329,7 +334,8 @@ const uploadName = (input: Readonly<Record<string, unknown>>) =>
 /**
  * The new asks a call opens, read from `first` (the scan of its arguments): a retype gets its
  * block's own text from the document, and an upload leaves out the asks the version it replaces
- * already holds.
+ * already holds. An empty list is two different facts, which `asksPartial` tells apart: unset,
+ * the call opens no new ask; set, the read failed and the gate judges none of the call's asks.
  */
 async function readAsks(
   deps: RulesCheckDeps,
@@ -418,8 +424,10 @@ async function readDocument(
 
 /**
  * The rules check of one gated call: `undefined` when it opens no new ask, so no model is asked and
- * the entry records nothing of it. Its own failure (a read, a render, the model) never refuses a
- * call: the charter check decides alone, and the outcome is recorded.
+ * the entry records nothing of it. An upload left with nothing to judge because its read failed is
+ * not that call: it answers `unjudged` with no model call, so the entry and the record say it went
+ * through unjudged. Its own failure (a read, a render, the model) never refuses a call: the charter
+ * check decides alone, and the outcome is recorded.
  */
 export async function runRulesCheck(
   deps: RulesCheckDeps,
@@ -442,7 +450,11 @@ export async function runRulesCheck(
   if (first.length === 0) return undefined;
   try {
     const { asks, textMissing, asksPartial } = await readAsks(deps, call, first);
-    if (asks.length === 0) return undefined;
+    if (asks.length === 0)
+      // With the read failed and every opener carrying an id, nothing says which of them are new:
+      // the call may add an ask no one judges, so it answers rather than stays silent. Its latency
+      // is the read's, the only time it spent.
+      return asksPartial ? ended("unjudged", { asksPartial }) : undefined;
     const described = describeAsks(asks);
     const user = () => {
       const { primarySystemPrompt, transcript } = call.context();

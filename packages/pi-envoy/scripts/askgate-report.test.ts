@@ -354,7 +354,7 @@ describe("readSessions and computeStats", () => {
     expect(lines).toContain("sent back: n/a (0 of 0 reviews)");
     expect(lines).toContain("rules calls: 0");
     expect(lines).toContain(
-      "rules outcomes: match 0, none 0, error 0, timeout 0, no-verdict 0, abandoned 0, shutdown 0"
+      "rules outcomes: match 0, none 0, error 0, timeout 0, no-verdict 0, abandoned 0, shutdown 0, unjudged 0"
     );
     expect(lines).toContain("rules latency median: n/a");
     expect(lines).toContain("rules matches: no_change 0, untried_access 0");
@@ -419,6 +419,7 @@ describe("the rules check", () => {
       { name: "no-verdict", count: 1 },
       { name: "abandoned", count: 0 },
       { name: "shutdown", count: 0 },
+      { name: "unjudged", count: 0 },
     ]);
     expect(rules.matches).toEqual([
       { name: "no_change", count: 3 },
@@ -457,7 +458,7 @@ describe("the rules check", () => {
     for (const line of [
       "refusals: 4",
       "rules calls: 9",
-      "rules outcomes: match 4, none 1, error 2, timeout 1, no-verdict 1, abandoned 0, shutdown 0",
+      "rules outcomes: match 4, none 1, error 2, timeout 1, no-verdict 1, abandoned 0, shutdown 0, unjudged 0",
       "rules latency median: 300 ms",
       "rules latency p90: 700 ms",
       "rules model p/m1: 7",
@@ -477,6 +478,35 @@ describe("the rules check", () => {
       lines.indexOf('rules error "no-verdict": 1')
     );
     expect(lines.at(-1)).toBe("seed: 5");
+  });
+
+  test("an entry whose rules check judged none of its asks is a rules call, outcome unjudged, with no error", () => {
+    // An upload whose stored version could not be read, every opener carrying an id: no model was
+    // asked, so the entry has no model and no error, and it is a rules call all the same.
+    const [unjudged] = parseSessionText(
+      gate({
+        id: "u1",
+        tool: "dispatch_artifact",
+        fields: {
+          target: "dispatch_artifact issue=ACME-4",
+          ruleOutcome: "unjudged",
+          ruleLatencyMs: 40,
+          ruleAsksPartial: true,
+        },
+      }),
+      "s"
+    );
+    const rules = computeStats([unjudged as GateRecord]).rules;
+    expect(rules.calls).toBe(1);
+    expect(rules.outcomes.find((count) => count.name === "unjudged")).toEqual({
+      name: "unjudged",
+      count: 1,
+    });
+    expect(rules.errors).toBe(0);
+    expect(rules.models).toEqual([]);
+    expect(formatReport(computeStats([unjudged as GateRecord]), 1)).toContain(
+      "rules outcomes: match 0, none 0, error 0, timeout 0, no-verdict 0, abandoned 0, shutdown 0, unjudged 1"
+    );
   });
 
   test("prints at most five error texts, each cut to 200 code points", () => {
@@ -741,6 +771,7 @@ const DAY_REPORT: DispatchReport = {
     errors: 2,
     cut: 2,
     partial: 0,
+    unjudged: 0,
   },
   pod: {
     calls: 3,
@@ -750,6 +781,7 @@ const DAY_REPORT: DispatchReport = {
     errors: 1,
     cut: 1,
     partial: 0,
+    unjudged: 0,
   },
   machine: {
     calls: 3,
@@ -759,6 +791,7 @@ const DAY_REPORT: DispatchReport = {
     errors: 1,
     cut: 1,
     partial: 0,
+    unjudged: 0,
   },
 };
 
@@ -805,6 +838,7 @@ describe("the Dispatch reader", () => {
       errors: 0,
       cut: 0,
       partial: 0,
+      unjudged: 0,
     });
   });
 
@@ -875,6 +909,7 @@ describe("the Dispatch reader", () => {
       errors: 0,
       cut: 0,
       partial: 0,
+      unjudged: 0,
     });
   });
 
@@ -898,6 +933,7 @@ describe("the Dispatch reader", () => {
     expect(text).toContain("rules errors: 2 (pod 1, machine 1)");
     expect(text).toContain("rules calls with asks cut: 2 (pod 1, machine 1)");
     expect(text).toContain("rules calls judged on part of their asks: 0 (pod 0, machine 0)");
+    expect(text).toContain("rules calls that judged none of their asks: 0 (pod 0, machine 0)");
     expect(text).toContain("rules error rate: 33.3% (pod 33.3%, machine 33.3%)");
   });
 
@@ -983,6 +1019,45 @@ describe("the Dispatch reader", () => {
     expect([json.total.partial, json.pod.partial, json.machine.partial]).toEqual([2, 1, 1]);
   });
 
+  test("a call that judged none of its asks is a rules call, judged on part of its asks, and counted apart", async () => {
+    // An upload whose stored version the gate could not read and whose every opener carries an id:
+    // the record is written with no model call behind it. It is a decision, and not a clean one.
+    const documents: ProjectDocument[] = [
+      {
+        name: `askgate-decisions-${POD_SESSION}.md`,
+        markdown: decisionDocument(POD_SESSION, [
+          decision({
+            time: at(1),
+            session: POD_SESSION,
+            source: "pod",
+            target: SPEC,
+            ruleOutcome: "unjudged",
+            ruleAsksPartial: true,
+          }),
+          decision({ time: at(2), session: POD_SESSION, source: "pod", target: ASK_1 }),
+        ]),
+      },
+    ];
+    const { read, report } = await reportOf(documents, SINCE);
+    expect(read.records.map((record) => record.ruleOutcome)).toEqual(["unjudged", "none"]);
+    expect(report.pod).toEqual({
+      calls: 2,
+      refusals: 0,
+      byRule: { no_change: 0, untried_access: 0 },
+      overrides: 0,
+      errors: 0,
+      cut: 0,
+      partial: 1,
+      unjudged: 1,
+    });
+    const text = dispatchReportLines(report, false);
+    expect(text).toContain("rules calls: 2 (pod 2, machine 0)");
+    expect(text).toContain("rules calls judged on part of their asks: 1 (pod 1, machine 0)");
+    expect(text).toContain("rules calls that judged none of their asks: 1 (pod 1, machine 0)");
+    const json = JSON.parse(dispatchReportLines(report, true)[0] as string) as DispatchReport;
+    expect([json.total.unjudged, json.pod.unjudged, json.machine.unjudged]).toEqual([1, 1, 0]);
+  });
+
   test("an override counts on the refusal it overrode and in none of the rules call counts", async () => {
     const markdown = decisionDocument(POD_SESSION, [
       decision({
@@ -1026,6 +1101,7 @@ describe("the Dispatch reader", () => {
       errors: 1,
       cut: 0,
       partial: 0,
+      unjudged: 0,
     });
     const text = dispatchReportLines(report, false);
     expect(text).toContain("rules calls: 2 (pod 2, machine 0)");

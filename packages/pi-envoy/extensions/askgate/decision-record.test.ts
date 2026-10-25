@@ -285,6 +285,31 @@ describe("the AskGate decision record", () => {
     });
   });
 
+  test("an upload whose rules check judged none of its asks is recorded, as unjudged", async () => {
+    // No model call was made, so there is no rule and no error; the record is the only place a
+    // standing session learns the call went out unjudged.
+    const dispatch = fakeDispatch();
+    await harness({ client: dispatch.client }).write({
+      ...REFUSAL,
+      tool: "dispatch_artifact",
+      target: "dispatch_artifact issue=X-1",
+      decision: "allow",
+      rule: undefined,
+      ruleOutcome: "unjudged",
+      ruleAsksPartial: true,
+    });
+    expect(recordsIn(dispatch.uploads[0]?.content ?? "")).toMatchObject([
+      {
+        tool: "dispatch_artifact",
+        rule: null,
+        ruleOutcome: "unjudged",
+        ruleError: null,
+        ruleAsksPartial: true,
+        decision: "allow",
+      },
+    ]);
+  });
+
   test("source is pod with LEGION_ISSUE set, and machine without it", async () => {
     for (const [env, source] of [
       [{ OMP_ASKGATE_RECORD_PROJECT: "INFRA", LEGION_ISSUE: "INFRA-168" }, "pod"],
