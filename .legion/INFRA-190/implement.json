@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-190",
-  "completed": "2026-10-25T20:40:00Z",
-  "round": 3,
-  "roundReason": "Tester's fail at 6a206afc: a linked image's link was stored as written, not decoded as CommonMark and the editor read it (red test TestParseDecodesALinkedImagesLinkAsTheEditorReadsIt, 80ac2d84fc67). Architect: decode like src, leave text-link hrefs, prove encoded javascript: links are never clickable. Fix f91b263cc4ad9b987a7fa4d6b502f3b605723ca8; evidence https://github.com/sjawhar/legion/pull/2204#issuecomment-6402787716. Round 2 ('!' before a link) evidence: https://github.com/sjawhar/legion/pull/2204#issuecomment-6402092124",
+  "completed": "2026-10-25T21:30:00Z",
+  "round": 4,
+  "roundReason": "Tester's fail at 48eebf71: round 3's src decoder made an image whose source escapes a reference's '&' a refused write (R2; red test TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand, b9246afc). Architect narrowed the round: the red test, and every decoded image field (src, title, link, linkTitle) written by the exact inverse of its decoder, proved by one table-driven test and the differential over every corpus. Fix 437ef2a9e6666914755616f53747fb233f14b2d0; evidence https://github.com/sjawhar/legion/pull/2204#issuecomment-6403346645. Earlier rounds: https://github.com/sjawhar/legion/pull/2204#issuecomment-6402787716, https://github.com/sjawhar/legion/pull/2204#issuecomment-6402092124",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2204",
   "evidence": "https://github.com/sjawhar/legion/pull/2204#issuecomment-6401596447",
   "rebaseRecheck": "rebase re-check 3562964859069a0c762adda181fc94efe89e7123 -> 2c016c99830ae38b862237576bbd571dc8632783 (forward merge of main 4ceb3aa9c5, CHANGELOG-only conflicts): fingerprint 0ef9d407ca42... unchanged, bare gates only, plus linked-images.e2e.ts chromium+iphone 16 passed on the merged tree (https://github.com/sjawhar/legion/pull/2204#issuecomment-6401828292). Round 2: 358c3181be21 -> 073cd8515c22a654fa1fb974cf9023f6a6788b3c (forward merge of main 7af60a22, contracts CHANGELOG conflict only): fingerprint 645de12a231a... unchanged, bare gates only (https://github.com/sjawhar/legion/pull/2204#issuecomment-6402118309)",
@@ -64,6 +64,14 @@
       "observed": "live, past version and comment all draw https://ci.example/q?a=1&b=2 and https://ci.example/a*b; JAVASCRIPT:, <javascript:>, data:, vbscript:, javascript&#58; draw no anchor; window.__pwned null. Differential every GATE 0, linked image kept 39/39. linked-images.e2e.ts 16 passed (N2 now 5 javascript spellings)",
       "headSha": "f91b263cc4ad9b987a7fa4d6b502f3b605723ca8",
       "negativeControl": "at 6a206afc (tester's run) the live editor drew href https://ci.example/q?a=1&amp;b=2 and https://ci.example/a\\*b while the past version and comment drew the decoded address, and the differential's 'head loses a whole-image link' was 1 (adversarial) and 2 (control); the red test failed with link \"https://u.com/?a=1&amp;b=2\""
+    },
+    {
+      "criterion": "Round 4 (R2/A4): no write the base takes is refused; each decoded image field (src, title, link, linkTitle) is written by the exact inverse of its decoder",
+      "surface": "the documents API of the real Go Dispatch server built from the head, on the harness Postgres; the pmdoc differential over every corpus; pmdoc Render read back by Parse, ParseForWrite and the editor's engine",
+      "command": "bash /legion/scratch/tmp/infra190/live/amp.sh <tree> <label> (POST one document holding ![x](i\\&amp;.png), [![x](i\\&amp;.png)](https://u.com), ![x](i.png?a=1\\&copy;), then GET /text); go test ./internal/dispatch/pmdoc/ -run 'TestRenderWritesEachImageFieldSoItReadsBackAsHeld|TestParseTakesAnImageWhoseSourceEscapesAReferencesAmpersand'; differential.sh --base 7af60a22b33f over the in-repo corpora, the deployment's export and tester/corpus/{adversarial,control,decoding}.jsonl",
+      "observed": "head: HTTP 201 and /text returns the three lines byte for byte; both tests pass (red test unmodified); differential 2,336 documents, every GATE 0 (churn 0, head refuses a write the base takes 0), linked image kept 65/65; linked-images.e2e.ts chromium+iphone 16 passed",
+      "headSha": "437ef2a9e6666914755616f53747fb233f14b2d0",
+      "negativeControl": "at 48eebf71 (tester's live run) the same write answered HTTP 400 INVALID_MARKDOWN and the differential's 'head refuses a write the base takes' was 1; base 7af60a22 takes it but stores ![x](i&.png) and drops the link"
     }
   ],
   "filesChanged": [
@@ -87,7 +95,8 @@
     "The stay-as-today shape ![[![x](i.png)](u)](j.png) is its own diffcorpus document (linked-image-in-alt.md): engine and Go read the outer alt differently at base already, unrelated to links.",
     "A held browser edit that strips a link is reported through a new PendingState.strippedAt notice, not rebuiltAt.",
     "The past-version view now navigates in-app for any dispatch:// link (text, picture, fallback) on a plain click instead of opening a new tab.",
-    "Round 3: an image's src is now decoded with the same one-pass decoder as the link (decodeDestination, after micromark): the old unescapeMarkdownText decoded escapes before references and took legacy references without ';', which the editor does not. The differential shows no churn or regression from it."
+    "Round 3: an image's src is now decoded with the same one-pass decoder as the link (decodeDestination, after micromark): the old unescapeMarkdownText decoded escapes before references and took legacy references without ';', which the editor does not. The differential shows no churn or regression from it.",
+    "Round 4: image title and linkTitle now use the same one-pass decoder as src and link (decodedTitleOrNil); text-link href and title keep titleOrNil and titleSuffix unchanged. A title's line feed is written raw as before (no churn for stored titles); a CR, which only a reference puts in a title, is written &#13;."
   ],
   "openQuestions": [
     "Memory tests (go test -tags memory ./cmd/dispatch) cannot run in this pod (gVisor refuses /proc/<pid>/clear_refs); the new '[![](u)](v)' heaviest shape is measured only by CI's memory job.",
