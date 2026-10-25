@@ -2,10 +2,42 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T17:17:44Z",
+  "completed": "2026-10-25T17:55:11Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "codeHead": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
+  "codeHead": "90eca150f88936e46d1f354cbad83cba5f9e5236",
   "proof": [
+    {
+      "criterion": "Round 7: two stops 0.5 s apart finish the clean-up and print sequence: exit",
+      "surface": "this issue's role container, against the applied cluster, the page's block filled in, work fixture 'sleep 120', run as the page says (flock ... setsid -f)",
+      "command": "drive.sh twoterm: after 'answered', kill -TERM -- -<process>; sleep 0.5; kill -TERM -- -<process>; wait for the end; kubectl get job,service <name>; kubectl get pods -l job-name=<name>",
+      "observed": "infra-386-postgres-jg662: Terminated, readings, job.batch deleted, No resources found, sequence: exit 143; nothing left 5 s later",
+      "headSha": "90eca150f88936e46d1f354cbad83cba5f9e5236",
+      "negativeControl": "b773e110 block (infra-386-postgres-5fm5v): readings then nothing, no sequence: exit, Job/Service/pod left (removed by the name-based recovery); and the ignore without set -m (infra-386-postgres-g5cs8): 'Terminated', 'cleanup: the Job's delete failed', Service wait timed out, sequence: exit 143, Job/Service/pod left"
+    },
+    {
+      "criterion": "Round 7: one stop into a trap started by a failed step finishes the clean-up",
+      "surface": "same, work fixture 'false'",
+      "command": "drive.sh failterm: kill -TERM -- -<process> as soon as the trap's first reading (NAME header) appears",
+      "observed": "infra-386-postgres-ttn77: all readings, job.batch deleted, sequence: exit 1, nothing left",
+      "headSha": "90eca150f88936e46d1f354cbad83cba5f9e5236",
+      "negativeControl": "b773e110 block (infra-386-postgres-qpt87): first reading then nothing, no sequence: exit, Job/Service/pod left (removed by the name-based recovery)"
+    },
+    {
+      "criterion": "Round 7: SIGKILL still ends the sequence; ordinary runs end clean; the 40 s tool-timeout claim holds on the new block",
+      "surface": "same; the timeout run through this role's bash tool with a 40 s timeout at the pushed bytes",
+      "command": "drive.sh kill (kill -KILL -- -<process> after answered); drive.sh plain; the filled block with work 'sleep 60' run in the tool's foreground with a 40 s timeout, then flock <file> cat <log>; refused-create fixture cpu \"1\"",
+      "observed": "KILL (infra-386-postgres-nxxsk): no trap output, no sequence: exit, Job/Service/pod left, the two recovery lines removed them in 2 s; plain (jsrqt): sequence: exit 0, nothing left; timeout (qsjcl): call ended at 40 s, re-attach showed answered, deleted, sequence: exit 0, nothing left; refused create: label path, No resources found, sequence: exit 1",
+      "headSha": "90eca150f88936e46d1f354cbad83cba5f9e5236",
+      "negativeControl": "the KILL run is itself the case the page keeps as an exception: nothing of the trap ran"
+    },
+    {
+      "criterion": "Round 7: page checks; hazard sentences gone; block identical to base but for the signal line",
+      "surface": "docs/kubernetes.md fetched from GitHub at the pushed head",
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=90eca150f88936e46d1f354cbad83cba5f9e5236\" -H \"Accept: application/vnd.github.raw\"; plan checks; diff <(code.sh base) <(code.sh head); hunks7.awk",
+      "observed": "pushed page identical to the checked working copy; A1 0; A2 1 x7; A3 date 4; A7 0; A8 0; comment-stripped diff from base: one added line 'trap '' INT TERM HUP; set -m'; A5 eight hunks all ok; check-private-names exit 0; sweep 0",
+      "headSha": "90eca150f88936e46d1f354cbad83cba5f9e5236",
+      "negativeControl": "code hash base abe1b4cf..., head 798bb54b...: they differ by exactly that line"
+    },
     {
       "criterion": "Round 6: any stop reaching the trap is named as able to cut it short; the advice is a stop only while the work runs, at most one; the bullet separates the two label-path runs that found a Job from the rest; A1-A8 hold",
       "surface": "docs/kubernetes.md fetched from GitHub at the pushed head from this issue's role container",
@@ -188,13 +220,14 @@
     "Round 2: P1 was not re-run; the sequence block is byte-identical to 97e9883b's, where P1 and its control ran, and the architect ruled that no stop is re-measured.",
     "Round 3: P1 was not re-run; no command of the block changed (comment-stripped block cmp-identical to base), and the architect ruled that no stop is re-measured.",
     "Round 4: the INFRA-232 evidence bullet's two stop placements (base 3278-3282) changed, outside the plan's A5 ranges, under the architect's round-3 ruling that a further sweep finding is fixed in the same round; P1 not re-run (no command changed).",
-    "Round 5: the deliberate-stop paragraph (base 3188-3191) changed at the reviewer's request, outside the plan's A5 ranges; P1 not re-run (no command changed)."
+    "Round 5: the deliberate-stop paragraph (base 3188-3191) changed at the reviewer's request, outside the plan's A5 ranges; P1 not re-run (no command changed).",
+    "Round 7: the signal line carries set -m besides the ignore the architect named, because the ignore alone did not stop a group TERM from killing the trap's kubectl on the real block; measured and recorded."
   ],
   "openQuestions": [],
   "discoveredComplexity": [],
-  "round": 6,
-  "roundReason": "Review at 241f4e1a requested changes: any stop that reaches the trap, not only a second one, can cut it short (closing comment, stop paragraph, recovery list); the bullet's placement caveat split between the two runs that found a Job and the rest.",
-  "previousCodeHead": "241f4e1afcee63b80d5d76f5a3852816a6460d35",
+  "round": 7,
+  "roundReason": "Architect's standing ruling (PR comments 6400492408, 6400601649, 6400670216, 6400709005): cleanup() ignores further INT/TERM/HUP; delete the hazard sentences; correct the body's risk line that cited only a stub.",
+  "previousCodeHead": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
   "fullDiffSweep": "Every sentence in the four hunks against base 371d6c87 was re-read against its evidence. Beyond the two clauses, three were fixed: 'deletes every Job carrying that label' became 'deletes every Job the server lists with that label'; the 0.33 s/0.35 s stops, classed 'in flight' only by their outcome, became stops 'that took this path and found a Job', with 'none of the twenty-six left a Job' and the in-flight/answered split stated as not shown; and 'a SIGKILL inside the create' became 'a SIGKILL left before its name was printed'. The rest was checked and kept (listed in the PR body).",
   "threads": [
     "PRRT_kwDORFy7ds6wDE3_ fixed, replied, resolved",
@@ -205,5 +238,11 @@
     "PRRT_kwDORFy7ds6wDNvR fixed, replied, resolved",
     "PRRT_kwDORFy7ds6wDNvV fixed, replied, resolved",
     "PRRT_kwDORFy7ds6wDNvY fixed, replied, resolved"
-  ]
+  ],
+  "blockCommandChange": {
+    "line": "trap '' INT TERM HUP; set -m  (docs/kubernetes.md:3017, after trap - EXIT INT TERM HUP)",
+    "codeHashBase": "abe1b4cf246007dcaeb06de73bff62a3b372ee50b0aa8b1b0e8d77dbe076195c",
+    "codeHashHead": "798bb54b05f106be502e32c78e2e5d1126d03485c054cbe0f33f3d499c367892",
+    "why set -m": "with the ignore alone, a second TERM killed the trap's kubectl delete on the real block: kubectl (Go) does not keep an inherited SIGTERM ignore (stub: TERM rc 143 after 1 s, INT/HUP survived); set -m gives each trap command its own process group, which a group stop does not reach"
+  }
 }
