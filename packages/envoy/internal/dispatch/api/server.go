@@ -248,6 +248,11 @@ type server struct {
 	// (newFailingAdviceHandler), so a case's outcome is its own choice rather than its machine's
 	// speed (INFRA-56).
 	suggestionTimeout time.Duration
+	// broadcastResolveBudget overrides the budget a broadcast's recipient resolution runs under;
+	// zero, which every server the deployment builds leaves it, means broadcastResolveTimeout.
+	// Only a test sets it, so a budget that ends before every selected session is read is the
+	// test's choice rather than a race against five seconds of wall clock (INFRA-249).
+	broadcastResolveBudget time.Duration
 	// deliveryHub keeps the open Delivery and Pipeline pages current (LEGION-690); nil on a server
 	// with no Lifetime (register), which mounts no GET /ws/delivery.
 	deliveryHub *deliveryHub

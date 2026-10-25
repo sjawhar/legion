@@ -660,7 +660,7 @@ func TestTask310RouteGoldens(t *testing.T) {
 	golden(t, "grant.json", GrantResponse{
 		GrantID: "grant-for-one-command", ExpiresAt: "2026-09-23T12:01:00Z",
 	})
-	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: `no check is required on "main" of acme/widgets, so READY was published without reading the head's checks`})
+	golden(t, "handoff-complete.json", HandoffCompleteResponse{Note: "pull request #312 is already merged, so READY was published without reading its head's handoffs"})
 	golden(t, "issue-status.json", IssueStatusResponse{})
 	golden(t, "gate-register.json", GateRegisterResponse{})
 	golden(t, "wave-release.json", WaveReleaseResponse{Released: []string{"LEGION-209"}})

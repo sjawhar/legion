@@ -1078,7 +1078,8 @@ func linesCarrying(log, want string) []string {
 // decides who the name is for, so no process reserving its own configuration's names at its first
 // exchange takes a name from another principal. Its rows run in order and each starts from the
 // database the one before it left: a stranger asks for the name before its entry ever has, two
-// processes of the old generation then serve that entry by turns, and the rollout comes last.
+// processes of the old generation then serve that entry by turns, the rollout comes next, and
+// last what the two generations do to each other until the last old-configuration process stops.
 // Every process is started with no drain, since nothing is in flight when one is stopped.
 func TestAFixedSessionNameAcrossARollout(t *testing.T) {
 	binary := buildBroker(t)
@@ -1209,5 +1210,105 @@ func TestAFixedSessionNameAcrossARollout(t *testing.T) {
 			t.Errorf("%s logged %d names left with their holder %q; want exactly one, %s left with %s until %s claims it",
 				restarted.name, len(left), left, rolloutSession, newEntryPrincipal, oldEntryPrincipal)
 		}
+	})
+
+	// What the rollout does while both generations are still live, as they are until the last
+	// old-configuration process stops: each configuration says the name is its own entry's, and
+	// each process acts on its own. The old entry exchanging at the old-configuration process that
+	// survived the rows above takes the name back, and that process logs the take; the new entry
+	// exchanging at a new-configuration process takes it again and logs it the same way; and so on
+	// by turns, neither entry refused at any of them. While the old entry holds the name, a
+	// new-configuration process answers it 200 for the name too, although its configuration fixes
+	// nothing for that entry: a claim by the holder is the holder's whichever process serves it,
+	// and the serving process's configuration decides only who may take the name from a holder.
+	// It is bounded by the rollout: once no old-configuration process serves, the new entry's next
+	// exchange takes the name for the last time, it stays with the new entry, and the old entry is
+	// refused it.
+	t.Run("4_UntilTheLastOldProcessStopsTheEntriesTakeTheNameByTurnsAndItsHolderIsAnsweredOnEveryProcess", func(t *testing.T) {
+		claim := func(broker rolloutBroker, account, why string) {
+			t.Helper()
+			if status, body := exchange(t, broker, account, rolloutSession); status != http.StatusOK || body["access_token"] == nil {
+				t.Fatalf("%s answered a pod of %s asking for %s, %s, %d %v; want 200 with an access token",
+					broker.name, account, rolloutSession, why, status, body)
+			}
+		}
+		requireHolder := func(after, want string) {
+			t.Helper()
+			if holder, fixed := sessionHolder(t, conn, rolloutSession); holder != want || !fixed {
+				t.Fatalf("after %s, %s is held by %q (the configuration's hold: %t); want %s, held for as long as a configuration fixes it",
+					after, rolloutSession, holder, fixed, want)
+			}
+		}
+		// requireTakes waits for broker to have logged want takes in all, then fails unless it
+		// logged exactly that many and the last moved the name from from to to. A take is logged
+		// before the exchange is answered, so the wait is only for the log's copy out of the
+		// child; and because every take a process logs is counted here, a take logged where none
+		// was expected shows up at the next count.
+		requireTakes := func(broker rolloutBroker, want int, from, to string) {
+			t.Helper()
+			var took []string
+			for deadline := time.Now().Add(awaitTimeout); ; time.Sleep(listeningPoll) {
+				if took = linesCarrying(broker.process.Log(), takeoverWarning); len(took) >= want || time.Now().After(deadline) {
+					break
+				}
+			}
+			if len(took) != want || want > 0 &&
+				(!strings.Contains(took[want-1], "from="+from) || !strings.Contains(took[want-1], "to="+to)) {
+				t.Fatalf("%s logged %d takeovers %q; want %d, the last from %s to %s", broker.name, len(took), took, want, from, to)
+			}
+		}
+
+		// The surviving old-configuration process is the first row's, which has taken nothing
+		// yet. The new-configuration process of this row reserves at its first exchange, the new
+		// entry's own on the name the last row left that entry holding, so it starts the turns
+		// from a fleet at rest: it takes nothing and leaves nothing with another holder.
+		next := start(t, "a new-configuration process", newEntryAccount)
+		claim(next, newEntryAccount, "which its configuration fixes for that account and that account already holds")
+		requireHolder(next.name+" served the new entry's first exchange there", newEntryPrincipal)
+		requireTakes(old, 0, "", "")
+		requireTakes(next, 0, "", "")
+		if left := linesCarrying(next.process.Log(), leftWarning); len(left) != 0 {
+			t.Fatalf("%s logged names left with another holder at its first exchange, the new entry's own on a name the new entry holds:\n%s",
+				next.name, strings.Join(left, "\n"))
+		}
+
+		const turns = 3
+		for turn := 1; turn <= turns; turn++ {
+			claim(old, oldEntryAccount, fmt.Sprintf("turn %d: which its configuration fixes for that account and %s holds", turn, newEntryAccount))
+			requireHolder(fmt.Sprintf("turn %d: the old entry exchanged at %s", turn, old.name), oldEntryPrincipal)
+			requireTakes(old, turn, newEntryPrincipal, oldEntryPrincipal)
+
+			// The part a reader will not expect: the old entry, which this process's
+			// configuration fixes nothing for, is answered the name because it holds it.
+			claim(next, oldEntryAccount, fmt.Sprintf("turn %d: which its configuration fixes for %s, not for that account, but which that account holds", turn, newEntryAccount))
+			requireHolder(fmt.Sprintf("turn %d: the old entry exchanged at %s", turn, next.name), oldEntryPrincipal)
+			requireTakes(next, turn-1, oldEntryPrincipal, newEntryPrincipal)
+
+			// The bound: on the last turn the old-configuration process stops while the old
+			// entry holds the name, which stopping does not move; the new entry's next exchange
+			// is what takes it, for the last time.
+			if turn == turns {
+				old.process.Terminate(t)
+				if err := old.process.AwaitExit(t, stopTimeout); err != nil {
+					t.Fatalf("%s exited with %v after its SIGTERM; want 0:\n%s", old.name, err, old.process.Log())
+				}
+				requireHolder(old.name+" stopped", oldEntryPrincipal)
+			}
+
+			claim(next, newEntryAccount, fmt.Sprintf("turn %d: which its configuration fixes for that account and %s holds", turn, oldEntryAccount))
+			requireHolder(fmt.Sprintf("turn %d: the new entry exchanged at %s", turn, next.name), newEntryPrincipal)
+			requireTakes(next, turn, oldEntryPrincipal, newEntryPrincipal)
+		}
+
+		// No old-configuration process serves any more: the name stays with the new entry, the
+		// old entry is refused it, and nothing takes it again.
+		if status, body := exchange(t, next, oldEntryAccount, rolloutSession); !refusedTheName(status, body) {
+			t.Fatalf("with no old-configuration process serving, %s answered a pod of %s, for which its configuration fixes no name, asking for %s, %d %v; want 400 invalid_grant naming the name another identity's",
+				next.name, oldEntryAccount, rolloutSession, status, body)
+		}
+		requireHolder(next.name+" refused the old entry", newEntryPrincipal)
+		claim(next, newEntryAccount, "which its configuration fixes for that account and that account holds")
+		requireHolder("the new entry exchanged again at "+next.name, newEntryPrincipal)
+		requireTakes(next, turns, oldEntryPrincipal, newEntryPrincipal)
 	})
 }
