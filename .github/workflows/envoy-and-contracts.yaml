@@ -854,7 +854,7 @@ jobs:
           sudo locale-gen en_US.UTF-8
           bash deploy/scripts/autodeploy_test.sh
         working-directory: packages/envoy
-      - name: Integration test envoy (testcontainers + NATS)
+      - name: Integration test envoy (a real NATS server, in the test process)
         run: go test ./internal/integration/ -timeout 300s -count=1
         working-directory: packages/envoy
       - name: Build envoy services
@@ -941,8 +941,8 @@ jobs:
   # fixtures under internal/dispatch/pmdoc/gen (envoy-go's own "Check pmdoc fixtures are up to
   # date" step), so this job needs Bun installed and its workspace linked the same way, though not
   # that freshness check itself - a stale fixture is envoy-go's failure to catch, not a race.
-  # delivery's and the bus's tests start NATS containers, so the job takes envoy-go's Ryuk setting
-  # and pulls that image first, for the reason .github/actions/pull-test-images gives.
+  # delivery's and the bus's NATS runs in the test process (internal/testnats), so the job needs
+  # no container runtime of its own.
   envoy-go-race:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -961,7 +961,6 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -971,10 +970,6 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
-      - name: Pull the NATS test container image
-        uses: ./.github/actions/pull-test-images
-        with:
-          consts: packages/envoy/internal/testnats/nats.go Image
       - name: Race-test the document service, its API, pmdoc, delivery, the store, and the bus
         run: go test -race -timeout 30m ./internal/dispatch/docs/ ./internal/dispatch/api/ ./internal/dispatch/pmdoc/... ./internal/dispatch/delivery/... ./internal/dispatch/store/... ./internal/bus/
         working-directory: packages/envoy
@@ -1020,9 +1015,8 @@ jobs:
   # them out, and they are a job of their own for the reason dispatch-memory is: envoy-go's unit
   # step runs under go test's default ten-minute package deadline, which the memory tests
   # already took red at 600 s (run 37116639565), and one row here waits out a durable hand-over
-  # or a maintenance loop's tick, tens of seconds each. The job takes envoy-go's Ryuk setting and
-  # pre-pulls testnats.Image, for the reason .github/actions/pull-test-images gives: with no
-  # DISPATCH_TEST_NATS_URL set, each run starts its NATS in a container of its own.
+  # or a maintenance loop's tick, tens of seconds each. Each row's NATS runs in its own test
+  # process (internal/testnats), so the job needs no container runtime of its own.
   dispatch-multiprocess:
     needs: changes
     if: needs.changes.outputs.envoy == 'true'
@@ -1041,7 +1035,6 @@ jobs:
           --health-retries 5
     env:
       DISPATCH_TEST_DATABASE_URL: postgres://postgres:ci@localhost:5432/postgres?sslmode=disable
-      TESTCONTAINERS_RYUK_DISABLED: "true"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -1049,10 +1042,6 @@ jobs:
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version-file: packages/envoy/go.mod
-      - name: Pull the NATS test container image
-        uses: ./.github/actions/pull-test-images
-        with:
-          consts: packages/envoy/internal/testnats/nats.go Image
       - name: Two-process tests of the Dispatch server
         run: go test -tags multiprocess -count=1 -timeout 20m -v ./cmd/dispatch
         working-directory: packages/envoy
