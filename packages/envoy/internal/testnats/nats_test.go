@@ -551,6 +551,28 @@ func TestNoPackageOutsideTestnatsNeedsAContainerRuntime(t *testing.T) {
 	})
 }
 
+// The file walk's matcher recognises a hand-driven docker in every way a test of this module spells
+// the call, the context argument included: the module already passes context.Background() inline,
+// and t.Context() is the test's own. Each line is assembled from pieces so this file, which the walk
+// also reads, is not a finding itself.
+func TestTheDockerDriverMatchCatchesEveryContextArgument(t *testing.T) {
+	const run, docker = "exec." + "Command", `"dock` + `er"`
+	for _, line := range []string{
+		run + "(" + docker + `, "pause", id)`,
+		run + "Context(ctx, " + docker + `, "pause", id)`,
+		run + "Context(context.Background(), " + docker + `, "pause", id)`,
+		run + "Context(t.Context(), " + docker + `, "unpause", id)`,
+		"client.NewDocker" + "ClientWithOpts(client.FromEnv)",
+	} {
+		if !dockerDriver.MatchString(line) {
+			t.Errorf("the docker-driver match misses %s", line)
+		}
+	}
+	if line := run + `("go", "list", "./...")`; dockerDriver.MatchString(line) {
+		t.Errorf("the docker-driver match flags %s, which runs no container", line)
+	}
+}
+
 // containerImporters lists every package of this module, outside the rigs allowed one, that
 // imports a testcontainers package, from its own sources or its tests'.
 func containerImporters(t *testing.T) []string {
