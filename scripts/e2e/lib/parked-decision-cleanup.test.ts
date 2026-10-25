@@ -61,6 +61,15 @@ describe("wait_for_run_processes", () => {
     expect(r.stderr).toContain("4343");
   });
 
+  // Catches a wait that gives up on the poll floor alone, the wall-clock half dropped: it would
+  // abandon a cleanup after one poll on a machine where processes merely linger.
+  test("a process of the run that never ends holds the wait until the deadline passes", () => {
+    const r = wait("printf '%s\\n' 7777", "5 1");
+    expect(r.code).not.toBe(0);
+    expect(r.calls).toBeGreaterThan(1);
+    expect(r.stderr).toContain("7777");
+  }, 15_000);
+
   test("a call with no arguments waits the production bounds, 600 s and 10 polls", () => {
     // The walk finds nothing at once and, like the real walk, exits 1 from its last test.
     const r = wait("false", "");
