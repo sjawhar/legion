@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "phase": "plan",
   "issue": "INFRA-179",
-  "completed": "2026-10-25T02:34:15Z",
+  "completed": "2026-10-25T03:12:00Z",
   "plan": "dispatch://INFRA-179/artifact/plan-md",
   "requiredSkills": {
     "implement": [
@@ -43,7 +43,7 @@
       },
       {
         "finding": "F6. A room already admitted and still in use can grow from the median document (5 KiB) to the bound (1 MiB) with no lever: the budget acts at admission and by closing unused rooms, and unusedLocked requires no connected browser (roomstate.go:192-196). The only remaining backstop is maxLiveRooms = 1,000. A3's second drive has no pass condition if its browsers stay connected.",
-        "answer": "The plan does not add a lever: closing an in-use room was the option the architect weighed and rejected in dispatch://INFRA-179/ask/7cb661b3-b85a-4454-88cc-e7de5ee75271. A3's second drive is written as the spec describes it, with browsers leaving as their rooms grow, so the budget has unused rooms to close and a next browser to refuse. The residual gap is written into plan.md under 'What this plan does not close' and reported to the architect as its decision."
+        "answer": "The architect answered that the gap belongs in this issue, and version 17 of the spec carries the lever: while the budget is over and nothing can be closed, the update hook takes a third state in every room and refuses, with the transient close 4503 and DOC_BUSY, an update that would grow a document, while one that shrinks it or leaves it as it is still applies. Nobody's room is taken from them and nobody loses text, since a transient refusal leaves the edit in the browser. For that state to end the charge must be able to fall, so each measurement the observer publishes replaces the charge rather than adding to it. The plan carries both (T2's third state, T7's re-based charge and its full-or-not signal), and A3's second drive now keeps its browsers connected so the growth case is real."
       },
       {
         "finding": "F7. A1's benchmark clause is not machine-checkable: no go test -bench invocation exists anywhere in the repository, 'without the hook' would need a toggle the design does not provide, 'half a processor' is unnamed, and a median over three runs is read by a person.",
@@ -93,21 +93,9 @@
   },
   "planReview": {
     "verdict": "approved",
-    "rounds": 1
+    "rounds": 2
   },
   "specDepartures": [
-    {
-      "spec": "When nothing can be closed, the browser asking for one more document is refused before its socket is upgraded, with a reason that names the bound in place of today's bare 503 (websocket.go:218-222); A4 asserts that refusal before the upgrade.",
-      "plan": "The refusal completes the upgrade and closes with a new transient close code, 4503 and reason DOC_BUSY, as refuseOutsideSchema does with 4409. No room is created and no document is loaded, which is the memory property the spec's wording protects.",
-      "evidence": "A browser's WebSocket interface exposes neither the status nor the body of a refused handshake, so a 503 reaches the dashboard only as an offline dot; the repository already records the rule at docs/websocket.go:172-174 ('a browser reads a close code, never the status of a refused upgrade') and solved the schema refusal that way at :176-196. A2's third case ('is shown that reason and tries again') is otherwise unprovable.",
-      "outcome": {
-        "kind": "changed",
-        "acceptance": [
-          "A4: 'refused before its socket is upgraded' becomes 'refused before any room is created or any document is loaded, by a close with code 4503 and reason DOC_BUSY'.",
-          "A2's third case is proven against that close code rather than against a refused handshake."
-        ]
-      }
-    },
     {
       "spec": "Once the measurement is at or over either half, the hook decodes that one update and admits it only when what it inserts is under 8 KiB.",
       "plan": "What it inserts is measured as what the update adds beyond the room's own state, taken against the room's state vector (crdt.DiffUpdateV1 or crdt.ContentIDsFromUpdateV1); and the editor drops a refused edit by deleting that frame's saved row and rebuilding its document from a fresh server read before reconnecting.",
@@ -117,17 +105,6 @@
         "acceptance": [
           "A1's refusal cases are measured against net-new content, so the whole-state case and the refusal case no longer collide.",
           "A2's first case gains the editor's rebuild from the server's state as part of what 'the refused edit is gone' means."
-        ]
-      }
-    },
-    {
-      "spec": "The element half is counted only once the rendering reaches 65,536 bytes, since a rendering makes at most one element per byte (pmdoc/elements.go:18-19).",
-      "plan": "The element half is counted once the rendering reaches MaxDocumentElements / 4, 16 KiB, and a Go test measures the densest shapes the repository knows and fails if any exceeds four elements a byte.",
-      "evidence": "pmdoc/elements.go:16-27 records densities 'up to 1,421 a kibibyte for a 147-byte test fixture of empty list items', about 1.4 elements a byte, and nodeGuard's comment at :31-37 says markdown can count about twice what it weighs. At one element a byte the gate would open only after a browser could already have passed the element bound.",
-      "outcome": {
-        "kind": "changed",
-        "acceptance": [
-          "A1's element case is driven by the densest shape measured, not by headings ('headings being the cheapest way there' is false: headings are one element a byte)."
         ]
       }
     },
@@ -175,13 +152,13 @@
       }
     },
     {
-      "spec": "A1: a run of small updates that together pass the element bound, headings being the cheapest way there, stops the same way and ends no more than 4,096 elements past it.",
-      "plan": "That case is driven by the densest shape the repository has measured, and each drive states the arithmetic it asserts and computes it from the same constants the server uses rather than from a number read by hand.",
-      "evidence": "pmdoc/elements.go:16-27 measures headings at about one element a byte against densities up to 1,421 a kibibyte; and A1's 'no more than 64 KiB past the bound plus the single update that crossed it' and A3's 'within one room of the budget's own arithmetic' have no decidable reading until the test computes them.",
+      "spec": "A3: a second drive opens rooms on small documents, well inside the budget, and grows each one through its socket to the document bound: the budget follows them up, closing unused rooms and then refusing the next browser, before peak resident memory passes that same 4 GiB.",
+      "plan": "That drive keeps every browser connected while its rooms grow, so it closes no unused room and refuses no next browser. It proves that the charge follows the rooms up, that the hook's third state refuses the updates that would grow them while the ones that shrink them still apply, and that peak resident memory stays under 4 GiB.",
+      "evidence": "unusedLocked requires len(state.connected) == 0 (roomstate.go:190-197), so a drive that holds every socket open has no closable room, and a drive that opens no further document asks for no admission. Those two clauses are proven by A3's first drive, where rooms whose browsers have gone are closed before any refusal, and by A4, where the next browser's socket is closed with 4503. Holding the sockets open is what makes the growth case the third hook state exists for.",
       "outcome": {
         "kind": "changed",
         "acceptance": [
-          "A1's element case names the densest shape; A1's and A3's tolerances are computed by the tests from the server's own constants."
+          "A3's second drive proves the growth case and peak resident memory; its 'closing unused rooms and then refusing the next browser' clauses move to A3's first drive and to A4."
         ]
       }
     }
