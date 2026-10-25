@@ -28,10 +28,15 @@
   stored, so the next attempt runs the request again, and an answer larger than 1 MiB is replayed
   as its status with `ANSWER_NOT_KEPT`. Keys belong to the caller's login and are kept 24 hours,
   in migration `0116_request_keys`'s table, which the suggestion-outcome sweep empties of older
-  rows. A write without the header runs as before. The single-session send and the broadcast
-  commit a recovery point with what they made, so a repeat of either resumes whatever delivery it
-  still owes and answers the message or broadcast as it stands, under the first's `201`, even
-  across a crash between the send's commit and its answer. The dashboard and the `dispatch` CLI
+  rows. A write without the header runs as before. A repeat whose first request committed a write
+  but whose answer was lost (its lease lapsed in flight, or it ended in a 5xx or a panic after
+  committing) is `409 KEY_COMMITTED`, with no `Retry-After`: the write landed and is not run again,
+  and the client reads what it wrote; every transaction a keyed request commits marks the key in
+  that same transaction. The single-session send, the broadcast, the issue message and both
+  comment routes commit a recovery point with what they made, so a repeat of any of them resumes
+  whatever delivery it still owes (a comment's mentions under their own attempt numbers) and
+  answers what it made as it stands, under the first's `201`, even across a crash between the
+  commit and its answer. The dashboard and the `dispatch` CLI
   send a key on every write and retry under it. Every answer to a keyed request carries the key
   back (`Idempotency-Key: <key>`), and `/healthz` answers `idempotency_keys: true` on every build
   that judges the header, so a client can tell this Dispatch from one that ignores the header and

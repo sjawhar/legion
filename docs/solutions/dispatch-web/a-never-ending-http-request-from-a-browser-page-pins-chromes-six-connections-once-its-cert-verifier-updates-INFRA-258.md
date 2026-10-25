@@ -87,10 +87,13 @@ Specs: dispatch://INFRA-258 and dispatch://INFRA-292.
   (`packages/envoy/internal/dispatch/api/request_keys.go`, a `request_keys` row per key) runs a
   key's request once, replays its stored answer to a repeat with `Idempotency-Replayed: ?1`,
   refuses the key reused for another request (`422 KEY_REUSED`), keeps no 5xx, and keeps each key
-  24 hours. A write that also reaches outside the database (the single-session send and the
-  broadcast) commits a recovery point with what it made, so a repeat resumes what its delivery
-  still owes and answers what it made as it stands, even across a crash between its commit and its
-  answer. The page keeps each unconfirmed write in `sessionStorage` so a reload resumes it; a kept
+  24 hours. Every transaction a keyed request commits marks its key in that same transaction, so a
+  write that landed but lost its answer is never run again: its repeat is `409 KEY_COMMITTED`,
+  which every client treats as a landing and re-reads. A write that also reaches outside the
+  database (the single-session send, the broadcast, the issue message and a comment, each of which
+  delivers to agents) commits a recovery point with what it made, so a repeat resumes what its
+  delivery still owes and answers what it made as it stands, even across a crash between its commit
+  and its answer. The page keeps each unconfirmed write in `sessionStorage` so a reload resumes it; a kept
   write belongs to the login that pressed it and resumes on its own only within five minutes, so a
   tab reopened the next morning never sends yesterday's change by itself. The two hand-written key
   paths that came before it, one per send, are gone.

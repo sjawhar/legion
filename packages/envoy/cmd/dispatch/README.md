@@ -1018,16 +1018,21 @@ suggestion-outcome sweep deletes older rows).
 | --- | --- |
 | The first answer, with `Idempotency-Replayed: ?1` | A repeat under a key whose first request finished, with the same method, route, path values, query, media type and body: the stored status, content type and body, and nothing runs again. |
 | The first status with `ANSWER_NOT_KEPT` | That repeat, when the first answer was larger than the 1 MiB a key keeps: the write ran, and the caller reads what it wrote again. |
-| `409 KEY_IN_FLIGHT`, `Retry-After: 1` | A repeat while the key's first request still runs, inside its 60 s lease; nothing ran, and the caller asks again under the same key. A repeat past the lease takes a key whose holder died over and runs the request. |
+| `409 KEY_IN_FLIGHT`, `Retry-After: 1` | A repeat while the key's first request still runs, inside its 60 s lease; nothing ran, and the caller asks again under the same key. A repeat past the lease takes over a key whose holder died before it committed anything, and runs the request. |
+| `409 KEY_COMMITTED`, no `Retry-After` | A repeat whose first request committed a write but whose answer was lost: its lease lapsed in flight, or it ended in a 5xx or a panic after committing (every transaction a keyed request commits marks the key's `committed_at` in that same transaction). The write landed and is not run again; there is no answer to replay, so the caller reads what it wrote. |
 | `422 KEY_REUSED` | The key was already used for a different request; the message names its method and path, and this request did not run. A changed request needs a new key. |
 | `400 IDEMPOTENCY_KEY_INVALID` | The header is not 1 to 128 of those characters, or was sent twice. |
 
 A 5xx, a 401, a 408 and a 429 are not stored: the key is released and the next attempt runs the
-request again. The two sends keep their own recovery point beside the key, so a repeat of
-`POST /api/v1/agents/{session_id}/messages` or `POST /api/v1/broadcasts` resumes whatever delivery
-is still owed and answers the message or broadcast as it stands now, under the first's `201`,
-however the first request ended; a recipient a live sender still holds reads `pending`. Neither
-route takes a body `idempotency_key` any more.
+request again, unless the request had already committed a write, which makes that next attempt
+`409 KEY_COMMITTED` at once. Four kinds of write keep their own recovery point beside the key, so a
+repeat of `POST /api/v1/agents/{session_id}/messages`, `POST /api/v1/broadcasts`,
+`POST /api/v1/issues/{key}/messages`, or a comment (`POST /api/v1/issues/{key}/comments`,
+`POST /api/v1/artifacts/{id}/comments`) resumes whatever delivery is still owed and answers what it
+made as it stands now, under the first's `201`, however the first request ended; a recipient a
+live sender still holds reads `pending`. A comment's or an issue message's replay keeps the first
+answer's `advice` and `ask_waiting_on` and reads every other member fresh. Neither send route takes
+a body `idempotency_key` any more.
 
 Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the
 `400 IDEMPOTENCY_KEY_INVALID`, a request whose caller it could not resolve, or one whose body is

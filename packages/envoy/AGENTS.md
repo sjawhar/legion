@@ -1978,20 +1978,38 @@ from a reuse:
   and body, with `Idempotency-Replayed: ?1`, and the handler does not run again.
 - The handler answers on a writer that holds its answer (`keyedAnswer`) until the row has it. A
   2xx or a 4xx is stored and the row finished in one statement; a 5xx, a 401 (a session that
-  lapsed mid-write), a 408, a 429 and a panic delete the row, so the next attempt runs the handler
-  again. An answer past 1 MiB is answered in full but kept as its status alone, and its replay is
-  that status with the body `ANSWER_NOT_KEPT` (`IDEMPOTENCY_ANSWER_NOT_KEPT`): the write ran, and
-  the client reads what it wrote again.
-- A row whose holder never finished (its process died) is taken over by the first repeat past the
-  lease, `attempt + 1`; every write the holder makes to the row is scoped to its own attempt, so a
-  holder that was only slow changes nothing once it has lost the key.
+  lapsed mid-write), a 408, a 429 and a panic release the key, so the next attempt runs the
+  handler again - unless the request had already committed something (below). An answer past
+  1 MiB is answered in full but kept as its status alone, and its replay is that status with the
+  body `ANSWER_NOT_KEPT` (`IDEMPOTENCY_ANSWER_NOT_KEPT`): the write ran, and the client reads what
+  it wrote again.
+- Every transaction a keyed request commits that wrote anything sets the row's `committed_at` in
+  that same transaction (`store.WithBeforeCommit`, the pool's hook), so the key knows the write
+  landed even when its answer never made it into the row. A repeat that finds such a row in
+  flight past its lease, or released after a 5xx or a panic, is `409 KEY_COMMITTED`
+  (`IDEMPOTENCY_KEY_COMMITTED`) at once, with the echo and no `Retry-After`: `the write under
+  Idempotency-Key "k" (POST /path) landed, but Dispatch lost its answer, so it is not run again
+  and has no answer to replay: read what it wrote`. A client treats it as a landing and reads
+  again what it wrote. A request that wrote nothing is not marked, so a repeat past the lease runs
+  it again.
+- A row whose holder never finished and committed nothing (its process died first) is taken over
+  by the first repeat past the lease, `attempt + 1`; every write the holder makes to the row is
+  scoped to its own attempt, so a holder that was only slow changes nothing once it has lost the
+  key.
 - A write that also mutates foreign state keeps its own recovery point (Brandur Leach,
   "Implementing Stripe-like Idempotency Keys in Postgres"): it commits what it made into the row in
   its own transaction (`bindRequestKeyRecovery`), and a repeat that finds the point is answered by
-  its route's `keyedReplay` rather than from the stored bytes, however its first request ended:
-  whatever delivery is still owed is resumed first, then what it made is read again. The
-  single-session send and the broadcast are the two (below). The layer replays the answer; the
-  delivery code decides what is still owed.
+  its route's `keyedReplay` rather than from the stored bytes or a `KEY_COMMITTED`, however its
+  first request ended (finished, lapsed, or released after a 5xx): whatever delivery is still owed
+  is resumed first, then what it made is read again, under `201` and `Idempotency-Replayed: ?1`.
+  Four routes do: the single-session send and the broadcast (below), the issue message
+  (`POST /api/v1/issues/{key}/messages`), and a comment (`POST /api/v1/issues/{key}/comments` and
+  `POST /api/v1/artifacts/{id}/comments`), whose replay resumes every mention whose one attempt
+  is pending under a lapsed claim, under that attempt's own number (so its dedupe key is the same
+  and the stream drops a frame that landed), then answers the comment with its mentions and
+  deliveries in the first answer's shape, its `advice` and `ask_waiting_on` kept and every other
+  member read fresh; the issue message does the same. The layer replays the answer; the delivery
+  code decides what is still owed.
 
 Every answer the layer judged echoes the key back (`Idempotency-Key: <key>`) - not the
 `400 IDEMPOTENCY_KEY_INVALID`, nor a request whose caller it could not resolve, nor one whose body

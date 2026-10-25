@@ -407,10 +407,15 @@ letters, digits, `.`, `_`, `:` and `-`, bare or double-quoted; anything else is
 repeat with the same key and request once the first has finished is answered the first's stored
 status and body with `Idempotency-Replayed: ?1` and runs nothing; the same key with a different
 request is `422 KEY_REUSED`; a repeat while the first still runs, inside the 60 s lease, is
-`409 KEY_IN_FLIGHT` with `Retry-After: 1`; and a 5xx, 401, 408 or 429 is not stored, so the next
-attempt runs again. Keys belong to the caller's login and are kept 24 hours (`request_keys`,
-migration `0116`, swept by the suggestion-outcome sweep's pass). A write without the header runs
-unkeyed, as before. `PUT` and `DELETE` take no key.
+`409 KEY_IN_FLIGHT` with `Retry-After: 1`; a 5xx, 401, 408 or 429 is not stored, so the next
+attempt runs again; and a repeat whose first request committed a write but whose answer was lost
+(its lease lapsed, or it ended in a 5xx or a panic after committing) is `409 KEY_COMMITTED` with no
+`Retry-After`, never run again, which a client treats as a landing. The issue message, both
+comment routes, the single-session send and the broadcast commit a recovery point with what they
+made, so their repeat resumes owed delivery and answers `201` from a fresh read instead. Keys
+belong to the caller's login and are kept 24 hours (`request_keys`, migration `0116`, swept by
+the suggestion-outcome sweep's pass). A write without the header runs unkeyed, as before. `PUT`
+and `DELETE` take no key.
 
 | Path | Method | Access | Purpose |
 | --- | --- | --- | --- |
