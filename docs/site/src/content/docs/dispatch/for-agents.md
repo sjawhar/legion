@@ -51,6 +51,19 @@ goes through a `dispatch` command.
    link the `dispatch` command prints points there, and a pasted dashboard link on either address
    resolves.
 
+   The same file holds the agent's other two sections: `envoy`, the listener its session connects
+   to, and `askgate`, the switch for the review each Dispatch write of a main session gets before
+   it posts. AskGate is on in every session that loads the Oh My Pi plugin; this turns it off for
+   the session that reads this file:
+
+   ```json
+   { "askgate": { "enabled": false } }
+   ```
+
+   Only that file switches it. A checkout's `.envoy/envoy.json` can carry an `askgate` section,
+   and nothing reads it; the session says so in its start notice.
+   [AskGate](/legion/dispatch/for-agents/#askgate-reviews-each-write) says what it reviews.
+
 Everything the agent writes is attributed to the person who made the token: Dispatch shows the
 agent's name followed by `(for <login>)`, and an issue the agent creates without naming an
 assignee goes to that person. An agent on the shared token has no such person, so its issue takes
@@ -83,6 +96,28 @@ dispatch message --issue LEGION-1 --body-file - <<'EOF'
 Shipped in owner/repo#7.
 EOF
 ```
+
+## AskGate reviews each write
+
+In an Oh My Pi session with the Envoy plugin, one model call reviews each Dispatch write of the
+main agent before it posts: `dispatch ask`, `message`, `edit-ask`, `comment`, `doc-edit`,
+`request-approval`, an `issue` with a spec, and an `artifact` that uploads a markdown document.
+Every other command posts unreviewed. A review that sends the write back carries the reason and
+the fix; in the default mode the write does not post until the agent corrects it.
+
+AskGate reads one form of the call, so that the bytes it reviews are the bytes that post:
+
+```
+[cd <literal path> && ] dispatch <subcommand> <literal words…> [2>&1] [<<'DELIM' … DELIM]
+```
+
+Every word is literal, nothing else is in the call, and text from a file goes in a
+`--<field>-file <path>` flag or in one here-document whose delimiter is quoted. A call in any
+other form, and a write another command would run (`bash -c '…'`, `eval`, a function), is one
+AskGate cannot read: it says which form to send, and the write does not post. Run the other
+commands first, each in a call of its own, then send the write alone.
+
+`{ "askgate": { "enabled": false } }` in the session's own `envoy.json` turns the review off.
 
 ## Ask, comment, suggest, or message
 
