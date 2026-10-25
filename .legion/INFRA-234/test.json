@@ -2,30 +2,30 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-234",
-  "completed": "2026-10-25T07:38:00Z",
-  "headSha": "83df94e30df2efff22380f4d844f7999860fba5e",
-  "codeSha": "9d6c255bf78efaa4a67f62ef8d50caed0dd1b76b",
+  "completed": "2026-10-25T07:46:00Z",
+  "headSha": "ce16d41c6ccf452bc7b81584eda37e3b5cc64da2",
+  "codeSha": "b7b742bf7d40e2b43a07151e73ef6b6b7fd173fc",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Round 3 changes one hunk of docs/kubernetes.md (the INFRA-71 evidence bullet, 2806-2816) and no executable block, so the implementer's proof is a read of the run records, which I checked independently against my own: all five 2026-10-25 runs (tester run.log, run2.log, run3.log for workloads 8a6d92, e7ad30, 3022f9; implementer run1 and run2 for 1c9d92 and af1ede) record `job.batch/<workload> created` and both waits, so the Job half did run again and is rightly no longer under 'not run again since'. None of the five records a credential-less gate (no `localhost:8080`), a Job-rule breakage (my dry runs were all of the Service), or a synthetic reachability case, so those three rightly stay under it. The unchanged blocks were last driven at b5b5f61a (workload 3022f9), and the round-2 proof still holds for them."
+    "how": "Round 4 changes one hunk of the INFRA-71 evidence bullet and no executable block. I checked the implementer's entry-by-entry table against the five 2026-10-25 run logs myself (tester run.log, run2.log, run3.log; implementer run1/out.log, run2/out.log). Reachability answered against a listener: 5 of 5, so it leaves the qualifier. Refused then answered: 3 of 5 (e7ad30, 3022f9, af1ede), so it leaves. TimeoutError, the dropped-packets case: 0 of 5, so it stays. localhost:8080, the credential-less gate: 0 of 5, so it stays. Job-rule breakage: 0. The pattern's 3 hits in run.log are my Service dry-run refusals, whose rule text mentions the Job that owns the Service, so it stays. Each entry matches the implementer's table and the text at b7b742bf."
   },
   "failures": [],
   "failed": 0,
   "proof": [
     {
-      "criterion": "Round 3: the INFRA-71 evidence bullet says what ran on 2026-10-24 and what was not run again since, true against the 2026-10-25 run records",
-      "surface": "The evidence passage at 9d6c255b, read against the five 2026-10-25 run logs of the published sequence from this issue's role containers",
-      "command": "jj -R \"$LEGION_WORKSPACE\" diff --git --from 5245de2a --to 83df94e3 -- docs (one hunk); for each run log: grep -c 'job.batch/.* created$', grep -ciE for a Job-rule dry run or refusal, grep -c 'localhost:8080'",
-      "observed": "Every log: job created 1, Job-rule dry run 0, credential-less gate 0. The bullet now gives the Job half (87 s / 10 s, the reason for two waits) as a 2026-10-24 measurement and puts 'not run again since' only on the credential-less gate, the Job manifest's enforced-rule breakages and the reachability block's three synthetic cases, all three absent from every 2026-10-25 record. The 2026-10-25 bullet above it records the whole sequence, Job half included, so the two no longer contradict each other.",
-      "headSha": "9d6c255bf78efaa4a67f62ef8d50caed0dd1b76b",
-      "negativeControl": "The approved text at b5b5f61a listed the Job half under 'not run again since'; the same grep shows a Job created in all five 2026-10-25 logs, which contradicts it."
+      "criterion": "Round 4: every entry under the INFRA-71 bullet's 'not run again since' is absent from all five 2026-10-25 runs, and every entry present in one is outside it",
+      "surface": "The evidence passage at b7b742bf, read entry by entry against the five 2026-10-25 run logs of the published sequence from this issue's role containers",
+      "command": "for f in tester/run.log tester/run2.log tester/run3.log infra234/run1/out.log infra234/run2/out.log: grep -c '^answered', ConnectionRefusedError, TimeoutError, localhost:8080, and a Job-rule refusal or dry run (hits inspected by line)",
+      "observed": "answered 1,1,1,1,1; refused-then-answered 0,1,1,0,1; TimeoutError 0 everywhere; localhost:8080 0 everywhere; Job-rule breakage 0. The 3 pattern hits in run.log are Service refusals. The text now dates the Job half and the listener and refuses-then-listens cases to 2026-10-24 with no qualifier, and keeps under 'not run again since' only the credential-less gate, the Job-rule breakages and the dropped-packets case: exactly the three entries absent from every record.",
+      "headSha": "b7b742bf7d40e2b43a07151e73ef6b6b7fd173fc",
+      "negativeControl": "At 9d6c255b the qualifier still covered the listener and refuses-then-listens cases, and the same greps show both in the 2026-10-25 logs. I passed that text in round 3 by judging the Job half alone; the reviewer's entry-by-entry read caught it."
     },
     {
-      "criterion": "Round 3: the rewritten bullet renders as three list items with balanced emphasis",
-      "surface": "markdown-it 14 (CommonMark) over docs/kubernetes.md 2786-2825 at 9d6c255b",
-      "command": "cd $TMPDIR/tester/md && bun -e 'markdown-it render of passage.md; count <li>, list <em>, count * outside code'",
+      "criterion": "Round 4: the rewritten bullet renders as three list items with balanced emphasis",
+      "surface": "markdown-it 14 (CommonMark) over docs/kubernetes.md 2786-2825 at b7b742bf",
+      "command": "cd $TMPDIR/tester/md && bun -e 'markdown-it render of passage4.md; count <li>, list <em>, count * outside code'",
       "observed": "3 li; em: 'Executed from a role container on 2026-10-25, for dispatch://INFRA-234', 'Executed from a role container on 2026-10-24, for dispatch://INFRA-71', 'not run again since', 'Refused as published, and corrected on 2026-10-25'; 0 stray asterisks.",
-      "headSha": "9d6c255bf78efaa4a67f62ef8d50caed0dd1b76b",
+      "headSha": "b7b742bf7d40e2b43a07151e73ef6b6b7fd173fc",
       "negativeControl": "The same passage with the opening '*' of '*not' removed renders with 1 stray asterisk."
     },
     {
@@ -63,9 +63,9 @@
     {
       "criterion": "A8: no private literal reaches the diff, the commit messages, the PR text or a handoff",
       "surface": "This role's own shell",
-      "command": "grep -c -i -F with nine patterns held in shell variables (the label's domain and key, the owner's name, the admission policy name, the scratch storage class, the pool's name, '-n <ns>', '<ns>.svc', '<ns> namespace', the deployment repository's name) over the diff c6387bde..83df94e3, every commit message in that range, the PR title, branch name and body",
+      "command": "grep -c -i -F with nine patterns held in shell variables (the label's domain and key, the owner's name, the admission policy name, the scratch storage class, the pool's name, '-n <ns>', '<ns>.svc', '<ns> namespace', the deployment repository's name) over the diff c6387bde..ce16d41c, every commit message in that range, the PR title, branch name and body",
       "observed": "0 hits for every pattern in every file.",
-      "headSha": "83df94e30df2efff22380f4d844f7999860fba5e",
+      "headSha": "ce16d41c6ccf452bc7b81584eda37e3b5cc64da2",
       "negativeControl": "The same grep over the deployment's README counts 21 and 8 for two of the patterns."
     }
   ],
@@ -84,8 +84,15 @@
       "head": "e3147c7f",
       "verdict": "pass",
       "failures": []
+    },
+    {
+      "round": 3,
+      "head": "83df94e3",
+      "verdict": "pass",
+      "failures": [],
+      "note": "Missed that the listener and refuses-then-listens cases also ran on 2026-10-25; the reviewer's changes_requested at 7eaf61ab caught it."
     }
   ],
-  "ci": "At 2026-10-25T07:36:40Z on head 83df94e3 (code 9d6c255b, which has no run of its own; both were pushed together): Tests run 40173332511 (lint, typecheck, test) queued; Legion Envoy and Contracts run 40173332325 queued; PR Title run 40173350840 queued (run 40173332354 cancelled). Cited as queued, not waited for.",
-  "notRun": "T6 and T7, by the architect's direction: sjawhar/legion#2149 still OPEN at 07:36Z. No new cluster workload this round: no executable block changed since the round-2 drive at b5b5f61a."
+  "ci": "At 2026-10-25T07:44Z on head ce16d41c: Tests run 40173797493 pending; Legion Envoy and Contracts run 40173797490 queued; PR Title runs 40173829396 pending, 40173808788 and 40173808048 queued (40173797509 cancelled). Recorded as queued or pending; I did not wait for them.",
+  "notRun": "T6 and T7, by the architect's direction: sjawhar/legion#2149 still OPEN at 07:44Z. No new cluster workload this round: no executable block changed since the round-2 drive at b5b5f61a."
 }
