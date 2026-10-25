@@ -1,0 +1,94 @@
+{
+  "schemaVersion": 1,
+  "phase": "implement",
+  "issue": "INFRA-122",
+  "completed": "2026-10-25T17:43:00Z",
+  "proof": [
+    {
+      "criterion": "1. A serving-port session receives a topic the stream does not store within 2 s; fails before, passes after",
+      "surface": "built envoy-listener (cmd/listener) against a real nats-server v2.10.29 -js and a python fake serving port bound on 0.0.0.0:18080, registered with host = this pod's IP 10.1.10.198, no ENVOY_HOST_BRIDGE",
+      "command": "bash $TMPDIR/smoke/run.sh $TMPDIR/bin/envoy-listener-head head-on ENVOY_SUBSCRIBE_ALL_TOPICS=1 (POST /v1/interests/subscribe topics [notifications.team.smoke-<t>] port 18080 host 10.1.10.198; POST /v1/messages/publish to it). CI before-run: run 40210282599 job envoy-go 121220517750 at d6cf8f38; after-run: run 40217683605 at 5bdf1607",
+      "observed": "healthz live_topics=subscribed; INFO 'live topics subscribed' subject=notifications.> queue=envoy-listener-live-smoke; publish at 17:37:51.127Z -> one POST /session/smoke-s/prompt_async at 17:37:51 carrying 'Topic: notifications.team.smoke-1792949870'. CI before-run failed exactly TestAServingPortReceivesATopicTheStreamDoesNotStore (live_topics_test.go:182 no prompt within 2s) and TestAListenerReachesASessionAtTheHostItRecorded (:206); every other job green",
+      "headSha": "5bdf16079401da78cf036f243905bad95b356356",
+      "negativeControl": "ENVOY_SUBSCRIBE_ALL_TOPICS unset -> live_topics=not_applicable, 0 prompts in 4 s; parent-commit binary (d6cf8f38) with the variable set -> 0 prompts in 4 s"
+    },
+    {
+      "criterion": "5. A session is reached at its recorded host",
+      "surface": "same rig: listener with no ENVOY_HOST_BRIDGE, session host = pod IP 10.1.10.198, fake port on 0.0.0.0",
+      "command": "bash $TMPDIR/smoke/run.sh $TMPDIR/bin/envoy-listener-head head-on ENVOY_SUBSCRIBE_ALL_TOPICS=1",
+      "observed": "the prompt reached 10.1.10.198:18080 (the recorded host) rather than host.docker.internal; registration with host evil.example:80/x answered 400 {\"error\":\"host is not a host name or address\",\"expected\":[\"host\"]}",
+      "headSha": "5bdf16079401da78cf036f243905bad95b356356",
+      "negativeControl": "parent binary d6cf8f38: the malformed host registration answered 200 (no check) and no prompt arrived; CI before-run TestAListenerReachesASessionAtTheHostItRecorded failed (no prompt in 10 s)"
+    },
+    {
+      "criterion": "4. Text corrected",
+      "surface": "the files the plan names",
+      "command": "grep -rnE 'receives nothing on such a topic|receives no team topic|never the routing key' docs/site/src/content/docs/dispatch/envoy.md packages/envoy-client/src/tool-contract.ts packages/claude-envoy/dist skills/envoy/SKILL.md packages/envoy/AGENTS.md packages/envoy/CHANGELOG.md packages/envoy/internal/session/registry.go packages/envoy/cmd/listener/claim_wiring.go; cd packages/claude-envoy && bun scripts/build.ts --check",
+      "observed": "grep prints nothing (exit 1); build check 'dist/ and legion/ match a fresh build'",
+      "headSha": "5bdf16079401da78cf036f243905bad95b356356",
+      "negativeControl": "the same grep at the base 064cc728 matches envoy.md, claude-envoy dist/envoy-channel.js, tool-contract.ts, registry.go and skills/envoy/SKILL.md"
+    }
+  ],
+  "filesChanged": [
+    "docs/site/src/content/docs/dispatch/envoy.md",
+    "packages/claude-envoy/CHANGELOG.md",
+    "packages/claude-envoy/dist/envoy-channel.js",
+    "packages/envoy/AGENTS.md",
+    "packages/envoy/CHANGELOG.md",
+    "packages/envoy/cmd/listener/api.go",
+    "packages/envoy/cmd/listener/api_test.go",
+    "packages/envoy/cmd/listener/claim_wiring.go",
+    "packages/envoy/cmd/listener/claim_wiring_test.go",
+    "packages/envoy/cmd/listener/delivery.go",
+    "packages/envoy/cmd/listener/live_topics_test.go",
+    "packages/envoy/cmd/listener/main.go",
+    "packages/envoy/cmd/listener/main_test.go",
+    "packages/envoy/cmd/listener/shutdown_test.go",
+    "packages/envoy/deploy/README.md",
+    "packages/envoy/deploy/compose/listener.compose.yml",
+    "packages/envoy/deploy/compose/single-node.compose.yml",
+    "packages/envoy/infra/AGENTS.md",
+    "packages/envoy/infra/README.md",
+    "packages/envoy/infra/aws/rendering/listener.go",
+    "packages/envoy/infra/aws/webhooklistener.go",
+    "packages/envoy/infra/aws/webhooklistener_test.go",
+    "packages/envoy/infra/core/listener_env.go",
+    "packages/envoy/infra/core/listener_env_test.go",
+    "packages/envoy/infra/core/permissions_live_test.go",
+    "packages/envoy/infra/host/construct_test.go",
+    "packages/envoy/infra/host/listener.go",
+    "packages/envoy/infra/host/listener_test.go",
+    "packages/envoy/infra/provider/provider_test.go",
+    "packages/envoy/infra/render/render.go",
+    "packages/envoy/infra/render/render_test.go",
+    "packages/envoy/internal/bus/adhoc_topic_test.go",
+    "packages/envoy/internal/bus/listener_names_test.go",
+    "packages/envoy/internal/bus/nats.go",
+    "packages/envoy/internal/bus/recovery_test.go",
+    "packages/envoy/internal/bus/stream.go",
+    "packages/envoy/internal/config/config.go",
+    "packages/envoy/internal/config/config_test.go",
+    "packages/envoy/internal/session/handler_test.go",
+    "packages/envoy/internal/session/registry.go",
+    "packages/envoy/internal/session/session.go",
+    "packages/envoy/internal/session/session_test.go",
+    "packages/envoy-client/CHANGELOG.md",
+    "packages/envoy-client/src/tool-contract.ts",
+    "packages/envoy-client/src/transport.ts",
+    "packages/pi-envoy/CHANGELOG.md",
+    "skills/envoy/SKILL.md"
+  ],
+  "trickyParts": [
+    "The live lane is a second bus.Client (one core subscription per client) in queue group envoy-listener-live-<machine>, never the role lane's group, which NATS would merge across subjects.",
+    "The live wrapper filters on msg.Subject before decoding (role lanes and StreamCaptures subjects dropped), and only for liveDelivery drops an envelope whose Topic differs from its subject.",
+    "A refused live subscribe is detected by Flush then Conn.LastError() errors.Is ErrPermissionViolation; the start exits 1.",
+    "Docker is absent in the pod: listener/bus/session tests ran locally through a go -overlay of internal/testnats that starts a local nats-server ($TMPDIR/overlay, never committed); tests needing Postgres or container stop/pause are CI-only."
+  ],
+  "deviations": [
+    "Acceptance 4's grep is narrowed to the stale claims, dropping the literal INFRA-122, at the architect's direction: the envoy CHANGELOG entry names the issue it closes.",
+    "Simplify pass: 0 applied; six priority-3 findings skipped as cosmetic (listed in the PR's Thermo line)."
+  ],
+  "openQuestions": [
+    "The host check (spec-approved) refuses with 400 a serving-port registration whose host holds a space or other character outside [A-Za-z0-9_.-]; envoy-client sends host = ENVOY_MACHINE_ID || os.hostname(), so an OpenCode session with such an ENVOY_MACHINE_ID would be refused. The spec's snapshot held no serving-port registration, and such a host could not be dialled anyway."
+  ]
+}
