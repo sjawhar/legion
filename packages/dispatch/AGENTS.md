@@ -347,10 +347,11 @@ page's ordinary queries once the event feed starts again. Dispatch sends the fre
 holds right after each subscription's first answer (its snapshot, or a resume's delta, or where
 that delta would be when the resume has nothing to catch up), and nothing before it holds one, so
 a verdict that changed while the socket was down, or while the page held no delivery view, shows
-once the view is back. A `freshness` frame is written into the cached body whole - the
-`freshness` object (the last event, the last reconcile, its error and the unfetchable count) and
-the stale-source list together - so a last error that cleared, or an unfetchable count that rose,
-shows at the frame rather than waiting for the next snapshot. Until the timeline's configuration
+once the view is back. The row reads that frame's verdict whole wherever the socket has carried
+one (`lib/freshness.ts`, over the body's own): the `freshness` object - the last event, the last
+reconcile, its error and the unfetchable count - and the stale-source list together, never the
+stale list alone, so a last error that cleared, or an unfetchable count that rose, shows at the
+frame rather than waiting for the next snapshot. Until the timeline's configuration
 record exists, Dispatch refuses the view
 with a `DELIVERY_NOT_CONFIGURED` error frame, which the client raises as the GET route's `404` and
 the shared retry policy takes as definitive (`isDeliveryNotConfigured`), and the page renders
