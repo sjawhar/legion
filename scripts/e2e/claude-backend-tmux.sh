@@ -8,25 +8,13 @@
 # pane is killed, comes back with `--resume` into the same Claude Code session, its transcript's
 # earlier turns intact and in its context.
 #
-# LEGION_E2E_MODEL_ROUTE (required, `gateway` or `login`) picks how both harnesses reach their
-# models; unlike Stage 2's and Stage 3's, which pick the Oh My Pi agents' route alone, it picks
-# Claude Code's too:
-#   - `gateway`: `LEGION_E2E_MODEL_ROUTE=gateway LEGION_E2E_CLAUDE_KEY_FILE=<file>
-#     LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic bash scripts/e2e/claude-backend-tmux.sh`.
-#     LEGION_E2E_CLAUDE_KEY_FILE is a file holding the Anthropic API key the Claude Code implementer
-#     reaches its model with: the run copies it once into its work directory (0600), and the
-#     implementer's claim directory names a key command that prints that copy (Claude Code's
-#     apiKeyHelper). The Oh My Pi agents reach their model through the Hawk model gateway, as Stage
-#     3's do (lib/install-model-gateway.sh).
-#   - `login`: `LEGION_E2E_MODEL_ROUTE=login LEGION_E2E_ANTHROPIC_PROFILE=<profile> bash
-#     scripts/e2e/claude-backend-tmux.sh`, on the operator's own signed-in logins. The implementer's
-#     claim directory names, in its settings' `env`, the Anthropic profile whose Console login Claude
-#     Code reads (ANTHROPIC_CONFIG_DIR and ANTHROPIC_PROFILE), and the Oh My Pi profile's agent.db
-#     links to the operator's own Oh My Pi database (lib/install-login-model-route.sh). Each is
-#     preflighted with one answer before any pane exists, and each login must outlast the run
-#     (run_minutes), so no agent of the run refreshes one for its expiry.
-# Either way no credential reaches a pane's environment (the watcher checks every agent process), an
-# argv or a transcript. The rig is Stage 3's without its GitHub ingress bridge: scratch
+# Run it as `LEGION_E2E_CLAUDE_KEY_FILE=<file> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
+# bash scripts/e2e/claude-backend-tmux.sh`. LEGION_E2E_CLAUDE_KEY_FILE is a file holding the
+# Anthropic API key the Claude Code implementer reaches its model with: the run copies it once into
+# its work directory (0600), and the implementer's claim directory names a key command that prints
+# that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no argv and no
+# transcript. The Oh My Pi agents reach their model through the Hawk model gateway, as Stage 3's do
+# (lib/install-model-gateway.sh). The rig is Stage 3's without its GitHub ingress bridge: scratch
 # Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (resolved by the
 # daemon's private_key_command and once by lib/app-logins.ts, never in this shell), and the smoke
 # repository sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
@@ -57,9 +45,6 @@ profile_agent="$omp_home/.omp/profiles/$profile/agent"
 repo="sjawhar/legion-smoke"
 # The model the Claude Code implementer runs, set in its claim directory's settings.json.
 claude_model=claude-sonnet-5
-# The longest a run lasts, every bounded wait at its bound: under `login`, every login the run uses
-# must have longer left.
-run_minutes=150
 pg_container="legion-e2ecc-pg-$$"
 nats_container="legion-e2ecc-nats-$$"
 daemon_pid=
@@ -267,28 +252,17 @@ start_daemon() {
   fail "the Go daemon lost a picked port five times"
 }
 
-# claude_settings prints the settings.json the implementer's claim directory gets, by the run's model
-# route: under gateway, an apiKeyHelper that prints the run's copy of the key; under login, an env
-# naming the operator's Anthropic profile (ANTHROPIC_CONFIG_DIR and ANTHROPIC_PROFILE), which Claude
-# Code reads its Console login from. Either way, model is claude_model.
-claude_settings() {
-  case "$model_route" in
-  gateway) jq -n --arg helper "$work/claude-key-command" --arg model "$claude_model" '{apiKeyHelper: $helper, model: $model}' ;;
-  login)
-    jq -n --arg dir "$claude_login_dir" --arg profile "$claude_login_profile" --arg model "$claude_model" \
-      '{env: {ANTHROPIC_CONFIG_DIR: $dir, ANTHROPIC_PROFILE: $profile}, model: $model}'
-    ;;
-  esac
-}
-
 # write_claude_route gives the implementer's claim its model before the claim exists: the daemon
 # makes the claim's Claude Code directory, <state>/claude/<claim token>, only if it is missing, and
-# Claude Code reads settings.json there (claude_settings).
+# Claude Code reads settings.json there. Its apiKeyHelper prints the run's copy of the key.
 write_claude_route() {
   local dir
   dir=$state/claude/$(claim_token "$issue" implementer)
-  (umask 077 && mkdir -p "$dir" && claude_settings >"$dir/settings.json")
-  note "the implementer's Claude Code directory $dir names $claude_model and $claude_route_note"
+  (umask 077 && mkdir -p "$dir" &&
+    printf '#!/bin/sh\nexec cat %s\n' "$work/claude-model-key" >"$work/claude-key-command" &&
+    jq -n --arg helper "$work/claude-key-command" --arg model "$claude_model" '{apiKeyHelper: $helper, model: $model}' >"$dir/settings.json")
+  chmod 0700 "$work/claude-key-command"
+  note "the implementer's Claude Code directory $dir names $claude_model and the run's key command"
 }
 
 # ---- the runtime seam: a pane's session file and its issue's workspace live on this host --------
@@ -333,8 +307,9 @@ claim_pane_pid() {
 }
 pane_value() { tr '\0' '\n' <"/proc/$1/environ" | sed -n "s/^$2=//p"; }
 # endpoint_mismatch AGENT_PID prints the first rig endpoint the agent does not carry, or the model
-# credential variable it must not carry: every agent's model credential is a key command's or a
-# login's file, never its environment's.
+# credential variable it must not carry: every agent's key is a key command's, never its
+# environment's. Beside ANTHROPIC_API_KEY, Oh My Pi reads ANTHROPIC_OAUTH_TOKEN and
+# ANTHROPIC_FOUNDRY_API_KEY, and Claude Code ANTHROPIC_AUTH_TOKEN and CLAUDE_CODE_OAUTH_TOKEN.
 endpoint_mismatch() {
   local agent=$1 name want got
   for name in DISPATCH_URL DISPATCH_TOKEN_FILE ENVOY_URL ENVOY_NATS_URL; do
@@ -457,95 +432,24 @@ resumed_reply_names() {
   grep -Fq -- "$3" <<<"$text"
 }
 handoff_recorded() { [ -n "$(role_handoff "$issue" implementer implementing)" ]; }
-# preflight_claude_login proves the settings.json the claim will get reaches a model by itself: one
-# `claude -p` from a scratch directory, under a scratch Claude Code directory holding that file alone,
-# in a pane's environment (the daemon's pane allow-list, with HOME and XDG_CONFIG_HOME empty scratch
-# directories), so nothing but the file's env can name a login. It then holds that Claude Code wrote
-# no credential of its own into that directory: the login stays in the operator's profile alone, so a
-# refresh there is never forked into a copy this run would throw away. The scratch directories go
-# with it.
-preflight_claude_login() {
-  local p=$work/claude-preflight out status=0 name forked
-  local -a env_pairs=()
-  mkdir -p "$p/config" "$p/home" "$p/xdg" "$p/cwd"
-  (umask 077 && claude_settings >"$p/config/settings.json")
-  for name in PATH USER LOGNAME SHELL TERM TZ LANG LC_ALL LC_CTYPE TMPDIR XDG_RUNTIME_DIR \
-    HTTP_PROXY HTTPS_PROXY NO_PROXY http_proxy https_proxy no_proxy SSL_CERT_DIR SSL_CERT_FILE NODE_EXTRA_CA_CERTS; do
-    [ -z "${!name+set}" ] || env_pairs+=("$name=${!name}")
-  done
-  out=$(cd "$p/cwd" && env -i "${env_pairs[@]}" HOME="$p/home" XDG_CONFIG_HOME="$p/xdg" CLAUDE_CONFIG_DIR="$p/config" \
-    timeout 300 "$claude_bin" -p "Reply with exactly: OK" --max-turns 1 --output-format json 2>"$p/stderr") || status=$?
-  forked=$(find "$p/config" "$p/home" "$p/xdg" -name '*credential*' -print -quit)
-  local said
-  said=$(tr '\n' ' ' <"$p/stderr" | cut -c1-300)
-  # A forked credential may hold the only live refresh token, so its directory is kept for the
-  # operator to recover the login from, never removed with the rest.
-  [ -z "$forked" ] ||
-    fail "the preflight \`claude -p\` wrote a credential of its own ($forked, kept with $p for you to recover the login from) beside the operator's Anthropic profile $claude_login_profile, so a pane would fork that login"
-  rm -rf "$p"
-  jq -e --arg model "$claude_model" '.is_error == false and (.modelUsage // {} | has($model))' <<<"$out" >/dev/null 2>&1 ||
-    fail "the preflight \`claude -p\` on the operator's Anthropic profile $claude_login_profile ($claude_login_dir) exited $status without an answer from $claude_model: $(tr '\n' ' ' <<<"$out" | cut -c1-300)${said:+; stderr: $said}"
-  note "the Claude Code implementer's login: the preflight \`claude -p\` answered on $claude_model"
-}
 
 begin prerequisites
-model_route=${LEGION_E2E_MODEL_ROUTE:-}
-case "$model_route" in
-gateway | login) ;;
-*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or login, not '$model_route'" ;;
-esac
-if [ "$model_route" = gateway ]; then
-  key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
-  [ -n "$key_file" ] ||
-    fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: under LEGION_E2E_MODEL_ROUTE=gateway, name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
-  [ -f "$key_file" ] && [ -r "$key_file" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE names $key_file, which is not a readable file"
-fi
+key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
+[ -n "$key_file" ] ||
+  fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
+[ -f "$key_file" ] && [ -r "$key_file" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE names $key_file, which is not a readable file"
 refuse_leftovers legion-e2ecc
-tools=(go docker jq curl ss tmux bun mise secrets gh jj pgrep claude)
-[ "$model_route" != gateway ] || tools+=(hawk-token)
-for tool in "${tools[@]}"; do command -v "$tool" >/dev/null || fail "$tool is required"; done
-case "$model_route" in
-gateway)
-  (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
-  [ -s "$work/claude-model-key" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE ($key_file) holds no key"
-  # The key's preflight: Anthropic lists its models to a key it accepts. The header goes by file, so
-  # the key is in no argv.
-  (umask 077 && printf 'x-api-key: %s\n' "$(cat "$work/claude-model-key")" >"$work/claude-key-header")
-  code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-key-header" -H 'anthropic-version: 2023-06-01' \
-    https://api.anthropic.com/v1/models) || code="unreachable (curl exited $?)"
-  rm -f "$work/claude-key-header"
-  [ "$code" = 200 ] || fail "Anthropic refuses the key in LEGION_E2E_CLAUDE_KEY_FILE ($key_file): GET /v1/models answered $code"
-  (umask 077 && printf '#!/bin/sh\nexec cat %s\n' "$work/claude-model-key" >"$work/claude-key-command")
-  chmod 0700 "$work/claude-key-command"
-  claude_route_note="the run's key command"
-  note "the Claude Code implementer's key from $key_file: Anthropic accepts it"
-  ;;
-login)
-  # The operator's Anthropic profile, where Claude Code reads a Console login: the directory
-  # ANTHROPIC_CONFIG_DIR names, else $XDG_CONFIG_HOME/anthropic, else ~/.config/anthropic, and in it
-  # the profile LEGION_E2E_ANTHROPIC_PROFILE names. The profile is the operator's own choice, never
-  # whatever active_config names, since it picks the organization the run's tokens are billed to.
-  # Claude Code refreshes the login in that profile's own file, so every Claude Code of the box, the
-  # implementer's included, keeps one login (preflight_claude_login holds that it forks none).
-  claude_login_dir=${ANTHROPIC_CONFIG_DIR:-}
-  if [ -z "$claude_login_dir" ]; then
-    if [ -n "${XDG_CONFIG_HOME:-}" ]; then claude_login_dir=$XDG_CONFIG_HOME/anthropic; else claude_login_dir=$HOME/.config/anthropic; fi
-  fi
-  claude_login_profile=${LEGION_E2E_ANTHROPIC_PROFILE:-}
-  [ -n "$claude_login_profile" ] ||
-    fail "LEGION_E2E_ANTHROPIC_PROFILE is unset: under LEGION_E2E_MODEL_ROUTE=login, name the Anthropic profile in $claude_login_dir whose Console login the Claude Code implementer runs on (\`ls $claude_login_dir/configs\`); a claude.ai login or a CLAUDE_CODE_OAUTH_TOKEN is not handed to a pane"
-  [[ $claude_login_profile =~ ^[A-Za-z0-9._-]+$ ]] || fail "LEGION_E2E_ANTHROPIC_PROFILE '$claude_login_profile' is not a profile name"
-  [ -f "$claude_login_dir/configs/$claude_login_profile.json" ] && [ -f "$claude_login_dir/credentials/$claude_login_profile.json" ] ||
-    fail "LEGION_E2E_ANTHROPIC_PROFILE names $claude_login_profile, which has no login in $claude_login_dir (configs/ and credentials/$claude_login_profile.json): sign in with \`claude auth login --console\`"
-  # Claude Code refreshes the login near its expiry, and a refresh killed mid-exchange (the run's
-  # teardown kills every process) can lose the rotated token and sign the operator out, so the
-  # login must outlast the run.
-  left=$(jq -r '(.expires_at // empty | numbers | floor) - now | . / 60 | floor' "$claude_login_dir/credentials/$claude_login_profile.json" 2>/dev/null) || left=
-  [[ $left =~ ^-?[0-9]+$ ]] && [ "$left" -gt "$run_minutes" ] ||
-    fail "the Anthropic profile $claude_login_profile's login expires in ${left:-an unknown number of} minutes, within the run's $run_minutes: refresh it first with your own Claude Code (one \`ANTHROPIC_PROFILE=$claude_login_profile claude -p hi\` near its expiry, or \`claude auth login --console\`), then run again"
-  claude_route_note="the operator's Anthropic profile $claude_login_profile in $claude_login_dir"
-  ;;
-esac
+for tool in go docker jq curl ss tmux bun mise secrets gh jj hawk-token pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+(umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
+[ -s "$work/claude-model-key" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE ($key_file) holds no key"
+# The key's preflight: Anthropic lists its models to a key it accepts. The header goes by file, so the
+# key is in no argv.
+(umask 077 && printf 'x-api-key: %s\n' "$(cat "$work/claude-model-key")" >"$work/claude-key-header")
+code=$(curl -sS --max-time 30 -o /dev/null -w '%{http_code}' -H "@$work/claude-key-header" -H 'anthropic-version: 2023-06-01' \
+  https://api.anthropic.com/v1/models) || code="unreachable (curl exited $?)"
+rm -f "$work/claude-key-header"
+[ "$code" = 200 ] || fail "Anthropic refuses the key in LEGION_E2E_CLAUDE_KEY_FILE ($key_file): GET /v1/models answered $code"
+note "the Claude Code implementer's key from $key_file: Anthropic accepts it"
 for key in LEGION_IMPLEMENT_APP_PRIVATE_KEY_B64 GH_REVIEW_APP_PRIVATE_KEY_B64; do
   status=$(secrets get "$key" --no-request 2>&1) || fail "secrets get $key does not resolve: $status"
   jq -e --arg key "$key" '.key == $key and .tier == "agent"' <<<"$status" >/dev/null 2>&1 ||
@@ -555,32 +459,20 @@ done
 claude_bin=$(command -v claude)
 # The daemon and every pane run with HOME moved to the run's own (make_omp_home), which hides mise's
 # global config from the box's own gh, jj, tmux and bun shims: a pane's jj shim hands the call back
-# to itself (exit 127), and the pane's MCP server and dispatch find no bun. So the real binaries mise
-# resolves here come first on the daemon's PATH, which every pane inherits (lib/rig.sh,
-# real_bin_path), and LEGION_BUN_PATH names the real bun.
+# to itself (exit 127), and the pane's MCP server finds no bun. So the real binaries mise resolves
+# here come first on the daemon's PATH, which every pane inherits (lib/rig.sh, real_bin_path), and
+# LEGION_BUN_PATH names the real bun. The real tmux is among them because the tmux runtime runs tmux
+# with the pane allow-list alone, where a shimmed tmux finds the operator's mise config untrusted.
 realbin=$(real_bin_path "$work/realbin" gh jj tmux bun)
 note "Claude Code: $claude_bin ($("$claude_bin" --version)); bun: $(readlink "$realbin/bun")"
-[ "$model_route" != login ] || preflight_claude_login
 require_proof_human
 gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh cannot read $repo"
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-pin=$(<"$root/.omp-pin")
-mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
-case "$model_route" in
-gateway)
-  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-    fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-  note "the Oh My Pi agents' model route: keyed by $key_command"
-  ;;
-login)
-  login_db=$(bash "$root/scripts/e2e/lib/install-login-model-route.sh" --profile "$profile" --home "$omp_home" \
-    --dest "$evidence/model-login" --omp "$pin" --run-minutes "$run_minutes") ||
-    fail "the Oh My Pi agents' model route on the operator's Oh My Pi login could not be installed (the reason is above)"
-  note "the Oh My Pi agents' model route: the operator's Oh My Pi login, the profile's agent.db linked to $login_db"
-  ;;
-esac
+key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+  fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+note "the Oh My Pi agents' model route: keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
@@ -616,6 +508,8 @@ dispatch_human PUT "settings/repo-projects/$repo" "$(jq -cn --arg project "$proj
 (cd "$root" && bun install --frozen-lockfile >/dev/null)
 envoy_manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-envoy --profile "$profile" --home "$omp_home" --dest "$work/pi-envoy")
 manifest=$(bash "$root/scripts/e2e/lib/install-plugin-profile.sh" --package pi-legion --profile "$profile" --home "$omp_home" --dest "$work/pi-legion")
+pin=$(<"$root/.omp-pin")
+mise where "$pin" >/dev/null 2>&1 || mise install "$pin" >&2
 cat >"$work/instructions.md" <<'EOF'
 # Claude Code backend proof instructions
 

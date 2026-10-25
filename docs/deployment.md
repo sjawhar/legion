@@ -224,9 +224,7 @@ Code. Its key reaches it the way an Oh My Pi pane's does: `provider_keys` (for e
 environment, which Claude Code inherits, and into every Oh My Pi pane's as well. A key meant for the
 Claude Code roles alone goes in the claim's directory instead, before the claim first launches: a
 `settings.json` there whose `apiKeyHelper` prints the key, as `scripts/e2e/claude-backend-tmux.sh`,
-the live proof, writes it under its `gateway` route. Its `login` route writes that file's `env`
-instead, naming an Anthropic profile (`ANTHROPIC_CONFIG_DIR` and `ANTHROPIC_PROFILE`), so the role
-runs on the Console login Claude Code keeps in that profile's credentials file.
+the live proof, writes it.
 
 ### How a harness plugs in
 
