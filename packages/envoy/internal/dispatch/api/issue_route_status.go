@@ -13,7 +13,7 @@ import (
 // and an issue routed to a role nobody holds reads as owned while nobody is working it. So every
 // issue read carries route_status beside the route, resolved from one GET /v1/sessions per
 // request (each listener row carries the roles its session holds), never one lookup per issue,
-// and stored nowhere. Like fetchLiveSessions, the listener call runs with no transaction open
+// and stored nowhere. Like fetchHolderLiveness, the listener call runs with no transaction open
 // and no pooled connection held (envoy_resolve.go carries the reason).
 //
 // no_holder is one read and says only "nobody right now": a session that restarts or moves

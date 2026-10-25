@@ -72,8 +72,10 @@ guarantees no real subscriber will ever match the probe traffic.
 Runs the local listener against a throwaway NATS server it builds and runs
 itself (`internal/testnats/cmd/natsd`), so it needs no container runtime. It
 posts signed public GitHub fixtures and a three-paragraph direct message,
-checks the one-warning response for a never-seen GitHub repository, rejects an
-unheld role publish before claiming it for the fake session, captures the raw
+checks the one-warning response for a never-seen GitHub repository, reads the
+registered session back by id from `/v1/registry/<session_id>` and an id that
+never registered as `404 {"error":"no live session <id>"}`, rejects an unheld
+role publish before claiming it for the fake session, captures the raw
 notification envelopes, and proves both the Go prompt text and the shared
 TypeScript renderer print the full direct message once, with no separate
 summary line repeating its first line.

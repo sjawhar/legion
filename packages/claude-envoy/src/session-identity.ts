@@ -1,7 +1,8 @@
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises"
-import { dirname, join } from "node:path"
-import { hasErrnoCode } from "@legion/envoy-client/errors"
+import { readFile } from "node:fs/promises"
+import { basename, join } from "node:path"
+import { hasErrnoCode, messageFor } from "@legion/envoy-client/errors"
 import { z } from "zod"
+import { pruneStateDirectory, writeAtomicStateFile, writtenLongAgo } from "./session-state"
 
 const PersistedRole = z.object({ session_id: z.string().min(1), role: z.string().min(1) })
 
@@ -46,20 +47,49 @@ export function sessionHandoffFile(stateDirectory: string, claudePid: number): s
   return join(sessionHandoffDirectory(stateDirectory, claudePid), "session-id")
 }
 
-/** Role state is keyed by session id so `claude --resume <id>` finds the role it held. */
+/** The directory the role records live in, named once for the writer and the sweep. */
+const ROLES_DIRECTORY = "roles"
+
+/** Role state is keyed by session id so `claude --resume <id>` finds the role it held. The
+ *  `.json` suffix keeps the name a path segment: `encodeURIComponent` leaves a dot alone, so a
+ *  session id of `.` or `..` would otherwise name the directory itself or its parent. */
 export function roleStateFile(stateDirectory: string, sessionId: string): string {
-  return join(stateDirectory, "roles", `${encodeURIComponent(sessionId)}.json`)
+  return join(stateDirectory, ROLES_DIRECTORY, `${encodeURIComponent(sessionId)}.json`)
 }
 
-/** The role a session held, from its role file; undefined when it has none. */
+/**
+ * A role record whose bytes cannot be parsed — truncated, hand-edited, written by a later format.
+ * Thrown only by `readPersistedRole`, the one place that knows the bytes came from the file and
+ * not from a listener answering a claim: no later read of the same bytes succeeds, so unlike every
+ * other failure to restore a role it is not worth retrying.
+ */
+export class UnparseableRoleRecordError extends Error {
+  readonly name = "UnparseableRoleRecordError"
+
+  constructor(roleFile: string, cause: unknown) {
+    super(`the role record ${roleFile} cannot be parsed (${messageFor(cause)})`, { cause })
+  }
+}
+
+/**
+ * The role a session held, from its role file; undefined when it has none. Bytes that do not
+ * parse throw `UnparseableRoleRecordError`; every other failure to read them (`EACCES`, `EISDIR`,
+ * any I/O error) propagates unchanged.
+ */
 export async function readPersistedRole(
   roleFile: string,
 ): Promise<z.infer<typeof PersistedRole> | undefined> {
+  let bytes: string
   try {
-    return PersistedRole.parse(JSON.parse(await readFile(roleFile, "utf8")))
+    bytes = await readFile(roleFile, "utf8")
   } catch (error) {
     if (hasErrnoCode(error, "ENOENT")) return undefined
     throw error
+  }
+  try {
+    return PersistedRole.parse(JSON.parse(bytes))
+  } catch (error) {
+    throw new UnparseableRoleRecordError(roleFile, error)
   }
 }
 
@@ -68,17 +98,6 @@ export async function writePersistedRole(
   state: z.infer<typeof PersistedRole>,
 ): Promise<void> {
   await writeAtomicStateFile(roleFile, `${JSON.stringify(state)}\n`)
-}
-
-/**
- * Write a private state file atomically: a 0700 directory, a 0600 temporary file
- * unique to this process, then a rename onto `file`.
- */
-export async function writeAtomicStateFile(file: string, contents: string): Promise<void> {
-  await mkdir(dirname(file), { recursive: true, mode: 0o700 })
-  const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
-  await writeFile(temporary, contents, { mode: 0o600 })
-  await rename(temporary, file)
 }
 
 export async function writeSessionHandoff(file: string, sessionId: string): Promise<void> {
@@ -104,15 +123,42 @@ function processExists(pid: number): boolean {
   }
 }
 
-/** Drop `sessions/<pid>` directories whose Claude process has exited. */
+/** Drop `sessions/<pid>` directories whose Claude process has exited. Anything else under
+ *  `sessions/` is left alone: it was never this sweep's to name. */
 export async function pruneStaleSessionHandoffs(stateDirectory: string): Promise<void> {
-  const sessions = join(stateDirectory, "sessions")
-  const entries = await readdir(sessions).catch((error: unknown) => {
-    if (hasErrnoCode(error, "ENOENT")) return []
-    throw error
+  await pruneStateDirectory(join(stateDirectory, "sessions"), (file) => {
+    const pid = basename(file)
+    return /^\d+$/.test(pid) && !processExists(Number(pid))
   })
-  for (const entry of entries) {
-    if (!/^\d+$/.test(entry) || processExists(Number(entry))) continue
-    await rm(join(sessions, entry), { recursive: true, force: true })
-  }
+}
+
+/**
+ * Drop `roles/` records nothing has touched in `STATE_FILE_MAX_AGE_MS`, by the age rule the
+ * title records follow, except the record of `currentSessionId` — the session running the sweep.
+ *
+ * A record's mtime is when its session was last seen holding the role: every heartbeat on which
+ * the listener still names the session as holder touches the record (`refreshRoleRecord` in the
+ * channel server), so this age reaches only a record whose session has not confirmed its role for
+ * that long — in practice one that stopped running. Only one path removes a role file by hand — a
+ * soft `setRole` that comes back unclaimed — so a session that holds its role to the end leaves
+ * its file behind, and the handoff sweep cannot reach it: that one walks `sessions/<pid>/` and asks
+ * the operating system about a pid, while a role file is keyed by session id and has no process
+ * left to ask about.
+ *
+ * The sweep runs at startup, before any heartbeat has touched anything, and a session whose claim
+ * the listener refused there has not touched its own record either: age alone would expire the
+ * record of the very session that is running, and the retry queued for its next heartbeat would
+ * find nothing left to restore. Expiring an abandoned record is this sweep's whole point, and the
+ * running session's own record is by construction not abandoned, so it is the one record age does
+ * not decide.
+ */
+export async function pruneStaleSessionRoles(
+  stateDirectory: string,
+  currentSessionId: string,
+): Promise<void> {
+  const own = roleStateFile(stateDirectory, currentSessionId)
+  await pruneStateDirectory(
+    join(stateDirectory, ROLES_DIRECTORY),
+    async (file) => file !== own && (await writtenLongAgo(file)),
+  )
 }

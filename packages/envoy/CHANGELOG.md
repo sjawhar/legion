@@ -4,6 +4,18 @@
 
 ### Added
 
+- A project's default assignee, the last step of an issue create's assignee chain: an issue created
+  with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
+  it, goes to the person the project names; nothing already filed, and no create that names an
+  assignee or `null`, changes. A default that no longer names a person who has signed in is
+  ignored rather than refused, so a create never fails on a stale one. A person sets it on the
+  Settings page through
+  `GET /api/v1/settings/project-default-assignees` and `PUT /api/v1/projects/{key}/default-assignee`
+  `{assignee}` (an email of someone who has signed in, or `null` to clear it; otherwise
+  `400 ASSIGNEE_NOT_ALLOWED`, and a body without `assignee`, or whose `assignee` is neither a
+  string nor null, is `400 INVALID_PROJECT`), which appends
+  `settings.project_default_assignee.updated`. Both routes are human-only and no agent command,
+  flag or route sets a project's default.
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
   releases nothing and ends the grant for good, as a kind change found before the read does, so a
@@ -1113,6 +1125,22 @@
 
 ### Fixed
 
+- `GET /v1/registry/<session_id>` is the listener's authoritative answer about one session, so a
+  session that is working is no longer read as gone while a listener's session cache refills. The
+  read goes through that cache to the session bucket: a 200 carries the same body a row of `GET
+  /v1/sessions` carries (`session_id`, `machine_id`, `host`, `dir`, `port`, `title`,
+  `capabilities`, `self_subscribed`, `topics`, `roles`, `updated_at`, `last_seen`), a 413 naming
+  its size or a 400 naming the key refuses an id NATS will not take as a KV key, `404
+  {"error":"no live session <id>"}` is only the bucket's word that it holds no key for that id,
+  and a read that did not answer is `503 {"error":"envoy: the message bus did not answer:
+  <reason>"}` with `Retry-After: 1`. Dispatch asks about the one session it holds the id of
+  instead of fetching every live session and scanning the answer, so three decisions no longer
+  turn on one listener's cache: a comment mention's `session:` target, a broadcast's recipients
+  (each selected recipient read by its own id, eight reads in flight under one five-second
+  budget, and a read that did not answer refuses the whole send `503 ENVOY_UNAVAILABLE` with
+  nothing written), and whether an issue's claim holder is still working (the claim is free only
+  on the bucket's 404; anything else is a 503, never a live session's claim taken without
+  `{"force": true}`).
 - A listener whose durable consumer was deleted and created again under it, so that the durable
   delivers to some other subscription, reports itself unhealthy and binds the durable again
   instead of receiving nothing while every check passed. `GET /healthz` answers `503`

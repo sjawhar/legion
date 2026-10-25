@@ -56,7 +56,7 @@ itself (`unreviewedChange`) on the same two heads with the implement App's token
 publishes a pull request already merged without reading it. With `LEGION_READY_SCOPE_REFUSE` set,
 both must be refused `READY_UNREVIEWED_CHANGE` naming that path. Unset, the check must pass, and
 READY must be accepted, or refused only by a check that runs after it: the head's handoffs, a
-conflict, a by-hand file list or a required check. It only reads GitHub; the pull request and its
+conflict or a by-hand file list. It only reads GitHub; the pull request and its
 two heads are the operator's to make and close.
 
 

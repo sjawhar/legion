@@ -107,9 +107,12 @@ merger — runs from one image, `ghcr.io/sjawhar/legion-worker` (public). It car
   reader-facing Dispatch change must pass before it merges, reaches `psql` through
   `packages/dispatch/e2e/psql.ts` — `packages/dispatch/e2e/seed.ts` calls it for every spec's
   database reset — and the local stack `bun run dispatch:local`
-  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without it on `PATH`, so a role
-  whose image lacks `psql` cannot run the suite its own change owes — Debian's `psql` is a Perl
-  wrapper around the versioned client, and it resolves because `perl-base` is in the image),
+  (`packages/dispatch/e2e/local-instance.ts`) refuses to start without `go`, `psql`, `flock` and
+  `openssl` on `PATH`, and without `docker` too unless a `DATABASE_URL` is given; the image
+  carries `go`, `flock` and `openssl`, a `DATABASE_URL` stands in for `docker`, and `psql` was the
+  one a role had no way to supply, so a role on a digest without it cannot run the suite its own
+  change owes — Debian's `psql` is a Perl wrapper around the versioned client, and it resolves
+  because `perl-base` is in the image),
   `redis-cli` (from `redis-tools`: no
   repository of the project speaks Redis today, and it is carried anyway, at about a megabyte,
   because a second image roll costs more than a megabyte), `sqlite3` (a repository's own SQLite
@@ -196,7 +199,7 @@ priced options and their verdicts:
 | option | the measurement | verdict |
 | :--- | :--- | :--- |
 | the image carries the five clients | 20 Debian packages and 5.9 MiB of downloads (6,216,928 bytes), from `apt-get install -y --no-install-recommends --print-uris bind9-dnsutils netcat-openbsd postgresql-client redis-tools sqlite3` against this image's own installed package set, so it is the true increment. In the unit a cold launch pays — compressed image size, each read from that image's own manifest in the registry, and each image's `org.opencontainers.image.revision` read from its config blob — this branch's head, `ghcr.io/sjawhar/legion-worker:sha-afa29128061f` (revision `afa29128061fc10dd6c6aa3755ba051b98b84e02`), is 24 layers and 1026.9 MiB (1,076,764,060 bytes) against the 24 layers and 1019.0 MiB (1,068,477,764 bytes) of the base it forks from, `:sha-92dbeea3d391` (revision `92dbeea3d3911b5fb08e279fb201634a84ffe72e`): 8,286,296 bytes, 7.9 MiB on an image of a gigabyte, of which the runtime stage's Debian layer is 8,285,191 bytes (327,156,512 → 335,441,703), the other 23 layers carrying 1,105 bytes between them and none of them differing by more than 3,164 bytes | **chosen** |
-| a per-issue install onto the issue's disk | the issue's disk is 49 GiB, and every cache already sits on it (`TMPDIR`, `XDG_CACHE_HOME`, `XDG_DATA_HOME`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR`, `GOCACHE`, `GOMODCACHE`), so disk is not what rules it out | **rejected for a compiled client on a role's `PATH`**: `apt` refuses above, and leaving one unpacked where a role's later commands resolve it is the withheld `operator-setup` capability (ruling dispatch://LEGION-200), the extraction row below. Still right for a language's own package set — which is the runner row — and for a test harness's own prefix, which only its own commands resolve through |
+| a per-issue install onto the issue's disk | the issue's disk is 49 GiB, and every cache already sits on it (`XDG_CACHE_HOME`, `XDG_DATA_HOME`, `XDG_STATE_HOME`, `TMPDIR`, `GOCACHE`, `GOMODCACHE`, `BUN_INSTALL_CACHE_DIR`, `UV_CACHE_DIR` and `UV_PYTHON_INSTALL_DIR`, the nine `skills/legion-worker/references/tools.md` lists), so disk is not what rules it out | **rejected for a compiled client on a role's `PATH`**: `apt` refuses above, and leaving one unpacked where a role's later commands resolve it is the withheld `operator-setup` capability (ruling dispatch://LEGION-200), the extraction row below. Still right for a language's own package set — which is the runner row — and for a test harness's own prefix, which only its own commands resolve through |
 | a runner the image already provides, pinned and failing closed | `uvx ruff@0.14.0 --version` takes 1.7 s with the uv cache empty and 0.15 s warm; `bunx --package @biomejs/biome@2.6.3 biome --version` 0.3 s with bun's cache warm; `go run github.com/nats-io/natscli/nats@v0.1.5 --version` 7.2 s with the module cache warm, 103 s on a cold one | **chosen, as documentation rather than new code**: the image already carries all three |
 | extracting Debian packages onto the issue's disk | 30 packages, 11 MiB of downloads, 105 MiB extracted; `redis-cli`, `sqlite3` and `dig` ran from the prefix with `LD_LIBRARY_PATH` set and `psql` did not, Debian's `/usr/bin/psql` being a Perl wrapper that loads `PgCommon.pm` through Perl's own search path, which no extraction prefix is on | **rejected as the way to get these five clients onto a role's `PATH`**: that is the withheld `operator-setup` capability (`packages/daemon/internal/capabilities/capabilities.go`, ruling dispatch://LEGION-200) under the test in `skills/legion-worker/references/tools.md`, "What the withheld capability is, and what it is not", and it is fragile for exactly the client this change exists for. The same unpacking inside a test harness's own environment passes that test and is a different verdict — and it would not have got a role `psql` either way |
 | `runtime.kubernetes.setup`, the operator-set command every role container runs before its agent starts | it runs on every start of every role, six times per issue | **rejected**: it buys nothing the image does not, since it is still an unprivileged container |
@@ -528,8 +531,8 @@ A Legion agent's conversation — its OMP session — is by default a JSONL file
 loses its disk loses the conversation. The OMP fork the daemon pins (`OMP_FORK_PIN`) can store the session
 in a SQL database instead, selected by two environment variables the pod (or a tmux pane) carries. Under
 the Kubernetes runtime the daemon sets them for you when `legion.yaml` says
-`runtime.kubernetes.session_store: postgres` ([Selecting the store](#selecting-the-store) below); the
-tmux runtime has no such setting.
+`runtime.kubernetes.session_store: postgres` or `cloudsql-iam`, its two database stores
+([Selecting the store](#selecting-the-store) below); the tmux runtime has no such setting.
 
 ### The two variables
 
@@ -574,7 +577,7 @@ Every refusal is exit 1 with the message on stderr, and none falls back to file 
 | the file's contents are not a connection URL the driver accepts (for example the libpq keyword form `host=… user=… password=…`) | `… names <path>, but its contents are not a connection URL the database driver accepts` — the driver's parse error is not printed, since it embeds the whole string; never the contents |
 | the database is unreachable or refuses the connection             | `… names <path>, but the session database could not be opened: <driver error> (<code>)` — for a closed port `Connection closed (ERR_POSTGRES_CONNECTION_CLOSED)`; the driver's error, never the connection string |
 | any other `OMP_SESSION_STORAGE` value                             | `OMP_SESSION_STORAGE is "<value>"; expected "file" or "sql"`                                                                                                                           |
-| the running Oh My Pi build predates the setting                   | the variables are ignored and the session stays on files — caught before it can happen: the session-storage launch probe (`verifySessionStorageSetting`, `boot-probes.ts`) runs inside the worker image through `legion probe-image` (see [The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), fails on such a build so the image never publishes, and on a passing image prints `session-storage=probed` on the command's OK line; under `session_store: postgres` the daemon requires that token in the probe pod's output — it never probes a host OMP for it |
+| the running Oh My Pi build predates the setting                   | the variables are ignored and the session stays on files — caught before it can happen: the session-storage launch probe (`verifySessionStorageSetting`, `boot-probes.ts`) runs inside the worker image through `legion probe-image` (see [The image is probed before it publishes](#the-image-is-probed-before-it-publishes)), fails on such a build so the image never publishes, and on a passing image prints `session-storage=probed` on the command's OK line, which a `legion probe-image` of this release prints only once that probe has passed, under every store ([The image guard](#the-image-guard)) — the daemon never probes a host OMP for it |
 
 ### What stays on the pod's disk
 
@@ -601,7 +604,8 @@ Nothing in either plugin reads the two variables, and neither needs any other ch
 
 ### Selecting the store
 
-Two keys in `legion.yaml`, both inside the `runtime.kubernetes` mapping:
+Three keys in `legion.yaml`, all inside the `runtime.kubernetes` mapping: `session_store` chooses
+the kind, and each kind carries the one key that opens its store.
 
 ```yaml
 runtime:
@@ -610,9 +614,49 @@ runtime:
     session_dsn_secret: SESSION_DSN  # the providers-Secret key that holds the connection URL
 ```
 
+```yaml
+runtime:
+  kubernetes:
+    session_store: cloudsql-iam    # every pod signs in to Cloud SQL as itself; no URL is held anywhere
+    session_database:              # the database each pod signs in to; all three members are required
+      instance: example-project:us-central1:example-instance  # the connection name, project:region:instance
+      name: legion_sessions                                   # the database in that instance
+      user: legion-sessions@example-project.iam               # the IAM login a pod signs in as
+```
+
 `pvc` keeps each conversation a file in the `sessions` directory of the issue's volume. `postgres`
-keeps every pod agent's conversation, each role's and a daemon-launched controller's, in Oh My Pi's
-table. The daemon never holds the connection string: put it in the providers Secret
+and `cloudsql-iam` both keep every pod agent's conversation, each role's and a daemon-launched
+controller's, in Oh My Pi's table; what differs is how a pod reaches that database and what it must
+hold to do so (`Store` and `Database`, `internal/ompsessions/store.go`), which for the second of
+them is [What `cloudsql-iam` puts in a pod](#what-cloudsql-iam-puts-in-a-pod), below. Each kind
+names its own key
+and refuses the other's, an inert key being refused and never ignored:
+`runtime.kubernetes.session_dsn_secret is not used when runtime.kubernetes.session_store is
+cloudsql-iam; remove it`, and `runtime.kubernetes.session_database is not used when
+runtime.kubernetes.session_store is postgres; remove it`, each of them under `pvc` too, which
+carries neither. All three members of `session_database` are required, since no pod reaches the
+database without them; `instance` must be a connection name the Cloud SQL connector uses whole —
+`project:region:instance`, or `domain:project:region:instance` for a legacy domain-scoped project,
+with no whitespace anywhere, which its own parser (`instance.ParseConnName`) accepts and reads back
+as exactly that string, so a longer string it would take only part of is refused too
+(`ValidInstance`, `internal/ompsessions/store.go`, which the pod's proxy holds to as well); and a
+member the mapping does not model is refused by name (`readSessionStore` and `readSessionDatabase`,
+`internal/config/kubernetes.go`).
+
+**No deployment runs `cloudsql-iam` yet, and the sign-in it needs cannot be granted from here.**
+Every Legion pod of every project runs as the one Kubernetes ServiceAccount the operator's
+`runtime.kubernetes.pod.service_account` names (`ServiceAccountName`, `manifest.go`), so every pod
+presents the same cloud identity: a federated principal with no email address, where Cloud SQL
+accepts only a user, a service account or a group as a database login. Giving that shared account
+an email-bearing identity of its own would hand every project's pods one sign-in, so it is not done
+here. `dispatch://INFRA-321` gives each project's pods an account of their own,
+`dispatch://INFRA-311` declares the login, its grant and the instance's identity flag where the
+deployment is declared, and `dispatch://INFRA-320` points a deployment's session store at that
+login once its pods can use it. Everything written below is implemented and configurable on this
+branch; no deployment has it turned on.
+
+`postgres` holds the whole connection URL, password and all, in one providers-Secret key. The
+daemon never holds the connection string: put it in the providers Secret
 (`legion-<project>-providers`) under the key `session_dsn_secret` names, as one `postgres://…` URL.
 Every issue pod, the controller's pod and the image probe mount that key read-only at
 `/var/run/legion/providers/OMP_SESSION_SQL_DSN`, whatever the key is called, so a Secret without it
@@ -638,27 +682,41 @@ rewrite every conversation in the table, the controller's included, with the log
 is the trade LEGION-654's spec accepts for sessions that outlive their volumes: give the login no
 rights beyond the two tables' database, and treat its URL as a credential every agent holds.
 
-A resume under `postgres` is held to the table, not the volume. A role's launcher looks the recorded
-session up in the table through the same URL file before it starts the child
-(`internal/launcher`, `resumable`), and refuses the start when the table holds no such session
-(`resume session <path>: the session table holds no such session`): a launch failure, never a fresh
-agent. A database it cannot reach is asked again with a backoff (half a second, doubling to four
-seconds) for up to 30 seconds, the URL file read afresh each time, and only then refuses the start.
+Under `cloudsql-iam` there is no such credential to hold: what the agent reads carries a login and
+no password at all (`Endpoint.AgentURL`, `internal/ompsessions/store.go`), and what it names is a
+unix socket in the generation's own directory on the role container's own memory-backed private
+volume, which no other container of the pod mounts. Any process in the role's container can still
+dial that socket, as any process in a pod can read the URL file under `postgres`: this store
+removes the password, not that trade, and the rights the login has in the database are still every
+conversation's.
+
+A resume under either database store is held to the table, not the volume. A role's launcher looks
+the recorded session up in the table before it starts the child (`internal/launcher`, `resumable`,
+`sessionWritten`) — under `postgres` through the same URL file the child will read, and under
+`cloudsql-iam` through its own pgx client over the socket its proxy has just bound and proven,
+which is that generation's own (`Endpoint.ClientURL`) — and refuses the start when the table holds
+no such session (`resume session <path>: the session table holds no such session`): a launch
+failure, never a fresh agent. A database it cannot reach is asked again with a backoff (half a
+second, doubling to four seconds) for up to 30 seconds — under `postgres` the URL file read afresh
+each time, since that file is a projection something else may replace — and only then refuses the
+start.
 Neither `workspace-init` looks for session files: an issue pod is not
 told `LEGION_EXPECT_ISSUE_VOLUME` for a session, and the controller's pod is not told
 `LEGION_RESUME_SESSION_FILE`. So a claim resumed on a new volume (an issue closed as `done` or its
 tree drained, its volume deleted, then re-admitted) provisions its workspace from the issue's pushed
 branch (`legion/<issue>`, or the repository's default branch when none was pushed) and continues
 its own session; anything it had not pushed is gone with the old volume. A child issue re-admitted
-as a root of its own keeps its roles' sessions under either store (`Machine.Retree`): under
-`postgres` they are in the table, and under `pvc` on the issue's own volume, which its Sandbox
-keeps across the move while the old tree lingers ([Volume retention](#volume-retention)).
+as a root of its own keeps its roles' sessions whatever the store (`Machine.Retree`): under
+`postgres` and `cloudsql-iam` they are in the table, and under `pvc` on the issue's own volume,
+which its Sandbox keeps across the move while the old tree lingers ([Volume
+retention](#volume-retention)).
 
 Such an agent is told so before its next turn. Provisioning records when it created a workspace, in
 the workspace's own `.jj/legion-created`, which jj never snapshots (`workspace.RecordCreated`). At
 every resume the role's launcher compares that record with when the session was last written: the
-row's `mtime_ms` under `postgres`, which Oh My Pi moves on every write and `legion sessions import`
-sets to the copied file's, and the file's own under `pvc`. A workspace created after that write
+row's `mtime_ms` under either database store, which Oh My Pi moves on every write and `legion
+sessions import` sets to the copied file's, and the file's own under `pvc`. A workspace created
+after that write
 starts the generation with `LEGION_WORKSPACE_RECREATED=true`; every other generation gets `false`,
 whatever the container's environment says, and so does a resume into a workspace with no record
 (one provisioned before the record was kept). A record that is empty or not one RFC 3339 instant,
@@ -687,20 +745,133 @@ process lost in that turn resumes with the notice already there. With the plugin
 re-send, the `length` case's stored branch had lost it; with the plugin before the id, so did the
 case of a second recreation. A `task` subagent is never told.
 
-The variables are a generation's, but the URL file's mount is the pod's. A pod whose providers
-volume projects another session store than a pod created now would — one created before
-`postgres` was turned on, or after it was turned off — holds a move (`movedSessionStore`,
-`internal/runtime/sandbox/addresses.go`): the next relaunch of any of its roles replaces the pod,
-as it does a pod that dials a moved worker stream. The image probe's container is told
-`OMP_SESSION_SQL_DSN_FILE` too, so `legion probe-image`, which reads the providers directory as
-the shim does, never exports the URL into Oh My Pi's environment.
+The variables are a generation's, but the store a pod was created under is the pod's: the providers
+volume's session item under `postgres`, and the three session-proxy flags each role container's
+`legion launcher` carries under `cloudsql-iam` (`sessionStoreInPod`). A pod that holds another
+session store than a pod created now would holds a move (`movedSessionStore`,
+`internal/runtime/sandbox/addresses.go`) — a store turned on, turned off, changed from one kind to
+the other, or, under `cloudsql-iam`, a changed instance, database or login — and the next relaunch
+of any of its roles replaces the pod, as it does a pod that dials a moved worker stream. Under
+`postgres` the image probe's container is told `OMP_SESSION_SQL_DSN_FILE` too, so `legion
+probe-image`, which reads the providers directory as the shim does, never exports the URL into Oh
+My Pi's environment; under `cloudsql-iam` the probe's pod mounts no session key and is told no
+pointer at all (`sessionDSNPointer`, `manifest.go`).
 
-A resumed session also restores the model it last used, and under either store the Oh My Pi
+A resumed session also restores the model it last used, and under any store the Oh My Pi
 `.omp-pin` names refuses, in `--mode rpc`, to resume one whose model the profile no longer has
 (`Could not restore model <provider>/<model>`, exit 1). So a change to the pods' model
 route (`runtime.kubernetes.pod`, `provider_keys`) that drops a model fails the launch of every agent
-resuming a session on it, `pvc` or `postgres`, until the route offers that model again. Keep the
+resuming a session on it, whatever the store, until the route offers that model again. Keep the
 route unchanged across the switch below in particular: there every session outlives its volume.
+
+### What `cloudsql-iam` puts in a pod
+
+No session key, anywhere. No issue pod, no controller pod and no image-probe pod mounts one
+(`sessionSecretKey`, `internal/runtime/sandbox/manifest.go`, which answers for `postgres` alone),
+the daemon holds no connection string, and no URL sits in a Secret, a volume, an argv, an
+environment value or a log. What each role container's `legion launcher` is told instead is where
+the database is — `--session-instance <project:region:instance>`, `--session-database <name>` and
+`--session-user <login>`, in that order, the three values of `session_database`
+(`sessionProxyFlags` over `sessionProxyFlagNames`, `manifest.go`). There is no address among them:
+the launcher binds its socket in the generation's own directory, which it already knows from
+`--private-dir`.
+
+Every generation of that role then gets its own connection, in this order
+(`manager.start`, `packages/daemon/internal/launcher/launcher.go`):
+
+1. The launcher makes the generation's own directory,
+   `/var/run/legion/private/g<generation>` on the role container's memory-backed private volume,
+   owner-only, and writes the connection URL into it as `OMP_SESSION_SQL_DSN`, mode `0600`,
+   created exclusively and without following a link — the way it writes that generation's boot
+   token (`writeFiles`, then `startSession`).
+2. It binds a unix socket beside that file, `.s.PGSQL.5432`, which is libpq's own name for a
+   Postgres server on port 5432 (`ompsessions.SocketName`), and proves the credential path with
+   one upstream connection before its start returns (`sessionproxy.Start`,
+   `packages/daemon/internal/sessionproxy`). The socket is bound before anything is dialed, so a
+   start that loses the address to something else costs no credential work.
+3. Only then, when the start carries a resume, it looks the recorded session up in the table
+   through that socket.
+4. Only then does it start the worker shim, and so Oh My Pi, whose `OMP_SESSION_SQL_DSN_FILE`
+   names the file written in step 1 (`sessionDSNFile`, `manifest.go`).
+
+A failure in any of the first three refuses the generation. The start answers with the error,
+which names what failed: clearing the private directory names it, or the entry it could not remove;
+making the generation's directory or writing one of its files (a credential, the connection URL)
+names the generation and the file; the proxy's start names the generation and the instance; the
+resume lookup names the recorded session file. No child is started; the proxy, if it had started,
+is closed and the generation's directory removed, so nothing is left bound and nothing is left on
+disk (`endSession`). An agent never runs against a proxy that cannot reach the database, because
+the proof dial happens before the proxy's start returns. That dial is bounded at half the
+launcher's `--stop-grace` (5 s at the default `worker_stop_timeout_seconds` of 10), so an instance
+that never answers — an unreachable private address, a handshake that stalls — is refused, as
+`no answer within <bound>`, while the daemon still waits for the start's answer: the daemon waits
+on a start until the launcher's connection deadline plus that same grace, so at least the whole
+grace remains however late the launcher connected (`proofTimeout`, `launcher.go`). The launcher
+reads one command at a time, so the bound also keeps it free to read the stop the daemon sends
+after a start it gave up on.
+
+The connection belongs to the generation, not to the pod. The proxy keeps serving through the
+child's stop grace however the stop arrives — the daemon's stop or the container's own SIGTERM — so
+the session writes the agent makes while it shuts down are served: the context the launcher starts
+the proxy with bounds only its start, and once started the proxy ends only when it is closed
+(`sessionproxy.Start`). It is closed once the child, and in the pod the generation's leftover
+processes (`cleanExitedGeneration`), have exited, and before the generation's directory goes, so
+the launcher exits with nothing bound, nothing is left listening over a socket that has been
+removed, and between generations nothing is bound and no connection file exists (`manager.wait`).
+The next generation binds a socket and writes a file of its own.
+
+How long the proxy outlives the moment the generation is told to end, in a pod, where the launcher
+is PID 1 of its role's PID namespace (`signalGeneration`, `process.go`):
+
+- **A stop** — the daemon's stop, with its grace, or the container's SIGTERM, with `--stop-grace`
+  (`worker_stop_timeout_seconds`, which is also the pod's `terminationGracePeriodSeconds`): at most
+  that one grace. The stop's SIGTERM and, at the grace, its SIGKILL reach every process in the
+  namespace, the child and whatever it left behind alike, so the leftovers' cleanup ends inside the
+  same grace, and no process is left to hold a connection open.
+- **A child that exits on its own** and leaves processes behind: the leftovers get up to
+  `--stop-grace` more, SIGTERM then SIGKILL (`cleanExitedGeneration`), with the proxy still serving
+  them, so at most one grace after the child's exit.
+
+When the proxy is closed, it lets connections still open finish for up to one second
+(`sessionDrain`, `launcher.go`; `Config.Drain`, `sessionproxy.go`), then closes both ends of those
+left. In a pod that drain costs nothing, since every process that could hold a connection is gone
+by then; it bounds the case where the launcher is not PID 1, where signals reach only the child's
+process group and a holder outside it could otherwise keep the stop, the next generation and the
+launcher's exit waiting.
+
+That URL carries a login and no password, because the credential is the pod's own cloud identity:
+the Cloud SQL Go connector puts it in the instance's ephemeral-certificate exchange (automatic IAM
+database authentication, `cloudsqlconn.WithIAMAuthN`), never in the Postgres startup packet, and
+mints one as it dials, per connection, from a certificate cache it keeps refreshed
+(`newConnectorDialer` and `serve`, `internal/sessionproxy`). That is why the proxy reads no
+Postgres protocol at all: it accepts a connection, dials the instance over its private IP, and
+copies bytes both ways — which is what Google's own `cloud-sql-proxy` does over the same
+connector. Google runs that connector as a container beside the application; a Legion pod admits
+no further container, since `runtime.kubernetes.pod` takes only env, volumes, mounts and a service
+account, so the same library runs inside the first process of the role's container, the launcher
+itself.
+
+The two readers of that socket spell it differently, so `ompsessions.Endpoint` composes both
+(`internal/ompsessions/store.go`):
+
+| reader | spelling | why |
+| :--- | :--- | :--- |
+| the agent's Oh My Pi, through `OMP_SESSION_SQL_DSN_FILE` | `AgentURL`: `postgres://<login>@localhost/<database>?path=<the socket>&sslmode=disable` | Oh My Pi hands the text to Bun's SQL client, which takes a unix socket as the URL's `path` parameter and ignores the host |
+| the launcher's own resume lookup | `ClientURL`: `postgres:///<database>?host=<the socket's directory>&sslmode=disable&user=<login>` | pgx takes libpq's `host` as the socket's *directory* and appends `.s.PGSQL.5432` itself |
+
+An IAM login holds an `@`, so both spellings are built with `net/url`, which percent-encodes it,
+and the socket path, wherever it lands. Neither carries a password. The file is the agent's to
+read through its pointer and nothing else's to export: it is in the generation's private
+directory, not in the providers mount the worker shim exports from.
+
+What the operator supplies is the three values of `session_database`, the pods' cloud identity —
+the ServiceAccount `runtime.kubernetes.pod.service_account` names, which is what the connector
+signs in as — and the login's rights in the database. Those rights are the ones `postgres` needs
+too: Oh My Pi creates and migrates `omp_session_files` and `omp_session_files_parts` in the
+`public` schema when it starts, so the login needs `USAGE, CREATE ON SCHEMA public` beside the
+database, or it must own the schema. `legion sessions import` and `legion sessions mark-lost` are
+unchanged and keep `--dsn-file`: they run on an operator's machine, where there is no launcher and
+no proxy, so the operator supplies a connection URL that machine can reach.
 
 ### Copying file sessions before turning it on
 
@@ -822,7 +993,7 @@ image: `legion probe-image`, which the image build runs before it publishes, sta
 Pi with a nonsense `OMP_SESSION_STORAGE` value and passes only if it refuses, then prints
 `session-storage=probed` on its OK line. The daemon's image probe passes only an OK line that carries
 its daemon API contract, which a `legion probe-image` of this release prints only after that probe
-passed, under either store. The daemon never probes a host Oh My Pi for this: pods run the image's
+passed, under every store. The daemon never probes a host Oh My Pi for this: pods run the image's
 build, not the host's.
 
 ## Kubernetes runtime: the Go daemon on Agent Sandbox
@@ -1030,13 +1201,17 @@ write is `Migrate`, after both checks. So a refused boot leaves the database as 
 left it, and re-pinning the earlier release's image recovers. In the cluster a refused boot is a
 crash-looping Deployment: the earlier release's pods keep running, but nothing supervises them.
 
-**A rollout that also turns on `session_store: postgres` does not drain.** It replaces steps 1 to 3
-below with steps 1 to 5 of [Copying file sessions before turning it on](#copying-file-sessions-before-turning-it-on),
+**A rollout that also turns on a database store — `session_store: postgres` or `cloudsql-iam` —
+does not drain.** It replaces steps 1 to 3 below with steps 1 to 5 of [Copying file sessions before
+turning it on](#copying-file-sessions-before-turning-it-on),
 which keep every tree's volume until its sessions are in the table. When `controller: daemon` ran,
 step 3 below runs before copy step 1: the earlier release resumes a suspended controller within a
 minute, so it cannot be held still for the copy, and copy step 5 marks its claim lost. Copy step 6
 deletes the per-claim Sandboxes and hands back to steps 4, 5 and 6 below: the two checks, the dump,
-and the rollout, with `session_store: postgres` set.
+and the rollout, with the store's own keys set: `session_dsn_secret` under `postgres`, and
+`session_database` under `cloudsql-iam`. The copy itself runs the same way under either, since
+`legion sessions import` takes the database as a `--dsn-file` URL the machine running it can
+reach, which under `cloudsql-iam` is the operator's to supply: no pod holds one.
 
 No migration turns a per-claim Sandbox or locator into an issue pod's, and nothing on a tree volume
 of either earlier layout carries over (below), so the upgrade drains the deployment while it still
@@ -1491,13 +1666,21 @@ who knows the root volume raises `ephemeral_storage_request` so the scheduler re
 - a `setup` that is not a list of non-empty strings (`runtime.kubernetes.setup must be an array
   of non-empty strings`), or an empty list (`runtime.kubernetes.setup must name a command: leave it
   out to run none`);
-- `session_store` other than `pvc` or `postgres`; `postgres` without `session_dsn_secret`, or with
-  one that is empty or not a Secret data key (`[-._a-zA-Z0-9]+`); and a `session_dsn_secret` under
-  `pvc` (an inert key is refused, never ignored). At boot the daemon also refuses a
-  `session_dsn_secret` that is the providers Secret's `NATS_NKEY_SEED`, a `provider_keys` entry
-  that reads the same key (the shim would export the URL into Oh My Pi's environment), and an
+- `session_store` other than `pvc`, `postgres` or `cloudsql-iam`; `postgres` without
+  `session_dsn_secret`, or with one that is empty or not a Secret data key (`[-._a-zA-Z0-9]+`);
+  `cloudsql-iam` without `session_database`, or with one that is not a mapping, names a member but
+  `instance`, `name` and `user`, leaves one of the three empty, or whose `instance` is not a
+  connection name the Cloud SQL connector uses whole (`project:region:instance`, or
+  `domain:project:region:instance` for a domain-scoped project, with no whitespace); a
+  `session_dsn_secret` under `pvc` or `cloudsql-iam`;
+  and a `session_database` under `pvc` or `postgres` (an inert key is refused, never ignored). At
+  boot the daemon also refuses, under `postgres`, a
+  `session_dsn_secret` that is the providers Secret's `NATS_NKEY_SEED` and a `provider_keys` entry
+  that reads the same key (the shim would export the URL into Oh My Pi's environment) — neither
+  can arise under `cloudsql-iam`, where no pod mounts a session key — and, under every store, an
   operator's `pod.env` or `provider_keys` naming `OMP_SESSION_STORAGE` or
-  `OMP_SESSION_SQL_DSN_FILE` ([Selecting the store](#selecting-the-store)).
+  `OMP_SESSION_SQL_DSN_FILE`, or a `provider_keys` entry named `OMP_SESSION_SQL_DSN`
+  ([Selecting the store](#selecting-the-store)).
 
 `legion start --check-config` shows each of these before anything starts: a file carrying
 `tree_volume: 20Gi` is refused naming `issue_volume`; one carrying `resources: {tester: {limits:
@@ -2646,8 +2829,12 @@ gives that configuration nothing to take. Run no command in it that holds a toke
 ### Running a workload in the cluster from a role
 
 A role sometimes needs something *running* rather than installed — a database for a test, a
-broker, a second copy of an application under test. Its own pod cannot hold one and the worker
-image cannot carry a running server, so it starts one in the cluster as a Job and reaches it by a
+broker, a second copy of an application under test. Its own pod holds a server only as a test
+harness's own rootless install at the pod's fixed reservation, which is how the Dispatch browser
+suite's Postgres runs today
+([The tools a role's own work needs](#the-tools-a-roles-own-work-needs)); a server image, or more
+processors than the pod reserves, it cannot hold, and the worker image cannot carry a running
+server, so a role starts one in the cluster as a Job and reaches it by a
 Service name. What makes that possible is the deployment's, not Legion's: the ingress rule that
 admits connections from the namespace Legion's pods run in, the grant on Services and the
 admission rule that holds them, and the quota that counts them are declared in the deployment's
@@ -2673,12 +2860,15 @@ kubectl -n <namespace> auth can-i create services  # may it give one a name on t
 kubectl -n <namespace> auth can-i get services     # `kubectl apply` reads the live object before it creates one
 ```
 
-The third is not a duplicate of the second. `kubectl apply` is client-side by default and reads
-the object it is about to create, so a role that may create a Service but not read one gets
-`Error from server (Forbidden): error when retrieving current configuration of: … cannot get
-resource "services"` and never reaches the create; `kubectl create` of the same file is refused
-on the create instead. Both verbs are needed for the step as written, which is why the gate asks
-for both.
+The third is not a duplicate of the second. The sequence writes each object with `kubectl apply`,
+which is client-side by default and reads the object it is about to create before it creates it,
+so a role that may create a Service but not read one gets `Error from server (Forbidden): error
+when retrieving current configuration of: … cannot get resource "services"` and never reaches the
+create. Both verbs are needed for the sequence as written, which is why the gate asks for both. A
+deployment that granted the create without the read would still admit a `kubectl create` of the
+same file; this section publishes no second form for that case, and no deployment answering that
+way has been measured — in this one, before dispatch://INFRA-206's declarations were applied, both
+Service answers were `no`.
 
 None of the three is the answer a role with no credential gets. The image ships no kubeconfig
 and sets no `KUBECONFIG`, so without a projected token `kubectl` builds no in-cluster
@@ -2687,14 +2877,17 @@ connection to the server localhost:8080 was refused - did you specify the right 
 (measured from a role container with the in-cluster environment removed). That is as conclusive
 as `no` — nothing in this section applies, and a tool the work needs on the issue's own files
 arrives the way it already does, below. A `yes` to the first and a `no` to either of the others
-is a deployment whose declarations are not applied yet: a workload can be started but never
-reached.
+is a deployment where the sequence as written does not run: a workload can be started there, and
+the sequence cannot give it a name to be reached by.
 
-**Unless all three commands answer a bare `yes`, submit nothing.** The sequence below is
-unconditional and its only `kubectl delete job` is after the Service steps, which are refused
-`Forbidden` wherever either Service answer is `no` — so a Job submitted on anything less is a
-four-processor workload nobody removes, sitting on the namespace's shared quota until its
-deadline runs out.
+**Unless all three commands answer a bare `yes`, submit nothing.** The sequence submits its Job
+before its Service, and the Service step is refused `Forbidden` wherever either Service answer is
+`no`, so a refusal there finds a Job already submitted, and the sequence's own trap deletes it.
+Measured on 2026-10-25 with a Service step the namespace's admission refused — a refusal of
+another kind that ends the step the same way, with `kubectl apply` failing — the trap deleted the
+Job within six seconds of its submission, while its pod was still `Pending`, and nothing of it was
+left. A role whose shell went away before the trap ran removes it with the recovery line under
+the sequence.
 
 `<namespace>` is the namespace the workload runs in, and each command names it because a pod's
 `kubectl` has no kubeconfig and takes its default namespace from the pod instead: `POD_NAMESPACE`
@@ -2707,6 +2900,15 @@ why it reads as working; the same account asked with `-n` the namespace Legion's
 answers `no` to all three (measured from a role container on 2026-10-25). The sequence below
 passes no `-n` and runs in that default namespace, so the gate's answers hold for it only where
 the default is `<namespace>`.
+
+The sequence has two sources for its namespace, and they agree only where `POD_NAMESPACE` does
+not say otherwise. Its `kubectl` commands, the recovery line's included, take that default,
+`POD_NAMESPACE` first; its reachability address is built from the `namespace` file alone. Where a
+pod set `POD_NAMESPACE` to another namespace, the Job and its Service would be made in one and the
+check would dial a name in the other, with no Service behind it. That gap is latent, recorded here
+rather than closed: Legion's runtime sets no `POD_NAMESPACE` (nothing in `packages/daemon` names
+it), an operator's `runtime.kubernetes.pod.env` could, and it was unset in the role container the
+runs of 2026-10-25 below came from.
 
 The rules the workload must satisfy. Every one but the last is enforced by the namespace's
 admission rather than by anyone's good behaviour; the last is enforced by nothing, which is why
@@ -2733,16 +2935,15 @@ it is marked where it stands:
   is admitted, started, charged against the shared quota, and reachable by nothing, because the
   ingress rule selects the label rather than the namespace. Nothing refuses it and nothing says
   so; the symptom is the reachability check below ending at its deadline with `TimeoutError`
-  every try — *that* class, not a refusal, which is a workload still starting up, and the
-  distinction the paragraph under the sequence sets out. It is why the check is the step after
-  the wait rather than the last. A role that sees it compares the labels on **the workload's**
-  pod (`kubectl get pod -l job-name="$workload" -o jsonpath='{.items[0].metadata.labels}'`,
-  which is a pod of this namespace; a role may not read its own, in the namespace Legion's pods
-  run
-  in) with the deployment's declaration — not the Service's endpoints, which this identity may
-  not read (`kubectl auth can-i get endpoints` answers `no`). The label's name is in that
-  declaration, with the compute class, the storage class and the namespace; a role reads it
-  there rather than here.
+  every try — a timeout, not a refusal. A refusal is a workload the packets do reach: still
+  starting in the first seconds, nothing listening on the port if it lasts the whole wait, as the
+  readings under the sequence set out. It is why the check is the step after the wait rather than
+  the last. A role that sees it compares the labels on **the workload's** pod, which the
+  sequence's trap prints before it deletes anything (`--show-labels`; a pod of this namespace — a
+  role may not read its own, in the namespace Legion's pods run in), with the deployment's
+  declaration — not the Service's endpoints, which this identity may not read (`kubectl auth
+  can-i get endpoints` answers `no`). The label's name is in that declaration, with the compute
+  class, the storage class and the namespace; a role reads it there rather than here.
 
 Name the workload for the issue **and for the run**, as everything else on this cluster is named
 for what owns it (`issue-legion-<project>-<issue key lowercased>`,
@@ -2756,7 +2957,7 @@ A bare `postgres`, or even `infra-71-postgres`, is a name something else is usin
 share one issue and one identity, so a second role submitting that name is refused — this
 identity may not patch a Job (`kubectl auth can-i patch jobs` answers `no`) — while everything
 after the apply acts on the *first* role's workload: both waits select its pod, the reachability
-check reaches its database, and the closing `kubectl delete job` takes it and its Service away
+check reaches its database, and the trap's `kubectl delete job` takes it and its Service away
 mid-test. And a role that re-runs the sequence after any failure meets a worse version of the
 same thing, because a pod keeps its `job-name` label while it terminates: measured here, the
 second run's `--for=create` returned 0 in **1 s on the previous run's dying pod**, and the Ready
@@ -2766,11 +2967,72 @@ reachability check against a workload that is not up and be sent, by the bullet 
 one failure this section says announces nothing. A fresh suffix each run is what removes the
 whole class: the selector cannot match a corpse that never carried it.
 
-```yaml
+The Job's manifest is the first of the two the sequence below writes, under this run's name. The
+name on the network is the second, a Service, held to a cluster-internal address: no node port, no
+load balancer, no external address and no external name. It is admitted only while the Job it
+fronts owns it, so removing the Job removes it too and leaves nothing for a person to sweep —
+which is why its `ownerReferences` carries the Job's own uid, read back after the Job is created.
+It selects its pods by that same uid and by nothing else: the namespace's admission requires a
+Service's selector to be exactly `batch.kubernetes.io/controller-uid` at the uid of the Job that
+owns it, because a rule checking a submission sees only the object submitted and cannot look a
+Job up, so a selector by name would let a Service owned by one Job front another's pods. A
+`job-name` selector, though the Job puts that label on its pods too, is refused at submission,
+naming that rule.
+
+The whole sequence, from a role container holding nothing but its checkout and that credential.
+It writes both manifests outside the checkout, into a directory `mktemp` makes under `$TMPDIR`
+(or `/tmp`), never the issue's workspace: the workspace is a jj working copy of this public
+repository, so a manifest left there is snapshotted into the role's working-copy commit and the
+password in it can reach the branch. It runs as a `bash` of its own, from a file, and detached
+from the command that starts it, because its clean-up is a trap and a role's bash tool ends a
+command that runs past its timeout by killing that command and every process under it, too fast
+for any trap to run (below). Detached, the sequence is outside what the tool kills; the last line
+holds the call until the sequence has ended and then prints what it printed. The three lines in
+angle brackets are the only ones a role fills in: the issue key, and the two lines it reads from
+the deployment's declaration.
+
+```sh
+sequence=$(mktemp "${TMPDIR:-/tmp}/sequence.XXXXXX")              # not the checkout: see above
+cat > "$sequence" <<'SEQUENCE'
+set -euo pipefail
+echo "sequence: process $$; a deliberate stop is: kill -TERM -- -$$"
+workload="<issue key lowercased>-postgres-$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
+echo "workload: $workload"                     # the name the recovery line below needs
+dir=$(mktemp -d "${TMPDIR:-/tmp}/workload.XXXXXX")
+password=$(python3 -c 'import secrets; print(secrets.token_hex(16))')
+
+cleanup() {
+  status=$?
+  trap - EXIT INT TERM HUP
+  set +e
+  if [ "$status" -ne 0 ]; then                 # what the readings below send a role to look at
+    kubectl get pods -l job-name="$workload" --show-labels
+    kubectl logs -l job-name="$workload" --tail=20
+    kubectl get pods -l job-name="$workload" \
+      -o jsonpath='{range .items[*].status.containerStatuses[*]}{.name}: {.state}{"\n"}{end}'
+    kubectl get service "$workload" --ignore-not-found \
+      -o jsonpath='{range .spec.ports[*]}port {.port} -> targetPort {.targetPort}{"\n"}{end}'
+  fi
+  kubectl delete job "$workload" --cascade=foreground --ignore-not-found \
+    || { echo "cleanup: the Job's delete failed"; [ "$status" -ne 0 ] || status=1; }
+  kubectl wait --for=delete service/"$workload" --timeout=60s \
+    || { echo "cleanup: the Service is still there"; [ "$status" -ne 0 ] || status=1; }
+  kubectl get job,service "$workload" --ignore-not-found   # prints nothing once both are gone
+  kubectl get pods -l job-name="$workload"                 # "No resources found"
+  rm -rf "$dir"
+  echo "sequence: exit $status"
+  exit "$status"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+trap 'exit 129' HUP
+
+cat > "$dir/job.yaml" <<YAML
 apiVersion: batch/v1
 kind: Job
 metadata:
-  name: <workload>                        # the sequence substitutes this run's name, here and in the Service
+  name: $workload
 spec:
   activeDeadlineSeconds: 3600           # on the Job, at most 43200
   ttlSecondsAfterFinished: 3600         # at most 86400
@@ -2789,57 +3051,45 @@ spec:
       containers:
         - name: db
           image: mirror.gcr.io/library/postgres:16   # the mirror, as every image here is pulled
+          terminationMessagePolicy: FallbackToLogsOnError   # an exited server's last lines stay in its status
           env:
-            - { name: POSTGRES_PASSWORD, value: <a password you choose> }
+            - { name: POSTGRES_PASSWORD, value: "$password" }
           resources:
             requests: { cpu: "4", memory: 8Gi }      # the largest container asks at least 4 CPU
           volumeMounts: [{ name: data, mountPath: /var/lib/postgresql/data }]
       volumes:
         - name: data
           emptyDir: {}                    # dies with the pod, by design
-```
+YAML
+kubectl apply -f "$dir/job.yaml"
+uid=$(kubectl get job "$workload" -o jsonpath='{.metadata.uid}')   # what the Service must name
 
-The name on the network is a Service, held to a cluster-internal address: no node port, no load
-balancer, no external address and no external name. It is admitted only while the Job it fronts
-owns it, so removing the Job removes it too and leaves nothing for a person to sweep — which is
-why its `ownerReferences` carries the Job's own uid, read back after the Job is created. It
-selects its pods by that same uid and by nothing else: the namespace's admission requires a
-Service's selector to be exactly `batch.kubernetes.io/controller-uid` at the uid of the Job that
-owns it, because a rule checking a submission sees only the object submitted and cannot look a
-Job up, so a selector by name would let a Service owned by one Job front another's pods. A
-`job-name` selector, though the Job puts that label on its pods too, is refused at submission,
-naming that rule:
-
-```yaml
+cat > "$dir/service.yaml" <<YAML
 apiVersion: v1
 kind: Service
 metadata:
-  name: <workload>
+  name: $workload
   ownerReferences:
-    - { apiVersion: batch/v1, kind: Job, name: <workload>, uid: <the Job's uid> }
+    - { apiVersion: batch/v1, kind: Job, name: $workload, uid: $uid }
 spec:
   type: ClusterIP                         # the only kind this namespace admits
-  selector: { batch.kubernetes.io/controller-uid: <the Job's uid> }   # its owner's pods, no one else's
+  selector: { batch.kubernetes.io/controller-uid: $uid }   # its owner's pods, no one else's
   ports: [{ port: 5432, targetPort: 5432 }]
-```
+YAML
+kubectl apply -f "$dir/service.yaml"
 
-The whole sequence, from a role container holding nothing but its checkout and that credential.
-**Write both manifests outside the checkout** — `$TMPDIR` or `/tmp`, never the issue's workspace:
-the workspace is a jj working copy of this public repository, so a `workload.yaml` left there is
-snapshotted into the role's working-copy commit and the password in it can reach the branch.
-
-```sh
-cd "${TMPDIR:-/tmp}"                                               # not the checkout: see above
-workload="<issue key lowercased>-postgres-$(python3 -c 'import secrets; print(secrets.token_hex(3))')"
-sed "s|<workload>|$workload|g" workload.yaml | kubectl apply -f -  # the Job, under this run's name
-uid=$(kubectl get job "$workload" -o jsonpath='{.metadata.uid}')   # what the Service must name
-sed -e "s|<workload>|$workload|g" -e "s|<the Job's uid>|$uid|g" service.yaml | kubectl apply -f -
 kubectl wait --for=create pod -l job-name="$workload" --timeout=120s   # it does not exist yet
 kubectl wait --for=condition=Ready pod -l job-name="$workload" --timeout=300s
 ns=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
-python3 - "$workload.$ns.svc.cluster.local" 5432 <<'PY'            # does it answer yet?
+address="$workload.$ns.svc.cluster.local"
+python3 - "$address" 5432 <<'PY'                                  # does it answer yet?
 import socket, sys, time
 host, port = sys.argv[1], int(sys.argv[2])
+readings = {
+    "ConnectionRefusedError": "reachable, and nothing listens on that port: read the pod's status, log and ports printed below",
+    "TimeoutError": "packets dropped: compare the pod's labels printed below with the reachability label",
+    "gaierror": "the name does not resolve: no Service of that name in the namespace the address names",
+}
 deadline = time.monotonic() + 60
 while True:
     try:
@@ -2848,14 +3098,72 @@ while True:
             break
     except OSError as error:
         if time.monotonic() >= deadline:
-            print(f"never answered: {type(error).__name__}: {error}")
+            kind = type(error).__name__
+            print(f"never answered: {kind}: {error}")
+            print(f"reading: {readings.get(kind, 'not one this section reads')}")
             sys.exit(1)
         time.sleep(2)
 PY
-kubectl logs -l job-name="$workload" --tail=5                      # and what it says it is doing
-kubectl delete job "$workload"                                     # takes its pod and its Service
-kubectl get jobs,pods,svc                                          # its Job and Service gone, its pod soon after
+kubectl logs -l job-name="$workload" --tail=5                    # and what it says it is doing
+
+# The work itself goes here, inside this script: "$address" port 5432, user postgres, password
+# "$password". However it ends, the trap above removes the workload, short of a SIGKILL.
+SEQUENCE
+echo "sequence: $sequence, its output in $sequence.log"
+flock "$sequence" setsid -f bash "$sequence" > "$sequence.log" 2>&1 < /dev/null   # out of the tool's reach
+flock "$sequence" cat "$sequence.log"          # waits for the sequence to end, then prints its output
 ```
+
+On every exit of that `bash` — the work's end, a failed step, or `SIGINT`, `SIGTERM` or `SIGHUP`
+— the trap runs. When the status is not 0 it first prints what the readings below send a role to
+look at: the workload pod's line with its labels, the last twenty lines of its log, its
+container's state, and the Service's port and target port. The state is there because a log read
+from a pod whose server has exited can fail — the read goes to the machine the pod ran on, and on
+2026-10-25 it timed out in two of eight runs of a server that had stopped — while the state comes
+from the cluster's own record, and `FallbackToLogsOnError` in the Job puts the last lines of the
+server's log into it when the server exits with an error. Then the trap deletes the Job with
+`--cascade=foreground`, which returns once the Job's pod is gone, since the Job controller's owner
+reference on the pod holds the Job's deletion back (6 s for a running `postgres:16`, 31 s for one
+still initialising, measured 2026-10-25); waits for the Service, whose owner reference, written
+without `blockOwnerDeletion`, holds nothing back, so the foreground delete does not wait for it;
+lists the Job, the Service and the pods by this run's name, which prints nothing and `No resources
+found`; and exits with the status it began with, or 1 when a clean-up step failed after a run that
+had succeeded, printing it last as `sequence: exit <status>`, since the call that waits for a
+detached sequence prints its output and not its status.
+
+**A timeout of the role's own bash tool is what the detaching is for.** The tool ends a call that
+runs past its timeout by signalling the command and every process under it and killing them almost
+at once: on 2026-10-25 a probe logging every 20 ms after a `SIGTERM` logged for 70 ms in one run
+and not at all in two others, and the sequence as this page published it before it detached, run
+in a call's foreground with a 40 s timeout, was gone with its Job, its Service and its running pod
+left behind, in two runs. That is the `SIGKILL` case below, and nothing in the call's output says
+so. A process in a session of its own is still killed while it descends from the call
+(`setsid --wait` was, measured the same day); `setsid -f` hands it to the system's init, which is
+what takes it out of the tool's reach. Run as published here, with the same 40 s timeout, the call
+ended at its timeout and the sequence ran on, answered, ran its trap and left nothing. A call that
+timed out has printed the sequence's file and its log before anything else, so a later call
+re-attaches with `flock <the sequence's file> cat <its log>`, which waits for the sequence to end
+and prints everything it printed; `cat` of the log alone shows how far it has got.
+
+A stop signal sent to the sequence's process group — `kill -TERM -- -<process>`, which its first
+line prints, is the deliberate stop — runs the trap at once; one sent to its `bash` alone runs it
+only when the step in progress returns, which each step's own timeout bounds. Measured on
+2026-10-25: that `kill -TERM` during the work ran the trap and the sequence exited 143 with nothing
+left; `SIGHUP` and `SIGINT` sent to the group during the Ready wait, and `SIGINT` and `SIGTERM`
+sent to it during the check, each ran the trap within a second; `SIGTERM` sent to the `bash` alone
+during the Ready wait ran it 76 s later, when the wait returned, and `SIGINT` sent to it alone
+during a check that was being refused ran it 58 s later, when the check gave up. A `SIGKILL`, or
+the role's pod going away, runs no trap: the Job's two deadlines bound what is left, and a role
+that stopped that way — or that ran the sequence in its tool's foreground and saw the call time
+out — removes it with the name the sequence printed first:
+
+```sh
+kubectl delete job <the printed workload name> --cascade=foreground
+kubectl wait --for=delete service/<the printed workload name> --timeout=60s
+```
+
+A role that lost the name lists the Jobs with `kubectl get jobs`. Its issue's start with its issue
+key, and so do its sibling roles', so it deletes only the one it started.
 
 That check is `python3`, which the image carries, because **the role container had no client for
 any of these servers** when it was written ([Worker image](#worker-image)), a role may not `exec`
@@ -2865,23 +3173,43 @@ this repository builds carries `psql`, `redis-cli`, `sqlite3`, `nc` and `dig` fr
 dispatch://INFRA-221's merge on 2026-10-25 onward, and a role has them once its deployment pins a
 digest built from that merge or a later commit of `main` ([Pin by digest, never by
 tag](#pin-by-digest-never-by-tag)) — a role on an older digest still has none of them, and
-`python3` runs on both. What it proves is what a role needs first: that the address resolves and
-the port answers.
+`python3` runs on both. The role container the runs of 2026-10-25 below came from was one of
+those: `command -v psql redis-cli sqlite3 nc dig` found none of the five. What the check proves
+is what a role needs first, that the address resolves and the port answers, and when it does not,
+it names the class of the failure, which is what the readings below key on.
 
 It loops because `kubectl wait` cannot tell a role the server is listening. The pod carries no
 readiness probe, so `condition=Ready` means the container started, and a database spends its
 first seconds initialising with its listener closed — `postgres:16`'s entrypoint does exactly
-that. **So the two failures are different, and the loop is what separates them.** A connection
-*refused*, in the first seconds, is the workload reachable and not listening yet: the loop
-retries and it answers. A connection that *times out* every time until the deadline is the
-workload unreachable — the packets are dropped rather than refused, which is what the missing
-reachability label above produces, and `never answered: TimeoutError` is how the step reports it.
-Read the first as starting up and the second as the label.
+that. A connection *refused* in those first seconds is the workload reachable and not listening
+yet: the loop retries and it answers. When the minute runs out, the check prints the class of its
+last attempt alone, with a reading for it, and each reading is the next thing to check rather than
+a proof:
+
+- `ConnectionRefusedError` — the packets reach the workload and nothing listens on the port its
+  Service sends them to. The pod's line, which the trap prints with the rest before it deletes
+  anything, says which way to look. `Running` is a server listening somewhere other than the
+  Service's `port -> targetPort`, or one still starting a minute after Ready, and its log tells
+  the two apart; any other status is a server that stopped, whose reason is in its log or, when
+  the log cannot be read, in its container's state. The cluster refuses rather than drops in both
+  cases, whether the pod runs with nothing on that port or has already exited. A server that stops
+  by itself shows here and not at the Ready wait: a `postgres:16` given an invalid setting ran its
+  initialisation, was Ready long enough for the wait to return and exited about a second later,
+  and a container that exited the moment it started was reported Ready all the same, so in both
+  the check was refused every try.
+- `TimeoutError` — the packets are dropped rather than refused, which is what the missing
+  reachability label above produces: compare the pod's labels, which the trap prints, with the
+  deployment's declaration first.
+- `gaierror` — the name does not resolve: there is no Service of that name in the namespace the
+  address names, because the address was mistyped or because of the namespace gap above. The
+  sequence stops at a refused Service step before it reaches the check, so a refusal there never
+  shows as this.
 
 Speaking the protocol is a client library onto the issue's own disk, the way every other tool
-that works from the checkout arrives (below), run from the checkout against that same address —
-never a binary installed into the pod. The last line asks for the Service as well as the Job and
-its pod, because the grant that admits a Service also lets this identity get, list and watch
+that works from the checkout arrives (below), run from the checkout against that same address,
+or, on a digest that carries them, one of the image's five clients — never a binary a role
+installs into its pod itself. The trap's listing asks for the Service by name as well as the Job
+and its pod, because the grant that admits a Service also lets this identity get, list and watch
 one, so the listing is what shows the Service went with its Job. The Service's endpoints are
 still out of reach (`kubectl auth can-i get endpoints` answers `no`, and so does the same
 question of `endpointslices`), which is why the bullet above compares the workload pod's labels
@@ -2893,14 +3221,50 @@ dispatch://INFRA-206's declarations on 2026-10-25 turned two of the gate's three
 to `yes`. So each bullet below carries the date of the run behind it, and a reader runs the three
 gate commands itself rather than trusting the answers recorded here:
 
+- *Executed from a role container on 2026-10-25, for dispatch://INFRA-215, with the sequence
+  exactly as published above, through the role's own bash tool*: the block taken from this page
+  with only its three bracketed lines filled in and pasted into a tool call, each run under its own
+  suffix, and a fixture changing one line of it where named. As published: `answered`, the trap's
+  listing empty, `sequence: exit 0`, the call returning 92 s after it started. With the Service's
+  `targetPort` changed: `never answered: ConnectionRefusedError` and its reading after the minute,
+  the pod `Running` and `port 5432 -> targetPort 5433` printed, `sequence: exit 1`. With
+  `postgres:16` given an invalid setting: refused every try, the pod `Error`, its log and its
+  container's state both carrying the server's `FATAL` line. With the reachability label's line
+  removed: `TimeoutError` after the minute. With the address renamed: `gaierror`. With a call
+  timeout of 40 s and of 20 s (the second with a 90 s stand-in for the work): the call ended at
+  its timeout, the sequence ran on to `sequence: exit 0` with nothing left, and a later call's
+  `flock … cat …` waited for the end and printed the whole run. `kill -TERM -- -<process>` during
+  the work: the trap ran, `sequence: exit 143`, nothing left. `kill -KILL -- -<process>` during the
+  work: the Job, its Service and its pod left, and the two recovery lines removed them in 2 s.
+  And, run the same way, the sequence as this page published it until then, in the call's
+  foreground with a 40 s timeout: the call ended at its timeout and the Job, its Service and its
+  running pod were left, until the recovery lines removed them. None of this issue's Jobs was left
+  after the runs.
+- *Executed from a role container on 2026-10-25, for dispatch://INFRA-215, with the sequence run
+  in the foreground of a process of its own, before it detached*: the steps from the Job to the
+  trap were then as they are above. The three gate commands answering `yes`, and `get endpoints`,
+  `get endpointslices` and `patch jobs` answering `no`; `POD_NAMESPACE` unset, and none of `psql`,
+  `redis-cli`, `sqlite3`, `nc` and `dig` on the `PATH`. Ready 79 s after the submission on a cold
+  machine, `answered` 2 s later, the trap's foreground delete in 6 s and the Service wait at once.
+  The `targetPort`, invalid-setting, label and address fixtures as above, and a container that
+  exits the moment it starts, reported Ready and then refused every try. With the Service selecting
+  by `job-name`: refused by admission at the apply, naming its rule, and the Job deleted while its
+  pod was `Pending`. The other signals the paragraph on stopping sets out, with what it records of
+  each, and a `SIGKILL` to the `bash` during the Ready wait, which left the Job for the two recovery
+  lines to remove in 2 s. The namespace's quota for Jobs counted 4 processors per workload and was
+  back at 0 after them. Once, with fourteen sequences submitted within four seconds, a Service step
+  failed `Error from server (Conflict)` on the namespace's quota object, which another submission
+  had just changed; the trap removed that run's Job, and a re-run went through. And the
+  credential-less gate again, with the in-cluster environment removed: exit 1, `The connection to
+  the server localhost:8080 was refused …`.
 - *Executed from a role container on 2026-10-25, for dispatch://INFRA-234*: the three gate
   commands, **all three answering `yes`**, and the grant matrix behind them
   (`create`/`delete`/`get`/`list`/`watch jobs`, `get`/`list pods`, `get pods/log`, `delete pods`
   and `create`/`get`/`list`/`watch`/`delete services` `yes`; `patch`/`update jobs`, `create pods`
   and `get`/`list` of `endpoints` and of `endpointslices` `no`); and **the whole sequence for
-  real**, as published above under a fresh suffix — the Job applied and created, its uid read, the
-  Service applied exactly as published and created, the pod waited for into existence (at once)
-  and then to Ready (70 s), the workload pod's labels read and carrying both its Job's
+  real**, as published then under a fresh suffix — the Job applied and created, its uid read, the
+  Service applied exactly as published then and created, the pod waited for into existence (at
+  once) and then to Ready (70 s), the workload pod's labels read and carrying both its Job's
   `batch.kubernetes.io/controller-uid` and the reachability label, the reachability check
   answering by the Service name about two seconds after the Ready wait returned — the same block
   with one print per attempt added saw its first connection refused and the retry answer, the
@@ -2912,13 +3276,13 @@ gate commands itself rather than trusting the answers recorded here:
   (87 s to Ready on a cold machine, 10 s on a warm one), which is where the two waits come from:
   the single `wait` this section published before exited 1 at once with `error: no matching
   resources found`, because the Job's pod does not exist the instant the apply returns; and the
-  reachability block, run as published against a listener and against a port that refuses and
-  then listens. And, *not run again since*: the credential-less gate, with the in-cluster
-  environment removed; one deliberate breakage of each **enforced** rule of the Job manifest
+  reachability block, run as published then against a listener and against a port that refuses
+  and then listens. And, *not run again since*: one deliberate breakage of each **enforced** rule
   above, put through the namespace's own admission server-side with nothing created, each refused
   naming the rule — the reachability label has no breakage to record, since admission does not
-  check it, which is the whole of why that bullet is marked; and the reachability block against an
-  address whose packets are dropped.
+  check it, which is the whole of why that bullet is marked. (The credential-less gate and the
+  reachability block against an address whose packets are dropped, on this list until then, were
+  run again for dispatch://INFRA-215, above.)
 - *Refused as published, and corrected on 2026-10-25*: until dispatch://INFRA-234 the Service
   manifest above selected the Job's pods by `job-name`, and the namespace's admission refuses
   that, naming the rule that a Service there selects by `batch.kubernetes.io/controller-uid` at
@@ -2930,9 +3294,9 @@ What a workload there cannot do, so nobody plans around it: it cannot mount the 
 which belongs to another namespace and to one node at a time, and a role may not run a command
 inside its pod — the grant is create, read, follow and delete, never `exec`. A formatter started
 that way would never see the file it would format, so **a tool that works on the checkout does not
-belong here**: those arrive through the image's package runners onto the issue's own disk, which
-every role of the issue shares and which outlives any one pod. That is also why the two notes
-recording `kubectl auth can-i` answering `no` are not contradicted here
+belong here**: those are the image's own clients, or arrive through its package runners onto the
+issue's own disk, which every role of the issue shares and which outlives any one pod. That is
+also why the two notes recording `kubectl auth can-i` answering `no` are not contradicted here
 (`a-pod-rehearses-a-checkpoints-own-readers-…-LEGION-578.md` in `docs/solutions/legion/`, and
 `prove-a-published-worker-image-from-a-pod-…-LEGION-764.md` in `docs/solutions/testing/`): each
 answers for a different verb — creating a Sandbox, creating a pod, `exec` into one — in the
@@ -2940,9 +3304,15 @@ namespace Legion's own pods run in, which this changes nothing about.
 
 Two costs are shared and are the reason a role cleans up after itself rather than waiting for a
 deadline. One quota covers that whole namespace and is shared with the team's builds, so a
-workload left running is charged against both. And every project's agents hold the one identity
-(`legion-worker`), so a password written into a Job is readable by every other agent, and any of
-them may delete any workload there; narrowing that to a per-project identity is
+workload left running is charged against both: measured on 2026-10-25, the namespace's quota for
+Jobs counted `requests.cpu` 4 for each of these workloads while it existed, 48 with twelve at once,
+and was back at 0 once the last of them was deleted. And every project's agents hold the one
+identity (`legion-worker`), so a password written into a Job is readable by every other agent,
+and any of them may delete any workload there. The other half is reach: the ingress rule admits
+the namespace Legion's pods run in rather than an identity, naming no pod and no port, so every
+pod there — every project's agents, with a Kubernetes credential or without one — reaches a
+labelled workload at its Service name, and the password in the Job, which every holder of the
+identity can read, is the only lock on it. Narrowing the identity to a per-project one is
 dispatch://INFRA-153's work, not something to design around here.
 
 ### Issue sizing: one reservation per pod
@@ -3666,8 +4036,12 @@ runtime:
     tree_volume: 20Gi            # default 20Gi; one volume per issue tree
     kubeconfig: ./kind.kubeconfig  # optional; relative paths resolve against legion.yaml's directory.
                                    # Omitted: the in-cluster service account
-    session_store: pvc           # default; postgres stores each agent's conversation in Postgres (see Session store)
-    session_dsn_secret: SESSION_DSN  # required with postgres: the key of legion-<project>-providers holding one postgres:// URL
+    session_store: pvc           # default; postgres or cloudsql-iam keeps each agent's conversation in a database (see Session store)
+    session_dsn_secret: SESSION_DSN  # with postgres alone: the key of legion-<project>-providers holding one postgres:// URL
+    session_database:            # with cloudsql-iam alone: no URL anywhere, each pod signs in to the instance as itself
+      instance: example-project:us-central1:example-instance  # the Cloud SQL connection name, project:region:instance
+      name: legion_sessions      # the database in that instance
+      user: legion-sessions@example-project.iam  # the IAM login every pod signs in as
     resources:                   # optional overrides of the profile table below, per quantity
       large:
         limits:
@@ -3719,10 +4093,17 @@ Startup refuses, naming the field, when: `runtime: kubernetes` is given without 
 (`envoy_token_file is required when runtime is kubernetes (or set ENVOY_TOKEN_FILE)` — a listener
 bound off loopback requires a bearer); `omp_launch_prefix` (or
 `LEGION_OMP_LAUNCH_PREFIX`) is set — provider keys come from the mounted Secret, so the prefix has no
-process to wrap; `session_store` is anything but `pvc` or `postgres`; `session_store: postgres` comes
+process to wrap; `session_store` is anything but `pvc`, `postgres` or `cloudsql-iam`;
+`session_store: postgres` comes
 without `session_dsn_secret`, or with one that is empty, is not a Secret data key
 (`[-._a-zA-Z0-9]+`), or is named `OMP_SESSION_STORAGE` or `OMP_SESSION_SQL_DSN_FILE` (see
-[Selecting the store](#selecting-the-store)); `session_dsn_secret` is set under `pvc` (an inert key
+[Selecting the store](#selecting-the-store)); `session_store: cloudsql-iam` comes without
+`session_database`, or with one that is not a mapping, names a member but `instance`, `name` and
+`user`, leaves one of the three empty, or whose `instance` is not a Cloud SQL connection name the
+connector uses whole (`project:region:instance`, or `domain:project:region:instance` for a
+domain-scoped project, with no whitespace); `session_dsn_secret` is set under `pvc` or
+`cloudsql-iam`, or
+`session_database` under `pvc` or `postgres` (an inert key
 is refused, never ignored); or the daemon runs neither with a `kubeconfig` nor inside a pod
 (`runtime.kubernetes.kubeconfig is not set and /var/run/secrets/kubernetes.io/serviceaccount/token
 does not exist`). Every one of those is a boot refusal before anything is spawned. `session_store`
