@@ -44,6 +44,10 @@ type DispatchIssue struct {
 	// own, else its nearest ancestor's, else its project's default; empty when it resolves to none.
 	// The workflow takes it when it first records the issue, and never after.
 	ResolvedRepo string
+	// Blockers is the keys of the issues the event says this issue waits on, in Dispatch's own
+	// order. An event retained from a Dispatch that did not yet send them carries none, as an issue
+	// waiting on nothing does: no reader needs to tell those two apart.
+	Blockers []string
 	// ResolvedRepoMissing is an event JetStream retained from before Dispatch resolved an issue's
 	// repository: its payload has no resolved_repo, so ResolvedRepo says nothing. The consumer's
 	// PrepareRepository fills ResolvedRepo from the issue's record, or from Dispatch for an issue
@@ -72,7 +76,7 @@ func ObservedIssue(issue dispatch.Issue) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Observed: true}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy, Observed: true}
 }
 
 // ListedIssue is issue as Dispatch's issue listing shows it, as a fact at the issue's sequence, with
@@ -83,7 +87,7 @@ func ListedIssue(issue dispatch.IssueSummary) DispatchIssue {
 		parent = *issue.Parent
 	}
 	return DispatchIssue{Key: issue.Key, Seq: issue.LastSeq, Status: issue.Status, Title: issue.Title, Parent: parent,
-		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo}
+		Rank: issue.Rank, HandedOver: issue.HandedOver, ResolvedRepo: issue.ResolvedRepo, Blockers: issue.BlockedBy}
 }
 
 // Handover is the outbox's direct completion of a hand-over whose Dispatch state is already todo

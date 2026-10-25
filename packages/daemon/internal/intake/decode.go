@@ -177,6 +177,10 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			Rank         string          `json:"rank"`
 			Labels       []string        `json:"labels"`
 			ResolvedRepo json.RawMessage `json:"resolved_repo"`
+			// An event retained from a Dispatch that did not yet send blocked_by decodes to no
+			// blockers, as an issue waiting on nothing does: unlike a missing repository, which the
+			// consumer fills, nothing reads an absence here.
+			BlockedBy []string `json:"blocked_by"`
 		}
 		if err := json.Unmarshal(event.Payload, &issue); err != nil {
 			return nil, fmt.Errorf("decode Dispatch issue payload: %w", err)
@@ -209,7 +213,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 		}
 		return DispatchIssue{Key: event.IssueKey, Seq: event.Seq, Type: event.Type, Status: issue.Status, Title: issue.Title, Parent: parent, Rank: issue.Rank,
 			HandedOver: dispatch.CarriesLegionLabel(issue.Labels), ActorSession: actorSession, DaemonActor: daemonActor, ResolvedRepo: deref(resolved),
-			ResolvedRepoMissing: missing}, nil
+			ResolvedRepoMissing: missing, Blockers: issue.BlockedBy}, nil
 	case "artifact.approved", "artifact.changes_requested":
 		var artifact struct {
 			ArtifactID string `json:"artifact_id"`
