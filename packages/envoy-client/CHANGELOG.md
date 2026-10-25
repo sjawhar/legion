@@ -12,6 +12,17 @@
 
 ### Added
 
+- `dispatch read --ref` reads one block of a document: `dispatch://KEY/spec#b-<id>`,
+  `dispatch://KEY/artifact/<slug>#b-<id>` or `dispatch://PROJECT/artifact/<slug>#b-<id>`,
+  optionally pinned `@v<N>`, or a live document page's URL ending `#b-<id>`. It prints `Block:`,
+  `Document:`, `Changed in version:` and `Text:`, then, for a pinned reference, `Pinned to version:`,
+  whether the block is unchanged, changed or removed since, and `Text at version N:`, then
+  `Referenced by:` and `Links:`. An unpinned reference to a block the document no longer holds
+  exits 1 with `No block <id> in <document>.`; a pinned one to a removed block prints it and exits 0.
+  `dispatch comment`, `suggest`, `doc-edit` and `doc-read` refuse a block reference, naming the
+  arguments for its document, and every read's reference row on a document ends
+  `(block <ref>)` when the graph names the document's block at that edge.
+
 - `dispatch issue-update --before <KEY>` and `--after <KEY>` move an issue on its project's board:
   the executor carries the two arguments into the server's `rank` on the PATCH it already makes, so
   the move rides along with any other change in the same call, and the printed result gains

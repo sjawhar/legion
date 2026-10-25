@@ -4,6 +4,29 @@
 
 ### Added
 
+- Each block of a Dispatch document is a node of the reference graph. A reference can name one
+  block, `dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
+  `dispatch://PROJECT/artifact/<slug>#b-<id>`, the id percent-encoded as `text.EncodeBlockID` and
+  `encodeBlockId` write it, and so does a live document page's `#b-<id>`; `@v<N>` after the id
+  pins it to version N of the document. A mention written inside a block starts at the innermost
+  block holding it: `GET /api/v1/references` names that block as the source (`kind: "block"`, with
+  `block_id`, `document`, `changed_version` and `changed_at`, the version its text last changed
+  in), a node cited from two blocks of one document counts twice, a document's own read names the
+  block at each edge as `block`, and each block is `part_of` its document, which a document's read
+  lists only under `?kind=part_of`. A block reference's read carries the block's whole current
+  `text`; a pinned one also carries `pin`, the block's text at that version and whether it is
+  `unchanged`, `changed` or `removed` since. Deleting a block takes the links to it out of every
+  list, count, closure and outgoing list until a version restores its id.
+  `GET /api/v1/block-links?from=<document>&to=<document>` lists the links from the blocks of one
+  document to the blocks of another. `GET /api/v1/artifacts/{id}/references` keeps every source.
+  Migrations `0117`-`0122` add the block tables, the triggers that owe the index what any build
+  writes, and the seed of the comments, asks and issue messages already holding `#b-`; the server's
+  block-index reconciliation (lease `block-index`, logged as `dispatch: block index`) indexes every
+  document and text owed, with no command run, and takes one more lease connection per server,
+  nine. `rebuild-refs` marks every document owed that index and prints `blocks_owed=`. The
+  dashboard titles a block link with the block's text, its hover card shows the document and, for
+  a pinned link, the version and how the block stands since, a pinned link opens that version, and
+  Referenced by shows one row per citing block, each linked to its block.
 - A project's default assignee, the last step of an issue create's assignee chain: an issue created
   with no assignee, by nobody (the shared token), under no parent or under a parent with nobody on
   it, goes to the person the project names; nothing already filed, and no create that names an

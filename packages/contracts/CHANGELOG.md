@@ -4,6 +4,16 @@
 
 ### Added
 
+- Blocks of a Dispatch document as graph nodes: `GraphNode.kind` gains `"block"`, whose node
+  carries `block_id`, `document`, `changed_version` and `changed_at`, and, on the node a reference
+  read names, `text` and, for a reference pinned to a version (`#b-<id>@v<N>`), `pin` (`BlockPin`:
+  `version`, `ref`, `text`, `state` `unchanged` | `changed` | `removed`, `removed_version?`).
+  `GraphEdge.block` names, on a document's read, the document's block at the queried end, and
+  `BlockLink` / `BlockLinks` are `GET /api/v1/block-links`. `encodeBlockId` writes a block id as a
+  `#b-` fragment carries it (every byte but ASCII letters, digits and `-` percent-encoded, so `@` is
+  `%40` and a raw `@` is only the pin), tested with Go's `text.EncodeBlockID` against
+  `DISPATCH_BLOCK_ID_ENCODINGS`; `DISPATCH_TEXT_REFERENCES` gains the block and pin rows both
+  reference readers are held to.
 - The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
   `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
   still names a person who has signed in, and `dispatch_whoami` says a session under the shared
@@ -121,6 +131,8 @@
 
 ### Changed
 
+- `DISPATCH_HREF_REFERENCES`: a live document page's `#b-<id>` href names that block,
+  `dispatch://…#b-<id>`, where it named the document; any other fragment still names the document.
 - `LegionHandoffCompleteResponse.note` carries one case fewer: READY no longer reads or judges the
   head's checks, so a base branch that requires none produces no note at all. What is left is the
   already-merged sentence, for a pull request a person merged before READY, and the by-hand

@@ -4,6 +4,12 @@
 
 ### Added
 
+- The `dispatch` command (`dist/dispatch.js`) reads one block of a document:
+  `dispatch read --ref dispatch://KEY/spec#b-<id>` (or an issue's or a project's document with
+  `#b-<id>`, optionally pinned to a version with `@v<N>`) prints the block, the version its text
+  last changed in, its text, for a pinned reference its text at that version and whether it
+  changed or was removed since, and what cites it; `dist/` was regenerated. The `dispatch` skill
+  the plugin links teaches the block forms, the pin and `GET /api/v1/block-links`.
 - The `dispatch` command (`dist/dispatch.js`) moves an issue on its project's board:
   `dispatch issue-update --issue <KEY> --before <OTHER>` puts it above that issue,
   `--after <OTHER>` below, and both together land it between them, printed as `rank -> before KEY`

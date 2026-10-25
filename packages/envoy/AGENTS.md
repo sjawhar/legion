@@ -1295,14 +1295,18 @@ and refuses the deletion; an unaccounted mark with no committed ask/comment row 
 
 References form one graph. Mentions (`dispatch://` refs and same-origin dashboard URLs in a
 document version, ask question, comment body, or issue message) are derived on every write into
-`refs` by `refs.ReplaceCounted`, which reconciles rather than rewrites: an edge that survives keeps its
+`refs` by `refs.ReplaceCounted`, or by `refs.ReplaceCountedRefs` for a document version whose
+mentions its index has already extracted. Both reconcile through the unexported `replaceRefs`
+rather than rewrite: an edge that survives keeps its
 `created_at` and `source_seq` (the `events.id` that introduced it, stamped by `refs.Stamp` right
 after the source's event is appended, in the same transaction). Structural relations stay in the
 columns that own them and the `graph_edges` view (migration 0032) unions both into one typed edge
 relation: `mentions`, `child_of` (`issues.parent_key`), `blocked_by` (`issue_links`),
 `attached_to` (`artifacts.issue_key`), `anchored_to` (ask/comment anchors), `owned_by`
 (project-document asks/comments), `replies_to` (comment and message threads), `followed_by`
-(`ask_followers`). An issue may wait only on issues in its own project through `blocked_by`.
+(`ask_followers`), and, since migration 0117, a block's `mentions` (`block_refs`) and its
+`part_of` edge to its document (`document_blocks`). An issue may wait only on issues in its own
+project through `blocked_by`.
 For cycle checks an issue has two halves: it starts after its `blocked_by` targets are done and
 after its parent starts, and it is done after it starts and after its children are done. A
 write that would make either half wait on itself is `409 DEPENDENCY_CYCLE`. One sibling may
@@ -1311,16 +1315,18 @@ descendant through `blocked_by`. Artifact targets are addressed by
 `ref_key`, artifact sources by uuid; each arm has the index its `to`/`from` predicate needs.
 `GET /api/v1/references?to=|from=` reads the view; `envoy-dispatch rebuild-refs` reparses every
 source and reconciles the index (the text is the truth), deleting edges whose source no longer
-exists, and refuses to run without `dispatch.server_url`. A document mention's backlink excerpt -
-the block holding the target's first mention, its id the `#b-<id>` jump and its markdown cut to
-480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
+exists, marks every document owed a block index (below), and refuses to run without
+`dispatch.server_url`. A document mention's backlink excerpt -
+the innermost block holding the target's first mention, its id the `#b-<id>` jump and its markdown
+cut to 480 characters - is stored on the `refs` row (`excerpt_block_id`, `excerpt_text`,
 `excerpt_version`, migration 0092) when the mention is indexed, cut from a render of the version's
 tree that the write already makes: every renderer of a version's tree takes the block offsets from
 its own render (`pmdoc.RenderWithBlockOffsets`; `renderTreeWithOffsets`,
 `documentMarkdownWithOffsets`), and a `docs.renderedTree` carries the tree, the markdown and the
-offsets together to `refs.MentionExcerpts` and `refs.RecordExcerpts` (`writeVersionTx`, and an
-upload's and a seeded spec's `docs.Service.IndexDocumentReferences`, which take the transaction's
-recorded rendering from the ledger), so the route reads no document and no write renders its tree
+offsets together to `docs.indexDocument` (`writeVersionTx`, and an upload's and a seeded spec's
+`docs.Service.IndexDocumentReferences`, which take the transaction's recorded rendering from the
+ledger), which indexes the version's references, excerpts and blocks from one
+`text.ExtractAt` of its markdown, so the route reads no document and no write renders its tree
 for the excerpts (LEGION-531). An edit, a named version, a seed, a rebuild and a settlement render
 the tree once; an upload that changes the document renders it twice, as it did before excerpts -
 `ReplaceText`'s render of the replacement, which is the stored markdown, and `applyLive`'s render
@@ -1344,6 +1350,82 @@ version the binary it replaces writes leaves the previous version's excerpt with
 marks it owed at the reconciliation's next tick, which starts within five minutes
 (`docs.ReferenceExcerptReconcileInterval`) of the last one ending. The deploy's overlap lies inside
 the hour after the new task starts, the only hour `MarkStaleExcerpts` runs.
+A `?to=` read lists a mention that one of the citing document's blocks holds from that block,
+with the block's own excerpt (below), so the excerpt on the `refs` row is what a document mention
+no block holds is shown with: one in a document the block index has not reached.
+
+Each identified block of a document is a graph node too: kind `block`, id
+`<document ref_key>#<block id>` (`refs.ToID`), its reference the document's with `#b-` and the id
+as `text.EncodeBlockID` writes it (`refs.BlockRef`). `refs.IndexBlocks` indexes a version's blocks
+in the version writer's transaction, from the same render and extraction as its references: the
+blocks the render's offsets name, which `GET /api/v1/artifacts/{id}/blocks` lists, the first
+holder of a repeated id being the node. Its tables are migration 0117's: `document_blocks` holds
+each block the latest indexed version holds, with its text's sha256, its
+text cut to 480 runes as its excerpt, and `changed_version` and `changed_at`, the version its text
+last changed in, which an unchanged text keeps. `document_block_texts` records a block's whole
+text in each version that makes it new, changes it, restores it, or deletes it (a null text).
+`document_indexed_versions` names each version a block-aware build indexed, and
+`document_block_versions` the version a document's blocks stand at, null while the document is
+owed an index. `block_refs` holds each link a block holds, keyed on the block, its target and the
+link's `kind`. A mention starts at the innermost block holding its start: a list item's
+paragraph, and the table for a mention in a cell, since rows and cells are not nodes.
+`docs.indexDocument` unions the targets whose block pairs moved with those the document's own
+`refs` moved before one `refs.CountedChanges`, so a version that goes from one citing block to
+two names the target in `references_changed`. A new pair takes the version and its time, and
+`refs.Stamp` gives it the version event's id; on a document's first indexing, a pair takes the
+`created_at` and `source_seq` of the document's own `refs` row for that target when there is one.
+
+The document keeps its own `refs` rows, which the closure and the older
+`GET /api/v1/artifacts/{id}/references` read, but a document's mention that one of its blocks
+holds with the same kind and target is listed and counted from that block alone
+(`heldByABlock`, in `refs.Edges` and `refs.BacklinkCounts`), so a node is counted once for each
+block citing it and each link shows once, where its block holds it. A document's own read
+(`?to=` or `?from=` a document reference) also lists the edges at its current blocks, each naming
+that block as the edge's `block`; its `part_of` edges are left out unless `?kind=` names them. A
+link to a block counts only while its block is a current `document_blocks` row: a deleted block
+has none, so `loadBlockNodes` (the `block` entry of `nodeLoaders`) resolves nothing and the edge
+drops out of `refs.Edges` and `refs.BacklinkCounts`, `refs.Outgoing` omits the target,
+`refs.Closure` does not follow it, and `refs.BlockLinks` drops the link. The mentions at it stay
+in their sources' `refs`, so a version holding the id again brings each link back. The older
+route keeps every source: `refs.ReferencedBy` lists each item and document that cites the
+document or one of its current blocks once, a document by its own row, and `refs.Outgoing` lists
+a block target with its document as the artifact.
+
+A block reference may be pinned to version N of its document, `#b-<id>@v<N>`; the pin is no part
+of the edge (`refs.ToID` drops it), and it is read when the reference is.
+`GET /api/v1/references?to=<block reference>` names the block node with `text`, its whole current text
+(`refs.CurrentBlockText`); a pinned reference adds `pin` (`model.BlockPin`), read by
+`refs.BlockTextAt`: the text of the latest `document_block_texts` row at or before N, read only
+when `document_indexed_versions` holds N. Its `state` is `unchanged` or `changed` by comparing that
+text with the current one, or `removed`, with `removed_version`, the node's text and changed
+version absent and no edges, when no current version holds the block. An unpinned reference to a
+block no current version holds is `404 NOT_FOUND` `no block "<id>" in <document ref>`, and a pin
+to a version the document lacks, to one with no record of its blocks, or to one that did not hold
+the block is `404 NOT_FOUND` saying which (`blockReferenceNode`, `api/references.go`).
+`GET /api/v1/block-links?from=<document>&to=<document>` (`refs.BlockLinks`) lists the links from
+blocks of one document to blocks of another, or of the same one, while both blocks are current.
+
+What no block-aware write indexed, the server indexes itself. Migration 0117 marks every document
+owed; 0118's trigger marks a document owed on every markdown version any build inserts, which a
+block-aware writer's own index settles later in the same transaction; and 0119-0121's triggers
+put each comment, ask and issue message (one with an `issue_key`) whose text holds `#b-` into
+`block_grammar_owed`, which 0122 seeds with those already stored, since a build that predates the
+block grammar indexes such a text without it. `cmd/dispatch` runs
+`docs.Service.RunBlockIndexReconciliation` under the lease `block-index`: each tick indexes up to
+20 owed documents, by a keyset cursor, and up to 200 owed items, oldest first, every 2 s while a
+batch is full and every 30 s after, and logs `dispatch: block index` with `documents=`, `items=`,
+`owed_documents=`, `owed_items=` and `live_ahead=`. It reads a document (`TextWithBlocks`) with no
+transaction held, then, under the document's owner lock, indexes it only while its latest version
+and its owed mark are the ones it listed, taking the version's time and the `source_seq` of the
+event that recorded the version (`stampVersionEvent`). A document that owes a settlement and whose
+live markdown differs from its latest version's is skipped, counted `live_ahead` and left owed; on
+a closed issue that lasts until the issue reopens. An item is re-read `for no key update`
+(`refs.SourceText`) and re-indexed with this build's grammar (`refs.ReindexOwedItem`), a new edge
+taking the time its text was written and no `source_seq`; its owed row is deleted only while it
+holds the `enqueued_at` the tick listed, so an edit that lands meanwhile leaves the item owed.
+`rebuild-refs` marks every document owed and prints `blocks_owed=`; it leaves
+`block_grammar_owed` alone, since it has just re-read every item itself.
+
 Blocker-list and parent changes serialize per project through `lockProjectIssueDependencies`
 (`api/issue_parent.go`), using the two-key advisory-lock namespace `dispatch-issue-dependencies`.
 That transaction lock comes before any row or rank lock. A PATCH then locks every issue row it
@@ -1369,7 +1451,9 @@ PATCH naming the issue itself is `400 BLOCKED_BY_INPUT` too.
 A mention's source is the node whose text holds it, never the issue that text belongs to: a
 citation in an issue's spec is an edge out of the spec document, so
 `GET /api/v1/references?from=dispatch://KEY/spec` lists it, `?from=dispatch://KEY` lists only the
-issue's own `child_of`, `blocked_by` and `affects` edges, and the cited node's `?to=` backlink names the spec.
+issue's own `child_of`, `blocked_by` and `affects` edges, and the cited node's `?to=` backlink names
+the spec's innermost block holding the citation (a `block` node whose `document` is the spec), or
+the spec itself while the block index has not reached it.
 Where a reference in text ends, and what it names, is one rule with two readers: `text.ExtractAt`,
 which every write indexes through, and the dashboard's `composerReferences` (`refs/routes.ts`,
 scanning with `referenceSpans` and parsing with `referenceRouteFromHref`), behind its reference
@@ -1378,7 +1462,15 @@ JSON copy is `text/testdata/dispatch-text-references.json`, is the table both ar
 so a change to the rule changes both readers and the table: `**dispatch://KEY**`,
 `` `dispatch://KEY` `` and `[dispatch://KEY](dispatch://KEY)` (how a document stores
 `<dispatch://KEY>`) all mention `KEY`, though the dashboard shows the code span as code, not a
-link. The Go reader parses a reference as the browser does: a query's pairs split on `&` alone,
+link. A `#b-<id>` fragment after an issue's spec or document, or a project's document, names that
+block (`text.parseBlock`, the dashboard's `parseBlockReference`), and so does one on a live
+document page (`documentPage`); a version page's fragment names no block. The id is read with any
+percent-encoding, and every writer writes it as `text.EncodeBlockID` and `encodeBlockId`
+(`@legion/contracts`) do: each UTF-8 byte but ASCII letters, digits and `-` percent-encoded in
+upper-case hex, so `@` is `%40` and a raw `@` in the fragment is only ever the `@v<N>` pin. Both
+are tested against `DISPATCH_BLOCK_ID_ENCODINGS`, whose JSON copy is
+`text/testdata/dispatch-block-id-encodings.json`. The Go reader parses a reference as the browser
+does: a query's pairs split on `&` alone,
 as `URLSearchParams` splits them (`searchParams`), an item id is decoded as `decodeURIComponent`
 decodes it, a slug is the whole segment, and a reference holding a control character, or an item
 id that decodes to one, names nothing; the index binds ids as `text[]`, where Postgres refuses a
@@ -1859,8 +1951,8 @@ from and that ask's document.
 - A reply to an open ask (`ask_id` set on `POST /api/v1/issues/{key}/comments` or `POST /api/v1/artifacts/{id}/comments`) records `turn` (`comments.turn`, migration 0028): who holds the turn after it. A human author's reply always stores `agent` whatever the request says; a session author's stores `human` unless the request says `turn: "agent"` (a progress note - the agent still owes the next move). A reply under an answered or resolved ask records no turn (nothing is waiting; a requested `turn` is ignored there, as a human's is). `turn` on a comment that is not an ask reply is `400 TURN_REQUIRES_ASK`; any value but `human`/`agent` is `400 INVALID_COMMENT`. Comment objects carry `turn` (null under a closed ask and off ask replies). The column's only constraint is `turn requires ask_id`, so a pre-0028 server still draining during a deploy inserts its ask replies with a null turn; every reader coalesces a null newest-reply turn to `human`.
 - Every ask the API serves is read through one row shape: `docs.AskColumns` + `docs.ScanAsk` decode the ask row (the document settler uses the same pair for indexed blocks and anchor-refresh events), while `api/ask_rows.go` extends it with the block ask's document (`askRowColumns`) and, for reads, the newest comment in its thread (`askReadColumns`, a `lateral ... limit 1` join). `opened_event_id` is attached afterwards by `attachOpenedEventIDs`, one `events` query per read served by the partial index `events_ask_payload_id` (`store/migrations/0030_events_ask_payload_id.up.sql`; its `type in (...)` list mirrors that query and must change with it). `asks.options` is always a JSON array, never null.
 - Every open ask read carries `waiting_on` (`human` | `agent`), and `waitingOnExpression` (`api/ask_rows.go`) is the rule's one home: the ask reads (`askReadColumns`, which alias it `waiting_on` so the Inbox order names that column and evaluates the rule once a row), `listOpenAsks`, a document's awaiting approval (`attachApprovals`), and the approval route's hand-back decision (`askWaitingOn`) all embed it. A reply learns its `ask_waiting_on` with no second statement: the comment write reads the ask it joins with the rule's moved-request arm, `approvalMoved` (`describeAsk`), under the owner row every version write and hand-back takes first, and once inserted the reply is the thread's newest, so `commentThreadTarget.waitingOnAfter` applies the rule to it in Go - `agent` for a moved request, otherwise the reply's own `turn`. An approval request whose `requested_version` is below its current `version` is waiting on its agent. One whose newest thread reply is the reply its last hand-back answered (`handed_back_reply_id`) is waiting on the human, and so is one nobody has replied to; otherwise the newest comment's `turn` decides. The newest reply is the one that committed last: `comments.created_at` defaults to `clock_timestamp()` (migration 0065), the moment its insert runs, and both comment inserts (`createCommentFor`, `replyComment`) leave it to the default and run once their transaction holds the owner row. The old default, `now()`, was the transaction's start, which sorted a reply that began first but waited for the row before one that committed while it waited; an older binary still serving during a rollout names no `created_at` either, so the default orders its replies too. The hand-back reads that reply under the same owner row, so a reply that inserts after the hand-back sorts after the reply it recorded and decides the turn, however early its own transaction began. It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`; closed asks and every `ask.*` event payload omit it. A `comment.created` or `comment.answered` payload that replies to an open ask carries the resulting `ask_waiting_on`, and every route that writes a comment (`POST /api/v1/issues/{key}/comments`, `POST /api/v1/artifacts/{id}/comments`, and the delivery callback `POST /api/v1/comments/{id}/reply`) answers the same `ask_waiting_on` beside the comment row (`commentWriteResponse`, `api/comment_projection.go`; `model.Comment` is the stored row and carries no derived turn), so a stream consumer or the writing agent reports the value every ask read has without a refetch. A replayed delivery callback, which writes nothing, answers the stored reply alone.
-- Every ask read also carries `referenced_by_count`: how many `graph_edges` rows point at that ask from a node kind this build reads (`refs.BacklinkCounts` binds the kinds `nodeLoaders` resolves, so a newer build's row is left out of the count as it is out of the list), counted for the whole page in one grouped query (`attachAskBacklinkCounts`, `api/ask_rows.go`) rather than one request per card. It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`; mutation responses omit it, and so does an `ask.*` event off the live broker — `attachAskEventFields` (`api/events.go`) stamps the count only on replayed event reads, and nothing builds a card from an event payload. A card that needs the count reads one of the routes above. `GET /api/v1/issues/{key}` carries the issue's own `referenced_by_count` the same way, so the issue page renders its header count without a graph request; `GET /api/v1/artifacts/{id}` carries no backlinks at all — the graph is `GET /api/v1/references?to=` (or `GET /api/v1/artifacts/{id}/references` for agents). An ask's own `replies_to` edges — its clarification thread, which every ask surface already renders — are excluded from that count and from `?to=<ask>`; `?kind=replies_to` still returns them.
-- A write that moves the reference graph names what it moved. `refs.ReplaceCounted` is the one way to index a body: it reconciles that source's edges (`replace`, unexported, so no producer can reconcile without holding what moved) and keeps the targets whose readers carry a batched count — an issue and an ask — which the event carries as `references_changed` (`[{kind, id, issue_key?, artifact_id?}]`), with `references_changed_truncated: true` past `refs.CountedChangeLimit`. A consumer refreshes exactly those rows (the ask's lists, its thread and the Inbox, the issue's detail) instead of sweeping every list; a write that cited nothing counted carries neither field. `grep -rn 'refs\.ReplaceCounted(' --include=*.go internal` lists every write that indexes a body, and the reconcile half is callable only from inside `refs`.
+- Every ask read also carries `referenced_by_count`: how many `graph_edges` rows point at that ask from a node kind this build reads (`refs.BacklinkCounts` binds the kinds `nodeLoaders` resolves, so a newer build's row is left out of the count as it is out of the list; a document's mention that one of its blocks holds counts once for each citing block, in place of the document's own row, `heldByABlock`), counted for the whole page in one grouped query (`attachAskBacklinkCounts`, `api/ask_rows.go`) rather than one request per card. It is on `GET /api/v1/inbox` rows, `GET /api/v1/asks/{id}`, `GET /api/v1/issues/{key}/asks`, `GET /api/v1/artifacts/{id}/asks`, and the issue detail's `open_asks`; mutation responses omit it, and so does an `ask.*` event off the live broker — `attachAskEventFields` (`api/events.go`) stamps the count only on replayed event reads, and nothing builds a card from an event payload. A card that needs the count reads one of the routes above. `GET /api/v1/issues/{key}` carries the issue's own `referenced_by_count` the same way, so the issue page renders its header count without a graph request; `GET /api/v1/artifacts/{id}` carries no backlinks at all — the graph is `GET /api/v1/references?to=` (or `GET /api/v1/artifacts/{id}/references` for agents). An ask's own `replies_to` edges — its clarification thread, which every ask surface already renders — are excluded from that count and from `?to=<ask>`; `?kind=replies_to` still returns them.
+- A write that moves the reference graph names what it moved. `refs.ReplaceCounted`, or `refs.ReplaceCountedRefs` for a document version's index (`docs.indexDocument`), which hands it the references it extracted and the targets its blocks' mentions moved, is the one way to index a body: it reconciles that source's edges (`replaceRefs`, unexported, so no producer can reconcile without holding what moved) and keeps the targets whose readers carry a batched count — an issue and an ask — which the event carries as `references_changed` (`[{kind, id, issue_key?, artifact_id?}]`), with `references_changed_truncated: true` past `refs.CountedChangeLimit`. A consumer refreshes exactly those rows (the ask's lists, its thread and the Inbox, the issue's detail) instead of sweeping every list; a write that cited nothing counted carries neither field. `grep -rn 'refs\.ReplaceCounted' --include=*.go internal` lists every write that indexes a body, and the reconcile half is callable only from inside `refs`.
 - Every payload family that can carry reference changes is built by a helper that takes them, so a producer that forgets does not compile: `artifact.*` through `api.artifactCreatedEventPayload` and `docs.ArtifactVersionEventPayload` (`writeVersionTx` returns `model.ReferenceChanges`, `SnapshotVersion` and `NamedVersion` return them on a `docs.VersionResult`, and the six producers — a settle, an upload, `POST /artifacts/{id}/versions`, `POST /artifacts/{id}/edits` (the route `dispatch doc-edit` uses), accepting a suggestion, and an anchor snapshot on an ask or a comment — each pass what their write moved); `ask.*` through `model.NewAskEventPayload` / `model.NewAskEditEventPayload`; `message.*` through `messageReplyThread.payload`; `comment.*` through `s.commentEventPayload`; and `issue.*` through `model.NewIssueEventPayload`, which is how `POST /api/v1/issues` names what the spec it seeds cited. A transition that writes no text passes `model.ReferenceChanges{}` rather than omitting the argument. The guard is the required argument plus review, not the compiler alone: a struct literal (`model.AskEditEventPayload{Ask: …}`, as `outbox/publisher_test.go` builds) still compiles. Re-runnable inventory: `grep -rn 'NewAskEventPayload\|NewAskEditEventPayload\|NewIssueEventPayload\|commentEventPayload\|artifactCreatedEventPayload\|ArtifactVersionEventPayload\|thread.payload(' --include=*.go internal`.
 - The reference grammar accepts any segment as an id, so `dispatch://CORE-1/ask/hello` parses and is stored like any other target. Every lookup that resolves a stored target skips what resolves to nothing rather than failing the write: issue and artifact targets compare text (`key = any($1)`, `project_key || '/' || id = any($1)`) and ask targets are filtered to syntactically valid uuids in Go before `id = any($1)`, which keeps the `asks` primary key on a query that runs inside every body-indexing transaction. A uuid cast in SQL would turn one malformed citation into a 500 on the write, and — because such rows are already stored — into a comment that can never be edited again.
 - `GET /api/v1/inbox` rows carry the owning issue's nullable `priority` and `last_reply` (`{author, created_at}` of the newest comment with that `ask_id`, or null) beside `waiting_on`. It orders rows by the owning issue's priority first (`P0` on top, unset priorities last; a document ask has none), then by whose turn it is (`waiting_on: human` before `agent`), then by recency (newest reply, else the ask's creation), so a P0 ask an agent is still working on outranks a P2 ask nobody has answered; the SPA partitions by `waiting_on` and keeps this order inside each section. The client uses the same open-ask response to surface every `waiting_on: human` row under `Waiting on you` and its `Blocked on you` count; `waiting_on: agent` rows are `Waiting on agents`, whoever replied last. `GET /api/v1/issues/{key}` carries the same `last_reply` and `waiting_on` on every `open_asks` row (`issueOpenAsk`, `issue_queries.go`), so the issue header applies the inbox's whose-turn rule without the human-only inbox. A `comment.created` payload that replies to an ask carries `ask_state` (the ask's state at posting time) beside `ask_question`, so an agent can tell a clarification request on its open ask from discussion after the answer.

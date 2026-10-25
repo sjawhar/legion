@@ -370,7 +370,7 @@ What the two processes share, and what each keeps to itself:
   event committed on either process reaches every open stream with no reconnect.
 - The two delivery durables keep their shape. NATS admits one binder; the second process stands
   by, asking every two seconds, and takes the durable over within seconds of the holder dying.
-- Six periodic maintenance loops run once per period across the processes, not once per process.
+- Seven periodic maintenance loops run once per period across the processes, not once per process.
   Each pass takes a named session-level advisory lease for its length (`duty.Exclusive`), so a
   process whose tick lands inside another's pass logs a skip; and, under that lease, each pass is
   recorded in `duty_passes` (migration `0115`) with the loop's own period, so a process whose tick
@@ -663,6 +663,52 @@ image and confirms the stop before it reads the schema, and when the schema has 
 the previous image runs against, it refuses to start that image again and exits `1` for a forward
 recovery.
 
+Migration `0117_block_graph` creates the tables behind a document's blocks as graph nodes
+(`packages/envoy/AGENTS.md`, "References form one graph"): `document_blocks`, `block_refs`,
+`document_block_versions`, `document_block_texts` and `document_indexed_versions`, each with a
+foreign key to `artifacts`, and `block_grammar_owed`, with their indexes, among them the partial
+`document_block_versions_owed` and `block_grammar_owed_enqueued` through which the block-index
+reconciliation reads what is owed. It creates the trigger function `block_grammar_owe`, which no
+trigger calls until `0119`, and re-states the `graph_edges` view with two more arms: a block's
+mentions and its `part_of` edge to its document. The five foreign keys take `SHARE ROW EXCLUSIVE`
+on `artifacts` for the migration's short transaction, so an artifact write waits behind it while a
+read does not, and re-stating the view holds `graph_edges` `ACCESS EXCLUSIVE`, so a reference read
+waits too. Its one insert marks every document owed a block index in `document_block_versions`, a
+table it creates, and the server's reconciliation indexes them with no command run. It refuses and
+rewrites no existing row; its census answers `0`.
+
+Migration `0118_artifact_versions_block_index_trigger` creates `document_block_versions_owe` and
+an `after insert` trigger on `artifact_versions` that marks a document owed a block index whenever
+any build inserts a version carrying markdown. A version a build without the block index writes
+during the roll is then indexed by the reconciliation, and a block-aware build's own index of the
+version, later in the same transaction, settles the mark. The trigger takes `SHARE ROW EXCLUSIVE`
+on `artifact_versions` alone, so a version write waits behind it while a read does not. It touches
+no row; its census answers `0`.
+
+Migration `0119_comments_block_grammar_trigger` attaches `block_grammar_owe` to `comments`,
+`after insert or update of body`, for a body that holds `#b-`: a comment any build writes that may
+cite a block is owed an index with the block grammar, which a build that predates the grammar does
+not give it. The trigger takes `SHARE ROW EXCLUSIVE` on `comments` alone, so a comment write waits
+behind it while a read does not. It touches no row; its census answers `0`.
+
+Migration `0120_asks_block_grammar_trigger` does the same for `asks`, `after insert or update of
+question`, for a question that holds `#b-`. Its trigger takes `SHARE ROW EXCLUSIVE` on `asks` alone,
+so an ask write waits behind it while a read does not. It touches no row; its census answers `0`.
+
+Migration `0121_messages_block_grammar_trigger` does the same for `messages`, `after insert or
+update of body`, for an issue message (`issue_key` set) whose body holds `#b-`; a direct message is
+indexed by nothing, so it owes nothing. Its trigger takes `SHARE ROW EXCLUSIVE` on `messages`
+alone, so a message write waits behind it while a read does not. It touches no row; its census
+answers `0`.
+
+Migration `0122_block_grammar_seed` owes the same index to every comment, ask and issue message
+already stored whose text holds `#b-`, read with the three triggers' predicates. The triggers are
+live by then, so a write that lands while it runs is owed by its trigger, and a row a trigger has
+already written keeps its `enqueued_at`. It takes `ACCESS SHARE` on `comments`, `asks` and
+`messages`, which no write waits behind, and writes only `block_grammar_owed`. Its census answers
+`0`: the one table it writes is `0117`'s, which holds no row at deploy, and the rows it inserts are
+new work owed, not a rewrite.
+
 Migration `0009_project_artifacts` deletes malformed derived artifact references, reports their
 count, and re-derives them from source text on the next write. It aborts server boot before a
 migration record or schema change only when an existing artifact has no owning issue. On success
@@ -853,13 +899,30 @@ out of every list and every count that build serves (`nodeLoaders`, `refs/graph.
 kinds it knows). The migration refuses to run when an ask or comment anchor carries a non-uuid
 `artifact_id`.
 
+Each block of a document is a node of the graph too (migration `0117`; `packages/envoy/AGENTS.md`,
+"References form one graph"). Its reference is the document's with `#b-` and the block's id,
+percent-encoded as `encodeBlockId` (`@legion/contracts`) writes it:
+`dispatch://KEY/spec#b-<id>`, `dispatch://KEY/artifact/<slug>#b-<id>` or
+`dispatch://PROJECT/artifact/<slug>#b-<id>`. A mention written inside a block starts at the
+innermost block holding it, so `?to=` a cited node names that block, whose `document` is the
+citing document; a document's own read also lists the links at its blocks, each edge naming its
+block as `block`, and `?kind=part_of` on a document lists each of its current blocks. A block
+reference pinned to a version of its document, `#b-<id>@v<N>`, reads the block as that version
+held it: the node's `pin` carries the block's text at `N` and says whether the block is
+`unchanged`, `changed` or `removed` since. `GET /api/v1/block-links?from=<document>&to=<document>`
+lists the links from the blocks of one document to the blocks of another. Text stored before the
+release, and text an earlier build writes during the roll, is indexed by the server's block-index
+reconciliation (lease `block-index`), with no command run.
+
 ```bash
 DATABASE_URL=postgres://... envoy-dispatch rebuild-refs
 ```
 
 reparses every source and reconciles the index with the text (surviving edges keep their
-provenance, edges of deleted sources are removed) and prints
-`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N`. It reads
+provenance, edges of deleted sources are removed), marks every document owed a block index, which
+the server's block-index reconciliation then indexes, and prints
+`rebuild-refs: documents=N asks=N comments=N messages=N orphans=N edges=N blocks_owed=N`,
+`blocks_owed` being the documents it marked. It reads
 `dispatch.server_url` from the envoy config the same way the server does and refuses an empty
 value: dashboard-URL mentions are recognised only against it, so an empty URL would drop them all.
 
@@ -996,8 +1059,9 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/whoami` | GET | cookie, trusted header, or bearer | Who the server takes the caller for: `{kind: "user", login}` for a person (`login` their lowercase email), `{kind: "agent", owner, service}` for a bearer (`owner` is a personal token's owner by lowercase email, null for the shared token; `service` is a verified service-account token's Kubernetes subject, null for every other bearer). |
 | `/api/v1/issues?project=&status=&parent=&priority=&updated_since=&route_status=&limit=&offset=` | GET | cookie, trusted header, or bearer | List issue summaries: every matching issue as an array, or, with `limit` (1–250) or `offset` (0 or more; alone it pages 50), one page `{issues, total, limit, offset}` cut after every filter, `total` counting the issues they match. A repeated, blank, non-integer or out-of-range `limit` or `offset`, or any `cursor`, is `400 INVALID_QUERY` naming the parameter. The order is status, rank, creation time and key, so consecutive offsets cover the listing once while it does not change between reads; an issue that enters or leaves what the filters match, or whose status or rank changes, between two reads shifts rows across a page boundary, so one issue is served twice and another never. Only the unpaged array is an exact set in one read. Filters are optional; `updated_since` is RFC3339 and inclusive, matching issue changes and later issue events. `priority` repeats (`priority=0&priority=1`), each value `0`–`3` or `none` for an issue with no priority; any other value is `400 INVALID_PRIORITY`. `route_status` (`live`, `no_holder` or `unknown`; anything else is `400 INVALID_ROUTE_STATUS`) keeps the open issues whose route is in that state, whatever their priority; `live` or `no_holder` is `503 ENVOY_UNAVAILABLE` when the listener does not answer. Summaries contain `key`, `title`, `status`, `priority`, `parent`, `assignee`, `route`, `route_status`, `route_holder`, `updated_at`, `last_seq`, and `open_asks`. Every issue read (this list, `?pinned=true`, and `GET /api/v1/issues/{key}`) resolves `route_status` from one listener `GET /v1/sessions` per request, stored nowhere: `live` (a live session holds the role, or the session is live; `route_holder` names it), `no_holder` (nobody live holds the role, or the session is not live), `unknown` (the listener did not answer), or null with no route. |
 | `/api/v1/search?q=&project=&limit=&offset=` | GET | cookie, trusted header, or bearer | Full-text search over issue titles, latest document text, comments, asks, and messages; each kind ranked on its own and merged by reciprocal rank fusion (above), with `<mark>` snippets and SPA `href`s. One page `{results, total, reachable, limit, offset, took_ms}`: `limit` 1–50 (default 20), `offset` 0 or more (default 0), `total` every match, `reachable` the hits the pages can return (each kind's best 100). An under-two-character query returns `400 INVALID_QUERY`; a stop-word-only query returns `200` with no results; `400 CAP_EXCEEDED` over 1,000 characters (`contracts.SearchQueryMax`, UTF-16 units after trimming), since the query rides in the URL; `400 INVALID_PROJECT` for a project that is not a project key (none searches every project); `400 INVALID_LIMIT`; `400 INVALID_OFFSET`. Keyword search finds a text whose search vector would pass Postgres's limit on one vector by the words in its opening part only ([Search](#search)). |
-| `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure. An `If-None-Match` value equal to the response ETag returns `304`. |
-| `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist. |
+| `/api/v1/issues/{key}/references` | GET | cookie, trusted header, or bearer | Read the issue's eight-hop artifact reference closure; a reference to a block reaches the block's document while a current version holds the block. An `If-None-Match` value equal to the response ETag returns `304`. |
+| `/api/v1/references?to=\|from=&kind=&since=` | GET | cookie, trusted header, or bearer | Edges of one node in the reference graph, newest first and cross-project: exactly one of `to` (backlinks) or `from` (links), each a `dispatch://` reference; `kind` filters a csv of edge kinds; `since=<events.id>` keeps mentions introduced after it (structural edges excluded). Each edge carries the other `node`, an `excerpt` (the containing block for a document mention), `created_at`, and `source_seq`. A mention a block of a document holds is listed from that block (`node.kind` `block`, `node.document` its document); a document's own read also lists the edges at its blocks, each naming the block as `block`, and leaves out their `part_of` edges unless `kind` names `part_of`. A block reference (`#b-<id>`) names a `block` node carrying its whole current `text`; pinned to a version (`#b-<id>@v<N>`) it also carries `pin` (`version`, `ref`, the block's `text` at that version, `state` `unchanged`, `changed` or `removed`, and `removed_version`), and a removed block answers no edges. `400 INVALID_REFERENCE` / `INVALID_KIND` / `INVALID_SINCE`; `404` for a node that does not exist, a block no current version holds (unpinned), or a pinned version the document lacks, has no record of the blocks of, or did not hold the block at. |
+| `/api/v1/block-links?from=&to=` | GET | cookie, trusted header, or bearer | The links from blocks of the document `from` names to blocks of the document `to` names (an issue's spec or document, or a project's document; one document may be both): `{from, to, links}`, each link with its `kind`, both block nodes, and the `created_at` and `created_version` at which the source block first held it, newest first. A link is listed only while both blocks are current blocks of their documents. `400 INVALID_REFERENCE` when either is not a document reference; `404 NOT_FOUND` for a document that does not exist. |
 | `/api/v1/issues` | POST | cookie, trusted header, or bearer | Create an issue and its primary document. Omitting or leaving `spec` blank gives an empty primary document at version 1. `repo` (`owner/name`) is the issue's own repository and must be mapped to its project: `400 INVALID_ISSUE` when it is not `owner/name`, `400 REPO_NOT_MAPPED` when it is not mapped. A title over 1,000 characters (`contracts.IssueTitleMax`, UTF-16 units after trimming) is `400 CAP_EXCEEDED` before the duplicate check. Refuses a title that near-duplicates an issue in the project with `409 POSSIBLE_DUPLICATE` and candidates unless `force` is true; external references skip the check. A spec whose ask block breaks its content rule (`paragraph+ bullet_list?`: one or more paragraphs, then at most one bullet list, last) is `400 INVALID_ASK_BLOCK`, and a spec whose markdown makes more than 65,536 elements (weighed as Element weights below lists) is `413 CAP_EXCEEDED`, naming the line that passes the limit; so is one whose markdown as stored (what `.../text` answers) would be longer than 1 MiB or make more than 65,536 elements. |
 | `/api/v1/issues/{key}` | PATCH | cookie, trusted header, or bearer | Update an issue's `title`, `status`, `priority`, `labels` (or `labels_add`, which adds to the labels the issue holds when the write commits; not with `labels`), `route`, `external_links`, `parent`, `rank`, `assignee`, `components` or `repo` (`null` clears it); `AGENTS.md` gives each field's rules. A title is trimmed, and one over 1,000 characters is `400 CAP_EXCEEDED`, as on creation. `expected_sequence` makes the write conditional: `409 ISSUE_CHANGED` when the issue's last event is no longer that sequence. |
 | `/api/v1/issues/{key}/asks` | POST | cookie, trusted header, or bearer | Create an optionally anchored ask. An anchor is exactly `{artifact, quote, occurrence?}` for a server-written quote mark or `{artifact, mark_id}` for a mark already written by a browser. A quote mark carries the ask's id and who asked, which no rendering shows and every load of the document builds: the marks a document's comments, suggestions and asks hold on its text carry at most 1 MiB of ids and authors, and a quote anchor that would leave them past it and carrying more is `413 CAP_EXCEEDED`, naming the bound and both sizes. |
@@ -1028,7 +1092,7 @@ Dispatch uses cookie identity through the sign-in pool.
 | `/api/v1/artifacts/{id}/asks?state=` | GET, POST | cookie, trusted header, or bearer | List or create asks on an unlinked document. |
 | `/api/v1/artifacts/{id}/comments` | GET, POST | cookie, trusted header, or bearer | List or create comments and suggestions on an unlinked document. |
 | `/api/v1/artifacts/{id}/events` | GET | cookie, trusted header, or bearer | Read an unlinked document's events. |
-| `/api/v1/artifacts/{id}/references` | GET | cookie, trusted header, or bearer | Read an artifact's outgoing and incoming reference edges. |
+| `/api/v1/artifacts/{id}/references` | GET | cookie, trusted header, or bearer | Read an artifact's outgoing and incoming reference edges. A link a block of the artifact holds is outgoing from the artifact, a block target listed with its document as `artifact` while a current version holds the block; every item and document citing the artifact or one of its current blocks is listed once, a document as itself. |
 | `/api/v1/issues/{key}/artifacts/{slug}` | GET | cookie, trusted header, or bearer | Read an issue artifact and its incoming references. `{slug}` is resolved within `{key}`. |
 | `/api/v1/issues/{key}/artifacts/{slug}/text` | GET | cookie, trusted header, or bearer | Read an issue artifact's live document markdown. |
 | `/api/v1/issues/{key}/artifacts/{slug}/versions/{n}` | GET | cookie, trusted header, or bearer | Read an issue artifact version or download its blob, as `/api/v1/artifacts/{id}/versions/{n}` does. |
