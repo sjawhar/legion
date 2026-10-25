@@ -1,24 +1,27 @@
 package testnats
 
 import (
-	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"net"
+	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"runtime"
+	"slices"
 	"strings"
 	"testing"
 	"time"
 
 	natsgo "github.com/nats-io/nats.go"
-	"github.com/testcontainers/testcontainers-go"
 )
 
 func TestMain(m *testing.M) { os.Exit(Main(m)) }
 
-// This protects the testcontainers boundary: a server can accept NATS's
+// This protects the rig's readiness boundary: a server can accept NATS's
 // protocol handshake while JetStream is still starting, so a KV test that returns at the handshake
 // races CreateKeyValue. The helper must retry the JetStream operation itself.
 func TestWaitForJetStreamRetriesTheOperationUntilItIsReady(t *testing.T) {
@@ -198,17 +201,11 @@ type namedTB struct {
 
 func (n namedTB) Name() string { return n.name }
 
-// ownAccountServer starts an account server of the test's own, declaring accounts accounts.
+// ownAccountServer starts an account server of the test's own, declaring accounts accounts, which
+// is shut down and removed when the test ends.
 func ownAccountServer(t *testing.T, accounts int) *accountServer {
 	t.Helper()
-	server, err := startAccountServer(accounts)
-	if server != nil {
-		testcontainers.CleanupContainer(t, server.ctr)
-	}
-	if err != nil {
-		t.Fatalf("start an account server: %v", err)
-	}
-	return server
+	return startAccountServer(t, accounts)
 }
 
 // A server whose accounts are all handed out declares twice as many by a reload and hands out the
@@ -282,10 +279,10 @@ func TestTheNkeyReadinessWaitRefusesAServerThatAdmitsAnyone(t *testing.T) {
 }
 
 // A restart keeps its server's URL even when something else takes the URL's port while the server is
-// stopped, as another test's container or a free-port pick can on a busy host.
+// stopped, as another test's server or a free-port pick can on a busy host.
 func TestARestartKeepsItsURLWhenThePortIsContendedWhileStopped(t *testing.T) {
-	ctr, uri := StartRestartable(t)
-	Stop(t, ctr)
+	server, uri := Start(t)
+	server.Stop(t)
 	u, err := url.Parse(uri)
 	if err != nil {
 		t.Fatalf("parse %s: %v", uri, err)
@@ -293,15 +290,55 @@ func TestARestartKeepsItsURLWhenThePortIsContendedWhileStopped(t *testing.T) {
 	if taken, err := net.Listen("tcp", u.Host); err == nil {
 		t.Cleanup(func() { _ = taken.Close() })
 	}
-	if err := ctr.Start(context.Background()); err != nil {
-		t.Fatalf("start NATS again: %v", err)
-	}
+	server.Start(t)
 	Connect(t, uri).Close()
 }
 
-// A second Grant on one server judges the outcome of its own reload, not the first Grant's, which
-// the server's log still holds: a second grant the server refuses fails the test with the server's
-// reason instead of passing on the first reload's line.
+// Server.Log is everything the server has said, which a test reads to see the server's own account
+// of what it did: a server stopped and started again says it is ready twice, once for each server
+// that ran behind the one URL.
+func TestTheLogHoldsWhatTheServerSaidAcrossARestart(t *testing.T) {
+	server, _ := Start(t)
+	server.Stop(t)
+	server.Start(t)
+	if ready := strings.Count(server.Log(), "Server is ready"); ready != 2 {
+		t.Errorf("the server said it was ready %d times across a stop and a start, want twice:\n%s", ready, server.Log())
+	}
+}
+
+// Terminate ends the server for good and gives up the port its URL named, so nothing answers there
+// any more; the cleanup that runs at the test's end finds the work done and does it no second time.
+func TestTerminateEndsTheServerAndGivesUpItsPort(t *testing.T) {
+	server, uri := Start(t)
+	Connect(t, uri).Close()
+	server.Terminate(t)
+	u, err := url.Parse(uri)
+	if err != nil {
+		t.Fatalf("parse %s: %v", uri, err)
+	}
+	if conn, err := net.DialTimeout("tcp", u.Host, dialTimeout); err == nil {
+		conn.Close()
+		t.Fatalf("%s still answers after the server was terminated", u.Host)
+	}
+}
+
+// MonitorURL is where the server's /varz and /connz are, which a test reads to see what the server
+// makes of its own state.
+func TestTheMonitorURLAnswersVarz(t *testing.T) {
+	server, _ := Start(t)
+	response, err := http.Get(server.MonitorURL() + "/varz")
+	if err != nil {
+		t.Fatalf("GET %s/varz: %v", server.MonitorURL(), err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		t.Errorf("GET %s/varz: %s, want 200 OK", server.MonitorURL(), response.Status)
+	}
+}
+
+// A second Grant on one server judges the outcome of its own reload, not the first Grant's: a
+// second grant the server refuses fails the test with the server's reason for that grant, which
+// comes back from that Grant's own reload.
 func TestASecondGrantWaitsForItsOwnReload(t *testing.T) {
 	_, public := User(t)
 	grant := StartNkeyGranted(t, public, "first.>")
@@ -320,71 +357,89 @@ func TestASecondGrantWaitsForItsOwnReload(t *testing.T) {
 	}
 }
 
-// StartImageConfig gives the server config as its whole configuration and serverArgs after it, on
-// either image: the server refuses a client with no credential, as config's one nkey user makes it,
-// admits that user by its seed, and answers JetStream, which the -js among serverArgs turns on.
-func TestStartImageConfigServesTheConfigWithTheArguments(t *testing.T) {
-	for _, image := range Images {
-		t.Run(image.Name, func(t *testing.T) {
-			seed, public := User(t)
-			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\n", public)
-			_, uri := StartImageConfig(t, image.Ref, config, []string{"-js"}, false)
-			conn, err := ConnectSeed(t, uri, seed)
-			if err != nil {
-				t.Fatalf("connect with the seed: %v", err)
-			}
-			defer conn.Close()
-			js, err := conn.JetStream()
-			if err != nil {
-				t.Fatalf("JetStream context: %v", err)
-			}
-			waitForJetStream(t, func() error {
-				_, err := js.AccountInfo()
-				return err
-			})
-		})
+// Server.Reload answers with the server's own reason for a configuration the server will not take,
+// and the server goes on serving the configuration it had: its user is still admitted and a client
+// with no credential still refused.
+func TestARefusedReloadAnswersWithTheServersReasonAndKeepsTheOldConfiguration(t *testing.T) {
+	seed, public := User(t)
+	server, uri := StartConfig(t, publishGrantConfig(public, []string{"first.>"}), []string{"-js"}, false)
+
+	err := server.Reload(t, publishGrantConfig(public, []string{"not..a.subject"}))
+	if err == nil {
+		t.Fatal("the server took a configuration granting an invalid subject")
+	}
+	if want := `subject "not..a.subject" is not a valid subject`; !strings.Contains(err.Error(), want) {
+		t.Fatalf("the refusal is %v, want it to say %s", err, want)
+	}
+
+	conn, err := ConnectSeed(t, uri, seed)
+	if err != nil {
+		t.Fatalf("the user of the configuration the server kept was refused: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.Publish("first.one", nil); err != nil {
+		t.Fatalf("publish to the subject the kept grant allows: %v", err)
+	}
+	if _, err := ConnectSeed(t, uri, ""); !errors.Is(err, natsgo.ErrAuthorization) {
+		t.Fatalf("a client with no credential after the refused reload: %v, want %v", err, natsgo.ErrAuthorization)
 	}
 }
 
-// With no serverArgs the server runs without JetStream: StartImageConfig replaces the NATS
-// module's own default arguments (-DV -js) rather than adding to them. nats-server enables
-// JetStream before it accepts a client (server/server.go Start), so the first answer is final.
-func TestStartImageConfigRunsNoArgumentItWasNotGiven(t *testing.T) {
-	for _, image := range Images {
-		t.Run(image.Name, func(t *testing.T) {
-			seed, public := User(t)
-			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\n", public)
-			_, uri := StartImageConfig(t, image.Ref, config, nil, false)
-			conn, err := ConnectSeed(t, uri, seed)
-			if err != nil {
-				t.Fatalf("connect with the seed: %v", err)
-			}
-			defer conn.Close()
-			js, err := conn.JetStream()
-			if err != nil {
-				t.Fatalf("JetStream context: %v", err)
-			}
-			if _, err := js.AccountInfo(); !errors.Is(err, natsgo.ErrJetStreamNotEnabled) {
-				t.Fatalf("JetStream account info on a server given no -js: %v, want %v", err, natsgo.ErrJetStreamNotEnabled)
-			}
-		})
+// StartConfig gives the server the arguments it was given and no others, as nats-server's own
+// command line does: -DV puts the protocol trace in its log, and without -js among them the server
+// has no JetStream, whatever a server started by another helper has.
+func TestStartConfigRunsTheArgumentsItWasGivenAndNoOther(t *testing.T) {
+	seed, public := User(t)
+	config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\n", public)
+	server, uri := StartConfig(t, config, []string{"-DV"}, false)
+	conn, err := ConnectSeed(t, uri, seed)
+	if err != nil {
+		t.Fatalf("connect with the seed: %v", err)
+	}
+	defer conn.Close()
+	js, err := conn.JetStream()
+	if err != nil {
+		t.Fatalf("JetStream context: %v", err)
+	}
+	if _, err := js.AccountInfo(); !errors.Is(err, natsgo.ErrJetStreamNotEnabled) {
+		t.Fatalf("JetStream account info on a server given no -js: %v, want %v", err, natsgo.ErrJetStreamNotEnabled)
+	}
+	if !strings.Contains(server.Log(), "[TRC]") {
+		t.Errorf("the log of a server given -DV holds no protocol trace:\n%s", server.Log())
 	}
 }
 
-// With anonymous set, StartImageConfig returns once the server admits a client with no
-// credential, as a configuration naming a no_auth_user makes it, and that client stays admitted.
-func TestStartImageConfigWaitsForAnAnonymousServerToAdmitAClient(t *testing.T) {
-	for _, image := range Images {
-		t.Run(image.Name, func(t *testing.T) {
-			_, public := User(t)
-			config := fmt.Sprintf("authorization {\n  users: [ { nkey: %q } ]\n}\nno_auth_user: %q\n", public, public)
-			_, uri := StartImageConfig(t, image.Ref, config, nil, true)
-			conn, err := ConnectSeed(t, uri, "")
-			if err != nil {
-				t.Fatalf("a client with no credential was refused after the wait: %v", err)
-			}
-			conn.Close()
-		})
+// A frozen server stops the bytes in either direction without dropping anything: the request times
+// out while its connection is still CONNECTED, as a server that has stopped answering leaves it,
+// and the traffic resumes when the test thaws it.
+func TestAFrozenServerTimesOutARequestWithoutDroppingTheConnection(t *testing.T) {
+	server, uri := Start(t)
+	conn := Connect(t, uri)
+	defer conn.Close()
+	sub, err := conn.Subscribe("echo", func(msg *natsgo.Msg) { _ = msg.Respond([]byte("answer")) })
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	defer func() { _ = sub.Unsubscribe() }()
+	if _, err := conn.Request("echo", nil, connectTimeout); err != nil {
+		t.Fatalf("request before the freeze: %v", err)
+	}
+
+	thaw := server.Freeze(t)
+	if _, err := conn.Request("echo", nil, time.Second); !errors.Is(err, natsgo.ErrTimeout) {
+		t.Fatalf("a request to a frozen server: %v, want %v", err, natsgo.ErrTimeout)
+	}
+	if status := conn.Status(); status != natsgo.CONNECTED {
+		t.Fatalf("the connection to a frozen server is %v, want CONNECTED", status)
+	}
+
+	thaw()
+	answer, err := conn.Request("echo", nil, connectTimeout)
+	if err != nil {
+		t.Fatalf("request after the thaw: %v", err)
+	}
+	if string(answer.Data) != "answer" {
+		t.Errorf("the answer after the thaw is %q, want %q", answer.Data, "answer")
 	}
 }
 
@@ -408,4 +463,152 @@ func TestTheAnonymousWaitRefusesAServerThatRefusesAnyone(t *testing.T) {
 	if want := "refused a client with no credential"; !strings.Contains(wait.message, want) {
 		t.Errorf("the anonymous wait ended with %q, want it to say %q", wait.message, want)
 	}
+}
+
+// envoyRoot is the module's directory, packages/envoy, from this package's own.
+const envoyRoot = "../.."
+
+// thisPackage is the one package that may reach a container runtime: the natslive half of this
+// rig, in image.go and image_test.go, which an untagged build does not see at all.
+const thisPackage = "github.com/sjawhar/envoy/internal/testnats"
+
+// containerModule is the import that needs a container runtime wherever a package reaches it.
+const containerModule = "github.com/testcontainers/testcontainers-go/modules/nats"
+
+// dockerDrivers are the two ways a file of this module drives a container runtime by hand. Each is
+// spelled in two pieces so that this file, which has to name them, is not itself a finding.
+var dockerDrivers = []string{"exec.Command(" + `"docker"`, "NewDockerClient" + "WithOpts"}
+
+// packagesAwaitingMigration and filesAwaitingMigration are the call sites of this rig that still
+// start a container, each one INFRA-250's migration moves to the in-process server. They are
+// listed so this guard holds every other package of the module to the in-process rig from the day
+// it lands; the migration deletes each entry with the call site it moves, and a stale entry is a
+// finding of its own, so the lists cannot outlive the work. Delete them, and this allowance, when
+// they are empty.
+var (
+	packagesAwaitingMigration = []string{
+		"github.com/sjawhar/envoy/cmd/natstail",
+		"github.com/sjawhar/envoy/internal/bus",
+		// internal/smoke is not here: its container-backed tests are behind the smoke build tag,
+		// which this walk does not see, as it does not see image.go either.
+		"github.com/sjawhar/envoy/internal/store",
+	}
+	filesAwaitingMigration = []string{
+		"internal/bus/request_core_test.go",
+		"internal/kvwatch/end_test.go",
+		"internal/session/stopwatch_test.go",
+	}
+)
+
+// No package of this module outside internal/testnats may reach a container runtime: Envoy's
+// agents have none, and a test that needs one cannot run where they do. The rig's own
+// container-backed half is behind the natslive tag, which an untagged go list does not see, so the
+// one package allowed here is this one.
+func TestNoPackageOutsideTestnatsNeedsAContainerRuntime(t *testing.T) {
+	t.Run("imports", func(t *testing.T) {
+		importers := natsContainerImporters(t)
+		missing, remaining := allowedAnd(packagesAwaitingMigration, importers)
+		for _, pkg := range remaining {
+			t.Errorf("package %s imports %s, which needs a container runtime; start the server with testnats.Start, StartConfig or URL instead", pkg, containerModule)
+		}
+		for _, pkg := range missing {
+			t.Errorf("package %s no longer imports %s: take it out of packagesAwaitingMigration", pkg, containerModule)
+		}
+	})
+	t.Run("docker", func(t *testing.T) {
+		drivers := dockerDriverFiles(t)
+		missing, remaining := allowedAnd(filesAwaitingMigration, drivers)
+		for _, file := range remaining {
+			t.Errorf("%s drives a container runtime itself; a test that has to stop a server's traffic uses testnats.Server.Freeze, and one that has to stop the server, Server.Stop", file)
+		}
+		for _, file := range missing {
+			t.Errorf("%s no longer drives a container runtime: take it out of filesAwaitingMigration", file)
+		}
+	})
+}
+
+// allowedAnd splits found into the allowances nothing found any more and the findings no allowance
+// covers.
+func allowedAnd(allowed, found []string) (missing, remaining []string) {
+	for _, entry := range allowed {
+		if !slices.Contains(found, entry) {
+			missing = append(missing, entry)
+		}
+	}
+	for _, entry := range found {
+		if !slices.Contains(allowed, entry) {
+			remaining = append(remaining, entry)
+		}
+	}
+	return missing, remaining
+}
+
+// natsContainerImporters lists every package of this module, outside this one, that imports the
+// container module, from its own sources or its tests'.
+func natsContainerImporters(t *testing.T) []string {
+	t.Helper()
+	const format = `{{.ImportPath}} {{join .Imports " "}} {{join .TestImports " "}} {{join .XTestImports " "}}`
+	list := exec.Command("go", "list", "-f", format, "./...")
+	list.Dir = envoyRoot
+	out, err := list.Output()
+	if err != nil {
+		var exit *exec.ExitError
+		if errors.As(err, &exit) {
+			t.Fatalf("go list ./...: %v: %s", err, exit.Stderr)
+		}
+		t.Fatalf("go list ./...: %v", err)
+	}
+	var importers []string
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 || fields[0] == thisPackage {
+			continue
+		}
+		if slices.Contains(fields[1:], containerModule) {
+			importers = append(importers, fields[0])
+		}
+	}
+	return importers
+}
+
+// dockerDriverFiles lists every Go file under packages/envoy that drives a container runtime
+// itself, by its path from there. The nested infra module is left out: its pulumilive lane runs a
+// real stack of containers on a host that has a runtime, which is the one place in this tree that
+// legitimately drives Docker.
+func dockerDriverFiles(t *testing.T) []string {
+	t.Helper()
+	var drivers []string
+	err := filepath.WalkDir(envoyRoot, func(path string, entry fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if entry.IsDir() {
+			if path == filepath.Join(envoyRoot, "infra") || entry.Name() == "node_modules" || entry.Name() == "testdata" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(path, ".go") {
+			return nil
+		}
+		text, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		for _, driver := range dockerDrivers {
+			if strings.Contains(string(text), driver) {
+				relative, err := filepath.Rel(envoyRoot, path)
+				if err != nil {
+					return err
+				}
+				drivers = append(drivers, filepath.ToSlash(relative))
+				return nil
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk %s: %v", envoyRoot, err)
+	}
+	return drivers
 }
