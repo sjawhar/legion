@@ -2,10 +2,18 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T18:32:30Z",
+  "completed": "2026-10-25T19:04:24Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "codeHead": "9d9bcf0ecca26298410bf72945d973833fad59cc",
+  "codeHead": "342ac4ed6ad42faa39623153ffb82bc20719367b",
   "proof": [
+    {
+      "criterion": "Round 9: the five reviewed sentences say only what was measured or read; the block's commands are unchanged so round 8's live runs hold",
+      "surface": "docs/kubernetes.md fetched from GitHub at the pushed head from this issue's role container",
+      "command": "gh api \"repos/sjawhar/legion/contents/docs/kubernetes.md?ref=342ac4ed6ad42faa39623153ffb82bc20719367b\" -H \"Accept: application/vnd.github.raw\"; code.sh | sha256sum; plan checks; grep -c 'set -m', 'with every command of', 'proves nothing' in the section; hunks8.awk; python line widths",
+      "observed": "pushed page identical to the checked working copy; comment-stripped hash 3277ca66... (same as 9d9bcf0e); A1 0; A2 1 x7; A3 date 4; A7 0; A8 0; set -m 0; 'with every command of' 0; no changed line over 100 characters; A5 all ok; check-private-names exit 0; sweep 0",
+      "headSha": "342ac4ed6ad42faa39623153ffb82bc20719367b",
+      "negativeControl": "at 9d9bcf0e: 'set -m' 1, 'with every command of' 1, 3025 comment 'an empty listing proves nothing'"
+    },
     {
       "criterion": "Round 8: no stop signal (TERM, INT or HUP) reaching the trap cuts the clean-up short",
       "surface": "this issue's role container, against the applied cluster, the page's block filled in with one fixture work line, run as the page says with TMPDIR private, stops sent to the sequence's group",
@@ -251,9 +259,9 @@
   ],
   "openQuestions": [],
   "discoveredComplexity": [],
-  "round": 8,
-  "roundReason": "Tester's round-7 failure: with set -m a SIGINT reaching the trap still ended it and left the Job, Service and pod; architect directed: keep the ignore, drop set -m, give the trap's commands a session of their own.",
-  "previousCodeHead": "90eca150f88936e46d1f354cbad83cba5f9e5236",
+  "round": 9,
+  "roundReason": "Review at 9d9bcf0e: five sentences overclaimed (the sessions' reason, the set -m clause, the INFRA-232 lead, the 3025 comment, the SIGKILL/cost sentences); prose and comments only.",
+  "previousCodeHead": "9d9bcf0ecca26298410bf72945d973833fad59cc",
   "fullDiffSweep": "Every sentence in the four hunks against base 371d6c87 was re-read against its evidence. Beyond the two clauses, three were fixed: 'deletes every Job carrying that label' became 'deletes every Job the server lists with that label'; the 0.33 s/0.35 s stops, classed 'in flight' only by their outcome, became stops 'that took this path and found a Job', with 'none of the twenty-six left a Job' and the in-flight/answered split stated as not shown; and 'a SIGKILL inside the create' became 'a SIGKILL left before its name was printed'. The rest was checked and kept (listed in the PR body).",
   "threads": [
     "PRRT_kwDORFy7ds6wDE3_ fixed, replied, resolved",
@@ -263,7 +271,13 @@
     "PRRT_kwDORFy7ds6wDNvP fixed, replied, resolved",
     "PRRT_kwDORFy7ds6wDNvR fixed, replied, resolved",
     "PRRT_kwDORFy7ds6wDNvV fixed, replied, resolved",
-    "PRRT_kwDORFy7ds6wDNvY fixed, replied, resolved"
+    "PRRT_kwDORFy7ds6wDNvY fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wEDkj fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wEDkl fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wEDko fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wEDkq fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wEDks fixed, replied, resolved",
+    "PRRT_kwDORFy7ds6wEDku fixed, replied, resolved"
   ],
   "blockCommandChange": {
     "change": "trap '' INT TERM HUP added after trap - EXIT INT TERM HUP; each of the trap's ten kubectl commands prefixed with setsid -w; no set -m",
