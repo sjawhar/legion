@@ -1406,19 +1406,24 @@ type deployJob struct {
 // envelope the row was queued from, which anyone holding an Envoy bearer can publish: a run of
 // another workflow file, branch or head repository, or one a pull request triggered (whose head is
 // the pull request's, never production's), wakes nothing, and neither does a run GitHub does not
-// know (404); each is logged. The attempt's jobs are read across every page. GitHub lists an
-// attempt's jobs with those it kept from an earlier attempt ("re-run failed jobs"), each under a
-// new job id and this attempt's run_attempt but with the earlier attempt's step times, so a step
-// counts only when it ran in this attempt: it started (or, naming no start, finished) no earlier
-// than the attempt's run_started_at. A kept step deployed in its own attempt, whose row woke the
-// check for it. A job's step named by the deploy that ran in this attempt and concluded `success`
-// strictly after merged_at is a deploy after the merge — every time compared is GitHub's, read in
-// this row, so no daemon clock is compared. Each such job, in order of its step's completion,
-// applies intake.CheckWake under an event of the check, the run, the attempt and the job: the same
-// run read again (a second delivery, a second row) is a duplicate, and two applying jobs are two
-// wakes, the second kept for the next look by the workflow's wake rule. A run with no such job
-// wakes nothing, logged with why. An attempt GitHub names no start time for, and any other
-// failure, retries on the row's backoff, a rate limit as every GitHub row's.
+// know (404); each is logged. Nor does an attempt GitHub does not name `completed`, whatever the
+// envelope said: a forged completion of an attempt still running would wake the check mid-run and
+// spend the jobs' event ids, so the genuine completion would wake nothing. It is logged and
+// finishes without a retry, since the attempt's own completion queues a row of its own. A completed
+// attempt is read whatever its conclusion: a failed run whose deploy step succeeded still deployed.
+// The attempt's jobs are read across every page. GitHub lists an attempt's jobs with those it kept
+// from an earlier attempt ("re-run failed jobs"), each under a new job id and this attempt's
+// run_attempt but with the earlier attempt's step times, so a step counts only when it ran in this
+// attempt: it started (or, naming no start, finished) no earlier than the attempt's run_started_at.
+// A kept step deployed in its own attempt, whose row woke the check for it. A job's step named by
+// the deploy that ran in this attempt and concluded `success` strictly after merged_at is a deploy
+// after the merge — every time compared is GitHub's, read in this row, so no daemon clock is
+// compared. Each such job, in order of its step's completion, applies intake.CheckWake under an
+// event of the check, the run, the attempt and the job: the same run read again (a second
+// delivery, a second row) is a duplicate, and two applying jobs are two wakes, the second kept for
+// the next look by the workflow's wake rule. A run with no such job wakes nothing, logged with why.
+// An attempt GitHub names no start time for, and any other failure, retries on the row's backoff,
+// a rate limit as every GitHub row's.
 func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, payload record.CheckCompare, check *record.ProductionCheck, github githubrest.Client) error {
 	deploy := *payload.Deploy
 	var pull struct {
@@ -1444,6 +1449,7 @@ func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, paylo
 		Path           string     `json:"path"`
 		HeadBranch     string     `json:"head_branch"`
 		Event          string     `json:"event"`
+		Status         string     `json:"status"`
 		HTMLURL        string     `json:"html_url"`
 		RunStartedAt   *time.Time `json:"run_started_at"`
 		HeadRepository struct {
@@ -1474,6 +1480,15 @@ func (r *outbox) checkDeployRun(ctx context.Context, row record.OutboxRow, paylo
 	if why != "" {
 		r.log.Info("outbox check compare finished without acting: the run is not a deploy of the default branch", "row", row.ID, "issue", row.Issue,
 			"run", deploy.Run, "attempt", deploy.Attempt, "url", run.HTMLURL, "why", why)
+		return nil
+	}
+	// The run's completion is read from GitHub too: a forged `completed` envelope for an attempt
+	// still running would otherwise wake the check mid-run and spend the jobs' event ids, so the
+	// genuine completion's row would find them duplicates and wake nothing. That row is queued by
+	// the attempt's own completion, so this one finishes rather than retrying.
+	if run.Status != "completed" {
+		r.log.Info("outbox check compare finished without acting: the run has not completed", "row", row.ID, "issue", row.Issue,
+			"run", deploy.Run, "attempt", deploy.Attempt, "url", run.HTMLURL, "status", run.Status)
 		return nil
 	}
 	// Without the attempt's start no job can be told this attempt's from a kept one, so the answer
