@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-354",
-  "completed": "2026-10-25T07:52:30Z",
+  "completed": "2026-10-25T08:24:58Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2185",
-  "codeHead": "8b53654d4545988b8880e4f627aa11c593964572",
+  "codeHead": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
   "proof": [
     {
       "criterion": "Line 1 and line 4: two accounts may name the same service, and the broker starts on that configuration (the start-up path, not the parser alone).",
@@ -29,6 +29,14 @@
       "observed": "Pods A and B: POST /v1/requests answered state granted, decision automatic, record_id null, approver null; POST /v1/grants/{id}/values answered SERVICE_KEY=service-value. Pod C: state denied, decision deny, grant_id null, record_id null, approver null. --- PASS (7.52s).",
       "headSha": "8b53654d4545988b8880e4f627aa11c593964572",
       "negativeControl": "Pod C (an account no entry names) is the in-test control. Mutations in a copy outside the checkout: requester's old service-keyed lookup put back makes this test, TestAServicesSecretGoesToItsOwnPodsAlone and TestAServiceGrantStopsWhenItsServiceAccountChanges fail; Load's duplicate-service refusal put back makes this test, TestLoadReadsTheRegisteredServices and TestTheRequestMachineCarriesTheServicesByAccount fail."
+    },
+    {
+      "criterion": "Review round: the shared fixture keeps both real-binary tests the same tests (line 1, line 3 and the cross-service boundary).",
+      "surface": "The real compiled broker under the repository's real-process harness, with a fresh Postgres Job and ClusterIP Service in the cluster (controller-uid selector), deleted after the run.",
+      "command": "cd packages/envoy && go test ./cmd/broker ./internal/broker/policy -count=1 (BROKER_TEST_DATABASE_URL on the cluster Postgres)",
+      "observed": "ok github.com/sjawhar/envoy/cmd/broker 61.199s; ok .../internal/broker/policy. TestOneServicesTwoAccountsEachGetItsSecret and TestAnAccountProvesOnlyTheServiceItIsListedFor both pass through podBroker.",
+      "headSha": "3ec1bea3bc5d468e680a3a19359e9f6c28c33c88",
+      "negativeControl": "In a copy outside the checkout, requester rewritten to trust any listed account (`if _, listed := services[deref(e.Subject)]; listed && e.Kind == \"pod\" && e.Service != nil`): TestAnAccountProvesOnlyTheServiceItIsListedFor FAILS with three 'granted' replies (OTHER_KEY to pods running as A and B under other-service's launcher, SERVICE_KEY to the pod running as other-service's account under example-service's launcher)."
     }
   ],
   "localChecks": [
@@ -51,7 +59,10 @@
     "packages/envoy/cmd/broker/service_accounts_test.go — new real-binary test TestOneServicesTwoAccountsEachGetItsSecret.",
     "packages/envoy/AGENTS.md, packages/envoy/CHANGELOG.md — the new rule, the field name and the rollback rule (an older broker refuses a service named twice).",
     "docs/site/src/content/docs/broker/operate.md, concepts.md, guides/log-a-machine-in.md, docs/site/src/content/docs/dispatch/envoy.md — several accounts per service.",
-    "docs/kubernetes.md — the BROKER_SERVICES deployment prose, the controller paragraph (D7), the cluster-workload Service selector (batch.kubernetes.io/controller-uid, which admission requires) and the run record (D10)."
+    "docs/kubernetes.md — the BROKER_SERVICES deployment prose, the controller paragraph (D7), the cluster-workload Service selector (batch.kubernetes.io/controller-uid, which admission requires) and the run record (D10).",
+    "packages/envoy/internal/broker/policy/policy.go — Requester.Service doc comment states the account-keyed rule.",
+    "packages/envoy/cmd/broker/pod_broker_test.go — new shared podBroker fixture.",
+    "packages/envoy/cmd/broker/service_accounts_test.go, service_account_scope_test.go — use podBroker; cases and assertions unchanged."
   ],
   "trickyParts": [
     "The Go type of the map did not change, so the rename to ServicesByAccount is what made every construction site fail to compile until it was read; TestAServiceGrantStopsWhenItsServiceAccountChanges maps a different account to the service so it still fails for the right reason.",
@@ -64,5 +75,13 @@
   "openQuestions": [],
   "discoveredComplexity": [
     "Pull request #2162 (legion/INFRA-236), still open, changes config.go, config_test.go, main.go, main_test.go, machine_state.go, packages/envoy/AGENTS.md, operate.md and concepts.md; the conflict is named in the pull request body."
-  ]
+  ],
+  "reviewRound": {
+    "review": "Changes requested at 2a0e351d0a05: two stale one-account passages and the duplicated real-binary test machinery.",
+    "fixes": [
+      "packages/envoy/internal/broker/policy/policy.go Requester.Service: now 'one of the accounts BROKER_SERVICES maps to that same service', keeping why an account proves exactly one service (commit 0bd14620).",
+      "docs/kubernetes.md first run-record bullet: dated to the change that first published the section, before the Service grants; the Service answers are yes since, as the last bullet records (commit 0bd14620).",
+      "Thread PRRT_kwDORFy7ds6v_kJy: new packages/envoy/cmd/broker/pod_broker_test.go podBroker fixture (logIn, enroll, ask, values; no options) used by service_accounts_test.go and service_account_scope_test.go; replied and resolved (commit 3ec1bea3bc5d)."
+    ]
+  }
 }
