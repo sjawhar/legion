@@ -24,8 +24,6 @@ later phase keeps it current rather than replacing it:
 
 ## Verification
 
-**CI:** `Tests` run <run-id> — jobs lint, typecheck, test all success at <head-sha>; `PR Title` run <run-id> — job pr-title success at <head-sha>.
-
 **Threads:** <n> resolved, 0 unresolved. Each answered and resolved individually by the implementer, the pull request's author, never in bulk (the reviewer names the bot threads it accepted; it resolves none itself):
 - Thread <node id>: fixed in <commit-sha> — <one line>; resolved at <head-sha>.
 - Thread <node id>: not a defect — <reason>; resolved at <head-sha>.
@@ -49,14 +47,6 @@ Verified the implementer's proof by <re-running its command | driving the same s
 
 **Chain:** stacked on <base bookmark> frozen at <sha> / not stacked.
 ```
-
-The `CI` line names the runs GitHub started for the code head, by run id, with each run's state
-as GitHub shows it when the line is written: `success`, a failure, or `queued` / `in progress`
-at <head-sha>, or `no run yet` when GitHub has started none. The implementer writes it at its completion from one `gh run list --commit <head-sha>`
-and never waits for a run to finish to fill it in: the daemon reads every settlement itself, and a
-check or workflow the base branch requires that settles red sends the work back to `implementing`,
-before or after that completion. A later role that reads CI on GitHub updates the line's states to
-what it read.
 
 ## Never waiting on CI
 
@@ -117,10 +107,11 @@ and the tester's proof below are both this proof.
   application, not CI again. Try to break the changed surface — wrong and boundary inputs, the
   second and the concurrent run, the party it must refuse — judge whether the implementer's tests
   would catch the ways it breaks, writing the red test for one that none would, and
-  read CI for everything static: lint, types and the unit and integration suites are CI's, cited
-  from the `CI` line, and no CI lane is rerun as evidence. A lane the line shows `queued` or
-  `in progress` is cited as such: the tester never waits for it, since a required red that settles
-  sends the work back from `testing` and the reviewer reads the head's checks before it approves.
+  read CI on GitHub at the head you are judging for everything static: lint, types and the unit
+  and integration suites are CI's, read there and recorded for no later step, and no CI lane is
+  rerun as evidence. A lane GitHub shows `queued` or `in progress` is read as such: the tester
+  never waits for it, since a required red that settles sends the work back from `testing` and
+  the reviewer reads the head's checks before it approves.
   A test handoff whose predecessor carried no proof is a test failure, not a gap for the tester to fill:
   record it in `failures` with `implementerProof.verdict: "rejected"`, complete the phase with
   `verdict: "fail"`, and the daemon returns the issue to the implementer — the agent that developed the change owns
@@ -149,7 +140,7 @@ and the tester's proof below are both this proof.
   the pull request's own diff at that head: nothing applied leaves the head as it is; applied →
   the implementer re-runs the repository's checks and its own proof on the applied head for the
   surface the simplify diff touched, since a refactor that "preserves behaviour" is a claim until
-  it is executed, and re-cites the `CI` line and `E2E (implementer)` there before it completes.
+  it is executed, and updates the `E2E (implementer)` line to that head before it completes.
   That cost is why 0-applied is the expected outcome and a pass that applies is spent sparingly.
   The reviewer's pair runs at the head each round reviews. Record both in the `Thermo` line.
 - **No deferrals** is the body's rule (*PR body, review, and the merge gate* in

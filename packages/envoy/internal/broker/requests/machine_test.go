@@ -140,14 +140,14 @@ func newFixture(t *testing.T) (m *Machine, enrollmentID string, requesterKey *ec
 	enrollmentID, requesterKey = newEnrollment(t, st, "session", "box-a-"+t.Name(), new(fixtureOperator), nil)
 
 	m = &Machine{
-		Store:           st,
-		Policy:          policytest.Current(t, local, fixtureService),
-		Secrets:         policytest.Store(local),
-		PendingTTL:      12 * time.Hour,
-		Audience:        testAudience,
-		Skew:            time.Minute,
-		Replay:          replayer(st),
-		ServiceAccounts: map[string]string{fixtureService: fixtureSubject},
+		Store:             st,
+		Policy:            policytest.Current(t, local, fixtureService),
+		Secrets:           policytest.Store(local),
+		PendingTTL:        12 * time.Hour,
+		Audience:          testAudience,
+		Skew:              time.Minute,
+		Replay:            replayer(st),
+		ServicesByAccount: map[string]string{fixtureSubject: fixtureService},
 	}
 	m.Chain = NewChainVerifier(st, testAudience, time.Minute)
 	return m, enrollmentID, requesterKey, fixtureOperator
@@ -1256,8 +1256,9 @@ func TestAnyoneDecidesASharedHumanTierRequest(t *testing.T) {
 
 // TestAServiceGrantStopsWhenItsServiceAccountChanges pins that a grant of a service's secret is
 // re-checked on every use, not only once the policy's version moves: the registered service
-// accounts are not in the version, so once BROKER_SERVICES binds the service to another account the
-// pod's grant releases nothing and its next request is denied rather than reusing the grant.
+// accounts are not in the version, so once BROKER_SERVICES names another account for the service
+// and no longer the pod's, the pod's grant releases nothing and its next request is denied rather
+// than reusing the grant.
 func TestAServiceGrantStopsWhenItsServiceAccountChanges(t *testing.T) {
 	m, _, _, _ := newFixture(t)
 	ctx := context.Background()
@@ -1266,7 +1267,7 @@ func TestAServiceGrantStopsWhenItsServiceAccountChanges(t *testing.T) {
 	if err != nil || granted.State != "granted" || granted.GrantID == nil {
 		t.Fatalf("Create(the service's pod) = %+v, %v; want granted", granted, err)
 	}
-	m.ServiceAccounts = map[string]string{fixtureService: "system:serviceaccount:example:other-sa"}
+	m.ServicesByAccount = map[string]string{"system:serviceaccount:example:other-sa": fixtureService}
 	if values, _, err := m.Values(ctx, *granted.GrantID, pod); !errors.Is(err, ErrGrantNotLive) {
 		t.Fatalf("Values after the service's account changed = %v, %v; want ErrGrantNotLive", values, err)
 	}

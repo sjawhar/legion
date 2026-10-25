@@ -126,8 +126,8 @@ func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []li
 	if err == nil || !client.Connected() {
 		return false
 	}
-	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, nats.ErrConnectionClosed) ||
-		errors.Is(err, nats.ErrStreamNotFound) {
+	if errors.Is(err, nats.ErrConsumerNotFound) || errors.Is(err, errDurableUnbound) ||
+		errors.Is(err, nats.ErrConnectionClosed) || errors.Is(err, nats.ErrStreamNotFound) {
 		return true
 	}
 	for _, c := range caches {
@@ -138,7 +138,12 @@ func isUnrecoverableSelfHealthFailure(err error, client *bus.Client, caches []li
 	return false
 }
 
+// rebuildListenerDependencies rewatches the KV caches and, when the durable probe reports the
+// consumer gone or bound elsewhere, subscribes the durable again. It reports success only once
+// the server reports this listener bound, so the probe that follows a rebuild reads a settled
+// consumer rather than the gap in which the subscription is being replaced.
 func rebuildListenerDependencies(
+	ctx context.Context,
 	client *bus.Client,
 	caches []listenerCache,
 	durableProbe func() error,
@@ -149,11 +154,18 @@ func rebuildListenerDependencies(
 		return nats.ErrConnectionClosed
 	}
 	err := rewatchListenerKVWatchers(client.Conn, caches)
-	if durableProbe == nil || !errors.Is(durableProbe(), nats.ErrConsumerNotFound) {
+	if durableProbe == nil {
+		return err
+	}
+	probeErr := durableProbe()
+	if !errors.Is(probeErr, nats.ErrConsumerNotFound) && !errors.Is(probeErr, errDurableUnbound) {
 		return err
 	}
 	if _, durableErr := startListenerSubscription(client, consumer, handler); durableErr != nil {
 		return errors.Join(err, fmt.Errorf("recreate durable consumer: %w", durableErr))
+	}
+	if boundErr := awaitDurableBound(ctx, client, consumer, durableRebindInterval, durableRebindDeadline); boundErr != nil {
+		return errors.Join(err, fmt.Errorf("rebind durable consumer: %w", boundErr))
 	}
 	return err
 }
@@ -247,6 +259,12 @@ func runSelfHealthMonitor(
 			terminalFailures++
 			if rebuild != nil {
 				if rebuildErr := rebuild(); rebuildErr != nil {
+					// The rebuild runs under ctx, so a shutdown that cancels ctx mid-rebuild cuts it
+					// with context.Canceled. That error is the shutdown, not a failed rebuild, and an
+					// ordered shutdown writes no ERROR, so the monitor stops here without logging it.
+					if ctx.Err() != nil {
+						return
+					}
 					logger.Error("self-health rebuild failed", slog.Int("consecutive", terminalFailures), slog.String("error", rebuildErr.Error()))
 				} else {
 					logger.Info("self-health rebuild started", slog.Int("consecutive", terminalFailures))
@@ -319,10 +337,12 @@ func sessionHealthFields(sessions *session.SessionRegistry) map[string]interface
 // healthzHandler is the listener's /healthz. It answers 200 "starting" until main publishes deps
 // once the durable consumer binds, which during a rolling deploy waits out the task being replaced
 // while /v1 already serves; 200 "healthy" with the durable consumer's lag once every dependency
-// answers; 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a cache's
-// watcher has stopped or the durable consumer is gone; and 200 "degraded" for a transient KV failure
-// the self-health monitor and the NATS reconnect retry. A listener that mounts no GitHub webhook
-// route keeps no CI cache, and its answer carries "ci_cache": "not_applicable".
+// answers; 503 "unhealthy" when NATS is unavailable, the durable subscription is inactive, a
+// cache's watcher has stopped, the durable consumer is gone, or the durable consumer is
+// "not bound to this listener's subscription" because it was recreated server-side and now
+// delivers elsewhere; and 200 "degraded" for a transient KV failure the self-health monitor and
+// the NATS reconnect retry. A listener that mounts no GitHub webhook route keeps no CI cache,
+// and its answer carries "ci_cache": "not_applicable".
 func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -364,6 +384,13 @@ func healthzHandler(deps *atomic.Pointer[listenerDeps]) http.HandlerFunc {
 		consumerInfo, err := d.client.JS().ConsumerInfo(bus.Stream, d.consumer)
 		if err != nil {
 			writeDependencyHealth(w, "durable consumer", err, errors.Is(err, nats.ErrConsumerNotFound))
+			return
+		}
+		// One read and no confirming second one, unlike durableProbe's: the endpoint reports the
+		// fault the moment a request finds it, and a request landing in a rebuild's own gap simply
+		// answers 503 until the next one.
+		if durableUnbound(consumerInfo, d.client) {
+			writeDependencyHealth(w, "durable consumer", errDurableUnbound, true)
 			return
 		}
 		response["num_pending"] = consumerInfo.NumPending
@@ -666,6 +693,12 @@ func main() {
 		log.Fatal(err)
 	}
 
+	// The margin between a client's registration refresh and this lifetime can only be checked
+	// against the defaults in the source, while the live value is whatever MaxAge the existing
+	// bucket was created with. Say it at boot so an operator can read the value in force.
+	logger.Info("session record lifetime resolved; a session record is dropped this long after its last write",
+		slog.String("ttl", sessions.TTL().String()))
+
 	// Wait for the session cache to finish its initial scan before we accept
 	// traffic, mirroring the interest-cache gate above. Bounded at 30s: a healthy
 	// cluster completes in milliseconds. On timeout we fail open — Put
@@ -833,14 +866,11 @@ func main() {
 	// Phase 6c: Keep transient JetStream timeouts observable without restarting
 	// the listener. Terminal watcher/consumer failures are rebuilt immediately;
 	// after three failed recovery intervals, SIGTERM enters the bounded shutdown
-	// path and exits non-zero for Docker to replace the listener.
-	durableProbe := func() error {
-		if _, err := client.JS().ConsumerInfo(bus.Stream, consumer); errors.Is(err, nats.ErrConsumerNotFound) {
-			return err
-		}
-		return nil
-	}
+	// path and exits non-zero for Docker to replace the listener. The durable probe and a rebuild's
+	// rebind wait run under monitorCtx, each JetStream read included, so the shutdown's monitorCancel
+	// cuts a read the server has not answered and the 10 s shutdown budget is held by neither.
 	monitorCtx, monitorCancel := context.WithCancel(context.Background())
+	probeDurable := func() error { return durableProbe(monitorCtx, client, consumer) }
 	monitorDone := make(chan struct{})
 	go func() {
 		defer close(monitorDone)
@@ -848,7 +878,7 @@ func main() {
 			monitorCtx,
 			logger,
 			func() error {
-				return checkSelfHealth(caches, durableProbe)
+				return checkSelfHealth(caches, probeDurable)
 			},
 			func(err error) bool {
 				return isUnrecoverableSelfHealthFailure(err, client, caches)
@@ -856,9 +886,10 @@ func main() {
 			client.Connected,
 			func() error {
 				return rebuildListenerDependencies(
+					monitorCtx,
 					client,
 					caches,
-					durableProbe,
+					probeDurable,
 					consumer,
 					jetStreamDeliveryHandler(deliveryConfig),
 				)

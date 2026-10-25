@@ -77,10 +77,10 @@ Two decisions stay with people:
   approves it, unless that version is the person's own answer to a decision block and the answer is
   the whole change since the version they approved: then Dispatch records their approval at the new
   version and the gate reopens. The gate is on by default; a deployment can turn it off.
-- **The merge.** The merger sends `READY`. The daemon accepts it only when no check or workflow
-  the base branch requires has failed or is missing, posts it on the Dispatch issue, and submits
-  the pull request for merge. The repository's own rules decide when it lands, so a review a
-  person must give, or a by-hand merge, stays theirs.
+- **The merge.** The merger sends `READY`. The daemon accepts it on the approved head, posts it on
+  the Dispatch issue, and submits the pull request for merge. The repository's own rules decide
+  whether and when it lands, so a check it requires, a review a person must give, or a by-hand
+  merge, stays theirs.
 
 The coordinator runs its agents as Oh My Pi sessions, either in tmux panes on one host or as Agent
 Sandbox pods in a Kubernetes cluster.
@@ -126,7 +126,7 @@ only where an event goes; what to do about it is the coordinator's and the agent
    changes sends it back to the implementer, and through the tester again.
 6. Once the reviewer approves, the architect reads the evidence and accepts the change (or sends
    it back), and the retrospective runs. The merger then sends `READY`, which the daemon accepts
-   once no required check has failed or is missing, and posts on the issue.
+   on the approved head plus retro's notes, and posts on the issue.
 7. The daemon submits the pull request for merge, and it lands under the repository's own rules.
    The merge closes the issue: it is Done.
 8. After the close, once the deploy carries the merge, the implementer drives the change in

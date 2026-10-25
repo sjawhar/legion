@@ -18,10 +18,11 @@ related_issues:
 
 # A pod rehearses a checkpoint's own readers over its session and probes the release rootfs under unshare before asking for a four-hour run
 
-- An issue pod's kubectl creates nothing (`kubectl auth can-i create sandboxes.agents.x-k8s.io
-  -n legion` → `no`), so no agent of a tree runs Stage 4a or 4b. The run is the coordinator lane's
-  (the Legion PO's session, live holder of Envoy role `legion-deploy`), asked by `envoy_send` with
-  one message carrying everything: the head and that it contains `main`, the image by digest and
+- An issue pod's kubectl creates nothing in the namespace Legion's own pods run in (`kubectl auth
+  can-i create sandboxes.agents.x-k8s.io -n legion` → `no`), so no agent of a tree runs Stage 4a
+  or 4b. The run is the coordinator lane's (the Legion PO's session, live holder of Envoy role
+  `legion-deploy`), asked by `envoy_send` with one message carrying everything: the head and that
+  it contains `main`, the image by digest and
   the `Worker Image` run that published it, both commands with every operator input a placeholder,
   the expected verdict lines and the checkpoint→criterion map, the re-run entry points, the rule
   that the lane fixes nothing in the checkout, and what to paste back and where. A full Stage 4b is

@@ -106,10 +106,10 @@ comes back, with everything it knew, the next time its role is needed.
 | `implementing` | implementer | Writes the change, proves it works, pushes `legion/<KEY>` and opens the pull request. | implement App |
 | `testing` | tester | Runs the changed surface for real, tries to break it, judges whether the tests would catch what breaks, and reads CI for everything static; reports `pass` or `fail`. | review App |
 | `reviewing` | reviewer | Reviews the pull request and submits an approval of the head, or changes requested. | review App |
-| `accepting` | the architect | Reads the tester's handoff, the pull request's two `E2E` lines and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
+| `accepting` | the architect | Reads the tester's handoff, the pull request's two `E2E` lines and the reviewer's approval of the head, and accepts the issue (on to retro) or sends it back to the implementer or the tester. The daemon refuses the acceptance (`SIGNOFF_CHILD_IN_WORKFLOW`) while any issue beneath this one is still in the workflow, naming each of them. No worker runs here; the issue's Dispatch status stays `needs_review`. | review App |
 | `retro` | implementer | Writes down what the work taught, as notes in the repository and one message on the issue, and brings up to date whatever the repository's instructions require the pull request description to say about the paths it changes, those notes included. | implement App |
-| `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head plus retro's notes, with no required check or workflow failed or missing, and submits the merge. | implement App |
-| `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue. | none |
+| `merging` | merger | Sends `READY` for the current head; the daemon accepts it only on the approved head plus retro's notes, and submits the merge, which GitHub completes under the base branch's own rules. | implement App |
+| `awaiting_merge` | none | Waits for the merge to land under the repository's rules: the daemon's submission, or a person's for a by-hand READY. The merge closes the issue; a root whose tree still runs records the merge and waits here until the last other issue of its tree is done or parked. | none |
 
 A failed test, red CI on the head in testing, review, acceptance, retro or merging (a check or workflow the
 base branch requires), or a review that requests changes sends the issue back to `implementing`,
@@ -121,9 +121,10 @@ own: the reviewer's approval of the head ends the round whatever CI says at that
 reviewer reads the code commit's checks on GitHub before it approves, and a red the daemon reads
 later sends the work back to the implementer from wherever the issue stands. Red CI on the head of
 an issue in `awaiting_merge` sends it back too, at any fix-attempt count, when the head's own checks
-or required workflow runs are red: the work returns through testing, review and `READY`, since
-GitHub will not merge the head it was ready for, and the issue, and the project's merge-queue role
-when one is set, are told the `READY` is withdrawn.
+or required workflow runs are red: the work returns through testing, review and `READY`, and the
+daemon takes back the merge it submitted, since that submission names a commit about to be
+replaced; the issue, and the project's merge-queue role when one is set, are told the `READY` is
+withdrawn.
 
 ## Admission and the `legion` label
 
@@ -203,27 +204,33 @@ Legion uses GitHub's own review mechanisms rather than labels:
   turn interrupted; from retro the implementer keeps its turn and is handed the implementing task
   after it. The implementer pushes and completes without waiting for CI: a red that settled while
   it was still implementing sends the work back the moment it completes, so no tester round runs
-  on code CI already found broken. Once the issue awaits its merge, only a red of the head's own counts: `READY` found the
-  head's own checks and runs green on GitHub, so a red carried from the head before it moves
-  nothing. Only what the base branch requires counts, the same set the merger's `READY` checks: its
-  rulesets' required status checks and required workflows, and its branch protection's required
+  on code CI already found broken. Once the issue awaits its merge, only a red of the head's own
+  counts: a red carried from the head a `.legion/`-only push replaced was already there when
+  `READY` was accepted, and says nothing new about the commit the daemon's submission names. Only
+  what the base branch requires counts, the set the daemon reads for itself: its rulesets'
+  required status checks and required workflows, and its branch protection's required
   status checks. CI is red when one of those checks failed, or when the latest pull-request run of
   a required workflow on the head did not pass (it failed, was cancelled or timed out; a run that
   ended neutral or skipped passes). A required check that was cancelled, or that the head's checks
   settled without, leaves the head with no verdict until a later settlement decides it, since a
   settlement can come before an aggregator job is queued or just after a run is cancelled. The
-  check may never run again: a head with no verdict is sent nowhere, and never reaches `READY`,
-  which is refused `READY_CHECKS_NOT_GREEN` naming the check. A required workflow still running
+  check may never run again: a head with no verdict is sent nowhere, and nothing holds `READY`
+  back for it, since GitHub decides the merge under the base branch's own rules, where a required
+  check that never reported is what keeps the merge waiting. A required workflow still running
   leaves no verdict until the daemon's next read of its runs, and one with no run on the head
-  leaves none either, and `READY` is refused naming it. A failing check the base branch does not
+  leaves none either. A failing check the base branch does not
   require, such as a lane started by hand or an advisory review check, never makes CI red, and on
-  a base branch that requires nothing, nothing does. The daemon judges the check runs GitHub
+  a base branch that requires nothing, nothing does: there Legion submits a merge GitHub completes
+  whatever the head's checks say, and the scheduling that sends work back to an implementer never
+  fires, because a base that requires nothing reads green (`HeadVerdict` in
+  `packages/daemon/internal/classify/required.go`). The daemon judges the check runs GitHub
   reports, so a required check that only a commit status reports never reports to it: the head
-  has no verdict and is sent nowhere, and `READY`, which reads the commit statuses too, decides it.
+  has no verdict and is sent nowhere, and GitHub, which reads that status, holds the merge on it.
   Legion matches a required workflow to a run by its path and the repository that defines it, and
   a run belongs to the repository it ran for, so a required workflow another repository defines
-  (an organization ruleset) never matches a run: the head never reads green, and `READY` is
-  refused naming the repository that defines the workflow. A head that a push changing only
+  (an organization ruleset) never matches a run: the head never reads green, so Legion sends the
+  work nowhere for it, and whether it holds the merge is GitHub's to say. A head that a push
+  changing only
   `.legion/` made carries the checks and workflow runs of the head before it, except a workflow run
   cancelled there, which the new head's own run superseded: it leaves no verdict until that head's
   own CI settles, and a red carried that way is that code's red and sends the work back as the
@@ -255,9 +262,9 @@ Legion uses GitHub's own review mechanisms rather than labels:
 ## READY and the merge
 
 When the reviewer has approved, the architect has accepted and retro is done, the merger sends **READY**. The daemon accepts
-it only when the pull request's head is the approved one plus only retro's notes, no check the base
-branch requires has failed or is missing on it, and no workflow its rulesets require has failed or
-has no run on the head; a required check or workflow still running is no reason to wait. It posts
+it only when the pull request's head is the approved one plus only retro's notes; it reads no check
+of that head at all, since whether the merge happens is GitHub's to decide under the base branch's
+own rules. It posts
 the READY on the Dispatch issue as one message:
 
 ```text
@@ -287,7 +294,13 @@ record shows the issue left that `READY` or the pull request closed. While the r
 the `READY` head, GitHub showing the pull request closed or at another head means one of them has
 not caught up: the submission waits. It ends and tells the architect only once GitHub's last change
 to the pull request is more than 10 minutes old, far longer than a webhook takes to arrive, however
-long the submission waited before. A reopen at the `READY` head takes the submission back from a
+long the submission waited before. A merge that simply waits ends nothing: when GitHub has not
+completed one the daemon submitted within an hour of the workflow queueing it at `READY`'s
+acceptance, the issue's architect is told once (`merge-waiting`) and the submission goes on.
+Nothing is withdrawn and the issue stays in `awaiting_merge`, so what is left to find is on
+GitHub: a required check that never ran or failed, a review only a person can give, a merge queue
+that has not landed it.
+A reopen at the `READY` head takes the submission back from a
 run that read the record before the reopen, so it is never lost. A refusal GitHub would repeat on a
 retry ends the submission and is told to the architect too. GitHub checks the expected head only when
 auto-merge is enabled, so an arm outliving its `READY` would merge an unreviewed head. Arming is right
@@ -304,7 +317,11 @@ and posts on the issue, and tells that role, that the `READY` is withdrawn, nami
 ## The production check
 
 The merge closes the issue: once the pull request merges, the daemon writes `done`, and nothing is
-left of the issue to develop. What is left is to see the change work in production, and that is
+left of the issue to develop. A root whose tree still runs is the one issue the merge does not
+close at once: the daemon records the merge, the root waits in `awaiting_merge` with its workers
+and its admission slot while its children reach their own merges, its architect is told once which
+issues the close waits for, and the close comes when the last of them is done or parked. What is
+left after the close is to see the change work in production, and that is
 work after the close: the implementer — the agent that wrote the change — is handed a production
 check in its live session as the issue closes. Each look of the check reaches the deploy as your
 deployment instructions say (the merge commit published to your deploy role, with no reply
@@ -326,11 +343,13 @@ whole check at `production_check_hours` (336, fourteen days, by default): the wa
 the last look, and a `pending` there closes the check as not run, which the implementer writes on
 the pull request. `legion state` prints how many checks are open and the oldest of them.
 
-A child's close releases its pod at once and its volume when the check closes; a root's close frees
-its admission slot, and the finished tree **lingers** for `linger_hours` (72 by default) with its
-workspace kept, in case work resumes; then its pods and volume are deleted, once no member's check
-is open. Setting a done root back to `todo` runs it again as a new generation, starting from its
-architect.
+A child's close releases its pod at once and its volume when the check closes; a root's close
+frees its admission slot once no other issue of its tree is still in the workflow, and the
+finished tree **lingers** for `linger_hours` (72 by default) with its workspace kept, in case work
+resumes; then its pods and volume are deleted, once no member's check is open. Closing a root
+yourself from the Dispatch dashboard lingers the tree at once, children and all: your decision
+outranks that order. Setting a done root back to `todo` runs it again as a new generation,
+starting from its architect.
 
 ## Supervision
 

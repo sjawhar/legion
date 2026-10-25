@@ -551,13 +551,16 @@ These arrive as messages on the Dispatch issue, and the architect is told:
   the review round recorded no approval (`READY_NOT_APPROVED`): either way the issue goes back to
   `reviewing`. It is refused while the head still carries
   the issue's handoffs, `.legion/<issue>/`, which retro's last commit removes (the issue goes back
-  to `retro`); while a check the base branch requires has failed or is missing on the head, or a
-  workflow its rulesets require has failed or has no run on it (one still running refuses nothing);
-  and while the design gate is closed. The refusal names the head and the directory, the check or workflow, or the spec version
+  to `retro`); while the head conflicts with its base, which GitHub cannot merge and starts no
+  pull-request CI for (`READY_HEAD_CONFLICTS`, naming the base the implementer merges forward);
+  and while the design gate is closed. The refusal names the head and the directory, the base, or the spec version
   that needs approval. A refusal saying GitHub's read of `.legion/<issue>/` failed is GitHub's
-  failure, and the merger completes again. None of the head checks applies to a pull request a
+  failure, and the merger completes again. `READY` reads no check of the head: whether the merge
+  happens is GitHub's to decide, under the base branch's own rules. None of these reads applies
+  to a pull request a
   person already merged: its `READY` is published unread, and the merge closes the issue the moment
-  it reaches `awaiting_merge`. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
+  it reaches `awaiting_merge` — or, for a root whose tree still runs, once the last other issue of
+  that tree is done or parked. If that merge carried `.legion/<issue>/` onto the base, the architect asks whoever merged
   for a pull request that deletes it.
 
 An issue back in `in_progress` from `retro` or `merging` had a required check or workflow turn red
@@ -568,8 +571,9 @@ while it awaited its merge, had a required check or workflow turn red on the hea
 head conflicts with its base (GitHub computes no merge ref for a conflicting head and runs no
 checks on it at all): the daemon sent it back to the implementer, told the architect which checks
 or that the head conflicts, and posted on the issue, and told the project's `merge_queue_role` when
-one is set, that the `READY` is withdrawn; the work comes back through testing, review and a new
-`READY`.
+one is set, that the `READY` is withdrawn: the merge the daemon had submitted names a commit about
+to be replaced, so it takes its own submission back. The work comes back through testing, review
+and a new `READY`.
 
 The pull request's state as the daemon sees it, its `checksVerdict` judged only by the checks and
 workflows the base branch requires:
@@ -580,7 +584,10 @@ legion state --config legion.yaml --json | jq '.issues["<KEY>"].pullRequest'
 
 No `checksVerdict` on a pull request whose checks have settled means the daemon has not read the
 base branch's required checks yet, or a required workflow's run on the head is still going, has
-not happened, or has not been read since the head settled. Its log names each read GitHub refused,
+not happened, or has not been read since the head settled. A head with no verdict holds nothing
+back - `READY` reads no check of it, and GitHub decides the merge under the base branch's own
+rules - it is only that Legion sends the work nowhere on it. Its log names each read GitHub
+refused,
 with the repository, the pull request and the HTTP status (`read the checks a pull request's base
 branch requires`); the daemon reads again every two minutes.
 

@@ -39,7 +39,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 - When you finish an issue, take the top ready issue: status `todo`, by priority and then board rank, in each project.
 - `todo` means specced and waiting on nothing. An issue that waits goes in `backlog`, saying on what.
 - Hold at most three issues in flight; move the rest to `backlog`, saying where each is.
-- Never reorder the board. If the top looks wrong, tell `notifications.role.legion-<project>-controller`.
+- Never reorder the board: one agent keeps each project's order (`issue-update --before`/`--after`). If the top looks wrong, tell `notifications.role.legion-<project>-controller`.
 
 ## Issue status is yours to move
 
@@ -83,4 +83,3 @@ A bare id or filename is not a reference. An ask or comment id can be an 8-hex p
 
 - Use a personal token from Dispatch **Settings → Agent tokens**, as `DISPATCH_TOKEN` or `dispatch.token` in the session's `envoy.json`.
 - `GET /api/v1` lists every route; never guess one. Branch on an error's `code`, not its text.
-- No command reorders the board: `PATCH /api/v1/issues/{key}` with `{"rank": {"before": "<key>", "after": "<key>"}, "actor": {"kind": "session", "id": "<your session id>"}}`.

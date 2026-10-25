@@ -7,6 +7,15 @@ import { DIALOG_SCOPE, useKeymap, useKeymapScope } from "./keymap";
 export const COMPACT_VIEWPORT_QUERY = "(max-width: 1279px)";
 /** Below Tailwind's `md`: a phone, where a margin thread opens full-screen. */
 export const PHONE_VIEWPORT_QUERY = "(max-width: 767px)";
+/** Tailwind's `md` itself: true exactly when the `md:` classes apply. A caller that pairs this
+ *  query with `md:` classes on the same element must keep the two in step, since a predicate a
+ *  pixel out leaves a fractional viewport width - zoom, a fractional device-pixel ratio - with
+ *  one answer from the query and the other from the classes. The unit matters as much as the
+ *  number: Tailwind declares `md` as `48rem` (`--breakpoint-md` in its `theme.css`), and a media
+ *  query's `rem` is the browser's default font size, so `768px` agrees with it only at a 16 px
+ *  default; at a 20 px one the `md:` classes switch at 960 px while a pixel query still would at
+ *  768. */
+export const MD_VIEWPORT_QUERY = "(min-width: 48rem)";
 
 const focusableSelector = [
   "a[href]",

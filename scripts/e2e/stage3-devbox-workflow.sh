@@ -740,6 +740,12 @@ until_true 120 "the child to join its first tree without taking a slot" child_is
 timeout_hook=
 state_file admission
 note "active roots: $(jq -c .admission.active "$evidence/admission.json"); waiting: $(jq -c .admission.waiting "$evidence/admission.json"); child $child_issue remains slotless under $root_issue"
+# The slotless check is everything this child was filed for, so the proof human takes it out of
+# the workflow at once: a child still in the workflow refuses its root's sign_off
+# (SIGNOFF_CHILD_IN_WORKFLOW), and the first root is accepted below, in retro-handoff.
+set_status "$child_issue" backlog
+until_true 300 "$child_issue to leave the workflow" issue_phase "$child_issue" "done"
+note "the proof human parked $child_issue (backlog): it takes no further turns and holds no issue above it"
 pass
 
 begin panes-pinned-to-the-rig-before-any-agent-turn

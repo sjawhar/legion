@@ -79,21 +79,19 @@ this session, each `set_status` minting its grant in-process from the registrati
 takeover session gets no token file from Legion: `legion controller start` and the pod write
 `LEGION_GH_OWNERS_DIR`'s tokens, but a hand-started session's `gh` is what its environment gives it.
 The takeover moves the role and the daemon's recorded session id to this session. Never pass a
-secret as a command argument or copy it into a transcript. The Envoy
-registration heartbeat keeps the role afterwards, so `/legion-claim-controller` is the manual
-override, not a routine step after a listener restart.
+secret as a command argument or copy it into a transcript. The Envoy registration heartbeat keeps
+the role afterwards, so `/legion-claim-controller` is the manual override, not a routine step
+after a listener restart.
 
-Two limits of a takeover session. It caches the controller secret it started with: the next
-`legion controller start` mints a new secret, every `set_status` in the takeover session then
-fails with a 403 from the grant mint, and the fix is to start a fresh OMP with the new secret, not to
-retry. And the role does not follow `/new` or `/fork` in a takeover session — without
-`LEGION_CONTROLLER=1` the new session is not a Legion session to the extension — so after either
-command run `/legion-claim-controller` again.
+Two limits of a takeover session. It caches the controller secret it started with: the next `legion
+controller start` mints a new secret, every `set_status` in the takeover session then fails with a
+403 from the grant mint, and the fix is a fresh OMP with the new secret, not a retry. And the role
+does not follow `/new` or `/fork` there — without `LEGION_CONTROLLER=1` the new session is no Legion
+session to the extension — so run `/legion-claim-controller` again after either command.
 
-Daemon state and the Dispatch project remain authoritative, and the start procedure below reads
-what happened while no controller ran. Who launched you is the deployment's `controller` setting:
-the operator, or the daemon itself. The `How this controller runs` part of your system prompt says
-which.
+Daemon state and the Dispatch project remain authoritative, and the start procedure below reads what
+happened while no controller ran. Who launched you is the deployment's `controller` setting: the
+operator, or the daemon itself. The `How this controller runs` part of your system prompt says which.
 
 ### Started by the daemon
 
@@ -217,17 +215,16 @@ own, or one that still holds, needs nothing.
 
 ## Free slots (Go daemon)
 
-A free slot is no reason to take an issue, and nothing reconsiders `backlog` or `icebox` on its
-own. Work reaches Legion only when a person hands it over or a role reports a clear defect
-([Issues handed to Legion](#issues-handed-to-legion-go-daemon)), and a labelled root in `todo`
-takes the next free slot through the daemon's waiting line (`admission.waiting`) without you, so a
-park means "should not run now", and a parked root keeps its `legion` label. Never label an issue
-nobody asked you to hand over. Never set a parked issue back to `todo` to fill a slot. The one
-exception is a clear defect, by the deployment owner's ruling: a clear defect goes to the controller
-and is filed for Legion. It fits `STRATEGY.md`'s "humans decide what, agents decide how". Its fix is
-"how", inside work a person already wants. Its `Filed for Legion` line names the source issue and
-the evidence. A defect whose fix needs a choice of "what" is an ask. A person's parked issue moves
-only when that person asks. These are every move to `todo` you make:
+A free slot is no reason to take an issue, and nothing reconsiders `backlog` or `icebox` on its own.
+Work reaches Legion only when a person hands it over or a role reports a clear defect ([Issues
+handed to Legion](#issues-handed-to-legion-go-daemon)), and a labelled root in `todo` takes the next
+free slot through the daemon's waiting line (`admission.waiting`) without you, so a park means
+"should not run now", and a parked root keeps its `legion` label. Never label an issue nobody asked
+you to hand over, and never set a parked issue back to `todo` to fill a slot. The one exception is a
+clear defect, by the deployment owner's ruling. It fits `STRATEGY.md`'s "humans decide what, agents
+decide how": its fix is "how", inside work a person already wants, and its `Filed for Legion` line
+names the source issue and the evidence. A defect whose fix needs a choice of "what" is an ask, and
+a person's parked issue moves only when that person asks. These are every move to `todo` you make:
 
 - a root a person handed over, or a clear defect you filed for Legion, at triage ([New issue triage](#new-issue-triage));
 - an issue a person asks you to start ([Issues handed to Legion](#issues-handed-to-legion-go-daemon));
@@ -265,15 +262,15 @@ them, and do the rest of the turn ([Turn discipline](#turn-discipline)).
 You file an issue when a person asks you to (a direct message, a Slack request, [Slack
 mentions](skill://legion-controller/references/slack-mentions.md), or their answer to a finding
 ask), for a clear defect, and the report issue. A finding, yours or one a role sends, takes one of
-the two paths of `skill://legion-worker/references/findings.md`:
+the two paths of `skill://legion-worker/references/findings.md`, and [finding
+asks](skill://legion-controller/references/finding-asks.md) gives the steps of both:
 
-- **A clear defect:** file it for Legion, as [finding
-  asks](skill://legion-controller/references/finding-asks.md#file-a-clear-defect) says.
+- **A clear defect:** file it for Legion, as its [File a clear
+  defect](skill://legion-controller/references/finding-asks.md#file-a-clear-defect) says.
 - **A finding that needs a decision:** open a `dispatch ask` on your report issue ([Daily
-  report](#daily-report-go-daemon) finds, creates or reopens it), as `findings.md` says, naming
-  where the fix belongs, and file nothing until a person answers. Follow another role's finding
-  ask, act on each answer, and catch up at every start, as [finding
-  asks](skill://legion-controller/references/finding-asks.md) says.
+  report](#daily-report-go-daemon) finds, creates or reopens it), naming where the fix belongs, and
+  file nothing until a person answers. Follow another role's ask, act on each answer, and catch up
+  at every start.
 
 Every issue you file carries one line in its spec, which [New issue triage](#new-issue-triage)
 reads. For a person it is `Filed for <person> at their request: <request>`. The request, and the
@@ -290,9 +287,10 @@ For a clear defect it is `Filed for Legion from <role> on <issue>: <evidence>`.
 
 Each `curl` in this skill and its references reads `DISPATCH_URL` and `DISPATCH_TOKEN_FILE`, which
 `legion controller start` sets only when `controller.yaml` names `dispatch_url`. A read that fails
-or prints no JSON array admits nothing and acts on nothing, and an assignment that does not print
-the issue with its new `assignee` leaves it unassigned (`400 ASSIGNEE_NOT_ALLOWED` names an email
-nobody has signed in to Dispatch with). Name either, with its first line, in your summary.
+or prints no JSON array admits nothing and acts on nothing, and an assignment that does not print the
+issue with its new `assignee` leaves the issue's assignee as the read showed it (`400
+ASSIGNEE_NOT_ALLOWED` names an email nobody has signed in to Dispatch with). Name either, with its
+first line, in your summary.
 
 ## Daily report (Go daemon)
 
@@ -302,9 +300,9 @@ change and why, and what is running.
 **Where.** On the issue the deployment instructions name for Legion's reports. With none named, on
 the project's `Legion daily report` issue: `dispatch search --query '"Legion daily report"' --project
 <PROJECT>` finds it. When it does not exist, create it once, unasked, and park it in `icebox`, so
-nobody takes it as work. It never carries the `legion` label. It holds every finding ask, so assign
-it to the person who answers for the project: the one the deployment instructions name, else the
-owner `dispatch whoami` names:
+nobody takes it as work, and it never carries the `legion` label. It holds every finding ask, so
+assign it to the person who answers for the project: the one the deployment instructions name, else
+the owner `dispatch whoami` names:
 
 ```text
 dispatch issue --project <PROJECT> --title 'Legion daily report' --assignee '<email>' --spec-file - <<'EOF'
@@ -315,9 +313,11 @@ EOF
 legion({ op: "set_status", issue: "<report KEY>", status: "icebox" })
 ```
 
-With no person known, leave out `--assignee`. While the issue's `Assignee:` says `unassigned`,
-each report opens with one sentence asking a person to take the issue from its header, since its
-asks reach only the Inbox's `Unassigned` filter.
+With no person known, leave out `--assignee`: the issue then goes to your token's owner, or, under
+the shared token, to the project's default assignee when a person set one on the Settings page, and
+is otherwise unassigned. While the issue's `Assignee:` says `unassigned`, each report opens with
+one sentence asking a person to take the issue from its header, since its asks reach only the
+Inbox's `Unassigned` filter.
 
 Each time you read it, keep it answerable. `Status: done` means someone closed it: Dispatch
 refuses an ask or a message there (`409 ISSUE_CLOSED`) and hides its open asks, so reopen it with
@@ -420,18 +420,17 @@ themselves: an issue reaches Legion only when a person hands it over or a role r
    decision, made from the issue header.
 2. Read who handed it over. `dispatch read` does not show who set a label, so list the issue's
    events: `curl -sS -H "Authorization: Bearer $(cat "$DISPATCH_TOKEN_FILE")" "$DISPATCH_URL/api/v1/issues/<issue>/events?limit=200"`.
-   The first `issue.created` or `issue.updated` event whose `payload.labels` holds `legion` (in
-   any case) set it, and its `actor` is who. A person's label (`actor.kind` is `user`) hands it
-   over. So does your own filing: its spec as filed (`dispatch doc-read --issue <issue> --version
-   1`) holds a `Filed for` line ([Findings, and the issues you
-   file](#findings-and-the-issues-you-file)), and its `actor` is this session, which `dispatch
-   whoami` names, or an earlier one of yours. An earlier session is yours when its reply starts
-   `Filed dispatch://<this KEY>`: under the ask a `Filed for <person>` line names, after a newest
-   answer of `File it for Legion`, or under the evidence comment a `Filed for Legion` line names.
-   Any other filing hands over nothing: leave the issue in `triage` and ask the person on your
-   report issue whether Legion should take it, naming the issue and who labelled it, with the
-   options `Admit it` and `Leave it`. On `Admit it`, admit it below. Either way, reply under the
-   ask `Admitted dispatch://<KEY>` or `Not admitted: <reason>`, as for a finding ask.
+   The first `issue.created` or `issue.updated` event whose `payload.labels` holds `legion` (in any
+   case) set it, and its `actor` is who. A person's label (`actor.kind` is `user`) hands it over. So
+   does your own filing: its spec as filed (`dispatch doc-read --issue <issue> --version 1`) holds a
+   `Filed for` line ([Findings, and the issues you file](#findings-and-the-issues-you-file)), and its
+   `actor` is this session, which `dispatch whoami` names, or an earlier one of yours. An earlier
+   session is yours when its reply starts `Filed dispatch://<this KEY>`: under the ask a `Filed for
+   <person>` line names, after a newest answer of `File it for Legion`, or under the evidence comment
+   a `Filed for Legion` line names. Any other filing hands over nothing: leave the issue in `triage`
+   and ask the person on your report issue whether Legion should take it, naming the issue and who
+   labelled it, with the options `Admit it` and `Leave it`. On `Admit it`, admit it below, and either
+   way reply `Admitted dispatch://<KEY>` or `Not admitted: <reason>`, as for a finding ask.
 3. If a person handed it over, or it is a clear defect you filed for Legion, and it should run now,
    admit the root issue:
 
@@ -444,16 +443,17 @@ themselves: an issue reaches Legion only when a person hands it over or a role r
    parking leaves the `legion` label in place. Park only a root that should not run now: in
    `todo` the daemon's admission queue holds it for a slot. Do not triage a system-created child
    as a root issue.
-5. When you post a triage note (a `dispatch comment` on the issue saying what you decided and
-   why), name who will be asked with the assignee sentence: `Assigned to <login>, who will get
-   this tree's questions and its design approval`, or, when the `Assignee:` line says
-   `unassigned`, `Unassigned — nobody's Inbox shows this tree's questions or its design approval
-   until someone takes it from the issue header (Assignee, beside Priority)`. The design approval
-   is promised only when the `Design gate policy:` line of your system prompt, which
-   whoever launched you writes from the daemon's own configuration, says
-   `gates.design: root-issues`. Under `gates.design: off` nobody approves a design, so drop "and
-   its design approval" (and "or its design approval") from the sentence. An unassigned root
-   still runs; its architect's asks reach no default Inbox list, only the `Unassigned` filter.
+5. When you post a triage note (a `dispatch comment` on the issue saying what you decided and why),
+   name who will be asked with the assignee sentence: `Assigned to <login>, who will get this tree's
+   questions and its design approval`, or, when the `Assignee:` line says `unassigned`, `Unassigned
+   — nobody's Inbox shows this tree's questions or its design approval until someone takes it from
+   the issue header (Assignee, beside Priority)`. The design approval is promised only when the
+   `Design gate policy:` line of your system prompt, which whoever launched you writes from the
+   daemon's own configuration, says `gates.design: root-issues`. Under `gates.design: off` nobody
+   approves a design, so drop "and its design approval" (and "or its design approval") from the
+   sentence. Take the line from the read, never from how the issue was created: an issue filed with
+   no assignee still lands on the project's default assignee where a person set one. An unassigned
+   root still runs; its architect's asks reach no default Inbox list, only the `Unassigned` filter.
 
 ## Architect escalation
 
