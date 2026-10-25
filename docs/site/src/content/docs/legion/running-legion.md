@@ -234,7 +234,26 @@ What each part is for:
   ([Envoy](/legion/dispatch/envoy/#how-slack-mentions-arrive-and-how-an-agent-replies) says how
   the mentions arrive and where the controller's reply token is stored). A channel belongs to one
   project: the loader refuses one named twice. A daemon restarted with a changed list relaunches the
-  controller, which resumes its session hearing the new list.
+  controller, which resumes its session hearing the new list. Its optional `deploys` names the
+  workflows that deploy its repositories to production, each a repository, a workflow file
+  directly under `.github/workflows/` (ending `.yml` or `.yaml`, the top-level file a run names,
+  not one it calls) and the step whose success is the deploy:
+
+  ```yaml
+  projects:
+    WIDGETS:
+      deploys: [{repo: <owner>/<name>, workflow: .github/workflows/<file>.yaml, step: Apply}]
+  ```
+
+  Each time a run of that workflow on the repository's default branch completes, the daemon reads
+  the run and its jobs from GitHub as the implement App, and wakes each open
+  [production check](/legion/legion/concepts/#the-production-check) of that repository once for
+  every job of the run whose named step succeeded after the check's pull request merged. A run a
+  pull request triggered, a step that was skipped or failed, and a step that finished before the
+  merge wake nothing. The run's `workflow_run` webhook reaches the daemon through Envoy, so the
+  Envoy App (or a repository webhook) must deliver the repository's events. The loader refuses one
+  repository's workflow named twice, and a daemon that predates the key refuses it at boot, as it
+  does any key it does not know.
 - **`daemon_url`**, **`envoy_url`**, **`dispatch_url`**, every **`nats_urls`** entry and the
   worker-stream host (**`advertise_host`** when set, **`bind`** otherwise) are handed to pods, so
   none of them may be a loopback or unspecified address. `advertise_host` (optional, Kubernetes
@@ -575,8 +594,8 @@ Closing the terminal leaves the project without one, and the daemon logs
 
   The `open production checks` line counts the closed issues whose production check is still
   open and names the oldest: its pull request, merge commit, which look it is on, what woke that
-  look (`merge`, `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`)
-  and when, and when the check's bound comes due (`none` when no check is open).
+  look (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build`
+  or `bound`) and when, and when the check's bound comes due (`none` when no check is open).
 
   `--json` prints everything the daemon records: `admission` (`cap`, `active`, `waiting`), each
   issue under `issues` with its `phase`, `status`, `repo` and `defaultBranch`, `holdReason`,

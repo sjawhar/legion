@@ -4,7 +4,8 @@ Read this to catch up after a restart, read a node, trace what cites it, or writ
 
 ## What comes back
 
-- After a restart, catch up with `dispatch read --issue <KEY>` (or `--artifact` with `--issue` or `--project`, or `--ref`). It prints the issue's summary, open asks, references and recent events, a document's summary (its issue, reference, versions and approval), an ask's, comment's or message's thread, or one block of a document. Reads do not subscribe. Use `dispatch doc-read` for document text.
+- After a restart, catch up with `dispatch read --issue <KEY>` (or `--artifact` with `--issue` or `--project`, or `--ref`). It prints the issue's summary, open asks, references and last 10 events, a document's summary (its issue, reference, versions and approval), an ask's, comment's or message's thread, or one block of a document. Reads do not subscribe. Use `dispatch doc-read` for document text.
+- To audit an issue's history (who asked what, which ask was answered), add `--events N` for the last N events or `--all-events` for every one. Both work on `--ref dispatch://KEY/log` too.
 - An anchored comment or ask prints `Position:`, where its quote's block stands. `unavailable (DOC_SERVICE_UNAVAILABLE)` means try again shortly. `unavailable (DOC_SCHEMA)` means the document needs repair.
 - The API gives the same facts as `anchor_block` (or `anchor_block_error`) on `GET /api/v1/comments/{id}` and `GET /api/v1/asks/{id}`. `GET /api/v1/artifacts/{id}/blocks/{block_id}` gives them for any block.
 - Each read ends with `Referenced by:` (what cites the node) and `Links:` (what it cites), across projects. "What led to this decision" is one read on the ask.

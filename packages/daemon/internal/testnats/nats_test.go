@@ -19,8 +19,12 @@ import (
 // A start that fails after Docker created the container — here a readiness wait that can never
 // succeed, as a start timing out under load does — leaves no container behind once it returns: the
 // container is shared by the package, so no test's end would remove it. The container is asked for
-// by its label on the same Docker daemon testcontainers created it on.
+// by its label on the same Docker daemon testcontainers created it on. A run on an external server
+// starts no container, and is how a host with no Docker runs these tests, so it skips this one.
 func TestAFailedStartLeavesNoContainer(t *testing.T) {
+	if server, _, err := external(); err == nil && server != "" {
+		t.Skipf("%s names a running NATS server, so the package starts no container", externalURLEnv)
+	}
 	label := "legion-testnats-" + rand.Text()
 	created, err := start(Image,
 		testcontainers.WithLabels(map[string]string{"legion.test": label}),
@@ -48,6 +52,37 @@ func TestAFailedStartLeavesNoContainer(t *testing.T) {
 }
 
 func TestMain(m *testing.M) { os.Exit(Main(m)) }
+
+// A running server is named by both of its variables, the monitoring endpoint's trailing slash
+// dropped, since the reset appends its path; neither set is no external server, and one set without
+// the other is refused naming both, never taken as an instruction to start a container.
+func TestAnExternalServerIsNamedByBothVariables(t *testing.T) {
+	for _, tc := range []struct {
+		name, server, monitoring string
+		wantServer, wantMonitor  string
+		wantErr                  bool
+	}{
+		{name: "both", server: "nats://127.0.0.1:4222", monitoring: "http://127.0.0.1:8222/", wantServer: "nats://127.0.0.1:4222", wantMonitor: "http://127.0.0.1:8222"},
+		{name: "neither"},
+		{name: "the client URL alone", server: "nats://127.0.0.1:4222", wantErr: true},
+		{name: "the monitoring endpoint alone", monitoring: "http://127.0.0.1:8222", wantErr: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv(externalURLEnv, tc.server)
+			t.Setenv(externalMonitorEnv, tc.monitoring)
+			server, monitoring, err := external()
+			if tc.wantErr {
+				if err == nil || !strings.Contains(err.Error(), externalURLEnv) || !strings.Contains(err.Error(), externalMonitorEnv) {
+					t.Fatalf("external() = %q, %q, %v; want an error naming %s and %s", server, monitoring, err, externalURLEnv, externalMonitorEnv)
+				}
+				return
+			}
+			if err != nil || server != tc.wantServer || monitoring != tc.wantMonitor {
+				t.Fatalf("external() = %q, %q, %v; want %q, %q", server, monitoring, err, tc.wantServer, tc.wantMonitor)
+			}
+		})
+	}
+}
 
 // A test's first create after URL's reset can meet nats-server still removing the account's
 // streams directory, and is answered with the store failure; CreateStream tries it again. Every

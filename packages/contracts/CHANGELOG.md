@@ -15,6 +15,12 @@
   `DISPATCH_BLOCK_ID_ENCODINGS`; `decodeBlockId` and `parseBlockFragment` read a fragment's id and
   pin back, for the dashboard and the client alike; `DISPATCH_TEXT_REFERENCES` gains the block and
   pin rows both reference readers are held to.
+- `dispatch_read` takes `events` (a positive integer, the issue's last N events) and `all_events`
+  (every event), for an issue read and its `dispatch://KEY/log`, and its description says an issue
+  read lists the last 10 without either.
+- `DEFAULT_ISSUE_READ_EVENTS` (10), how many of an issue's newest events `dispatch_read` lists
+  without `events` or `all_events`: the number its description names and `DispatchClient.read`'s
+  default.
 - The project default assignee the create chain ends on: `dispatch_issue`'s `assignee` help and
   `CreateIssueInput.assignee` say an omitted assignee falls to the project's default when that
   still names a person who has signed in, and `dispatch_whoami` says a session under the shared
