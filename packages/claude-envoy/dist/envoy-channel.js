@@ -43263,6 +43263,7 @@ var DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 var DEFAULT_HEARTBEAT_MS = 90000;
 var MIN_PASS_DEADLINE_MS = 30000;
 var MIN_INTERVAL_MS = 25;
+var MAX_INTERVAL_MS = 2147483647;
 function natsSeedFromEnvironment(env) {
   const { NATS_NKEY_SEED_FILE: file2, NATS_NKEY_SEED: plain } = env;
   if (file2 !== undefined) {
@@ -43351,7 +43352,7 @@ function envoySettings(env, config2, options = {}) {
   }
   const intervalMs = (raw, fallback) => {
     const parsed = Number(raw);
-    return Number.isFinite(parsed) && parsed > 0 ? Math.max(parsed, MIN_INTERVAL_MS) : fallback;
+    return Number.isFinite(parsed) && parsed > 0 ? Math.min(Math.max(parsed, MIN_INTERVAL_MS), MAX_INTERVAL_MS) : fallback;
   };
   const heartbeatMs = intervalMs(env.ENVOY_HEARTBEAT_MS, DEFAULT_HEARTBEAT_MS);
   return {
@@ -43360,7 +43361,7 @@ function envoySettings(env, config2, options = {}) {
     token,
     inbound,
     heartbeatMs,
-    passDeadlineMs: Math.max(intervalMs(env.ENVOY_PASS_DEADLINE_MS, MIN_PASS_DEADLINE_MS), heartbeatMs)
+    passDeadlineMs: Math.min(Math.max(intervalMs(env.ENVOY_PASS_DEADLINE_MS, MIN_PASS_DEADLINE_MS), heartbeatMs), MAX_INTERVAL_MS)
   };
 }
 function normalizeEnvoyUrl(value) {

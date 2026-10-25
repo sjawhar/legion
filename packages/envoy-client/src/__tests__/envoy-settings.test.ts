@@ -141,6 +141,41 @@ describe("envoySettings", () => {
     });
   });
 
+  // A delay past 2_147_483_647 ms overflows the host timer's 32-bit field and fires *at once*, so
+  // an unclamped value turns each setting into its opposite with nothing logged: a heartbeat that
+  // ticks continuously instead of hourly, and a pass deadline that abandons every pass the moment
+  // it is queued.
+  test("a heartbeat or pass deadline past the timer's ceiling is clamped to it", () => {
+    const config = configFrom({ envoy: listener });
+    for (const value of ["2147483648", "99999999999"]) {
+      expect(envoySettings({ ENVOY_HEARTBEAT_MS: value }, config)).toMatchObject({
+        heartbeatMs: 2_147_483_647,
+        // The deadline is never shorter than the heartbeat, so it cannot escape over the ceiling
+        // by that route either.
+        passDeadlineMs: 2_147_483_647,
+      });
+      expect(envoySettings({ ENVOY_PASS_DEADLINE_MS: value }, config)).toMatchObject({
+        heartbeatMs: 90_000,
+        passDeadlineMs: 2_147_483_647,
+      });
+    }
+  });
+
+  // The ceiling is the largest delay a timer takes as asked, so a value just under it is a
+  // legitimate configuration and must come back untouched: clamping low would shorten a deadline
+  // its caller chose and abandon passes that were meant to run on.
+  test("a heartbeat or pass deadline just below the ceiling is used as given", () => {
+    const config = configFrom({ envoy: listener });
+    expect(envoySettings({ ENVOY_HEARTBEAT_MS: "2147483646" }, config)).toMatchObject({
+      heartbeatMs: 2_147_483_646,
+      passDeadlineMs: 2_147_483_646,
+    });
+    expect(envoySettings({ ENVOY_PASS_DEADLINE_MS: "2147483646" }, config)).toMatchObject({
+      heartbeatMs: 90_000,
+      passDeadlineMs: 2_147_483_646,
+    });
+  });
+
   test("a section with enabled: false is off whatever the variables say, and the notice says so", () => {
     const config = configFrom({ envoy: { ...listener, enabled: false } });
     expect(

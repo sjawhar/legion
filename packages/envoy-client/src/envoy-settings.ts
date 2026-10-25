@@ -32,6 +32,12 @@ export const DEFAULT_HEARTBEAT_MS = 90_000;
 /** The floor under a pass deadline when nothing names one and the heartbeat is shorter than it. */
 export const MIN_PASS_DEADLINE_MS = 30_000;
 const MIN_INTERVAL_MS = 25;
+// The ceiling over every resolved interval: the largest delay a host timer takes without
+// overflowing its 32-bit signed field. A larger one wraps and the timer fires *at once*, which
+// turns each setting into its opposite and logs nothing - a heartbeat that ticks continuously,
+// and a pass deadline that abandons every queued task the moment it is queued. It is about 24.8
+// days, far past any configuration anyone means.
+const MAX_INTERVAL_MS = 2_147_483_647;
 
 /** The variables `envoySettings` consults, by name, over whatever else the environment holds. */
 export type EnvoyEnvironment = EnvoyConfigEnvironment & {
@@ -249,7 +255,9 @@ export function envoySettings(
   }
   const intervalMs = (raw: string | undefined, fallback: number): number => {
     const parsed = Number(raw);
-    return Number.isFinite(parsed) && parsed > 0 ? Math.max(parsed, MIN_INTERVAL_MS) : fallback;
+    return Number.isFinite(parsed) && parsed > 0
+      ? Math.min(Math.max(parsed, MIN_INTERVAL_MS), MAX_INTERVAL_MS)
+      : fallback;
   };
   const heartbeatMs = intervalMs(env.ENVOY_HEARTBEAT_MS, DEFAULT_HEARTBEAT_MS);
   // The pass deadline is never shorter than the heartbeat: a shorter one abandons every pass
@@ -258,15 +266,17 @@ export function envoySettings(
   // every tick, while a pass wedged before `registerSession` never registers at all. A caller that
   // wants a short deadline must shorten `ENVOY_HEARTBEAT_MS` with it. `MIN_INTERVAL_MS` has
   // nothing left to do here: the result is at least `heartbeatMs`, which it already floors.
+  // `MAX_INTERVAL_MS` is applied again over the `max`: both arms are already under it, so this
+  // only keeps the ceiling true of the result by every route into it.
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url),
     token,
     inbound,
     heartbeatMs,
-    passDeadlineMs: Math.max(
-      intervalMs(env.ENVOY_PASS_DEADLINE_MS, MIN_PASS_DEADLINE_MS),
-      heartbeatMs
+    passDeadlineMs: Math.min(
+      Math.max(intervalMs(env.ENVOY_PASS_DEADLINE_MS, MIN_PASS_DEADLINE_MS), heartbeatMs),
+      MAX_INTERVAL_MS
     ),
   };
 }
