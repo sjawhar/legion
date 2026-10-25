@@ -2,38 +2,32 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-221",
-  "completed": "2026-10-25T06:52:00Z",
-  "round": 8,
+  "completed": "2026-10-25T07:14:00Z",
+  "round": 9,
   "decision": "changes_requested",
   "critical": 0,
-  "important": 2,
+  "important": 1,
   "minor": 0,
   "keyFindings": [
     {
       "severity": "important",
-      "file": "docs/solutions/legion/a-port-held-in-an-issue-pod-is-a-sibling-roles-harness-move-your-run-with-the-five-port-variables-and-your-own-database-and-never-stop-the-holder-LEGION-695.md:43-49",
-      "description": "The INFRA-221 note this PR added calls the recipe above it 'still the step' and 'the clearest instance' of the line tools.md draws, summarising that line as 'about scope rather than about unpacking'. The recipe builds Postgres under literal /tmp (:37-39), which is not a mount in a role container (INFRA-44 note :53) and lost the harness twice in one morning (INFRA-43 :68); tools.md:84-91's first condition refuses it, and tools.md:182-186 cites this note as 'the illustration' of the test 'passed again'. Same class as round 7's finding 1: the location condition dropped from a hand-kept summary, here in a note marked status: active that a role follows."
-    },
-    {
-      "severity": "important",
-      "file": "docs/solutions/testing/the-real-dispatch-stack-runs-inside-a-legion-pod-with-no-postgres-no-docker-and-no-root-INFRA-42.md:41-44",
-      "description": "The note says 'still the step' for a recipe whose <root> and <data> are unplaced (:30, :36-38), and gives as the reason only that the line is drawn 'by what a prefix leaves resolving'. A role that reads this note alone has nothing telling it the root goes on the issue's volume; the INFRA-43 and INFRA-44 notes carry the same one-condition paraphrase, true of their own recipes only because those recipes already place the root on the volume. Name both conditions, or point at tools.md's 'The test: where it lands, and what it leaves resolving' heading, in all four notes."
+      "file": "skills/legion-worker/references/tools.md:84-91",
+      "description": "The test's first condition requires an install to land on the issue's volume 'through one of the variables the runtime actually sets for you' and lists nine. The worked case (:170-181) and this round's INFRA-43 note (:41-48, 'judged by both conditions ... the root lands under /legion') sanction the Dispatch harness at /legion/harness (INFRA-43 :69-70). That path is under none of the nine: the XDG homes and TMPDIR are under /legion/scratch (manifest.go:701, :730-737), Go's caches under /legion/go (:806-807), uv's under /legion/uv. Read as written, the canonical test classifies its own worked case as the withheld capability ('It is the withheld capability when either condition fails', :93). The ground the page gives for the condition (:153-168) is the issue's volume against the container's filesystem, which /legion/harness meets. Fix in one place: state condition 1 as landing on the issue's volume (under /legion), with the nine variables as where a tool's own cache already goes; or move the harness under a listed root and update INFRA-43. Keep the bundle identical."
     }
   ],
-  "ciRead": "Base main requires lint, typecheck, test and pr-title (rulesets; branch protection names none). The branch's newest pull_request run head is the code head 21c0047b30ea; its check-runs show all four completed/success. compare 21c0047b...4e5e344b is `ahead` with only .legion/ files; GitHub reports the pull request MERGEABLE.",
-  "threads": "Thirty-four threads, all resolved by the implementer. Round 7's two (PRRT_kwDORFy7ds6v9qYb, PRRT_kwDORFy7ds6v9qYf) were read against 4ec472c97eb1: both fixed as described; I accept both and unresolved none. This round's two findings are new threads.",
+  "ciRead": "Base main requires lint, typecheck, test and pr-title. The newest pull_request run head is the code head b4ebc2dd74e2 (only docs/solutions/ markdown since 21c0047b). At review time typecheck was success, lint in_progress, test and pr-title queued; an earlier pr-title run was cancelled when it was superseded. compare b4ebc2dd...fcefe699 is `ahead` with only .legion/ files; MERGEABLE. A REQUEST_CHANGES does not need these checks to finish; the next round reads them again.",
+  "threads": "Thirty-six threads, all resolved by the implementer. I read round 8's two (PRRT_kwDORFy7ds6v_F35, PRRT_kwDORFy7ds6v_F38) against b82e5899 and b4ebc2dd. Both are fixed as described. I accept both and unresolved none. This round's one finding is a new thread.",
   "verifiedMyself": [
-    "Round 7 finding 1 fixed: tools.md:45-51 no longer states the test, says a $HOME extraction fails its first condition whatever it is scoped to, and agrees with :158-165.",
-    "Round 7 finding 2 fixed: running-legion.md:188-190 rules out a client on a role's own PATH, not the unpacking.",
-    "The test is stated once, under '### The test: where it lands, and what it leaves resolving' (tools.md:82); the pointers at :45-46, :395 and docs/kubernetes.md:176-181,195 name headings that exist.",
-    "The committed bundle is byte-identical to skills/ (diff -r clean for legion-worker; legion-architect SKILL.md identical).",
-    "/tmp is not a mount in a role container: manifest.go:453-461 mounts the issue volume at /legion only, and TMPDIR (manifest.go:734) does not move an explicit /tmp path."
+    "LEGION-695 note: the /tmp placement is replaced by a root on the issue's volume, and the note cites the tools.md heading.",
+    "INFRA-44 note dates match GitHub: #2088 merged 2026-10-21T03:32:31Z, #2085 at 06:29:42Z. #2085 touches manifest.go, and roleEnvironment sets TMPDIR, GOCACHE and GOMODCACHE on /legion (manifest.go:728-738).",
+    "LEGION-748 note: the installs it supersedes land under $HOME (:51-53), so 'fails both conditions' is true.",
+    "INFRA-42 note places <root> and <data> on the issue's volume by INFRA-43, and cites the heading.",
+    "/legion/harness is under none of the nine listed variables (TreeRoot=/legion at names.go:48; scratchRoot=/legion/scratch at manifest.go:701)."
   ],
   "thermonuclear": {
-    "head": "4e5e344bbaa2be195b0c88e3d33589b66124ab7d",
-    "deepReview": "CHANGES at 4e5e344b: 1 medium, the LEGION-695 note endorsing a /tmp build that fails the first condition; confirmed both round-7 fixes, the toolchain consumers (CheckImage, probe-image, bootprobe, legion-api capability shape, stage4b) and the bundle hashes.",
-    "codeQuality": "CHANGES at 4e5e344b: 1 blocking, the same LEGION-695 note; Go capability changes sound; no reported findings."
+    "head": "fcefe699af71a8175bbfc6461f97182bb159aafa",
+    "deepReview": "CHANGES at fcefe699: 1 P2. The endorsed /legion/harness fails the canonical placement condition as written. It confirmed the INFRA-44 dates and manifest.go, and traced the toolchain consumers through CheckImage, probe-image, probe.go, deployment.go, legion-api.ts and stage4b; all are unchanged.",
+    "codeQuality": "CHANGES at fcefe699: the same single blocker. The Go changes are sound and it reported nothing else."
   },
-  "bodyNote": "E2E (implementer) carries eight successive 'Negative control:' lines (PR body :31-38), one per round; the proof line needs one, at this round's head.",
   "fastFollow": "none"
 }
