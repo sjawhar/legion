@@ -48090,9 +48090,23 @@ function phaseStallFrom(data) {
   }
 }
 function phaseStallReportFrom(data) {
-  const reported = data !== undefined && "reported" in data && data.reported === true;
-  const key = data !== undefined && "reportKey" in data && typeof data.reportKey === "string" ? data.reportKey : undefined;
+  const reported = "reported" in data && data.reported === true;
+  const key = "reportKey" in data && typeof data.reportKey === "string" ? data.reportKey : undefined;
   return { reported, reportKey: key };
+}
+function phaseStallEntryFrom(data) {
+  if (data === undefined)
+    return;
+  const stall = phaseStallFrom(data);
+  if (stall === undefined)
+    return;
+  const report2 = phaseStallReportFrom(data);
+  return {
+    state: stall.state,
+    count: stall.count,
+    reported: report2.reported,
+    ...report2.reportKey === undefined ? {} : { reportKey: report2.reportKey }
+  };
 }
 
 // ../pi-shared/src/phase-reminder.ts
@@ -48127,6 +48141,7 @@ function createPhaseReminder(deps) {
   let reportKey;
   let generation = 0;
   let turnRunning = false;
+  let continued = false;
   let lastAssistantText = "";
   let recorded = "";
   const entryOf = () => ({
@@ -48276,26 +48291,33 @@ function createPhaseReminder(deps) {
         generation += 1;
       advance(input);
     },
-    settle: async (text) => {
+    settle: async (text, options) => {
       turnRunning = false;
       generation += 1;
       lastAssistantText = text;
       const before = stall.count;
       const reminder = advance({ kind: "settle", lastAssistantText: text });
       if (stall.state === "waiting") {
+        continued = false;
         armReminder(reminderText(text), deps.limits.waitingMs);
         return;
       }
-      if (reminder === undefined)
+      if (reminder === undefined) {
+        continued = false;
         return;
-      if (before !== 0) {
+      }
+      if (before !== 0 || continued || options?.canContinue === false) {
+        continued = false;
         armReminder(reminder, deps.limits.reminderMs);
         return;
       }
-      if (!(await recordCheck()).reminds)
+      if (!(await recordCheck()).reminds) {
+        continued = false;
         return;
+      }
       advance({ kind: "reminded" });
       generation += 1;
+      continued = true;
       return reminder;
     },
     sessionChanged: () => {
@@ -48411,21 +48433,15 @@ function readPhaseStallRecord(file2, log) {
     log.warn("legion: the phase-stall state is not an object; this session starts afresh", { file: file2 });
     return NO_RECORD;
   }
-  const stall = phaseStallFrom(data);
-  if (stall === undefined) {
+  const entry = phaseStallEntryFrom(data);
+  if (entry === undefined) {
     log.warn("legion: the phase-stall state holds no state this build knows; starting afresh", {
       file: file2
     });
     return NO_RECORD;
   }
-  const report2 = phaseStallReportFrom(data);
   return {
-    entry: {
-      state: stall.state,
-      count: stall.count,
-      reported: report2.reported,
-      ...report2.reportKey === undefined ? {} : { reportKey: report2.reportKey }
-    },
+    entry,
     recreatedNoticeSent: "recreatedNoticeSent" in data && data.recreatedNoticeSent === true
   };
 }
@@ -48524,6 +48540,7 @@ function createPhaseHookEndpoint(deps) {
   });
   return {
     deliveryWritten: noteWritten,
+    phaseClosed: () => reminder.apply({ kind: "phase-closed" }),
     stop: dropTimer,
     handle: async (input) => {
       const parsed = hookArguments.safeParse(input);
@@ -48544,9 +48561,7 @@ function createPhaseHookEndpoint(deps) {
           return reminded === undefined ? {} : { decision: "block", reason: reminded };
         }
         case "StopFailure": {
-          const reminded = await reminder.settle(event.lastAssistantMessage ?? "");
-          if (reminded !== undefined)
-            armTimer(() => sendReminder(reminded), limits.reminderMs);
+          await reminder.settle(event.lastAssistantMessage ?? "", { canContinue: false });
           return {};
         }
         case "PostToolUse":
@@ -49473,7 +49488,11 @@ async function runEnvoyChannelServer() {
         claim: () => claim?.capability(),
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env })
       };
-      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments));
+      const answer = await executeLegionTool(legionRuntime, request.params.arguments);
+      const op = request.params.arguments?.["op"];
+      if (op === "handoff_complete" || op === "request_backward_move")
+        phaseHook?.phaseClosed();
+      return mcpResult(answer);
     }
     if (runtime === undefined)
       throw new Error("Envoy channel server is still starting");

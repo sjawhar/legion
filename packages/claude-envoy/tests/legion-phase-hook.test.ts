@@ -215,14 +215,43 @@ test("a turn that ended on an API error is settled, answered {} and reminded fro
     claim: implementer,
   })
   try {
-    // Claude Code ignores what a StopFailure hook returns, so the reminder it earned cannot be a
-    // continuation: it is written into the session instead.
+    // Claude Code ignores what a StopFailure hook returns, so the machine is told this settle can
+    // carry no continuation: it arms the reminder itself, under the guards every armed reminder
+    // has, and the count moves when that reminder is written into the session.
     expect(
       await endpoint.handle({ event: "StopFailure", lastAssistantMessage: "I pushed the branch." }),
     ).toEqual({})
-    expect(await record()).toEqual({ state: "open", count: 1, reported: false })
+    expect(await record()).toEqual({ state: "open", count: 0, reported: false })
     await waitFor(async () => inbox.length > 0, "the reminder the failed turn earned")
     expect(inbox).toEqual([REMINDER])
+    expect(await record()).toEqual({ state: "open", count: 1, reported: false })
+  } finally {
+    await close()
+  }
+})
+
+test("a successful handoff_complete closes the phase, and the next settle blocks nothing", async () => {
+  const { endpoint, record, inbox, close } = await harness({
+    record: recorded("open", 1),
+    claim: implementer,
+  })
+  try {
+    // What the server's CallTool handler does once the `legion` tool returned without throwing
+    // (`./src/envoy-channel-server`): the worker completed its phase, so nothing is open to
+    // remind it about any more.
+    endpoint.phaseClosed()
+    expect(await record()).toEqual({ state: "closed", count: 0, reported: false })
+
+    expect(
+      await endpoint.handle({ event: "Stop", lastAssistantMessage: "Completed the phase." }),
+    ).toEqual({})
+    // Neither a continuation nor a timer: the record check is not what stands between a finished
+    // worker and a reminder telling it to complete again. A case asserting that nothing happens
+    // has no condition to wait for, so this is one of the file's fixed waits, three times the
+    // reminder interval above.
+    await Bun.sleep(60)
+    expect(inbox).toEqual([])
+    expect(await record()).toEqual({ state: "closed", count: 0, reported: false })
   } finally {
     await close()
   }

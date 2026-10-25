@@ -59,9 +59,9 @@ const WAITING_REPLY = /^\W*WAITING\b/m;
  * namespace prefix: the shape the Stage 3 model emitted in place of a `tool_use` block. */
 const TOOL_CALL_SHAPED = /<(?:[\w-]+:)?(?:function_calls\b|invoke\s+name\s*=|parameter\s+name\s*=)/;
 
-/** What a worker whose turn ended with its phase open is told. The Claude Code bridge's own copy
- * (`packages/daemon/internal/claudebridge/stall.go`) is pinned to this text character for
- * character, so a change here is a change there. */
+/** What a worker whose turn ended with its phase open is told. This is the one copy, read by
+ * both hosts: the Claude Code bridge kept its own (`packages/daemon/internal/claudebridge/
+ * stall.go`, deleted with this change) until the bridge became pure transport. */
 export const REMINDER =
   "Your turn ended with your Legion phase still open: the `legion` tool's `handoff_complete` has " +
   "not succeeded since your assignment. If your phase's work is done, call the `legion` tool now " +
@@ -175,10 +175,8 @@ export function assistantRanTool(message: unknown): boolean {
 
 /** The state one recorded entry holds, or undefined when it holds none this build understands.
  * `quiet` and `text-call` are the build now in the pods: both mean the phase is open and nothing
- * has been reminded about it yet, so a session resumed on one is reminded rather than left alone.
- * Exported for the host whose record is not a transcript entry: the Claude Code state file
- * (`packages/claude-envoy/src/legion-phase-hook.ts`) reads the same mapping rather than its own. */
-export function phaseStallFrom(data: object): PhaseStallState | undefined {
+ * has been reminded about it yet, so a session resumed on one is reminded rather than left alone. */
+function phaseStallFrom(data: object): PhaseStallState | undefined {
   if (!("state" in data) || typeof data.state !== "string") return undefined;
   const recorded = "count" in data ? data.count : undefined;
   const count =
@@ -220,34 +218,48 @@ function lastPhaseStallData(branch: readonly unknown[]): object | undefined {
   return undefined;
 }
 
-/** The state the branch's last phase-stall entry recorded; closed with no reminders when it holds
- * none (a fresh session, before the daemon's first assignment). */
-export function restorePhaseStall(branch: readonly unknown[]): PhaseStallState {
-  const data = lastPhaseStallData(branch);
-  return (data === undefined ? undefined : phaseStallFrom(data)) ?? { state: "closed", count: 0 };
+/** What one recorded entry carries. The machine never reads `reported` and `reportKey`, and each
+ * host persists them its own way — the Oh My Pi transcript entry, the Claude Code state file —
+ * but they ride the same record, so a relaunch mid-run neither repeats an accepted notice nor
+ * loses the key a refused one is retried under. */
+export interface PhaseStallEntry {
+  readonly state: PhaseStall;
+  readonly count: number;
+  readonly reported: boolean;
+  readonly reportKey?: string;
 }
 
 /** Whether the architect has already been told about the run of reminders one record belongs to,
- * and the idempotency key that notice was sent under. The machine never reads these two, and each
- * host persists them its own way — the Oh My Pi transcript entry, the Claude Code state file —
- * but they ride the same record, so a relaunch mid-run neither repeats an accepted notice nor
- * loses the key a refused one must be retried under. */
-export function phaseStallReportFrom(data: object | undefined): {
+ * and the idempotency key that notice was sent under. */
+function phaseStallReportFrom(data: object): {
   readonly reported: boolean;
   readonly reportKey: string | undefined;
 } {
-  const reported = data !== undefined && "reported" in data && data.reported === true;
+  const reported = "reported" in data && data.reported === true;
   const key =
-    data !== undefined && "reportKey" in data && typeof data.reportKey === "string"
-      ? data.reportKey
-      : undefined;
+    "reportKey" in data && typeof data.reportKey === "string" ? data.reportKey : undefined;
   return { reported, reportKey: key };
 }
 
-/** `phaseStallReportFrom` over the branch's last phase-stall entry. */
-export function restorePhaseStallReport(branch: readonly unknown[]): {
-  readonly reported: boolean;
-  readonly reportKey: string | undefined;
-} {
-  return phaseStallReportFrom(lastPhaseStallData(branch));
+/** The record one entry's data holds, or undefined when it holds no state this build understands.
+ * The one assembly of a restored record: the Oh My Pi transcript entry reaches it through
+ * `restorePhaseStallEntry` and the Claude Code state file through `readPhaseStallRecord`
+ * (`packages/claude-envoy/src/legion-phase-hook.ts`), so no host assembles its own. */
+export function phaseStallEntryFrom(data: object | undefined): PhaseStallEntry | undefined {
+  if (data === undefined) return undefined;
+  const stall = phaseStallFrom(data);
+  if (stall === undefined) return undefined;
+  const report = phaseStallReportFrom(data);
+  return {
+    state: stall.state,
+    count: stall.count,
+    reported: report.reported,
+    ...(report.reportKey === undefined ? {} : { reportKey: report.reportKey }),
+  };
+}
+
+/** The record the branch's last phase-stall entry holds, or undefined when it holds none (a fresh
+ * session, before the daemon's first assignment). */
+export function restorePhaseStallEntry(branch: readonly unknown[]): PhaseStallEntry | undefined {
+  return phaseStallEntryFrom(lastPhaseStallData(branch));
 }

@@ -37,7 +37,8 @@ func (claudeLauncher) Marker() string { return " claude-bridge -- " }
 const ClaudeMCPServer = claudelaunch.MCPServer
 
 // ClaudeConfigDir is a claim's own Claude Code directory, its CLAUDE_CONFIG_DIR: the session
-// transcripts `--resume` reads, the MCP configuration, the bridge's phase-stall state. It is named
+// transcripts `--resume` reads, the MCP configuration, and the phase-stall record the pane's
+// Legion MCP server keeps (packages/claude-envoy/src/legion-phase-hook.ts). It is named
 // for the claim token, under the state directory but outside its secrets, so it outlives every
 // launch of the claim and no secret pruning removes it.
 func ClaudeConfigDir(stateDir string, token claim.Token) string {

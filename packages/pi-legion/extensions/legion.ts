@@ -23,18 +23,13 @@ import {
   LEGION_PLUGIN_LOADED_KEY,
   readEnvoyPluginInterface,
 } from "@legion/pi-shared/interface";
-import {
-  createPhaseReminder,
-  type EnvoyPublish,
-  type PhaseStallEntry,
-} from "@legion/pi-shared/phase-reminder";
+import { createPhaseReminder, type EnvoyPublish } from "@legion/pi-shared/phase-reminder";
 import {
   assistantRanTool,
   assistantText,
   inboundKind,
   PHASE_STALL_ENTRY,
-  restorePhaseStall,
-  restorePhaseStallReport,
+  restorePhaseStallEntry,
 } from "@legion/pi-shared/phase-stall";
 import type { CommandContext, PiApi, SessionContext } from "@legion/pi-shared/pi-types";
 import { legionRoleClaimBridge } from "@legion/pi-shared/role-claim-bridge";
@@ -260,14 +255,7 @@ export default function legionExtension(pi: PiApi): void {
     // A worker the daemon relaunched with --resume keeps its phase: its next turn may start from
     // an Envoy notice rather than a new assignment, and must find the phase still open. The
     // transcript is this host's store for that record; the runner is handed the record alone.
-    const branch = context.sessionManager.getBranch?.() ?? [];
-    const report = restorePhaseStallReport(branch);
-    const stallEntry: PhaseStallEntry = {
-      ...restorePhaseStall(branch),
-      reported: report.reported,
-      ...(report.reportKey === undefined ? {} : { reportKey: report.reportKey }),
-    };
-    phaseReminder.restore(stallEntry);
+    phaseReminder.restore(restorePhaseStallEntry(context.sessionManager.getBranch?.() ?? []));
     const session = classifySession(process.env);
     if (session.kind === "not-legion") return;
     // Every Legion session (a root architect, a phase worker, the controller) claims through the

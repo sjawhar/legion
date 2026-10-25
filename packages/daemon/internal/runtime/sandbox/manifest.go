@@ -211,8 +211,8 @@ type claudeInputs struct {
 	// legion is the image's `legion` (Tools.Legion), whose claude-bridge runs the worker's turns.
 	legion string
 	// session is the uuid the agent command names: the one the recorded transcript continues when
-	// the launch resumes (validateSessionPath read it from spec.ResumeSessionFile), and a fresh
-	// one otherwise.
+	// the launch resumes (prepare read it from spec.ResumeSessionFile with
+	// claudelaunch.ResumeSession), and a fresh one otherwise.
 	session string
 	// resume is whether session is a recorded transcript's rather than a fresh uuid, which is the
 	// difference between the agent command's `--resume` and its `--session-id` (claudelaunch.Argv).
@@ -225,6 +225,15 @@ type claudeInputs struct {
 // runsClaude is whether the launch's role runs Claude Code rather than the image's Oh My Pi: its
 // agent command, its launcher file and three of its variables are the Claude lane's.
 func (l launch) runsClaude() bool { return runtime.Of(l.spec.Backend) == runtime.BackendClaude }
+
+// sessionInDatabase is whether the launch's recorded session lives in the session database rather
+// than as a file on the volume every replacement pod mounts: the runtime keeps Oh My Pi's sessions
+// there (Options.SessionDSNKey, sessionsInDatabase) and the role is not a Claude Code one. A
+// Claude claim's session is a transcript on the issue's volume whatever `session_store` says
+// (claudeConfigDir, under the role's state home on that volume), so it is on the volume either
+// way. Everything that asks what the volume must hold, and what Oh My Pi is told about its store,
+// asks this.
+func (l launch) sessionInDatabase() bool { return l.sessionsInDatabase && !l.runsClaude() }
 
 // prepare checks spec and resolves everything a launch needs from it, reading the prompt files on
 // the daemon's disk, so a launch that cannot be honoured is refused before any API call: the
@@ -252,24 +261,31 @@ func (r *Runtime) prepare(spec runtime.SpawnSpec) (launch, error) {
 	} else {
 		l.cacheURL = r.cacheURL(CacheSandboxName(r.project, spec.Repository))
 	}
-	resumeSession := ""
 	if spec.ResumeSessionFile != "" {
-		session, err := validateSessionPath(spec.ResumeSessionFile, runtime.Of(spec.Backend), spec.Role)
-		if err != nil {
-			return launch{}, refuse("%v", err)
+		if !l.runsClaude() {
+			if err := validateSessionPath(spec.ResumeSessionFile); err != nil {
+				return launch{}, refuse("%v", err)
+			}
 		}
-		l.resumeFile, resumeSession = spec.ResumeSessionFile, session
+		l.resumeFile = spec.ResumeSessionFile
 	}
 	if l.runsClaude() {
 		mcp, err := claudelaunch.MCPConfig(claudeBun, claudePluginDir, claudeConfigDir(spec.Role))
 		if err != nil {
 			return launch{}, refuse("its Claude Code MCP configuration: %v", err)
 		}
-		// A launch that resumes continues the transcript the replaced pod left, by the id
-		// validateSessionPath read from its path; one that starts a session names a fresh uuid.
 		l.claude = claudeInputs{legion: r.tools.Legion, session: claudelaunch.NewSessionID(), mcp: string(mcp)}
-		if resumeSession != "" {
-			l.claude.session, l.claude.resume = resumeSession, true
+		// A launch that resumes continues the transcript the replaced pod left, by the id read
+		// from its path, which is the rule a Claude claim's recorded session is held to and the
+		// tmux lane's too (claudeResumeSession, runtime/tmux/claude.go): a transcript of this
+		// pod's own Claude Code directory and nothing else. One that starts a session names a
+		// fresh uuid.
+		if l.resumeFile != "" {
+			session, err := claudelaunch.ResumeSession(claudeConfigDir(spec.Role), l.resumeFile)
+			if err != nil {
+				return launch{}, refuse("%v", err)
+			}
+			l.claude.session, l.claude.resume = session, true
 		}
 	}
 	if err := l.kind.prepare(&l); err != nil {
@@ -339,25 +355,18 @@ func systemPrompt(parts runtime.PromptParts) (string, error) {
 	return strings.Join(fragments, "\n\n"), nil
 }
 
-// validateSessionPath keeps a recorded session where every replacement pod reads it, and reads
-// from it what the launch resumes. An Oh My Pi claim's session is a file on the volume every
-// replacement pod mounts at ompSessionsDir, and the rule is that path alone; it returns no id,
-// since Oh My Pi resumes by the path itself. A Claude claim's is a Claude Code transcript under
-// the pod's own Claude Code directory (claudeConfigDir),
-// `<CLAUDE_CONFIG_DIR>/projects/<cwd>/<uuid>.jsonl`, and the id `--resume` names is the one
-// claudelaunch.ResumeSession reads from it — the same rule, and the same refusal naming the
-// backend change that left a session of the other harness recorded, as the tmux lane's
-// claudeResumeSession (runtime/tmux/claude.go).
-func validateSessionPath(file string, backend runtime.Backend, role claim.Role) (string, error) {
-	if backend == runtime.BackendClaude {
-		return claudelaunch.ResumeSession(claudeConfigDir(role), file)
-	}
+// validateSessionPath keeps an Oh My Pi claim's recorded session where every replacement pod reads
+// it: a file on the volume mounted at ompSessionsDir, and the rule is that path alone, since Oh My
+// Pi resumes by the path itself. A Claude claim's recorded session is a transcript of the pod's
+// own Claude Code directory and is held to claudelaunch.ResumeSession instead, where the launch
+// also reads the id `--resume` names (prepare).
+func validateSessionPath(file string) error {
 	rest, ok := strings.CutPrefix(file, ompSessionsDir+"/")
 	if !ok || rest == "" || filepath.Clean(rest) != rest || strings.HasPrefix(rest, "../") {
-		return "", fmt.Errorf("recorded OMP session file %s is not under %s, the only directory a pod keeps sessions in; it cannot be resumed on this runtime",
+		return fmt.Errorf("recorded OMP session file %s is not under %s, the only directory a pod keeps sessions in; it cannot be resumed on this runtime",
 			file, ompSessionsDir)
 	}
-	return "", nil
+	return nil
 }
 
 // ClaudeSessionRefusal refuses file as a Claude Code transcript —
@@ -385,7 +394,7 @@ func SessionOnVolume(file, root string) (string, error) {
 	if err := ClaudeSessionRefusal(file); err != nil {
 		return "", err
 	}
-	if _, err := validateSessionPath(file, runtime.BackendOmp, ""); err != nil {
+	if err := validateSessionPath(file); err != nil {
 		return "", err
 	}
 	return sessionOnVolume(file, root), nil
@@ -1055,15 +1064,14 @@ func (r *Runtime) mainEnvironment(l launch) []corev1.EnvVar {
 	env = append(env, r.providersPointers()...)
 	// Oh My Pi's own two variables, which place the session in the database whose URL the mounted
 	// key holds (providers); with none, the pod baseline keeps it a file (internal/podsafety). A
-	// Claude Code role is told neither, whatever the store: its session is a Claude Code
-	// transcript on the issue's volume, which that database holds nothing of, and its role
+	// session that lives on the volume instead (sessionInDatabase) is told neither: the role
 	// launcher's existence check stats the file it is asked to resume unless OMP_SESSION_STORAGE
 	// is sql (internal/launcher's sessionWritten), so withholding these two is what sends the
-	// launcher down its file branch and onto the transcript. Nothing on the wire says so: a
-	// Backend on shimwire.LauncherStart would decide nothing this environment does not already
-	// decide, and an image whose launcher predates such a field would ignore it silently, since
-	// shimwire.Decode sets no DisallowUnknownFields.
-	if r.sessionDSNKey != "" && !l.runsClaude() {
+	// launcher down its file branch and onto a Claude role's transcript. Nothing on the wire says
+	// so: a Backend on shimwire.LauncherStart would decide nothing this environment does not
+	// already decide, and an image whose launcher predates such a field would ignore it silently,
+	// since shimwire.Decode sets no DisallowUnknownFields.
+	if l.sessionInDatabase() {
 		add(ompsessions.StorageVariable, ompsessions.SQLStorage)
 		add(ompsessions.DSNFileVariable, ProvidersDir+"/"+sessionDSNFile)
 	}

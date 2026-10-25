@@ -1139,7 +1139,14 @@ export async function runEnvoyChannelServer(): Promise<void> {
         claim: () => claim?.capability(),
         handoffCommit: (phase, role) => findHandoffCommit({ phase, role, env: process.env }),
       }
-      return mcpResult(await executeLegionTool(legionRuntime, request.params.arguments))
+      const answer = await executeLegionTool(legionRuntime, request.params.arguments)
+      // A call that returned without throwing: a completion, and a backward move, which hands the
+      // issue to another phase. Either way this session's phase is no longer open, and the
+      // reminder must stop — the same two operations the Oh My Pi host closes its phase on
+      // (`createLegionTool` in `packages/pi-legion/src/tools.ts`).
+      const op = request.params.arguments?.["op"]
+      if (op === "handoff_complete" || op === "request_backward_move") phaseHook?.phaseClosed()
+      return mcpResult(answer)
     }
     if (runtime === undefined) throw new Error("Envoy channel server is still starting")
     return mcpResult(await executeEnvoyTool(runtime, request.params.name, request.params.arguments))

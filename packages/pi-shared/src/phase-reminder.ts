@@ -5,7 +5,7 @@ import { messageFor } from "@legion/envoy-client/errors";
 import { EnvoyApiError, type PublishInput } from "@legion/envoy-client/transport";
 import type { ClaimCapability } from "./legion-phase-ops";
 import {
-  type PhaseStall,
+  type PhaseStallEntry,
   type PhaseStallInput,
   type PhaseStallState,
   reminderText,
@@ -21,11 +21,12 @@ import type { StallLimits } from "./stall-limits";
  * that knows what `pi` and the daemon client are.
  *
  * The first reminder of a run is the `session_stop` continuation, which the host turns into one
- * more turn of the same session. Every one after it is a timer: the run must settle so the daemon
- * sees the turn end, can deliver a queued task and can land a held suspension. The host's timer
- * cannot be cancelled (`SessionContext.setTimeout` returns void and there is no clearTimeout), so
- * a monotonic generation, bumped by everything that makes an armed timer stale, is the whole
- * defence against two timers sending two reminders.
+ * more turn of the same session, and it is the only one of that run: every one after it is a
+ * timer, so the run settles and the daemon sees the turn end, can deliver a queued task and can
+ * land a held suspension. A host that cannot continue at all says so on `settle`, and its first
+ * reminder is a timer too. The host's timer cannot be cancelled (`SessionContext.setTimeout`
+ * returns void and there is no clearTimeout), so a monotonic generation, bumped by everything
+ * that makes an armed timer stale, is the whole defence against two timers sending two reminders.
  */
 
 /** Publishes one Envoy message (`EnvoyClient.publish`). */
@@ -34,17 +35,6 @@ export type EnvoyPublish = (input: PublishInput) => Promise<unknown>;
 export interface PhaseReminderLog {
   readonly debug: (message: string, context?: Record<string, unknown>) => void;
   readonly warn: (message: string, context?: Record<string, unknown>) => void;
-}
-
-/** What one recorded entry carries. The machine never reads `reported` and `reportKey`, and each
- * host persists them its own way — the Oh My Pi transcript entry, the Claude Code state file —
- * but they ride the same record, so a relaunch mid-run neither repeats an accepted notice nor
- * loses the key a refused one is retried under. */
-export interface PhaseStallEntry {
-  readonly state: PhaseStall;
-  readonly count: number;
-  readonly reported: boolean;
-  readonly reportKey?: string;
 }
 
 export interface PhaseReminderDeps {
@@ -82,8 +72,14 @@ export interface PhaseReminder {
   readonly turnStarted: () => void;
   /** An input the session's hooks classified; `settle` and `reminded` are this module's own. */
   readonly apply: (input: Exclude<PhaseStallInput, { kind: "settle" | "reminded" }>) => void;
-  /** `session_stop`: the continuation text to return to the host, or undefined. */
-  readonly settle: (lastAssistantText: string) => Promise<string | undefined>;
+  /** `session_stop`: the continuation text to return to the host, or undefined. A host that
+   * cannot turn this settle into one more turn of the same session — Claude Code ignores what a
+   * `StopFailure` hook returns — says so with `canContinue: false`, and the reminder it earned
+   * comes from the timer instead, under every guard an armed reminder has. */
+  readonly settle: (
+    lastAssistantText: string,
+    options?: { readonly canContinue?: boolean }
+  ) => Promise<string | undefined>;
   /** `session_switch`, `session_branch`, `session_tree`. */
   readonly sessionChanged: () => void;
 }
@@ -137,6 +133,12 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
   /** Bumped by everything that makes an armed timer stale. */
   let generation = 0;
   let turnRunning = false;
+  /** Whether a continuation has already been delivered in the run that is now settling. The count
+   * cannot say so: the continuation's own turn is one the worker is being told to call a tool in,
+   * so a `tool-call` or an `inbound-event` puts the count back to 0 mid-run. At most one
+   * continuation per run: the run then settles, the daemon sees the turn end, and the next
+   * reminder comes from the timer with its delay. */
+  let continued = false;
   /** What the worker said as its last turn settled: the architect notice quotes its head. */
   let lastAssistantText = "";
   /** The entry last saved or restored, so only a change of the recorded value is saved. */
@@ -321,29 +323,41 @@ export function createPhaseReminder(deps: PhaseReminderDeps): PhaseReminder {
       if (input.kind === "phase-closed") generation += 1;
       advance(input);
     },
-    settle: async (text) => {
+    settle: async (text, options) => {
       turnRunning = false;
       generation += 1;
       lastAssistantText = text;
       const before = stall.count;
       const reminder = advance({ kind: "settle", lastAssistantText: text });
+      // Every outcome but the continuation ends the run here, so the next one may continue again.
       if (stall.state === "waiting") {
         // The machine sends no reminder into a quiet wait, so the timer carries the one this
         // settling message earned, for when the wait has been long enough.
+        continued = false;
         armReminder(reminderText(text), deps.limits.waitingMs);
         return undefined;
       }
       // A closed phase earns none.
-      if (reminder === undefined) return undefined;
-      if (before !== 0) {
-        // The worker has already been reminded and done nothing about it: let the run settle, and
-        // deliver this reminder from a timer instead.
+      if (reminder === undefined) {
+        continued = false;
+        return undefined;
+      }
+      // The continuation is the first reminder of a run and the only one of it: the worker has
+      // been reminded already (`before`), has had this run's continuation (`continued`), or is on
+      // a host that cannot continue at all, and the reminder comes from a timer instead. The run
+      // then settles, the daemon sees the turn end, and the next reminder comes with its delay.
+      if (before !== 0 || continued || options?.canContinue === false) {
+        continued = false;
         armReminder(reminder, deps.limits.reminderMs);
         return undefined;
       }
-      if (!(await recordCheck()).reminds) return undefined;
+      if (!(await recordCheck()).reminds) {
+        continued = false;
+        return undefined;
+      }
       advance({ kind: "reminded" });
       generation += 1;
+      continued = true;
       return reminder;
     },
     sessionChanged: () => {

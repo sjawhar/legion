@@ -76,13 +76,11 @@ func (issuePod) claimToken(project, issue string, role claim.Role) (claim.Token,
 }
 
 // prepare refuses a spec with no repository, which the workspace is provisioned from, and resolves
-// the workspace's place on the issue's volume. A resume of a session kept on the volume expects
-// the volume to hold what it left; a session kept in the database expects nothing of the volume, so
-// a resume on a new one provisions its workspace from the issue's pushed branch and continues.
-// A Claude claim's session is neither: its transcript is on the issue's volume whatever
-// `session_store` says (claudeConfigDir, under the role's state home on that volume), so its
-// resume expects the volume however Oh My Pi's sessions are kept, and a lost volume is
-// workspace-init's loud refusal rather than a quiet fresh agent.
+// the workspace's place on the issue's volume. A resume of a session kept on the volume
+// (sessionInDatabase) expects the volume to hold what it left; a session kept in the database
+// expects nothing of the volume, so a resume on a new one provisions its workspace from the
+// issue's pushed branch and continues. A lost volume a resume expected is workspace-init's loud
+// refusal rather than a quiet fresh agent.
 func (issuePod) prepare(l *launch) error {
 	spec := l.spec
 	if spec.Repository.IsZero() {
@@ -93,7 +91,7 @@ func (issuePod) prepare(l *launch) error {
 		return err
 	}
 	l.workspace = working.Dir
-	l.expectVolume = l.resumeFile != "" && (l.runsClaude() || !l.sessionsInDatabase)
+	l.expectVolume = l.resumeFile != "" && !l.sessionInDatabase()
 	return nil
 }
 
@@ -224,19 +222,18 @@ func ghAgentEnv(l launch) []corev1.EnvVar {
 }
 
 // provision is what a new issue pod needs before it starts: it reads whether workspace-init must
-// find the issue's volume holding retained sessions (for an Oh My Pi claim never under a session
-// database, which keeps none on it; for a Claude claim whatever the store, since its transcript
-// is on that volume either way, prepare), mints the provisioning token for the repository's owner,
-// makes sure the repository has its cache (EnsureRepositoryCache: one a sweep has not made yet is
-// made now), since a fresh feed comes from that cache alone, waits until the cache's Service is
-// its own (awaitCacheService), since the fetch presents the cache's token at that Service's name,
-// and writes the token to the pod's init-only provisioning Secret with the cache's bearer token.
-// It waits on no other pod, the cache's included: the fetch waits for the cache to be ready
-// itself, and the issue's clone lives on the issue's own volume, which no other pod mounts. A
-// cache that cannot be made, or whose Service is not its own by the boot timeout, fails the
-// launch, with nothing written: the fetch could fill no fresh feed without it.
+// find the issue's volume holding retained sessions (for a claim whose sessions live on that
+// volume rather than in the database, sessionInDatabase), mints the provisioning token for the
+// repository's owner, makes sure the repository has its cache (EnsureRepositoryCache: one a sweep
+// has not made yet is made now), since a fresh feed comes from that cache alone, waits until the
+// cache's Service is its own (awaitCacheService), since the fetch presents the cache's token at
+// that Service's name, and writes the token to the pod's init-only provisioning Secret with the
+// cache's bearer token. It waits on no other pod, the cache's included: the fetch waits for the
+// cache to be ready itself, and the issue's clone lives on the issue's own volume, which no other
+// pod mounts. A cache that cannot be made, or whose Service is not its own by the boot timeout,
+// fails the launch, with nothing written: the fetch could fill no fresh feed without it.
 func (issuePod) provision(ctx context.Context, r *Runtime, l *launch, s *sandbox) error {
-	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" && (l.runsClaude() || !l.sessionsInDatabase) {
+	if !l.expectVolume && l.spec.WorkspaceRecoveredFrom == "" && !l.sessionInDatabase() {
 		sessions, err := r.store.IssueHasSessions(ctx, r.project, l.spec.Issue)
 		if err != nil {
 			return fmt.Errorf("read its issue's retained sessions: %w", err)

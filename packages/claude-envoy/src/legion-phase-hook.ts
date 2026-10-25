@@ -8,9 +8,8 @@ import {
   createPhaseReminder,
   type EnvoyPublish,
   type PhaseReminderLog,
-  type PhaseStallEntry,
 } from "@legion/pi-shared/phase-reminder"
-import { phaseStallFrom, phaseStallReportFrom } from "@legion/pi-shared/phase-stall"
+import { type PhaseStallEntry, phaseStallEntryFrom } from "@legion/pi-shared/phase-stall"
 import { stallLimits } from "@legion/pi-shared/stall-limits"
 import { workspaceRecreatedNotice } from "@legion/pi-shared/workspace-recreated"
 import { z } from "zod"
@@ -25,9 +24,10 @@ import { configuredValue } from "./claude-session"
  * (`./envoy-channel-server`). Nothing of the machine is re-decided here.
  *
  * The record lives in a file rather than a transcript entry, `<CLAUDE_CONFIG_DIR>/
- * legion-phase-stall-<session id>.json`, which is the path and the write the Go bridge already
- * uses (`packages/daemon/internal/claudebridge/config.go`, `stall.go`), so a session carried
- * across the cutover keeps one record in one place.
+ * legion-phase-stall-<session id>.json`. Nothing else writes that file: the Go bridge, which
+ * wrote it until this change made it pure transport, is now only what carries a line into the
+ * session. The path and the atomic rename are kept as the bridge left them, so a session carried
+ * across the cutover from the build now in the pods still reads its record.
  *
  * The first reminder of a run is the `Stop` hook's `block`, which Claude Code turns into one more
  * turn of the same session. Every one after it is written into the session over the bridge's
@@ -62,8 +62,10 @@ const HOOK_EVENTS = [
  * How many inbox lines this server wrote are kept waiting for the prompt that carries them back.
  * Each is dropped as its prompt arrives, so the set stays at the one or two lines in flight; the
  * cap is what bounds it when a line never comes back at all, because the bridge handed two of
- * them to one turn. A turn whose line was dropped by the cap counts as an assignment, which
- * resets the count rather than holding it: the safe way to be wrong.
+ * them to one turn. A turn whose line was dropped by the cap counts as an assignment rather than
+ * an inbound event: both put the count back to 0, but an assignment reopens a phase an inbound
+ * event would leave closed, so the mistake is the unsafe direction and the record check is all
+ * that bounds it. The cap is high enough that only a bridge that lost a line reaches it.
  */
 const WRITTEN_LINES_KEPT = 32
 
@@ -103,6 +105,10 @@ export interface PhaseHookEndpoint {
    * prompt that carries it back is that delivery's turn, not a fresh assignment, and this is the
    * only way the endpoint can tell the two apart: the server writes every delivery itself. */
   readonly deliveryWritten: (content: string) => void
+  /** The `legion` tool's `handoff_complete`, or its `request_backward_move`, returned without
+   * throwing: this session's phase is no longer open. The CallTool handler of the same server
+   * calls it (`./envoy-channel-server`), as `onPhaseCompleted` does on the Oh My Pi host. */
+  readonly phaseClosed: () => void
   /** Drops the armed timer, so a 15-minute WAITING wait never holds a shutting-down server
    * open (the server's own `stop`). */
   readonly stop: () => void
@@ -132,8 +138,9 @@ export interface PhaseHookDeps {
   readonly log: PhaseReminderLog
 }
 
-/** `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json`, the path the Go bridge's
- * `Configure` builds (`packages/daemon/internal/claudebridge/config.go`). */
+/** `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json`, the path the Go bridge built while
+ * it kept this record itself: kept as it was, so a session carried across the cutover from the
+ * build now in the pods finds the record where it left it. */
 export function phaseStallFile(configDir: string, sessionID: string): string {
   return join(configDir, `legion-phase-stall-${sessionID}.json`)
 }
@@ -157,8 +164,8 @@ export function paneReminderLog(write: (line: string) => void): PhaseReminderLog
 /**
  * What this host's state file holds: the record the machine shares with the Oh My Pi host, and the
  * one key only this host keeps. `PhaseStallEntry` is the machine's record and both hosts read it,
- * so the extra key is composed around it here rather than added to it, and a record written by the
- * Go bridge, which has no such key, still reads.
+ * so the extra key is composed around it here rather than added to it, and a record the Go bridge
+ * left behind, which has no such key, still reads.
  */
 export interface PhaseStallRecord {
   /** The phase and count the file holds, or undefined when it holds none this build knows. */
@@ -174,10 +181,11 @@ const NO_RECORD: PhaseStallRecord = { entry: undefined, recreatedNoticeSent: fal
 
 /**
  * The record `file` holds: a missing file is no record at all, so a fresh session restores
- * nothing. A file written by the build now in the pods holds only `{"state":"quiet"}` or
- * `{"state":"text-call"}`, and `phaseStallFrom` is the one place that maps those to an open phase
- * with no reminders yet; a missing `count`, `reported` or `reportKey` reads as 0, false and
- * absent.
+ * nothing. The entry itself is assembled where the Oh My Pi host's is
+ * (`phaseStallEntryFrom`), so a record written by the build now in the pods —
+ * `{"state":"quiet"}` or `{"state":"text-call"}` — reads as an open phase with no reminders yet
+ * here too, and a missing `count`, `reported` or `reportKey` reads as 0, false and absent. This
+ * host adds the warning for a record it understands none of, and its own `recreatedNoticeSent`.
  */
 export function readPhaseStallRecord(file: string, log: PhaseReminderLog): PhaseStallRecord {
   let raw: string
@@ -208,31 +216,25 @@ export function readPhaseStallRecord(file: string, log: PhaseReminderLog): Phase
     log.warn("legion: the phase-stall state is not an object; this session starts afresh", { file })
     return NO_RECORD
   }
-  const stall = phaseStallFrom(data)
-  if (stall === undefined) {
+  const entry = phaseStallEntryFrom(data)
+  if (entry === undefined) {
     log.warn("legion: the phase-stall state holds no state this build knows; starting afresh", {
       file,
     })
     return NO_RECORD
   }
-  const report = phaseStallReportFrom(data)
   return {
-    entry: {
-      state: stall.state,
-      count: stall.count,
-      reported: report.reported,
-      ...(report.reportKey === undefined ? {} : { reportKey: report.reportKey }),
-    },
+    entry,
     recreatedNoticeSent: "recreatedNoticeSent" in data && data.recreatedNoticeSent === true,
   }
 }
 
 /** Replaces `file` with `entry` and this host's own key, through a temporary file in the same
  * directory renamed into place, so a process killed mid-write never leaves half a record to read:
- * the Go bridge's `writeStall` (`packages/daemon/internal/claudebridge/stall.go`), matched. The
- * key is written only once it is true, so a record this host writes is otherwise the shared entry
- * and nothing more. A write that fails is logged rather than thrown: the worker still gets its
- * reminder. */
+ * the shape the Go bridge wrote the same file in while it kept this record, kept so a session
+ * carried across the cutover reads whatever the build now in the pods left. The key is written
+ * only once it is true, so a record this host writes is otherwise the shared entry and nothing
+ * more. A write that fails is logged rather than thrown: the worker still gets its reminder. */
 export function writePhaseStallRecord(
   file: string,
   entry: PhaseStallEntry,
@@ -374,6 +376,7 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
 
   return {
     deliveryWritten: noteWritten,
+    phaseClosed: () => reminder.apply({ kind: "phase-closed" }),
     stop: dropTimer,
     handle: async (input) => {
       const parsed = hookArguments.safeParse(input)
@@ -402,14 +405,12 @@ export function createPhaseHookEndpoint(deps: PhaseHookDeps): PhaseHookEndpoint 
         }
         case "StopFailure": {
           // The turn ended on an API error. Claude Code ignores whatever this hook returns, so
-          // this event can only record and arm: the machine settles as it does on `Stop`, the
-          // answer is `{}` whatever comes back, and the reminder that settle earned — one the
-          // runner has already counted as delivered — is written from the timer instead of as a
-          // continuation this event cannot make. This is the one event of the five the pod
-          // measurements did not cover; it records only, so a `StopFailure` that never fires
-          // costs the reminder after an API-error turn and nothing else.
-          const reminded = await reminder.settle(event.lastAssistantMessage ?? "")
-          if (reminded !== undefined) armTimer(() => sendReminder(reminded), limits.reminderMs)
+          // this event cannot carry a continuation: the machine is told so and arms the reminder
+          // its settle earned itself, under every guard an armed reminder has. This is the one
+          // event of the five the pod measurements did not cover; it records only, so a
+          // `StopFailure` that never fires costs the reminder after an API-error turn and nothing
+          // else.
+          await reminder.settle(event.lastAssistantMessage ?? "", { canContinue: false })
           return {}
         }
         case "PostToolUse":

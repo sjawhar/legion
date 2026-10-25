@@ -80,11 +80,12 @@ every hook with `{}` for a session that holds no claim yet (the bridge's seeding
 or whose role is `architect` — the same gate `phaseWorkerSession` applies in pi-legion. `Stop`
 settles the machine: the first reminder of a run comes back as
 `{"decision":"block","reason":<the reminder>}`, which Claude Code turns into one more turn of the
-same session; every later one is written into the session over the bridge's inbox from a timer,
-because a line written while a turn runs is appended to that turn and the run would never settle
-for the daemon. `StopFailure` (the turn ended on an API error, and Claude Code ignores whatever
-the hook returns) records and arms that timer instead. `PostToolUse` and `PostToolUseFailure` are
-the worker working, which puts the count back to zero; a non-empty `${agent_id}` is a subagent's
+same session, and it is the only one of that run; every later one is written into the session over
+the bridge's inbox from a timer, because a line written while a turn runs is appended to that turn
+and the run would never settle for the daemon. `StopFailure` (the turn ended on an API error, and
+Claude Code ignores whatever the hook returns) settles with `canContinue: false`, so the machine
+arms that timer for the reminder instead. `PostToolUse` and `PostToolUseFailure` are the worker
+working, which puts the count back to zero; a non-empty `${agent_id}` is a subagent's
 call and is ignored. `UserPromptSubmit` is this server's only sight of an inbound turn — the
 daemon's task reaches Claude Code's stdin from the bridge, never this process — so it declares the
 turn, drops the armed timer, and classifies the prompt: the reminder it last wrote is itself and
@@ -92,6 +93,13 @@ changes nothing, a line this server wrote (an Envoy delivery, the recreated-work
 an inbound event, and anything else is an assignment. The tool is visible to the model, and a call
 it does not recognise is answered with `PHASE_HOOK_REFUSAL` and records nothing, so the model
 cannot zero its own count.
+
+**What closes the phase.** Nothing a hook sees: the `legion` tool's `handoff_complete`, and its
+`request_backward_move`, are calls of the same MCP server, and its CallTool handler tells the
+endpoint (`phaseClosed`) once one of the two returned without throwing — the two operations
+`createLegionTool` closes the Oh My Pi host's phase on. Until that lands, a completed worker's
+record still says `open`, and only the runner's record check, which fails open when the daemon
+does not answer, stands between it and a reminder telling it to complete again.
 
 **The state file.** This host has no transcript entry to record in, so the record is
 `<CLAUDE_CONFIG_DIR>/legion-phase-stall-<session id>.json` (`phaseStallFile`), written whole

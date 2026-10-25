@@ -30,7 +30,7 @@ import {
   PHASE_STALL_ENTRY,
   REMINDER,
   reminderText,
-  restorePhaseStall,
+  restorePhaseStallEntry,
 } from "@legion/pi-shared/phase-stall";
 import type {
   CommandContext,
@@ -1748,6 +1748,25 @@ describe("Legion OMP extension", () => {
       expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 2, reported: false });
     });
 
+    // The continuation's own turn is one the worker was told to call a tool in, so it very often
+    // does: the count is back at zero and only the run's own flag says the continuation has
+    // already gone out. Without it the run would never settle — reminder, model turn, reminder,
+    // with no delay and no turn end for the daemon to see.
+    test("a tool call in the continuation's own turn earns no second continuation: one per run", async () => {
+      const worker = await bootStalling({});
+      await worker.arrives(assignment);
+      expect(await worker.settles("Pushed.")).toEqual(followUp("handoff_complete"));
+
+      await hook(worker.handlers, "message_end")(ranTool, worker.context);
+      expect(recorded(worker).at(-1)).toEqual({ state: "open", count: 0, reported: false });
+
+      expect(await worker.settles("Read the file.")).toBeUndefined();
+      expect(worker.timers.map((timer) => timer.delayMs)).toEqual([
+        DEFAULT_STALL_LIMITS.reminderMs,
+      ]);
+      expect(steered(worker)).toEqual([]);
+    });
+
     test("the reminding never stops: with nothing arriving from outside, every settle earns the next reminder", async () => {
       const worker = await bootStalling({});
       await worker.arrives(assignment);
@@ -1868,7 +1887,7 @@ describe("Legion OMP extension", () => {
     // reminded about, so a session resumed on one is reminded rather than left alone.
     test("a resume on the state the deployed build wrote stands at an open phase with nothing counted", async () => {
       const branch = branchAt({ state: "quiet" });
-      expect(restorePhaseStall(branch)).toEqual({ state: "open", count: 0 });
+      expect(restorePhaseStallEntry(branch)).toEqual({ state: "open", count: 0, reported: false });
 
       const resumed = await bootStalling({ branch });
 

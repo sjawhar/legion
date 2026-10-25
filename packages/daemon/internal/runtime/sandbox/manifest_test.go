@@ -2025,39 +2025,49 @@ func TestAResumingClaudePodContinuesItsTranscriptByItsID(t *testing.T) {
 	}
 }
 
-// validateSessionPath holds each backend's recorded session to its own harness's rule. A Claude
-// claim resumes a transcript of the pod's own Claude Code directory and nothing else: one of
-// another role's directory, an Oh My Pi session file, or a name that is no session id is refused,
-// and a session of the other harness is refused naming the backend change that left it recorded,
-// as the tmux lane's resume refuses one (claudelaunch.ResumeSession). An Oh My Pi claim's rule is
-// the pod's sessions directory, unchanged, and a Claude transcript is no session of it.
-func TestValidateSessionPathIsEachBackendsOwnRule(t *testing.T) {
+// Each harness's recorded session is held to its own rule, where the launch resolves it. A Claude
+// claim resumes a transcript of the pod's own Claude Code directory and nothing else, which
+// prepare reads through claudelaunch.ResumeSession as the tmux lane's resume does: one of another
+// role's directory, an Oh My Pi session file, or a name that is no session id is refused, and a
+// session of the other harness is refused naming the backend change that left it recorded. An Oh
+// My Pi claim's rule is validateSessionPath, the pod's sessions directory, unchanged, and a Claude
+// transcript is no session of it.
+func TestARecordedSessionIsHeldToItsHarnesssRule(t *testing.T) {
+	r, err := configure(goldenOptions())
+	if err != nil {
+		t.Fatal(err)
+	}
+	resuming := func(file string) (launch, error) {
+		spec := claudeResumeSpec(t)
+		spec.ResumeSessionFile = file
+		return r.prepare(spec)
+	}
 	transcript := claudeTranscript(claim.RoleTester)
-	session, err := validateSessionPath(transcript, runtime.BackendClaude, claim.RoleTester)
-	if err != nil || session != claudeTranscriptID {
-		t.Fatalf("validateSessionPath(%s, claude) = %q, %v; want the transcript's session id %s", transcript, session, err, claudeTranscriptID)
+	l, err := resuming(transcript)
+	if err != nil || l.claude.session != claudeTranscriptID || !l.claude.resume {
+		t.Fatalf("prepare resuming %s = %q (resume %v), %v; want the transcript's session id %s",
+			transcript, l.claude.session, l.claude.resume, err, claudeTranscriptID)
 	}
 	for name, file := range map[string]string{
 		"a transcript of another role's directory": claudeTranscript(claim.RolePlanner),
 		"an Oh My Pi session file":                 resumeSession,
 	} {
-		_, err := validateSessionPath(file, runtime.BackendClaude, claim.RoleTester)
-		if err == nil || !strings.Contains(err.Error(), file) ||
+		if _, err := resuming(file); err == nil || !strings.Contains(err.Error(), file) ||
 			!strings.Contains(err.Error(), "the role's backend changed since it was recorded") {
-			t.Errorf("validateSessionPath(%s, %s, claude) = %v, want a refusal naming it and the backend change", name, file, err)
+			t.Errorf("prepare of a Claude claim resuming %s (%s) = %v, want a refusal naming it and the backend change", name, file, err)
 		}
 	}
 	named := claudeConfigDir(claim.RoleTester) + "/projects/--cwd--/2026-09-23T12-00-00-000Z_0198.jsonl"
-	if _, err := validateSessionPath(named, runtime.BackendClaude, claim.RoleTester); err == nil ||
+	if _, err := resuming(named); err == nil ||
 		!strings.Contains(err.Error(), "not named for a Claude Code session id") {
-		t.Errorf("validateSessionPath(%s, claude) = %v, want it refused as no session id", named, err)
+		t.Errorf("prepare of a Claude claim resuming %s = %v, want it refused as no session id", named, err)
 	}
-	if _, err := validateSessionPath(resumeSession, runtime.BackendOmp, claim.RoleTester); err != nil {
-		t.Errorf("validateSessionPath(%s, omp) = %v, want the pod's sessions directory accepted", resumeSession, err)
+	if err := validateSessionPath(resumeSession); err != nil {
+		t.Errorf("validateSessionPath(%s) = %v, want the pod's sessions directory accepted", resumeSession, err)
 	}
-	if _, err := validateSessionPath(transcript, runtime.BackendOmp, claim.RoleTester); err == nil ||
+	if err := validateSessionPath(transcript); err == nil ||
 		!strings.Contains(err.Error(), "cannot be resumed on this runtime") {
-		t.Errorf("validateSessionPath(%s, omp) = %v, want it refused as no file of the pod's sessions directory", transcript, err)
+		t.Errorf("validateSessionPath(%s) = %v, want it refused as no file of the pod's sessions directory", transcript, err)
 	}
 }
 
