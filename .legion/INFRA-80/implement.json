@@ -2,78 +2,67 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-80",
-  "completed": "2026-10-25T10:55:00Z",
-  "round": "3 — answering review 5642336459 (REQUEST_CHANGES at e1bc9cb0, 5 open threads)",
+  "completed": "2026-10-25T12:35:00Z",
+  "round": "4 — answering review 5642791870 (REQUEST_CHANGES at e1bc9cb0, 4 open threads), plus the architect's two body items",
   "proof": [
     {
-      "criterion": "2. An issue whose branch has been merged and deleted starts its agents, and this round's deletion of the dead <root>/sessions write holds on the real command.",
-      "surface": "The real `legion workspace-init provision` binary built from this round's head, against a real bare git remote and a real feed mirror, provisioning into an empty root — the command an issue pod's second init container runs.",
-      "command": "legion workspace-init provision --issue ACME-1 --repo acme/widgets --default-branch main --root /tmp/p2/root --credential-helper '!true' --feed /tmp/p2/feed, with refs/heads/legion/ACME-1 deleted from both the bare remote and the feed mirror",
-      "observed": "Exit 0 and `workspace-init: /tmp/p2/root/workspaces/acme/widgets/acme-1 on legion/ACME-1 from main`. The workspace holds a.txt alone with legion/ACME-1 an empty commit on main, and the root holds `repos` and `workspaces` and no `sessions` directory.",
-      "headSha": "7609fd93fdc2f992b5eca3c4652d5a612e56e5ba",
-      "negativeControl": "The same command with legion/ACME-1 restored on the remote and in the feed put the workspace on legion/ACME-1 at 'branch work' with b.txt present."
+      "criterion": "The e2e harness's SQL-backed session reader, which is the round's blocking fix and the one piece of it that reading cannot settle.",
+      "surface": "A real PostgreSQL 16, brought up as a Job in the cluster from this pod on the pgvector/pgvector image the harness itself pins, seeded with the daemon's own schema (omp_session_files and omp_session_files_parts exactly as internal/ompsessions/ompsessions.go:42-45 declares them), with one row and two parts inserted at start_offset 200 then 100.",
+      "command": "kubectl apply -f <job>; the job runs the exact statement scripts/e2e/stage4b-sandbox-tree.sh's session_text runs — SELECT f.content || coalesce((SELECT string_agg(p.content, '' ORDER BY p.start_offset) FROM omp_session_files_parts p WHERE p.path = f.path), '') FROM omp_session_files f WHERE f.path = :'path' — under psql -X -q -A -t, and prints od -c of the result",
+      "observed": "The row's content, then the part at offset 100, then the one at offset 200 — offset order and not insert order. Embedded single quotes, escaped double quotes, \\t and \\n survive byte for byte, and exactly one trailing newline remains, which is -A -t's plus the reader's own strip. The three lines read back as the three JSON objects seeded.",
+      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
+      "negativeControl": "Two, both run in the same job. A path the table does not hold answers empty, which is what makes the reader fail naming the path as the old `cat` of a missing file did. A path of `x'; DROP TABLE omp_session_files; --` matched 0 rows and left the table standing with its row, because the path is passed as a psql variable (-v path=…, :'path') and never spliced into the SQL."
     },
     {
-      "criterion": "1. No disk outlives a pod, the disk carries no labels, the controller's pod is one launcher and no init container, and this round's displacement guard holds in both directions.",
-      "surface": "The rendered Sandbox judged against the pinned production Agent Sandbox custom-resource definition, whose schema walker reproduces the API server's pruning, plus the package's own rig for the displacement and failed-init classifications.",
-      "command": "cd packages/daemon && go test ./internal/runtime/sandbox -run 'TestManifestGoldens|TestManifestMatchesTheSandboxCRD|TestAnIssuePodOwnsItsDiskAndItsSandboxOwnsNoVolume|TestTheControllersClaimTemplateCarriesItsProjectAndRoleAlone|TestALaunchReplacesTheIssueSandboxOfTheSupersededDiskShape|TestTheMappingRowByRowInPrecedence|TestTheControllersPodIsOneLauncherOnAVolumeOfItsOwn' -count=1",
-      "observed": "All pass. The controller's pod renders one container and no `initContainers` key, and its two goldens are the only ones that moved for it.",
-      "headSha": "7609fd93fdc2f992b5eca3c4652d5a612e56e5ba",
-      "negativeControl": "Three run and reverted across the rounds: a label on the ephemeral claim template fails the CRD check with `metadata.labels: not in the schema; the API server prunes it`; removing the displaced-pod carry fails with `the Sandbox this launch created names \"\" as the pod the daemon replaced`; reverting the failed-init rule to `initExit != nil` fails the killed-init row with `initFailed = true, want false`. This round adds the window's own pair: without the runtime's record a sibling probed from inside the gap reads `gone, Displaced false`, and with the record never dropped a role of the replacement's own pod that later dies is wrongly read Displaced."
+      "criterion": "A confirming read the replacement's delete overtakes is Uncertain, not a final Gone that charges a death the daemon itself made.",
+      "surface": "The sandbox package's own rig, driving the fake dynamic client so the delete lands while the confirming GET is out — the mirror of round 3's test, which probes from inside the gap.",
+      "command": "cd packages/daemon && CGO_ENABLED=0 go test ./internal/runtime/sandbox -count=1 -run 'TestAConfirmingReadTheReplacementsDeleteOvertakesIsUncertain|TestASiblingReadBetweenAMigratingLaunchsDeleteAndCreateIsDisplaced'",
+      "observed": "Both pass: the read the delete overtakes answers Uncertain and the claim stays watched, and a second probe once the store has settled answers Gone with Displaced true.",
+      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
+      "negativeControl": "With the generation comparison disabled the new test fails: `the reviewer recorded in the replaced pod, read by a confirming GET the replacement's delete overtook: gone, Displaced false (no pod of sandbox legion-legion-legion-208 (operatingMode Suspended)); want Uncertain — the record taken before the read is not the one its absence belongs to, and a final verdict would charge a death the daemon made`."
     },
     {
-      "criterion": "5. The configuration refusal: a deployment cannot keep sessions as files on a disk that dies with its pod.",
-      "surface": "The real `legion start --check-config` CLI built from this round's head, against deploy/kubernetes/daemon/legion.yaml.example with its token files, App PEMs and kubeconfig staged.",
-      "command": "legion start --check-config --config legion.yaml (postgres), then the same file with session_store: pvc and session_dsn_secret removed, then with session_store omitted entirely",
-      "observed": "The example passes: exit 0, `Config OK: project=WIDGETS`. Both the explicit `pvc` and the omitted key exit 1 with `legion start: runtime.kubernetes.session_store must be 'postgres': an issue pod's disk is deleted with the pod, so a session kept as a file on it ('pvc') dies with it and the next launch's resume fails on the missing file, retiring the claim after three failures`.",
-      "headSha": "7609fd93fdc2f992b5eca3c4652d5a612e56e5ba",
-      "negativeControl": "The unmodified example, which names postgres and its secret, exits 0 — so the refusal is the store's and not a broken fixture."
+      "criterion": "The inherited red lane is green at this head, read here rather than inferred from main.",
+      "surface": "The repository's own guard at the branch's head after the forward merge that imported main's fix.",
+      "command": "bun test packages/pi-legion/src/skills-guard.test.ts",
+      "observed": "10 pass, 0 fail. skills/legion-architect/SKILL.md is 33,757 bytes against the guard's 51,200, after INFRA-376 (merge 56ba79b8cf6d) moved its Wake routing section into skills/legion-architect/references/wake-routing.md.",
+      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
+      "negativeControl": "The same command at every earlier head of this pull request fails with `[{ \"bytes\": 51256, \"file\": \"legion-architect/SKILL.md\" }]`, which is why the merge was taken."
     },
     {
-      "criterion": "5. No code is left that reuses, repairs or inspects a disk from an earlier pod, and nothing of the deleted controller subcommand remains.",
-      "surface": "The tree itself at this round's head.",
-      "command": "grep -rn 'LEGION_EXPECT_ISSUE_VOLUME\\|WorkspaceLost\\|workspace-recovered\\|hasRetainedSession\\|IssueHasSessions\\|ensureCloneConnectivity\\|mark-lost' packages docs scripts, and grep -rn 'workspace-init controller\\|mountsProviders\\|WorkspaceRecoveredFrom' packages docs scripts AGENTS.md deploy",
-      "observed": "17 hits for the first, every one history, a deliberate statement that the thing is gone, or a negative assertion in the live proofs. Zero hits for the second.",
-      "headSha": "7609fd93fdc2f992b5eca3c4652d5a612e56e5ba",
-      "negativeControl": "The same greps at the branch's base return the implementations themselves."
-    },
-    {
-      "criterion": "The branch's diff across the round's second forward merge, which is the head this round completes on.",
-      "surface": "jj over the pushed commits, as skill://legion-worker/references/conflicts-and-rewrites.md defines the fingerprint, plus GitHub's own mergeability.",
-      "command": "jj diff --from 'fork_point(\"main\"@origin | <head>)' --to <head> --git --context 0 '~(.legion | docs/solutions)' | sed -e '/^@@/d' -e '/^index /d' | sha256sum, at 7609fd93fdc2 and again at c99701afc1e7",
-      "observed": "5f37ac27… before, bdcb5864… after — **changed**, and reported as changed. The change is a contract collision, not drift: main shipped daemon/plugin contract 36 for INFRA-229 while this branch had taken 36, so this branch moves to 37 as version.go's own collision note prescribes, with main's 36 entry kept as main wrote it. Six further files conflicted and were resolved by which sentence is true of the merged tree. GitHub reported mergeable false / dirty before the merge and true after, and the five workflow runs it then started are the first this head has had.",
-      "headSha": "c99701afc1e7aa4dc709c7d331f1af2bd90d7a6c",
-      "negativeControl": "GitHub itself: `git merge-tree --write-tree --name-only` named the seven conflicting files before the merge, and `mergeable_state` moved from `dirty` to `blocked` after it."
+      "criterion": "The branch's own diff is unchanged across the round's forward merge.",
+      "surface": "jj over the pushed commits, as skill://legion-worker/references/conflicts-and-rewrites.md defines the fingerprint, with GitHub's own conflict read beside it.",
+      "command": "git merge-tree --write-tree --name-only c03eee9a 862a809d, then the fingerprint at 862a809d and at 4c9bf0e6",
+      "observed": "merge-tree named no conflicting file, and the fingerprint is 7062196879022e75272447d84a252f45cea4435c9bc3efacebf4ff913054d12f on both sides — unchanged. Only the bare gates were re-run at the merge head.",
+      "headSha": "4c9bf0e687a3fa4699d0b9bb9066abf5ff91d3c1",
+      "negativeControl": "The two earlier forward merges of this branch: the first unchanged with one conflicting file, the second legitimately changed by the contract collision and reported as changed."
     }
   ],
   "filesChanged": [
-    "scripts/e2e/lib/stage4b-pods.test.ts: the Biome formatter error this round's own lost_detail removal left, which made the required `lint` lane red (thread 4370231566).",
-    "packages/daemon/internal/runtime/sandbox/{sandbox,relaunch,observe}.go and relaunch_test.go: the runtime keeps the displaced pod's uid under the Sandbox's name across the gap a migrating replacement opens, and the observer consults it only once the API server has confirmed the name holds no Sandbox (thread 4370231571, first half).",
-    "docs/kubernetes.md: the cutover's true order — push and stop every running issue, then stop the earlier daemon, then apply the image — and step 3's corrected disclosure that a live claim's launch is the boot itself (thread 4370231571, second half).",
-    "scripts/e2e/stage4b-sandbox-tree.sh: the parked issue's disk is read inside the bounded wait at all three sites (thread 4370231575).",
-    "scripts/e2e/README.md: the three checkpoint rows say what their checkpoints now assert (thread 4370231582).",
-    "packages/daemon/internal/runtime/sandbox/podkind.go, cmd/legion/{workspace_init,main}.go, the controller goldens and tests: the controller's emptied init container and the `workspace-init controller` subcommand are deleted (thread 4370231589).",
-    "packages/daemon/internal/runtime/sandbox/{manifest_test,layout_test}.go: the two comments that still said the controller's volume is where its session is resumed from (the reviewer's fast-follow).",
-    "packages/daemon/internal/api/version.go, packages/contracts/fixtures/daemon-api/version.json, both plugin manifests, the rebuilt claude-envoy bundle, both CHANGELOGs, packages/pi-legion/AGENTS.md and docs/kubernetes.md: the daemon/plugin contract moves from 36 to 37 for the collision with main's INFRA-229.",
-    "AGENTS.md, docs/site/src/content/docs/legion/concepts.md, scripts/e2e/README.md, scripts/e2e/lib/stage4b-verdict.test.ts, scripts/e2e/stage4b-sandbox-tree.sh, packages/pi-legion/CHANGELOG.md: the second forward merge's twenty-four conflict hunks."
+    "scripts/e2e/stage4b-sandbox-tree.sh: one SQL-backed session reader (session_psql, session_text, session_copy) that every pod-session consumer goes through, in place of a pod_exec cat per call site; claim_session_text and pair_text keep their names (thread 4370611493).",
+    "scripts/e2e/lib/stage4b-session-text.test.ts: the reader's own unit test, beside the four suites that pin the script's produced shape.",
+    "packages/daemon/internal/runtime/sandbox/{sandbox,relaunch,observe}.go and relaunch_test.go: a generation counter beside the gap record, and an Uncertain verdict when a confirming read is overtaken by the replacement's delete (thread 4370611498).",
+    "packages/daemon/internal/runtime/sandbox/podkind.go: the controllerPod type comment no longer describes the deleted init container (thread 4370611503).",
+    "docs/kubernetes.md: the cutover's step 9 drops a label selector that cannot answer its question in either direction, and says why; the jq audit that follows is the instrument (the architect's item).",
+    "The pull request body: the contract number is 37 in the Change bullets and the census, the deleted-world sweep is published with its command, and the body is trimmed (thread 4370611500 and the architect's item)."
   ],
   "trickyParts": [
-    "The displacement record's lifetime is the whole of its correctness: written just before the delete is sent, reading the uid off the Sandbox being deleted rather than at the patch that wrote the annotation (a launch can suspend a pod and then fail before the delete, after which the next launch replaces a Sandbox whose annotation an earlier launch wrote), kept through every failure in between, and dropped by the one `createSandbox` both creates now go through. Kept past the Create it would be the opposite defect, which the second test pins.",
-    "The cutover's ordering was a false promise rather than an unaccepted loss: raising the contract makes boot post StalePlugin to every restored live claim, that relaunch is a migrating one, and `supersededDisk` matches every issue pod of the previous release — so the disks are gone before step 1's census can be read. Fixed in the runbook's order on the architect's ruling; no hold was added to the relaunch path.",
-    "A contract-number collision with main: both branches took 36. version.go's own note prescribes taking the number above, so this branch is 37 and main's 36 entry stands as written. Every declaration of the number had to move with it, including the rebuilt claude-envoy bundle."
+    "The session reader's output handling is where a transcript is easiest to corrupt: psql's aligned and quoted formats would mangle JSONL, so it runs -A -t; the capture is $(psql … && printf x) so the session's own trailing newlines survive the substitution, with psql's one closing newline then taken off; and an empty answer is what distinguishes a session the table does not hold from a short one, which is what lets the reader fail naming the path as the old cat did.",
+    "One generation counter for every name, not one per name: a per-name counter deleted with its record would read the same before a strand as after its unstrand, which is exactly the window it exists to catch. A bump for another issue costs one Uncertain and a re-evaluation a tick later.",
+    "The forward merge is an exception to 'reintegrate the base only on a real conflict' — merge-tree named no conflict — and was taken on the architect's ruling for a different reason: the red lane was inherited and unfixable on this branch, and main had the fix."
   ],
   "deviations": [
-    "The architect first ruled that I should trim `skills/legion-architect/SKILL.md` by 56 bytes to clear the inherited guard red, then reversed it twenty minutes later on better information: dispatch://INFRA-376 moves that skill's whole Wake routing section into a references file, which removes the condition rather than squeezing under it, and a trim here would conflict with that move. The file is left untouched and the red is recorded on the pull request with its owner.",
-    "The census in the pull request body was taken at 55624814a287. The reviewer re-ran all nine searches at the round-2 head and found eight exact, with `SuspendIssue` reading 24 against the body's 25 because the forward merge moved the tree after the census was taken; every one of the 24 falls in a class the body lists. The body now says so."
+    "The sweep found four session reads the enumeration had missed (pair_settled's grep, record_pair's and collect_transcripts' tars, and the daemon-launched controller's tar); they were fixed with the named ones rather than left for a later round.",
+    "Two pod_exec cat calls were deliberately left and said so in the code: the recovery marker's absence assertion, and the operator token, which is not a session.",
+    "The body trim stopped at 48,378 characters. Everything cut was mine — the per-thread ledger for rounds 1 and 2, whose content lives in the thread replies GitHub keeps, and my own E2E block, which now points at this handoff and those replies. The remaining long passages are the tester's E2E evidence, which is not mine to shorten."
   ],
   "openQuestions": [
-    "One red lane is inherited from main and is not this change's: `bun test packages/pi-legion/src/skills-guard.test.ts` fails because `skills/legion-architect/SKILL.md` is 51256 bytes against the guard's 51200. The file is byte-identical at 4b01e0122f94 (#2180, which last touched it), at main's tip, and in this branch, which does not touch it. Routed to the project controller; fixed by dispatch://INFRA-376, after which a forward merge clears the lane.",
-    "The seven inverted Stage 4a per-check assertions have still not run. The live run against b650d854 answered the design's open assumption — the Agent Sandbox controller passes the ephemeral pod volume through untouched — and died at root-ready before them. The cause is fixed and the rerun is arranged against c99701af. Until it reports, nothing here shows the disk going with its pod on a real cluster.",
-    "Stage 4b has run at no head."
+    "Stage 4b is repaired and has run at no head, here or anywhere. The proof above covers the reader's SQL and nothing else; the bun suites that pin the script's shape were written by the same reading that wrote the repair. shellcheck is not installed in this pod (`command -v shellcheck` returns nothing), so the scripts have `bash -n` and `bunx biome check scripts/e2e/lib` only.",
+    "The seven inverted Stage 4a per-check assertions have still not run. The live run answered the design's open assumption — the Agent Sandbox controller passes the ephemeral pod volume through untouched — and died at root-ready before them. The cause was fixed in round 2 and the rerun is arranged.",
+    "Two documentation residues the reviewer found while enumerating, both in scripts/e2e/README.md and both already carried as review findings rather than fixed here: the pod-baseline row promising OMP_SESSION_STORAGE=file, and the setup-negative row describing a Sandbox-owned PVC deleted by hand."
   ],
   "discoveredComplexity": [
-    "A correction to the architect's own note, reached by reading this branch rather than the deployment's commit: `movedSessionStore` replaces rather than relaunches a pod created before the session database was configured, and the replacement's resume is then refused by the table. On this branch that case cannot arise at all, because `configure` refuses an empty session DSN key and every pod projects the file — so it can only ever apply to pods the deployment's current daemon has already created, at the cutover, which is the single pass the runbook now orders around.",
-    "GitHub runs no `on: pull_request` workflow at all while a pull request conflicts, so a conflicting head is never judged whatever its content. This round's second forward merge was required for that reason rather than to refresh anything, and the head before it carries no verdict.",
-    "./internal/daemon, ./internal/admit, ./internal/intake, ./internal/natsauth and ./internal/testnats cannot run in a Legion pod (rootless Docker or LEGION_TEST_PG_DSN); ./internal/runtime/tmux needs tmux; ./internal/supervise needs CGO_ENABLED=0 exported; three check scripts need PyYAML; two tests in scripts/e2e/lib need Docker. Everything else was run green here, including `bunx biome check .` with no error."
+    "The deleted-world sweep's honest result is that two of its four categories were already clean, and clean for a reason: the recovery vocabulary survives only as negative assertions — the lost-volume line must never appear, the recovery marker must never exist — and Stage 4a reads a marker rather than transcripts, which is why the marker path was its only tie to the old world. A category checked and found clean, with its command, is reported as clean rather than padded to look like a wider fix.",
+    "A build Job in this namespace is admitted only with activeDeadlineSeconds and ttlSecondsAfterFinished on both the Job and its pod template, automountServiceAccountToken false, runtimeClassName gvisor, the build compute class, and at least 4 CPU; ConfigMaps are forbidden, so a script reaches the pod base64-encoded in its command. That is what it took to exercise the reader's SQL against a real Postgres from a worker pod, and it is worth knowing for the next role that needs a database."
   ]
 }
