@@ -8,7 +8,7 @@
 // schema) is parsed and evaluated on every prompt. The role helpers import from here, never the
 // other way round.
 import { readFileSync } from "node:fs"
-import { mkdir, readdir, rename, rm, stat, writeFile } from "node:fs/promises"
+import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import { hasErrnoCode } from "@legion/envoy-client/errors"
 import { configuredValue } from "./claude-session"
@@ -22,6 +22,16 @@ export async function writeAtomicStateFile(file: string, contents: string): Prom
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`
   await writeFile(temporary, contents, { mode: 0o600 })
   await rename(temporary, file)
+}
+
+/**
+ * Mark `file` as current without touching what it holds: the sweeps below read an mtime for
+ * "last seen", and a holder that is still holding has nothing new to write. A touch also leaves
+ * no temporary file beside it, which an atomic rewrite on every heartbeat would.
+ */
+export async function touchStateFile(file: string): Promise<void> {
+  const now = new Date()
+  await utimes(file, now, now)
 }
 
 /** Whether an entry of a state directory may go, given its path. */

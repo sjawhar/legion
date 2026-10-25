@@ -47665,13 +47665,17 @@ import { basename as basename3, join as join5 } from "path";
 
 // src/session-state.ts
 import { readFileSync as readFileSync5 } from "fs";
-import { mkdir, readdir, rename, rm, stat, writeFile } from "fs/promises";
+import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
 import { dirname as dirname2, join as join4 } from "path";
 async function writeAtomicStateFile(file2, contents) {
   await mkdir(dirname2(file2), { recursive: true, mode: 448 });
   const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await writeFile(temporary, contents, { mode: 384 });
   await rename(temporary, file2);
+}
+async function touchStateFile(file2) {
+  const now = new Date;
+  await utimes(file2, now, now);
 }
 async function pruneStateDirectory(directory, isStale) {
   const entries = await readdir(directory).catch((error48) => {
@@ -48576,12 +48580,27 @@ async function startChannelSession(options) {
 `);
     });
   };
+  let roleRefreshFailureReported = false;
+  const refreshRoleRecord = async () => {
+    const roleFile = roleStateFile(options.stateDirectory, identity.id);
+    try {
+      await touchStateFile(roleFile);
+      roleRefreshFailureReported = false;
+    } catch (error48) {
+      if (!roleRefreshFailureReported) {
+        roleRefreshFailureReported = true;
+        process.stderr.write(`envoy-channel: could not refresh the role record ${roleFile} (${messageFor(error48)}); retrying every heartbeat
+`);
+      }
+    }
+  };
   const reassertRole = async (afterOutage) => {
     if (heldRole === undefined)
       return;
     const role = heldRole;
     const holder = await options.client.getRole(role).then((info) => info.holder, undefinedOnNotFound);
     if (holder === identity.id) {
+      await refreshRoleRecord();
       if (afterOutage)
         fireRegained(role, "reregistered");
       return;
@@ -48709,7 +48728,10 @@ async function startChannelSession(options) {
   await serialized(async () => {
     await register();
     await restoreRole().catch((error48) => {
-      process.stderr.write(`envoy-channel: could not restore the role from ${roleStateFile(options.stateDirectory, identity.id)} (${messageFor(error48)}); the session starts without one
+      const unparseable = error48 instanceof SyntaxError || error48 instanceof exports_external.ZodError;
+      if (!unparseable)
+        roleTransferFrom = identity.id;
+      process.stderr.write(`envoy-channel: could not restore the role from ${roleStateFile(options.stateDirectory, identity.id)} (${messageFor(error48)}); ${unparseable ? "the session starts without one" : "the next heartbeat retries"}
 `);
     });
   });

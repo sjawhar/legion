@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test"
-import { mkdir, readdir, readFile, rm, writeFile } from "node:fs/promises"
+import { mkdir, readdir, readFile, rm, stat, utimes, writeFile } from "node:fs/promises"
 import { dirname, join } from "node:path"
 import type { EnvoyClient } from "@legion/envoy-client/transport"
 import {
@@ -8,12 +8,19 @@ import {
   startChannelSession,
 } from "../src/envoy-channel-server"
 import {
+  pruneStaleSessionRoles,
+  readPersistedRole,
   roleStateFile,
   SessionIdentity,
   sessionHandoffFile,
   writeSessionHandoff,
 } from "../src/session-identity"
-import { readChosenTitleSync, sessionTitleFile, writeChosenTitle } from "../src/session-state"
+import {
+  readChosenTitleSync,
+  STATE_FILE_MAX_AGE_MS,
+  sessionTitleFile,
+  writeChosenTitle,
+} from "../src/session-state"
 import { sessionTitle } from "../src/session-title"
 import {
   deliveryRaw,
@@ -94,7 +101,6 @@ test("follows the session id its Claude process hands off: new subject first, th
     // Whatever followed is a later tick doing nothing but re-registering.
     expect(handoffCalls.slice(6).filter((call) => call !== reregister)).toEqual([])
     expect(identity.id).toBe("ses_new")
-    expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_new.json"])
     expect(
       await executeEnvoyTool(
         { identity, client: client as EnvoyClient, session },
@@ -102,6 +108,8 @@ test("follows the session id its Claude process hands off: new subject first, th
         {},
       ),
     ).toMatchObject({ session_id: "ses_new" })
+
+    expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_new.json"])
 
     calls.length = 0
     await session.shutdown()
@@ -564,6 +572,84 @@ test("two handoffs before a registration succeeds move the role from the first i
     )
     expect(calls).toContain("setRole ses_c reviewer soft previous=ses_a")
     expect(await readdir(join(stateDirectory, "roles"))).toEqual(["ses_c.json"])
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a role claim that fails at startup still starts the session, and the next heartbeat takes the role back", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_claude", role: "reviewer" }))
+  // The listener's own view of the role: the first two claims fail in transit, every later one
+  // lands. Two, not one: `transferRole` clears the queued retry only once `restoreRole` resolves,
+  // so a single failure would pass even if that retry were one-shot.
+  let holder = ""
+  let claims = 0
+  const client = recordingClient([], {
+    setRole: async (input) => {
+      claims += 1
+      if (claims <= 2) throw new Error("listener unavailable")
+      holder = input.sessionID
+      return { claimed: true, interest: noInterest() }
+    },
+    getRole: async (role) => ({ role, holder, last_seen: 1 }),
+  })
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, { client, heartbeatMs: 25 }),
+  )
+
+  try {
+    expect(holder).toBe("")
+    await waitFor(async () => holder === "ses_claude", "the listener naming ses_claude holder")
+    expect(await readPersistedRole(roleFile)).toEqual({
+      session_id: "ses_claude",
+      role: "reviewer",
+    })
+    // The session counts the role as its own, not only the listener: a holder the listener then
+    // loses is one the heartbeat's soft claim takes back, and it reclaims only a role it holds.
+    holder = "ses_lost"
+    await waitFor(async () => holder === "ses_claude", "the heartbeat reclaiming the held role")
+  } finally {
+    await session.shutdown()
+    await rm(stateDirectory, { recursive: true, force: true })
+  }
+})
+
+test("a heartbeat that confirms this session as holder refreshes the role record the age sweep reads", async () => {
+  const stateDirectory = await scratchState()
+  const identity = new SessionIdentity("ses_claude", "/tmp")
+  const roleFile = roleStateFile(stateDirectory, "ses_claude")
+  await mkdir(dirname(roleFile), { recursive: true })
+  await writeFile(roleFile, JSON.stringify({ session_id: "ses_claude", role: "reviewer" }))
+  const session = await startChannelSession(
+    sessionOptions(identity, stateDirectory, {
+      client: recordingClient([], {
+        getRole: async (role) => ({ role, holder: identity.id, last_seen: 1 }),
+      }),
+      heartbeatMs: 25,
+    }),
+  )
+
+  try {
+    // Aged past the sweep's limit after startup restored it, as a record nothing had rewritten
+    // since a claim thirty days ago would be.
+    const past = new Date(Date.now() - STATE_FILE_MAX_AGE_MS - 60_000)
+    await utimes(roleFile, past, past)
+    await waitFor(
+      async () => (await stat(roleFile)).mtimeMs > Date.now() - STATE_FILE_MAX_AGE_MS,
+      `a heartbeat rewriting ${roleFile}`,
+    )
+    await session.shutdown()
+    await pruneStaleSessionRoles(stateDirectory)
+
+    expect(await readPersistedRole(roleFile)).toEqual({
+      session_id: "ses_claude",
+      role: "reviewer",
+    })
   } finally {
     await session.shutdown()
     await rm(stateDirectory, { recursive: true, force: true })

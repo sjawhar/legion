@@ -85,7 +85,12 @@ import {
   sessionHandoffFile,
   writePersistedRole,
 } from "./session-identity"
-import { pruneStaleSessionTitles, readChosenTitleSync, sessionTitleFile } from "./session-state"
+import {
+  pruneStaleSessionTitles,
+  readChosenTitleSync,
+  sessionTitleFile,
+  touchStateFile,
+} from "./session-state"
 import { type SessionTitle, sessionTitle } from "./session-title"
 
 const CHANNEL_NOTIFICATION_METHOD = "notifications/claude/channel" as const
@@ -582,6 +587,35 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       })
   }
 
+  /** Whether a failure to refresh the role record has been reported since the last success. */
+  let roleRefreshFailureReported = false
+  /**
+   * Marks the role record of a holder the heartbeat has just confirmed, so its mtime is the last
+   * time this session was seen holding the role, which is what `pruneStaleSessionRoles`'s age
+   * rule takes it for: nothing else touches the record of a session that keeps its role, and
+   * without this the sweep expires a live holder's only way back to it.
+   *
+   * A timestamp touch and not a rewrite: the record's content has not changed, and an atomic
+   * rewrite would leave a temporary file beside it in `roles/` every two minutes. Best-effort,
+   * because a state directory that cannot be written must not cost the session its heartbeat;
+   * the record it could not touch is still there to restore from until the sweep's age.
+   */
+  const refreshRoleRecord = async (): Promise<void> => {
+    const roleFile = roleStateFile(options.stateDirectory, identity.id)
+    try {
+      await touchStateFile(roleFile)
+      roleRefreshFailureReported = false
+    } catch (error) {
+      // Said once per failure run: every heartbeat retries it.
+      if (!roleRefreshFailureReported) {
+        roleRefreshFailureReported = true
+        process.stderr.write(
+          `envoy-channel: could not refresh the role record ${roleFile} (${messageFor(error)}); retrying every heartbeat\n`,
+        )
+      }
+    }
+  }
+
   /** `afterOutage`: the last tick's registration failed, so a holder the listener still names
    * may have been answered "no holder" meanwhile. */
   const reassertRole = async (afterOutage: boolean): Promise<void> => {
@@ -591,6 +625,7 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
       .getRole(role)
       .then((info) => info.holder, undefinedOnNotFound)
     if (holder === identity.id) {
+      await refreshRoleRecord()
       if (afterOutage) fireRegained(role, "reregistered")
       return
     }
@@ -805,12 +840,20 @@ export async function startChannelSession(options: ChannelSessionOptions): Promi
     await register()
     // Best-effort, as the interests read above is, and for a sharper reason: registration has
     // already happened, so a throw here takes down a channel the registry is advertising and
-    // leaves the Agents page a row that never beats again. A role file that cannot be read -
-    // unreadable, truncated, hand-edited, written by a later format - costs this session its
-    // role, which its next soft `setRole` off the heartbeat re-claims, and nothing more.
+    // leaves the Agents page a row that never beats again.
+    //
+    // A soft `setRole` that failed is queued as a transfer from this session's own id, so the
+    // heartbeat's `transferRole` runs `restoreRole` again on its next tick; `transferRole` clears
+    // the queue only once that resolves, so a failure that repeats stays queued for the tick
+    // after it. A role file that cannot be parsed - truncated, hand-edited, written by a later
+    // format - is not queued: no later read of the same bytes succeeds, and a transfer that threw
+    // on every tick would end each one before its interests reconciliation. That costs this
+    // session its role and nothing more.
     await restoreRole().catch((error: unknown) => {
+      const unparseable = error instanceof SyntaxError || error instanceof z.ZodError
+      if (!unparseable) roleTransferFrom = identity.id
       process.stderr.write(
-        `envoy-channel: could not restore the role from ${roleStateFile(options.stateDirectory, identity.id)} (${messageFor(error)}); the session starts without one\n`,
+        `envoy-channel: could not restore the role from ${roleStateFile(options.stateDirectory, identity.id)} (${messageFor(error)}); ${unparseable ? "the session starts without one" : "the next heartbeat retries"}\n`,
       )
     })
   })

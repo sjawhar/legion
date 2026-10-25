@@ -19474,13 +19474,17 @@ import { basename as basename2, join as join4 } from "path";
 
 // src/session-state.ts
 import { readFileSync as readFileSync4 } from "fs";
-import { mkdir, readdir, rename, rm, stat, writeFile } from "fs/promises";
+import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
 import { dirname as dirname2, join as join3 } from "path";
 async function writeAtomicStateFile(file2, contents) {
   await mkdir(dirname2(file2), { recursive: true, mode: 448 });
   const temporary = `${file2}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await writeFile(temporary, contents, { mode: 384 });
   await rename(temporary, file2);
+}
+async function touchStateFile(file2) {
+  const now = new Date;
+  await utimes(file2, now, now);
 }
 async function pruneStateDirectory(directory, isStale) {
   const entries = await readdir(directory).catch((error48) => {

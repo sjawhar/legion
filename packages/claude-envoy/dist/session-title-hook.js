@@ -55,7 +55,7 @@ function hasErrnoCode(error, code) {
 
 // src/session-state.ts
 import { readFileSync } from "fs";
-import { mkdir, readdir, rename, rm, stat, writeFile } from "fs/promises";
+import { mkdir, readdir, rename, rm, stat, utimes, writeFile } from "fs/promises";
 import { dirname, join } from "path";
 
 // src/claude-session.ts
@@ -78,6 +78,10 @@ async function writeAtomicStateFile(file, contents) {
   const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
   await writeFile(temporary, contents, { mode: 384 });
   await rename(temporary, file);
+}
+async function touchStateFile(file) {
+  const now = new Date;
+  await utimes(file, now, now);
 }
 async function pruneStateDirectory(directory, isStale) {
   const entries = await readdir(directory).catch((error) => {
