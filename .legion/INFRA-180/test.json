@@ -25,7 +25,7 @@
   ],
   "acceptance": {
     "one": "Verified at round 7 and untouched since, which the fingerprint shows across both forward merges.",
-    "two": "Proven on the production code by run 40176669854 at f3c3d411a87c (`envoy-go` completed success) and run 40205954172 at 621ea16a91dd (`envoy-go` and `envoy-go-race` completed success), both read by me. At the new merge head the same lane is `Legion Envoy and Contracts` run 40226148175, queued at my read and cited as queued.",
+    "two": "Now driven on this pod, not only cited from CI. #2189, which this merge brought in, starts the NATS server in the test process, so the lane that needed a container runtime through every earlier round of this pull request runs here: `cd packages/envoy && go test ./internal/integration/ -count=1 -run TestSlackAttachmentWordsReachTheStream -v` at the merge head gives `--- PASS: TestSlackAttachmentWordsReachTheStream (0.35s)` and `ok github.com/sjawhar/envoy/internal/integration 0.370s`. I ran it myself on the merged code rather than reading the implementer's run of it, so the signed-webhook-to-NATS criterion is proven by my own execution for the first time. It stays proven in CI as well, by run 40176669854 at f3c3d411a87c (`envoy-go` completed success) and run 40205954172 at 621ea16a91dd (`envoy-go` and `envoy-go-race` completed success), both read by me; at the new merge head the same lane is `Legion Envoy and Contracts` run 40226148175, queued at my read and cited as queued.",
     "three": "packages/envoy/CHANGELOG.md carries the entry; it is the path the first merge conflicted on and the fingerprint shows the branch's own addition unchanged through both merges."
   },
   "risksForTheArchitect": [
