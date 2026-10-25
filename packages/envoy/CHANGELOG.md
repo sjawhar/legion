@@ -4,6 +4,29 @@
 
 ### Added
 
+- Dispatch now keeps a browser tab's delivery, event-feed, and agent-view subscriptions on one
+  `GET /ws/live` socket (INFRA-258). Delivery views retain their snapshots, deltas, freshness, and
+  resume semantics; an `events` view sends `events_start` then event frames; an `agent` view sends
+  responder, replay, and frame events. The server rotates each socket at a random age from 30 to
+  60 minutes with `4001 max age`; a page reconnects and resumes without a gap. Shutdown and
+  `POST /api/v1/live/_test/disconnect` close with `1012`; loss of identity closes with `1008`;
+  a full hub queue closes with `1013`; oversized and unencodable frames close with `1009` and
+  `1011`; and a disappeared peer is the ordinary `1006` connection loss. The page closes a silent
+  socket with `4000`. `POST /api/v1/live/_test/rotate` exercises the age rotation. `GET
+  /api/v1/events`, `POST /api/v1/events/_test/disconnect`, `GET
+  /api/v1/agents/{session_id}/stream`, `GET /ws/delivery`, and `POST
+  /api/v1/delivery/_test/disconnect` are removed; the agent publish hook remains and its
+  `as=drop` result ends agent views as `dropped`.
+- Migration `0116_agent_message_idempotency_keys` makes `idempotency_key` required on
+  `POST /api/v1/agents/{session_id}/messages`. The key belongs to its sender, survives for the
+  message's life, and is stored in the message transaction. A matching retry returns `200` with
+  the first message and its deliveries, ensuring an unattempted or stranded delivery resumes
+  without a second message; a conflicting request is `409 MESSAGE_KEY_REUSED` with `message_id`.
+  The delivery runs after commit on the server lifetime rather than the request context, so an
+  aborted request cannot cancel it. During a rolling deploy, a page loaded before this release
+  reports `Live updates unavailable`; copy an unsent message and reload. Its one-session sends
+  have no required key and are refused until it reloads.
+
 - A release of a stored secret checks the policy again once it has read the store: a retag to a
   kind (`github-app` or `google-login`) the broker rereads while the release reads the secret
   releases nothing and ends the grant for good, as a kind change found before the read does, so a
@@ -277,19 +300,6 @@
   store, a merge queue's or another branch's job is published nowhere, and `job` joins
   `contracts.GithubTopicKinds`, so the listener's subscribe warnings take it as a kind.
 
-- The Delivery and Pipeline pages update themselves live (LEGION-690). `GET /ws/delivery` (any
-  signed-in person or agent token) takes a `subscribe` frame naming a view, the GET route's query
-  string and a preset or custom window, and answers a `snapshot`, the matching GET route's body
-  with a revision per key; after that it sends only `delta` frames carrying what changed (pull
-  requests, runs and session groups by id, map entries by key, counts by facet and value, the
-  other fields whole), a `freshness` frame when the freshness verdict changes, and a `heartbeat`
-  every 15 s, the only frame on a quiet window. Nothing re-reads on a timer, a preset's end stays
-  at the present, and a reconnecting page resumes with its last change and revisions and is sent
-  what changed since. A jobs read marks a run complete only when that same GitHub listing has every
-  job finished, and Dispatch shutdown waits for delivery sockets and the live hub before it closes
-  its database pool. Under `DISPATCH_TEST_HOOKS=1`, `POST /api/v1/delivery/_test/disconnect`
-  closes every such socket. `packages/dispatch/e2e/delivery-live-probe.ts` watches the route under
-  a bearer, one JSON line per frame, and compares what it applied with the GET routes.
 
 - Dispatch has a Replies page (LEGION-687): every thread a person wrote in - an ask's thread, a
   comment thread, an issue message thread - where someone else has written since they last read

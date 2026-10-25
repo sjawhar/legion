@@ -161,7 +161,7 @@ function boardMovesSettled(context: QueryFunctionContext, project: string): Prom
 
 /** What every live-owned delivery query shares (LEGION-690): its first load subscribes its view
  *  over the page's one live socket (`api/live-socket.ts`), which writes the snapshot and every
- *  later change into the cache, so nothing here reads again. `meta.live` keeps the event stream's
+ *  later change into the cache, so nothing here reads again. `meta.live` keeps the event feed's
  *  refresh paths away from it (`api/query-refresh.ts`); `gcTime` 0 drops the subscription with the
  *  last observer; the page keeps the previous answer on screen while a new view's snapshot is out,
  *  as a filter change in the prototype it ports never blanks it. */

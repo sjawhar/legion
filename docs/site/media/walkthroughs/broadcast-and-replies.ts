@@ -173,7 +173,7 @@ const broadcastAndReplies: Walkthrough<Seeded> = {
             { attempt: 1, body: reply },
             sessionOf(title)
           );
-          // The open page hears the reply on its event stream; nothing reloads it.
+          // The open page hears the reply through its live socket's events view; nothing reloads it.
           await expect(card(page, title)).toContainText(reply);
           await expect(answered(page, index + 1)).toBeVisible();
           // The pointer follows each reply but the last, which lands as the line ends.

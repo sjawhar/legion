@@ -84,7 +84,7 @@ mapping it adds emits `settings.repo_project.updated` on its project, actor the 
 session. External issues fall back to `DISPATCH_DEFAULT_PROJECT` when
 configured. An unmapped repository without a default is rejected; issues that
 use the default get a `repo:owner/name` label. `DISPATCH_NATS_DISABLED=1` leaves
-database and SSE paths available and makes `/healthz` report `nats: null`.
+database and live-socket paths available and makes `/healthz` report `nats: null`.
 Dispatch loads config at every start, `DISPATCH_NATS_DISABLED` set or not, in this precedence
 order: the user `envoy.json` (`${XDG_CONFIG_HOME:-~/.config}/legion/envoy.json`), the `dispatch`
 section of the checkout's `.envoy/envoy.json` in the directory it starts in, then environment
@@ -114,22 +114,19 @@ used for sign-in. It must equal the URL humans type into the browser, with
 `<DISPATCH_SERVER_URL>/auth/callback` listed on the sign-in pool's app client. Host
 adapters can override their configured Dispatch base URL with `DISPATCH_URL`.
 `DISPATCH_TEST_HOOKS=1` mounts test-only routes — unset in every real deployment. `POST
-/api/v1/events/_test/disconnect` closes every open SSE connection, as if the server had restarted;
-e2e's `run-server.sh` sets the flag so the web client's reconnect-from-lastId path can be exercised
-without seeding thousands of events to trip the SSE replay cap. `POST
-/api/v1/artifacts/_test/quiesce` closes every live document, flushing each through the store, and
-waits for the settlements in flight, leaving the service able to load documents again; `e2e/seed.ts`
-calls it before truncating so no document the previous scenario had open writes after the truncate. `POST
-/api/v1/delivery/_test/disconnect` closes every open `/ws/delivery` socket, so the Delivery page's
-resume path can be exercised. `POST
+/api/v1/live/_test/disconnect` closes every open `/ws/live` socket with 1012, as a server restart
+does, so e2e can exercise the page's resume and refresh-after-gap path. `POST
+/api/v1/live/_test/rotate` closes every live socket with 4001 (`max age`), so e2e can exercise its
+quiet resubscribe without waiting 30 minutes. `POST /api/v1/artifacts/_test/quiesce` closes every
+live document, flushing each through the store, and waits for the settlements in flight, leaving
+the service able to load documents again; `e2e/seed.ts` calls it before truncating so no document
+the previous scenario had open writes after the truncate. `POST
 /api/v1/artifacts/{id}/_test/outside-schema` writes the crafted malformed tree the document-repair
-browser test uses. `POST /api/v1/agents/{id}/stream/_test/publish` feeds the in-memory agent
-relay the live view's browser rows run against: with no query it publishes one frame, `?as=replay`
-sets what the next connection to that session is answered with, `?as=responder` says whether
-anyone answers on its control subject, and `?as=drop` ends every open viewer stream for the
-session, as a lost connection does, so the page's own reconnect rebuilds its transcript from the
-replay set by then — the only way a test reaches the rebuild path, since the stream carries no
-cursor and nothing else ends an established one.
+browser test uses. `POST /api/v1/agents/{id}/stream/_test/publish` feeds the in-memory agent relay
+the live-view browser rows run against: with no query it publishes one frame, `?as=replay` sets
+what the next agent view is answered with, `?as=responder` says whether anyone answers on its
+control subject, and `?as=drop` ends every open agent view as `dropped`, so the page subscribes
+again and rebuilds from the replay set by then.
 
 With NATS configured and the GitHub App private key loaded, startup also runs the webhook
 redelivery sweep (`internal/dispatch/redeliver`, wired in `cmd/dispatch/redeliver.go`). Every
@@ -409,7 +406,7 @@ the table says human only.
 | `/auth/start` | GET | public | Start Google sign-in at the sign-in issuer (the Cognito pool, or Google for `DISPATCH_SIGNIN_DOMAIN`, with offline access, `prompt=consent` and `hd`); `503 SIGNIN_UNCONFIGURED` on a server with no `DISPATCH_SIGNIN_*`. |
 | `/auth/callback` | GET | sign-in state | Exchange the issuer's code and sign in the person `SignInRule.Person` admits (`GroupRule` or `DomainRule`): a member of `DISPATCH_SIGNIN_GROUP` named by the email in their pool username (a 403 page naming anyone else), or a verified Google account of `DISPATCH_SIGNIN_DOMAIN` named by its `email` (a 403 page with the reason for anyone else); record them in `people` with the refresh token sealed (and, under a domain, its `sub`, ending the address's sessions when another account held it), and issue the session cookie. `409 SIGNIN_SUPERSEDED` and no cookie when, under a domain, another account signed in to the address between this sign-in's record and its cookie (`issueSession`). |
 | `/auth/logout` | POST | identity | Advance the person's session generation, forget their refresh token, and clear the cookie. Local only: the issuer's own session is left alone. |
-| `/auth/whoami` | GET | identity | Return the resolved person, `{kind: "user", login}` with `login` their lowercase email. |
+| `/auth/whoami` | GET | identity | Return the resolved person, `{kind: "user", login, event_head}` with `login` their lowercase email and `event_head` the newest committed event id when the sign-in check answered. The page uses that head as its first events subscription's resume point, so reads begun after sign-in cannot miss an event; `503 EVENT_HEAD_UNAVAILABLE` when the event head cannot be read. |
 | `/auth/_dev/signin` | GET | public, `DISPATCH_DEV_SIGNIN=1` only; loopback peer, no forwarding header | Record the lowercased person `login` names and issue their session cookie with no issuer exchange, then redirect to the sanitized `next`; `400 DEV_SIGNIN_INPUT`, `403 DEV_SIGNIN_FORBIDDEN`. Not mounted otherwise. |
 | `/api/github/rest/...` | GET | identity | Read a pull request, an issue or a commit's check runs from GitHub as the GitHub App (above). |
 | `/healthz` | GET | public | Report that the process serves, Postgres answers within two seconds on the health pool, NATS is connected where configured, and the file store's bucket answers a two-second `HeadBucket` where one is configured (`files`, null otherwise), plus `commit` (the build's legion commit, or `null`) and `schema_version` (the highest applied migration, or `null` when the database did not answer). |
@@ -486,13 +483,12 @@ the table says human only.
 | `/api/v1/me/issues/{key}/state` | PUT | identity | Update the user's issue UI state. |
 | `/api/v1/me/agents/state` | GET | identity | Read the user's per-agent conversation state: `{[session_id]: {cleared_before?, read_through?, unread_replies}}`, where `unread_replies` counts the session's replies to the user's direct messages newer than both the Clear and the read mark and not read by id. |
 | `/api/v1/me/agents/{session_id}/state` | PUT | identity | Clear an agent's conversation (`cleared_before`), mark it read (`read_through`, which only moves forward and covers every reply up to it), and/or mark some of its replies read by id (`read_replies`, messages the path's session wrote, covering those alone, each in any form `uuid.Parse` reads) for this user: at least one; 400 `INVALID_STATE` when none is given, a cutoff is malformed or more than a minute ahead of the server clock, or a `read_replies` id is not a uuid or not a message that session wrote (nothing is written then); an accepted cutoff is stored no later than the server's now. Appends `user_agent_state.updated` (`{login, session_id}`) for the viewer's other devices, except for a request naming only replies already read by id or passed by the read mark, which changes nothing (a reply the Clear hides but the read mark has not passed is neither: the first request naming it writes its row and appends the event), and answers the session's state. |
-| `/api/v1/events` | GET | identity | Stream durable events with SSE. Omitting `since` (a cold client) subscribes before resolving the current head internally, so no separate request can race it. |
 | `/api/v1/artifacts/_test/quiesce` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every live document and wait for the settlements in flight; not mounted otherwise. |
-| `/api/v1/events/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open SSE connection; not mounted otherwise. |
-| `/api/v1/delivery/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/delivery` socket; not mounted otherwise. |
-| `/api/v1/agents/{session_id}/stream/_test/publish` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Feed the in-memory agent relay: one frame, `?as=replay` what the next connection is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` end every open viewer stream so the page's reconnect rebuilds from that replay; not mounted otherwise. |
-| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/api/v1/events` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. |
-| `/ws/delivery` | GET | user or bearer | The Delivery and Pipeline pages' live updates: a subscribe frame names a view; Dispatch answers a snapshot, then only what changed, and a resume with the page's revisions answers what changed since (packages/contracts `Live*` and `DeliveryLive*`). A `heartbeat` frame goes out every `StreamHeartbeat` (15 s), so a client tells a quiet socket from a dead one. |
+| `/api/v1/live/_test/disconnect` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/live` socket with 1012 (service restart); not mounted otherwise. |
+| `/api/v1/live/_test/rotate` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Close every open `/ws/live` socket with 4001 (`max age`); not mounted otherwise. |
+| `/api/v1/agents/{session_id}/stream/_test/publish` | POST | user or bearer, `DISPATCH_TEST_HOOKS=1` only | Feed the in-memory agent relay: one frame, `?as=replay` what a new agent view is answered with, `?as=responder` whether anyone answers on the control subject, `?as=drop` ends every open agent view as `dropped`, so the page subscribes again and rebuilds from that replay; not mounted otherwise. |
+| `/ws/doc/{room}` | GET | user or bearer | Join the Hocuspocus document room. A room whose stored tree is outside the Proof schema admits no connection, a provider's reconnect included: the upgrade completes and closes with code `4409` (reason `DOC_SCHEMA`; `DOCUMENT_SCHEMA_CLOSE_CODE` and `DOCUMENT_SCHEMA_CLOSE_REASON` in `packages/contracts`) before any sync, and the dashboard reads that close as the repair state. The check reads a copy of a resident room taken under its lock, as `/text` reads it, so a healthy room under writes is never refused. An open socket resolves its caller again on every 15 s heartbeat, as `/ws/live` does, and closes once they no longer resolve (a sign-out, a membership the sign-in issuer no longer confirms), so their editor stops receiving and sending the document's edits. |
+| `/ws/live` | GET | user or bearer | One live socket per browser tab. Each `subscribe` names a delivery, `events`, or human-only `agent` view; the socket replies on that subscription id with delivery snapshots/deltas/freshness, `events_start` and events, or agent responder/replay/frame data. An `events` resume is its decimal event id; a delivery resume is its change and revisions; an agent view never resumes. Every quiet socket receives a `heartbeat` every `StreamHeartbeat` (15 s). It closes with 4001 (`max age`) at a random age in [30, 60) minutes, 1012 on restart, 1008 when the caller stops resolving, and 1013 when its hub queue fills. |
 
 ## Dispatch topics
 
@@ -534,8 +530,8 @@ env DISPATCH_TEST_DATABASE_URL=… go test -tags memory -count=1 -timeout 60m ./
 The two-process tests (`multiprocess_test.go`, INFRA-66) start two real Dispatch servers on one
 Postgres and one NATS and drive the properties a rolling release depends on — one pass per period
 across the leased maintenance loops, the delivery intake's standby and takeover, each outbox row
-published once, a live event stream fed from the other process, and a document room closed when
-the other process writes it. They build only under the `multiprocess` tag and run in their own CI
+published once, an event-feed subscription receiving another process's event, and a document room
+closed when the other process writes it. They build only under the `multiprocess` tag and run in their own CI
 job (`dispatch-multiprocess` in `.github/workflows/envoy-and-contracts.yaml`), because two servers
 and their NATS take minutes rather than seconds:
 

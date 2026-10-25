@@ -4,17 +4,19 @@
 
 ### Added
 
-- The live socket's views and frames beside the delivery views' (INFRA-258): `LiveView`, which is
-  a `DeliveryLiveView`, an `EventsLiveView` (the Dispatch event feed) or an `AgentLiveView` (one
-  session's agent stream); `DeliveryLiveResume` (`seq`, `revs`) and `EventsLiveResume` (`since`);
-  `LiveEventsStart`, `LiveEventFrame`, `LiveAgentFrame` and `LiveEnded`; and
-  `LIVE_SOCKET_MAX_AGE_CLOSE` (4001), the code a socket closes with at its age, a random point in
+- One WebSocket per browser tab at `GET /ws/live` (INFRA-258), with the common `Live*` frames and
+  `LiveView`: a `DeliveryLiveView`, the Dispatch event-feed `EventsLiveView`, or one session's
+  `AgentLiveView`. Delivery views resume with `DeliveryLiveResume` (`seq`, `revs`); events views
+  resume with `EventsLiveResume` (`since`) and begin with `LiveEventsStart`; agent views begin from
+  the session replay. `LiveEventFrame`, `LiveAgentFrame`, and `LiveEnded` complete the new frame
+  family. `LIVE_SOCKET_MAX_AGE_CLOSE` (4001) rotates a socket at a random age in
   [`LIVE_SOCKET_MIN_AGE_MS`, `LIVE_SOCKET_MAX_AGE_MS`) (30 to 60 minutes), and
-  `LIVE_SOCKET_MAX_SUBSCRIPTIONS` (64). `fixtures/delivery-live/` is now `fixtures/live/`.
-- `CreateAgentMessageInput.idempotency_key`, optional for now: names one send to a session, so the
-  server answers a repeat with the message the first request made and refuses the key's reuse for
-  a different request with `409 MESSAGE_KEY_REUSED`, naming that message as `message_id`
-  (INFRA-258).
+  `LIVE_SOCKET_MAX_SUBSCRIPTIONS` is 64. `fixtures/delivery-live/` is now `fixtures/live/`.
+- Required `CreateAgentMessageInput.idempotency_key`: it names one session-targeted send for its
+  sender. A repeat with the same session, body, delivery, and reply answers the first message and
+  its deliveries with `200` and sends nothing again; a different request under the held key is
+  `409 MESSAGE_KEY_REUSED` with `message_id`. A missing or malformed key is `400 MESSAGE_INPUT`;
+  a key longer than 128 characters is `400 CAP_EXCEEDED` (INFRA-258).
 - The repository an issue targets: `RepoProject.default`; `Issue.repo` and `resolved_repo`, also on
   `IssueSummary` and `IssueClaimEventPayload`; `CreateIssueInput.repo` and `UpdateIssueInput.repo`
   (`null` clears); and a `repo` argument on `dispatch_issue` and `dispatch_issue_update` (`""`
@@ -38,15 +40,6 @@
   `dispatch_request_approval` tool description says the same rule: an edit outside the decision
   blocks stales the approval and the request after it carries a one-sentence summary of what
   changed, and the human's own answer carries it when it is the whole change (LEGION-573).
-- The Delivery and Pipeline pages' live frames on `GET /ws/delivery` (LEGION-690):
-  `DeliveryLiveView` and `DeliveryLiveWindow` (a preset, whose end stays at the present, or a
-  custom `from`/`to`), the page's `DeliveryLiveSubscribe` and `DeliveryLiveUnsubscribe`, and
-  Dispatch's `DeliveryLiveSnapshot` (the matching GET route's body and a revision per key),
-  `DeliveryLiveDelta` (list items by id, map entries by key, counts by facet and value, null for a
-  key that left, and the other fields whole), `DeliveryLiveFreshness`, `DeliveryLiveError` and
-  `DeliveryLiveHeartbeat` (sent every heartbeat interval beside the socket's ping, which a browser
-  never shows the page). `fixtures/delivery-live/` holds a snapshot, a delta, the snapshot after it,
-  an error and a heartbeat frame as the server writes them.
 - `githubJobSubject(owner, repo, runId, "completed")` and its type `GithubJobSubject`,
   `notifications.github.<owner>.<repo>.job.<run_id>.completed`: a finished Actions job on the
   default branch, of a run with no pull request, and the generated Go `GithubJobSubject`

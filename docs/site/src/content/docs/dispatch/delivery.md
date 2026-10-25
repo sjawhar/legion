@@ -128,14 +128,22 @@ timeline. The routes and the page's live updates compute from the same stored fa
 code, so they agree. `flags_source` says whether recorded flags fed the change failure rate;
 `none` means no flags are recorded yet.
 
-`GET /ws/delivery` is the websocket the pages keep themselves current over, and any signed-in
-person or agent token may open it. Each frame is one JSON object; `Live*` and `DeliveryLive*` in
-`packages/contracts/src/dispatch-api.ts` type them all. A client subscribes to a view with
-`{"type": "subscribe", "sub": "<its own id>", "view": ...}`, where the view is
-`{"kind": "timeline" | "measures", "window": {"preset": 28}, "query": "repo=acme%2Fwidgets"}`
-(a window is a preset of 7, 14, 28 or 84 days, or a custom `{"from", "to"}`; `query` is the GET
-route's query string without `from` and `to`), or `{"kind": "pipeline"}` with an optional `at`.
-`{"type": "unsubscribe", "sub"}` ends one. Dispatch answers a subscription with:
+`GET /ws/live` is the one websocket each browser tab keeps open for all of its live views. A
+signed-in person or agent token may open it; only a person may subscribe to an agent conversation.
+Every client message is one JSON object:
+
+```json
+{"type":"subscribe","sub":"<client id>","view":{"kind":"timeline","window":{"preset":28},"query":""}}
+```
+
+`sub` identifies that subscription in every response. `unsubscribe` with the same `sub` ends it.
+A delivery view is `timeline` or `measures` with its window and GET-route query, or `pipeline`
+with optional `at`; it may resume with `{"seq":"…","revs":{…}}`. An event-feed view is
+`{"kind":"events"}` and resumes with `{"since":"<event id>"}`. An agent view is
+`{"kind":"agent","session_id":"<uuid>"}` and never has a resume. A resume of the wrong shape, or
+any unknown member, is an `INVALID_FRAME` error.
+
+Dispatch answers a delivery view with:
 
 - a `snapshot`: the matching GET route's body for the window resolved now, the change it reflects
   (`seq`), when that change was recorded (`changed_at`), and a revision for every key it holds;
@@ -144,17 +152,27 @@ route's query string without `from` and `to`), or `{"kind": "pipeline"}` with an
   and `counts`, null for a key that left), and the fields replaced whole (`set`, which carries
   `window` whenever it moved, never alone);
 - `freshness`, sent to every subscriber only when the freshness verdict changes;
-- `error`, with the code the GET route would answer (`INVALID_QUERY`,
-  `DELIVERY_NOT_CONFIGURED`) or `INVALID_FRAME`;
+- `error`, with the code the matching GET route would answer (`INVALID_QUERY`,
+  `DELIVERY_NOT_CONFIGURED`) or `INVALID_FRAME`; and
 - `heartbeat`, every 15 seconds. While nothing the view shows changes, the heartbeat is the only
-  frame sent: a reconcile pass that records nothing new sends nothing.
+  frame sent.
 
-A client that reconnects subscribes again with `"resume": {"seq", "revs"}`, the last change it
-applied and the revisions it holds, and is sent a delta of what changed since; a resume from
-before the day of changes Dispatch keeps is answered with a snapshot. Dispatch closes every
-socket with code 1012 when it restarts, and a client reconnects at once.
+An events subscription first receives `events_start` with the decimal id it starts after, then
+`event` frames with their id and event. A page that has no cursor adopts `events_start.since`, so
+the next subscription resumes without a gap. An agent subscription receives `agent` frames whose
+`event` is `responder`, `replay`, or `frame`; their `data` is the session's JSON. Either kind may
+receive `ended` with `behind` or `dropped`; subscribe that view again at once. An agent refusal is
+terminal for that view (`HUMAN_ONLY`, `SESSION_ID_INPUT`, or `STREAM_UNAVAILABLE`).
 
-`packages/dispatch/e2e/delivery-live-probe.ts` is the way to watch the route from a checkout:
+Reconnect every subscription when the socket closes. A 4001 `max age` close is routine: Dispatch
+chooses an age in [30, 60) minutes, and the page reconnects at once without refreshing. A 1012
+restart close reconnects at once and refreshes ordinary queries after it resumes. A 1008 close
+means the caller no longer resolves; re-check sign-in before retrying. A 1013 full-queue close,
+1009 oversized frame, 1011 internal error, or an ordinary connection loss backs off and resumes.
+The page may close a silent socket with 4000 before it opens its replacement.
+
+`packages/dispatch/e2e/delivery-live-probe.ts` is the way to watch one delivery subscription from
+a checkout:
 
 ```sh
 cd packages/dispatch

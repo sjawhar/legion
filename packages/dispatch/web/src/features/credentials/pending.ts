@@ -19,14 +19,14 @@ function holdsList(query: Query<CredentialPendingResponse | null>): boolean {
 
 /** Every credential request waiting on the viewer, as the Inbox's credential-requests section
  *  lists them; `null` is a Dispatch with no secrets broker. The server reads its broker setting
- *  once, at boot, so the query holds that answer until the page reloads or the event stream
+ *  once, at boot, so the query holds that answer until the page reloads or the events subscription
  *  reconnects (`reaskHeldCredentialList`): it is never fetched again while it holds `null` - not
- *  when a page mounts another reader, the window regains focus, or the event stream refreshes
- *  every query - so a deployment without a broker asks once per page load and once per
- *  reconnect. Once it holds a list, it also asks again every `CREDENTIAL_POLL_INTERVAL_MS` while
- *  the page is visible: TanStack's interval timer keeps ticking on a hidden tab, but leaves its
- *  fetch a no-op there unless `refetchIntervalInBackground` is set, which this query leaves
- *  unset - since no Dispatch event tells the page a request arrived at or left the broker. */
+ *  when a page mounts another reader, the window regains focus, or the event feed refreshes every
+ *  query - so a deployment without a broker asks once per page load and once per reconnect. Once
+ *  it holds a list, it also asks again every `CREDENTIAL_POLL_INTERVAL_MS` while the page is
+ *  visible: TanStack's interval timer keeps ticking on a hidden tab, but leaves its fetch a no-op
+ *  there unless `refetchIntervalInBackground` is set, which this query leaves unset - since no
+ *  Dispatch event tells the page a request arrived at or left the broker. */
 export const credentialPendingQuery = () =>
   queryOptions({
     enabled: holdsList,
@@ -35,10 +35,10 @@ export const credentialPendingQuery = () =>
     refetchInterval: (query) => (holdsList(query) ? CREDENTIAL_POLL_INTERVAL_MS : false),
   });
 
-/** A reconnect of the event stream is the one moment the server may have restarted, perhaps
- *  with a broker configured, so it asks a held `null` again. The fetch runs over the held answer,
- *  so the list stays listed and empty while it is out and nothing blinks; a list that comes back
- *  makes the query an ordinary one that every refresh refetches. */
+/** A reconnect of the events subscription is the one moment the server may have restarted,
+ *  perhaps with a broker configured, so it asks a held `null` again. The fetch runs over the held
+ *  answer, so the list stays listed and empty while it is out and nothing blinks; a list that
+ *  comes back makes the query an ordinary one that every refresh refetches. */
 export function reaskHeldCredentialList(queryClient: QueryClient): void {
   const query = credentialPendingQuery();
   if (queryClient.getQueryData(query.queryKey) !== null) return;

@@ -10,8 +10,8 @@ suggestions, artifacts, and durable event history. The Go server in
 `AuthGate` requests `GET /auth/whoami` and sends unauthenticated visitors to the
 Google sign-in flow. All application requests are same-origin. React Router serves
 the Inbox at `/`, an issue workspace at `/issues/:key/*`, and the human-only
-repository-to-project settings page at `/settings`; TanStack Query and SSE keep
-the issue, Inbox, documents, and sidebar current.
+repository-to-project settings page at `/settings`; TanStack Query and the live socket's events
+feed keep the issue, Inbox, documents, and sidebar current.
 
 The desktop shell has a sidebar, issue content, and review margin. Issue content has Spec,
 Conversation, Children, Artifacts, and Activity tabs; the Conversation lists one card per

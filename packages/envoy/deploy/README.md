@@ -221,7 +221,7 @@ The Dispatch service reads its public browser origin and NATS URLs from
 | `DISPATCH_IDENTITY_HEADER_TRUSTED` | test/local header identity | Set to `1` for every header-identity test or local harness. A missing flag refuses boot. |
 | `DISPATCH_REPO_PROJECTS` | no | Optional boot seed for repository-to-project settings (`owner/repo=KEY,...`). Existing dashboard settings are not overwritten. |
 | `DISPATCH_DEFAULT_PROJECT` | no | Native Dispatch project for external repositories without a stored mapping. |
-| `DISPATCH_NATS_DISABLED` | no | Set to `1` to run database and SSE paths without NATS. |
+| `DISPATCH_NATS_DISABLED` | no | Set to `1` to run database and live-socket paths without NATS. |
 | `ENVOY_URL` | no | Envoy listener base URL for live agent titles; defaults to `http://127.0.0.1:9020` (set it when `ENVOY_LISTENER_PORT` changes). |
 | `ENVOY_TOKEN` | conditional | Matching Listener API bearer token when `ENVOY_API_TOKEN` protects the listener. |
 | `DISPATCH_OIDC_ISSUER` | conditional | OIDC issuer whose projected service-account tokens authenticate as agents beside `DISPATCH_AGENT_TOKEN`. Set with `DISPATCH_OIDC_AUDIENCE` or not at all; half the pair refuses to boot naming the missing one, as does an issuer that does not answer discovery. |
