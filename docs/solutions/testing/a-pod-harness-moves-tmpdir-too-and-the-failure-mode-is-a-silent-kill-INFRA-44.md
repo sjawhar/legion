@@ -135,10 +135,15 @@ cluster that admits the configured limit the number differs; the mechanism does 
   writes a gigabyte against the limit unless `TMPDIR` is exported onto the issue volume with
   `GOCACHE`, `GOMODCACHE` and `PLAYWRIGHT_BROWSERS_PATH`. Export it in the same sourced env file as
   the rest.
-  **Note 2026-10-25 (INFRA-221):** that staging is still the step, judged by both conditions of
-  `skills/legion-worker/references/tools.md`, "The test: where it lands, and what it leaves
-  resolving": the root is staged through a `TMPDIR` on the issue's volume, and only the harness's
-  own commands reach it.
+  **Note 2026-10-25 (INFRA-221):** the premise "No role container sets `TMPDIR`" was true when
+  this learning merged (sjawhar/legion#2088, 2026-10-21 03:32Z) and expired three hours later:
+  since sjawhar/legion#2085 (06:29Z) the runtime sets `TMPDIR` to `/legion/scratch/tmp`, on the
+  issue's volume, in every role container, with `GOCACHE` and `GOMODCACHE` beside it
+  (`roleEnvironment`, `packages/daemon/internal/runtime/sandbox/manifest.go`), so no export is
+  needed and only an explicit `/tmp` path still lands on the container's filesystem. A harness
+  root staged through that `TMPDIR` and reached only by the harness's own commands meets both
+  conditions of `skills/legion-worker/references/tools.md`, "The test: where it lands, and what
+  it leaves resolving".
 
 The same applies to any long-lived cache a role sets up for itself, not only this harness: a Go
 build's caches land under `/home/legion` by default, which the limit charges exactly as it charges
