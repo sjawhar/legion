@@ -2,11 +2,11 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-372",
-  "completed": "2026-10-25T09:15:30Z",
-  "headSha": "22113966f09ee1610ca65786ef0c5634c3e73042",
+  "completed": "2026-10-25T09:27:30Z",
+  "headSha": "a79a58fcabb71b04df048bde28e2c9cc1ad07659",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Re-ran its commands: crane (v0.20.6 under $TMPDIR) digest/config/export on sha-98e5f6a8c72c (sha256:88c9da3d..., revision 98e5f6a8c72c...) and sha-92dbeea3d391 (sha256:ddf7c64c...), getting the same listings; re-diffed worker.Dockerfile at 98e5f6a8 against main via gh api contents (one comment block, 470-472) and confirmed it byte-identical between 6ede52ccb376 and main@origin 158654c89e8b; re-ran check_clauses.py and both name checks at 22113966 (OK / exit 0); re-ran command -v in this role container. The fallback image is still the right one: the main-built image remains unpublished (MANIFEST_UNKNOWN for sha-6ede52ccb376, sha-158654c89e8b, sha-897d398aebf9; release run 40177490116 pending)."
+    "how": "Round 2: re-ran the implementer's six-way kubectl auth can-i matrix from this tester's own role container (no kubeconfig, KUBECONFIG and POD_NAMESPACE unset, account legion:legion-worker) at 2026-10-25T09:24:57Z and got its answers: bare yes x3, -n <workload ns> yes x3, -n <Legion's pod ns> no x3, POD_NAMESPACE=<Legion's pod ns> bare no x3, the same with -n <workload ns> yes x3; read client-go v0.35.0 tools/clientcmd/client_config.go:646-661 (POD_NAMESPACE, else the serviceaccount namespace file, else \"default\"); re-ran its widened check_clauses.py and both name checks at a79a58fcabb71b04df048bde28e2c9cc1ad07659 (OK / exit 0). Round 1's image proof re-verified earlier at 22113966 still stands; the main-built image is still MANIFEST_UNKNOWN."
   },
   "failed": 0,
   "failures": [],
@@ -16,7 +16,7 @@
       "surface": "published worker image by digest, ghcr.io/sjawhar/legion-worker@sha256:88c9da3d582a26e3ac71d55937a07ed3f048129f4f151e91cdb79e2333c20e7d (#2149's head, Dispatch: INFRA-221), plus its Dockerfile against main's",
       "command": "crane config <ref> | jq -r '.config.Labels[\"org.opencontainers.image.revision\"]'; crane export <ref> - | tar -tvf - usr/bin/psql usr/bin/redis-cli usr/bin/sqlite3 usr/bin/nc etc/alternatives/nc usr/bin/dig usr/bin/python3; gh api 'repos/sjawhar/legion/contents/packages/daemon/docker/worker.Dockerfile?ref=<98e5f6a8 | main>' -H 'Accept: application/vnd.github.raw' | diff; jj file show worker.Dockerfile at 6ede52cc and main@origin | sha256sum; gh pr view 2149 --json mergedAt",
       "observed": "revision 98e5f6a8c72cb75fe65a6fa72aeba9e06fd14dba; psql -> pg_wrapper, redis-cli, sqlite3, nc -> /etc/alternatives/nc -> /bin/nc.openbsd, dig, python3 -> python3.13 all listed; Dockerfile differs from main only in comment lines 470-472; 6ede52cc and main@origin Dockerfiles share sha256 57eb3b86...; #2149 merged 2026-10-25T08:39:30Z as 6ede52ccb376, matching the page's date",
-      "headSha": "22113966f09ee1610ca65786ef0c5634c3e73042",
+      "headSha": "22113966f09ee1610ca65786ef0c5634c3e73042 (round 1; these regions are unchanged at a79a58fcabb71b04df048bde28e2c9cc1ad07659, re-checked by the clause check below)",
       "negativeControl": "sha256:ddf7c64ca12b33ec005104b5d00bef997ade33a8400c0e2dc5ef1ad08894aa80 (sha-92dbeea3d391) -> tar: usr/bin/psql, usr/bin/redis-cli, usr/bin/sqlite3, usr/bin/nc, etc/alternatives/nc, usr/bin/dig: Not found in archive; only usr/bin/python3 listed"
     },
     {
@@ -24,7 +24,7 @@
       "surface": "this tester's own role container, on the deployment's current digest",
       "command": "for b in psql redis-cli sqlite3 nc dig python3; do command -v $b || echo '(none)'; done; python3 -c 'import socket; socket.getaddrinfo(\"ghcr.io\",443)'",
       "observed": "psql, redis-cli, sqlite3, nc, dig: (none); python3: /usr/bin/python3, and the getaddrinfo call runs",
-      "headSha": "22113966f09ee1610ca65786ef0c5634c3e73042",
+      "headSha": "22113966f09ee1610ca65786ef0c5634c3e73042 (round 1; these regions are unchanged at a79a58fcabb71b04df048bde28e2c9cc1ad07659, re-checked by the clause check below)",
       "negativeControl": "the image built with the change (sha256:88c9da3d...) lists all five, so the absence is the digest, not the shell"
     },
     {
@@ -32,7 +32,7 @@
       "surface": "docs/kubernetes.md as GitHub renders it at the head",
       "command": "gh api 'repos/sjawhar/legion/contents/docs/kubernetes.md?ref=22113966f09ee1610ca65786ef0c5634c3e73042' -H 'Accept: application/vnd.github.html', then the paragraph's text and hrefs, and a count of each href's user-content- heading id",
       "observed": "the paragraph renders as written ('had no client ... when it was written', 'The first of those three reasons has since changed, and only the first', the five clients from INFRA-221's merge on 2026-10-25, older digest has none, python3 runs on both); its two links #worker-image and #pin-by-digest-never-by-tag each have exactly one heading id",
-      "headSha": "22113966f09ee1610ca65786ef0c5634c3e73042",
+      "headSha": "22113966f09ee1610ca65786ef0c5634c3e73042 (round 1; these regions are unchanged at a79a58fcabb71b04df048bde28e2c9cc1ad07659, re-checked by the clause check below)",
       "negativeControl": "the clause check on a copy rewording the second reason ('may not' -> 'cannot') -> FAIL: a surviving part is no longer word-for-word, exit 1"
     },
     {
@@ -40,13 +40,32 @@
       "surface": "AGENTS.md and docs/kubernetes.md at the head against the merge base of main@origin and the head (158654c89e8b, carrying #2182)",
       "command": "cd -- \"$LEGION_WORKSPACE\" && python3 /legion/scratch/tmp/infra372/check_clauses.py; bash .github/scripts/check-private-names.sh; bash .github/scripts/check-plugin-names.sh",
       "observed": "OK: two authorized edits, nothing else moved, both rows point at each other (exit 0); both name checks exit 0",
-      "headSha": "22113966f09ee1610ca65786ef0c5634c3e73042",
+      "headSha": "22113966f09ee1610ca65786ef0c5634c3e73042 (round 1; these regions are unchanged at a79a58fcabb71b04df048bde28e2c9cc1ad07659, re-checked by the clause check below)",
       "negativeControl": "HEAD_DIR at a copy whose service row lost its new pointer -> FAIL: the 'Run a database' row is not the merged row with only its last sentence replaced, exit 1"
+    },
+    {
+      "criterion": "The section's three gate commands name the workload's namespace (-n <namespace>, a placeholder in the page's register), and the corrected form answers about the namespace the sentence is about while the published form answered for the pod",
+      "surface": "this tester's role container (no kubeconfig; projected serviceaccount namespace file naming the workload's namespace; account legion:legion-worker), kubectl v1.35.9 against the deployment's API server",
+      "command": "W=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace); for v in 'create jobs' 'create services' 'get services'; do kubectl auth can-i $v; kubectl -n \"$W\" auth can-i $v; kubectl -n legion auth can-i $v; POD_NAMESPACE=legion kubectl auth can-i $v; POD_NAMESPACE=legion kubectl -n \"$W\" auth can-i $v; kubectl -n default auth can-i $v; done (2026-10-25T09:24:57Z)",
+      "observed": "each verb: bare=yes, -n <workload ns>=yes, -n <Legion's pod ns>=no, POD_NAMESPACE=<Legion's pod ns> bare=no, POD_NAMESPACE=<Legion's pod ns> -n <workload ns>=yes, -n default=no. The bare answer follows POD_NAMESPACE, then the projected file; the flagged answer follows -n, matching the new paragraph and client-go v0.35.0 client_config.go:646-661",
+      "headSha": "a79a58fcabb71b04df048bde28e2c9cc1ad07659",
+      "negativeControl": "-n <Legion's own pod namespace> and the bare form under POD_NAMESPACE=<that namespace> each answer no to all three, against yes for the corrected form"
+    },
+    {
+      "criterion": "The page renders the gate and its reason as written, names no literal namespace, and moves nothing outside the authorized regions",
+      "surface": "docs/kubernetes.md as GitHub renders it at the head; both files against the merge base of main@origin and the head (158654c89e8b)",
+      "command": "gh api 'repos/sjawhar/legion/contents/docs/kubernetes.md?ref=a79a58fcabb71b04df048bde28e2c9cc1ad07659' -H 'Accept: application/vnd.github.html'; cd -- \"$LEGION_WORKSPACE\" && python3 /legion/scratch/tmp/infra372/check_clauses.py; bash .github/scripts/check-private-names.sh; bash .github/scripts/check-plugin-names.sh; jj diff --from main@origin --to a79a58fcabb71b04df048bde28e2c9cc1ad07659 | grep -w <workload ns>",
+      "observed": "the three kubectl -n <namespace> lines and the namespace paragraph render as written, in the register the page uses at `kubectl -n <namespace> get sandboxes`; #worker-image and #pin-by-digest-never-by-tag each still resolve to one heading id; check prints 'OK: three authorized edits (reason, gate -n, namespace clause) and the AGENTS.md row, nothing else moved, both rows point at each other', exit 0; both name checks exit 0; the workload namespace appears in the diff only as an ordinary English word in the round-1 sentence, never as a namespace",
+      "headSha": "a79a58fcabb71b04df048bde28e2c9cc1ad07659",
+      "negativeControl": "the implementer's HEAD_DIR copies (round-1 page, one command without -n, old 'no command here passes -n' claim kept, literal namespace, edited ns=$(cat ...) line) each refused, exit 1; this tester's round-1 copies (service row pointer removed, second reason reworded) refused, exit 1"
     }
   ],
-  "ci": "At fc8dc19f9059 (the code head): Tests 40179356470 queued, PR Title 40179408256 queued (40179356530 cancelled), Legion Envoy and Contracts 40179356509 queued; 22113966 is handoff-only with skip-checks: true. Not waited on.",
+  "ci": "At code head ce9ec359dbc7: Tests 40180408514 queued, PR Title 40180446127 queued (40180408501 cancelled), Legion Envoy and Contracts 40180408498 queued; a79a58fc is handoff-only with skip-checks: true. Not waited on.",
   "notes": [
-    "Docs-only change: no implementer test exists or is warranted; the acceptance check is the plan's throwaway script, which caught each break tried.",
-    "The main-built worker image of 6ede52ccb376 is not yet published; proof rests on #2149's head image plus a Dockerfile identical to main's in every non-comment line."
-  ]
+    "Docs-only change: no implementer test exists or is warranted; the acceptance check is the plan's throwaway script, widened for round 2, which caught each break tried.",
+    "The main-built worker image of 6ede52ccb376 is still not published; round 1's image proof rests on #2149's head image plus a Dockerfile identical to main's in every non-comment line.",
+    "Not a failure, for the architect and reviewer: AGENTS.md's 'Run a database' row still names the gate as bare `kubectl auth can-i create jobs`, `create services` and `get services` (the implementer's open question); the ruling added nothing else, and the clause check pins that row to its last sentence only.",
+    "Not a failure, for the reviewer: the ruling asked for one clause saying why; the paragraph runs to five sentences, which the implementer attributes to the architect's later ruling (envoy f4a5138e) to write the measured mechanism."
+  ],
+  "round": 2
 }
