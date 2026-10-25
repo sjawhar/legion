@@ -2,31 +2,27 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T12:45:28Z",
-  "round": 2,
-  "reviewedCodeHead": "cb81dabd7aac85bf80908a8eb560c2f75ae3e68f",
+  "completed": "2026-10-25T14:07:13Z",
+  "round": 3,
+  "reviewedCodeHead": "c9b95f0c760dd8fd959fc846f531385154577dcf",
   "base": "56ba79b8cf6d981ce6ba2f588204fd8ff3778d1b",
   "decision": "changes_requested",
   "critical": 0,
   "important": 1,
-  "minor": 1,
+  "minor": 0,
   "previousRounds": [
-    {"round": 1, "codeHead": "7d38337be60f", "decision": "changes_requested", "findings": "e2e-local.sh destroyed a live same-checkout run before refusing (Important); README described the Docker path; false guard comment. All three fixed in 529a9c541aef; the Important one re-driven by the reviewer at cb81dabd: the second run exits 3 with 'another run of e2e-local.sh is using .../out/e2e; this run removed nothing.', the first run PASSes with its store present, no stray processes."}
+    {"round": 1, "codeHead": "7d38337be60f", "decision": "changes_requested", "findings": "e2e-local.sh destroyed a live same-checkout run; stale README; false guard comment. Fixed in 529a9c541aef, re-driven at cb81dabd."},
+    {"round": 2, "codeHead": "cb81dabd7aac", "decision": "changes_requested", "findings": "Gate port band inside gVisor's ephemeral range; relay.Close comment. Fixed in c9b95f0c760d; both thermonuclear passes approve that fix at c9b95f0c."}
   ],
-  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. The tester's push carried a test file, so CI runs at cb81dabd itself. At the time of this round: typecheck, pr-title, envoy-e2e-local, pi-legion success; lint, test, envoy-go and others still in progress. A request for changes does not wait on them.",
-  "thermonuclear": "Both passes at cb81dabd: deep-review CHANGES and code-quality CHANGES, on the same Gate finding below; the lock and trap changes, the new e2e-local.test.sh cases (run in CI step 'Refusal test for e2e-local.sh'), the forward merge (go vet ./... exit 0) and the README held up.",
+  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. CI head c9b95f0c760d (the newest pull_request run); compare to 25a7b6a6183a is ahead, 2 files, both under .legion/. lint, typecheck, test, pr-title all completed/success. Legion Envoy and Contracts run 40195850135 completed failure on three jobs: broker-multiprocess and envoy-go (its unit step's only FAIL is 'cmd/broker [build failed]', startBroker signature mismatch from main, dispatch://INFRA-379; go vet -tags multiprocess ./cmd/broker/ is clean on this branch, which touches no cmd/broker file; envoy-go's natslive and integration steps were therefore skipped at this head), and envoy-go-race, which is this round's finding.",
+  "thermonuclear": "Both passes at c9b95f0c: deep-review APPROVE (gatePorts parsing and floor traced, no 15xxx fixed listener in the repository, macOS falls back to 15000-15999 below Darwin's 49152; go test ./internal/testnats/ ./internal/bus/ -run 'Gate|Reconnect' ok), code-quality APPROVE (wording-only nits on nats.go:688-690). Neither pass saw the envoy-go-race result, which settled after them.",
   "keyFindings": [
     {
       "severity": "important",
-      "file": "packages/envoy/internal/testnats/nats.go:686-711,742-752",
-      "description": "Gate picks its port from 20000-29999 on the stated ground that a :0 port comes from 32768-60999 and nothing in that range is allocated on its own. In this gVisor worker pod /proc/sys/net/ipv4/ip_local_port_range is '16000 65535', and 401 of 2000 :0 binds landed in 20000-29999. While the gate is closed its port is free, and reconnect_err_test.go:138-139 restarts the server (fresh :0 client and monitoring listeners, nats.go:476-479) before gate.Open(), as do concurrent test binaries; a bind that lands on the gate's port makes Open fail with EADDRINUSE or the warning waits time out. Rare per run (about 1 in 25,000 for the restart's own two binds, more with concurrent packages) and loud rather than vacuous, but the invariant the code states is false on the surface this issue exists for. Fix: choose the gate's port below the low bound of the effective ephemeral range read from /proc/sys/net/ipv4/ip_local_port_range (or a fixed range below 16000 with the comment naming both Linux's and gVisor's ranges), and correct the comment."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/envoy/internal/testnats/nats.go:630",
-      "description": "relay.Close's comment says it ends the copies in flight; it closes the listener and releases frozen waits, while unfrozen copies run until an endpoint ends, which Gate.Close's own comment (726-729) states correctly. Align the comment."
+      "file": "packages/envoy/internal/bus/stream_config_test.go:421-453",
+      "description": "envoy-go-race at c9b95f0c (job 121177536920) fails TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn/narrow at line 453 with 'nats: error creating store for stream': the nats-server delete-then-create race testnats.RecreateKeyValue documents (nats.go:982-990). The parent test takes one account (URL and Connect at 421-422) and both subtests use its js; 'narrow' deletes the stream 'widen' made, the account's last, and recreates the same name at once. testnats.URL's own contract (nats.go:97-103) says each subtest gets its own account because subtests that delete and recreate one name in a shared account race. The test predates this PR, but it now runs against the in-process server, which the race detector instruments together with the test, and this is its first red at this branch's heads (envoy-go-race success at 7d38337be60f). 200 non-race runs pass in this pod, which cannot run -race (no C compiler). Fix: take URL and Connect inside each subtest, and check the module's other delete-then-recreate sites (DeleteStream/DeleteKeyValue followed by a create of the same name without RecreateKeyValue) for the same pattern."
     }
   ],
-  "verifiedProofs": "E2E (implementer) and E2E (tester) lines both present. Reproduced my round-1 negative path at cb81dabd and saw it now refused cleanly.",
-  "threads": "PRRT_kwDORFy7ds6wAuxe (e2e-local.sh ownership) and PRRT_kwDORFy7ds6wAuxh (guard comment): both fixed in 529a9c541aef, verified; the implementer resolved both; replied on each."
+  "verifiedProofs": "E2E (implementer) and E2E (tester) lines both present. The round-2 fix is proved by the tester's three 2000-bind runs (0 in 15000-15999) and attacked table, and by the deep-review pass's targeted run.",
+  "threads": "PRRT_kwDORFy7ds6wBYc9 (gate band) and PRRT_kwDORFy7ds6wBYc_ (relay.Close comment): fixed in c9b95f0c760d, accepted; replied on each. Round-1 threads already accepted."
 }
