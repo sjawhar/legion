@@ -9,16 +9,22 @@
 # and, once its pane is killed, comes back with `--resume` into the same Claude Code session, its
 # transcript's earlier turns intact and in its context.
 #
-# Run it as `LEGION_E2E_CLAUDE_KEY_FILE=<file> LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic
-# bash scripts/e2e/claude-backend-tmux.sh`. LEGION_E2E_CLAUDE_KEY_FILE is a file holding the
-# Anthropic API key the Claude Code implementer reaches its model with: the run copies it once into
-# its work directory (0600), and the implementer's claim directory names a key command that prints
-# that copy (Claude Code's apiKeyHelper), so the key reaches no pane's environment, no argv and no
-# transcript. The Oh My Pi agents reach their model through the Hawk model gateway, as Stage 3's do
-# (lib/install-model-gateway.sh). The rig is Stage 3's without its GitHub ingress bridge: scratch
-# Postgres, NATS, Envoy listener and Dispatch, Legion's role Apps through `secrets` (resolved by the
-# daemon's private_key_command and once by lib/app-logins.ts, never in this shell), and the smoke
-# repository sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
+# Run it as `LEGION_E2E_MODEL_ROUTE=<route> LEGION_E2E_CLAUDE_KEY_FILE=<file> bash
+# scripts/e2e/claude-backend-tmux.sh`, with the route's own input beside them.
+# LEGION_E2E_CLAUDE_KEY_FILE is a file holding the Anthropic API key the Claude Code implementer
+# reaches its model with: the run copies it once into its work directory (0600), and the
+# implementer's claim directory names a key command that prints that copy (Claude Code's
+# apiKeyHelper), so the key reaches no pane's environment, no argv and no transcript. The Oh My Pi
+# agents reach their model by Stage 3's route, LEGION_E2E_MODEL_ROUTE (`gateway` or `key-file`):
+#   - `gateway`: LEGION_E2E_MODEL_GATEWAY_URL=<gateway>/anthropic and hawk-token, through the Hawk
+#     model gateway (lib/install-model-gateway.sh).
+#   - `key-file`: LEGION_E2E_ANTHROPIC_KEY_FILE, a 0600 file holding a plaintext Anthropic key, for
+#     a devbox with no Hawk gateway (lib/install-key-file-model-route.sh). An operator may name the
+#     same file for LEGION_E2E_CLAUDE_KEY_FILE and LEGION_E2E_ANTHROPIC_KEY_FILE.
+# The rig is Stage 3's without its GitHub ingress bridge: scratch Postgres, NATS, Envoy listener
+# and Dispatch, Legion's role Apps through `secrets` (resolved by the daemon's private_key_command
+# and once by lib/app-logins.ts, never in this shell), and the smoke repository
+# sjawhar/legion-smoke, where the implementer pushes a branch and opens no pull request.
 set -Eeuo pipefail
 
 root=$(cd "$(dirname "$0")/../.." && pwd)
@@ -114,6 +120,9 @@ cleanup() {
   # Teardown is best effort: a failing command here is a warning about the teardown, never a check's
   # FAIL line, and the run's exit status stays the one the checks set.
   trap 'printf "cleanup warning: line %s exited %s\n" "$LINENO" "$?" >&2' ERR
+  # First, unconditionally: the key-file route's own key command bakes in the key file's resolved
+  # path and must never outlive the run.
+  rm -rf "$work/model-gateway-key" || true
   rm -f "$work/claude-model-key" "$work/claude-key-header"
   stop_tree "$watcher_pid"
   stop_pid "$daemon_pid"
@@ -549,12 +558,18 @@ resumed_reply_names() {
 handoff_recorded() { [ -n "$(role_handoff "$issue" implementer implementing)" ]; }
 
 begin prerequisites
+model_route=${LEGION_E2E_MODEL_ROUTE:-}
+case "$model_route" in
+gateway | key-file) ;;
+*) fail "LEGION_E2E_MODEL_ROUTE must be gateway or key-file, not '$model_route'" ;;
+esac
+[ "$model_route" != gateway ] || command -v hawk-token >/dev/null || fail "hawk-token is required under LEGION_E2E_MODEL_ROUTE=gateway"
 key_file=${LEGION_E2E_CLAUDE_KEY_FILE:-}
 [ -n "$key_file" ] ||
   fail "LEGION_E2E_CLAUDE_KEY_FILE is unset: name a file holding the Anthropic API key the Claude Code implementer reaches its model with"
 [ -f "$key_file" ] && [ -r "$key_file" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE names $key_file, which is not a readable file"
 refuse_leftovers legion-e2ecc
-for tool in go docker jq curl ss tmux bun mise secrets gh jj hawk-token pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
+for tool in go docker jq curl ss tmux bun mise secrets gh jj pgrep claude; do command -v "$tool" >/dev/null || fail "$tool is required"; done
 (umask 077 && tr -d '[:space:]' <"$key_file" >"$work/claude-model-key")
 [ -s "$work/claude-model-key" ] || fail "LEGION_E2E_CLAUDE_KEY_FILE ($key_file) holds no key"
 # The key's preflight: Anthropic lists its models to a key it accepts. The header goes by file, so the
@@ -585,9 +600,19 @@ gh repo view "$repo" --json name >/dev/null || fail "the devbox's ordinary gh ca
 mkdir -p "$state" "$work/xdg" "$work/tmux"
 chmod 0700 "$state" "$work/xdg" "$work/tmux"
 make_omp_home "$omp_home"
-key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
-  fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
-note "the Oh My Pi agents' model route: keyed by $key_command"
+case "$model_route" in
+gateway)
+  key_command=$(bash "$root/scripts/e2e/lib/install-model-gateway.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --cache-dir "$work/model-gateway-cache") ||
+    fail "the Oh My Pi agents' model route through the Hawk model gateway could not be installed (the reason is above)"
+  ;;
+key-file)
+  anthropic_key_file=${LEGION_E2E_ANTHROPIC_KEY_FILE:-}
+  [ -n "$anthropic_key_file" ] || fail "LEGION_E2E_ANTHROPIC_KEY_FILE is unset: name a 0600 file holding a plaintext Anthropic key"
+  key_command=$(bash "$root/scripts/e2e/lib/install-key-file-model-route.sh" --profile "$profile" --home "$omp_home" --dest "$evidence/model-gateway" --key-dir "$work/model-gateway-key" --key-file "$anthropic_key_file") ||
+    fail "the Oh My Pi agents' model route through the key file could not be installed (the reason is above)"
+  ;;
+esac
+note "the Oh My Pi agents' model route: $model_route, keyed by $key_command"
 export XDG_STATE_HOME="$work/xdg"
 export TMUX_TMPDIR="$work/tmux"
 pass
