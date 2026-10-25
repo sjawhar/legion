@@ -2,67 +2,28 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-220",
-  "completed": "2026-10-25T10:39:00Z",
-  "round": 1,
-  "reviewedHead": "dce77dffc58b2fcc2be150cbf75dee94b9b31d7a (code head f22898635c734a7d7d52dddff5952c4815b04606; only .legion/ changed above it)",
-  "ci": "Required set (rulesets): lint, typecheck, test, pr-title; branch protection lists none. CI head f22898635c73 (newest pull_request runs 40183997284 Tests, 40183997374 PR Title): lint, typecheck, test, pr-title, build all completed success at 10:37Z; compare f2289863...dce77dff touches only .legion/.",
+  "completed": "2026-10-25T13:27:00Z",
+  "round": 2,
+  "reviewedHead": "52feca1a999db3bf486ec683d5472d0eb1fda952 plus this handoff commit (code head 2fc4b487c8fad9f8f9c786fc41c0eed4214a75d9; compare 2fc4b487...52feca1a: status ahead, 2 files, both under .legion/)",
+  "ci": "Required set (main rulesets): lint, typecheck, test, pr-title; branch protection names none. CI head 2fc4b487 (newest pull_request runs: Tests 40195025978, PR Title 40195026011): lint, typecheck, test, pr-title completed success at 13:17Z.",
+  "forwardMerges": "6ef7e8e5 and 2fc4b487 brought main in. Interdiff of the branch's own changes (14571f6f..fb3bc446 against 3ca092a6..2fc4b487) differs only in the adaptation to main's session_store cloudsql-iam (SessionDSNSecret -> SessionStore.InDatabase(); the DSN file pointer for every role under either database store). Reviewed and accepted.",
   "thermonuclear": {
-    "deepReview": "CHANGES at dce77dff: four Medium findings (late publish ack marks the next run reported; a failed Claude inbox write ends the reminder loop; mixed-harness lost-volume detection under session_store postgres depends on which role makes the pod; a Claude volume loss drops postgres-backed sibling sessions) and one hardening (session DSN exported into a Claude role's environment).",
-    "codeQuality": "CHANGES at dce77dff: three P2 structure items. Accepted: ClaudeSessionRefusal belongs in claudelaunch. Declined with reasons in the review: consolidating the four runsClaude() branch points, and splitting bootgate.go."
+    "deepReview": "APPROVE at 52feca1a: all four round-1 Important fixes traced correct and complete, the cloudsql-iam adaptation included; no new finding.",
+    "codeQuality": "APPROVE at 52feca1a: no finding in the round-2 changes."
   },
-  "decision": "changes_requested",
+  "ownChecks": "At this head, go test ./internal/runtime/sandbox ./internal/claudelaunch ./cmd/legion: ok. go test ./internal/supervise: ok with CGO_ENABLED=0; with cgo, the table tests' type-check fails on this pod's missing C toolchain (go tool cgo for net), which is environment, not code. bun test pi-shared phase-reminder and phase-stall: 10 pass.",
+  "threads": "All 9 threads I opened in round 1 have the implementer's fix reply and its resolution. Each now carries my reply naming the fixing commit (0d606e3bee31 or 551d496d1143) and what I verified; all 9 accepted. No bot threads.",
+  "decision": "approved",
   "critical": 0,
-  "important": 4,
-  "minor": 5,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/pi-shared/src/phase-reminder.ts",
-      "description": "tellArchitect sets reported = true after the await unconditionally (:270). A tool call or delivery during the publish resets the run (count 0, reportKey cleared) and the next run's continuation brings count to 1; the late acknowledgement then marks the new run reported, so its architect notice is never sent (deep-review probe: count 1 reported true, no second publish at count 2). Set reported only when reportKey is still the key this publish was sent under."
-    },
-    {
-      "severity": "important",
-      "file": "packages/claude-envoy/src/legion-phase-hook.ts",
-      "description": "sendReminder discards the inbox promise (:327). When the bridge's inbox refuses or the socket drops, the runner has already counted the reminder and used its one-shot timer, and nothing re-arms it: no turn starts, so no Stop arrives. The endless reminder stops silently, the failure this issue exists to end. A failed write must re-arm a generation-guarded reminder."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/runtime/sandbox/podkind.go",
-      "description": "Under session_store postgres the issue pod's LEGION_EXPECT_ISSUE_VOLUME is decided by the launch that makes the pod (:94, :236). When an Oh My Pi role makes it after a volume loss, the retained-session lookup is skipped, workspace-init provisions fresh, and the Claude sibling's resume then fails in internal/launcher's sessionWritten (stat of the missing transcript) as a plain launch failure until its budget ends, never the WorkspaceLost relaunch."
-    },
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/runtime/sandbox/podkind.go",
-      "description": "The other ordering: a Claude resume now makes the lost-volume exit reachable under postgres (:94). Its WorkspaceLost reaches supervise relaunchFresh -> VolumeLost -> sessionLost (supervise/table.go:991) for every processless or booting sibling, which drops Oh My Pi sessions that are intact in the session table and relaunches them fresh."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/pi-shared/src/phase-reminder.ts",
-      "description": "A publish failure other than 404 unclaimed/holder_lapsed is retried at every later reminder (:280); the approved spec says it is logged and dropped. Either align the code or record the departure."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/pi-shared/src/phase-stall.ts",
-      "description": "Acceptance bullet 6 names both removed states; only quiet is tested on either host. Add text-call cases (pi-legion and claude-envoy)."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/manifest.go",
-      "description": "Security[secret] hardening: under postgres a Claude role gets no OMP_SESSION_SQL_DSN_FILE pointer (:1074), so the shim exports the session database URL as OMP_SESSION_SQL_DSN into Claude Code and every command it runs. Keep the pointer for every role and set OMP_SESSION_STORAGE for Oh My Pi alone."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/runtime/sandbox/manifest.go",
-      "description": "ClaudeSessionRefusal (:382) is harness-wide transcript recognition living in the pod renderer and built by inverting ResumeSession's error; cmd/legion/sessions.go depends on it. Move a transcript recognizer into claudelaunch and have ResumeSession use it."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/pi-shared/src/stall-limits.ts",
-      "description": "The header says nothing in the daemon sets the four numbers; specs.go now forwards them from the daemon's environment."
-    }
+  "important": 0,
+  "minor": 0,
+  "keyFindings": [],
+  "notes": [
+    "The PR body's E2E (implementer) line still names 6ef7e8e5, and items 1-2 name dc2230ae. implement.json names 2fc4b487 for all three proofs. I asked the implementer on Envoy to bring the body line to its handoff. This is a body edit, not a code finding: the tester's line names this code head and re-ran both real-binary proofs there.",
+    "M1, retrying publish failures other than no-holder, is a departure from the spec that the architect accepted on Envoy. It is not a finding."
   ],
   "notProven": [
-    "scripts/e2e/claude-backend-sandbox.sh (acceptance bullet 1's cluster run) and the new step of scripts/e2e/claude-backend-tmux.sh have not been run; the spec puts that run before acceptance.",
-    "Claude Code 2.1.310's LICENSE.md reads 'All rights reserved. Use is subject to the Legal Agreements'; the worker image that now carries the binary is public on ghcr.io. Redistribution rights are unverified."
+    "scripts/e2e/claude-backend-sandbox.sh (acceptance bullet 1's cluster run) and the tmux step of scripts/e2e/claude-backend-tmux.sh are written but not run. Whether the issue is accepted without them is with the owner (ask 14f85ee4).",
+    "Claude Code's LICENSE.md grants no redistribution, and the worker image is public. This is with the owner (ask ff4a6680)."
   ]
 }
