@@ -334,6 +334,8 @@ export interface GateEntry {
   ruleModel?: string;
   /** The rules check's own time, its document read included. */
   ruleLatencyMs?: number;
+  /** The charter call's own time, on the clock `ruleLatencyMs` uses, so the two concurrent calls' shares of `latencyMs` can be told apart. */
+  charterLatencyMs?: number;
   /** An ask's text could not be read, so the rules call judged that ask without it. */
   ruleTextMissing?: true;
   /** New asks the rules request left out or cut to its bounds. */
@@ -2325,9 +2327,9 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       return undefined;
     };
 
-    /** What one model walk answered: the answer, and the fields every entry that reached the model records. */
+    /** What one model walk answered: the answer, the fields every entry that reached the model records, and the walk's own time. */
     type Called = Pick<GateEntry, "promptBytes" | "model" | "failedModels" | "usage">;
-    type Walked = { answer: Answer; called: Called };
+    type Walked = { answer: Answer; called: Called; elapsedMs: number };
     /**
      * One call to the gate's model: appends its prompts to OMP_ASKGATE_DUMP under `label`, then walks
      * `chain` under the call's one stop, which its deadline is armed on. The charter check and the
@@ -2341,6 +2343,8 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
       prompt: { system: string; user: () => string; label: string },
       chain: readonly GateModel[]
     ): Promise<Walked> => {
+      // Timed from here, so a walk's own share of the gate's latency covers its render as well as its call.
+      const began = deps.now();
       const user = prompt.user();
       const promptBytes = byteLength(prompt.system) + byteLength(user);
       if (dumpPath)
@@ -2373,6 +2377,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
           ...(failedModels.length > 0 ? { failedModels } : {}),
           ...(billed ? { usage } : {}),
         },
+        elapsedMs: deps.now() - began,
       };
     };
 
@@ -2477,6 +2482,7 @@ export function createAskGate(deps: Deps): (pi: Pi) => void {
         ...charter.called,
         deadlineMs,
         reviewedText: args,
+        charterLatencyMs: charter.elapsedMs,
         // Both calls' prompts and spend are the gated call's own.
         promptBytes: (charter.called.promptBytes ?? 0) + (ruled?.promptBytes ?? 0),
         ...(addUsage(charter.called.usage, ruled?.usage) ?? {}),

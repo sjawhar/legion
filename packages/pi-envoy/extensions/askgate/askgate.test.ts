@@ -99,6 +99,8 @@ function bind(
     dispatch?: (directory: string, signal: AbortSignal) => DispatchSession | undefined;
     /** Whether the session shows the gate's notices; a pane with no UI only logs them. */
     hasUI?: boolean;
+    /** The clock the gate times itself by; the real one unless a test drives it. */
+    now?: () => number;
   } = {}
 ) {
   const handlers = new Map<string, Handler>();
@@ -125,7 +127,7 @@ function bind(
   createAskGate({
     env: opts.env ?? {},
     home: HOME,
-    now: Date.now,
+    now: opts.now ?? Date.now,
     logger: { warn: (message: string) => warnings.push(message) },
     appendFile: (p, text) => dumps.push([p, text]),
     readFile: (p) => (fs.existsSync(p) ? fs.readFileSync(p, "utf8") : undefined),
@@ -2953,6 +2955,39 @@ describe("rules check", () => {
     expect(g.entries[0].rule).toBeUndefined();
     expect(g.entries[0].ruleAsksCut).toBeUndefined();
     expect(g.entries[0].ruleLatencyMs).toBeGreaterThanOrEqual(0);
+  });
+  test("an ask's entry times the charter call apart from the rules call and the whole gate", async () => {
+    // A clock only the two model calls move. The charter call is billed before the rules check
+    // begins, and the rules call only after the charter walk has ended, so the charter's own time,
+    // the rules call's own time and the gate's whole time are three different numbers: an entry
+    // that read either of the other two clocks for charterLatencyMs fails here.
+    const charterMs = 11;
+    const rulesMs = 250;
+    let clock = 1_000;
+    const g = bind({
+      now: () => clock,
+      complete: bySystem(
+        async () => {
+          clock += charterMs;
+          return { text: ALLOW, usage: USAGE };
+        },
+        async () => {
+          // The charter walk ends on microtasks alone, so a check-phase callback — not a duration,
+          // and no wall clock — is the signal that it has ended; only then is the rules call billed.
+          const drained = Promise.withResolvers<void>();
+          setImmediate(() => {
+            drained.resolve();
+          });
+          await drained.promise;
+          clock += rulesMs;
+          return { text: RULES_NONE, usage: USAGE };
+        }
+      ),
+    });
+    expect(await g.device("t1", "dispatch_ask", KEEP_INPUT)).toBeUndefined();
+    expect(g.entries[0].charterLatencyMs).toBe(charterMs);
+    expect(g.entries[0].ruleLatencyMs).toBe(rulesMs);
+    expect(g.entries[0].latencyMs).toBe(charterMs + rulesMs);
   });
   test("an ask's entry sums both calls' usage and prompt bytes, and the dump holds both prompts (D7)", async () => {
     const g = bind({
