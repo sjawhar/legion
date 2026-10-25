@@ -1,20 +1,12 @@
 package main
 
 import (
-	"bytes"
-	"crypto/ecdsa"
-	"encoding/json"
-	"io"
-	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/sjawhar/envoy/internal/broker/policy"
-	"github.com/sjawhar/envoy/internal/broker/proof"
-	"github.com/sjawhar/envoy/internal/broker/record"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
 	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
@@ -61,152 +53,35 @@ func TestOneServicesTwoAccountsEachGetItsSecret(t *testing.T) {
 		"BROKER_SERVICE_LOGINS="+service+"="+loginAccount,
 		"BROKER_SERVICES="+service+"="+accountA+" "+service+"="+accountB,
 	)
-	if addr == "" {
-		t.Fatalf("the broker logged no bound address:\n%s", boot)
-	}
 	requireHealthy(t, addr)
 	if strings.Contains(boot, "agent secret policy refused") || strings.Contains(boot, policy.ReasonOwnerTagMalformed) {
 		t.Fatalf("boot log refuses the secret %s owns, which BROKER_SERVICES registers for two accounts:\n%s", service, boot)
 	}
-	base := "http://" + addr
-
-	call := func(method, path string, auth map[string]string, body any) (int, []byte) {
-		t.Helper()
-		var payload []byte
-		if body != nil {
-			var err error
-			if payload, err = json.Marshal(body); err != nil {
-				t.Fatal(err)
-			}
-		}
-		request, err := http.NewRequest(method, base+path, bytes.NewReader(payload))
-		if err != nil {
-			t.Fatal(err)
-		}
-		request.Header.Set("Content-Type", "application/json")
-		for name, value := range auth {
-			request.Header.Set(name, value)
-		}
-		response, err := http.DefaultClient.Do(request)
-		if err != nil {
-			t.Fatalf("%s %s: %v", method, path, err)
-		}
-		defer response.Body.Close()
-		answer, err := io.ReadAll(response.Body)
-		if err != nil {
-			t.Fatal(err)
-		}
-		t.Logf("> %s %s\n< %d %s", method, path, response.StatusCode, bytes.TrimSpace(answer))
-		return response.StatusCode, answer
-	}
-	decode := func(answer []byte, into any) {
-		t.Helper()
-		if err := json.Unmarshal(answer, into); err != nil {
-			t.Fatalf("decode %s: %v", answer, err)
-		}
-	}
-	session := func(key *ecdsa.PrivateKey, enrollmentID, path string, body any) (int, []byte) {
-		t.Helper()
-		signed, err := proof.Sign(key, enrollmentID, http.MethodPost, base+path, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		return call(http.MethodPost, path, map[string]string{"Proof": signed}, body)
-	}
+	broker := podBroker{t: t, base: "http://" + addr, issuer: issuer, key: podKey, audience: podAudience}
 
 	t.Log("--- the service logs in once with its own token")
-	launcherKey := proofKey(t)
-	loginRequest, err := record.Sign(launcherKey, base, []record.AuthorizationDetail{
-		{Type: record.KindLauncherCredential, Identifier: "example-host-cluster", Service: service},
-	}, "", "", nil, time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	status, answer := call(http.MethodPost, "/v1/launcher-credentials/token", nil, map[string]any{
-		"token":   issuer.Mint(t, podKey, issuer.Claims(loginAccount, podAudience)),
-		"request": loginRequest,
-	})
-	var login struct {
-		CredentialID string `json:"credential_id"`
-	}
-	decode(answer, &login)
-	if status != http.StatusOK || login.CredentialID == "" {
-		t.Fatalf("the service's token login = %d %s, want 200 with a credential_id", status, answer)
-	}
+	launcher := broker.logIn(service, loginAccount)
 
-	type pod struct {
-		name, account, enrollmentID string
-		key                         *ecdsa.PrivateKey
-	}
-	pods := []*pod{{name: "A", account: accountA}, {name: "B", account: accountB}, {name: "C", account: accountC}}
 	t.Log("--- the one credential enrolls a pod as each of accounts A, B and C")
-	for _, p := range pods {
-		p.key = proofKey(t)
-		thumbprint, err := proof.Thumbprint(&p.key.PublicKey)
-		if err != nil {
-			t.Fatal(err)
-		}
-		uid := "pod-" + strings.ToLower(p.name)
-		claims := issuer.Claims(p.account, podAudience)
-		claims["kubernetes.io"] = map[string]any{"pod": map[string]any{"uid": uid}}
-		signed, err := proof.SignLauncher(launcherKey, login.CredentialID, http.MethodPost, base+"/v1/enrollments", time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		status, answer := call(http.MethodPost, "/v1/enrollments", map[string]string{"Proof": signed}, map[string]any{
-			"kind": "pod", "runtime_id": uid, "thumbprint": thumbprint, "pod_token": issuer.Mint(t, podKey, claims),
-		})
-		var enrolled struct {
-			EnrollmentID string `json:"enrollment_id"`
-		}
-		decode(answer, &enrolled)
-		if status != http.StatusCreated || enrolled.EnrollmentID == "" {
-			t.Fatalf("enroll pod %s as %s = %d %s, want 201 with an enrollment_id", p.name, p.account, status, answer)
-		}
-		p.enrollmentID = enrolled.EnrollmentID
-	}
+	granted := []struct {
+		name string
+		pod  pod
+	}{{"A", broker.enroll(launcher, "pod-a", accountA)}, {"B", broker.enroll(launcher, "pod-b", accountB)}}
+	podC := broker.enroll(launcher, "pod-c", accountC)
 
-	type created struct {
-		State    string          `json:"state"`
-		GrantID  *string         `json:"grant_id"`
-		RecordID *string         `json:"record_id"`
-		Approver json.RawMessage `json:"approver"`
-	}
-	ask := func(p *pod) created {
-		t.Helper()
-		request, err := record.Sign(p.key, base, []record.AuthorizationDetail{
-			{Type: record.KindAgentSecret, Identifier: secretName, Actions: []string{"inject"}},
-		}, "pod "+p.name+" needs it", "", nil, time.Now())
-		if err != nil {
-			t.Fatal(err)
-		}
-		status, answer := session(p.key, p.enrollmentID, "/v1/requests", map[string]any{"request": request, "session_id": nil})
-		if status != http.StatusOK {
-			t.Fatalf("pod %s's POST /v1/requests = %d %s, want 200", p.name, status, answer)
-		}
-		var reply created
-		decode(answer, &reply)
-		return reply
-	}
-
-	for _, p := range pods[:2] {
+	for _, p := range granted {
 		t.Logf("--- pod %s, running as one of the service's accounts, is granted its secret at once", p.name)
-		reply := ask(p)
+		reply := broker.ask(p.pod, secretName)
 		if reply.State != "granted" || reply.GrantID == nil || reply.RecordID != nil || string(reply.Approver) != "null" {
 			t.Fatalf("pod %s's request = %+v (approver %s), want granted with a grant, no record and approver null", p.name, reply, reply.Approver)
 		}
-		status, answer := session(p.key, p.enrollmentID, "/v1/grants/"+*reply.GrantID+"/values", nil)
-		var values struct {
-			Values map[string]string `json:"values"`
-		}
-		decode(answer, &values)
-		if status != http.StatusOK || values.Values[secretName] != secretValue {
-			t.Fatalf("pod %s's grant values = %d %s, want 200 with %s=%s", p.name, status, answer, secretName, secretValue)
+		if values := broker.values(p.pod, *reply.GrantID); values[secretName] != secretValue {
+			t.Fatalf("pod %s's grant values = %v, want %s=%s", p.name, values, secretName, secretValue)
 		}
 	}
 
 	t.Log("--- pod C, running as an account no entry names, is denied it at once with no one to ask")
-	reply := ask(pods[2])
+	reply := broker.ask(podC, secretName)
 	if reply.State != "denied" || reply.GrantID != nil || reply.RecordID != nil || string(reply.Approver) != "null" {
 		t.Fatalf("pod C's request = %+v (approver %s), want denied with no grant, no record and approver null", reply, reply.Approver)
 	}
