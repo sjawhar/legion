@@ -117,7 +117,9 @@ dependency in its body. For the image-pin comparison and `/healthz` deployment e
   sends what the entry holds then, from whichever surface presses it (`requestFor`): a refusal the
   live view holds whose draft was edited on the Agents row goes out as the edited draft under a
   new key, an unedited one as the held request verbatim, and the row's mode warnings for a send
-  the live view made describe that request's own mode (`pickedDelivery`), never the row's. A
+  the live view made describe that request's own mode (`pickedDelivery`), never the row's. The
+  live view's refusal reads that held draft back too (`Your message: “…”`), so both surfaces show
+  one message and Retry sends what they show. A
   broadcast is keyed and kept the same way (`features/agents/broadcast-queue.ts`, below).
   An upload carries its target as its own mutation variable, taken by the paste or drop that
   starts it, so a pick in that task moves the next message, never the file.
