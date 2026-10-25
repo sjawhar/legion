@@ -45,7 +45,7 @@ The problem and why it matters. Recommendation: the option and its reason.
 
 Outside Legion, claim your issue (`dispatch claim`) and move it and your children: `in_progress` at implementation, `testing` on a production-like surface, `needs_review` while its PR waits, and `done` with `--reason` once you drove it in production. Never write the status of an issue with the `legion` label, or under one.
 
-A claim delivers no comments: in the same turn, `--route session:<your id>` (clear it on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. Never route such an issue.
+A claim delivers no comments: in the same turn, `dispatch issue-update --route session:<your id>` (clear with `--route ''` on release) or `envoy_subscribe notifications.dispatch.issue.<KEY>.>`. Never route such an issue.
 
 ## Close what you opened
 
