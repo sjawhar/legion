@@ -2,54 +2,55 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-83",
-  "completed": "2026-10-24T23:50:00Z",
-  "decision": "changes_requested",
+  "completed": "2026-10-25T01:05:00Z",
+  "decision": "approved",
   "critical": 0,
-  "important": 1,
-  "minor": 1,
-  "round": 12,
-  "keyFindings": [
-    {
-      "severity": "important",
-      "file": "packages/daemon/internal/api/ready.go:95, and the five places this branch copied it into",
-      "description": "The one surviving READY note reads 'pull request #%d is already merged, so READY was published without reading its head's checks or handoffs'. The checks half is now true of every READY - ready.go's own doc says the daemon reads none of the head's check runs or commit statuses - so the sentence's contrast tells the merger that an ordinary READY would have read them. The wording predates the branch and is unchanged on main, where it was accurate; what makes it this change's defect is that the change falsifies it and then promotes it: this is now the only note the route can answer, and the branch writes it into the published contract fixture packages/contracts/fixtures/daemon-api/handoff-complete.json, the golden at api/state_golden_test.go:661, the tool test at packages/pi-legion/src/tools.test.ts:593,621,625 and the contract doc comment at packages/contracts/src/legion-api.ts:557-559. It is agent-facing text asserting a read that no longer exists anywhere, shipped in a contract, by the change whose second deliverable is that no record carries such a claim. Dropping two words - 'without reading its head's handoffs' - fixes it, with the five mirrors."
-    },
-    {
-      "severity": "minor",
-      "file": "packages/daemon/internal/daemon/auto_merge.go:153-155",
-      "description": "The doc this round's commit added says that for a disagreement, naming both ghautomerge.Lagging and ghautomerge.Disappeared, 'the single telling for a disagreement is finishRefused's, once it has stood past ghautomerge.LagBound (merge-stalled) or GitHub has named what took the arm away (merge-removed)'. For a Disappeared the first half never applies: permanentRefusal tests errors.As(err, &lagging) && lagging.Stalled(now), and a Disappeared is not a Lagging. The second half is contingent on GitHub's timeline eventually naming the removal; if it never does, Submit returns Disappeared on every run, the row never ends, and nobody is told anything - the outbox's warning line is the only signal. So the sentence promises a telling that may never come, for the type this very commit moved into that silence. Say that the telling for a Disappeared is merge-removed if GitHub names the removal, and nothing otherwise."
-    }
+  "important": 0,
+  "minor": 0,
+  "round": 13,
+  "keyFindings": [],
+  "roundTwelveFindingsVerified": [
+    "Finding 1 (READY's one note claiming a check read that is gone) fixed in bc3445181971dbb3ecdee92f14b5cb08187c7241, in the producer and all six homes: packages/daemon/internal/api/ready.go:95, handoff_test.go's constant, state_golden_test.go's golden, the published fixture packages/contracts/fixtures/daemon-api/handoff-complete.json, the two tools.test.ts strings and the legion-api.ts doc comment, which now says the head's handoffs went unread rather than the head was published unread. I swept the whole tree for the old wording rather than reading the diff: the only surviving occurrences are inside .legion/ handoff records quoting the finding, which is where a quotation belongs.",
+    "Finding 2 (the doc promising a telling that may never come) fixed in the same commit: the clause now separates a Lagging's telling, merge-stalled once it has stood past LagBound, from a Disappeared's, merge-removed if GitHub names what took the arm away and nothing at all if it never does, naming the outbox's own log line as the only signal in that case. That is the fact, stated where the decision is."
   ],
-  "roundElevenFindingsVerified": [
-    "Finding 1 (Disappeared reaching the warn gate) fixed in 434f974106d9d24ff24756d37f1d6f02a9f2d254, and fixed the way I asked rather than with a third exclusion: the gate is now !payload.Warned && waited > mergeWaitWarn && waitingOnGitHub(cause), with waitingOnGitHub naming Armed, Unmergeable and Merging. The dead permanentRefusal term and the wait import went with it. TestAREADYMergeArmGoneFromGitHubSpendsNoWaitingNotice drives armed, then an arm gone with the timeline naming no removal an hour on, then armed again, and its comment names the assertion that breaks on the old gate rather than only claiming the new one passes.",
-    "Finding 2 (workflow/review.go:67-68 naming a READY check that reads the head's required checks) fixed in the same commit: the clause now reads 'since the pass reads every open pull request, in whatever phase its issue is when the base moves', which is what actually decides there."
+  "approval": {
+    "head": "8c3a365d5c6a2a6cba4940501cb7541c48cc0e56",
+    "codeHead": "bc3445181971dbb3ecdee92f14b5cb08187c7241",
+    "why": "No finding stands and both thermonuclear halves returned APPROVE at this head, each with a body and a verdict line on its first invocation. Thirteen rounds closed thirty defects. What the branch now is: READY refuses the head it must and reads no check of it; the one architect notice it adds is behind a typed allowlist whose membership is argued at the decision and pinned by five tests, three of which name the assertion that breaks without the code they guard; the deleted CI line survives nowhere in any skill, prompt, bundle or script, and the twelve docs/solutions learnings that instructed it carry supersede notes while the two that narrate rightly do not; and every deletion survived two forward merges of main, checked each time by a sweep rather than by a fingerprint, which cannot see a deletion a merge undoes."
+  },
+  "notBlocking": [
+    "packages/daemon/internal/daemon/required_checks.go:67-69 still calls requiredchecks.Required 'the reader READY uses'. It is the last of the family this branch rewrote in four other places, it is a Go comment and reaches no agent, and it is not on the body's fast-follow line though it belongs there. Named in the review so the follow-up carries it.",
+    "The body's Size line says +1790/-684 where GitHub answers 1776/684 at this head, the fourth round in which that figure has outlived its push. The mechanism is structural rather than careless: the line is written before the handoff push that changes it, so 're-read at this head' can never be true of the head a reviewer reads. The fix is to stop making the claim rather than to chase the number, which is a wording change and not a round. The merger quotes Outcome and Not proven / risk, not Size, so nothing in the gate reads it.",
+    "Three line citations in the body drifted again, two of them the implementer's fast-follow pointers and one mine. Mine is corrected in this round's body edit and now names the symbol; the branch has now paid for line-numbered pointers in four separate rounds, which is the general lesson rather than any one of the instances.",
+    "The code-quality half's reading that waitingOnGitHub could be routineWait(cause) || errors.As(cause, &unmergeable), which would cover a wait type added later that declares Routine() without anyone remembering a second package, is a real improvement and an architect's call rather than a correctness risk. Recorded on the fast-follow line with the rest."
   ],
-  "myOwnLinesCorrected": "The Look at first line I rewrote last round for exactly this drifted again inside the same commit that fixed the finding it pointed at: :170-172 is now the legacy-row fallback, the gate is :175 and waitingOnGitHub :212-217; :226-242 is readyMergeEnded, and readyMergeWaiting is :252-256. I had computed those numbers against the pre-fix head and written them into a line whose whole purpose is to send a reader to the right place. Corrected in this round's body edit, with the cause named rather than quietly repaired - the lesson is that a line-numbered pointer written in the same round that moves the lines is a retyped fact about a moving target, and the way to stop paying for it is to cite the symbol and let the number follow it.",
   "whatIVerifiedMyself": [
-    "The allowlist's membership and the three admitted types read against the notice's sentence; Merging is the queue's own removal for the merge, so an hour on it is a genuinely stuck merge and the notice is right for it.",
-    "The doc clause of the minor traced through permanentRefusal rather than taken from the report: it tests Lagging and Stalled only, so the LagBound half cannot apply to a Disappeared.",
-    "ready.go:95 read in place, and checked against main@origin, where the same sentence stands and was accurate before this change; the five mirrors found by grep rather than from the report.",
-    "The body's Size line: it says +1751/-682 and claims it was re-read at this head, where GitHub answers 1784 additions. Third round in which that figure outlived its push, disclosed by its own sentence, recorded rather than carried.",
-    "I read the required checks of the code commit on GitHub myself before deciding and carry no verdict or run id forward as what the head holds now: the required set is lint, typecheck, test and pr-title with no branch-protection checks, every required name's newest run at the code commit had completed and succeeded when I read it, nothing there was failed, cancelled or timed out, the only lane still running was the non-required dispatch check, and the compare from that commit to the pull request's head returned handoffsOnly true over two files."
+    "The note's six homes swept by grep over the whole tree, not read from the diff.",
+    "required_checks.go:67-69 read in place and its claim checked against ready.go's imports.",
+    "The Size figure and the thread count re-derived at the forge: GitHub answers 76 files, 1776 additions, 684 deletions, and reviewThreads totalCount 15 with none unresolved.",
+    "The tester's measurement taken and checked rather than accepted: waitWarnAttempts is 7 at packages/daemon/internal/daemon/outbox.go:59, so an excluded wait type is quiet for seven retries before the outbox's warn line begins. Added to the risk bullet, which is mine.",
+    "I read the required checks of the code commit on GitHub myself before approving and carry no verdict or run id forward as what the head holds now: the required set is lint, typecheck, test and pr-title with no branch-protection checks, every required name's newest run at the code commit had completed and succeeded when I read it, nothing there was failed, cancelled or timed out, the only lane still running was the non-required dispatch check, and the compare from that commit to the head I approve returned handoffsOnly true over two files."
   ],
   "thermonuclear": {
-    "head": "8aa977612b5e40297bd5a6c1609eaf8e525b1437",
-    "deepReview": "First invocation returned no body - its result was the string 'see text' in place of a report, the second time this half has done that on this issue. Re-run once at the same head: CHANGES at 8aa97761, six Low findings, with the whole error taxonomy of ghautomerge enumerated against the gate and every run id in the body re-derived. Its Low 6 is the finding carried above; its Low 4 is the minor; its Low 2 and Low 3 are my own line numbers and the Size figure.",
-    "codeQuality": "CHANGES at 8aa97761, body returned in full on the first invocation. Its two Mediums are waitingOnGitHub's placement and name - that the property belongs on the types in ghautomerge beside Routine(), and that the name overclaims since a Lagging and a Disappeared are also waits on GitHub, which is why two of the helper's three doc lines retract it - and ready.go:95, which I carried. It also corrected my brief: newArmableGitHub predates the branch, so the new test reuses a helper rather than adding a second one.",
-    "perHalf": "Both halves reported after the re-run and both returned CHANGES with a verdict line. Nothing in this round rests on a half that answered with a promise."
+    "head": "8c3a365d5c6a2a6cba4940501cb7541c48cc0e56",
+    "deepReview": "APPROVE at 8c3a365d, body returned in full on the first invocation - the first round in three in which this half did not have to be re-run. Two Lows, both carried above as not blocking; it swept the note's homes independently, traced every consumer of the new notice kind and payload fields, and re-derived the body's figures.",
+    "codeQuality": "APPROVE at 8c3a365d, body returned in full. Four low-to-medium findings, none blocking: the two predicates over the same taxonomy, the first switch arm now duplicating the third, three of the note's six homes being avoidable by reading the published fixture as every sibling suite does, and the allowlist rationale's length. All on the fast-follow line.",
+    "perHalf": "Both halves reported on their first invocation and both returned APPROVE."
   },
   "fastFollow": [
-    "waitingOnGitHub's name and placement: the property is GitHub holding the merge, which ghautomerge could state on its types beside Routine() so the next wait type is written in a file that asks the question, and the current name needs two lines of retraction because a Lagging and a Disappeared are waits on GitHub too. The architect's call, not a correctness risk.",
-    "Every rendering of merge-waiting's remedy lists a required check that never ran or failed, a review only a person can give and a merge queue that has not landed it, and omits a branch GitHub requires to be up to date with its base - the likeliest one-hour wait on a strict base, and one no worker in awaiting_merge can fix. Six places: auto_merge.go's reason, prompts/go/architect-common.md, skills/legion-architect/references/merge-notices.md and its mirror, skills/legion-worker/references/merge-gate.md and its mirror, AGENTS.md and the concepts page.",
-    "required_checks.go:69 still calls requiredchecks.Required the reader READY uses - the last live one of the five claims this branch rewrote elsewhere, and not on the body's fast-follow line.",
-    "handoff_test.go's no-read proof checks only the check-runs and status suffixes, while the docs now claim rules/branches is not read either; adding that suffix pins the stronger claim with the same test.",
-    "The literal pin forces a 187-character line in three otherwise narrow documents; the CI-line guard's negation lookbehind does not compose with its own re- prefix; neither guard reads docs/solutions; classify.Judge lost its last caller outside its package; readyChecks reads no check; rememberWait keeps a positional bool its callee can derive; the compare command is hand-maintained in two files."
+    "required_checks.go:67-69's 'the reader READY uses'.",
+    "waitingOnGitHub expressed as routineWait(cause) || an Unmergeable, so a later wait type that declares Routine() is covered without a second package to remember; and its doc naming routineWait, which classifies the same types two hundred lines away with one term's difference.",
+    "readyMerge's first switch arm, now the same body as its third with a bool literal between them, collapsible into one arm with a named local - which also retires the positional bool.",
+    "packages/pi-legion/src/tools.test.ts hardcoding the daemon's note three times where every sibling suite loads the published fixture.",
+    "The body's Size line claiming it was re-read at a head it cannot have been, and the two fast-follow line-number pointers.",
+    "The merge-waiting remedy enumeration omitting a branch GitHub requires to be up to date with its base, in six places.",
+    "The literal retro-sentence pin forcing a 187-character line in three documents; the CI-line guard's re- lookbehind; neither guard reading docs/solutions; classify.Judge's lost external caller; the readyChecks name; the compare command hand-maintained in two files."
   ],
   "threads": {
     "onGitHub": 15,
     "resolved": 15,
     "answeredByMe": 15,
     "botThreadsAdjudicated": 0,
-    "note": "Counted at the forge. The one I opened in round eleven is answered by the implementer and by me and resolved by it as the pull request's author. No bot has opened a thread on #2121."
+    "note": "Counted at the forge. Round twelve's finding carried no inline comment, since the line it named is unchanged context between two hunks, so it opened no thread and the fifteen are rounds one to eleven's, each carrying the implementer's disposition and mine and resolved by it as the pull request's author. No bot has opened a thread on #2121."
   }
 }
