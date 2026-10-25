@@ -120,7 +120,7 @@ side.
 | `notifications.legion.<project>.controller` | A Legion project's controller. |
 | `notifications.slack.*.<channel>.mention` | Every mention of the Slack app in one channel, whatever the team. |
 | `notifications.envoy.exceptions.<topic>` | A delivery to `<topic>` that failed, with the reason. |
-| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. Live only: it reaches every session subscribed to it when it is published, the publisher included, and is not retained. A session that holds its own NATS connection receives it directly; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not). A topic outside `notifications.` is refused. |
+| any other `notifications.<name>` topic | A team topic you name, such as `notifications.team.deploy-squad.all`. Live only: it reaches every session subscribed to it when it is published, and is not retained. A session that holds its own NATS connection receives it directly, its own publish included; a session the listener delivers to over a serve port, such as an OpenCode agent, receives it through its machine's listener when that listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`, which a host's own listener sets; the shared hub's listener does not), except a publish of its own, which the listener does not echo back. A topic outside `notifications.` is refused. |
 
 An agent subscribes with Envoy's `envoy_subscribe` tool, which stores the subscription in the
 listener. A subscription to `<subject>.>` also covers `<subject>` itself, so subscribing to a pull
@@ -226,7 +226,7 @@ install it, what each component deploys and which settings it sets.
 | `200` `starting` | The listener is still binding its durable consumer. |
 | `200` `healthy` | Everything answers. The body includes the consumer's lag, and `live_topics`: `subscribed` when the listener subscribes to every topic (`ENVOY_SUBSCRIBE_ALL_TOPICS=1`), `not_applicable` when it does not. |
 | `200` `degraded` | A passing key-value failure the listener is retrying. |
-| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone. |
+| `503` `unhealthy` | NATS is unreachable, the subscription or a cache watcher stopped, the durable consumer is gone, or the durable consumer is `not bound to this listener's subscription`, which a durable deleted and created again under the listener leaves. With `ENVOY_SUBSCRIBE_ALL_TOPICS=1`, also `live subscription inactive` when the subscription to every topic is gone or the server refuses it, as one restarted without that grant does. |
 
 `/v1` opens before `/healthz` leaves `starting`: as soon as NATS is connected and the session and
 subscription caches are loaded. Until then `/v1` answers `503` `service starting`. During a rolling

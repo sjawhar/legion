@@ -257,7 +257,10 @@
   or Dispatch's listener grant the start ends with exit 1 and an ERROR naming
   `ENVOY_SUBSCRIBE_ALL_TOPICS`. Both compose files set it. `/healthz` gains `live_topics`,
   `subscribed` or `not_applicable`, and answers `503 {"status":"unhealthy","error":"live
-  subscription inactive"}` when the opt-in is on and the live subscription is gone. Shutdown
+  subscription inactive"}` when the opt-in is on and the live subscription is gone or the server
+  refuses it (one restarted without the grant refuses the subscription the client re-sends, which
+  nats.go keeps valid, so `bus.Client.CoreSubOK` reads the server's refusal until the subscription
+  is sent again). Shutdown
   drains the live client for up to 3 s between the HTTP stop and the main client's drain: 10 s +
   3 s + 13 s = 26 s, inside every runtime's 30 s. envoy-infra renders it from
   `core.ListenerConfig.SubscribeAllTopics`, set by the optional input `subscribeAllTopics` on
