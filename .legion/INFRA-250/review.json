@@ -2,9 +2,9 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-250",
-  "completed": "2026-10-25T16:00:39Z",
-  "round": 4,
-  "reviewedCodeHead": "9ca2004f5f5f2c192cd1bfa0df284f4308ab3eeb",
+  "completed": "2026-10-25T16:44:25Z",
+  "round": 5,
+  "reviewedCodeHead": "ae01882052a9a3c9780d75c22fd4f5cdf61d93d6",
   "base": "687c9e6f2b92b9c0b0e59df6ca026b7bc899304b",
   "decision": "approved",
   "critical": 0,
@@ -13,16 +13,20 @@
   "previousRounds": [
     {"round": 1, "codeHead": "7d38337be60f", "decision": "changes_requested", "findings": "e2e-local.sh destroyed a live same-checkout run; stale README; false guard comment. Fixed in 529a9c541aef."},
     {"round": 2, "codeHead": "cb81dabd7aac", "decision": "changes_requested", "findings": "Gate port band inside gVisor's ephemeral range; relay.Close comment. Fixed in c9b95f0c760d."},
-    {"round": 3, "codeHead": "c9b95f0c760d", "decision": "changes_requested", "findings": "envoy-go-race red: overlap test's subtests shared one account and raced nats-server's delete-then-create window. Fixed in cf4fb50d1afc (URL per subtest; kv_test.go recreate through RecreateKeyValue); envoy-go-race success at 9ca2004f."}
+    {"round": 3, "codeHead": "c9b95f0c760d", "decision": "changes_requested", "findings": "envoy-go-race red: overlap test's subtests shared one account. Fixed in cf4fb50d1afc."},
+    {"round": 4, "codeHead": "9ca2004f5f5f", "decision": "approved", "findings": "none; recorded kvwatch_test.go:837-840 as a risk, which the architect then had fixed (ae01882052a9), voiding this approval by a push."}
   ],
-  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. CI head 9ca2004f5f5f is the newest pull_request run; compare to 160e82120e54 is ahead, 2 files, both under .legion/. lint, typecheck, test, pr-title completed/success. Legion Envoy and Contracts run 40206938033: envoy-go (unit, natslive, integration), envoy-go-race, envoy-infra-go, envoy-smoke, envoy-e2e-local, dispatch-memory, dispatch-multiprocess, broker-multiprocess, pi-legion all success; dispatch still in progress at the read (not required).",
-  "thermonuclear": "Both passes at 9ca2004f: deep-review APPROVE (the fixes close the window; every other same-name delete-then-create in packages/envoy tests is retried, keeps other streams in its account, or is cleanup-only; the merge keeps the flock ahead of every destructive step; #2191's tests take NATS through testnats.URL; go vet ./... exit 0), code-quality APPROVE (wording-only notes on stream_config_test.go:421-423 and nats_test.go:354-355).",
+  "ci": "Required set (ruleset on main): lint, typecheck, test, pr-title; branch protection lists none. CI head ae01882052a9 is the newest pull_request run; compare to 3bd29e65fae1 is ahead, 2 files, both under .legion/. lint, typecheck, test, pr-title success (one earlier pr-title run cancelled, a later one success). envoy-go, envoy-go-race, envoy-infra-go, envoy-smoke, envoy-e2e-local success; dispatch and dispatch-memory still in progress at the read (not required).",
+  "thermonuclear": "Both passes at ae018820: deep-review APPROVE (the keeper, created before the first delete, keeps the account's streams directory non-empty so nats-server's cleanup os.Remove fails harmlessly for both deletes; independent post-condition sweep over 23 delete locations finds no unprotected same-name recreate; go test ./internal/kvwatch/ -run TestARewatchOntoABucketRestoredWithAnOlderStreamRefillsTheCache -count=20 ok), code-quality APPROVE (wording only).",
   "keyFindings": [],
-  "risksRecorded": [
-    "In a worker pod, cmd/listener's four dispatch_resolution_test.go tests (from #2191, merged in) panic with 'rootless Docker not found' through testpg.URL (Postgres); the architect ruled it out of this issue's scope and routed it to the controller. The proven claim is that no NATS container starts anywhere, not that every package passes in a pod.",
-    "internal/kvwatch/kvwatch_test.go:837-840 deletes its account's only stream and restores the same name from a snapshot with no retry: the same server window, unchanged by this PR, behind several request round trips before the restore commits; not seen failing.",
-    "TestEveryGatePortLiesJustBelowThisMachinesEphemeralRange passes on a pod even if StartGate ignored the file, since the pod's range equals the fallback; it fails such a regression on a default Linux runner."
+  "bodyCorrectionsForImplementer": [
+    "The sweep table puts cmd/listener/main_test.go:4565 under 'never put back', but its caller at :4596 recreates the interest bucket at :4599; it is protected because the notification stream and role bucket stay in the account.",
+    "kvwatch/repair_test.go:114 is a helper whose callers at :156 and :258 recreate through RecreateKeyValue (:159, :260); classify by caller.",
+    "The table omits store/interest_markers_test.go:532 (purgeThenDelete, never recreated) and the t.Cleanup deletes at bus/kv_key_test.go:36,160; its rows total 20, not 23.",
+    "The paragraph saying no raw $JS.API.STREAM.RESTORE subject is sent anywhere is false: kvwatch_test.go:921 sends \"$JS.API.STREAM.RESTORE.\"+stream through conn.Request, and a subject grep finds it.",
+    "Entry 17 says nats-server schedules no streams-directory removal with the keeper present; the cleanup is still scheduled (stream.go:5279-5293) and its os.Remove fails on the non-empty directory.",
+    "The unprotected row cites kvwatch_test.go:837-840; at this head the delete is :851 and the restore :854, protected by the keeper at :816."
   ],
-  "verifiedProofs": "E2E (implementer) and E2E (tester) lines both present; the round-3 fix is confirmed by envoy-go-race success at 9ca2004f, the one configuration the pod cannot run.",
-  "threads": "All four threads (PRRT_kwDORFy7ds6wAuxe, PRRT_kwDORFy7ds6wAuxh, PRRT_kwDORFy7ds6wBYc9, PRRT_kwDORFy7ds6wBYc_) carry my answer and are resolved; no bot threads. Round 3's finding had no thread."
+  "verifiedProofs": "E2E (implementer) and E2E (tester) lines both present. The fix is test-only in internal/kvwatch, which envoy-go-race does not run; the evidence is the tester's two mutations, the deep-review pass's 20 runs and the nats-server filesystem mechanism.",
+  "threads": "All four threads carry my answer and are resolved; no bot threads; no new thread this round."
 }
