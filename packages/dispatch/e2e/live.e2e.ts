@@ -402,7 +402,7 @@ test("live: a forced server disconnect resumes from the last event id", async ({
 
 // The page's first live socket fails its opening handshake. A change committed before the next one
 // opens still reaches the page, with no reload: the page tries again, and its event feed resumes
-// from the sign-in check's head.
+// from the sign-in check's head, so Dispatch replays the change on it.
 test("live: a change committed while the first live socket fails to open is shown without a reload", async ({
   browser,
 }) => {
@@ -412,11 +412,18 @@ test("live: a change committed while the first live socket fails to open is show
   const alice = await asUser(browser, "alice");
   try {
     const page = await alice.newPage();
-    let loads = 0;
-    page.on("load", () => {
-      loads += 1;
+    // Every document the page fetched for itself: its first load, and a reload if there were one.
+    // The `load` event is not that count - Playwright's Firefox fires one for the initial
+    // `about:blank` - while a reload is a navigation request of the main frame in every engine.
+    const loaded: string[] = [];
+    page.on("request", (request) => {
+      if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+        loaded.push(request.url());
+      }
     });
     let opens = 0;
+    // The event feed's subscribes the second socket carried to Dispatch, in order.
+    const resumes: (string | undefined)[] = [];
     const refused = Promise.withResolvers<void>();
     const committed = Promise.withResolvers<void>();
     await page.routeWebSocket(/\/ws\/live$/u, async (route) => {
@@ -427,10 +434,25 @@ test("live: a change committed while the first live socket fails to open is show
         return;
       }
       await committed.promise;
-      route.connectToServer();
+      const server = route.connectToServer();
+      route.onMessage((message) => {
+        const frame = JSON.parse(String(message)) as {
+          readonly type?: string;
+          readonly view?: { readonly kind?: string };
+          readonly resume?: { readonly since?: string };
+        };
+        if (frame.type === "subscribe" && frame.view?.kind === "events") {
+          resumes.push(frame.resume?.since);
+        }
+        server.send(message);
+      });
     });
+    const whoami = page.waitForResponse(
+      (response) => new URL(response.url()).pathname === "/auth/whoami" && response.ok()
+    );
 
     await page.goto(`/issues/${issue.key}/conversation`);
+    const head: string = (await (await whoami).json()).event_head;
     await expect(page.getByText("Before the failed handshake", { exact: true })).toBeVisible();
     await refused.promise;
     await patchIssue(issue.key, { title: "Committed while the socket was down" }, bob);
@@ -439,8 +461,11 @@ test("live: a change committed while the first live socket fails to open is show
     await expect(
       page.getByText("Committed while the socket was down", { exact: true })
     ).toBeVisible();
+    // The first subscribe the page ever sent rode the second socket, and resumed from the sign-in
+    // check's head: the patch is above it, so Dispatch replayed it there.
+    expect(resumes[0]).toBe(head);
     expect(opens).toBe(2);
-    expect(loads).toBe(1);
+    expect(loaded).toHaveLength(1);
   } finally {
     await alice.close();
   }

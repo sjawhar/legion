@@ -139,6 +139,20 @@ async function waitForReads(pending: Map<Request, number>): Promise<void> {
   await expect.poll(() => pending.size).toBe(0);
 }
 
+/** Every document the page fetched for itself, in order: its first load and every reload after
+ *  it. The `load` event is not that count - Playwright's Firefox fires one for the page's initial
+ *  `about:blank`, Chromium none - while a reload is a navigation request of the main frame in
+ *  every engine. */
+function trackDocumentLoads(page: Page): string[] {
+  const loaded: string[] = [];
+  page.on("request", (request) => {
+    if (request.isNavigationRequest() && request.frame() === page.mainFrame()) {
+      loaded.push(request.url());
+    }
+  });
+  return loaded;
+}
+
 test.beforeEach(async () => {
   await resetDatabase();
 });
@@ -181,9 +195,11 @@ test("a tab holds one live socket for every live view", async ({ browser }) => {
   }
 });
 
-test("no request to Dispatch stays open while the page idles", async ({ browser }, testInfo) => {
+// Forty seconds of real idling: a page that holds a request open shows it here and nowhere else.
+// It runs in every engine of this spec's projects, since what it proves - that the live socket
+// replaced the long-lived request - is each engine's own connection behaviour.
+test("no request to Dispatch stays open while the page idles", async ({ browser }) => {
   test.setTimeout(60_000);
-  test.skip(testInfo.project.name !== "chromium", "the forty-second idle proof runs once");
   await createProject({ key: "CORE", name: "Core" });
   await createIssue({ project: "CORE", title: "Board issue" });
   await seedDeliveryFixture();
@@ -225,9 +241,8 @@ test("no request to Dispatch stays open while the page idles", async ({ browser 
 // The page rotates before it has seen any event, so its event feed resumes from the sign-in
 // check's head: the change committed while the next socket waits arrives on it, and the rotation
 // costs no request beyond what that change costs a page with no rotation (the control).
-test("a rotation loses no event and makes no extra request", async ({ browser }, testInfo) => {
+test("a rotation loses no event and makes no extra request", async ({ browser }) => {
   test.setTimeout(45_000);
-  test.skip(testInfo.project.name !== "chromium", "the rotation proof runs once");
   await createProject({ key: "CORE", name: "Core" });
   const baselineIssue = await createIssue({ project: "CORE", title: "Comment request control" });
 
@@ -320,10 +335,7 @@ test("a rotation loses no event and makes no extra request", async ({ browser },
   }
 });
 
-test("a change committed while the page loads is shown without a reload", async ({
-  browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name !== "chromium", "the event-head proof runs once");
+test("a change committed while the page loads is shown without a reload", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Before the page load" });
 
@@ -333,10 +345,7 @@ test("a change committed while the page loads is shown without a reload", async 
     const pending = trackApiRequests(page);
     let held: WebSocketRoute | undefined;
     const firstSocketReleased = Promise.withResolvers<void>();
-    let loads = 0;
-    page.on("load", () => {
-      loads += 1;
-    });
+    const loaded = trackDocumentLoads(page);
     await page.routeWebSocket(/\/ws\/live$/u, async (route) => {
       held = route;
       await firstSocketReleased.promise;
@@ -357,16 +366,13 @@ test("a change committed while the page loads is shown without a reload", async 
     await expect(page.getByText("Committed during the page load", { exact: true })).toBeVisible({
       timeout: 5_000,
     });
-    expect(loads).toBe(1);
+    expect(loaded).toHaveLength(1);
   } finally {
     await alice.close();
   }
 });
 
-test("a first live socket opening without a change makes no API request", async ({
-  browser,
-}, testInfo) => {
-  test.skip(testInfo.project.name !== "chromium", "the event-head control runs once");
+test("a first live socket opening without a change makes no API request", async ({ browser }) => {
   await createProject({ key: "CORE", name: "Core" });
   const issue = await createIssue({ project: "CORE", title: "Quiet page load" });
 
@@ -406,8 +412,7 @@ test("a first live socket opening without a change makes no API request", async 
   }
 });
 
-test("an agent live view survives a rotation in place", async ({ browser }, testInfo) => {
-  test.skip(testInfo.project.name !== "chromium", "the transcript position proof runs once");
+test("an agent live view survives a rotation in place", async ({ browser }) => {
   await setLiveSessions([agent]);
   await publishAgentStreamFrame(agent.session_id, replay(agent.session_id), "replay");
 
