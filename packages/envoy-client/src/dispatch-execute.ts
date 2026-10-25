@@ -74,6 +74,7 @@ import {
   DispatchGatewayError,
   DispatchServiceError,
   type GraphReferencesQuery,
+  type IssueReadOptions,
 } from "./dispatch-http";
 import {
   dispatchChildRef,
@@ -907,6 +908,20 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
           "message must be a full message id (uuid) or a dispatch://KEY/message/<id> reference"
         );
       }
+      const events = optionalNumber(args, "events");
+      const allEvents = optionalBoolean(args, "all_events") === true;
+      if (events !== undefined && allEvents) {
+        problems.push(
+          "--events and --all-events both say how many events the read lists: name one, --events N for the last N or --all-events for every one"
+        );
+      }
+      const count = events !== undefined ? "--events" : allEvents ? "--all-events" : undefined;
+      const eventless = count === undefined ? undefined : readWithoutEvents(args);
+      if (eventless !== undefined) {
+        problems.push(
+          `${count} lists an issue's events, which dispatch read prints only for an issue or its dispatch://KEY/log, not for ${eventless}: drop ${count}`
+        );
+      }
       break;
     }
     case "dispatch_doc_read": {
@@ -922,6 +937,36 @@ function argumentProblems(tool: string, args: ToolArguments): string[] {
     }
   }
   return problems;
+}
+
+/** What a `dispatch_read` of the owner-resolved `args` prints in place of an issue's events, or
+ *  undefined for an issue read or its `dispatch://KEY/log`, the two reads that list them. The
+ *  ref's kind comes before `artifact` and `project`: a project document's ask or comment ref
+ *  fills both, and the read prints the ask or comment. */
+function readWithoutEvents(args: ToolArguments): string | undefined {
+  if (optionalString(args, "message") !== undefined) return "a message's conversation";
+  const ref = optionalString(args, "ref");
+  switch (ref === undefined ? undefined : parseDispatchRef(ref)?.kind) {
+    case "ask":
+      return "an ask";
+    case "comment":
+      return "a comment";
+    case "message":
+      return "a message's conversation";
+    case "children":
+      return "the issue's children";
+    // An artifact beside a log ref is refused by `ownerConflictProblems`, which says to drop the
+    // artifact; the log lists events, so the count stays.
+    case "log":
+      return undefined;
+  }
+  if (
+    optionalString(args, "artifact") !== undefined ||
+    optionalString(args, "project") !== undefined
+  ) {
+    return "a document summary";
+  }
+  return undefined;
 }
 
 /**
@@ -3965,8 +4010,14 @@ export async function executeDispatchTool(
         };
       }
       const issueKey = issue();
+      // Which of the issue's events the issue read and its log list; `argumentProblems` refused a
+      // count beside any other read.
+      const readEvents: IssueReadOptions = {
+        events:
+          optionalBoolean(args, "all_events") === true ? "all" : optionalNumber(args, "events"),
+      };
       if (ownerArguments.ref?.kind === "log") {
-        const read = await client.read(issueKey);
+        const read = await client.read(issueKey, readEvents);
         const pictures = await picturesOf(read.events.flatMap(eventTexts));
         return {
           text: [logSummary(read.issue, read.events), ...pictures.lines].join("\n"),
@@ -3975,13 +4026,14 @@ export async function executeDispatchTool(
         };
       }
       if (ownerArguments.ref?.kind === "children") {
-        const read = await client.read(issueKey);
+        // The children list prints no events, so only the issue is read.
+        const parent = await client.getIssue(issueKey);
         return {
-          text: childrenSummary(read.issue),
-          details: { issue: read.issue.key },
+          text: childrenSummary(parent),
+          details: { issue: parent.key },
         };
       }
-      const readPromise = client.read(issueKey);
+      const readPromise = client.read(issueKey, readEvents);
       // Start the independent, non-fatal closure lookup with the issue read. `read` retains
       // its internal issue-then-events order because event pagination starts at issue.last_seq.
       const referencesPromise = issueReferencesOrUnavailable(client, issueKey);

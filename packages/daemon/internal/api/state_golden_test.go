@@ -70,6 +70,8 @@ dispatch_token_file: /var/run/legion/DISPATCH_TOKEN
 projects:
   LEGION:
     slack_channels: [C0123ABCD, C0123ABCE]
+    deploys:
+      - {repo: sjawhar/legion, workflow: .github/workflows/release.yaml, step: Apply}
   WIDGETS:
     merge_queue_role: merge-queue
     merge:

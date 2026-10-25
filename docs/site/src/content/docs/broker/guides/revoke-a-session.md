@@ -34,13 +34,13 @@ broker allows it when you are the grant's approver or its session's operator, an
 else `NOT_APPROVER`.
 
 ```console
-$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/grants/<grant id>/revoke-by-approver"
+$ curl -s -X POST -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/grants/<grant id>/revoke-by-approver"
 {"state":"revoked"}
 ```
 
-(That is the call Dispatch's server makes with the broker's UI token, the credential only
-Dispatch's server holds; on the [local stack](/legion/broker/guides/run-locally/) you can make it
-yourself.)
+(That is the call Dispatch's server makes as its own ServiceAccount, the caller the broker lists
+in `BROKER_API_ACCOUNTS`; on the [local stack](/legion/broker/guides/run-locally/) you can make it
+yourself with the token in `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.)
 
 ## Revoke a grant from your shell
 
@@ -195,9 +195,9 @@ daemon's token login is listed the same way with `approved_by` empty and `subjec
 ServiceAccount:
 
 ```console
-$ curl -s -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" "$AGENT_SECRETS_URL/v1/launcher-credentials?approver=ada@example.com"
+$ curl -s -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" "$AGENT_SECRETS_URL/v1/launcher-credentials?approver=ada@example.com"
 {"credentials":[{"credential_id":"d4187389-953c-4156-90c1-1dd937e9bf0b","host":"example-host-devbox","service":null,"subject":null,"approved_by":"ada@example.com","issued_at":"2026-10-10T14:56:01.121955Z","expires_at":"2026-10-17T14:56:01.122701Z","expired":false},{"credential_id":"8f4c8ae4-b73e-4a60-a591-725667480f1a","host":"example-host-cluster","service":"legion-daemon","subject":null,"approved_by":"bob@example.com","issued_at":"2026-10-10T14:55:59.906427Z","expires_at":"2026-10-17T14:55:59.9071Z","expired":false}]}
-$ curl -s -X POST -H "Authorization: Bearer $AGENT_SECRETS_UI_TOKEN" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/8f4c8ae4-b73e-4a60-a591-725667480f1a/revoke-by-approver"
+$ curl -s -X POST -H "Authorization: Bearer $(cat "$AGENT_SECRETS_ACCOUNT_TOKEN_FILE")" -d '{"approver":"ada@example.com"}' "$AGENT_SECRETS_URL/v1/launcher-credentials/8f4c8ae4-b73e-4a60-a591-725667480f1a/revoke-by-approver"
 {"state":"revoked"}
 ```
 

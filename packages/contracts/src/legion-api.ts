@@ -179,8 +179,9 @@ const legionSlotView = z.strictObject({
 });
 
 /** `api.CheckWakeView` — what woke a production check's latest look: `kind` names the cause
- * (`merge`, `issue.deployed`, `daemon boot`, `dispatch start`, `dispatch build` or `bound`),
- * `detail` the cause's own detail (the run and its completion, or the build's commit), `at` when. */
+ * (`merge`, `issue.deployed`, `deploy run`, `daemon boot`, `dispatch start`, `dispatch build` or
+ * `bound`), `detail` the cause's own detail (the run and its completion, the deploy workflow's run,
+ * attempt, job and step success, or the build's commit), `at` when. */
 const legionCheckWakeView = z.strictObject({
   kind: nonEmptyString,
   detail: z.string(),

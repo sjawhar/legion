@@ -108,8 +108,8 @@
             "value": "https://example-broker.internal.example"
           },
           {
-            "name": "DISPATCH_AGENT_SECRETS_TOKEN_FILE",
-            "value": "/var/run/secrets/dispatch/agent-secrets-token"
+            "name": "DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE",
+            "value": "/var/run/secrets/dispatch/agent-secrets-account-token"
           },
           {
             "name": "DISPATCH_APP_CLIENT_ID",
@@ -172,7 +172,7 @@
           },
           {
             "mountPath": "/var/run/secrets/dispatch",
-            "name": "agent-secrets-token",
+            "name": "agent-secrets-account-token",
             "readOnly": true
           }
         ]
@@ -220,14 +220,18 @@
         "name": "nats-seed"
       },
       {
-        "csi": {
-          "driver": "secrets-store-gke.csi.k8s.io",
-          "readOnly": true,
-          "volumeAttributes": {
-            "secretProviderClass": "example-dispatch-agent-secrets-token"
-          }
-        },
-        "name": "agent-secrets-token"
+        "name": "agent-secrets-account-token",
+        "projected": {
+          "sources": [
+            {
+              "serviceAccountToken": {
+                "audience": "example-broker-audience",
+                "expirationSeconds": 3600,
+                "path": "agent-secrets-account-token"
+              }
+            }
+          ]
+        }
       }
     ]
   }

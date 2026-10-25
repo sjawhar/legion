@@ -569,6 +569,17 @@
 
 ### Changed
 
+- **Breaking (local development):** `agent-secrets-devrelay` presents a listed caller's own
+  ServiceAccount token, read from `--account-token-file` (default
+  `$AGENT_SECRETS_ACCOUNT_TOKEN_FILE`), in place of the shared bearer the broker no longer takes. A
+  missing or empty file exits 1 naming it, before any request. `scripts/dev-broker.sh` starts
+  `dev-oidc-issuer`, a new local stand-in for a cluster's ServiceAccount token issuer (the Go
+  tests' `internal/oidc/oidctest` served on a loopback port), and its broker trusts it, lists
+  `system:serviceaccount:example-ns:example-dispatch` as its caller `dispatch` and turns the token
+  exchange on for `system:serviceaccount:example-ns:example-worker`; the issuer keeps both tokens in
+  the workdir and rewrites each before it lapses, and the script exports
+  `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, so devrelay approves records and machine logins locally
+  again. The Dispatch e2e harness's broker token is `DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`.
 - A failed NATS reconnect attempt is logged, where it was silent: one WARN a minute per
   connection, `envoy nats reconnect attempt failed`, naming the client, the servers it was
   configured with and the error, with the first failure of an outage logged at once. nats.go
@@ -1134,6 +1145,43 @@
 
 ### Fixed
 
+- An agent woken by a Slack message now reads the words the message carries, wherever it carries
+  them. A Slack delivery's `text` is the message's own text and then every display string its
+  blocks and then its attachments hold — the strings under `pretext`, `author_name`,
+  `author_subname`, `title`, `text`, `alt_text`, `value` and `footer`, at any depth,
+  each object read with those names in that rank and then its remaining keys alphabetically, so a
+  section's own text precedes its fields and a button's label its hidden value — joined by line
+  feeds, and the summary shows the first line. Blocks come before attachments because Slack
+  renders a block as the message body and an attachment after it. An attachment's `fallback` is
+  read last of all, after everything else that attachment carries, and only when nothing in that
+  attachment said it already: it is the plain-text copy Slack shows where the attachment itself
+  cannot be shown, so a coloured alert whose `fallback` repeats its own section delivers that line
+  once, and one whose `fallback` says more delivers the attachment's body first. An app that
+  posts a formatted message leaves `text` empty and puts the words in `blocks` or `attachments`,
+  and such a wake used to carry a summary ending in `: ` and a payload with no words in it at all;
+  an image-only post now carries the `alt_text` Slack renders in the image's place. A string an
+  object has already shown under another of its own names is not shown twice; two objects saying
+  the same thing are two
+  things a reader sees, so a message whose fields read `Passed 3`, `Failed 0`, `Skipped 0` keeps
+  both counts of `0` and two attachments both reading `ok` keep both. A string equal to the
+  message's own text, or to one of its lines, is dropped wherever it sits,
+  and a `rich_text` block that says nothing that text does not say
+  already is left unread — that tree is the Slack client's structured copy of a person's words,
+  and it is the one block kind the walk knows by name, which is why a message composed in a client
+  reads as it did, the `&`, `<` and `>` its author typed included. An app's own rich text, which
+  Slack tells app authors to post beside a short `text` field, says more than that field and is
+  read like any other block, as is a `rich_text` block nested in one already read. The delivered
+  text is still cut at 2,048 runes and marked `body_truncated`, and a deleted message still
+  delivers nothing (INFRA-180).
+
+- A Dispatch reference read no longer fails while the database holds an edge a newer build wrote.
+  `GET /api/v1/references` (`?to=` and `?from=`) and `GET /api/v1/artifacts/{id}/references`
+  answered `500` on a row whose other end is a node kind the running build does not know, which a
+  person saw as "Referenced by unavailable." and an agent's `dispatch read` as one `unavailable`
+  row; the build now leaves that edge out and lists every edge it knows. The `referenced_by_count`
+  of an issue and of every ask leaves it out too, so a count is the number of rows its panel lists,
+  and a document's `outgoing` no longer lists a target of a kind no client reads. A build that adds
+  a node kind to the graph can therefore roll out while the older build still serves reads.
 - `GET /v1/registry/<session_id>` is the listener's authoritative answer about one session, so a
   session that is working is no longer read as gone while a listener's session cache refills. The
   read goes through that cache to the session bucket: a 200 carries the same body a row of `GET

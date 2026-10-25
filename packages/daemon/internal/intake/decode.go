@@ -468,6 +468,8 @@ func decodeGitHubFact(subject string, repositories []ghrepo.Repository, payload 
 		fact, err = decodePush(repository, raw)
 	case "checks":
 		fact, err = decodeChecks(subject, repository, raw)
+	case "workflow":
+		fact = decodeWorkflowRun(repository, raw)
 	}
 	// Comments, and every other kind, route to the current role but do not change the durable
 	// workflow record.
@@ -592,6 +594,31 @@ func decodeChecks(subject string, repository ghrepo.Repository, raw map[string]j
 	return PullRequestChecks{Repo: repository.String(), Number: number, HeadSHA: headSHA, CheckRuns: runs, Generation: generation, Snapshot: snapshot, Failing: failed, Cancelled: cancelled}, nil
 }
 
+// decodeWorkflowRun reads a workflow run's envelope (Envoy's `workflow_run` payload): its
+// completion is a WorkflowRunCompleted, and every other action, or a completion that names no
+// positive run id and attempt (decimal strings, as Envoy writes GitHub's numbers), no workflow
+// path or no branch, is no fact. A malformed run is acknowledged rather than poison: it can wake
+// nothing, and the next run's envelope is read on its own.
+func decodeWorkflowRun(repository ghrepo.Repository, raw map[string]json.RawMessage) Fact {
+	if action, _ := rawString(raw, "action"); action != "completed" {
+		return nil
+	}
+	runID, ok := rawPositiveDecimal(raw, "run_id", 64)
+	if !ok {
+		return nil
+	}
+	attempt, ok := rawPositiveDecimal(raw, "run_attempt", 32)
+	if !ok {
+		return nil
+	}
+	path, _ := rawString(raw, "path")
+	branch, _ := rawString(raw, "head_branch")
+	if path == "" || branch == "" {
+		return nil
+	}
+	return WorkflowRunCompleted{Repo: repository.String(), Path: path, RunID: runID, Attempt: int(attempt), HeadBranch: branch}
+}
+
 func githubIdentity(raw map[string]json.RawMessage) (int, string, bool) {
 	number, numberOK := rawNumber(raw, "number")
 	action, actionOK := rawString(raw, "action")
@@ -668,7 +695,7 @@ func rawNumber(raw map[string]json.RawMessage, key string) (int, bool) {
 		integer = rawInt
 	} else {
 		var text string
-		if err := json.Unmarshal(value, &text); err != nil || !regexp.MustCompile(`^\d+$`).MatchString(text) {
+		if err := json.Unmarshal(value, &text); err != nil || !decimalDigits.MatchString(text) {
 			return 0, false
 		}
 		parsed, err := strconv.ParseInt(text, 10, 64)
@@ -697,6 +724,21 @@ func rawInt64Value(value json.RawMessage) (int64, bool) {
 		return 0, false
 	}
 	return integer, true
+}
+
+// decimalDigits is a number as Envoy writes GitHub's numeric fields into a payload: decimal digits
+// alone, with none of the sign or base prefix strconv would otherwise accept. rawNumber holds a
+// number written as a string to it, and rawPositiveDecimal every number it reads.
+var decimalDigits = regexp.MustCompile(`^[0-9]+$`)
+
+// rawPositiveDecimal reads a positive integer of at most bits bits written as a decimal string.
+func rawPositiveDecimal(raw map[string]json.RawMessage, key string, bits int) (int64, bool) {
+	text, ok := rawString(raw, key)
+	if !ok || !decimalDigits.MatchString(text) {
+		return 0, false
+	}
+	value, err := strconv.ParseInt(text, 10, bits)
+	return value, err == nil && value > 0
 }
 
 // rawTimestamp reads an optional RFC 3339 time: an absent, null or empty field is the zero time,
