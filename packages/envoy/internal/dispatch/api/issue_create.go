@@ -236,19 +236,26 @@ func (s *server) createIssue(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	if !assigneeProvided {
-		assignee = defaultAssignee(actor, parentAssignee)
-	}
-
 	var number int
+	var projectDefaultAssignee *string
 	if err := tx.QueryRow(r.Context(), `
 		update projects
 		set next_number = next_number + 1
 		where key = $1
-		returning next_number - 1
-	`, input.Project).Scan(&number); err != nil {
+		returning next_number - 1, default_assignee
+	`, input.Project).Scan(&number, &projectDefaultAssignee); err != nil {
 		s.writeHandlerError(w, err)
 		return
+	}
+	// The project's stored default is the chain's last step, and this update already holds the
+	// project row: the decision moves below it so a create in a project with no default costs no
+	// round trip and takes no lock of its own.
+	if !assigneeProvided {
+		assignee, err = defaultAssignee(r.Context(), tx, actor, parentAssignee, projectDefaultAssignee)
+		if err != nil {
+			s.writeHandlerError(w, err)
+			return
+		}
 	}
 	// The project row is locked from here; the mapping check takes its key-share lock only now, in
 	// the project-then-mapping order every mapping write follows (lockRepoProjectWrite).

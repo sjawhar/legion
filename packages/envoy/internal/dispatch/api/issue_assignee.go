@@ -49,17 +49,40 @@ func (s *server) allowedLogin(ctx context.Context, login string) (string, error)
 	return canonical, nil
 }
 
-// defaultAssignee is who a new issue goes to when the creator names nobody: the human who
-// created it, the owner of the personal token that created it, or the parent's assignee.
-// The shared token creating a root issue leaves it unassigned.
-func defaultAssignee(actor model.Actor, parent *string) *string {
+// defaultAssignee is who a new issue goes to when the create names nobody, in order: the human
+// who created it, the owner of the personal token that created it, the parent's assignee, and
+// the project's default assignee (projectDefault, the column a human sets through PUT
+// /api/v1/projects/{key}/default-assignee). An explicit assignee on the create, a JSON null
+// among them, never reaches here: parseIssueAssignee decides both. The shared token creating a
+// root issue in a project with no default leaves it unassigned.
+//
+// The project's default is used only when it still names a person who has signed in. That check
+// is one query on q, the create's own transaction, which already holds the project row: it runs
+// only when every earlier step yielded nobody, so a create in a project with no default costs
+// nothing new. It is deliberately not allowedLogin: a default left stale by a restore or a
+// direct write must fall through to nobody, not refuse the create.
+func defaultAssignee(ctx context.Context, q queryer, actor model.Actor, parent, projectDefault *string) (*string, error) {
 	if actor.Kind == "user" {
-		return new(model.CanonicalLogin(actor.ID))
+		return new(model.CanonicalLogin(actor.ID)), nil
 	}
 	if actor.Owner != nil {
-		return new(model.CanonicalLogin(*actor.Owner))
+		return new(model.CanonicalLogin(*actor.Owner)), nil
 	}
-	return parent
+	if parent != nil {
+		return parent, nil
+	}
+	if projectDefault == nil {
+		return nil, nil
+	}
+	var known bool
+	if err := q.QueryRow(ctx,
+		`select exists(select 1 from people where email = $1)`, *projectDefault).Scan(&known); err != nil {
+		return nil, fmt.Errorf("read project default assignee %q: %w", *projectDefault, err)
+	}
+	if !known {
+		return nil, nil
+	}
+	return projectDefault, nil
 }
 
 type dispatchUser struct {
