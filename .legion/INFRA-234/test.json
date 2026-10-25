@@ -2,51 +2,68 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-234",
-  "completed": "2026-10-25T06:58:30Z",
-  "headSha": "580468237319f9c66b150da7798b06eab4948067",
-  "codeSha": "3bac57da727e34a365c22c6872a2c6e7a13be7ec",
+  "completed": "2026-10-25T07:08:00Z",
+  "headSha": "e3147c7f6c15dca6e182cb08a620eb10316bf0fb",
+  "codeSha": "b5b5f61ae51c16a5d2702194aee2fd5b1b2ea1fb",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Drove the same surface independently from this issue's tester role container on 2026-10-25: the Job block, the Service block and the sequence extracted fresh from docs/kubernetes.md at the head (lines 2669-2700, 2712-2723, 2730-2757; the Job's two deployment placeholders filled from the deployment's own declaration read with gh, not from the implementer's files; issue key infra-234), run twice in turn under fresh suffixes (infra-234-postgres-8a6d92 06:54:25Z-06:55:41Z, infra-234-postgres-e7ad30 06:56:01Z-06:56:07Z). Every outcome the implementer reports reproduced (Job and Service created, pod labels carry the Job's controller-uid and the reachability label, the Service reads back that selector and the Job as its one owner with matching uid, answered by the Service name, Job's deletion takes the Service, the closing listing shows the pod Terminating, nothing of it a few seconds later) and so did its negative control. One observed detail did not: 'answered on its first try' (failure 1)."
+    "how": "Drove the same surface independently from this issue's tester role container: the Job block, the Service block and the sequence extracted fresh from docs/kubernetes.md at b5b5f61a (lines 2669-2700, 2713-2724, 2731-2758; the Service block and sequence byte-identical to round 1's, the Job block identical but for the password), the Job's two deployment placeholders filled from the deployment's own declaration, with one print per reachability attempt and a timestamp after the Ready wait. Workload infra-234-postgres-3022f9, 07:05:30Z-07:06:32Z on 2026-10-25. Every outcome of the implementer's round-2 proof (infra-234-postgres-af1ede) reproduced, including the refused first attempt and the answer about two seconds after Ready."
   },
-  "failures": [
+  "failures": [],
+  "failed": 0,
+  "proof": [
     {
-      "criterion": "A3: the evidence passage records the Service half as run, saying what ran, where and when",
-      "evidence": "docs/kubernetes.md:2799 (and the PR body's E2E (implementer) line, and implement.json proof[0].observed) record the reachability check 'answering by the Service name on its first try'. The published block prints nothing per attempt, so no run of it can observe a first try, and the run behind the bullet contradicts it: the implementer's own log ($TMPDIR/infra234/run1/out.log) has the check starting at T0+71s = 06:43:45Z, the Job's log 'listening on IPv4 address \"0.0.0.0\", port 5432' at 06:43:46.370, and the next step at T0+73s, the 2 s gap of one refused attempt and the loop's sleep. Measured directly: the same block with one print per attempt added (driver2.sh, workload infra-234-postgres-e7ad30, 2026-10-25 06:56:03Z) printed 'attempt at 06:56:03 / ConnectionRefusedError: [Errno 111] Connection refused / attempt at 06:56:05 / answered', with postgres listening at 06:56:03.160; the uninstrumented run (infra-234-postgres-8a6d92) shows the same 2 s gap (check at 06:55:34Z, listener 06:55:35.258, next step 06:55:36Z). The page's own paragraph at 2765-2773 says why: Ready precedes the listener, so the first connection is refused and the loop retries. Fix: the bullet says the check answered after a refused first attempt (or drops 'on its first try'), and the PR body's E2E (implementer) line likewise. No repository test pins this: the defect is a sentence of prose, and a test reading the document's text is a source-text test; the run log is the pin."
+      "criterion": "A1: a role applying the Service exactly as the section publishes it gets a Service, and the workload answers by the Service name (spec finding 5)",
+      "surface": "This issue's Legion tester role container, against the applied cluster, kubectl with the projected credential and its default namespace",
+      "command": "cd $TMPDIR/tester && python3 extract.py && TMPDIR=$TMPDIR/tester bash driver3.sh: the page's sequence lines verbatim, with timestamps, a label read and Service read after the Ready wait, and one print per attempt in the reachability loop; workload infra-234-postgres-3022f9, 07:05:30Z-07:06:32Z 2026-10-25",
+      "observed": "job.batch created; service created; --for=create met at once; Ready wait returned 07:06:25.054 (55 s); pod labels: batch.kubernetes.io/controller-uid == the Job's uid True, reachability label true True; Service: selector == {batch.kubernetes.io/controller-uid: <uid>} True, ClusterIP, one ownerReference, Job, name and uid match True; reachability: attempt 07:06:25 ConnectionRefusedError, attempt 07:06:27 answered, by <workload>.<ns>.svc.cluster.local:5432; postgres 'listening on IPv4 address \"0.0.0.0\", port 5432' at 07:06:26.138; log ends 'database system is ready to accept connections'.",
+      "headSha": "b5b5f61ae51c16a5d2702194aee2fd5b1b2ea1fb",
+      "negativeControl": "kubectl create --dry-run=server of the Service with selector {job-name: <workload>} (fresh name, owner uid): refused, exit 1, 'denied request: a … Service's selector is batch.kubernetes.io/controller-uid alone, at the uid of the Job that owns it: it fronts its owner's pods and no one else's' (policy and binding elided); the published block rendered the same way: 'created (server dry run)', exit 0."
     },
     {
-      "criterion": "A9: no other sentence of the section moves (formatting of the changed paragraph)",
-      "evidence": "The diff deletes the blank line between 'naming that rule:' and the Service's ```yaml fence (docs/kubernetes.md:2711-2712). It is now the only fenced block in the 4539-line file with no blank line before it (awk over the file: one hit, line 2712). CommonMark still renders it, so this is a formatting regression rather than a broken render; restore the blank line in the same round."
+      "criterion": "A3: the dated evidence bullet says what ran (round-1 finding 1 corrected)",
+      "surface": "The same run as proof 1, read against docs/kubernetes.md:2797-2805 at b5b5f61a",
+      "command": "Compare the bullet's 'answering by the Service name about two seconds after the Ready wait returned', 'first connection refused and the retry answer', 'the listener opening a second or so after Ready' with run3.log",
+      "observed": "Ready 07:06:25.054; first attempt refused; listener 07:06:26.138 (1.1 s after Ready); answered at 07:06:27 (about 2 s after Ready). Round 1's two runs agree (listener about 1 s after the Ready wait returned, read at one-second precision; 2 s gaps). 'first try' no longer appears in docs/kubernetes.md; in the PR body and implement.json it appears only as history of round 1.",
+      "headSha": "b5b5f61ae51c16a5d2702194aee2fd5b1b2ea1fb",
+      "negativeControl": "The round-1 text ('on its first try') against the same run: contradicted by the refused attempt printed at 07:06:25."
+    },
+    {
+      "criterion": "A4: the closing listing shows the Service went with its Job, and its comment says what it shows",
+      "surface": "The same run as proof 1",
+      "command": "The published closing line `kubectl get jobs,pods,svc` run right after `kubectl delete job`, then the listing once a second",
+      "observed": "exit 0; no Job and no Service line for the run, pod 1/1 Terminating; pod gone 4 s later (round 1: 4 s and 1 s). 'its Job and Service gone, its pod soon after' holds.",
+      "headSha": "b5b5f61ae51c16a5d2702194aee2fd5b1b2ea1fb",
+      "negativeControl": "The old comment 'nothing of it is left' against the same listing: false at that moment (the pod line is present)."
+    },
+    {
+      "criterion": "A9 formatting (round-1 finding 2): the blank line before the Service's fence is back",
+      "surface": "docs/kubernetes.md at b5b5f61a",
+      "command": "awk 'NR>1 && /^```[a-z]/ && prev!=\"\" {print NR} {prev=$0}' docs/kubernetes.md",
+      "observed": "No line printed: every fenced block in the file has a blank line before it.",
+      "headSha": "b5b5f61ae51c16a5d2702194aee2fd5b1b2ea1fb",
+      "negativeControl": "The same command at 3bac57da printed 2712."
+    },
+    {
+      "criterion": "A8: no private literal reaches the diff, the commit messages, the PR text or a handoff",
+      "surface": "This role's own shell",
+      "command": "grep -c -i -F with nine patterns held in shell variables (the label's domain and key, the owner's name, the admission policy name, the scratch storage class, the pool's name, '-n <ns>', '<ns>.svc', '<ns> namespace', the deployment repository's name) over the diff c6387bde..e3147c7f, every commit message in that range, the PR title, branch name and body",
+      "observed": "0 hits for every pattern in every file.",
+      "headSha": "e3147c7f6c15dca6e182cb08a620eb10316bf0fb",
+      "negativeControl": "The same grep over the deployment's README counts 21 and 8 for two of the patterns."
     }
   ],
-  "failed": 2,
-  "checks": [
+  "rounds": [
     {
-      "what": "Real-surface drive of the page as published, Service half included",
-      "command": "cd $TMPDIR/tester && python3 extract.py && TMPDIR=$TMPDIR/tester bash driver.sh (the sequence's lines verbatim, with timestamps, four server dry runs between the uid read and the Service apply, and a label read and Service read after the Ready wait)",
-      "observed": "job.batch/infra-234-postgres-8a6d92 created; service/... created; --for=create met at once; Ready after 67 s; pod labels: controller-uid == the Job's uid True, reachability label true True; Service: selector == {batch.kubernetes.io/controller-uid: <uid>} True, ClusterIP, 1 ownerReference, Job, name match True, uid match True; 'answered'; log ends 'database system is ready to accept connections'; kubectl delete job: deleted; closing kubectl get jobs,pods,svc exit 0 with no job line, no service line for the run, and the pod 1/1 Terminating; polled every second: pod gone 4 s after the listing."
-    },
-    {
-      "what": "The closing listing's new comment ('its Job and Service gone, its pod soon after')",
-      "command": "Both runs above; the published closing line run verbatim immediately after kubectl delete job, then kubectl get jobs,pods,svc once a second",
-      "observed": "Both runs: at the closing listing the Job and the Service were already gone and the pod was Terminating; the pod was gone 4 s later in run 1 and 1 s later in run 2. The comment is true as written; 'nothing of it is left' would have been false at the moment the line runs."
-    },
-    {
-      "what": "Negative control: the Service admission",
-      "command": "kubectl create --dry-run=server of the Service with the live Job as owner and selector {job-name: <workload>}; with a controller-uid selector at a uid that is not its owner's; with controller-uid at the owner's uid plus job-name; and the published block rendered",
-      "observed": "The first three refused, exit 1, each 'denied request: a … Service's selector is batch.kubernetes.io/controller-uid alone, at the uid of the Job that owns it: it fronts its owner's pods and no one else's' (policy and binding names elided); the published block 'service/... created (server dry run)', exit 0."
-    },
-    {
-      "what": "Grant matrix in the first dated bullet",
-      "command": "kubectl auth can-i for each of 22 verbs at 2026-10-25T06:56:30Z",
-      "observed": "create/delete/get/list/watch jobs, get/list pods, get pods/log, delete pods, create/get/list/watch/delete services yes; patch/update jobs, create pods, get/list endpoints, get/list endpointslices, create pods/exec no. Matches docs/kubernetes.md:2790-2794 exactly."
-    },
-    {
-      "what": "Private-name sweep (plan section 2's three literals plus the namespace)",
-      "command": "grep -c -i -F with ten patterns held in shell variables (the label's domain and key, the owner's name, the admission policy name, the scratch storage class, the pool's name, '-n <ns>', '<ns>.svc', '<ns> namespace', the deployment repository's name) over the diff c6387bde..58046823, both commit messages, the PR title, branch name and body, plan.json and implement.json",
-      "observed": "0 hits for every pattern in every file. Positive control: the same grep over the deployment's README counts 21 and 8 for two of the patterns."
+      "round": 1,
+      "head": "58046823",
+      "verdict": "fail",
+      "failures": [
+        "docs/kubernetes.md:2799 said the check answered 'on its first try'; runs showed a refused first attempt and a retry 2 s later.",
+        "The diff removed the blank line before the Service's yaml fence (2711-2712)."
+      ]
     }
   ],
-  "ci": "At 2026-10-25T06:56:30Z on head 58046823: Tests run 40170622957 (lint, typecheck, test) queued; Legion Envoy and Contracts run 40170622948 (changes) queued; PR Title run 40170635103 queued (run 40170622911 cancelled, superseded). Cited as queued, not waited for.",
+  "ci": "At 2026-10-25T07:06:46Z on head e3147c7f: Tests (lint, typecheck, test) queued; Legion Envoy and Contracts: changes success, pi-legion queued, the rest skipped; PR Title queued (an earlier run cancelled). Cited as queued, not waited for.",
   "notRun": "T6 and T7, by the architect's direction: sjawhar/legion#2149 is open."
 }
