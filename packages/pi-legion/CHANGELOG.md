@@ -7,6 +7,14 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
 
 ### Added
 
+- The `legion-controller` skill this plugin ships reorders a project's board with
+  `dispatch issue-update --issue <KEY> --before <OTHER>` or `--after <OTHER>`, and its backlog
+  stewardship reference is corrected to the rule the daemon applies: Legion admits waiting roots by
+  board rank alone, so board rank alone carries the weekly plan's order. The controller still sets
+  the coarse priority, as the signal people and filters read and as the order by which an agent
+  takes its own next issue, but it changes no admission; the reference used to have the controller
+  set priority and rank together so that "highest priority, then board rank" produced the plan's
+  order (INFRA-188).
 - Daemon API contract 35 (LEGION-791): `legion state` and the controller's `read_state` carry
   `settings`, the daemon's resolved `legion.yaml` with every credential, credential source and
   credential file path left out and a URL's userinfo masked as `xxxxx@` (`max_fix_attempts`,
