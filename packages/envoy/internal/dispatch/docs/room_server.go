@@ -54,6 +54,29 @@ func (r *roomServer) CloseRoom(room string, force bool) error {
 	return r.Server.CloseRoom(room, force)
 }
 
+// closeInstance is CloseRoom for one instance of room: it closes room only while the room holds
+// doc, and reports whether it closed it. A room that has gone, or that holds another document - a
+// replacement loaded since its caller read doc, or one still loading, which GetDoc reads as nil -
+// is not doc's, and closeInstance closes nothing and reports false. CloseRoom closes by name, so
+// two closes queued on one gate for one instance, the second of which runs once the first has let
+// go, would close whatever replaced it in between (a browser's reload among them).
+//
+// The check is made holding the gate exclusively, so no other close the service makes runs
+// between it and the close, and before runs there too, once the room is known to be doc's and
+// before ygo closes it: what before changes is changed only for a room this call closes. before
+// takes the room's state lock under the gate, the order evictRoom takes them in.
+func (r *roomServer) closeInstance(room string, doc *crdt.Doc, before func()) (bool, error) {
+	gate := r.acquireGate(room)
+	defer r.releaseGate(room, gate)
+	gate.Lock()
+	defer gate.Unlock()
+	if r.GetDoc(room) != doc {
+		return false, nil
+	}
+	before()
+	return true, r.Server.CloseRoom(room, true)
+}
+
 // holdOpen holds doc's room open while a repair commits into it, until release. It refuses,
 // holding nothing, while a close is under way or waiting, or when room has retired or replaced doc:
 // a repair never waits for a close.
