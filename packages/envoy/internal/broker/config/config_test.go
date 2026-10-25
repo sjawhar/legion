@@ -143,19 +143,20 @@ func TestLoadReadsTrustedProxyHeaderOptionally(t *testing.T) {
 }
 
 // TestLoadReadsTheRegisteredServices pins BROKER_SERVICES: whitespace-separated
-// name=<service-account subject> entries, none when unset. A name is one a machine login's service
-// can take ([a-z0-9-]{1,64}) and not the owner tag's own "shared"; a subject is a Kubernetes
-// service account's (system:serviceaccount:<namespace>:<name>), the only subject a pod's projected
-// token can carry. An entry with no "=", an empty side, an invalid name or subject, or a name given
-// twice refuses to start naming the entry, since the broker could never serve that service a secret
-// or would have to pick one of two subjects.
+// name=<service-account subject> entries keyed by subject, none when unset. A name is one a
+// machine login's service can take ([a-z0-9-]{1,64}) and not the owner tag's own "shared"; a
+// subject is a Kubernetes service account's (system:serviceaccount:<namespace>:<name>), the only
+// subject a pod's projected token can carry. One service may be named for several accounts. An
+// entry with no "=", an empty side, an invalid name or subject, or an account given twice refuses
+// to start naming the entry or the account, since the broker could never serve that service a
+// secret or the account would prove more than one entry.
 func TestLoadReadsTheRegisteredServices(t *testing.T) {
 	cfg, err := Load(env(validEnv()))
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ServiceAccounts != nil {
-		t.Fatalf("ServiceAccounts = %v, want nil when BROKER_SERVICES is unset", cfg.ServiceAccounts)
+	if cfg.ServicesByAccount != nil {
+		t.Fatalf("ServicesByAccount = %v, want nil when BROKER_SERVICES is unset", cfg.ServicesByAccount)
 	}
 
 	e := validEnv()
@@ -165,11 +166,26 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 		t.Fatal(err)
 	}
 	want := map[string]string{
-		"example-service": "system:serviceaccount:example:example-sa",
-		"other-service":   "system:serviceaccount:other:other-sa",
+		"system:serviceaccount:example:example-sa": "example-service",
+		"system:serviceaccount:other:other-sa":     "other-service",
 	}
-	if !maps.Equal(cfg.ServiceAccounts, want) {
-		t.Fatalf("ServiceAccounts = %v, want %v", cfg.ServiceAccounts, want)
+	if !maps.Equal(cfg.ServicesByAccount, want) {
+		t.Fatalf("ServicesByAccount = %v, want %v", cfg.ServicesByAccount, want)
+	}
+
+	// One service may run its pods as several accounts, each of which proves it.
+	e = validEnv()
+	e["BROKER_SERVICES"] = "example-service=system:serviceaccount:example:example-sa example-service=system:serviceaccount:example:another-sa"
+	cfg, err = Load(env(e))
+	if err != nil {
+		t.Fatal(err)
+	}
+	want = map[string]string{
+		"system:serviceaccount:example:example-sa": "example-service",
+		"system:serviceaccount:example:another-sa": "example-service",
+	}
+	if !maps.Equal(cfg.ServicesByAccount, want) {
+		t.Fatalf("ServicesByAccount with two accounts for one service = %v, want %v", cfg.ServicesByAccount, want)
 	}
 
 	for _, bad := range []string{
@@ -184,7 +200,6 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 		"other-service=other-sa",
 		"other-service=system:serviceaccount:other",
 		"other-service=system:serviceaccount:Other:other-sa",
-		"example-service=system:serviceaccount:example:another-sa",
 	} {
 		e := validEnv()
 		e["BROKER_SERVICES"] = "example-service=system:serviceaccount:example:example-sa " + bad
@@ -201,6 +216,14 @@ func TestLoadReadsTheRegisteredServices(t *testing.T) {
 	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES") ||
 		!strings.Contains(err.Error(), "system:serviceaccount:x:y") || !strings.Contains(err.Error(), `"a"`) || !strings.Contains(err.Error(), `"b"`) {
 		t.Errorf("BROKER_SERVICES binding one account to two names: err = %v, want a refusal naming the account and both names", err)
+	}
+
+	// The same account named twice for one service is a mistake in the setting, refused naming the
+	// account and the service.
+	e = validEnv()
+	e["BROKER_SERVICES"] = "a=system:serviceaccount:x:y a=system:serviceaccount:x:y"
+	if _, err := Load(env(e)); err == nil || !strings.Contains(err.Error(), "BROKER_SERVICES names the service account system:serviceaccount:x:y twice for \"a\"; each account proves one service, so name it once") {
+		t.Errorf("BROKER_SERVICES naming one account twice for one service: err = %v, want a refusal naming the account twice for the service", err)
 	}
 
 	// A namespace's default service account proves nothing: every pod in that namespace whose spec
