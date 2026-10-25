@@ -155,15 +155,18 @@ type DispatchAskOpened struct {
 func (DispatchAskOpened) isFact() {}
 
 // DispatchAskClosed is an answered or resolved ask (State), its kind (`question`, or `approval`
-// for a design gate's request; empty when the event did not say) and the actor who closed it. Only
-// a person's answer or resolution returns a waiting architect to its tree; a session's or
-// Dispatch's own resolution does not.
+// for a design gate's request), the actor who closed it and where Dispatch recorded that act
+// (Mark, zero when the event carried none). Only a person's answer or resolution returns a waiting
+// architect to its tree; a session's or Dispatch's own resolution does not. The mark places the
+// act against the start of the root's wait, and the daemon records a person's close so an
+// ask.opened delivered after it starts no wait.
 type DispatchAskClosed struct {
 	Key   string
 	Ask   string
 	Kind  string
 	State string
 	Actor dispatch.Actor
+	Mark  record.EventMark
 }
 
 func (DispatchAskClosed) isFact() {}
@@ -527,9 +530,10 @@ func (SignOff) isFact() {}
 
 // GateRegistered records a design document and its current version, with what register_gate read
 // of Dispatch's approval of it, so a person's review given before the architect registered is never
-// waited on. ApprovedVersion is the version Dispatch showed approved, set only when that approval is
-// of Dispatch's latest version (the read the gate seed makes), and 0 otherwise: the gate opens at
-// registration. ChangesRequestedVersion is the version of a changes request Dispatch showed on its
+// waited on. ApprovedVersion is the version Dispatch showed approved, set only when that approval
+// is of Dispatch's latest version (the read the gate seed makes), and 0 otherwise: the gate opens
+// at registration, keeping that approval's place in the issue's Dispatch event log (ApprovedMark).
+// ChangesRequestedVersion is the version of a changes request Dispatch showed on its
 // latest version, with its reason and the review's place in the issue's Dispatch event log
 // (ChangesRequestedMark), and 0 otherwise: the root keeps its slot with its architect told.
 // RequestWaitsOnAgent says Dispatch showed the open approval request waiting on the agent (a reply
@@ -545,6 +549,7 @@ type GateRegistered struct {
 	ArtifactID              string
 	Version                 int
 	ApprovedVersion         int
+	ApprovedMark            record.EventMark
 	ChangesRequestedVersion int
 	ChangesReason           string
 	ChangesRequestedMark    record.EventMark

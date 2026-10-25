@@ -98,8 +98,8 @@ func (r *statusRecorder) GetIssue(_ context.Context, key string) (dispatch.Issue
 	return issue, nil
 }
 
-func (*statusRecorder) Ask(context.Context, string) (dispatch.Ask, error) {
-	return dispatch.Ask{}, errors.New("architect status recorder reads no asks")
+func (*statusRecorder) Asks(context.Context, string) ([]dispatch.Ask, error) {
+	return nil, errors.New("architect status recorder reads no asks")
 }
 
 func (r *statusRecorder) SetStatus(_ context.Context, issue, status string) error {
@@ -968,5 +968,46 @@ func TestGateRegistrationRefusesAVersionDispatchDoesNotShow(t *testing.T) {
 	}, nil), http.StatusConflict, "VERSION_NOT_IN_DISPATCH")
 	if got := facts.recorded(); len(got) != 0 {
 		t.Fatalf("gate facts = %#v, want none for a refused registration", got)
+	}
+}
+
+// Two registrations of one version are two facts when their reads of Dispatch differ: the second
+// carries a review the first could not see, and the fact's id names the read it began at, so the
+// handlers see it. A retry of one read stays one fact.
+func TestASecondRegistrationAtOneVersionCarriesWhatItsOwnReadFound(t *testing.T) {
+	h, facts, statuses := newArchitectHarness(t, nil, nil)
+	const artifact = "d2f1c6b4-8e07-4a53-9c1d-6b8f2e5a7093"
+	statuses.documents = map[string]string{artifact: "LEGION-208"}
+	statuses.approvals = map[string]dispatch.Approval{artifact: {State: "awaiting", LatestVersion: 4, WaitingOn: "agent"}}
+	seedTree(t, h, "LEGION-208")
+	architect := newLiveClaim(t, h, "LEGION-208", claim.RoleArchitect)
+	register := func() {
+		t.Helper()
+		response := h.request(http.MethodPost, "/legion/v1/gates/register", map[string]any{
+			"grantId": architect.grant(t), "issue": "LEGION-208", "artifactId": artifact, "version": 4,
+		}, nil)
+		if response.Code != http.StatusOK {
+			t.Fatalf("register gate = %d: %s", response.Code, response.Body)
+		}
+	}
+
+	register()
+	register()
+	if got := facts.recorded(); len(got) != 1 {
+		t.Fatalf("facts after two registrations of one read = %#v, want the retry deduplicated", got)
+	}
+
+	// The person requests changes, which moves the issue's sequence, and the architect registers
+	// the same version again.
+	statuses.issues["LEGION-208"] = dispatch.Issue{Key: "LEGION-208", LastSeq: 11}
+	statuses.approvals[artifact] = dispatch.Approval{State: "changes_requested", LatestVersion: 4, Version: new(4), Reason: new("name the rollback path"), Seq: 11}
+	register()
+	got := facts.recorded()
+	if len(got) != 2 {
+		t.Fatalf("facts after a registration carrying a new review = %#v, want two", got)
+	}
+	registered, ok := got[1].(intake.GateRegistered)
+	if !ok || registered.ChangesRequestedVersion != 4 || registered.ChangesRequestedMark.Seq != 11 || registered.Since.Seq != 11 {
+		t.Fatalf("second registration fact = %#v, want the changes request at sequence 11 and a read beginning there", got[1])
 	}
 }

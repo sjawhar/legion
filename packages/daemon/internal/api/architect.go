@@ -247,10 +247,17 @@ func (s *server) gateRegister(w http.ResponseWriter, r *http.Request) {
 	fact := intake.GateRegistered{Issue: req.Issue, ArtifactID: artifactID, Version: req.Version, ApprovedVersion: approval.ApprovedLatest(),
 		ChangesRequestedVersion: changes, ChangesReason: reason, RequestWaitsOnAgent: approval.State == "awaiting" && approval.WaitingOn == "agent",
 		DispatchVersion: approval.LatestVersion, Since: record.EventMark{Seq: since, At: approval.At}}
+	review := record.EventMark{Seq: approval.Seq, At: approval.At}
 	if changes != 0 {
-		fact.ChangesRequestedMark = record.EventMark{Seq: approval.Seq, At: approval.At}
+		fact.ChangesRequestedMark = review
 	}
-	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d", req.Issue, recorded.Generation, artifactID, req.Version), fact, GateRegisterResponse{})
+	if fact.ApprovedVersion != 0 {
+		fact.ApprovedMark = review
+	}
+	// The fact's id names the read as well as the version: a second registration at one version
+	// carries what Dispatch showed when it ran, so a retry of one read stays one fact while a new
+	// read — a review, a reply or a version since — is a new fact the handlers see.
+	s.applyFact(w, r, fmt.Sprintf("gate:%s:%d:%s:%d:%d", req.Issue, recorded.Generation, artifactID, req.Version, since), fact, GateRegisterResponse{})
 }
 
 // issueSequence reads the issue's latest Dispatch event sequence. A failed read records nothing,

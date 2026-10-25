@@ -306,7 +306,7 @@ func decodeDispatchFact(subject, project, payload string) (Fact, error) {
 			return nil, fmt.Errorf("Dispatch %s payload has no id", event.Type)
 		}
 		return DispatchAskClosed{Key: event.IssueKey, Ask: ask.ID, Kind: ask.Kind, State: strings.TrimPrefix(event.Type, "ask."),
-			Actor: dispatch.Actor(event.Actor)}, nil
+			Actor: dispatch.Actor(event.Actor), Mark: event.mark()}, nil
 	case "ask.handed_back":
 		// An approval request its asker returned to the person (Dispatch's handBackApprovalAsk):
 		// whatever the thread held, it now waits on the human, as a session's human-turn reply does.

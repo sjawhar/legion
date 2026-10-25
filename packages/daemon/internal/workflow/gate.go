@@ -38,9 +38,10 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 	if err != nil || issue == nil {
 		return intake.Result{}, err
 	}
-	// The registration's read of Dispatch began at fact.Since.Seq and decides the root's state from
-	// everything up to it: a hand-back or question at or below it, delivered after, starts no wait.
-	if issue.RaiseWaitFence(fact.Since.Seq) {
+	// The registration's read of Dispatch began at fact.Since.Seq and decided the gate from
+	// everything up to it: a hand-back at or below it, delivered after, starts no wait on the gate.
+	// It read the approval alone, so it fences no ordinary question (record.Issue.GateFenced).
+	if issue.RaiseGateFence(fact.Since.Seq) {
 		if err := e.store.PutIssue(ctx, tx, *issue); err != nil {
 			return intake.Result{}, err
 		}
@@ -61,15 +62,25 @@ func (e *Engine) gateRegistered(ctx context.Context, tx pgx.Tx, fact intake.Gate
 			"artifact", fact.ArtifactID, "version", version, "gate_version", stored.LatestVersion)
 		return intake.Result{}, e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: stored.LatestVersion, Generation: issue.Generation})
 	}
+	// A review the daemon applied at this version after the registration's read began is newer
+	// than anything that read could show: the person acted after it, and that review is the
+	// registration's own. The gate keeps it, so a read that predates a told changes request does
+	// not ask the person again, and one that predates an approval does not close the gate the
+	// approval opened; neither starts a wait, which only the person's next act could answer.
+	if stored != nil && stored.ArtifactID == fact.ArtifactID && classify.ReviewAfter(*stored, version, fact.Since) {
+		e.logOnCommit(ctx, "workflow: a registration read Dispatch before the review the gate already holds", "issue", issue.Key,
+			"artifact", fact.ArtifactID, "version", version, "open", classify.DesignGateOpen(*stored), "since_seq", fact.Since.Seq)
+		return intake.Result{}, e.enqueue(ctx, tx, fact.Issue, record.GateSeed{ArtifactID: fact.ArtifactID, Version: version, Generation: issue.Generation})
+	}
 	gate := record.DesignGate{Issue: fact.Issue, ArtifactID: fact.ArtifactID, LatestVersion: version}
 	changesRequested := false
 	switch {
 	case e.cfg.DesignGate == config.DesignGateOff:
-		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, version)
+		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, version, record.EventMark{})
 	case fact.ApprovedVersion >= version:
-		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.ApprovedVersion)
+		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateApproved, fact.ApprovedVersion, fact.ApprovedMark)
 	case fact.ChangesRequestedVersion >= version:
-		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateChangesRequested, fact.ChangesRequestedVersion)
+		gate = classify.ApplyDesignGateEvent(gate, classify.DesignGateChangesRequested, fact.ChangesRequestedVersion, fact.ChangesRequestedMark)
 		changesRequested = true
 	}
 	// A registration whose read predates a review the live event already told keeps that record:
@@ -215,11 +226,22 @@ func copyTakes(gate record.DesignGate, fact intake.DispatchArtifact) bool {
 // answers the root's wait, where the resume task names it. Whatever reaches the architect is
 // recorded on the gate, so the registration, the gate seed and the boot catch-up, which all re-read
 // Dispatch, never tell it twice and never stay silent about a request nothing else carried.
+//
+// A review the person has already followed with another at that version changes nothing at all
+// (classify.StaleReview): the daemon applied the newer one first, and this one reached it late, so
+// it neither moves the gate nor tells the architect nor answers a wait. That is an approval
+// delivered after the changes request that superseded it, which would otherwise reopen the gate,
+// and a changes request delivered after a newer approval, which would otherwise close it.
 func (e *Engine) applyArtifact(ctx context.Context, tx pgx.Tx, gate record.DesignGate, fact intake.DispatchArtifact, carried bool) error {
 	key := gate.Issue
+	if fact.Kind != intake.DispatchArtifactVersion && classify.StaleReview(gate, fact.Version, fact.Mark) {
+		e.logOnCommit(ctx, "workflow: a review the person has already followed with another changes no gate state", "issue", key,
+			"artifact", fact.ArtifactID, "event", fact.Kind, "version", fact.Version, "review_seq", fact.Mark.Seq)
+		return nil
+	}
 	wasOpen := classify.DesignGateOpen(gate)
 	kind := classify.DesignGateEventKind(fact.Kind)
-	updated := classify.ApplyDesignGateEvent(gate, kind, fact.Version)
+	updated := classify.ApplyDesignGateEvent(gate, kind, fact.Version, fact.Mark)
 	isOpen := classify.DesignGateOpen(updated)
 	switch {
 	case isOpen != wasOpen:
