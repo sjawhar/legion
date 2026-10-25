@@ -2916,7 +2916,7 @@ func TestSlackDeliveredText(t *testing.T) {
 			body: map[string]any{
 				"team_id": "T01234567",
 				"event": map[string]any{
-					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "Build failed",
+					"type": "message", "channel": "C01234567", "user": "U01234567", "text": "",
 					"attachments": []any{map[string]any{
 						"title": "Build failed", "text": "Build failed", "fallback": "Build failed",
 					}},
