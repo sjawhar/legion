@@ -1033,11 +1033,11 @@ func TestCreateRequestWithInvalidSessionIDIs400SessionIDInput(t *testing.T) {
 }
 
 // TestDecisionsTakeOnlyTheApproversLogin pins that only the record's approver decides it, and
-// only through Dispatch: the approver's own login sent without the UI bearer is 401 UI_INVALID,
-// another login's approve and deny are both 403 NOT_APPROVER, a missing approver is 400
-// APPROVER_REQUIRED, all of them leave the record pending, the approver's deny succeeds, and a
-// second decision on the now-terminal record is 409 RECORD_TERMINAL for its approver and still 403
-// NOT_APPROVER for another login.
+// only through Dispatch: the approver's own login sent with no ServiceAccount token is 401
+// ACCOUNT_TOKEN_INVALID, another login's approve and deny are both 403 NOT_APPROVER, a missing
+// approver is 400 APPROVER_REQUIRED, all of them leave the record pending, the approver's deny
+// succeeds, and a second decision on the now-terminal record is 409 RECORD_TERMINAL for its
+// approver and still 403 NOT_APPROVER for another login.
 func TestDecisionsTakeOnlyTheApproversLogin(t *testing.T) {
 	ts := newTestServer(t)
 	enrollmentID, sessionKey := ts.newSessionEnrollment(t, "session-"+t.Name(), "sjawhar")

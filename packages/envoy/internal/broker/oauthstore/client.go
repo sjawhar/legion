@@ -91,8 +91,8 @@ func exchangeClient() *oauth2.DefaultRegisteredClient {
 }
 
 // ClientAssertionJWTValid reports every jti as unknown: no registered client authenticates with a
-// client assertion, the machine-login client being public and the exchange client authenticating
-// with its secret.
+// client assertion, the machine-login client being public and the exchange client presenting no
+// credential of its own (the subject token and its DPoP proof are what the exchange judges).
 func (s *Store) ClientAssertionJWTValid(context.Context, string) error { return nil }
 
 // SetClientAssertionJWT is oauth2.ErrNotFound: no registered client authenticates with a client

@@ -234,7 +234,7 @@ func TestCredentialRouteRelaysRequestBodyVerbatim(t *testing.T) {
 }
 
 // TestDecisionsNameTheCallerNeverTheBrowsersApprover pins the one thing Dispatch adds to a
-// decision: the broker trusts the approver field on the UI bearer's word, so approve, deny and
+// decision: the broker trusts the approver field on its listed caller's word, so approve, deny and
 // revoke must send the login Dispatch's own session resolved, canonical lowercase, and forward a
 // machine login's typed code — never an approver, or anything else, the browser put in its body.
 func TestDecisionsNameTheCallerNeverTheBrowsersApprover(t *testing.T) {

@@ -1132,7 +1132,7 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			// The broker the router relays credential requests to; without one it has none, and the
 			// pending list answers null.
 			t.Run("router", func(t *testing.T) {
-				if got := brokerReceived(t, "ui-token"); !strings.HasPrefix(got, "GET /v1/pending?approver=alice ") {
+				if got := brokerReceived(t, "account-token"); !strings.HasPrefix(got, "GET /v1/pending?approver=alice ") {
 					t.Errorf("the broker DISPATCH_AGENT_SECRETS_URL names received %q, want alice's pending list", got)
 				}
 				request := signedIn(t, httptest.NewRequest(http.MethodGet, "/api/v1/credential-requests?approver=me", nil), "alice")
@@ -1162,8 +1162,8 @@ func TestEverySettingReachesItsReader(t *testing.T) {
 			}
 			// The bearer the broker receives on the router's relay: the file's trimmed contents.
 			t.Run("router", func(t *testing.T) {
-				if got := brokerReceived(t, " ui-token\n"); !strings.HasSuffix(got, " Bearer ui-token") {
-					t.Errorf("the broker received %q, want Authorization Bearer ui-token", got)
+				if got := brokerReceived(t, " account-token\n"); !strings.HasSuffix(got, " Bearer account-token") {
+					t.Errorf("the broker received %q, want Authorization Bearer account-token", got)
 				}
 			})
 		},

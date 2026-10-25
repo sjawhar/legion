@@ -3171,7 +3171,11 @@ makes a stolen token useless, since whoever reads this answer checks the caller'
 it. A machine login's own token carries neither project field, no exchange having decided for
 it. A token the broker does not know, one it revoked and one that has expired are all `active`
 false and nothing else (Section 2.2), so an answer discloses nothing to a caller holding a string
-at random; only the broker's own failure to read its storage is a refusal (503), since answering
+at random. So is any token that is not an access token, a machine login's refresh token among
+them: the answer names no token type, and a refresh token, which outlives the access token issued
+beside it, answered live would pass for a credential no request can present, so `Introspect`
+checks the kind the library reports finding rather than trusting the `access_token` hint it
+passes. Only the broker's own failure to read its storage is a refusal (503), since answering
 that as "not live" would deny a sound token and hide the outage. It spends its source address's
 own bucket (`DefaultIntrospectLimit`) before the provider reads anything, `429 RATE_LIMITED` with
 `Retry-After`, and logs no caller: reading a token back acts on nobody's behalf.
@@ -3561,7 +3565,7 @@ or revoke holds are left to the next tick. Each ended enrollment's live grants a
 lookup each rather than a scan of `grants`.
 
 Tests: `cd packages/envoy && go vet ./... && go test ./internal/broker/... ./cmd/broker/...
-./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/...`. The Postgres-backed tests skip, rather
+./cmd/agent-secrets/... ./cmd/agent-secrets-devrelay/... ./cmd/dev-oidc-issuer/...`. The Postgres-backed tests skip, rather
 than fail, when `BROKER_TEST_DATABASE_URL` is unset (`t.Skip`, e.g. `internal/broker/store`,
 `internal/broker/requests`); `packages/envoy/scripts/dev-postgres.sh` starts a local Postgres for
 them, the same script `cmd/dispatch/README.md` documents for its own Postgres-backed tests, and
@@ -3575,20 +3579,29 @@ rather than a hand-rolled fake standing in for broker behavior — `internal/bro
 (settings and reread alone) are the sanctioned exceptions, since they exist to test the CLI
 binary's own request-building and response-parsing logic, not broker behavior;
 `secret_e2e_test.go` runs the same forms against the real rig.
-`packages/envoy/scripts/dev-broker.sh` and `cmd/agent-secrets-devrelay` (a stand-in
-for Dispatch's relay: it sends the broker's approval routes a bearer and a login, as Dispatch
-sends its own ServiceAccount token and a login
-when a signed-in human clicks Approve) run a whole local broker stack by hand for manual smoke
-testing; neither ships in `docker/Dockerfile`, which builds exactly `envoy-listener`,
-`envoy-dispatch`, `envoy-broker`, and `agent-secrets`. `dev-broker.sh` prints the exports a second
-shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_APPROVER`, the helper's
-`AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE` and `AGENT_SECRETS_MACHINE_FILE`, all in its workdir, where it writes
-the operator file, and `DEV_BROKER_DIR`, the workdir itself), and says in the same output that it
-lists no caller (`BROKER_API_ACCOUNTS`) and trusts no Kubernetes issuer, a local run having
-neither a cluster to mint a ServiceAccount token nor an issuer to publish its keys: the approval
-routes refuse every caller there, devrelay cannot decide anything, and the token exchange is
-unconfigured. Those paths are exercised against a broker on a cluster, or by the Go tests, whose
-rig (`internal/broker/brokertest`) mints both kinds of token against a local issuer.
+`packages/envoy/scripts/dev-broker.sh`, `cmd/agent-secrets-devrelay` (a stand-in for Dispatch's
+relay: it presents a listed caller's ServiceAccount token, read from `--account-token-file` /
+`AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, and a login, as Dispatch sends its own token and a login when a
+signed-in human clicks Approve) and `cmd/dev-oidc-issuer` (a stand-in for a cluster's
+ServiceAccount token issuer) run a whole local broker stack by hand for manual smoke testing, with
+no cluster and no Docker beyond the Postgres below; none ships in `docker/Dockerfile`, which builds
+exactly `envoy-listener`, `envoy-dispatch`, `envoy-broker`, and `agent-secrets`.
+`dev-oidc-issuer` serves `internal/oidc/oidctest`'s issuer, the Go tests' own, on a loopback port
+(a process `oidctest.TB` whose `Fatalf` exits), and keeps each `--token
+<audience>=<service account>=<file>` in its file, minted for `machine.MaxTokenLoginLifetime`,
+bound to a pod uid of its own, and rewritten by rename at four fifths of that life, as a kubelet
+rewrites a projected token; it logs `issuer listening url=<url>` once every file is written. Its
+key lives in its memory alone, so its tokens stop verifying when it stops. `dev-broker.sh` starts
+it with two tokens, `account-token` for `system:serviceaccount:example-ns:example-dispatch` (the
+broker's `BROKER_API_ACCOUNTS` caller `dispatch`) and `exchange-token` for
+`system:serviceaccount:example-ns:example-worker`'s pod at the exchange audience (its
+`BROKER_EXCHANGE_ACCOUNTS` entry, project `EXAMPLE` for `ada@example.com`, no fixed session),
+points the broker's `BROKER_K8S_OIDC_ISSUER` at it, and stops it on exit. It prints the exports a
+second shell needs (`AGENT_SECRETS_URL`, `AGENT_SECRETS_ACCOUNT_TOKEN_FILE`,
+`AGENT_SECRETS_APPROVER`, the helper's `AGENT_SECRETS_HELPER_SOCK`, `AGENT_SECRETS_OPERATOR_FILE`
+and `AGENT_SECRETS_MACHINE_FILE`, all in its workdir, where it writes the operator file, and
+`DEV_BROKER_DIR`, the workdir itself). The docs rig (`docs/site/media/broker/rig.sh`) starts the
+same issuer for Dispatch's own token.
 Each `dev-broker.sh` run creates
 and drops its own isolated database, on the shared `dispatch-pg` container, which it boots through
 `dev-postgres.sh` (so a `dispatch-pg` off that script's pinned image is refused before anything is
@@ -3597,8 +3610,9 @@ Docker), so concurrent instances never see each other's enrollments, requests or
 listens on the
 port its own `cmd/broker` binds and logs (`BROKER_LISTEN_ADDR=127.0.0.1:0`), so
 concurrent instances can never collide on a shared port either.
-`dev-broker.test.sh` proves both kinds of isolation with fakes (no real Postgres or network) and
-runs in CI's `envoy-go` job.
+`dev-broker.test.sh` proves both kinds of isolation, and that each instance's broker trusts the
+issuer that instance started, lists its dev caller, exports the caller token that issuer wrote and
+stops the issuer on exit, with fakes (no real Postgres or network) and runs in CI's `envoy-go` job.
 
 `.github/workflows/release-envoy-listener.yaml` runs on a `main` push that touches a file the
 image builds from, and by hand (`workflow_dispatch`) from any branch. Every run builds,

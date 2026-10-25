@@ -22,8 +22,10 @@
 # readiness check, both name the exact port its own broker logged as bound — never a different,
 # stale, or script-precomputed value, the exact property that closes the race where a
 # port collision let a losing instance report "ready" while a different, already-running
-# instance's broker actually answered; and (e) the two concurrent instances bind two different
-# ports.
+# instance's broker actually answered; (e) the two concurrent instances bind two different
+# ports; and (f) each instance's broker trusts the dev-oidc-issuer that instance started, lists
+# its dev caller and exchange account, exports the caller token that issuer wrote, and stops the
+# issuer on exit.
 set -euo pipefail
 
 project_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
@@ -106,11 +108,13 @@ chmod +x "${fake_bin_dir}/psql"
 
 # --- Fake go: "go build -o <path> ./cmd/<pkg>" installs a stub executable at <path> instead of
 # compiling. The client stubs are never run by dev-broker.sh (it only prints their directory); the
-# broker stub logs a "broker listening addr=..." line exactly like the real cmd/broker does once
-# it binds — using its own PID as a stand-in for the kernel-assigned port a real
-# Listen would report, since two concurrently running stub processes always have distinct PIDs —
-# and then stays alive as the backgrounded "server" process dev-broker.sh waits on and kills
-# during cleanup. ---
+# broker stub logs the issuer and the callers it was configured with, then a "broker listening
+# addr=..." line exactly like the real cmd/broker does once it binds — using its own PID as a
+# stand-in for the kernel-assigned port a real Listen would report, since two concurrently
+# running stub processes always have distinct PIDs — and then stays alive as the backgrounded
+# "server" process dev-broker.sh waits on and kills during cleanup. The dev-oidc-issuer stub writes
+# each --token's file, then logs "issuer listening url=..." as the real one does, its own PID
+# standing in for its port the same way, and stays alive until cleanup kills it. ---
 cat >"${fake_bin_dir}/go" <<'EOF'
 #!/usr/bin/env bash
 out=""
@@ -130,6 +134,21 @@ case "$pkg" in
 exit 0
 DEVRELAY
     ;;
+  */dev-oidc-issuer)
+    cat >"$out" <<'ISSUER'
+#!/usr/bin/env bash
+while [[ $# -gt 0 ]]; do
+  if [[ "$1" == --token ]]; then
+    account_and_file="${2#*=}"
+    printf 'fake-token-for-%s\n' "${account_and_file%%=*}" >"${account_and_file#*=}"
+    shift
+  fi
+  shift
+done
+echo "dev-oidc-issuer: issuer listening url=http://127.0.0.1:$$" >&2
+exec sleep 999999
+ISSUER
+    ;;
   */broker)
     cat >"$out" <<'BROKER'
 #!/usr/bin/env bash
@@ -137,6 +156,7 @@ if [[ $# -ne 0 ]]; then
   echo "fake broker: unexpected arguments: $*" >&2
   exit 2
 fi
+echo "fake broker: issuer=${BROKER_K8S_OIDC_ISSUER:-} callers=${BROKER_API_ACCOUNTS:-} exchange=${BROKER_EXCHANGE_ACCOUNTS:-}" >&2
 echo "broker listening addr=127.0.0.1:$$" >&2
 exec sleep 999999
 BROKER
@@ -299,12 +319,33 @@ assert_instance_isolated() {
     exit 1
   fi
   printf 'PASS: %s points its broker at its own database\n' "$label"
+  # Its broker trusts the issuer this instance started, lists the dev account as the caller
+  # "dispatch" and the worker account at the exchange, and the caller token devrelay is told to read
+  # is the one that issuer wrote for the listed account.
+  local issuer token_file
+  issuer="$(grep -o 'issuer listening url=http://127\.0\.0\.1:[0-9]\+' "$log_file" | head -n1 | cut -d= -f2- || true)"
+  if [[ -z "$issuer" ]] || ! grep -qF "fake broker: issuer=${issuer} callers=dispatch=system:serviceaccount:example-ns:example-dispatch exchange=system:serviceaccount:example-ns:example-worker=EXAMPLE=ada@example.com" "$log_file"; then
+    cat "$log_file" >&2
+    echo "FAIL: $label's broker does not trust its own issuer (${issuer:-none logged}) with the dev caller and the exchange account listed" >&2
+    exit 1
+  fi
+  token_file="$(grep -o 'AGENT_SECRETS_ACCOUNT_TOKEN_FILE=[^ ]*' "$log_file" | head -n1 | cut -d= -f2- || true)"
+  if [[ -z "$token_file" ]] || [[ "$(cat "$token_file" 2>/dev/null)" != "fake-token-for-system:serviceaccount:example-ns:example-dispatch" ]]; then
+    echo "FAIL: $label's AGENT_SECRETS_ACCOUNT_TOKEN_FILE (${token_file:-none printed}) does not hold the token its issuer wrote for the listed caller" >&2
+    exit 1
+  fi
+  printf 'PASS: %s trusts its own issuer (%s), lists its caller, and exports the caller token that issuer wrote\n' "$label" "$issuer"
   port="$bound"
 
   local pid="${instance_pid[$n]}"
   kill -TERM "$pid"
   wait "$pid" 2>/dev/null || true
   instance_pid[n]=""
+  if kill -0 "${issuer##*:}" 2>/dev/null; then
+    echo "FAIL: $label's cleanup left its issuer (pid ${issuer##*:}) running" >&2
+    exit 1
+  fi
+  printf 'PASS: %s stops its issuer on exit\n' "$label"
 
   if ! grep -qxF "${drop_prefix} -c drop database if exists ${db};" "$docker_call_file"; then
     cat "$docker_call_file" >&2

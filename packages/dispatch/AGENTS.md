@@ -497,12 +497,15 @@ service needs a new login approval. Revoking ends the login and every session it
 also invalidates the Live grants list.
 
 `packages/envoy/internal/dispatch/agentsecrets/client.go` is Dispatch's server-side client for the
-broker's UI-bearer API (`DISPATCH_AGENT_SECRETS_URL`/`DISPATCH_AGENT_SECRETS_TOKEN[_FILE]`,
-resolved in `cmd/dispatch/main.go`'s boot config with the repo's usual trimmed-file-wins `_FILE`
-convention, threaded through `api.Deps`/`routes.AppContextOptions` as `Deps.AgentSecrets`, nil
-when unconfigured). Its reads and the machine lookup return the broker's JSON body as
-`json.RawMessage`, relayed unmodified. The UI bearer is the approval credential: the broker takes
-the approving human from the request body on that bearer's word, so Dispatch builds every decision
+broker's named-caller API (`DISPATCH_AGENT_SECRETS_URL`, and
+`DISPATCH_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, the file holding Dispatch's own projected Kubernetes
+ServiceAccount token, both resolved in `cmd/dispatch/main.go`'s boot config, threaded through
+`api.Deps`/`routes.AppContextOptions` as `Deps.AgentSecrets`, nil when unconfigured). Every call
+presents that token, read from the file at call time behind a 30-second cache since the kubelet
+rewrites it in place; the broker verifies it and finds Dispatch in its `BROKER_API_ACCOUNTS`. Its
+reads and the machine lookup return the broker's JSON body as `json.RawMessage`, relayed
+unmodified. The listed account's token is the approval credential: the broker takes the approving
+human from the request body on that caller's word, so Dispatch builds every decision
 body itself. `Approve` and `Deny` take an `agentsecrets.Decision{Approver, Code}`, where `Approver`
 is always `canonicalLogin` of the `requireHuman` caller and `Code` is the only field read from the
 browser's body; any other field the browser sends, an `approver` among them, is dropped.
@@ -521,8 +524,11 @@ configured client (`404 FEATURE_OFF` on a nil one), except the pending list, whi
 without a broker once its input is checked; the two `?approver=` routes accept only the
 literal string `"me"` (`400 APPROVER_ME_ONLY` otherwise) and resolve it to the caller's own
 canonical login — the UI never asks for anyone else's list. A `*agentsecrets.Error` forwards the
-broker's exact status and body verbatim (e.g. `403 NOT_APPROVER`, `409 RECORD_TERMINAL`); any other
-failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go` pins the decision bodies
+broker's exact status and body verbatim (e.g. `403 NOT_APPROVER`, `409 RECORD_TERMINAL`); a call
+that stopped at Dispatch's own token, a file missing, unreadable or empty, is
+`500 AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE`, logged with the file's path, since the broker was
+never asked; any other failure is `503 AGENT_SECRETS_UNAVAILABLE`. `credential_requests_test.go`
+pins the decision bodies
 against a fake broker, and `internal/dispatch/api/contract_test.go` round-trips a real broker
 (`brokerapi.Register` with real services on `BROKER_TEST_DATABASE_URL`): another login refused
 `403 NOT_APPROVER` even when its browser body names the approver, the approver's click accepted
@@ -862,13 +868,16 @@ exports `ENVOY_URL`). The harness ports stay inputs because the server script re
 the TypeScript side `e2e/harness-ports.ts` is the one place they are resolved. The secrets broker
 the server relays credential requests to is one switch, `DISPATCH_E2E_AGENT_SECRETS_URL`, which
 `run-server.sh` and `e2e/harness-broker.ts` read alike (`${VAR-default}`, so empty and unset
-differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (default `9024`) with a
-throwaway UI bearer, so the credential-request feature is on; empty is no broker, the feature off
-as in a deployment that configures none (`DISPATCH_E2E_AGENT_SECRETS_URL= bun run e2e`, which is
-how the no-broker path is run locally); a URL is a broker the caller runs, whose bearer
-`run-server.sh` hands the server by `DISPATCH_E2E_AGENT_SECRETS_TOKEN_FILE`, a path it makes
-absolute against the caller's directory before it changes into `packages/envoy`. The broker's docs
-rig (`docs/site/media/broker/rig.sh`) sets a URL. Playwright starts the
+differ): unset, the default, is `e2e/fake-broker.ts` on `FAKE_BROKER_PORT` (default `9024`), which
+verifies no caller, so the server presents the throwaway token in
+`e2e/fake-broker-account-token` and the credential-request feature is on; empty is no broker, the
+feature off as in a deployment that configures none (`DISPATCH_E2E_AGENT_SECRETS_URL= bun run
+e2e`, which is how the no-broker path is run locally); a URL is a broker the caller runs, which
+lists the ServiceAccount whose token `run-server.sh` hands the server by
+`DISPATCH_E2E_AGENT_SECRETS_ACCOUNT_TOKEN_FILE`, a path it makes absolute against the caller's
+directory before it changes into `packages/envoy`. The broker's docs rig
+(`docs/site/media/broker/rig.sh`) sets a URL, and keeps that token with
+`packages/envoy/cmd/dev-oidc-issuer`, the local issuer its broker trusts. Playwright starts the
 fake broker only for the default, and the skill-scenarios rig sets the switch empty.
 
 Proof uses collaborative cursor decorations at the desktop `xl` breakpoint and above. Compact

@@ -18,7 +18,10 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -133,12 +136,12 @@ func req(t *testing.T, method, url string, headers map[string]string, body any) 
 }
 
 // devrelay runs the command in-process with args and the broker connection flags, failing t on a
-// nonzero exit, and decodes its stdout into T. Its --ui-token is the caller's own ServiceAccount
-// token, the bearer the broker's listed caller presents.
+// nonzero exit, and decodes its stdout into T. Its --account-token-file holds the caller's own
+// ServiceAccount token, the bearer the broker's listed caller presents.
 func devrelay[T any](t *testing.T, brokerURL, callerToken string, args ...string) T {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	args = append(args, "--broker", brokerURL, "--ui-token", callerToken, "--login", testApprover)
+	args = append(args, "--broker", brokerURL, "--account-token-file", tokenFile(t, callerToken), "--login", testApprover)
 	if code := run(args, &stdout, &stderr); code != 0 {
 		t.Fatalf("agent-secrets-devrelay %v: exit %d\nstdout: %s\nstderr: %s", args, code, stdout.String(), stderr.String())
 	}
@@ -156,6 +159,40 @@ func newKey(t *testing.T) *ecdsa.PrivateKey {
 		t.Fatalf("proof.NewKey: %v", err)
 	}
 	return key
+}
+
+// tokenFile writes token to a file of t's own and answers its path, as dev-oidc-issuer keeps a
+// listed caller's token for devrelay on the local stack.
+func tokenFile(t *testing.T, token string) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "account-token")
+	if err := os.WriteFile(path, []byte(token+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	return path
+}
+
+// TestATokenFileItCannotUseSendsNothing pins that a missing or empty account token file is an
+// error naming the file, before any request: the broker is never sent an empty bearer to refuse.
+func TestATokenFileItCannotUseSendsNothing(t *testing.T) {
+	var reached atomic.Bool
+	broker := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) { reached.Store(true) }))
+	t.Cleanup(broker.Close)
+	missing := filepath.Join(t.TempDir(), "missing")
+	empty := tokenFile(t, "")
+	for _, tc := range []struct{ file, says string }{
+		{missing, "read the account token: open " + missing},
+		{empty, "the account token file " + empty + " is empty"},
+	} {
+		var stdout, stderr bytes.Buffer
+		code := run([]string{"approve", "--record", "record-1", "--broker", broker.URL, "--account-token-file", tc.file, "--login", testApprover}, &stdout, &stderr)
+		if code != 1 || !strings.Contains(stderr.String(), tc.says) {
+			t.Errorf("--account-token-file %s: exit %d, stderr %q; want 1 saying %q", tc.file, code, stderr.String(), tc.says)
+		}
+	}
+	if reached.Load() {
+		t.Error("the broker was called with a token file devrelay could not use")
+	}
 }
 
 // TestDevStackEnrollsRequestsApprovesAndReleases runs the dev stack's whole story end to end: a

@@ -1,21 +1,23 @@
 #!/usr/bin/env bash
 # packages/envoy/scripts/dev-broker.sh
 #
-# The local dev surface a human can drive without AWS or Dispatch. Boots Postgres
+# The local dev surface a human can drive without AWS, Dispatch or a cluster. Boots Postgres
 # (the dispatch-pg container, through dev-postgres.sh), builds the
-# broker and its three clients (agent-secrets, agent-secrets-helper and agent-secrets-devrelay),
-# writes a fake secrets file standing in for Secrets Manager (DEMO_READ_TOKEN, tagged
-# owner=APPROVER_LOGIN tier=agent, so APPROVER_LOGIN's sessions get it without asking, and
+# broker, its three clients (agent-secrets, agent-secrets-helper and agent-secrets-devrelay) and
+# dev-oidc-issuer, writes a fake secrets file standing in for Secrets Manager (DEMO_READ_TOKEN,
+# tagged owner=APPROVER_LOGIN tier=agent, so APPROVER_LOGIN's sessions get it without asking, and
 # DEMO_API_KEY, tagged tier=human, which APPROVER_LOGIN approves), then starts cmd/broker against
 # it. Prints the exports a second shell needs to drive the clients against it.
 #
 # The broker's approval routes, and its introspection route, take the calling service's own
 # Kubernetes ServiceAccount token (BROKER_API_ACCOUNTS, verified against BROKER_K8S_OIDC_ISSUER),
-# and so does the RFC 8693 token exchange's subject token. A local run has no cluster and no OIDC
-# issuer to mint or publish keys for one, so this script configures neither: the broker it starts
-# lists no caller and runs with no exchange, which it says in its printed output. A walk through
-# the approval routes needs a broker on a cluster, or a test (internal/broker/brokertest's rig
-# mints both kinds of token against a local issuer).
+# and so does the RFC 8693 token exchange's subject token. With no cluster to mint one, this
+# script starts cmd/dev-oidc-issuer, the Go tests' local issuer (internal/oidc/oidctest) served on
+# a loopback port, which keeps two tokens in WORK_DIR and rewrites each before it lapses, as a
+# kubelet does a pod's projected token: account-token, for API_ACCOUNT, the caller "dispatch" the
+# broker lists, which agent-secrets-devrelay presents in Dispatch's place; and exchange-token, for
+# EXCHANGE_ACCOUNT's pod, which the broker's exchange takes for a Dispatch access token. The
+# broker trusts that issuer for both.
 #
 # Each invocation creates and drops its own isolated Postgres database (named from this run's own
 # WORK_DIR, below) and binds an OS-assigned ephemeral port (BROKER_LISTEN_ADDR=127.0.0.1:0), so two
@@ -68,6 +70,18 @@ SECRETS_PREFIX="example/agent-secrets/"
 SECRETS_KMS_KEY_ARN="arn:aws:kms:us-east-1:111122223333:key/1234abcd-12ab-34cd-56ef-1234567890ab"
 BROKER_LOG="$WORK_DIR/broker.log"
 OPERATOR_FILE="$WORK_DIR/operator"
+# The local issuer and what it mints for (above): the audience every enrolment and listed caller's
+# token carries, the exchange's own audience, and the two accounts, as internal/broker/brokertest's
+# rig names them. The exchange entry fixes no session, so a pod names its own.
+ISSUER_BIN="$BIN_DIR/dev-oidc-issuer"
+ISSUER_LOG="$WORK_DIR/issuer.log"
+BROKER_AUDIENCE="legion-broker-pod"
+EXCHANGE_AUDIENCE="legion-broker-exchange"
+API_ACCOUNT="system:serviceaccount:example-ns:example-dispatch"
+EXCHANGE_ACCOUNT="system:serviceaccount:example-ns:example-worker"
+EXCHANGE_PROJECT="EXAMPLE"
+ACCOUNT_TOKEN_FILE="$WORK_DIR/account-token"
+EXCHANGE_TOKEN_FILE="$WORK_DIR/exchange-token"
 # This instance's own database, named from WORK_DIR's mktemp-generated random suffix (already
 # unique per invocation). Postgres unquoted identifiers fold to lowercase anyway, but lowercase
 # explicitly rather than rely on that.
@@ -83,14 +97,19 @@ else
 fi
 
 BROKER_PID=""
+ISSUER_PID=""
 # Set once this run's own create database succeeded: a run whose create failed (the name taken by
 # another run) must never drop that other run's database.
 CREATED_DB=false
 cleanup() {
-  if [ -n "$BROKER_PID" ] && kill -0 "$BROKER_PID" 2>/dev/null; then
-    kill "$BROKER_PID" 2>/dev/null || true
-    wait "$BROKER_PID" 2>/dev/null || true
-  fi
+  # The broker first, then the issuer whose keys it reads.
+  local pid
+  for pid in "$BROKER_PID" "$ISSUER_PID"; do
+    if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+      kill "$pid" 2>/dev/null || true
+      wait "$pid" 2>/dev/null || true
+    fi
+  done
   if [ "$CREATED_DB" = true ]; then
     # Best-effort: cleanup runs on every exit path and must never itself fail, even if the server
     # is already gone or the drop fails for some other reason.
@@ -137,10 +156,10 @@ fi
 # The banner names the database without any password the URL carries.
 DISPLAY_URL="$(printf '%s' "$POSTGRES_URL" | sed -E 's#^(postgres(ql)?://[^:/@?]+):[^@/?]*@#\1:***@#')"
 
-# --- Build the broker and the clients a second shell drives it with. ---
-echo "dev-broker: building broker, agent-secrets, agent-secrets-helper and agent-secrets-devrelay..." >&2
+# --- Build the broker, the local issuer, and the clients a second shell drives it with. ---
+echo "dev-broker: building broker, dev-oidc-issuer, agent-secrets, agent-secrets-helper and agent-secrets-devrelay..." >&2
 mkdir -p "$BIN_DIR"
-for cmd in broker agent-secrets agent-secrets-helper agent-secrets-devrelay; do
+for cmd in broker dev-oidc-issuer agent-secrets agent-secrets-helper agent-secrets-devrelay; do
   ( cd "$ENVOY_DIR" && GOTOOLCHAIN=go1.27.1 go build -o "$BIN_DIR/$cmd" "./cmd/$cmd" )
 done
 
@@ -156,6 +175,35 @@ cat > "$FAKE_SECRETS_FILE" <<EOF
 EOF
 chmod 600 "$FAKE_SECRETS_FILE"
 echo "$APPROVER_LOGIN" >"$OPERATOR_FILE"
+
+# --- Start the local issuer, teed like the broker below. It writes both token files before it
+# logs its URL, so once that line is in ISSUER_LOG the files are there for devrelay and a pod to
+# read, and the URL is the issuer the broker discovers at boot. ---
+echo "dev-broker: starting dev-oidc-issuer..." >&2
+: >"$ISSUER_LOG"
+"$ISSUER_BIN" \
+  --token "$BROKER_AUDIENCE=$API_ACCOUNT=$ACCOUNT_TOKEN_FILE" \
+  --token "$EXCHANGE_AUDIENCE=$EXCHANGE_ACCOUNT=$EXCHANGE_TOKEN_FILE" \
+  > >(trap '' TERM INT; exec tee -a "$ISSUER_LOG" >&2) 2>&1 &
+ISSUER_PID=$!
+ISSUER_URL=""
+for _ in $(seq 1 30); do
+  if ! kill -0 "$ISSUER_PID" 2>/dev/null; then
+    echo "dev-broker: dev-oidc-issuer exited during startup" >&2
+    wait "$ISSUER_PID" || true
+    exit 1
+  fi
+  # `|| true`, as for the broker's address below: no line yet is the normal case, not a failure.
+  ISSUER_URL="$(grep -o 'issuer listening url=[^ ]*' "$ISSUER_LOG" 2>/dev/null | head -n1 | cut -d= -f2- || true)"
+  if [ -n "$ISSUER_URL" ]; then
+    break
+  fi
+  sleep 0.5
+done
+if [ -z "$ISSUER_URL" ]; then
+  echo "dev-broker: dev-oidc-issuer never logged its URL within 15s" >&2
+  exit 1
+fi
 
 # --- Start the broker: BROKER_LISTEN_ADDR/BROKER_PUBLIC_URL of port 0 (above); its own log names
 # the real address once Listen succeeds. Output is teed to BROKER_LOG (read below) and to this
@@ -175,6 +223,11 @@ BROKER_SECRETS_PREFIX="$SECRETS_PREFIX" \
 BROKER_SECRETS_KMS_KEY_ARN="$SECRETS_KMS_KEY_ARN" \
 BROKER_FAKE_SECRETS_FILE="$FAKE_SECRETS_FILE" \
 BROKER_LISTEN_ADDR="$LISTEN_ADDR" \
+BROKER_K8S_OIDC_ISSUER="$ISSUER_URL" \
+BROKER_K8S_OIDC_AUDIENCE="$BROKER_AUDIENCE" \
+BROKER_API_ACCOUNTS="dispatch=$API_ACCOUNT" \
+BROKER_EXCHANGE_K8S_AUDIENCE="$EXCHANGE_AUDIENCE" \
+BROKER_EXCHANGE_ACCOUNTS="$EXCHANGE_ACCOUNT=$EXCHANGE_PROJECT=$APPROVER_LOGIN" \
 "$BROKER_BIN" > >(trap '' TERM INT; exec tee -a "$BROKER_LOG" >&2) 2>&1 &
 BROKER_PID=$!
 
@@ -230,6 +283,7 @@ cat <<EOF
 dev-broker: ready.
 
   export AGENT_SECRETS_URL=$PUBLIC_URL
+  export AGENT_SECRETS_ACCOUNT_TOKEN_FILE=$ACCOUNT_TOKEN_FILE
   export AGENT_SECRETS_APPROVER=$APPROVER_LOGIN
   export AGENT_SECRETS_HELPER_SOCK=$WORK_DIR/helper.sock
   export AGENT_SECRETS_OPERATOR_FILE=$OPERATOR_FILE
@@ -237,24 +291,27 @@ dev-broker: ready.
   export DEV_BROKER_DIR=$WORK_DIR
   export PATH=$BIN_DIR:\$PATH
 
-  binaries:            $BIN_DIR  (broker, agent-secrets, agent-secrets-helper, agent-secrets-devrelay)
+  binaries:            $BIN_DIR  (broker, dev-oidc-issuer, agent-secrets, agent-secrets-helper, agent-secrets-devrelay)
   fake secrets file:   $FAKE_SECRETS_FILE  (each secret's tags and value, for confirming a released grant)
   approver login:      $APPROVER_LOGIN (the login a decision names as the deciding human)
   database:            $DISPLAY_URL  (this instance's own; created and dropped by this script)
+  token issuer:        $ISSUER_URL  (dev-oidc-issuer, logging to $ISSUER_LOG)
+  caller token:        $ACCOUNT_TOKEN_FILE  ($API_ACCOUNT, the caller "dispatch")
+  exchange token:      $EXCHANGE_TOKEN_FILE  ($EXCHANGE_ACCOUNT's pod, audience $EXCHANGE_AUDIENCE)
 
   One agent-tier secret (DEMO_READ_TOKEN, granted without asking) and one human-tier secret
   (DEMO_API_KEY, approver: $APPROVER_LOGIN), both owned by $APPROVER_LOGIN, whose sessions ask
   for them. A grant lasts until its session ends, or for the --ttl its request names.
   Drive it with agent-secrets and agent-secrets-helper in another shell;
-  press Ctrl-C here to stop the broker.
+  press Ctrl-C here to stop the broker and its issuer.
 
-  This broker lists no caller (BROKER_API_ACCOUNTS) and trusts no Kubernetes token issuer
-  (BROKER_K8S_OIDC_ISSUER), because a local run has neither a cluster to mint a ServiceAccount
-  token nor an issuer to publish its keys. So the approval routes refuse every caller,
-  agent-secrets-devrelay cannot approve a record or a machine login here, and the RFC 8693 token
-  exchange is unconfigured: no pod or workflow token is accepted. Those paths are exercised
-  against a broker on a cluster, or by the Go tests, whose rig
-  (packages/envoy/internal/broker/brokertest) mints both kinds of token against a local issuer.
+  The broker lists the caller token's account as its caller "dispatch" (BROKER_API_ACCOUNTS) and
+  trusts dev-oidc-issuer's ServiceAccount tokens (BROKER_K8S_OIDC_ISSUER); the issuer rewrites
+  each token file before its token lapses. agent-secrets-devrelay presents the caller token
+  (AGENT_SECRETS_ACCOUNT_TOKEN_FILE) to approve or deny a record or a machine login as Dispatch's
+  server does. The RFC 8693 token exchange (POST /v1/oauth/token) takes the exchange token as a
+  pod's subject token, with a DPoP proof of the caller's own key and a session name of its
+  choosing, and mints an access token that writes $EXCHANGE_PROJECT for $APPROVER_LOGIN.
 EOF
 
 wait "$BROKER_PID"
