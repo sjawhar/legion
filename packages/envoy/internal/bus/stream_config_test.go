@@ -417,14 +417,11 @@ func assertStreamSubjectsInclude(t *testing.T, js nats.JetStreamContext, want []
 // JetStream refuses two overlapping subjects in one stream. When one deployment widens, narrows or
 // splits a subject another deployment still holds, each start (and a rollback's) must still
 // succeed, with the starting binary's shape of that subject in the stream.
+//
+// Each subtest deletes and recreates Stream, so each takes an account of its own (testnats.URL):
+// in one account shared by both, the second would recreate the name the first left as the
+// account's last stream while nats-server may still be removing that account's streams directory.
 func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testing.T) {
-	uri := testnats.URL(t)
-	conn := testnats.Connect(t, uri)
-	t.Cleanup(conn.Close)
-	js, err := conn.JetStream()
-	if err != nil {
-		t.Fatalf("open JetStream: %v", err)
-	}
 	shaped := func(legion string) nats.StreamConfig {
 		cfg := *streamCfg
 		cfg.Subjects = nil
@@ -446,6 +443,13 @@ func TestEnsureStreamWithConfigStartsWhenADeployedSubjectOverlapsItsOwn(t *testi
 		{name: "narrow", deployed: wide, start: narrow},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
+			uri := testnats.URL(t)
+			conn := testnats.Connect(t, uri)
+			t.Cleanup(conn.Close)
+			js, err := conn.JetStream()
+			if err != nil {
+				t.Fatalf("open JetStream: %v", err)
+			}
 			if err := js.DeleteStream(Stream); err != nil && !errors.Is(err, nats.ErrStreamNotFound) {
 				t.Fatalf("reset stream: %v", err)
 			}

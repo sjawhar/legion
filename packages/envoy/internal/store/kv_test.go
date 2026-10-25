@@ -2003,10 +2003,12 @@ func TestRewatchOntoARecreatedBucketRefillsTheCache(t *testing.T) {
 	if err := js.DeleteKeyValue(bus.InterestBucket); err != nil {
 		t.Fatalf("delete the interest bucket: %v", err)
 	}
-	recreated, err := js.CreateKeyValue(&natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
-	if err != nil {
-		t.Fatalf("recreate the interest bucket: %v", err)
-	}
+	// Through the rig's retry, as every other delete-then-create of one name in this module is:
+	// nats-server answers a delete before it has removed the account's streams directory, and a
+	// create inside that window is refused. The role bucket Open made is still in this account, so
+	// the directory is not being removed here — but that is a fact about this test's neighbours,
+	// not about the call, and the retry does not depend on it.
+	recreated := testnats.RecreateKeyValue(t, js, &natsgo.KeyValueConfig{Bucket: bus.InterestBucket, Replicas: 1, Storage: natsgo.FileStorage})
 	putInterest(t, recreated, Interest{SessionID: "ses_a", MachineID: "m1", Topics: []string{"notifications.new"}})
 	putInterest(t, recreated, Interest{SessionID: "ses_b", MachineID: "m1", Topics: []string{"notifications.b"}})
 	if err := reg.Rewatch(conn); err != nil {
