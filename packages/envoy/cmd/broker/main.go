@@ -130,7 +130,7 @@ func main() {
 		secretStore, credentials = secrets.AWS{Client: sm, KMS: kms.NewFromConfig(awsCfg), KeyARN: cfg.SecretsKMSKey}, "aws-sdk"
 	}
 	slog.Info("secret store", "store", cfg.SecretsStore, "credentials", credentials)
-	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Sorted(maps.Keys(cfg.ServiceAccounts))}
+	loader := policy.Loader{Store: secretStore, Prefix: cfg.SecretsPrefix, Services: slices.Compact(slices.Sorted(maps.Values(cfg.ServicesByAccount)))}
 	var pod enroll.PodVerifier
 	// Discovery is bounded: an issuer that accepts the connection and never answers refuses the
 	// boot instead of hanging it with no health endpoint serving.
@@ -287,15 +287,15 @@ func refusePortZeroPublicURLInProduction(publicURL, fakeSecretsFile string) erro
 }
 
 // newRequestMachine builds the requests.Machine the broker decides every secret request with, from
-// its configuration: the audience and skew every request object is checked against, and the
-// service accounts that prove a pod is a registered service's. A grant lasts the lifetime its
-// request signed, or until its session ends.
+// its configuration: the audience and skew every request object is checked against, and, for each
+// service account, the registered service a pod running as it proves. A grant lasts the lifetime
+// its request signed, or until its session ends.
 func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Current, secretStore secrets.Store, replay func(context.Context, string, time.Time) (bool, error)) *requests.Machine {
 	m := &requests.Machine{
 		Store: st, Policy: current, Secrets: secretStore, PendingTTL: agentSecretPendingTTL,
 		Audience: cfg.PublicURL, Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Replay: replay,
-		ServiceAccounts: cfg.ServiceAccounts,
-		Minters:         kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
+		ServicesByAccount: cfg.ServicesByAccount,
+		Minters:           kindMinters(secrets.GitHubApp{}, secrets.GoogleLogin{}),
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
