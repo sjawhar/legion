@@ -28,21 +28,39 @@ import (
 // DatabaseURLEnv names the Postgres server the broker's tests run against.
 const DatabaseURLEnv = "BROKER_TEST_DATABASE_URL"
 
-// URL creates a fresh schema on the DatabaseURLEnv server, migrates it, drops it when t ends, and
-// returns a connection string whose connections use that schema. params are extra connection
-// parameters as key=value (e.g. "pool_max_conns=2"). It skips t when DatabaseURLEnv is unset.
-func URL(t testing.TB, params ...string) string {
+// serverURL is the DatabaseURLEnv server every schema and database here is made on, skipping t
+// when the variable is unset: a run with no server is skipped rather than failed, which is the
+// contract URL, Open and DatabaseURL all state.
+func serverURL(t testing.TB) string {
 	t.Helper()
 	raw := os.Getenv(DatabaseURLEnv)
 	if raw == "" {
 		t.Skip(DatabaseURLEnv + " must be set to run Postgres-backed broker tests")
 	}
-	ctx := context.Background()
+	return raw
+}
+
+// randomName mints the name of the schema or database one test gets of its own, kind naming
+// which of the two in a failure. It is random rather than derived from t.Name() because two
+// concurrent runs of one test - this package's tests and a sibling package's, against the one
+// server - would otherwise mint the same name and act on each other's rows.
+func randomName(t testing.TB, kind string) string {
+	t.Helper()
 	var suffix [8]byte
 	if _, err := rand.Read(suffix[:]); err != nil {
-		t.Fatalf("random schema name: %v", err)
+		t.Fatalf("random %s name: %v", kind, err)
 	}
-	schema := "broker_test_" + hex.EncodeToString(suffix[:])
+	return "broker_test_" + hex.EncodeToString(suffix[:])
+}
+
+// URL creates a fresh schema on the DatabaseURLEnv server, migrates it, drops it when t ends, and
+// returns a connection string whose connections use that schema. params are extra connection
+// parameters as key=value (e.g. "pool_max_conns=2"). It skips t when DatabaseURLEnv is unset.
+func URL(t testing.TB, params ...string) string {
+	t.Helper()
+	raw := serverURL(t)
+	ctx := context.Background()
+	schema := randomName(t, "schema")
 	admin(t, raw, "create schema "+schema)
 	t.Cleanup(func() { admin(t, raw, "drop schema "+schema+" cascade") })
 
@@ -68,22 +86,56 @@ func URL(t testing.TB, params ...string) string {
 	if err != nil {
 		t.Fatalf("open test schema: %v", err)
 	}
-	defer st.Pool.Close()
+	defer st.Close()
 	if err := st.Migrate(ctx); err != nil {
 		t.Fatalf("migrate test schema: %v", err)
 	}
 	return dsn
 }
 
-// Open is store.Open on a fresh URL(t, params...), its pool closed when t ends.
+// Open is store.Open on a fresh URL(t, params...), closed when t ends.
 func Open(t testing.TB, params ...string) *store.Store {
 	t.Helper()
 	st, err := store.Open(context.Background(), URL(t, params...))
 	if err != nil {
 		t.Fatalf("open test store: %v", err)
 	}
-	t.Cleanup(st.Pool.Close)
+	t.Cleanup(st.Close)
 	return st
+}
+
+// DatabaseURL creates a fresh, UNMIGRATED database on the DatabaseURLEnv server, drops it when t
+// ends, and returns its DSN. URL remains the right helper for everything else: a schema is
+// cheaper than a database and isolates rows just as well. A test needs a database of its own
+// only when what it exercises is per-database rather than per-schema, and two things are.
+// LISTEN/NOTIFY is one: a channel name is a database-wide identifier, so every schema on one
+// server hears every other's notifications on the one channel constant a feature listens to, and
+// a test on a schema would hear a sibling test's sends. The migration advisory lock is the
+// other: Migrate takes it database-wide, so two processes migrating their own schemas of one
+// database still serialize on each other.
+//
+// The DSN is unmigrated because that is what both callers need: a LISTEN/NOTIFY test, which
+// reads no table at all, and a test that starts two broker processes against a database neither
+// has migrated yet, which is the race those two processes are there to settle. A caller that
+// wants tables runs store.Migrate on it itself.
+func DatabaseURL(t testing.TB) string {
+	t.Helper()
+	raw := serverURL(t)
+	name := randomName(t, "database")
+	// Both statements go through admin, whose bare Exec runs them outside a transaction: a
+	// create database cannot run inside one. The drop forces the connections a test left behind
+	// (a listener that outlived its own cleanup, a pool closing) off the database, because a
+	// database one connection still holds cannot be dropped, and a leaked one would otherwise
+	// leave a database behind that no later run can clean up either.
+	admin(t, raw, "create database "+name)
+	t.Cleanup(func() { admin(t, raw, "drop database "+name+" with (force)") })
+
+	parsed, err := url.Parse(raw)
+	if err != nil {
+		t.Fatalf("parse %s: %v", DatabaseURLEnv, err)
+	}
+	parsed.Path = "/" + name
+	return parsed.String()
 }
 
 func admin(t testing.TB, databaseURL, statement string) {

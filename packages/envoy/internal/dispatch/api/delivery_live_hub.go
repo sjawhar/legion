@@ -11,8 +11,8 @@ import (
 	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/envoy/internal/dispatch/delivery"
-	"github.com/sjawhar/envoy/internal/dispatch/pglisten"
 	"github.com/sjawhar/envoy/internal/dispatch/store"
+	"github.com/sjawhar/envoy/internal/pglisten"
 )
 
 // The delivery hub's side of GET /ws/delivery (LEGION-690). The socket keeps no view state of its
@@ -340,6 +340,7 @@ func newDeliveryHub(s *server, lifetime context.Context, clock hubClock) *delive
 func (h *deliveryHub) start() {
 	h.once.Do(func() {
 		listener := &pglisten.Listener{
+			Owner:       "dispatch",
 			Dial:        h.dial,
 			Channels:    []string{deliveryChangesChannel, deliveryFreshnessChannel, dispatchEventsChannel},
 			ListenIdle:  h.listenIdle,

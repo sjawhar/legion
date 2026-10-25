@@ -64,10 +64,10 @@ tester instead. Retro runs next.
 
 ## 7. READY, and the merge
 
-The merger sends `READY`; the daemon checks the head against the approved one and the required
-checks, posts it on the Dispatch issue, and submits its merge, which lands under the repository's
-rules. The merge closes the issue: it moves to `done` the moment GitHub reports the pull request
-merged.
+The merger sends `READY`; the daemon checks the head against the approved one, posts it on the
+Dispatch issue, and submits its merge, which lands under the repository's own rules — the checks
+it requires among them. The merge closes the issue: it moves to `done` the moment GitHub reports
+the pull request merged.
 
 ![The READY message on the issue: the pull request, its head and the approved commit, then the outcome and the risk.](/legion/media/legion/ready.png)
 

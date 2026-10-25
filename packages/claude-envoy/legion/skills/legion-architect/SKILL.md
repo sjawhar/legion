@@ -74,7 +74,8 @@ exercise a criterion end to end, building that path is a child issue of this tre
   relationship from `--parent`. Keep the returned issue keys in ordered waves; a child is
   inert until released. Do not pass `--assignee`: the default keeps the tree's questions in one
   Inbox — under the shared token a child inherits its parent's assignee (the human who
-  answers the tree's asks); under a personal token it goes to that token's owner, whom
+  answers the tree's asks), and where no parent names one the project's default assignee, which
+  a person sets on the Settings page; under a personal token it goes to that token's owner, whom
   `dispatch whoami` names. Set it only when a human told you a specific person owns that child.
 
 A change across repositories gets one child per repository, each created with
@@ -314,7 +315,7 @@ The reviewer's approval of the head moves the issue to `accepting` (its Dispatch
 notice with an `APPROVED` review is the cue. Read the evidence against every acceptance line of the
 spec and the plan: the tester's handoff (`.legion/<issue>/test.json` at the approved head), the PR
 body's `E2E (implementer)` and `E2E (tester)` lines, the reviewer's approval of that head by SHA
-(`gh api repos/<o>/<r>/pulls/<n>/reviews`). Accept only when scope is fully met, integration
+(`gh api --paginate repos/<o>/<r>/pulls/<n>/reviews`). Accept only when scope is fully met, integration
 evidence is current, corrective work is complete, review is clean, and no necessary work was
 silently deferred. Post the acceptance as a
 `dispatch comment` explicit about that evidence, then accept with `sign_off`, which runs only in

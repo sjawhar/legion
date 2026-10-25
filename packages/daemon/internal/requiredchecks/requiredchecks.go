@@ -1,10 +1,10 @@
 // Package requiredchecks reads what a pull request's base branch requires before GitHub merges into
 // it (Required) - its required status checks and the workflows its rulesets require to succeed -
-// and how each required workflow's run stands on a head (Workflows): the one reader both the
-// merger's READY (the `legion` tool's `handoff_complete` with `ready: true`, api.readyChecks) and the daemon's workflow use, since only what
-// the base branch requires decides whether CI is red at a head (classify.Judge). What each judges
-// the required checks against is its own: READY the head's check runs and commit statuses as GitHub
-// reports them, the workflow the Envoy settlement that stands for the head.
+// and how each required workflow's run stands on a head (Workflows): what the daemon's own pass
+// over every open pull request reads every two minutes (daemon.watchRequiredChecks), since only
+// what the base branch requires decides whether CI is red at a head (classify.Judge). The verdict
+// judges those required checks against the Envoy settlement that stands for the head, and each
+// required workflow against the run this package read there.
 package requiredchecks
 
 import (
@@ -111,11 +111,6 @@ type WorkflowRun struct {
 	Result  string
 	Run     int64
 	Attempt int
-}
-
-// Standing is the run's result as classify judges a required check's, named by the workflow's path.
-func (r WorkflowRun) Standing() classify.Standing {
-	return classify.Standing{Name: r.Path, Result: r.Result}
 }
 
 // Workflows is how each required workflow's run stands on sha, one WorkflowRun for each workflow in
