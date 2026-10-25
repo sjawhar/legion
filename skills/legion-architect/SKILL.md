@@ -101,6 +101,13 @@ merges, and its task names the merged commit
 the toolchain, the pin is that commit. Read the other repositories with the read-only access your
 gh carries (`-R owner/repo`).
 
+**Before you design, research how this problem is normally solved.** Find the standard practice,
+and how two or three well-regarded projects that do the same thing solve it, from web search and
+their docs or code. Write what you found in the spec's `Design` in a few lines, with links, and
+design the standard way unless you have a reason not to. If your design departs sharply from the
+standard, treat that as a sign to fix the underlying problem, not to add a workaround, and say so
+in the spec.
+
 Specifications written into Dispatch follow `skill://dispatch-writing-specs`, starting at [The outline](skill://dispatch-writing-specs/SKILL.md#the-outline).
 Wave releases, child closures, and your own status are visible from the issue tree and the
 handoffs; do not narrate them into the spec or a `dispatch message`. A to-do only a human can
@@ -130,14 +137,17 @@ covers the tree. When the gate is armed, run this exact sequence **before the tr
 
 2. Settle its ask blocks as [Approval](skill://dispatch-writing-specs/SKILL.md#approval)
    says.
-3. Before you request approval, check every factual claim in the spec against the code, the docs
-   or a command, and resolve each finding of the fresh-reader check. Run
-   `task(agent="plan-gap-analyst")` with the current root spec, the code and command output it
-   relies on, and the human's words; resolve every finding in the root spec.
-4. Request approval once:
+3. Before every approval request, run two fresh reviews of the current root spec. Give each one
+   the spec, the code and command output it relies on, and the human's words:
+   `task(agent="plan-gap-analyst")` finds its gaps, and `task(agent="plan-reviewer")`, told that
+   the document is a spec, checks each factual claim against the code, the docs or a read-only
+   command it runs. Resolve every finding in the root spec. Before the request, check with a
+   command each claim that either reviewer marks unverified, and fix it when it is false, or remove
+   the claim from the spec.
+4. Request approval once, with a `--summary` whose last sentence states both reviews' results:
 
    ```bash
-   dispatch request-approval --issue <root issue> --summary '<what the human is approving>'
+   dispatch request-approval --issue <root issue> --summary '<what the human is approving> Reviews: <gap result>, <claim result>.'
    ```
 
    The primary document is the default; the command prints `Approval requested for spec.md
@@ -156,7 +166,9 @@ covers the tree. When the gate is armed, run this exact sequence **before the tr
 The ask blocks come first: settle every one as
 [Approval](skill://dispatch-writing-specs/SKILL.md#approval) says before you request approval;
 `dispatch request-approval` refuses while one is open. Each answer reaches you, since you follow
-every ask you open. `--summary` says in one to three sentences what the human is approving.
+every ask you open. `--summary` says in one to three sentences what the human is approving, then
+one sentence with both reviews' results, for example `Reviews: no open gap, 14 of 14 claims
+verified.`
 
 `dispatch request-approval` opens a system question on the document with the fixed options
 `Approve` and `Request changes`; a human answers it from the Inbox or approves from the
@@ -181,9 +193,8 @@ yourself.
 
 Then park. Do not release a wave until a later delivered wake shows `design-approved` on the root;
 the daemon starts no phase in the tree before then. On `design-changes-requested`, (1) revise the
-spec as the human's reason asks, (2) run `task(agent="plan-gap-analyst")` with that new version,
-the code and command output it relies on, and the human's words, then resolve every finding, and
-(3) request approval again and stay parked.
+spec as the human's reason asks, (2) run step 3's two reviews on that new version and resolve every
+finding, and (3) request approval again as step 4 says and stay parked.
 
 **After approval, the root spec changes only when what the tree delivers, or a decision a human
 settled, changes.** Approval is pinned to the spec version: any new version of the root spec closes
@@ -204,11 +215,11 @@ answered, one of two follows. When the answer is the whole change, request nothi
 chip reads Approved at the new version, its reviews dialog shows the review in their name, and the
 `design-approved` the daemon sent opens nothing new — carry on, and release no wave because of it.
 When the answer changes the Summary, the Acceptance or the tree's scope, rewrite that text and
-repeat steps 3 through 5 on the new version, with a one-sentence `--summary` naming what changed
-since the earlier approval (the card shows that approval, `Approved at version N on <date> by
-<who>.`, and its `Show diff` control carries the detail); the rewrite closes the gate until they
-approve, and what the daemon released at the answer stands. Release no new wave on the
-`design-approved` the answer brought when a rewrite follows, and none until the next
+repeat steps 3 through 5 on the new version, with a `--summary` of one sentence naming what changed
+since the earlier approval, then the reviews' sentence. The card shows that approval, `Approved at
+version N on <date> by <who>.`, and its `Show diff` control carries the detail. The rewrite closes
+the gate until they approve, and what the daemon released at the answer stands. Release no new
+wave on the `design-approved` the answer brought when a rewrite follows, and none until the next
 `design-approved` after the rewrite — work already in flight continues. Every merger's `READY` in
 the tree is refused until a human approves the latest version. A settled decision is the human's.
 A plan that would overturn one goes back to

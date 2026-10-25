@@ -26,6 +26,26 @@ before the split, and the Envoy plugin's releases after it, are in `packages/pi-
   factual claim in the spec against the code, the docs or a command, resolves each finding of the
   fresh-reader check, and requests approval once. `dispatch-writing-specs`, "Approval", says the
   same for every spec.
+- A root spec gets a cross review before every approval request. `legion-architect`'s step 3 runs
+  two fresh reviews: `plan-gap-analyst` for its gaps, and `plan-reviewer`, told that the document
+  is a spec, for each factual claim. The architect verifies with a command, or removes, each claim
+  either review marks unverified, and the request's `--summary` ends with one sentence that gives
+  both reviews' results. The root and sub-architect role prompts say the same. Self-review alone
+  did not stop false claims: an architect requested approval, then again minutes later because a
+  claim was false.
+- `plan-reviewer` reviews a spec as well as a plan. In its spec mode it checks each factual claim
+  against the code, the docs or a read-only command, and marks each claim verified, false or
+  unverified, with the file and line or the command and its output. It also checks that the spec
+  names the standard practice and its sources, or says why none applies.
+- `plan-gap-analyst` and `plan-reviewer` get `bash`, so they check live state themselves (read-only
+  `kubectl`, `gh`, `curl`, `dispatch read`) and stop marking such a claim unverified. Oh My Pi has
+  no per-agent command limit, so each agent's prompt holds it to read-only commands. Oh My Pi no
+  longer labels the two agents read-only in the task tool's agent list.
+- `legion-architect`: before it designs, an architect researches how the problem is normally
+  solved: the standard practice, and how two or three well-regarded projects solve it, from web
+  search and their docs or code. It writes what it found in the spec with links, designs the
+  standard way unless it has a reason not to, and treats a sharp departure from the standard as a
+  sign to fix the underlying problem.
 
 - An architect's questions about its own tree follow `dispatch-writing-specs`, "Questions". When
   the issue already says to do a thing, it does not ask whether. It asks about an open point only

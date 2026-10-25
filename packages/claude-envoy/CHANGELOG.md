@@ -80,6 +80,12 @@
 
 ### Changed
 
+- The `legion/` plugin's `plan-reviewer` reviews a spec as well as a plan, checking each factual
+  claim, and it and `plan-gap-analyst` get `Bash` for read-only commands (INFRA-140). Its
+  `legion-architect` runs both on a root spec before every approval request, and ends the
+  request's `--summary` with their results. The bundled `dispatch request-approval` help names
+  both reviewers.
+
 - The plugin ships `claude-envoy:dispatch-writing-specs` in place of
   `claude-envoy:dispatch-brainstorming` (INFRA-140): `skills/dispatch-writing-specs` links the
   repository's new skill, and the old link is gone. The three Dispatch skills are under 2,000 words

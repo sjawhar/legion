@@ -59,6 +59,11 @@
 
 ### Changed
 
+- `dispatch request-approval --help`, and `dispatch-writing-specs`, "Each version", name both
+  reviewers a Legion architect runs before an approval request, `plan-gap-analyst` and
+  `plan-reviewer`. `--summary` says that a Legion architect ends it with one sentence giving the
+  two reviews' results (INFRA-140).
+
 - Three Dispatch skills ship, under 2,000 words together (INFRA-140), from four skills and the
   dispatch skill's eight references of 10,908 words. `dispatch-writing-specs` replaces
   `dispatch-brainstorming`, and `skill://dispatch-brainstorming` no longer resolves. It sets a
