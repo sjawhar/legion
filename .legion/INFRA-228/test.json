@@ -2,42 +2,45 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-228",
-  "completed": "2026-10-25T16:28:27Z",
-  "round": 7,
-  "headTested": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-  "handoffHead": "82aaf56b9d50d328f12af0300cf2fcb51d282075",
+  "completed": "2026-10-25T17:07:52Z",
+  "round": 8,
+  "headTested": "a84de1d34f9d12e65ec38adfb11a4eeb5e4ce556",
+  "handoffHead": "a2ab69ab82c4a11d475505f15b822546dc7d972f",
   "implementerProof": {
     "verdict": "verified",
-    "how": "Nothing but the ledger moved: `jj diff --from 71dedd02cc65 --to 82aaf56b9d50` touches .legion/INFRA-228/implement.json alone, so the code head is still 6c9e78b02f9b, the head round 6 drove. The body was read on GitHub: 'at every moment', 'refused throughout', 'some running configuration', 'no lapse hands it', 'exactly two ways' and 'cannot take a name from each other' each return zero hits; the Threads ledger line for PRRT_kwDORFy7ds6wBhTN now says a token lapsing no longer hands the name across and points at the Change bullet. The two scoped statements match what I drove: 'while both generations fix the same name, one of their two entries holds it and every other principal is refused it' is round 5's alternation (A and C taking the name by turns, a stranger refused on both generations); 'a name a rollout newly fixes … stays with whichever principal already held it … until the new entry's first exchange' is round 6's B case (B answered 200 on both generations until C's first exchange)."
+    "how": "Re-ran the implementer's two new tests five times each (`go test -count=5 -run 'TestAForgedAccountTokenFloodStopsReachingTheVerifier|TestAListedCallersOrdinaryTrafficIsNotRefused' ./internal/broker/api/` -> 5/5 PASS each) and the api package's introspection, account and limit tests three times (ok). Then counted the key fetches myself on the real binary, with the limit and without it (proof below). The code delta from the round-7 head 6c9e78b02f9b is api/{limits.go,server.go,handlers_introspect.go} and the new account_limit_test.go."
   },
   "failed": 0,
   "failures": [],
   "proof": [
     {
-      "criterion": "A pod, a workflow run and a dev box session each obtain a Dispatch access token naming the session, the person and the project scope, by the RFC 8693 exchange, holding no secret; the token is bound to the caller's key, and introspection answers only a live access token.",
-      "surface": "The real compiled cmd/broker binary on a real Postgres, driven over HTTP; the production code at 6c9e78b02f9b is 2fa337992ae8's (6c9e78b02f9b changed one test file).",
-      "command": "rounds 3-6 throwaway drivers against the built binary, plus `go test -count=1 -v -run TestTheBinaryExchangesAPodsTokenIntrospectsItAndRenewsIt ./cmd/broker/` (PASS 25.38s at 2fa337992ae8, whose production code 6c9e78b02f9b carries unchanged)",
-      "observed": "Pod, workflow and dev-box exchanges each 200 and introspected with session, person and project scope; a machine login's refresh token and a revoked or lapsed token introspect {\"active\":false}; a storage outage and an undecodable row answer 503 and log the store's own words, with no token or token part anywhere in the log.",
-      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-      "negativeControl": "The machine token exchanged under a DPoP proof of another key -> 400 invalid_dpop_proof; a replayed workflow token -> 400 (jti used once); a pod of another project asking a held name after the holder's token lapsed -> 400 invalid_grant."
+      "criterion": "A flood of forged ServiceAccount tokens no longer makes the broker fetch the issuer's keys once per request (the reviewer's round-2 finding): every accountAuth route spends its source address's bucket before the token is verified.",
+      "surface": "The real compiled cmd/broker binary on a real Postgres, its cluster issuer a local OIDC issuer whose key-set fetches are counted; 400 GET /v1/pending requests from one address, each with a token signed by an unpublished key ('attacker-kid') for the listed account and audience.",
+      "command": "throwaway Go driver ($TMPDIR/infra228/probes/r8/ on the tester's volume) run against the binary built at a84de1d34f9d, and the same driver against a git archive of 6c9e78b02f9b (the head before the fix)",
+      "observed": "At a84de1d34f9d: in 1.02 s, 250 x 401 then 150 x 429 RATE_LIMITED with Retry-After 1, and 250 key-set fetches — the burst of 200 plus fifty a second. At 6c9e78b02f9b: 400 x 401 and 400 key-set fetches, one per request. Right after the flood a legitimate token from the same address is 429 on introspection and on /v1/grants, and 1 s later 200 on both.",
+      "headSha": "a84de1d34f9d12e65ec38adfb11a4eeb5e4ce556",
+      "negativeControl": "A legitimate token from a second source address (127.0.0.2), sent while the first address's bucket was drained -> 200: the limit refuses the flooding address, not the class."
     },
     {
-      "criterion": "A session name belongs to its principal: a replacement pod, the next run of a fixed-session workflow and a resumed session keep it; a stranger is refused a fixed name before its entry ever claims it; a re-point lands on the new entry and never locks it out; a revoke wins over an exchange.",
-      "surface": "Real broker processes on one Postgres, including two configurations at once, as in a rollout.",
-      "command": "`go test -tags multiprocess -count=5 -v -run TestAFixedSessionNameAcrossARollout ./cmd/broker/` at 6c9e78b02f9b, and my own live sequences (rounds 3-6 probes on the tester's volume)",
-      "observed": "All four subtests PASS five of five. Replacement pod and workflow runs 101-103 keep the fixed name; a stranger gets 400 before the entry's first claim on both generations; after a re-point the new entry gets 200 at every exchange, the two entries alternate while old-configuration processes serve, and after the last old process stops the new entry keeps it; 10 races of exchange against revoke left no live token.",
-      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-      "negativeControl": "Subtest 4 is not vacuous: with the take at the claim removed, subtests 3 and 4 fail; with a process refusing the holder a name its configuration fixes for another, subtests 1, 3 and 4 fail."
+      "criterion": "The rollout paragraph's first scoped statement carries the clause for the corner found in round 7, and no other sentence of it moved.",
+      "surface": "The pull request body on GitHub, diffed line by line against the body as round 7 left it.",
+      "command": "python difflib over the two bodies ($TMPDIR/infra228/body13.md -> body14.md)",
+      "observed": "In the Change bullets only line 14 changed: '… one of their two entries holds it and every other principal is refused it — once either of their entries has exchanged since the name was re-pointed; until then it stays with its earlier holder, as in the next statement.' That is the round-7 case (v1 fixes nothing and B holds the name; v2 fixes it for A, who never exchanges; v3 re-points it to C; B holds it while both generations fix it), and it matches what I drove. Every other change is in the reviewer's Not proven lines, the CI and Threads ledgers and a new E2E (implementer) block.",
+      "headSha": "a84de1d34f9d12e65ec38adfb11a4eeb5e4ce556",
+      "negativeControl": "Before this round the same statement was unqualified, and round 7's live sequence falsified it."
     },
     {
-      "criterion": "Dispatch reaches the broker on its own service-account token, the test suites and the local path run without a shared secret, and the deployment component renders what Dispatch boots on.",
-      "surface": "The real Dispatch binary relaying to the real broker; packages/dispatch/e2e/run-server.sh; scripts/dev-broker.sh; envoy-infra's rendering test.",
-      "command": "round-2 drivers (unchanged code on these paths since), and `go test -run TestDispatchWithABrokerPresentsItsOwnServiceAccountToken ./gcp/` in packages/envoy/infra",
-      "observed": "Dispatch's credential pages answer through the broker on its own token, a rotated token file reaches the broker after the 30 s cache, an unreadable one answers 500 AGENT_SECRETS_ACCOUNT_TOKEN_UNREADABLE and logs its path; run-server.sh boots against the fake and a real broker; dev-broker.sh's walk-through approves a machine login and exchanges both kinds of token; the component renders a projected ServiceAccount token.",
-      "headSha": "6c9e78b02f9bc9e4bd2a8eefddff56ce1449eeaa",
-      "negativeControl": "An unlisted account's token -> 403 ACCOUNT_NOT_LISTED; the dev broker with no token -> 401 ACCOUNT_TOKEN_INVALID; carol approving alice's machine login on Dispatch -> 403 NOT_APPROVER."
+      "criterion": "Everything earlier rounds proved still holds at this head: the exchange, introspection, session-name binding across a rollout, revoke ordering, Dispatch's own token, and the local paths.",
+      "surface": "The production code outside api/ is unchanged since 6c9e78b02f9b (exchange, oauth, oauthstore, Dispatch, scripts), which rounds 5-7 drove on the real binaries.",
+      "command": "`jj diff --from 6c9e78b02f9b --to a84de1d34f9d --stat`",
+      "observed": "Only packages/envoy/internal/broker/api/{limits.go,server.go,handlers_introspect.go,account_limit_test.go} changed. The introspection route's own tests (live token, unknown, revoked, outage 503, listed caller only) pass three times of three at this head.",
+      "headSha": "a84de1d34f9d12e65ec38adfb11a4eeb5e4ce556",
+      "negativeControl": "An introspection with no caller token -> 401 and from an unlisted account -> 403 (TestIntrospectionTakesOnlyAListedCallersToken), now after the address bucket is spent."
     }
   ],
-  "observationForTheArchitect": "Statement 1 has one stacked corner, sent to the architect as a child-issue candidate per its ruling: a name newly fixed by one generation whose entry never exchanged, then re-pointed by the next. Live (probe $TMPDIR/infra228/probes/r7/zz_tester_r7_test.go): v1 fixes nothing and B claims legion-daemon:ACME; v2 fixes it for A, who never exchanges; v3 re-points it to C; during the v2 -> v3 rollout both generations fix the name, yet B, neither generation's entry, holds it and is answered 200 on both. It is statement 2's window still open from the earlier rollout, so nothing undisclosed happens; only 'one of their two entries holds it' does not hold in that composition.",
-  "ciAtCodeHead": "6c9e78b02f9b: Docs 40210525008 success; Worker Image 40210525014 success; Tests 40210525013 in progress (test running); Legion Envoy and Contracts 40210525029 queued. 2fa337992ae8 (same production code) settled Tests 40209134669 success."
+  "observations": [
+    "No realistic caller I can produce trips the limit today. The deployment's nginx sidecar sets X-Forwarded-For to the caller's own address and the broker trusts it, so each Dispatch pod and each Legion pod has its own bucket. Dispatch relays a few broker requests per page or decision, and the only other caller of the class, introspection, has no caller yet (Child A builds it). Once Child A lands, one Dispatch pod's introspections and its people's approval clicks share one bucket of fifty a second; a burst of introspections past that would answer an approval 429. That is for Child A's cache sizing, not this slice.",
+    "Per-process buckets (a fleet of N brokers allows N times the rate) are as the architect ruled and the file states; not raised as a finding."
+  ],
+  "ciAtCodeHead": "a84de1d34f9d: Docs 40214553536 in progress; Tests 40214553379, Legion Envoy and Contracts 40214555415 and Worker Image 40214553452 queued; PR Title 40214590449 success (two later PR Title runs queued)."
 }
