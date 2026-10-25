@@ -87,8 +87,12 @@ session_pid=""
 subscriber_pid=""
 nats_pid=""
 
+# cleanup stops what this run started and exits with rc, the status the trap that ran it passes:
+# the script's own for EXIT, and the conventional 128 plus the signal's number for INT and TERM, so
+# a run that was interrupted never reports success: inside a signal's trap, $? is the status of the
+# last command that finished, usually 0, not the signal's.
 cleanup() {
-  local rc=$?
+  local rc=$1
   trap - EXIT INT TERM
   set +e
   for pid in "$subscriber_pid" "$session_pid" "$listener_pid" "$nats_pid"; do
@@ -113,13 +117,18 @@ done
 # script in the same checkout is refused before it touches anything a running first run is using.
 # The lock is held by this shell, and the servers it starts, for as long as they live, and needs no
 # cleanup of its own; a directory left by a run that is gone holds no lock and is cleaned as usual.
+# After a SIGKILL of this script, which runs no cleanup, the natsd and listener it started inherit
+# the lock's descriptor and outlive it, so a later run is refused until they are gone, as it would
+# be anyway: they still hold the NATS port.
 mkdir -p "$out_dir"
 exec {lock_fd}>"$lock_file"
 flock -n "$lock_fd" || {
   printf 'ERR: another run of e2e-local.sh is using %s; this run removed nothing.\n' "$out_dir" >&2
   exit 3
 }
-trap cleanup EXIT INT TERM
+trap 'cleanup "$?"' EXIT
+trap 'cleanup 130' INT
+trap 'cleanup 143' TERM
 
 rm -f "$envelopes_file" "$session_prompts_file" "$rendered_ts_file" "$rendered_go_file" \
   "$direct_response_file" "$unwired_response_file" "$unheld_role_response_file" "$role_claim_response_file" "$held_role_response_file" \
