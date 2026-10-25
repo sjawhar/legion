@@ -1,6 +1,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
+  BROADCAST_REFUSED,
   type FakeSession,
   getSentMessages,
   postedBroadcasts,
@@ -383,7 +384,7 @@ test("a session that leaves between a refused send and its restore is still in t
     await composer.getByRole("button", { name: "Send to 2" }).click();
     const sends = page.getByRole("region", { name: "Sends" });
     await expect(sends.getByRole("status")).toHaveText(
-      "Could not send to 2 agents: Envoy listener unreachable"
+      `Could not send to 2 agents: ${BROADCAST_REFUSED}`
     );
     expect(posted[0]?.session_ids).toEqual(["planner-session", "observer-session"]);
 

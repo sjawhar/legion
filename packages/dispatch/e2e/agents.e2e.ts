@@ -2,6 +2,7 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { Message } from "../web/src/api/types";
 import {
   agentRow,
+  BROADCAST_REFUSED,
   type FakeSession,
   getSentMessages,
   postedBroadcasts,
@@ -1273,7 +1274,7 @@ test("a typed broadcast survives clearing the selection and picking again, and a
     await expect(composer).toHaveCount(0);
     const failed = sends.getByRole("listitem").filter({ hasText: "Keep this draft." });
     await expect(failed.getByRole("status")).toHaveText(
-      "Could not send to 2 agents: Envoy listener unreachable"
+      `Could not send to 2 agents: ${BROADCAST_REFUSED}`
     );
     // A message or a selection started since that press would be lost to Restore draft, so it
     // refuses, and says why under its row, until both are cleared. Playwright waits out a click
@@ -1423,7 +1424,7 @@ test("a send the server refuses keeps its row after a later send succeeds, and R
     await composer.getByRole("button", { name: "Send to 2" }).click();
     const failed = row("Refused first.");
     await expect(failed.getByRole("status")).toHaveText(
-      "Could not send to 2 agents: Envoy listener unreachable"
+      `Could not send to 2 agents: ${BROADCAST_REFUSED}`
     );
 
     refusal.allow();

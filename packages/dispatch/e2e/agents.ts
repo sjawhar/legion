@@ -76,16 +76,22 @@ export function postedBroadcasts(page: Page): CreateBroadcastInput[] {
   return posted;
 }
 
-/** Refuses every broadcast POST the way an unreachable Envoy listener does, until `allow()`. The
- *  selected sessions stay live, so the page's 15 s agent poll cannot empty the list mid-row. */
+/** The reason `refuseBroadcasts` gives, which a refused row shows after `Could not send to N
+ *  agents: `. */
+export const BROADCAST_REFUSED = "no selected session can receive this message";
+
+/** Refuses every broadcast POST as Dispatch does one no selected session can receive (400
+ *  `BROADCAST_EMPTY`), until `allow()`. A broadcast tries a failed fetch, a 5xx or a 429 again
+ *  under its key until Dispatch answers, so a refusal is a 4xx of Dispatch's own. The selected
+ *  sessions stay live, so the page's 15 s agent poll cannot empty the list mid-row. */
 export async function refuseBroadcasts(page: Page): Promise<{ allow: () => void }> {
   let refusing = true;
   await page.route("**/api/v1/broadcasts", (route) =>
     refusing && route.request().method() === "POST"
       ? route.fulfill({
-          body: JSON.stringify({ code: "ENVOY_UNAVAILABLE", error: "Envoy listener unreachable" }),
+          body: JSON.stringify({ code: "BROADCAST_EMPTY", error: BROADCAST_REFUSED }),
           contentType: "application/json",
-          status: 503,
+          status: 400,
         })
       : route.fallback()
   );
