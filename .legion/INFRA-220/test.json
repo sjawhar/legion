@@ -2,9 +2,10 @@
   "schemaVersion": 1,
   "phase": "test",
   "issue": "INFRA-220",
-  "completed": "2026-10-25T16:56:00Z",
-  "round": 5,
-  "testedHead": "801c88948293 (code head: review round 3's fixes on top of 91f50e61; d8539b82 is its handoff-only child). Code changed since round 4: packages/daemon/internal/runtime/backend.go, sandbox/plugins.go, sandbox/plugins_test.go, scripts/e2e/stage1-skeleton.sh",
+  "completed": "2026-10-25T20:25:00Z",
+  "round": 6,
+  "rebaseRecheck": "rebase re-check 801c889482930f3ce5ead51c08eabd30de754642 → 990ebd7341e03fcab9a41a600bfdcbe6fb1e911e: fingerprint unchanged, bare gates only. The unchanged-diff fingerprint (skill://legion-worker/references/conflicts-and-rewrites.md, base main) computed by the tester at both heads is c0f38d54c32f00d83ce174f3191b5c0f10ae3051d145a811fa673b266dd9d3a9 on each side. The merge (against main f2c17ded) resolved one conflict, scripts/e2e/README.md: main's #2172 rewording of the `claude-implementer-registers` bullet is kept and this branch's `stop-hook-reminds-the-open-phase` bullet follows it; the README holds no conflict marker, and `bash -n` passes on claude-backend-tmux.sh, claude-backend-sandbox.sh and stage1-skeleton.sh at the merge. The behavioural proofs below were made at 801c8894 and are not repeated, per that rule and the architect's direction. CI on 990ebd73 at 20:21Z: Legion Envoy and Contracts 40230176830 in progress; Tests 40230176858, Worker Image 40230176771, Docs 40230176770 and PR Title 40230236637 queued (40230176860 cancelled by the body-edit re-run); cited as running, not waited for.",
+  "testedHead": "990ebd7341e0 (code head: the forward merge against main f2c17ded; d57af10b is its handoff-only child). Behaviour proven at 801c88948293, whose branch diff is identical (fingerprint above).",
   "implementerProof": {
     "verdict": "verified",
     "how": "Re-ran at 801c8894: `cd packages/pi-legion && LEGION_TEST_OMP=/opt/omp/bin/omp bun test extensions/legion-phase-stall-omp.test.ts` -> 9 pass, 0 fail in 135.48s; `cd packages/claude-envoy && LEGION_TEST_CLAUDE=$TMPDIR/cc/node_modules/@anthropic-ai/claude-code-linux-x64/claude bun test tests/legion-phase-hook-claude.test.ts` -> 2 pass, 0 fail in 5.92s; and the fourth proof, the pod's install of the pinned release, driven independently by running the rendered install block (proof 1 below)."
