@@ -2,33 +2,48 @@
   "schemaVersion": 1,
   "phase": "review",
   "issue": "INFRA-386",
-  "completed": "2026-10-25T17:40:36Z",
-  "round": 5,
-  "decision": "approved",
+  "completed": "2026-10-25T18:58:57Z",
+  "round": 6,
+  "decision": "changes_requested",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2196",
-  "reviewedCodeHead": "b773e1100696e877c3b10d0b44a6c31ab89bec93",
-  "roundReason": "Implementing round 6 answered the review at 241f4e1a: any stop that reaches the trap, not only a second one, can cut it short (closing comment, stop paragraph, recovery list), and the bullet's placement caveat now separates the two runs that found a Job from the rest.",
+  "reviewedCodeHead": "9d9bcf0ecca26298410bf72945d973833fad59cc",
+  "roundReason": "Implementing rounds 7-8, under the architect's rulings (PR comments 6400492408, 6400601649, 6400670216, 6400709005): cleanup() ignores further INT/TERM/HUP, and each trap kubectl runs under setsid -w; the hazard sentences are gone. The architect's Envoy note of 18:49Z asks that the set -m clause be deleted.",
   "critical": 0,
-  "important": 0,
-  "minor": 0,
-  "keyFindings": [],
-  "fixesVerified": [
-    "3133-3136 closing comment: any stop while the trap runs (a second one, or one after a failed step or the work's end started the trap)",
-    "3211-3222 stop paragraph: the reason holds (`trap -` at 3016 runs whatever started the trap); the stub runs are quoted as the reviewer ran them; 6-31 s delete (3147-3150) and the 60 s Service wait (3037)",
-    "3235-3236 recovery list: 'a stop that cut short a trap on its label path'",
-    "3321-3323 bullet: the two runs that found a Job versus the rest, consistent with 3171-3173"
+  "important": 3,
+  "minor": 2,
+  "keyFindings": [
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:3018-3020, 3218-3220",
+      "description": "The stated reason for the sessions is wrong for the trap's longest steps. 'kubectl ... keeps an inherited ignore of SIGINT and SIGHUP' does not hold for `kubectl delete` (waits by default) or `kubectl wait --for=delete`: while they wait, both call signal.Notify for INT, HUP and TERM, which Go documents as removing an inherited SIG_IGN. Measured 2026-10-25 with the pod's kubectl v1.35.9 against a stub API server whose watch never answers, launched with `trap '' INT TERM HUP`: `kubectl wait --for=delete service/x --timeout=60s` exited rc=1 on INT, on HUP and on TERM; the control `kubectl get --raw /hang` stayed alive after INT. The code is right. The reason is not, and it suggests the sessions are needed for TERM alone."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:3227-3228",
+      "description": "'a form that put the trap in job control (set -m) let a SIGINT end it' holds only for a sequence started with SIGINT ignored, a launch the page never states (the tester's round-8 correction; the architect's Envoy note asks to delete the clause). Delete it."
+    },
+    {
+      "severity": "important",
+      "file": "docs/kubernetes.md:3306-3309",
+      "description": "The INFRA-232 bullet's lead says 'with every command of the sequence as published above' while its own parenthetical lists command changes, and 'changed two of its comments' is now false (the block's changed comments are the label listing's, the `get job,service` one, the closing comment, and the new trap comments). Say the runs used the sequence as published then, and name what INFRA-386 has since changed."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:3026",
+      "description": "'# an empty listing proves nothing' contradicts 3184-3186, where an empty listing shows only that no such Job was stored by the time it ran."
+    },
+    {
+      "severity": "minor",
+      "file": "docs/kubernetes.md:3220, 3229",
+      "description": "'nothing but a SIGKILL ends a clean-up in progress' and 'ends the sequence, its trap included' are too broad. A signal the shell neither traps nor ignores ends it too: a stub run with TERM then two USR1 stopped at 'cleanup: start' (QUIT, which bash ignores, finished). A group SIGKILL ends the shell but not the kubectl then running in its own session; that kubectl runs on and keeps the flock descriptor, so `flock ... cat` waits for it (stub: 5.5 s after the KILL)."
+    }
   ],
-  "judgedNotDefects": [
-    "'Send a stop only while the work runs' (3211) is stricter than its reason needs, since the page measured stops during the Ready wait and the check as safe. It leaves no workload: a hanging step still times out and runs the trap. It came from the reviewer's own suggestion. Raised by the adversarial sweep at P3 and judged not a defect.",
-    "docs/kubernetes.md:3022's code line is 108 characters; the block already holds lines over 100 at base."
-  ],
-  "sweep": "A reviewer subagent attacked this round's changed sentences against bash semantics, kubectl, the page's measurements and every other sentence on the page: 'overall_correctness: correct', with the one P3 above.",
-  "ci": "Required set (ruleset): lint, typecheck, test, pr-title. CI head b773e110 (newest pull_request run): Tests 40215685620 success (lint, typecheck, test); pr-title success (PR Title 40215748348); compare b773e110...0a08ceee touches only .legion/. main is 0aa3aa04, with no docs/kubernetes.md change since base; GitHub reports MERGEABLE.",
-  "threads": "8 review threads, all mine: each answered by the implementer's fix and my reply confirming it at b773e110 or 241f4e1a; all resolved by the implementer.",
-  "thermo": "Not run: docs-only diff.",
+  "ci": "Code head 9d9bcf0e: Tests 40221598914 in progress, PR Title 40221714979 success when read. Not waited for: a request for changes stands whatever CI says. main is 4ceb3aa9, with no docs/kubernetes.md change since base; GitHub reports MERGEABLE.",
+  "threads": "8 earlier threads, all resolved, nothing open. The implementer's pending-change comment 6401142937 (the set -m comment) is obsolete at this head, since set -m is gone.",
+  "thermo": "Not run: the diff is docs/kubernetes.md only. A reviewer subagent attacked the new trap code and prose with stub experiments in its place.",
   "notProvenOrRisk": [
-    "A create the API server stores only after the trap's label delete has listed the Jobs is not measured; the page names it as unmeasured and gives the re-list and label delete as the recovery.",
-    "No wait was measured: how long after a stop the API server can still store a create whose client is gone is not known, so no re-list, however late, is proven to rule such a Job out. The page says so.",
-    "The stop paragraph's trap-cutting evidence is a stub of the trap's structure, not the real block against the cluster."
+    "A create the API server stores only after the trap's label delete has listed the Jobs is not measured; the page names it and gives the re-list and label delete.",
+    "No wait was measured, so no re-list is proven to rule a late-stored Job out; the page says so.",
+    "Between the EXIT trap's start and `trap '' INT TERM HUP`, a few builtins run with the stop signals still trapped to `exit` or at their defaults; a stop landing there ends the clean-up. Not measured; the window is a few builtin statements."
   ]
 }
