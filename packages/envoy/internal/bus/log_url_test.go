@@ -1,10 +1,7 @@
 package bus
 
 import (
-	"bytes"
-	"encoding/json"
 	"errors"
-	"log/slog"
 	"net/url"
 	"strings"
 	"testing"
@@ -12,35 +9,6 @@ import (
 	"github.com/nats-io/nats.go"
 	"github.com/sjawhar/envoy/internal/testnats"
 )
-
-// captureDefaultSlog points slog's default at a JSON handler writing into the returned buffer
-// until the test ends, as TestAConsumerNotActiveReportIsAWarning does. A test that calls it must
-// not run in parallel: the default is the process's.
-func captureDefaultSlog(t *testing.T) *bytes.Buffer {
-	t.Helper()
-	var records bytes.Buffer
-	previous := slog.Default()
-	slog.SetDefault(slog.New(slog.NewJSONHandler(&records, nil)))
-	t.Cleanup(func() { slog.SetDefault(previous) })
-	return &records
-}
-
-// decodeRecords decodes each line slog's JSON handler wrote into records.
-func decodeRecords(t *testing.T, records *bytes.Buffer) []map[string]any {
-	t.Helper()
-	var decoded []map[string]any
-	for _, line := range strings.Split(strings.TrimSpace(records.String()), "\n") {
-		if line == "" {
-			continue
-		}
-		var record map[string]any
-		if err := json.Unmarshal([]byte(line), &record); err != nil {
-			t.Fatalf("decode %q: %v", line, err)
-		}
-		decoded = append(decoded, record)
-	}
-	return decoded
-}
 
 // nats.go authenticates with a server URL's userinfo, a user name alone as a token and
 // user:password as a password, so neither part may reach a log line or a logged error.
@@ -66,7 +34,7 @@ func TestNATSURLWithoutUserinfo(t *testing.T) {
 // The failed-reconnect WARN names the servers the client was configured with, and the refusal of
 // a remote server names that server; both are logged, so neither carries a URL's userinfo.
 func TestLoggedNATSURLsCarryNoUserinfo(t *testing.T) {
-	records := captureDefaultSlog(t)
+	logs := captureLogs(t)
 	urls := []string{
 		"nats://user-marker-0:pw-marker-1@127.0.0.1:4222",
 		"nats://tok-marker-2@127.0.0.1:4223",
@@ -79,13 +47,13 @@ func TestLoggedNATSURLsCarryNoUserinfo(t *testing.T) {
 	// Only this client's records: a client an earlier test left reconnecting logs through the same
 	// default.
 	var mine []map[string]any
-	for _, record := range decodeRecords(t, records) {
+	for _, record := range logs.records(t) {
 		if record["name"] == "log-url-test" {
 			mine = append(mine, record)
 		}
 	}
 	if len(mine) != 1 {
-		t.Fatalf("%d records logged, want 1: %s", len(mine), records)
+		t.Fatalf("%d records logged, want 1: %s", len(mine), logs)
 	}
 	record := mine[0]
 	if record["level"] != "WARN" || record["msg"] != "envoy nats reconnect attempt failed" {
@@ -98,8 +66,8 @@ func TestLoggedNATSURLsCarryNoUserinfo(t *testing.T) {
 		}
 	}
 	for _, secret := range secrets {
-		if strings.Contains(records.String(), secret) {
-			t.Errorf("the failed reconnect WARN holds %q: %s", secret, records)
+		if strings.Contains(logs.String(), secret) {
+			t.Errorf("the failed reconnect WARN holds %q: %s", secret, logs)
 		}
 	}
 
@@ -134,18 +102,18 @@ func TestTheReconnectedLineCarriesNoUserinfo(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	t.Cleanup(nc.Close)
-	records := captureDefaultSlog(t)
+	logs := captureLogs(t)
 
 	options("reconnected-url-test", nil, nil, nil, nil).ReconnectedCB(nc)
 
 	var logged string
-	for _, record := range decodeRecords(t, records) {
+	for _, record := range logs.records(t) {
 		if record["name"] == "reconnected-url-test" && record["msg"] == "envoy nats reconnected" {
 			logged, _ = record["url"].(string)
 		}
 	}
 	if logged == "" {
-		t.Fatalf("no reconnected record with a url: %s", records)
+		t.Fatalf("no reconnected record with a url: %s", logs)
 	}
 	parsed, err := url.Parse(logged)
 	if err != nil {
