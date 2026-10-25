@@ -19,5 +19,7 @@ create table dispatch_issues (
     dispatch_seq bigint not null
 );
 
--- Both consumers read one project's whole mirror in a single query and judge in memory.
-create index dispatch_issues_project on dispatch_issues (project);
+-- Every consumer reads one project's whole mirror in a single query and judges in memory, and
+-- every one of those reads is `where project = $1 order by key`, so the index carries the key as
+-- well: the ordering comes off the index instead of a sort of the project's rows.
+create index dispatch_issues_project on dispatch_issues (project, key);

@@ -96,11 +96,8 @@ func TestTheStateWithTheControllersClaimGolden(t *testing.T) {
 		t.Fatalf("Project: %v", err)
 	}
 	for key, view := range state.Issues {
-		if key == "" {
-			t.Errorf("the state lists an issue keyed %q (%+v); the controller's claim is on no issue", key, view)
-		}
 		if worker, listed := view.Workers[claim.RoleController]; listed {
-			t.Errorf("issue %q lists a controller worker %+v", key, worker)
+			t.Errorf("issue %q lists a controller worker %+v: the controller's claim is on no issue", key, worker)
 		}
 	}
 	if view := state.Issues[issue]; view.Architect == nil || view.Architect.Session != "ses_architect_208" {

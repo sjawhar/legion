@@ -427,7 +427,7 @@ func (e *Engine) enterChild(ctx context.Context, tx pgx.Tx, root record.Issue, f
 	if err := e.store.PutIssue(ctx, tx, child); err != nil {
 		return err
 	}
-	rows, err := e.mirror(ctx, tx)
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project)
 	if err != nil {
 		return err
 	}
@@ -899,7 +899,7 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 	if err != nil {
 		return err
 	}
-	rows, err := e.mirror(ctx, tx)
+	rows, err := blockers.Load(ctx, tx, e.store, e.cfg.Project)
 	if err != nil {
 		return err
 	}
@@ -932,7 +932,7 @@ func (e *Engine) advanceAdmittedTree(ctx context.Context, tx pgx.Tx, root record
 func (e *Engine) StartUnblockedChildren(ctx context.Context, tx pgx.Tx, issues []record.Issue, rows map[string]blockers.Row) error {
 	starts := make(map[string]bool)
 	for _, issue := range issues {
-		if claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Phase != phase.Admitted {
+		if !blockers.Holdable(issue) {
 			continue
 		}
 		waited := rows[issue.Key].Blockers
@@ -979,18 +979,6 @@ func (e *Engine) treeStartsChildren(ctx context.Context, tx pgx.Tx, tree string)
 		return false, err
 	}
 	return classify.DesignGateOpen(*gate), nil
-}
-
-// mirror is the project's whole mirror of what Dispatch says each of its issues waits on, in one
-// query (record.Store.DispatchIssues). The engine decides inside a transaction that performs no
-// I/O, so it cannot ask Dispatch what a child is blocked by: it reads the rows blockers.Mirror
-// wrote and judges them in memory (blockers.Unfinished).
-func (e *Engine) mirror(ctx context.Context, tx pgx.Tx) (map[string]blockers.Row, error) {
-	mirrored, err := e.store.DispatchIssues(ctx, tx, e.cfg.Project)
-	if err != nil {
-		return nil, fmt.Errorf("list what the issues of %s wait on: %w", e.cfg.Project, err)
-	}
-	return blockers.Rows(mirrored), nil
 }
 
 // gateOpened moves an admitted member of a tree whose gate is open into planning, behind a row

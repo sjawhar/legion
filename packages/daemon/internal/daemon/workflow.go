@@ -933,10 +933,12 @@ func (w *workflowRuntime) observeWaitedOn(ctx context.Context) []intake.IssueSta
 }
 
 // waitedOn is the distinct keys of the unfinished blockers of everything this daemon holds back,
-// in one short read-only transaction: every root on the waiting line (record.Waiting) and every
-// recorded child left at phase.Admitted, which is where a blocker holds one, judged against one
-// read of the project's mirror — the same two judgements promotion itself makes
-// (admit.Admission.promoteHolds and workflow.Engine.StartUnblockedChildren).
+// in one short read-only transaction: the judgement the deciders themselves make, read rather
+// than remade (blockers.Blocked), over every root on the waiting line (record.Waiting) and every
+// recorded child a blocker holds at phase.Admitted. A candidate the rule exempts is read for
+// nothing, as promotion admits it whatever its links say and nothing consults the answer
+// (blockers.Exempt), and the keys come out in that judgement's own order, by the issue waiting
+// on them.
 func (w *workflowRuntime) waitedOn(ctx context.Context) ([]string, error) {
 	tx, err := w.pool.BeginTx(ctx, pgx.TxOptions{AccessMode: pgx.ReadOnly})
 	if err != nil {
@@ -951,28 +953,19 @@ func (w *workflowRuntime) waitedOn(ctx context.Context) ([]string, error) {
 	if err != nil {
 		return nil, fmt.Errorf("list the admission slots: %w", err)
 	}
-	mirrored, err := w.records.DispatchIssues(ctx, tx, w.dispatchProject)
+	rows, err := blockers.Load(ctx, tx, w.records, w.dispatchProject)
 	if err != nil {
-		return nil, fmt.Errorf("list what the issues of %s wait on: %w", w.dispatchProject, err)
+		return nil, err
 	}
-	rows := blockers.Rows(mirrored)
 	var keys []string
 	seen := make(map[string]struct{})
-	collect := func(key string) {
-		for _, blocker := range blockers.Unfinished(rows, key) {
+	for _, blocked := range blockers.Blocked(rows, issues, record.Waiting(issues, slots)) {
+		for _, blocker := range blocked.BlockedBy {
 			if _, repeated := seen[blocker]; repeated {
 				continue
 			}
 			seen[blocker] = struct{}{}
 			keys = append(keys, blocker)
-		}
-	}
-	for _, root := range record.Waiting(issues, slots) {
-		collect(root.Key)
-	}
-	for _, issue := range issues {
-		if issue.Phase == phase.Admitted && !claim.IsTreeRoot(issue.Key, issue.Tree) {
-			collect(issue.Key)
 		}
 	}
 	return keys, nil
@@ -995,8 +988,7 @@ func (w *workflowRuntime) readObserved(ctx context.Context, keys []string) []int
 		}
 		observed := make([]intake.IssueStatus, 0, len(summaries))
 		for _, summary := range summaries {
-			observed = append(observed, intake.IssueStatus{
-				Key: summary.Key, Status: summary.Status, Blockers: summary.BlockedBy, Seq: summary.LastSeq})
+			observed = append(observed, blockers.Observed(summary))
 		}
 		return observed
 	}

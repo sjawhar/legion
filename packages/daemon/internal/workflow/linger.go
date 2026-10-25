@@ -257,22 +257,28 @@ func (e *Engine) beginLinger(ctx context.Context, tx pgx.Tx, root record.Issue) 
 // is handed over, so that a child whose blockers outlive its tree is not parked for good but comes
 // back as a root of its own once they close. A never-gated child of a finishing tree, which waits
 // on nothing, would instead take an admission slot for work its tree's design never opened. The
-// mirror is read once for the whole call, as every blocker judgement reads it (Engine.mirror):
-// record.Issue.CarriesRun is false at phase.Admitted, so the new root carries no run, and its
-// re-admission is another tree's work arriving rather than its own coming back, so it is no tree
-// taken back either — it is checked, which is what the blocked-root rule reads when the child
-// comes up for admission (blockers.Exempt).
+// mirror is loaded by the first member that reaches that exception and then read for the rest
+// (blockers.Load), so the ordinary finishing tree — whose members all left admitted long ago —
+// loads nothing: record.Issue.CarriesRun is false at phase.Admitted, so the new root carries no
+// run, and its re-admission is another tree's work arriving rather than its own coming back, so
+// it is no tree taken back either — it is checked, which is what the blocked-root rule reads when
+// the child comes up for admission (blockers.Exempt).
 func (e *Engine) settleUnfinished(ctx context.Context, tx pgx.Tx, root record.Issue, members []record.Issue) error {
-	rows, err := e.mirror(ctx, tx)
-	if err != nil {
-		return err
-	}
+	var rows map[string]blockers.Row
 	for _, member := range members {
 		if member.Key == root.Key || record.OutOfWorkflow(member.Status) {
 			continue
 		}
-		if member.Phase == phase.Admitted && len(blockers.Unfinished(rows, member.Key)) == 0 {
-			continue
+		if member.Phase == phase.Admitted {
+			if rows == nil {
+				var err error
+				if rows, err = blockers.Load(ctx, tx, e.store, e.cfg.Project); err != nil {
+					return err
+				}
+			}
+			if len(blockers.Unfinished(rows, member.Key)) == 0 {
+				continue
+			}
 		}
 		if err := e.handOver(ctx, tx, root, member); err != nil {
 			return err

@@ -220,10 +220,11 @@ func TestATreeAlreadyRunningIsUntouchedWhenABlockerIsAddedToItsIssue(t *testing.
 }
 
 // A candidate that carries a run into a tree of its own — a handed-over child, a re-admitted tree
-// — is work already under way, and is admitted whatever its links say: startedRun is the whole of
-// waitsOn's answer for it. A candidate that carries none is checked like any other root, and its
-// unfinished blocker keeps it in the waiting line. Every door that brings such a candidate to
-// promotion is here with that pair, so the tests say which side of the rule each door is on.
+// — is work already under way, and is admitted whatever its links say: record.Issue.CarriesRun is
+// the whole of blockers.WaitsOn's answer for it. A candidate that carries none is checked like any
+// other root, and its unfinished blocker keeps it in the waiting line. Every door that brings such
+// a candidate to promotion is here with that pair, so the tests say which side of the rule each
+// door is on.
 func TestACandidateThatCarriesARunIsAdmittedWhateverItsLinksSay(t *testing.T) {
 	// The tick's candidate is a root already recorded mid-phase; the other three doors act on the
 	// child of a tree that signed off and lingers, behind the durable hand-over fence. Each is

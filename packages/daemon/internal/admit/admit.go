@@ -228,7 +228,7 @@ const todoWakeDelay = 30 * time.Second
 
 // slotFree says whether an admission slot stands free: fewer slots in use than the cap, counting a
 // slot a waiting root will take as taken. A root promotion skips because it waits on an unfinished
-// Dispatch issue (waitsOn) will take none, so it hides no free capacity from the project: the
+// Dispatch issue (blockers.WaitsOn) will take none, so it hides no free capacity from the project: the
 // controller hears of the slot and may hand Legion work that can actually run. The controller is
 // woken about it and takes nothing for it; only a person hands Legion work
 // (skill://legion-controller, "Free slots").
@@ -244,14 +244,14 @@ func (a *Admission) slotFree(ctx context.Context, tx pgx.Tx) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("list admission slots: %w", err)
 	}
-	rows, err := a.mirror(ctx, tx)
+	rows, err := blockers.Load(ctx, tx, a.store, a.project)
 	if err != nil {
 		return false, err
 	}
 	own := ownSlots(issues, slots)
 	taking := 0
 	for _, waiting := range record.Waiting(issues, own) {
-		if len(waitsOn(rows, waiting)) == 0 {
+		if len(blockers.WaitsOn(rows, waiting)) == 0 {
 			taking++
 		}
 	}
@@ -298,7 +298,7 @@ func (a *Admission) blocked(ctx context.Context, tx pgx.Tx) ([]record.BlockedIss
 	if err != nil {
 		return nil, fmt.Errorf("list admission slots: %w", err)
 	}
-	rows, err := a.mirror(ctx, tx)
+	rows, err := blockers.Load(ctx, tx, a.store, a.project)
 	if err != nil {
 		return nil, err
 	}
@@ -528,7 +528,7 @@ func (a *Admission) applyObservation(ctx context.Context, tx pgx.Tx, stored reco
 			// The carry's own test is the child's own run (record.Issue.CarriesRun), deliberately
 			// and only that: what the child waits on is not read here. A hand-over moves work
 			// already under way into a root of its own, and promotion admits such a candidate
-			// whatever its links say (waitsOn).
+			// whatever its links say (blockers.WaitsOn).
 			if !handover.Cancelled && root != nil && root.LingersAt(handover.Generation) {
 				a.log.Info("admission hand-over", "issue", stored.Key, "tree", handover.Tree, "linger", handover.Generation)
 				return a.readmit(ctx, tx, stored, observation.Title, observation.Parent, observation.Rank, observation.Seq, stored.CarriesRun())
@@ -642,43 +642,6 @@ func (a *Admission) recordObservation(ctx context.Context, tx pgx.Tx, stored rec
 // root, and its tree lingers after its sign-off or was closed. A child's done is only the child's.
 func readmittable(stored record.Issue) bool {
 	return claim.IsTreeRoot(stored.Key, stored.Tree) && (stored.Lingers() || stored.Phase == phase.Done)
-}
-
-// mirror is this project's whole mirror of what Dispatch says each of its issues waits on, in one
-// query (record.Store.DispatchIssues). Admission decides inside a transaction that performs no
-// I/O, so it cannot ask Dispatch what a root is blocked by: it reads the rows the blockers.Mirror
-// handler wrote, this fact's own included, and judges them in memory. Every call that judges reads
-// them once, whatever the number of candidates it then judges.
-func (a *Admission) mirror(ctx context.Context, tx pgx.Tx) (map[string]blockers.Row, error) {
-	mirrored, err := a.store.DispatchIssues(ctx, tx, a.project)
-	if err != nil {
-		return nil, fmt.Errorf("list what the issues of %s wait on: %w", a.project, err)
-	}
-	return blockers.Rows(mirrored), nil
-}
-
-// waitsOn is what candidate still waits on, from rows: the issues Dispatch says it is blocked by
-// that are not done (blockers.Unfinished, which counts a blocker the daemon has no row of as not
-// done), and nothing at all for a candidate the rule exempts (blockers.Exempt, the one definition
-// the state's `blocked` is read from too).
-//
-// The exemption is two sentences of the spec, one for each half of it. "An issue that carries a
-// run into a tree of its own, meaning its phases have already begun, by whichever of the three
-// doors it arrives through" is record.Issue.CarriesRun: a handed-over child, an orphan a person
-// labelled, work already under way, which is never stopped and never re-checked. "And a tree
-// Legion takes back after it has finished and lingered" is record.Issue.TakenBack, which
-// re-admission writes for the root's own tree returning, since that root comes back at
-// phase.Admitted carrying no run. "Those start again whatever their links say."
-//
-// Everything else is checked: "an issue that carries no run is checked like any other, a child
-// that has been released but never started among them" — a never-started child handed to Legion
-// as a root of its own when its tree finished arrives here carrying neither mark, and its
-// unfinished blockers hold it in the waiting line.
-func waitsOn(rows map[string]blockers.Row, candidate record.Issue) []string {
-	if blockers.Exempt(candidate) {
-		return nil
-	}
-	return blockers.Unfinished(rows, candidate.Key)
 }
 
 // readmit records a lingering or closed root's todo, or an orphan's, as a new generation waiting
@@ -872,7 +835,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 			return 0, fmt.Errorf("list admission issues: %w", err)
 		}
 	}
-	rows, err := a.mirror(ctx, tx)
+	rows, err := blockers.Load(ctx, tx, a.store, a.project)
 	if err != nil {
 		return 0, err
 	}
@@ -891,7 +854,7 @@ func (a *Admission) promoteHolds(ctx context.Context, tx pgx.Tx, respectHolds bo
 		// from the waiting line it would make record.TreeLive false for itself, and its children
 		// would be recorded as orphans admitted as roots of their own. A blocked root stays the
 		// live tree of its children; it simply takes no slot (slotFree counts it as taking none).
-		if waits := waitsOn(rows, candidate); len(waits) > 0 {
+		if waits := blockers.WaitsOn(rows, candidate); len(waits) > 0 {
 			a.log.Info("admission waits for what this root waits on", "issue", candidate.Key, "blockers", waits)
 			continue
 		}

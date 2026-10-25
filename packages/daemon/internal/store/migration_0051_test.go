@@ -2,13 +2,15 @@ package store
 
 import (
 	"context"
+	"strings"
 	"testing"
 )
 
 // The daemon mirrors what Dispatch says about every issue of its project, because the transaction
 // that decides whether to admit a root or start a child performs no I/O. 0051 gives that mirror
 // its table: a row per key, the keys it is blocked by as an array, the Dispatch sequence it was
-// observed at, and an index on the project each consumer reads whole.
+// observed at, and an index on the project each consumer reads whole, in the key order it reads
+// it in.
 func TestTheDispatchMirrorArrivesWith0051(t *testing.T) {
 	store := emptyStore(t)
 	ctx := context.Background()
@@ -26,13 +28,16 @@ func TestTheDispatchMirrorArrivesWith0051(t *testing.T) {
 		t.Fatalf("migrate: %v", err)
 	}
 
-	var indexes int
-	if err := store.Pool().QueryRow(ctx, `select count(*) from pg_indexes
-		where tablename = 'dispatch_issues' and indexname = 'dispatch_issues_project'`).Scan(&indexes); err != nil {
+	// The index carries the key as well as the project, because every read of the mirror is
+	// `where project = $1 order by key`: the ordering comes off the index rather than a sort of
+	// the project's rows.
+	var indexdef string
+	if err := store.Pool().QueryRow(ctx, `select indexdef from pg_indexes
+		where tablename = 'dispatch_issues' and indexname = 'dispatch_issues_project'`).Scan(&indexdef); err != nil {
 		t.Fatalf("look for the project index: %v", err)
 	}
-	if indexes != 1 {
-		t.Fatalf("dispatch_issues_project indexes = %d, want 1", indexes)
+	if !strings.Contains(indexdef, "(project, key)") {
+		t.Fatalf("dispatch_issues_project = %q, want it on (project, key)", indexdef)
 	}
 
 	if _, err := store.Pool().Exec(ctx, `insert into dispatch_issues (key, project, status, blockers, dispatch_seq)

@@ -10,7 +10,11 @@ package blockers
 
 import (
 	"cmp"
+	"context"
+	"fmt"
 	"slices"
+
+	"github.com/jackc/pgx/v5"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
 	"github.com/sjawhar/legion/daemon/internal/phase"
@@ -29,13 +33,29 @@ type Row struct {
 }
 
 // Rows indexes a project's mirror by issue key, as Unfinished takes it: every caller reads the
-// whole project in one query (record.Store.DispatchIssues) and then judges in memory.
+// whole project in one query (Load) and then judges in memory.
 func Rows(mirrored []record.DispatchIssueRow) map[string]Row {
 	rows := make(map[string]Row, len(mirrored))
 	for _, row := range mirrored {
 		rows[row.Key] = Row{Status: row.Status, Blockers: row.Blockers}
 	}
 	return rows
+}
+
+// Load is one project's whole mirror, read in one query (record.Store.DispatchIssues) and
+// indexed as every judgement here takes it.
+//
+// Admission decides whether to admit a root, and the workflow whether to start a child's first
+// phase, inside a transaction that performs no I/O: neither can ask Dispatch what an issue is
+// blocked by at the moment it decides. Both read the rows Mirror wrote instead — the deciding
+// fact's own row included, written ahead of them in the same transaction — and judge them in
+// memory. Each call that judges loads the project once, whatever the number of issues it judges.
+func Load(ctx context.Context, tx pgx.Tx, store record.Store, project string) (map[string]Row, error) {
+	mirrored, err := store.DispatchIssues(ctx, tx, project)
+	if err != nil {
+		return nil, fmt.Errorf("list what the issues of %s wait on: %w", project, err)
+	}
+	return Rows(mirrored), nil
 }
 
 // Unfinished is the keys key waits on that are not done, in the order its row lists them, and is
@@ -61,22 +81,19 @@ func Unfinished(rows map[string]Row, key string) []string {
 //
 // It is the two decisions themselves, read rather than made: a root of waiting — the line
 // admission promotes from, which the caller passes as it computes it — that promotion skips
-// (admit.waitsOn), and a recorded child the workflow holds at `admitted`
-// (workflow.Engine.StartUnblockedChildren). A candidate the rule exempts is never judged, as the
-// decider that would admit it does not judge it either (Exempt): what promotion starts whatever
-// its links say is never reported as waiting on them.
+// (WaitsOn), and a recorded child the workflow holds at `admitted` (Holdable, which
+// workflow.Engine.StartUnblockedChildren starts from there). A candidate the rule exempts is
+// never judged, as the decider that would admit it does not judge it either (Exempt): what
+// promotion starts whatever its links say is never reported as waiting on them.
 func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.BlockedIssue {
 	blocked := make([]record.BlockedIssue, 0, len(waiting))
 	for _, issue := range waiting {
-		if Exempt(issue) {
-			continue
-		}
-		if unfinished := Unfinished(rows, issue.Key); len(unfinished) > 0 {
-			blocked = append(blocked, record.BlockedIssue{Issue: issue.Key, BlockedBy: unfinished})
+		if waits := WaitsOn(rows, issue); len(waits) > 0 {
+			blocked = append(blocked, record.BlockedIssue{Issue: issue.Key, BlockedBy: waits})
 		}
 	}
 	for _, issue := range issues {
-		if claim.IsTreeRoot(issue.Key, issue.Tree) || issue.Phase != phase.Admitted {
+		if !Holdable(issue) {
 			continue
 		}
 		if unfinished := Unfinished(rows, issue.Key); len(unfinished) > 0 {
@@ -88,7 +105,7 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.Block
 }
 
 // Exempt says whether an issue starts whatever its links say, and so is neither held by the
-// promotion skip (admit.waitsOn) nor reported here. It is the one definition both readings share,
+// promotion skip (WaitsOn) nor reported here. It is the one definition both readings share,
 // so an issue one of them exempts can never be reported blocked by the other.
 //
 // Two kinds of issue are exempt. One that carries a run into a tree of its own — a handed-over
@@ -98,3 +115,23 @@ func Blocked(rows map[string]Row, issues, waiting []record.Issue) []record.Block
 // it carrying no run. Everything else is checked like any other issue, a child that has been
 // released but never started among them.
 func Exempt(issue record.Issue) bool { return issue.CarriesRun() || issue.TakenBack }
+
+// WaitsOn is what issue still waits on, from rows: the issues Dispatch says it is blocked by
+// that are not done (Unfinished, which counts a blocker the daemon has no row of as not done),
+// and nothing at all for an issue the rule exempts, which starts whatever its links say — the
+// one definition the promotion skip, the workflow's hold and the state's `blocked` all read the
+// exemption from (Exempt).
+func WaitsOn(rows map[string]Row, issue record.Issue) []string {
+	if Exempt(issue) {
+		return nil
+	}
+	return Unfinished(rows, issue.Key)
+}
+
+// Holdable says whether a blocker can hold issue where it stands: it is a child of a tree rather
+// than a root of its own, and it waits at phase.Admitted, where workflow.Engine.enterChild or
+// the opening of its tree's gate left it. A root's wait is the waiting line's instead, judged
+// over record.Waiting by the promotion that skips it.
+func Holdable(issue record.Issue) bool {
+	return !claim.IsTreeRoot(issue.Key, issue.Tree) && issue.Phase == phase.Admitted
+}

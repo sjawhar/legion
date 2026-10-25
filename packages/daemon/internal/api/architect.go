@@ -78,21 +78,11 @@ func (wr WaveReleaseResponse) MarshalJSON() ([]byte, error) {
 
 // HeldChild is one released child the daemon did not start, and the issues it waits on that are
 // not done — the keys of its Dispatch blocked-by links, including any the daemon has not yet
-// observed as an issue of its own.
-type HeldChild struct {
-	Issue     string   `json:"issue"`
-	BlockedBy []string `json:"blockedBy"`
-}
-
-// MarshalJSON keeps `blockedBy` an array on the wire, empty rather than `null`.
-func (h HeldChild) MarshalJSON() ([]byte, error) {
-	type wire HeldChild
-	out := wire(h)
-	if out.BlockedBy == nil {
-		out.BlockedBy = []string{}
-	}
-	return json.Marshal(out)
-}
+// observed as an issue of its own. It is record.BlockedIssue, the row the state's `blocked` and
+// a tick controller notice carry: one issue and what it waits on, declared once below all three
+// and validated by the one schema the plugin reads them all through. Its own MarshalJSON is what
+// keeps `blockedBy` an array here too, empty rather than `null`.
+type HeldChild = record.BlockedIssue
 
 // PhaseBackwardRequest asks a phase worker to return its own issue to an earlier phase, or the
 // tree's architect to return an issue it owns from accepting. An architect's grant serves its
@@ -580,11 +570,10 @@ func (s *server) releaseOutcome(ctx context.Context, issues []string) ([]string,
 	// The mirror's rows are keyed by the Dispatch project key the issues are filed under, never
 	// by the claim project token: a read with the token finds nothing wherever the two differ,
 	// which in a deployment is always (Options.Project, Options.DispatchProject).
-	mirrored, err := s.records.DispatchIssues(ctx, tx, s.dispatchProject)
+	rows, err := blockers.Load(ctx, tx, s.records, s.dispatchProject)
 	if err != nil {
 		return nil, nil, err
 	}
-	rows := blockers.Rows(mirrored)
 	started, held := []string{}, []HeldChild{}
 	for _, issue := range issues {
 		recorded, err := s.records.Issue(ctx, tx, issue)

@@ -65,15 +65,20 @@ func (m *Mirror) put(ctx context.Context, tx pgx.Tx, observed intake.IssueStatus
 	})
 }
 
+// Observed is one summary of a Dispatch listing as an observation of that issue, the four facts
+// a mirror row is written from: the boot's reconcile and the periodic turn's listing both read
+// the project this way, and both write what it returns.
+func Observed(summary dispatch.IssueSummary) intake.IssueStatus {
+	return intake.IssueStatus{Key: summary.Key, Status: summary.Status, Blockers: summary.BlockedBy, Seq: summary.LastSeq}
+}
+
 // Reconcile mirrors the boot listing: every summary Dispatch returned for project, through the
 // same sequence-fenced write a live event takes, so a listing older than an event already applied
 // changes nothing.
 func Reconcile(ctx context.Context, tx pgx.Tx, store record.Store, project string, summaries []dispatch.IssueSummary) error {
+	mirror := NewMirror(store, project)
 	for _, summary := range summaries {
-		row := record.DispatchIssueRow{
-			Key: summary.Key, Project: project, Status: summary.Status, Blockers: summary.BlockedBy, Seq: summary.LastSeq,
-		}
-		if err := store.PutDispatchIssue(ctx, tx, row); err != nil {
+		if err := mirror.put(ctx, tx, Observed(summary)); err != nil {
 			return fmt.Errorf("mirror the boot listing of %s: %w", summary.Key, err)
 		}
 	}
