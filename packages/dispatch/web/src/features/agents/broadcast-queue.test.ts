@@ -138,9 +138,10 @@ test("broadcasts out or queued survive a reload and are sent again under their k
   }
 });
 
-// A broadcast Dispatch made whose answer was lost is answered `409 KEY_COMMITTED` under its key,
-// and Dispatch will not make it again: the send leaves the strip with no refusal and nothing kept,
-// and each recipient's conversation and the broadcasts are read again.
+// A broadcast the loop reports landed with no answer to give (`AnswerNotKeptError`, which is what
+// `409 KEY_COMMITTED` becomes; `POST /broadcasts` itself answers a repeat from its record) leaves
+// the strip with no refusal and nothing kept, and each recipient's conversation and the broadcasts
+// are read again.
 test("a broadcast answered KEY_COMMITTED leaves the strip as made, with nothing kept", async () => {
   const tab = keptTab();
   const client = new QueryClient();

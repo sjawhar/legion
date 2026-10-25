@@ -189,9 +189,10 @@ test("a failed fetch is retried under the same key until Dispatch answers", asyn
   }
 });
 
-// A send whose message landed and whose answer was lost is answered `409 KEY_COMMITTED` under its
-// key, after a dropped attempt or a 5xx alike, and Dispatch will not make it again: the send lands
-// - its draft cleared, no refusal - and the session's conversation is read again.
+// A send the loop reports landed with no answer to give - `409 KEY_COMMITTED`, after a dropped
+// attempt or a 5xx alike, which a composer's ask or edit can meet (the message and comment routes
+// answer a repeat from their record instead) - lands: its draft cleared, no refusal, and what it
+// wrote read again.
 test("a send answered KEY_COMMITTED lands with no refusal, and its session is read again", async () => {
   const createAgentMessage = spyOn(api, "createAgentMessage")
     .mockRejectedValueOnce(refusal)

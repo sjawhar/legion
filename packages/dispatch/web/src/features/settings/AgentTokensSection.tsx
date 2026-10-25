@@ -35,45 +35,57 @@ import {
 
 const agentTokensQueryKey = ["agent-tokens"] as const;
 
-/** The live token labelled `name` that a mint whose answer was lost made: the newest of that label,
- *  since the mint is the latest thing to have made one. */
-function lostToken(
+/** A mint Dispatch made and lost the answer to: the label it was pressed with, when it was pressed
+ *  (`Date.now()`), and whether the token list has been read again since. */
+interface LostMint {
+  readonly label: string;
+  readonly pressedAt: number;
+  readonly listed: boolean;
+}
+
+/** The live tokens labelled `label` made at or after `pressedAt`, newest first: the tokens the lost
+ *  mint can be. A token of that label made before the press is another one, never a candidate. */
+function lostTokens(
   tokens: readonly AgentToken[] | undefined,
-  name: string
-): AgentToken | undefined {
-  return tokens
-    ?.filter((token) => token.name === name && token.revoked_at === null)
-    .reduce<AgentToken | undefined>(
-      (newest, token) =>
-        newest === undefined || compareTimestamps(token.created_at, newest.created_at) > 0
-          ? token
-          : newest,
-      undefined
-    );
+  { label, pressedAt }: LostMint
+): AgentToken[] {
+  return (tokens ?? [])
+    .filter(
+      (token) =>
+        token.name === label &&
+        token.revoked_at === null &&
+        Date.parse(token.created_at) >= pressedAt
+    )
+    .sort((a, b) => compareTimestamps(b.created_at, a.created_at));
 }
 
 export function AgentTokensSection(): ReactNode {
   const queryClient = useQueryClient();
   const [name, setName] = useState("");
   const [shownToken, setShownToken] = useState<CreatedAgentToken>();
-  /** The label of a token Dispatch minted whose value was lost with its answer, until it is
-   *  replaced or the reader writes another label. */
-  const [lostLabel, setLostLabel] = useState<string | null>(null);
+  /** A mint whose value was lost with its answer, until it is replaced or the reader writes
+   *  another label. */
+  const [lost, setLost] = useState<LostMint | null>(null);
   const { copy, reset: resetCopyStatus, status: copyStatus } = useCopyFeedback();
   const tokens = useQuery({ queryKey: agentTokensQueryKey, queryFn: () => api.listAgentTokens() });
   // The form shows a refused mint beside the name it was refused over.
   const createToken = useKeyedWrite({
     inline: true,
-    label: (input: { name: string }) => `New agent token ${input.name}`,
-    write: (input, bounds) => api.createAgentToken(input, bounds),
+    label: (input: { name: string; pressedAt: number }) => `New agent token ${input.name}`,
+    write: ({ name: label }, bounds) => api.createAgentToken({ name: label }, bounds),
     onLanded: (created, input) => {
       setName("");
       if (created === null) {
         // Minted, and its value - shown once only - is gone with the answer: the token is
         // listed once the list is read again, and the reader can replace it.
         setShownToken(undefined);
-        setLostLabel(input.name);
-        void queryClient.invalidateQueries({ queryKey: agentTokensQueryKey });
+        const mint = { label: input.name, listed: false, pressedAt: input.pressedAt };
+        setLost(mint);
+        void queryClient
+          .invalidateQueries({ queryKey: agentTokensQueryKey })
+          .then(() =>
+            setLost((current) => (current === mint ? { ...mint, listed: true } : current))
+          );
         return;
       }
       const { token, ...safeToken } = created;
@@ -81,7 +93,7 @@ export function AgentTokensSection(): ReactNode {
         safeToken,
         ...current,
       ]);
-      setLostLabel(null);
+      setLost(null);
       setShownToken(created);
       resetCopyStatus();
     },
@@ -101,15 +113,25 @@ export function AgentTokensSection(): ReactNode {
     event.preventDefault();
     // An emptied form - a mint that landed - sends nothing, whatever submits it.
     if (name.trim() === "") return;
-    createToken.mutate({ name });
+    createToken.mutate({ name, pressedAt: Date.now() });
   };
-  const lost = lostLabel === null ? undefined : lostToken(tokens.data, lostLabel);
-  /** Revokes the token whose value was lost, then mints another under its label. */
-  const replaceLost = () => {
-    if (lost === undefined || lostLabel === null) return;
-    const label = lostLabel;
-    revokeToken.mutate(lost.id, { onSuccess: () => createToken.mutate({ name: label }) });
+  const candidates = lost === null ? [] : lostTokens(tokens.data, lost);
+  /** Revokes `token` - once the reader confirms it, by its label and when it was made - and then
+   *  mints another under its label. */
+  const replaceLost = (token: AgentToken) => {
+    const made = new Date(token.created_at).toLocaleString();
+    if (
+      !window.confirm(
+        `Revoke “${token.name}”, created ${made}? Agents using it stop working at once, and a new token “${token.name}” is minted in its place.`
+      )
+    ) {
+      return;
+    }
+    revokeToken.mutate(token.id, {
+      onSuccess: () => createToken.mutate({ name: token.name, pressedAt: Date.now() }),
+    });
   };
+  const replacing = revokeToken.isPending || createToken.isPending;
   const copyToken = () => {
     if (shownToken === undefined) {
       return;
@@ -229,7 +251,7 @@ export function AgentTokensSection(): ReactNode {
             className={`min-h-11 rounded-md px-3 py-2 ${inputClasses(false)} ${textPrimaryOnSurface}`}
             id="agent-token-name"
             onChange={(event) => {
-              setLostLabel(null);
+              setLost(null);
               setName(event.target.value);
             }}
             placeholder="Architect"
@@ -241,27 +263,61 @@ export function AgentTokensSection(): ReactNode {
           New token
         </button>
       </form>
-      {lostLabel === null ? null : (
+      {lost === null ? null : (
         <div className="mt-4 space-y-2">
-          <LandedWithoutAnswer what={`Token “${lostLabel}”`}>
+          <LandedWithoutAnswer what={`Token “${lost.label}”`}>
             Its value is shown only once and was lost with the answer, so revoke it and mint
             another.
           </LandedWithoutAnswer>
-          <button
-            className={settingsSubmitButton}
-            disabled={lost === undefined || revokeToken.isPending || createToken.isPending}
-            onClick={replaceLost}
-            type="button"
-          >
-            {lost === undefined ? "Waiting for it to be listed…" : "Revoke it and mint another"}
-          </button>
+          {!lost.listed ? (
+            <p className={`text-sm ${textMutedOnCanvas}`} role="status">
+              Looking for it…
+            </p>
+          ) : candidates.length === 0 ? (
+            <p className={`text-sm ${textSecondaryOnCanvas}`} role="status">
+              No live token “{lost.label}” made since you pressed New token is listed, so none was
+              revoked.
+            </p>
+          ) : candidates.length === 1 ? (
+            <button
+              className={settingsSubmitButton}
+              disabled={replacing}
+              onClick={() => candidates[0] !== undefined && replaceLost(candidates[0])}
+              type="button"
+            >
+              Revoke it and mint another
+            </button>
+          ) : (
+            <>
+              <p className={`text-sm ${textSecondaryOnCanvas}`}>
+                {candidates.length} live tokens “{lost.label}” were made since you pressed New
+                token. Pick the one to revoke:
+              </p>
+              <ul className="space-y-2">
+                {candidates.map((token) => (
+                  <li key={token.id}>
+                    <button
+                      className={settingsSubmitButton}
+                      disabled={replacing}
+                      onClick={() => replaceLost(token)}
+                      type="button"
+                    >
+                      Revoke the one created {new Date(token.created_at).toLocaleString()}
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            </>
+          )}
         </div>
       )}
       {createToken.isError ? (
         <div className="mt-4">
           <QueryError
             message="Couldn't create the agent token."
-            onRetry={() => createToken.mutate({ name })}
+            onRetry={() =>
+              createToken.mutate(createToken.variables ?? { name, pressedAt: Date.now() })
+            }
             retrying={createToken.isPending}
           />
         </div>
