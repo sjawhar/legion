@@ -2,83 +2,81 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-188",
-  "completed": "2026-10-25T06:05:00Z",
+  "completed": "2026-10-25T06:45:00Z",
   "pullRequest": "sjawhar/legion#2174",
+  "round": "Review round 1's corrective push. Code head b079634292d9; the first code head was 066ac315a446.",
   "proof": [
     {
-      "criterion": "A1 (R1): --before puts the issue above the named issue, --after below, both together between them, and what the command prints names the move.",
-      "surface": "Live production Dispatch (the server this pod's DISPATCH_URL names), driven by the command built from this branch: bun packages/envoy-client/bin/dispatch.ts, the same spec, schema, validation and executor an agent's `dispatch` runs. Fixtures SMOKE-19, SMOKE-20, SMOKE-21, scratch issues in project SMOKE carrying no `legion` label and neighboured only by each other; closed with a reason at the end of the run.",
-      "command": "bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-19 --after SMOKE-20 | --before SMOKE-20 | --after SMOKE-20 --before SMOKE-21 | --before SMOKE-20 --priority 2, each followed by bun packages/envoy-client/bin/dispatch.ts issues --project SMOKE --status todo --limit 250",
-      "observed": "Printed `SMOKE-19: rank -> after SMOKE-20` and the board read 20, 19, 21; `rank -> before SMOKE-20` and 19, 20, 21; `rank -> after SMOKE-20, before SMOKE-21` and 20, 19, 21; `priority -> P2; rank -> before SMOKE-20` on one line and 19, 20, 21. The same four forms were run before the simplify pass with fixtures SMOKE-16, SMOKE-17 and SMOKE-18, with the same results.",
-      "headSha": "066ac315a446",
-      "negativeControl": "The same call run as the pod's installed `dispatch` (the released build without this change) refused: `dispatch issue-update was not called: 1 problem / - unknown flag --before`."
+      "criterion": "Review round 1, finding 2 (packages/contracts/AGENTS.md:62): the spec's example must be updated with the argument shape, and it is the one command line dispatch issue-update --help and every refusal print.",
+      "surface": "The command built from this branch, run against live production Dispatch: a refusal (no field besides issue, which sends no write) and the command's own help.",
+      "command": "bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-26; bun packages/envoy-client/bin/dispatch.ts issue-update --help",
+      "observed": "Both print `Example: dispatch issue-update --issue DSP-1 --priority 1 --before DSP-2` — the move riding along with another change, which is the controller's own reconciliation call. The same two commands at the previous head printed the `--status done --reason '…'` example, which carried nothing of the move.",
+      "headSha": "b079634292d9",
+      "negativeControl": "packages/contracts/src/dispatch-tools.test.ts:298 parses every spec's example against its own schema; an example that did not fit the argument shape fails there, and the contracts suite is green (210 pass)."
     },
     {
-      "criterion": "A1 (R1): the request the command sends carries the move as the server's rank field.",
-      "surface": "The envoy-client recorded-fetch suite, which captures the PATCH body the executor sends (a live run cannot show the body).",
+      "criterion": "Review round 1, finding 1 (acceptance A4): no agent-facing text names a field an agent cannot set. skills/dispatch/references/issues.md:40 named `rank` as what a closed issue takes.",
+      "surface": "The repository's text at the head, plus the claim itself driven on live production Dispatch: the reworded bullet promises a closed issue takes the board move, so the move was run on a closed fixture.",
+      "command": "sed -n '40p' skills/dispatch/references/issues.md; then, live: bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-26 --status done --reason '…'; bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-26 --after SMOKE-27",
+      "observed": "The bullet now reads \"A closed issue takes only a board move (`--before` / `--after`), `components`, a reopening status, and an external-links write that adds no link. Reopen first, then set priority, in two commands (`409 ISSUE_CLOSED`).\" Live, the closed SMOKE-26 took `--after SMOKE-27` and printed `rank -> after SMOKE-27`, so the reworded claim holds. `grep -rn '\"rank\"' skills/` still finds nothing and the skills guard suite is green (9 tests, 0 fail).",
+      "headSha": "b079634292d9",
+      "negativeControl": "A priority write on the same closed issue is refused by the server with 409 ISSUE_CLOSED, which is why the bullet keeps its reopen-then-priority sentence: the move is the exception the text names, not a general closed-issue write."
+    },
+    {
+      "criterion": "Review round 1, finding 3 (minor): the executor test did not pin that an empty neighbour still reaches the server.",
+      "surface": "The envoy-client recorded-fetch suite, which captures the PATCH body the executor sends.",
       "command": "bun test packages/envoy-client/src/__tests__/dispatch-execute.test.ts -t 'board move'",
-      "observed": "1 pass, 7 expect() calls: the body carries rank {before: ACME-2}, {after: ACME-2} and {before: ACME-2, after: ACME-3} for the three forms, and the result text carries `rank -> before ACME-2`, `rank -> after ACME-2` and `rank -> after ACME-3, before ACME-2`.",
-      "headSha": "066ac315a446",
-      "negativeControl": "The same test asserts a status-only call's body has no `rank` key at all; a build that spread an empty rank object fails that assertion, which is the regression that would otherwise drop every updated issue to the bottom of its board."
+      "observed": "1 pass, 8 expect() calls: the added case asserts `{ issue, before: \"\" }` sends `rank: { before: \"\" }`, beside the three move shapes and the status-only call that sends no rank key. Live, that same call is refused by the server with `RANK_INPUT: rank neighbor must name another issue`.",
+      "headSha": "b079634292d9",
+      "negativeControl": "A falsy guard in the executor (`rankBefore ? … : …`) drops the key for an empty value; with it, the new assertion fails, which is the silent no-move this case exists to catch."
     },
     {
-      "criterion": "A2 (R1): a neighbour that does not exist, is in another project, is the issue itself, is empty, or is a pair the board does not hold in that order is refused with the server's own message, and the board is unchanged.",
-      "surface": "Live production Dispatch, same fixtures and command as above.",
-      "command": "bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-19 --before SMOKE-99999 | --before INFRA-188 | --before SMOKE-19 | --before '' | --after SMOKE-21 --before SMOKE-20, then the same board listing",
-      "observed": "RANK_INPUT: rank neighbor does not exist; rank neighbor must be in the same project; rank neighbor must name another issue (for the issue itself and for the empty value); rank neighbors are not ordered. The board read 20, 19, 21 before and after all five.",
-      "headSha": "066ac315a446",
-      "negativeControl": "The accepted call of the same shape, `--after SMOKE-20 --before SMOKE-21`, moved the card in the same session, so the refusals are the server judging the neighbour rather than the command failing to send the move."
+      "criterion": "A1 (R1): --before puts the issue above the named issue, --after below, both together between them, and what the command prints names the move. Re-run at the corrective head.",
+      "surface": "Live production Dispatch, driven by the command built from this branch, with fixtures SMOKE-26, SMOKE-27 and SMOKE-28 in project SMOKE — no `legion` label, neighboured only by each other, all closed with a reason at the end of the run.",
+      "command": "bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-26 --before SMOKE-27 | --after SMOKE-27 | --after SMOKE-27 --before SMOKE-28 | --priority 1 --before SMOKE-27, each followed by bun packages/envoy-client/bin/dispatch.ts issues --project SMOKE --status todo --limit 250",
+      "observed": "`rank -> before SMOKE-27` and the board read 26, 27, 28; `rank -> after SMOKE-27` and 27, 26, 28; `rank -> after SMOKE-27, before SMOKE-28` and 27, 26, 28; `priority -> P1; rank -> before SMOKE-27` on one line and 26, 27, 28.",
+      "headSha": "b079634292d9",
+      "negativeControl": "The pod's installed `dispatch` (the released build without this change) refuses the same call: `dispatch issue-update was not called: 1 problem / - unknown flag --before`."
     },
     {
-      "criterion": "A2 (R1), the hazard this change exists to avoid: an ordinary update that names no neighbour moves nothing.",
-      "surface": "Live production Dispatch, with SMOKE-19 standing between SMOKE-20 and SMOKE-21.",
-      "command": "bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-19 --status todo, then the board listing",
-      "observed": "Printed `SMOKE-19: status todo -> todo` and the board still read 20, 19, 21. A rank with neither neighbour would have ranked the issue last in its project (packages/envoy/internal/dispatch/api/issue_rank.go:51-53), so the card would have moved to the bottom.",
-      "headSha": "066ac315a446",
+      "criterion": "A2 (R1), the hazard this change exists to avoid: an ordinary update that names no neighbour moves nothing. Re-run at the corrective head.",
+      "surface": "Live production Dispatch, with SMOKE-26 standing between SMOKE-27 and SMOKE-28.",
+      "command": "bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-26 --status todo, then the board listing",
+      "observed": "Printed `SMOKE-26: status todo -> todo` and the board still read 27, 26, 28. A rank with neither neighbour would have ranked the issue last in its project (packages/envoy/internal/dispatch/api/issue_rank.go:51-53).",
+      "headSha": "b079634292d9",
       "negativeControl": "The neighbour-naming call in the same session did move the card, so the unchanged board is the absence of a rank key rather than an update that did nothing."
     },
     {
-      "criterion": "A3 (R2): a call of the Dispatch tool carrying only the issue and one of the new arguments passes the tool's own checks and moves the issue, and the refusal an empty call gets names them.",
-      "surface": "Live production Dispatch through the same command; --dry-run runs the tool's own schema and validation (checkDispatchCall) and sends nothing.",
-      "command": "bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-19 --before SMOKE-20 --dry-run; then the same call for real; then bun packages/envoy-client/bin/dispatch.ts issue-update --issue SMOKE-19",
-      "observed": "The dry run printed {\"issue\": \"SMOKE-19\", \"before\": \"SMOKE-20\"}; the real call moved the card; the issue-only call was refused with `Issue update requires at least one field besides issue: status, title, labels, priority, external_links, route, parent, blocked_by, components, repo, before, or after.` and listed --before, --before-file, --after and --after-file among the allowed flags.",
+      "criterion": "A1, A2, A3 and A4 at the first code head, unchanged by this round and kept for the record.",
+      "surface": "Live production Dispatch with fixtures SMOKE-19, SMOKE-20, SMOKE-21 (and SMOKE-16 to SMOKE-18 before the simplify pass), plus the repository's own text and guards.",
+      "command": "The command built from this branch for the three move forms, the ride-along, the five refusals, the dry run and the issue-only refusal; grep over skills/ and packages/contracts/src/; bun test packages/pi-envoy/src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist",
+      "observed": "The three forms moved the card as printed; the five refusals were the server's own (`rank neighbor does not exist`, `must be in the same project`, `must name another issue` for the issue itself and for an empty value, `rank neighbors are not ordered`) with the board unchanged; the issue-only call was refused with the fields rule naming before and after; `backlog-order` survives only on the two lines recording it as retired; no `\"rank\"` JSON and no 'highest priority, then board rank' under skills/; the guards and check-dist green. The whole of it is in the pull request body.",
       "headSha": "066ac315a446",
-      "negativeControl": "The released `dispatch` in this pod lists neither flag and refuses `--before` as unknown, so the accepted call proves this branch's schema rather than a pre-existing one."
-    },
-    {
-      "criterion": "A4 (R3): the texts agents read name the controller as the one agent that orders a board and these flags as how it does it, send nobody to the retired role or to a hand-built request, and the controller's backlog reference says Legion admits by board rank.",
-      "surface": "The repository's own text at the head, read with grep, plus the guards that judge those texts (the skills guard suite and the committed claude-envoy mirror's freshness check).",
-      "command": "grep -rn 'backlog-order' skills/; grep -rn '\"rank\"' skills/; grep -rn -- '--before' skills/; grep -rn 'highest priority, then board rank' skills/; grep -rni 'not settable here' packages/contracts/src/; bun test packages/pi-envoy/src/skills-guard.test.ts; cd packages/claude-envoy && bun run check-dist",
-      "observed": "`backlog-order` survives only at skills/legion-controller/SKILL.md:59 and skills/legion-controller/references/backlog-stewardship.md:11, the two lines recording it as retired; no `\"rank\"` JSON and no 'highest priority, then board rank' anywhere under skills/; `--before` appears at skills/dispatch/references/issues.md:13 and :46 and skills/legion-controller/references/backlog-stewardship.md:27; nothing says 'not settable here' under packages/contracts/src/; the skills guard suite ran 9 tests, 0 fail (it holds the anchor rename and the rule that no skill names a native tool); check-dist answered `dist/ and legion/ match a fresh build`.",
-      "headSha": "066ac315a446",
-      "negativeControl": "Before the claude-envoy rebuild, the committed bundle still carried the old string 'rank, the board's own order, is not settable here.' and the retired anchor `#board-rank-priority-and-assignee-on-a-read`; the same greps found both, and check-dist would have failed, which is how the stale mirror was caught."
+      "negativeControl": "Before the claude-envoy rebuild the committed bundle still carried 'rank, the board's own order, is not settable here.' and the retired anchor; the greps found both and check-dist failed, which is how the stale mirror was caught."
     }
   ],
   "filesChanged": [
-    "packages/contracts/src/dispatch-tools.ts — the fields rule, the validation input shape and changesAField, the tool description, and the two flat optional arguments before/after (sharing one BOARD_NEIGHBOUR_REFUSAL constant).",
-    "packages/contracts/src/dispatch-tools.test.ts — the rule's verbatim copy, four accepted single-field rows (including an empty before), a refused non-string before, and the renamed rank test that keeps the no-nested-object assertion.",
-    "packages/envoy-client/src/dispatch-execute.ts — rankBefore/rankAfter read beside repo, one derived `rank` value spread into the PATCH body only when a neighbour is named, and one printed changes entry after priority.",
-    "packages/envoy-client/src/__tests__/dispatch-execute.test.ts — the recorded-fetch test 'dispatch_issue_update sends a board move only when a neighbour is named'.",
-    "skills/dispatch/references/issues.md — the reorder rule (the controller keeps each project's order; the command moves a card) and the renamed '## Board rank, priority, and assignee' section whose raw-PATCH bullet is now the command.",
-    "skills/legion-controller/references/backlog-stewardship.md — the intro and step 2: board rank alone carries the plan's order, distinguished from the ready order an agent chooses its own work by, with priority kept as the signal people and filters read.",
-    "packages/contracts/AGENTS.md, packages/envoy-client/README.md, packages/pi-envoy/AGENTS.md, docs/site/src/content/docs/dispatch/for-agents.md — the three guides and the published command table that said the board's order is not exposed.",
-    "packages/claude-envoy/dist/*.js and packages/claude-envoy/legion/skills/legion-controller/references/backlog-stewardship.md — regenerated by `bun run build`, never hand-edited.",
-    "CHANGELOG.md in packages/contracts, envoy-client, pi-envoy, pi-legion and claude-envoy — one entry each."
+    "Review round 1: packages/contracts/src/dispatch-tools.ts — the dispatch_issue_update spec's example is now { issue: \"DSP-1\", priority: 1, before: \"DSP-2\" }.",
+    "Review round 1: skills/dispatch/references/issues.md:40 — the closed-issue bullet names the board move's flags in place of the `rank` field.",
+    "Review round 1: packages/envoy-client/src/__tests__/dispatch-execute.test.ts — the board-move test gains the empty-neighbour case.",
+    "Review round 1: packages/contracts/CHANGELOG.md — one clause added to the entry already there; packages/claude-envoy/dist/*.js regenerated by `bun run build` (the legion/ tree came out identical).",
+    "Round 1 (the implementation): packages/contracts/src/dispatch-tools.ts (fields rule, validation shape, description, the two flat arguments sharing one BOARD_NEIGHBOUR_REFUSAL constant), packages/contracts/src/dispatch-tools.test.ts, packages/envoy-client/src/dispatch-execute.ts (rankBefore/rankAfter, one derived rank value, the printed entry), packages/envoy-client/src/__tests__/dispatch-execute.test.ts, skills/dispatch/references/issues.md, skills/legion-controller/references/backlog-stewardship.md, packages/contracts/AGENTS.md, packages/envoy-client/README.md, packages/pi-envoy/AGENTS.md, docs/site/src/content/docs/dispatch/for-agents.md, the regenerated packages/claude-envoy dist/ and legion/, and one CHANGELOG entry in each of the five packages."
   ],
   "trickyParts": [
-    "A `rank` present with neither neighbour is not a no-op: the server falls through to lastProjectRank and ranks the issue last in its project (packages/envoy/internal/dispatch/api/issue_rank.go:51-53), which is how the web board's move-to-the-end works. The executor's spread idiom would have serialised a two-undefined object as \"rank\":{}, so every ordinary `dispatch issue-update --status …` would have dropped its issue to the bottom of the board. The body carries a rank key only when at least one argument is a string, locked by the recorded-fetch test and re-proven live.",
-    "The executor block already binds locals named `before` (the issue read before the PATCH) and `after` (the PATCH's answer), both used throughout the printed changes; the new arguments are read as rankBefore and rankAfter.",
-    "An empty value (`--before ''`) is counted as a field by the tool on purpose, so the call reaches the server and gets the server's own `rank neighbor must name another issue` rather than a tool-level refusal. It is not a clear, unlike `--parent ''` and `--repo ''`.",
+    "A `rank` present with neither neighbour is not a no-op: the server falls through to lastProjectRank and ranks the issue last in its project (packages/envoy/internal/dispatch/api/issue_rank.go:51-53). The executor builds the rank key only when at least one argument is a string; the recorded-fetch test pins both halves of that — no key for a status-only call, and a key for an empty neighbour, so a later falsy or trimming guard cannot turn the server's refusal into a silent no-move.",
+    "The executor block already binds locals named `before` and `after` (the issue read before the PATCH, and the PATCH's answer), so the arguments are read as rankBefore and rankAfter.",
+    "An empty value is counted as a field by the tool on purpose, so the call reaches the server and gets `rank neighbor must name another issue`. It is not a clear, unlike `--parent ''` and `--repo ''`; the server trims the neighbour before reading it, so `--before '   '` is refused the same way.",
     "The contracts test's `{ issue, rank: \"a0\" }` refusal is kept as the guard, under strict: true, that the tool takes two flat arguments and no nested rank object.",
-    "packages/claude-envoy's committed dist/ and legion/ are generated: the tool strings and the controller skill live there too, and `bun run build` from packages/claude-envoy is the only way to update them. Its dist-fresh test compares against a build made with that package as the working directory (as CI runs it), so running it from the repository root reports a false mismatch in the bundle's module paths."
+    "packages/claude-envoy's committed dist/ and legion/ inline the spec strings and the skill texts: `bun run build` from that package is the only way to update them, and its dist-fresh test compares against a build made with that package as the working directory (as CI runs it), so running it from the repository root reports a false mismatch in the bundle's module paths."
   ],
   "deviations": [
-    "The plan's T9 names `bunx tsc --noEmit` from the workspace root; there is no root tsconfig.json, so the typecheck was run per package (`bun run typecheck` in contracts, envoy-client, pi-envoy, pi-legion, pi-shared, claude-envoy and docs/site), which is what CI runs (.github/workflows/envoy-and-contracts.yaml).",
-    "The architect's instruction of 2026-10-25 was applied in skills/legion-controller/references/backlog-stewardship.md step 2: the corrected admission rule carries one clause distinguishing it from the ready order of skills/dispatch/references/issues.md:7, which is left untouched as the plan says.",
-    "The simplify pass applied two findings at head 744f9f2e9406 (the derived rank value; the shared neighbour-refusal constant), so the checks, the claude-envoy rebuild and the whole live proof were run again at 066ac315a446. The emitted argument descriptions, the request body and the printed forms are unchanged by it."
+    "Plan T9's `bunx tsc --noEmit` from the workspace root cannot run (no root tsconfig.json); the typecheck is per package, which is what CI runs.",
+    "The architect's addition is in skills/legion-controller/references/backlog-stewardship.md step 2: the corrected admission rule carries one clause distinguishing it from the ready order of skills/dispatch/references/issues.md:7, which is untouched.",
+    "The simplify pass applied two findings at 744f9f2e9406, so the checks and the whole live proof were run again at 066ac315a446. It runs once per pull request, so this round ran none.",
+    "Three items the architect kept out of this round, at its instruction: any authorization check on the move (the reviewer records it on the pull request's Not proven line), any narrowing of IssueRankInput (the shared wire shape generated into Go), and a status-bucket clause in the skill text."
   ],
   "openQuestions": [],
   "discoveredComplexity": [
-    "The proof fixtures of both runs are closed: SMOKE-16, SMOKE-17 and SMOKE-18 (before the simplify pass) and SMOKE-19, SMOKE-20 and SMOKE-21 (at the pushed head). Project SMOKE's todo board is empty again, as it was before the run. A tester repeating this proof should create its own fixtures and neighbour them only with each other, since a move rewrites the moved issue's rank alone and no real card's place may change."
+    "Every proof fixture is closed: SMOKE-16 to SMOKE-18 and SMOKE-19 to SMOKE-21 (round 1), SMOKE-26 to SMOKE-28 (this round); the tester's own were SMOKE-22 to SMOKE-25. Project SMOKE's todo board is empty again."
   ]
 }
