@@ -20,7 +20,7 @@
 //  4. deny path on a second request                                    -> "4_..."
 //  5. revoke-by-approver kills the grant                                -> "5_..."
 //  6. forged grant row releases nothing                                -> "6_..."
-//  7. another login, or no UI bearer, decides nothing                   -> "7_..."
+//  7. another login, or no caller token, decides nothing                 -> "7_..."
 //  8. a secret whose owner tag is edited to no person is refused by the
 //     live reload, logged by name, and served again once fixed          -> "8_..."
 //  9. anyone signed in approves a shared human-tier secret              -> "9_..."
@@ -55,10 +55,17 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 const (
-	testUIToken = "test-ui-token-e2e-0123456789abcdef"
+	// dispatchAccount is the ServiceAccount this broker's BROKER_API_ACCOUNTS names as the caller
+	// "dispatch": the identity that reaches the routes Dispatch's server calls.
+	dispatchAccount = "system:serviceaccount:example-ns:example-dispatch"
+	// dispatchAudience is the audience its projected token carries, the one the broker's verifier
+	// checks.
+	dispatchAudience = "agent-secrets"
 	// testApprover operates the box every request below comes from, owns every secret but the
 	// shared one, and so is every approval's approver but the shared one's; and the machine
 	// login's login_hint.
@@ -84,6 +91,9 @@ type e2eServer struct {
 	Store   *store.Store
 	Secrets *secrets.Local
 	Log     fmt.Stringer
+	// uiToken is dispatchAccount's own projected token, the credential the routes Dispatch's
+	// server calls take.
+	uiToken string
 }
 
 // newE2EServer holds e2eSecrets in a fake Secrets Manager and wires the full service graph —
@@ -123,14 +133,32 @@ func newE2EServer(t *testing.T) *e2eServer {
 		Replay: enr.Replay,
 	}
 
+	// The caller of the routes Dispatch's server calls presents its own projected ServiceAccount
+	// token, verified against a local OIDC issuer standing in for the cluster's, as the broker
+	// verifies one in production.
+	issuer := oidctest.New(t)
+	issuerKey := issuer.PublishKey(t, "signing-key")
+	accountTokens, err := oidc.New(context.Background(), issuer.URL(), dispatchAudience)
+	if err != nil {
+		t.Fatalf("oidc.New: %v", err)
+	}
+
 	api.Register(mux, api.Deps{
-		PublicURL: srv.URL, UIToken: testUIToken,
-		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
+		PublicURL:     srv.URL,
+		APIAccounts:   map[string]string{dispatchAccount: "dispatch"},
+		AccountTokens: enroll.K8sPodVerifier{Verifier: accountTokens},
+		Enroll:        enr, Machine: reqMachine, MachineLogin: mach,
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: current, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	})
 
-	return &e2eServer{URL: srv.URL, Store: st, Secrets: local, Log: logged}
+	// The caller's token lives well inside the hour one may, as a projected token does.
+	callerClaims := issuer.Claims(dispatchAccount, dispatchAudience)
+	callerClaims["iat"] = time.Now().Add(-5 * time.Second).Unix()
+	return &e2eServer{
+		URL: srv.URL, Store: st, Secrets: local, Log: logged,
+		uiToken: issuer.Mint(t, issuerKey, callerClaims),
+	}
 }
 
 // e2eSecrets are the fake Secrets Manager's secrets. Every one testApprover owns is human-tier but
@@ -184,9 +212,11 @@ func (s *e2eServer) req(t *testing.T, method, path string, headers map[string]st
 	return resp.StatusCode, respBody
 }
 
+// ui is req as the listed caller of the routes Dispatch's server calls, presenting that
+// account's own projected ServiceAccount token.
 func (s *e2eServer) ui(t *testing.T, method, path string, body any) (int, []byte) {
 	t.Helper()
-	return s.req(t, method, path, map[string]string{"Authorization": "Bearer " + testUIToken}, body)
+	return s.req(t, method, path, map[string]string{"Authorization": "Bearer " + s.uiToken}, body)
 }
 
 func (s *e2eServer) session(t *testing.T, key *ecdsa.PrivateKey, enrollmentID, method, path string, body any) (int, []byte) {
@@ -510,16 +540,16 @@ func TestEndToEnd(t *testing.T) {
 		}
 	})
 
-	// Step 7: only the record's approver decides it, and only through the UI bearer: the approver's
-	// own login sent without the bearer is 401, another login is 403 NOT_APPROVER, and the record
-	// is still pending for its approver, whose approval then releases the value.
-	t.Run("7_AnotherLoginOrNoBearerDecidesNothing", func(t *testing.T) {
+	// Step 7: only the record's approver decides it, and only from a listed caller: the approver's
+	// own login sent with no ServiceAccount token is 401, another login is 403 NOT_APPROVER, and
+	// the record is still pending for its approver, whose approval then releases the value.
+	t.Run("7_AnotherLoginOrNoCallerTokenDecidesNothing", func(t *testing.T) {
 		_, recordID := ts.createPending(t, sessionKey, enrollmentID, "e2e wrong login", "NOTION_API_KEY")
 
 		status, body := ts.req(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve", nil,
 			map[string]any{"approver": testApprover})
-		if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "UI_INVALID" {
-			t.Fatalf("approve without the UI bearer = %d %s, want 401 UI_INVALID", status, body)
+		if status != http.StatusUnauthorized || decode[wireError](t, body).Code != "ACCOUNT_TOKEN_INVALID" {
+			t.Fatalf("approve with no ServiceAccount token = %d %s, want 401 ACCOUNT_TOKEN_INVALID", status, body)
 		}
 		status, body = ts.ui(t, http.MethodPost, "/v1/credential-requests/"+recordID+"/approve",
 			map[string]any{"approver": "mallory"})

@@ -30,6 +30,7 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/api"
 	"github.com/sjawhar/envoy/internal/broker/config"
 	"github.com/sjawhar/envoy/internal/broker/enroll"
+	"github.com/sjawhar/envoy/internal/broker/exchange"
 	"github.com/sjawhar/envoy/internal/broker/machine"
 	"github.com/sjawhar/envoy/internal/broker/oauth"
 	"github.com/sjawhar/envoy/internal/broker/oauthstore"
@@ -48,11 +49,6 @@ import (
 // Configuration deltas name none for it): 15 minutes comfortably covers the "look at the
 // terminal, type the code" UX the confirmation-code flow is built around.
 const machineLoginPendingTTL = 15 * time.Minute
-
-// accessTokenLifetime is how long an issued access token lasts, the value that was compiled into
-// the OAuth provider before it became oauth.Config.AccessLifetime. The deployment setting that
-// replaces this literal lands with the token exchange's own configuration.
-const accessTokenLifetime = 15 * time.Minute
 
 // agentSecretPendingTTL bounds how long an agent_secret request waits for approval before the
 // Sweeper expires it. Unchanged from the pre-v9 poller's own hardcoded value.
@@ -195,11 +191,36 @@ func main() {
 	oauthStore.Reused = enroll.RevokeReusedCredential
 	oauthSecret, err := oauthStore.Secret(ctx)
 	fatal(err)
+	// The exchange's listed identities and the issuers whose tokens it accepts as a subject
+	// token. Both halves are optional and the grant is composed either way: a broker told about
+	// no issuer accepts no subject token at all, which the line below says once at boot rather
+	// than leaving an operator to read it out of a refusal.
+	exchangePolicy, err := exchange.NewSet(cfg.ExchangeAccounts, cfg.ExchangeWorkflows)
+	fatal(err)
+	exchangeConfig := oauth.ExchangeConfig{Policy: exchangePolicy}
+	if cfg.ExchangeK8sAudience != "" {
+		keys, err := exchangeKeys(ctx, cfg.K8sOIDCIssuer)
+		fatal(err)
+		exchangeConfig.Kubernetes = oauth.IssuerConfig{Issuer: cfg.K8sOIDCIssuer, Audience: cfg.ExchangeK8sAudience, Keys: keys}
+	}
+	if cfg.ExchangeGitHubIssuer != "" {
+		keys, err := exchangeKeys(ctx, cfg.ExchangeGitHubIssuer)
+		fatal(err)
+		exchangeConfig.GitHub = oauth.IssuerConfig{Issuer: cfg.ExchangeGitHubIssuer, Audience: cfg.ExchangeGitHubAudience, Keys: keys}
+	}
+	if cfg.ExchangeK8sAudience == "" && cfg.ExchangeGitHubIssuer == "" {
+		slog.Info("token exchange", "state", "unconfigured", "detail", "no subject token issuer is set, so no pod or workflow run exchanges")
+	} else {
+		slog.Info("token exchange", "state", "on", "kubernetes", cfg.ExchangeK8sAudience != "", "github", cfg.ExchangeGitHubIssuer != "",
+			"accounts", len(cfg.ExchangeAccounts), "workflows", len(cfg.ExchangeWorkflows))
+	}
 	// verification_uri is Dispatch's machine-login page, where the person types the code.
 	provider, err := oauth.New(oauth.Config{
-		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL, AccessLifetime: accessTokenLifetime,
+		Secret: oauthSecret, DeviceLifetime: machineLoginPendingTTL,
+		AccessLifetime:  time.Duration(cfg.AccessTokenSeconds) * time.Second,
 		RefreshLifetime: credentialLifetime, VerificationURL: cfg.MachineLoginURL,
 		ProofSkew: time.Duration(cfg.ProofSkewSeconds) * time.Second,
+		Exchange:  exchangeConfig,
 	}, oauthStore)
 	fatal(err)
 	mach := &machine.Service{
@@ -235,7 +256,8 @@ func main() {
 	if cfg.SecretsStore == secrets.StoreGCP {
 		rereadOverall = &api.GCPRereadOverallLimit
 	}
-	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, UIToken: cfg.UIToken, RereadOverallLimit: rereadOverall,
+	api.Register(mux, api.Deps{PublicURL: cfg.PublicURL, RereadOverallLimit: rereadOverall,
+		APIAccounts: cfg.APIAccounts, AccountTokens: pod,
 		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
 		OAuth: provider, DeviceLogin: mach.LoginDevice, TokenHooks: mach.TokenHooks(),
 		Proof:  &proof.Verifier{Skew: time.Duration(cfg.ProofSkewSeconds) * time.Second, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
@@ -315,4 +337,14 @@ func newRequestMachine(cfg config.Config, st *store.Store, current *policy.Curre
 	}
 	m.Chain = requests.NewChainVerifier(st, cfg.PublicURL, time.Duration(cfg.ProofSkewSeconds)*time.Second)
 	return m
+}
+
+// exchangeKeys reads issuer's published signing keys, the source the RFC 8693 exchange resolves a
+// subject token's own key against. It takes the same boot deadline discovery does: an issuer that
+// accepts the connection and never answers refuses the boot rather than hanging it with no health
+// endpoint serving. No key is fetched here; the first subject token reads the set.
+func exchangeKeys(ctx context.Context, issuer string) (*oidc.Keys, error) {
+	discovery, cancel := context.WithTimeout(ctx, oidc.DiscoveryTimeout)
+	defer cancel()
+	return oidc.NewKeys(discovery, issuer)
 }

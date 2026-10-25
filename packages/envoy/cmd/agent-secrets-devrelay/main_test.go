@@ -11,6 +11,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/ecdsa"
 	"encoding/json"
 	"io"
@@ -29,17 +30,24 @@ import (
 	"github.com/sjawhar/envoy/internal/broker/requests"
 	"github.com/sjawhar/envoy/internal/broker/secrets"
 	"github.com/sjawhar/envoy/internal/broker/store/storetest"
+	"github.com/sjawhar/envoy/internal/oidc"
+	"github.com/sjawhar/envoy/internal/oidc/oidctest"
 )
 
 const (
-	testUIToken  = "test-ui-token-0123456789abcdef"
-	testApprover = "sami@example.com"
-	testValue    = "dev-secret-value"
+	// dispatchAccount is the ServiceAccount the test broker's BROKER_API_ACCOUNTS names as the
+	// caller "dispatch", and dispatchAudience the audience its projected token carries: devrelay
+	// stands in for Dispatch's server, so it presents that account's token.
+	dispatchAccount  = "system:serviceaccount:example-ns:example-dispatch"
+	dispatchAudience = "agent-secrets"
+	testApprover     = "sami@example.com"
+	testValue        = "dev-secret-value"
 )
 
 // newDevrelayTestServer is a live broker HTTP server (real handlers, real Postgres) holding one
-// human-tier secret the box's operator owns and so approves, as scripts/dev-broker.sh does.
-func newDevrelayTestServer(t *testing.T) string {
+// human-tier secret the box's operator owns and so approves, as scripts/dev-broker.sh does. It
+// answers its URL and the ServiceAccount token devrelay calls it with.
+func newDevrelayTestServer(t *testing.T) (brokerURL, callerToken string) {
 	t.Helper()
 	st := storetest.Open(t)
 	local := secrets.NewLocal(policytest.Secret("AGENT_SECRETS_PROOF_APPROVAL", testApprover, policy.TierHuman, testValue))
@@ -62,13 +70,26 @@ func newDevrelayTestServer(t *testing.T) string {
 		Audience: srv.URL, Skew: time.Minute, PendingTTL: 15 * time.Minute, CredentialLifetime: 7 * 24 * time.Hour,
 		Replay: enr.Replay,
 	}
+	// devrelay calls the broker as the listed caller does in production: with its own projected
+	// ServiceAccount token, verified against a local OIDC issuer standing in for the cluster's.
+	issuer := oidctest.New(t)
+	issuerKey := issuer.PublishKey(t, "signing-key")
+	accountTokens, err := oidc.New(context.Background(), issuer.URL(), dispatchAudience)
+	if err != nil {
+		t.Fatalf("oidc.New: %v", err)
+	}
 	api.Register(mux, api.Deps{
-		PublicURL: srv.URL, UIToken: testUIToken,
-		Enroll: enr, Machine: reqMachine, MachineLogin: mach,
+		PublicURL:     srv.URL,
+		APIAccounts:   map[string]string{dispatchAccount: "dispatch"},
+		AccountTokens: enroll.K8sPodVerifier{Verifier: accountTokens},
+		Enroll:        enr, Machine: reqMachine, MachineLogin: mach,
 		Proof:  &proof.Verifier{Skew: time.Minute, Lookup: enr.Lookup, LookupLauncher: enr.AuthenticateLauncher, Replay: enr.Replay},
 		Policy: cur, SecretsStore: secrets.StoreAWS, SecretsPrefix: policytest.Prefix, SecretsKMSKey: policytest.KeyARN,
 	})
-	return srv.URL
+	// The caller's token lives well inside the hour one may, as a projected token does.
+	callerClaims := issuer.Claims(dispatchAccount, dispatchAudience)
+	callerClaims["iat"] = time.Now().Add(-5 * time.Second).Unix()
+	return srv.URL, issuer.Mint(t, issuerKey, callerClaims)
 }
 
 // req issues method against base+path with an optional JSON body and headers, returning the
@@ -106,11 +127,12 @@ func req(t *testing.T, method, url string, headers map[string]string, body any) 
 }
 
 // devrelay runs the command in-process with args and the broker connection flags, failing t on a
-// nonzero exit, and decodes its stdout into T.
-func devrelay[T any](t *testing.T, brokerURL string, args ...string) T {
+// nonzero exit, and decodes its stdout into T. Its --ui-token is the caller's own ServiceAccount
+// token, the bearer the broker's listed caller presents.
+func devrelay[T any](t *testing.T, brokerURL, callerToken string, args ...string) T {
 	t.Helper()
 	var stdout, stderr bytes.Buffer
-	args = append(args, "--broker", brokerURL, "--ui-token", testUIToken, "--login", testApprover)
+	args = append(args, "--broker", brokerURL, "--ui-token", callerToken, "--login", testApprover)
 	if code := run(args, &stdout, &stderr); code != 0 {
 		t.Fatalf("agent-secrets-devrelay %v: exit %d\nstdout: %s\nstderr: %s", args, code, stdout.String(), stderr.String())
 	}
@@ -136,7 +158,7 @@ func newKey(t *testing.T) *ecdsa.PrivateKey {
 // approves that record by the same login through the broker's UI route Dispatch relays to, and
 // the grant releases the fake secrets store's value.
 func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
-	brokerURL := newDevrelayTestServer(t)
+	brokerURL, callerToken := newDevrelayTestServer(t)
 
 	// --- enroll: a machine login approved by devrelay, then a box enrollment on its credential ---
 	machineKey := newKey(t)
@@ -159,7 +181,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 	issued := devrelay[struct {
 		State        string  `json:"state"`
 		CredentialID *string `json:"credential_id"`
-	}](t, brokerURL, "machine-approve", "--code", login.Code)
+	}](t, brokerURL, callerToken, "machine-approve", "--code", login.Code)
 	if issued.State != "approved" || issued.CredentialID == nil {
 		t.Fatalf("machine-approve output = %+v, want state=approved with a credential_id", issued)
 	}
@@ -213,7 +235,7 @@ func TestDevStackEnrollsRequestsApprovesAndReleases(t *testing.T) {
 	approved := devrelay[struct {
 		State   string  `json:"state"`
 		GrantID *string `json:"grant_id"`
-	}](t, brokerURL, "approve", "--record", *created.RecordID)
+	}](t, brokerURL, callerToken, "approve", "--record", *created.RecordID)
 	if approved.State != "approved" || approved.GrantID == nil {
 		t.Fatalf("approve output = %+v, want state=approved with a grant_id", approved)
 	}

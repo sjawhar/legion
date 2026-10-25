@@ -7,9 +7,15 @@
 # writes a fake secrets file standing in for Secrets Manager (DEMO_READ_TOKEN, tagged
 # owner=APPROVER_LOGIN tier=agent, so APPROVER_LOGIN's sessions get it without asking, and
 # DEMO_API_KEY, tagged tier=human, which APPROVER_LOGIN approves), then starts cmd/broker against
-# it. Prints the exports a second shell needs to drive the clients against it: devrelay stands in
-# for Dispatch's credential-request relay, sending the broker's UI routes the UI bearer and the
-# approving human's login, as Dispatch does when a signed-in human clicks Approve.
+# it. Prints the exports a second shell needs to drive the clients against it.
+#
+# The broker's approval routes, and its introspection route, take the calling service's own
+# Kubernetes ServiceAccount token (BROKER_API_ACCOUNTS, verified against BROKER_K8S_OIDC_ISSUER),
+# and so does the RFC 8693 token exchange's subject token. A local run has no cluster and no OIDC
+# issuer to mint or publish keys for one, so this script configures neither: the broker it starts
+# lists no caller and runs with no exchange, which it says in its printed output. A walk through
+# the approval routes needs a broker on a cluster, or a test (internal/broker/brokertest's rig
+# mints both kinds of token against a local issuer).
 #
 # Each invocation creates and drops its own isolated Postgres database (named from this run's own
 # WORK_DIR, below) and binds an OS-assigned ephemeral port (BROKER_LISTEN_ADDR=127.0.0.1:0), so two
@@ -41,7 +47,6 @@ POSTGRES_CONTAINER="dispatch-pg"
 # once it's running (below).
 LISTEN_ADDR="127.0.0.1:0"
 PUBLIC_URL="http://127.0.0.1:0"
-UI_TOKEN="${BROKER_UI_TOKEN:-dev}"
 APPROVER_LOGIN="ada@example.com"
 
 # DEV_BROKER_POSTGRES_URL is checked before anything is created, so a malformed one leaves nothing
@@ -166,7 +171,6 @@ echo "dev-broker: starting broker..." >&2
 BROKER_DATABASE_URL="$POSTGRES_URL" \
 BROKER_PUBLIC_URL="$PUBLIC_URL" \
 BROKER_MACHINE_LOGIN_URL="http://127.0.0.1/credentials/machine" \
-BROKER_UI_TOKEN="$UI_TOKEN" \
 BROKER_SECRETS_PREFIX="$SECRETS_PREFIX" \
 BROKER_SECRETS_KMS_KEY_ARN="$SECRETS_KMS_KEY_ARN" \
 BROKER_FAKE_SECRETS_FILE="$FAKE_SECRETS_FILE" \
@@ -226,7 +230,6 @@ cat <<EOF
 dev-broker: ready.
 
   export AGENT_SECRETS_URL=$PUBLIC_URL
-  export AGENT_SECRETS_UI_TOKEN=$UI_TOKEN
   export AGENT_SECRETS_APPROVER=$APPROVER_LOGIN
   export AGENT_SECRETS_HELPER_SOCK=$WORK_DIR/helper.sock
   export AGENT_SECRETS_OPERATOR_FILE=$OPERATOR_FILE
@@ -236,14 +239,22 @@ dev-broker: ready.
 
   binaries:            $BIN_DIR  (broker, agent-secrets, agent-secrets-helper, agent-secrets-devrelay)
   fake secrets file:   $FAKE_SECRETS_FILE  (each secret's tags and value, for confirming a released grant)
-  approver login:      $APPROVER_LOGIN (devrelay approve/deny --login \$AGENT_SECRETS_APPROVER decides as this human)
+  approver login:      $APPROVER_LOGIN (the login a decision names as the deciding human)
   database:            $DISPLAY_URL  (this instance's own; created and dropped by this script)
 
   One agent-tier secret (DEMO_READ_TOKEN, granted without asking) and one human-tier secret
   (DEMO_API_KEY, approver: $APPROVER_LOGIN), both owned by $APPROVER_LOGIN, whose sessions ask
   for them. A grant lasts until its session ends, or for the --ttl its request names.
-  Drive it with agent-secrets, agent-secrets-helper and agent-secrets-devrelay in another shell;
+  Drive it with agent-secrets and agent-secrets-helper in another shell;
   press Ctrl-C here to stop the broker.
+
+  This broker lists no caller (BROKER_API_ACCOUNTS) and trusts no Kubernetes token issuer
+  (BROKER_K8S_OIDC_ISSUER), because a local run has neither a cluster to mint a ServiceAccount
+  token nor an issuer to publish its keys. So the approval routes refuse every caller,
+  agent-secrets-devrelay cannot approve a record or a machine login here, and the RFC 8693 token
+  exchange is unconfigured: no pod or workflow token is accepted. Those paths are exercised
+  against a broker on a cluster, or by the Go tests, whose rig
+  (packages/envoy/internal/broker/brokertest) mints both kinds of token against a local issuer.
 EOF
 
 wait "$BROKER_PID"

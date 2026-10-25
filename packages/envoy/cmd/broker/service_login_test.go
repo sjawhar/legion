@@ -35,6 +35,12 @@ func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(
 	podKey := issuer.PublishKey(t, "signing-key")
 	const podAudience = "legion-broker-pod"
 	const daemonAccount = "system:serviceaccount:legion-system:legion-daemon-test"
+	// The broker's listed caller of the routes Dispatch's server calls, and the token it presents:
+	// its own projected ServiceAccount token, of the same issuer a pod's comes from.
+	const dispatchAccount = "system:serviceaccount:example-ns:example-dispatch"
+	dispatchClaims := issuer.Claims(dispatchAccount, podAudience)
+	dispatchClaims["iat"] = time.Now().Add(-5 * time.Second).Unix()
+	dispatchToken := issuer.Mint(t, podKey, dispatchClaims)
 	fakeSecretsFile := filepath.Join(t.TempDir(), "fake-secrets.json")
 	if err := os.WriteFile(fakeSecretsFile, []byte(`{"secrets": []}`), 0o600); err != nil {
 		t.Fatal(err)
@@ -47,6 +53,7 @@ func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(
 		"BROKER_K8S_OIDC_ISSUER="+issuer.URL(),
 		"BROKER_K8S_OIDC_AUDIENCE="+podAudience,
 		"BROKER_SERVICE_LOGINS=legion-daemon="+daemonAccount,
+		"BROKER_API_ACCOUNTS=dispatch="+dispatchAccount,
 	)
 	base := "http://" + addr
 
@@ -89,7 +96,7 @@ func TestTheBinaryLogsTheDaemonInWithItsTokenAndOnlyAPersonDecidesTheirOwnLogin(
 	}
 	ui := func(method, path string, body any) (int, []byte) {
 		t.Helper()
-		return call(method, path, map[string]string{"Authorization": "Bearer " + testUIToken}, body)
+		return call(method, path, map[string]string{"Authorization": "Bearer " + dispatchToken}, body)
 	}
 	launcher := func(key *ecdsa.PrivateKey, credentialID, method, path string, body any) (int, []byte) {
 		t.Helper()
