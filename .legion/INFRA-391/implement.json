@@ -2,15 +2,15 @@
   "schemaVersion": 1,
   "phase": "implement",
   "issue": "INFRA-391",
-  "completed": "2026-10-25T19:58:00Z",
+  "completed": "2026-10-25T20:24:23Z",
   "pullRequest": "https://github.com/sjawhar/legion/pull/2209",
   "proof": [
     {
       "criterion": "Root A2: with two repositories saved as one project's sources, two imports in a row record each head and no error",
-      "surface": "The branch's real Dispatch server (packages/dispatch/e2e/run-server.sh, rootless Postgres 17+pgvector in the issue pod, database dispatch_a2_real, port 18710) reading real GitHub through the implement App's gh behind a throwaway shim that answers only the two App-key calls (/legion/scratch/tmp/infra391/a2/shim.ts), driven by the branch's dispatch CLI; evidence https://github.com/sjawhar/legion/pull/2209#issuecomment-6402439218",
+      "surface": "The branch's real Dispatch server (packages/dispatch/e2e/run-server.sh, rootless Postgres 17+pgvector in the issue pod, database dispatch_a2_real, port 18710) reading real GitHub through the implement App's gh behind a throwaway shim that answers only the two App-key calls (/legion/scratch/tmp/infra391/a2/shim.ts), driven by the branch's dispatch CLI; evidence https://github.com/sjawhar/legion/pull/2209#issuecomment-6402749449 (merged head) and https://github.com/sjawhar/legion/pull/2209#issuecomment-6402439218 (pre-merge head 958dcb555e98, base controls)",
       "command": "bash /legion/scratch/tmp/infra391/a2/real.sh: PUT /api/v1/projects/CORE/architecture-sources/sjawhar/legion {branch:main} and .../sjawhar/legion-smoke {branch:infra-391/architecture} with a session actor, then `bun packages/envoy-client/bin/dispatch.ts architecture-sync --project CORE` twice",
-      "observed": "Both PUTs 200; each run printed `Synced CORE architecture from sjawhar/legion@main: commit f2c17ded5305...` and `Synced ... sjawhar/legion-smoke@infra-391/architecture: commit cc50e1512a12...`, equal to `gh api repos/<repo>/commits/<branch> --jq .sha`; the list shows 36 and 3 components, last_error null; shim log 12 calls answered by the shim, 62 forwarded to GitHub, all 200",
-      "headSha": "958dcb555e9808b4765e6edc0303ed54d7200dbc",
+      "observed": "Both PUTs 200; each run printed `Synced CORE architecture from sjawhar/legion@main: commit 0af6288a7a9f...` and `Synced ... sjawhar/legion-smoke@infra-391/architecture: commit cc50e1512a12...`, equal to `gh api repos/<repo>/commits/<branch> --jq .sha`; the list shows 36 and 3 components, last_error null; shim log 10 calls answered by the shim and 56 forwarded to GitHub (one forwarded blob read the shim could not parse, with no architecture.sync_failed recorded and all 36 files imported)",
+      "headSha": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
       "negativeControl": "The base build 83f6320140ec against the same shim: two singular PUT .../architecture-source saves (sjawhar/legion@main, then sjawhar/legion-smoke) leave GET /api/v1/settings/architecture-sources with one CORE row, sjawhar/legion-smoke"
     },
     {
@@ -18,7 +18,7 @@
       "surface": "Same server and CLI as above",
       "command": "dispatch.ts issue-update --issue CORE-1 --components-json '{\"mode\":\"explicit\",\"ids\":[\"daemon-api\",\"smoke-worker\"]}' then dispatch.ts read --issue CORE-1",
       "observed": "`CORE-1: components -> explicit [daemon-api, smoke-worker]`; read prints `Components: daemon-api, smoke-worker`",
-      "headSha": "958dcb555e9808b4765e6edc0303ed54d7200dbc",
+      "headSha": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
       "negativeControl": "ids [daemon-api, not-a-component] \u2192 `COMPONENTS_INPUT: CORE has no component not-a-component in its current architecture model`, exit 1"
     },
     {
@@ -26,15 +26,15 @@
       "surface": "Same server and CLI as above",
       "command": "Re-save sjawhar/legion-smoke on infra-391/architecture-collision (adds daemon.md, an id sjawhar/legion holds), then dispatch.ts architecture-sync --project CORE and GET /api/v1/projects/CORE/architecture",
       "observed": "sjawhar/legion `Synced`; `Sync failed for CORE (sjawhar/legion-smoke@infra-391/architecture-collision): component id \"daemon\" is already a component of CORE from sjawhar/legion` and `The previous model of sjawhar/legion-smoke stays up (3 components).`; tree still has 36 sjawhar/legion and 3 sjawhar/legion-smoke components, daemon's source sjawhar/legion; issue still reads `Components: daemon-api, smoke-worker`. Same three steps on the harness's fake GitHub (bash /legion/scratch/tmp/infra391/a2/fake.sh against `bun run dispatch:local`) pass identically",
-      "headSha": "958dcb555e9808b4765e6edc0303ed54d7200dbc",
+      "headSha": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
       "negativeControl": "The same failure on the fake GitHub (acme/infra re-seeded with platform.md) names `component id \"platform\" is already a component of FAKE from legion/arch` and leaves acme/infra on its previous commit ea0d5009b55d"
     },
     {
       "criterion": "Root A6: a browser-suite test proves Settings, the project page, the architecture page and an issue's components line show components from both sources; fails on the base build, passes at the head",
-      "surface": "Dispatch's browser suite (Playwright chromium, real Go server, production SPA bundle, rootless Postgres) in the issue pod; evidence https://github.com/sjawhar/legion/pull/2209#issuecomment-6402439218",
-      "command": "cd packages/dispatch && DATABASE_URL=<own db> bun run e2e -- e2e/architecture-sources.e2e.ts e2e/architecture.e2e.ts e2e/settings.e2e.ts --project=chromium --reporter=line",
-      "observed": "17 passed at the head (the new spec plus the moved single-source specs); the whole chromium project passed 734/734 (22 skipped) earlier on the same code before the docs and simplify commits",
-      "headSha": "958dcb555e9808b4765e6edc0303ed54d7200dbc",
+      "surface": "Dispatch's browser suite (Playwright chromium, real Go server, production SPA bundle, rootless Postgres) in the issue pod; evidence https://github.com/sjawhar/legion/pull/2209#issuecomment-6402749449 (merged head) and https://github.com/sjawhar/legion/pull/2209#issuecomment-6402439218 (pre-merge head 958dcb555e98, base controls)",
+      "command": "cd packages/dispatch && DATABASE_URL=<own db> bun run e2e -- e2e/architecture-sources.e2e.ts e2e/architecture.e2e.ts e2e/settings.e2e.ts e2e/live.e2e.ts e2e/keyboard-palette.e2e.ts --project=chromium --reporter=line",
+      "observed": "57 passed, 1 skipped (iphone-only) at the merged head for architecture-sources, architecture, settings, live and keyboard-palette specs; the whole chromium project passed 734 (22 skipped) earlier on the same code before the docs and simplify commits",
+      "headSha": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
       "negativeControl": "The same new spec copied alone into a tarball export of base 83f6320140ec007695a8c6415006392c2eeb7768, own database: 1 failed at architecture-sources.e2e.ts:89 `legion/arch is still a CORE source` (element not found) \u2014 the base's second save replaced the first"
     },
     {
@@ -42,7 +42,7 @@
       "surface": "Real Postgres migrated from schema 0116 to 0117 (store upgrade test) and the moved single-source browser specs",
       "command": "source /legion/harness/env.sh && cd packages/envoy && go test -count=1 ./internal/dispatch/store/ -run 'TestMigrationKeepsAProjectsOneSourceAndItsComponents|TestCensusCountsAComponentWhoseProjectHasNoSource'; architecture.e2e.ts and settings.e2e.ts in the A6 run",
       "observed": "Source reads id 0 with every bookkeeping column unchanged, components source_id 0, edge, snapshot and attachment unchanged, a new source gets id > 0; the legacy source re-syncs through the unchanged-head shortcut (importer test); single-source specs pass",
-      "headSha": "958dcb555e9808b4765e6edc0303ed54d7200dbc",
+      "headSha": "97ddf0a48fc4bed61f347de3327e18baaceaca07",
       "negativeControl": "A component whose project has no source makes the census answer 1 and the migration refuse, leaving the schema at 116"
     }
   ],
@@ -131,7 +131,8 @@
     "Base-build A6 control: /legion/scratch/tmp/infra391/base is a tarball export of 83f63201 with bun install done and contracts built; copy e2e/architecture-sources.e2e.ts into its packages/dispatch/e2e/ and run `bun run e2e` there with its own DATABASE_URL.",
     "A2 real-GitHub rig: /legion/scratch/tmp/infra391/a2/{shim.ts,real.sh,fake.sh,scratch-branches.sh}. Start the shim on FAKE_GITHUB_PORT, then run-server.sh with a fresh database; scratch branches infra-391/architecture and infra-391/architecture-collision live on sjawhar/legion-smoke and are deleted by the implementer after the production check.",
     "An earlier release over 0117 does not wipe components on a non-empty import: its insert names no source_id (no default), so it fails and rolls back, recording the error on every source row; only an empty model commits its delete of every source's components. The README section says this.",
-    "envoy-client's envoy-config.test.ts 'still running after 10 s' timing test is flaky in this gVisor pod at base and head alike (failed 1 of 3 at base 83f63201, 2 of 3 at head); unrelated to this change."
+    "envoy-client's envoy-config.test.ts 'still running after 10 s' timing test is flaky in this gVisor pod at base and head alike (failed 1 of 3 at base 83f63201, 2 of 3 at head); unrelated to this change.",
+    "GitHub reported the PR CONFLICTING against main f2c17ded5305 (one line of docs/site/src/content/docs/dispatch/for-agents.md); forward merge 97ddf0a48fc4, fingerprint ae5997ef5aa8ec567c0cd426d448bd0c88dfbc9c5a385604eccfc09939dc8fca before and after (unchanged), comment https://github.com/sjawhar/legion/pull/2209#issuecomment-6402718062."
   ],
   "deviations": [
     "The CLI's failed-source line names the components a re-saved source still shows (`The previous model of <repo> stays up (N components).`) when the row has no commit but keeps components; the plan named only the commit and never-imported lines, and the never-imported line was false after a re-save (seen in the real-GitHub run).",
