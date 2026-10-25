@@ -65,19 +65,31 @@ type Deps struct {
 // notification cannot strand a row, and beside that loop runs the coverage pass (Cover) at
 // startup and every coverageInterval, so content no trigger saw is embedded with no person-run
 // step. The pass runs on its own goroutine: one over a large database takes a while, and the
-// scan loop keeps draining what the pass has already added meanwhile. It returns once ctx is
-// cancelled and both loops have stopped. Run does nothing when deps.Embedder is nil: Dispatch
-// with no place configured, or one that could not be built at boot, never starts either loop,
-// and the next boot with an embedder covers everything left behind.
+// scan loop keeps draining what the pass has already added meanwhile. Each loop gets a
+// connection mark of its own (store.ForConcurrentRead): the pool refuses a caller a second
+// connection while its mark says it holds one, so loops sharing one mark would refuse each
+// other whenever the other had a cursor open. It returns once ctx is cancelled and both loops
+// have stopped. Run does nothing when deps.Embedder is nil: Dispatch with no place configured,
+// or one that could not be built at boot, never starts either loop, and the next boot with an
+// embedder covers everything left behind.
 func Run(ctx context.Context, deps Deps) {
 	if deps.Embedder == nil {
 		return
 	}
-	ctx = store.WithTransactionTracking(ctx)
+	coverageCtx, err := store.ForConcurrentRead(ctx)
+	if err != nil {
+		slog.Error("dispatch embedqueue: not started: the caller holds a pooled connection", "error", err)
+		return
+	}
+	scanCtx, err := store.ForConcurrentRead(ctx)
+	if err != nil {
+		slog.Error("dispatch embedqueue: not started: the caller holds a pooled connection", "error", err)
+		return
+	}
 	var wg sync.WaitGroup
-	wg.Go(func() { runCoverage(ctx, deps) })
+	wg.Go(func() { runCoverage(coverageCtx, deps) })
 	defer wg.Wait()
-	scan(ctx, deps)
+	scan(scanCtx, deps)
 	ticker := time.NewTicker(retryInterval)
 	defer ticker.Stop()
 	for {
@@ -85,7 +97,7 @@ func Run(ctx context.Context, deps Deps) {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			scan(ctx, deps)
+			scan(scanCtx, deps)
 		}
 	}
 }
