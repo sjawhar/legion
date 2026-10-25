@@ -99,6 +99,7 @@ review_round_cap: 4
 max_fix_attempts: 5
 controller: daemon
 worker_backends: {tester: omp}
+turn_watchdog_seconds: {controller: 600, implementer: 0}
 capabilities:
   decided:
     pool-capacity: "the pool is sized by hand for the admission cap"
@@ -253,6 +254,18 @@ func populatedState(t *testing.T) State {
 								Incarnation: "7f0c2f9a-6a4b-4f2e-9a1c-2f0d5a3b7e11/5",
 								OK:          []string{"subagents", "dispatch-envoy-tools"},
 								Open:        []CapabilityGap{{Name: "github", Detail: "gh api user: HTTP 401: Bad credentials"}},
+							},
+							// The turn watchdog's ladder on a turn that stopped producing events
+							// (contract 37): the agent answered get_state and took the abort, and
+							// its turn's end is awaited.
+							Watchdog: &WatchdogView{
+								Step:           "interrupted",
+								At:             time.Date(2026, 9, 22, 15, 31, 0, 0, time.UTC),
+								SilenceSeconds: 21600,
+								Steps: []string{
+									"the process answered get_state (streaming=true), which says nothing about its turn",
+									"the agent took the abort",
+								},
 							},
 						},
 						HandoffCommit: "",

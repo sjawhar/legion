@@ -48,15 +48,19 @@ func tmuxClaim(token claim.Token) supervise.Claim {
 	}
 }
 
-// sameClaim compares two claims field by field, with the delivery's times compared as instants:
-// Postgres hands a timestamptz back in the session's zone, not the one it was written in.
+// sameClaim compares two claims field by field, with the delivery's and the watchdog record's
+// times compared as instants: Postgres hands a timestamptz back in the session's zone, not the one
+// it was written in, and a time that rode through JSON has lost its monotonic reading.
 func sameClaim(t *testing.T, got, want supervise.Claim) {
 	t.Helper()
 	gotPending, wantPending := got.Pending, want.Pending
 	got.Pending, want.Pending = nil, nil
+	gotWatchdog, wantWatchdog := got.Watchdog, want.Watchdog
+	got.Watchdog, want.Watchdog = nil, nil
 	if !reflect.DeepEqual(got, want) {
 		t.Errorf("claim read back differs:\n got %+v\nwant %+v", got, want)
 	}
+	sameWatchdog(t, gotWatchdog, wantWatchdog)
 	if (gotPending == nil) != (wantPending == nil) {
 		t.Fatalf("pending delivery read back = %+v, want %+v", gotPending, wantPending)
 	}
@@ -84,6 +88,62 @@ func sameClaim(t *testing.T, got, want supervise.Claim) {
 			t.Errorf("pending delivery %s = %v, want %v", field.name, field.got, field.want)
 		}
 	}
+}
+
+// sameWatchdog compares two turn-watchdog records, their rung times as instants: the record rides
+// in a jsonb column, and a time read back out of JSON carries no monotonic reading.
+func sameWatchdog(t *testing.T, got, want *supervise.Watchdog) {
+	t.Helper()
+	if (got == nil) != (want == nil) {
+		t.Fatalf("watchdog read back = %+v, want %+v", got, want)
+	}
+	if got == nil {
+		return
+	}
+	untimed := func(w supervise.Watchdog) supervise.Watchdog {
+		w.At = time.Time{}
+		return w
+	}
+	if !reflect.DeepEqual(untimed(*got), untimed(*want)) {
+		t.Errorf("watchdog read back = %+v, want %+v", *got, *want)
+	}
+	if !got.At.Equal(want.At) {
+		t.Errorf("watchdog At = %v, want %v", got.At, want.At)
+	}
+}
+
+// The turn watchdog's ladder is on the claim because a restart must not repeat a rung: the record
+// rides to the store and back whole, and a claim the ladder has nothing on reads back with none.
+func TestAClaimsTurnWatchdogRecordRoundTrips(t *testing.T) {
+	ctx := context.Background()
+	store := migratedStore(t)
+	want := tmuxClaim("legion-LEGION-209-watched")
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put claim: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+
+	want.Watchdog = &supervise.Watchdog{
+		Step:    supervise.WatchdogRelaunched,
+		Silence: 6 * time.Hour,
+		At:      time.Date(2026, 10, 25, 20, 20, 0, 0, time.UTC),
+		Steps: []string{
+			"the process answered get_state (streaming=true), which says nothing about its turn",
+			"the agent took the abort",
+			"the claim was relaunched on its own session",
+		},
+	}
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put the claim with its watchdog record: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
+
+	// The agent is working again: the record goes, and the column with it.
+	want.Watchdog = nil
+	if err := store.PutClaim(ctx, want); err != nil {
+		t.Fatalf("put the recovered claim: %v", err)
+	}
+	sameClaim(t, onlyClaim(t, store), want)
 }
 
 func onlyClaim(t *testing.T, store *Store) supervise.Claim {

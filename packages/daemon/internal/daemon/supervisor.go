@@ -39,6 +39,9 @@ type supervisor struct {
 	// (supervision.start), since a relaunched worker's hello would wait for the relaunch itself.
 	restored chan struct{}
 	terminal func(supervise.Claim, supervise.ClaimState)
+	// onWedged is the workflow's publisher for the turn watchdog's report (OnWedged), nil until
+	// the workflow attaches and on a daemon that has none.
+	onWedged func(supervise.WedgedTurn)
 
 	mu       sync.RWMutex
 	machines map[claim.Token]*member
@@ -258,6 +261,29 @@ func (s *supervisor) volumeLost(c supervise.Claim) {
 			m.inbox.put(supervise.IssueVolumeLost{Claim: token})
 		}
 	}
+}
+
+// OnWedged installs the daemon callback for the turn watchdog's report, which the workflow
+// registers when it attaches: supervision is built before the workflow has its outbox, as
+// OnTerminal is.
+func (s *supervisor) OnWedged(callback func(supervise.WedgedTurn)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onWedged = callback
+}
+
+// wedged is the machines' Deps.Wedged: the turn watchdog's ladder ran out on a claim, and the
+// workflow publishes it (workflowRuntime.wedged). A daemon with no workflow — Stage 1 and 2, and
+// a configuration with no Dispatch — registers none, and the machine's own log line is the whole
+// report. It is called under the reporting machine's lock, as the terminal callback is.
+func (s *supervisor) wedged(report supervise.WedgedTurn) {
+	s.mu.RLock()
+	callback, stopped := s.onWedged, s.stopped
+	s.mu.RUnlock()
+	if callback == nil || stopped {
+		return
+	}
+	callback(report)
 }
 
 // count is how many claims the daemon supervises. It waits on no lock a decision holds.

@@ -132,6 +132,8 @@ func (e *Engine) Apply(ctx context.Context, tx pgx.Tx, fact intake.Fact) (intake
 		return e.claimReady(ctx, tx, fact)
 	case intake.ClaimFailed:
 		return e.claimFailed(ctx, tx, fact)
+	case intake.TurnWedged:
+		return e.turnWedged(ctx, tx, fact)
 	case intake.RetryOrEscalate:
 		return e.retryOrEscalate(ctx, tx, fact)
 	case intake.BackwardMove:
@@ -622,6 +624,30 @@ func (e *Engine) claimFailed(ctx context.Context, tx pgx.Tx, fact intake.ClaimFa
 		return intake.Result{}, err
 	}
 	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{Kind: "worker-died", Role: fact.Role, Phase: from})
+}
+
+// turnWedged tells a human that the turn watchdog's ladder ran out on a claim
+// (internal/supervise/watchdog.go): the turn produced no event for longer than its role's limit,
+// the process could not be interrupted, and the relaunch that follows — the suspend and resume a
+// person would have run by hand — produced no ready agent. It changes no phase and holds nothing:
+// the claim's own budgets decide what happens to it, and this says only that the recovery failed,
+// so the issue's architect can act on a worker nothing else will bring back.
+//
+// The daemon's own controller holds a claim on no issue, so its report goes to the controller
+// role's own topic, under the project key as every controller notice of no issue is.
+func (e *Engine) turnWedged(ctx context.Context, tx pgx.Tx, fact intake.TurnWedged) (intake.Result, error) {
+	if fact.Role == claim.RoleController {
+		return intake.Result{}, e.enqueue(ctx, tx, e.cfg.Project, record.ControllerNotice{
+			Kind: "turn-wedged", Role: fact.Role, Reason: fact.Reason,
+		})
+	}
+	issue, err := e.store.Issue(ctx, tx, fact.Issue)
+	if err != nil || issue == nil {
+		return intake.Result{}, err
+	}
+	return intake.Result{}, e.notice(ctx, tx, issue.Key, record.Notice{
+		Kind: "turn-wedged", Role: fact.Role, Phase: issue.Phase, Reason: fact.Reason,
+	})
 }
 
 func (e *Engine) retryOrEscalate(ctx context.Context, tx pgx.Tx, fact intake.RetryOrEscalate) (intake.Result, error) {

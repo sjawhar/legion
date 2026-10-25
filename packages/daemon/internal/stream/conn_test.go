@@ -6,6 +6,7 @@ import (
 	"errors"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -780,5 +781,97 @@ func TestATokenRequestTheShimCannotAnswerIsRefused(t *testing.T) {
 				t.Fatal("a refused token request reads as a refused prompt")
 			}
 		})
+	}
+}
+
+// testClock is a clock the test moves, as the listener stamps its connections with (Options.Now).
+type testClock struct {
+	mu  sync.Mutex
+	now time.Time
+}
+
+func (c *testClock) Now() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.now
+}
+
+func (c *testClock) set(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.now = at
+}
+
+// The connection records when the agent itself last wrote a frame — a turn's start or end and
+// every frame of its own in between, a tool call among them — and never an answer to a request
+// the daemon sent. It is what the daemon's turn watchdog reads to tell a turn that is still
+// working from one that has stopped, and a process that answers `get_state` while its turn makes
+// no progress is exactly what the watchdog is for.
+func TestLastEventFollowsTheAgentsOwnFramesAndNotItsAnswers(t *testing.T) {
+	epoch := time.Date(2026, 10, 25, 12, 0, 0, 0, time.UTC)
+	clock := &testClock{now: epoch}
+	h := startListener(t, harnessOptions{now: clock.Now})
+	p := h.connect(testToken)
+	conn := h.conn()
+	if got := conn.LastEvent(); !got.IsZero() {
+		t.Fatalf("LastEvent = %s before the agent wrote anything, want the zero time", got)
+	}
+
+	start := epoch.Add(time.Minute)
+	clock.set(start)
+	p.send(shimwire.AgentStart{})
+	if event := h.next(); event != (TurnStart{Claim: testClaim}) {
+		t.Fatalf("event = %#v, want the turn's start", event)
+	}
+	if got := conn.LastEvent(); !got.Equal(start) {
+		t.Fatalf("LastEvent = %s after agent_start, want %s", got, start)
+	}
+
+	// A tool call inside the turn is the turn making progress, though the daemon acts on no event
+	// for it. The clock stands still across the round trip that follows, so whenever the reader
+	// stamps the frame the value is the tool call's; the round trip is only how the test knows the
+	// reader has read it.
+	toolCall := epoch.Add(2 * time.Minute)
+	clock.set(toolCall)
+	p.send(shimwire.Raw{Type: "tool_execution_start", JSON: json.RawMessage(`{"type":"tool_execution_start","toolName":"bash"}`)})
+	askState(t, p, conn, true)
+	if got := conn.LastEvent(); !got.Equal(toolCall) {
+		t.Fatalf("LastEvent = %s after a tool call, want %s", got, toolCall)
+	}
+
+	// OMP's answer to a request the daemon sent is not the agent speaking: a process that answers
+	// get_state while its turn produces nothing is exactly what the watchdog looks for, so the
+	// mark stands where the tool call left it.
+	clock.set(epoch.Add(3 * time.Minute))
+	askState(t, p, conn, false)
+	if got := conn.LastEvent(); !got.Equal(toolCall) {
+		t.Fatalf("LastEvent = %s after an answered get_state, want the tool call's %s", got, toolCall)
+	}
+
+	end := epoch.Add(4 * time.Minute)
+	clock.set(end)
+	p.send(shimwire.AgentEnd{})
+	if event := h.next(); event != (TurnEnd{Claim: testClaim}) {
+		t.Fatalf("event = %#v, want the turn's end", event)
+	}
+	if got := conn.LastEvent(); !got.Equal(end) {
+		t.Fatalf("LastEvent = %s after agent_end, want %s", got, end)
+	}
+}
+
+// askState is one get_state round trip: the daemon asks, the peer answers, and the call returns —
+// so the reader has read everything the peer sent before that answer. negotiate answers the
+// protocol negotiation the connection sends ahead of its first request alone.
+func askState(t *testing.T, p *peer, conn *Conn, negotiate bool) {
+	t.Helper()
+	result := async(func() error { _, err := conn.GetState(context.Background()); return err })
+	if negotiate {
+		p.negotiate()
+	}
+	request := p.expect(shimwire.TypeGetState).(shimwire.GetState)
+	p.send(shimwire.Response{ID: request.ID, Command: shimwire.TypeGetState, Success: true,
+		Data: mustJSON(t, map[string]any{"isStreaming": true})})
+	if err := awaitResult(t, result); err != nil {
+		t.Fatalf("GetState: %v", err)
 	}
 }

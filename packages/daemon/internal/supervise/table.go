@@ -76,7 +76,8 @@ type PromptRefused struct {
 	Err        error
 }
 
-// TimerKind names the waits a machine times.
+// TimerKind names the waits a machine times. The transition table is keyed on each of them
+// (eventKind), so every wait means its own thing in every state.
 type TimerKind string
 
 const (
@@ -96,6 +97,10 @@ const (
 	// lifecycle check failed with no cleanup reserved, or a launch whose write failed. The claim waits
 	// launching with no process until it fires.
 	TimerRelaunch TimerKind = "relaunch"
+	// TimerWatchdog is the turn watchdog's clock (watchdog.go): the role's limit while a turn runs,
+	// then each rung's own wait — the probe interval before the interrupt, the stop timeout for the
+	// interrupted turn's end, and the registration deadline for the relaunched agent's ready.
+	TimerWatchdog TimerKind = "watchdog"
 )
 
 // Timer is a timer the machine armed, firing.
@@ -277,7 +282,7 @@ func (RequestDeliver) isEvent()       {}
 func (RequestExit) isEvent()          {}
 
 // eventKind is what the table is keyed on beside the state: an event's type, with a Timer split
-// by its kind, because the six waits mean six different things.
+// by its kind, because the seven waits mean seven different things.
 type eventKind string
 
 const (
@@ -295,6 +300,7 @@ const (
 	onProbeTimer    eventKind = timerPrefix + eventKind(TimerProbe)
 	onSuspendTimer  eventKind = timerPrefix + eventKind(TimerSuspend)
 	onRelaunchTimer eventKind = timerPrefix + eventKind(TimerRelaunch)
+	onWatchdogTimer eventKind = timerPrefix + eventKind(TimerWatchdog)
 	onSpawn         eventKind = "request_spawn"
 	onRegister      eventKind = "request_register"
 	onReady         eventKind = "request_ready"
@@ -532,6 +538,16 @@ func fillTable(t *builder) {
 		[]ClaimState{StateFailed, StateSuspended}, StateLaunching)
 	t.ignore(onRelaunchTimer, "no relaunch is waiting", StateQueued, StateLaunchUncertain, StateShimConnected, StateRegistered,
 		StateReady, StateWorking, StateIdle, StateSuspended, StateFailed, StateRetired)
+
+	// The turn watchdog (watchdog.go): its clock runs while the agent is in a turn, and nowhere
+	// else. The ladder's last rung, the report, is no timer of its own: the relaunch it makes
+	// raises the claim's generation and would fence one out, so the claim's own boot watch
+	// decides it (watchdogRelaunchFailed).
+	t.row(onWatchdogTimer, "the turn's silence is measured, and the ladder takes its next rung", watchdogTurn,
+		[]ClaimState{StateLaunching, StateFailed, StateSuspended}, StateWorking)
+	t.ignore(onWatchdogTimer, "the turn ended, so nothing is wedged", StateReady, StateIdle)
+	t.ignore(onWatchdogTimer, "the agent is not in a turn", StateQueued, StateLaunchUncertain, StateLaunching, StateShimConnected, StateRegistered)
+	t.ignore(onWatchdogTimer, noProcess, gone...)
 
 	// The issue's volume, found lost by another claim of the issue.
 	t.row(onVolumeLost, "the issue's volume was lost: drop the session it held", sessionLost, nil,
@@ -895,10 +911,12 @@ func agentBusy(reason string) bool {
 // turnStarted is a turn starting in a ready or idle claim. It confirms the pending delivery when
 // it is that delivery's turn: a replay naming it, or — B1 — Oh My Pi's own agent_start while the
 // delivery is in flight (sent and not yet answered, acknowledged and waiting, or possibly sent by
-// an earlier daemon). Any other turn is a foreign one, and confirms nothing.
+// an earlier daemon). Any other turn is a foreign one, and confirms nothing. Either way the turn
+// watchdog's clock starts (armWatchdog): every turn is watched, whatever started it.
 func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 	start := ev.(StreamTurnStart)
 	m.claim.State = StateWorking
+	m.armWatchdog()
 	p := m.claim.Pending
 	_, awaiting := m.timers[TimerTurn]
 	inFlight := m.send != nil || awaiting || m.askFirst
@@ -916,6 +934,7 @@ func turnStarted(m *Machine, ctx context.Context, ev Event) error {
 func turnEnded(m *Machine, ctx context.Context, _ Event) error {
 	m.askFirst = false
 	m.interruptOver()
+	m.watchdogRecovered("the turn ended")
 	if m.held != nil {
 		if err := m.suspendHeld(ctx); err != nil {
 			if m.held == nil {
@@ -952,6 +971,11 @@ func bootInterval(m *Machine, ctx context.Context, _ Event) error {
 // interval, as one whose stop fails is. An operator suspension retained through a rule-resuming
 // launch instead completes here: no ready will arrive to run it, and relaunching would drop the
 // operator's hold.
+//
+// It is also where the turn watchdog's ladder ends: a relaunch it made to recover a wedged turn
+// had exactly this deadline to produce a ready agent, so a claim still carrying that record when
+// the deadline runs out is reported to a human (watchdogRelaunchFailed), once, before the
+// retirement goes on.
 func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 	if m.held != nil && m.held.By == SuspendedByOperator {
 		return m.suspendHeld(ctx)
@@ -961,6 +985,9 @@ func registrationDeadline(m *Machine, ctx context.Context, _ Event) error {
 		never = "registered and never said it was ready"
 	}
 	return m.probe(ctx, func(ctx context.Context) error {
+		if err := m.watchdogRelaunchFailed(ctx, "the agent "+never+" within the registration deadline"); err != nil {
+			return err
+		}
 		if err := m.checkLaunch(ctx); err != nil {
 			m.arm(TimerRegistration, m.deps.Timeouts.Probe, "")
 			return fmt.Errorf("retire %s, whose agent %s: %w", m.claim.Token, never, err)
@@ -1056,7 +1083,12 @@ func ready(m *Machine, ctx context.Context, _ Event) error {
 
 // finishReady persists the current claim before publishing ready or delivering work. reready may
 // reach it while the claim is idle or working, so it must not rewrite the state to ready.
+//
+// An agent saying it can be prompted is the turn watchdog's recovery: the relaunch its ladder made
+// produced a live, registered agent, so the ladder's record goes and nothing is reported
+// (watchdogRecovered).
 func finishReady(m *Machine, ctx context.Context) error {
+	m.watchdogRecovered("the agent is ready")
 	if err := m.persist(ctx); err != nil {
 		return err
 	}

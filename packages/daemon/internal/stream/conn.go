@@ -11,6 +11,7 @@ import (
 	"net"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sjawhar/legion/daemon/internal/claim"
@@ -77,8 +78,14 @@ type Conn struct {
 	nc         net.Conn
 	writer     *shimwire.Writer
 	rpcTimeout time.Duration
+	now        func() time.Time
 	log        *slog.Logger
 	events     *eventQueue
+	// lastEvent is when the connection last read a frame of the agent's own (LastEvent), as Unix
+	// nanoseconds, and 0 before the first. It is an atomic rather than a field of the mutex below
+	// because the reader sets it on every agent frame and the turn watchdog reads it from a
+	// machine's decision, which must never wait on a connection answering a request.
+	lastEvent atomic.Int64
 
 	mu      sync.Mutex
 	pending map[string]pendingRequest
@@ -111,12 +118,13 @@ type ackedPrompt struct {
 	deliveryID string
 }
 
-func newConn(nc net.Conn, token claim.Token, rpcTimeout time.Duration, log *slog.Logger, events *eventQueue) *Conn {
+func newConn(nc net.Conn, token claim.Token, rpcTimeout time.Duration, now func() time.Time, log *slog.Logger, events *eventQueue) *Conn {
 	return &Conn{
 		claim:       token,
 		nc:          nc,
 		writer:      shimwire.NewWriter(connWriter{nc: nc, timeout: rpcTimeout}),
 		rpcTimeout:  rpcTimeout,
+		now:         now,
 		log:         log,
 		events:      events,
 		pending:     map[string]pendingRequest{},
@@ -124,6 +132,25 @@ func newConn(nc net.Conn, token claim.Token, rpcTimeout time.Duration, log *slog
 		done:        make(chan struct{}),
 		negotiation: make(chan struct{}, 1),
 	}
+}
+
+// LastEvent is when this connection last read a frame of the agent's own — a turn's start or end,
+// a tool call, a message — and the zero time before the first. An answer to a request the daemon
+// sent is none of them (markAgentFrame): the turn watchdog reads this to tell a turn that is still
+// working from one that has stopped, and a process that answers `get_state` while its turn makes no
+// progress is exactly what it looks for.
+func (c *Conn) LastEvent() time.Time {
+	nanos := c.lastEvent.Load()
+	if nanos == 0 {
+		return time.Time{}
+	}
+	return time.Unix(0, nanos)
+}
+
+// markAgentFrame records that the agent itself wrote a frame now. Only the connection's reader
+// calls it, so the mark never runs backwards.
+func (c *Conn) markAgentFrame() {
+	c.lastEvent.Store(c.now().UnixNano())
 }
 
 // Negotiate opens protocol v2 on this connection. It is sent once: a connection already
@@ -434,11 +461,19 @@ func (c *Conn) logNotAFrame(line []byte, err error) {
 // are not facts the daemon supervises on, and are dropped here, except an extension's failure,
 // which leaves the agent running without what the extension gives it (the Legion plugin's tool,
 // when its session_start fails) and is on no other record the daemon reads, so it is logged.
+//
+// Every frame the agent wrote itself still marks the connection (markAgentFrame), dropped or not:
+// a tool call, a message update and an extension's failure are each the turn making progress, and
+// the turn watchdog's whole question is whether any of them still arrives. The three frames the
+// shim answers for itself, and OMP's answer to a request the daemon sent, are not the agent's and
+// mark nothing.
 func (c *Conn) dispatch(frame shimwire.Frame) {
 	switch frame := frame.(type) {
 	case shimwire.AgentStart:
+		c.markAgentFrame()
 		c.events.push(TurnStart{Claim: c.claim, DeliveryID: frame.DeliveryID})
 	case shimwire.AgentEnd:
+		c.markAgentFrame()
 		c.mu.Lock()
 		c.acked = nil
 		c.mu.Unlock()
@@ -446,6 +481,7 @@ func (c *Conn) dispatch(frame shimwire.Frame) {
 	case shimwire.Response:
 		c.answer(frame)
 	case shimwire.Raw:
+		c.markAgentFrame()
 		if frame.Type == "extension_error" {
 			var event struct {
 				ExtensionPath string `json:"extensionPath"`

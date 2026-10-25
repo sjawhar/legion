@@ -25,7 +25,7 @@ const claimSelect = `select c.token, c.project, c.tree, c.issue, c.role, c.gener
 	c.session_file, c.locator, c.state, c.failure, c.launch_failures, c.deaths, c.prompt_failures, c.prompt_retires,
 	c.boot_token_hash, c.capability_hash, c.uncertain_streak, c.workspace_lost, c.last_start_row, c.serving_generation,
 	c.agent_secrets_enrollment, c.agent_secrets_enrollment_incarnation, c.suspended_by,
-	c.plugin_contract, c.plugin_relaunch_for,
+	c.plugin_contract, c.plugin_relaunch_for, c.watchdog,
 	d.delivery_id, d.task, d.phase, d.generation, d.queued_at, d.delivered_at, d.marked_by, d.confirmed_at, d.interrupted
 	from claims c left join pending_task_deliveries d on d.claim_token = c.token`
 
@@ -50,6 +50,14 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		}
 		locator = encoded
 	}
+	var watchdog []byte
+	if c.Watchdog != nil {
+		encoded, err := json.Marshal(c.Watchdog)
+		if err != nil {
+			return fmt.Errorf("put claim %s: encode its watchdog: %w", c.Token, err)
+		}
+		watchdog = encoded
+	}
 	var enrollmentID, enrollmentIncarnation *string
 	if c.Enrollment != nil {
 		enrollmentID = &c.Enrollment.ID
@@ -61,8 +69,8 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		session, session_file, locator, state, failure, launch_failures, deaths, prompt_failures, prompt_retires,
 		boot_token_hash, capability_hash, uncertain_streak, workspace_lost, last_start_row,
 		serving_generation, agent_secrets_enrollment, agent_secrets_enrollment_incarnation, suspended_by,
-		plugin_contract, plugin_relaunch_for)
-		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27)
+		plugin_contract, plugin_relaunch_for, watchdog)
+		values ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, $28)
 		on conflict (token) do update set project = excluded.project, tree = excluded.tree,
 		issue = excluded.issue, role = excluded.role, generation = excluded.generation, tree_epoch = excluded.tree_epoch,
 		session = excluded.session, session_file = excluded.session_file,
@@ -78,13 +86,14 @@ func putClaim(ctx context.Context, db execer, c supervise.Claim) error {
 		suspended_by = excluded.suspended_by,
 		plugin_contract = excluded.plugin_contract,
 		plugin_relaunch_for = excluded.plugin_relaunch_for,
+		watchdog = excluded.watchdog,
 		updated_at = now()`,
 		string(c.Token), c.Project, c.Tree, c.Issue, string(c.Role), int64(c.Generation), int64(c.TreeEpoch),
 		c.Session, c.SessionFile, locator, string(c.State), c.Failure,
 		c.Budgets.LaunchFailures, c.Budgets.Deaths, c.Budgets.PromptFailures, c.Budgets.PromptRetires,
 		c.BootTokenHash, c.CapabilityHash, c.UncertainStreak, c.WorkspaceLost, c.LastStartRow, int64(c.ServingGeneration),
 		enrollmentID, enrollmentIncarnation, string(c.SuspendedBy),
-		c.PluginContract, c.PluginRelaunchFor,
+		c.PluginContract, c.PluginRelaunchFor, watchdog,
 	)
 	if err != nil {
 		return fmt.Errorf("put claim %s: %w", c.Token, err)
@@ -328,7 +337,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		c                          supervise.Claim
 		token, role, state, by     string
 		generation, treeEpoch      int64
-		locator                    []byte
+		locator, watchdog          []byte
 		deliveryID, task           *string
 		markedBy                   *string
 		deliveryPhase              *string
@@ -343,7 +352,7 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 		&c.SessionFile, &locator, &state, &c.Failure, &c.Budgets.LaunchFailures, &c.Budgets.Deaths, &c.Budgets.PromptFailures,
 		&c.Budgets.PromptRetires, &c.BootTokenHash, &c.CapabilityHash, &c.UncertainStreak, &c.WorkspaceLost,
 		&c.LastStartRow, &servingGeneration, &enrollmentID, &enrollmentIC, &by,
-		&c.PluginContract, &c.PluginRelaunchFor,
+		&c.PluginContract, &c.PluginRelaunchFor, &watchdog,
 		&deliveryID, &task, &deliveryPhase, &deliveryGeneration, &queuedAt, &delivered, &markedBy, &confirmed, &interrupted)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return supervise.Claim{}, err
@@ -362,6 +371,13 @@ func scanClaim(row pgx.Row) (supervise.Claim, error) {
 			return supervise.Claim{}, fmt.Errorf("read claim %s: %w", token, err)
 		}
 		c.Locator = &loc
+	}
+	if watchdog != nil {
+		var ladder supervise.Watchdog
+		if err := json.Unmarshal(watchdog, &ladder); err != nil {
+			return supervise.Claim{}, fmt.Errorf("read claim %s: decode its watchdog: %w", token, err)
+		}
+		c.Watchdog = &ladder
 	}
 	if enrollmentID != nil && enrollmentIC != nil {
 		c.Enrollment = &supervise.Enrollment{ID: *enrollmentID, Incarnation: *enrollmentIC}

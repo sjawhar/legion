@@ -157,6 +157,10 @@ type Claim struct {
 	// records the daemon's own contract, so a registration that still differs while it equals the
 	// daemon's contract is the one that is charged rather than relaunched again uncharged.
 	PluginRelaunchFor int
+	// Watchdog is the turn watchdog's position on this claim (watchdog.go), nil while its agent's
+	// turns are producing events and on every claim the ladder has never acted on. It is persisted,
+	// so a restart takes the ladder up where it left it, and published in `legion state`.
+	Watchdog *Watchdog
 }
 
 // RuleMayResume says whether the rule may resume this suspended claim: every suspension but the
@@ -319,6 +323,17 @@ type Deps struct {
 	// means a stale claim is recorded and reported, never relaunched or refused — relaunching
 	// nothing it cannot build, and refusing nothing a relaunch is not already under way to fix.
 	PluginRelaunchable bool
+	// TurnLimit is how long a claim of this role may be in a turn that produces no event before
+	// the turn watchdog acts (legion.yaml's `turn_watchdog_seconds`, config.Config.TurnLimitFor);
+	// zero for a role the deployment switched it off for. nil watches no turn at all, which is
+	// what a test that is about something else passes.
+	TurnLimit func(role claim.Role) time.Duration
+	// Wedged is told when the watchdog's ladder has run out: a turn that produced no event, a
+	// process that could not be interrupted, and a relaunch that produced no ready agent
+	// (watchdog.go's rung 4). The daemon publishes it to the issue's architect, or to the
+	// controller role for the controller's own claim, and logs it. nil tells no one; the machine
+	// logs the report either way.
+	Wedged func(WedgedTurn)
 }
 
 func (d Deps) check() error {
@@ -428,6 +443,11 @@ type Machine struct {
 	// of a turn. Both are memory only (Quiesce).
 	interrupt *interrupt
 	quiesced  int64
+	// turnEventAt is when this machine last saw a turn of the claim's agent start or end, the
+	// floor of the turn watchdog's clock (lastTurnEvent); the connection's own mark is the rest of
+	// it. It is memory only: a restart has no record of what the agent said before it, so a
+	// restored claim's clock starts at the restart.
+	turnEventAt time.Time
 	// previous is the incarnation the claim last ran and no longer records — stopped by a
 	// suspension, retired, failed on, or found dead — which every launch of the same session hands
 	// the runtime to wait out until one starts. letGo is the one way a process gets here. It is
@@ -502,6 +522,11 @@ func NewMachine(ctx context.Context, deps Deps, c Claim) (*Machine, error) {
 		m.askFirst = c.Pending != nil && c.Pending.ConfirmedAt.IsZero()
 	case StateWorking:
 		m.askFirst = true
+		// The turn is in flight and this daemon has never seen an event of it: its clock starts
+		// now, so a restart gives a wedged turn its role's whole limit again rather than acting on
+		// a silence it cannot measure. The ladder's position is on the claim, so a restart mid-
+		// ladder takes it up where it left it (watchdog.go).
+		m.armWatchdog()
 	}
 	m.publish()
 	return m, nil
@@ -1053,7 +1078,13 @@ func (m *Machine) forgetSession() {
 // pending delivery stays for whoever decides what happens next. A process the claim still records
 // — found dead, or never stopped — is suspended first, so nothing of it keeps holding what it ran
 // on until the tree closes; a suspension that fails is logged, and the claim fails all the same.
+// A claim the turn watchdog relaunched whose agent never became ready is reported first
+// (watchdogRelaunchFailed): a spent budget is the other way that relaunch can fail, and a report
+// that cannot be written is logged rather than left to fail the failure.
 func (m *Machine) fail(ctx context.Context, why string) error {
+	if err := m.watchdogRelaunchFailed(ctx, "the claim failed before its agent became ready: "+why); err != nil {
+		m.log.Error("supervise: the turn watchdog's report could not be written", "error", err)
+	}
 	if loc := m.claim.Locator; loc != nil {
 		if err := m.endProcess(ctx); err != nil {
 			m.log.Error("supervise: could not suspend the failed claim's process", "incarnation", loc.Incarnation, "error", err)
@@ -1365,6 +1396,11 @@ func copyClaim(c Claim) Claim {
 	if c.Pending != nil {
 		d := *c.Pending
 		c.Pending = &d
+	}
+	if c.Watchdog != nil {
+		w := *c.Watchdog
+		w.Steps = slices.Clone(c.Watchdog.Steps)
+		c.Watchdog = &w
 	}
 	c.BootTokenHash = bytes.Clone(c.BootTokenHash)
 	c.CapabilityHash = bytes.Clone(c.CapabilityHash)

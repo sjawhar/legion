@@ -415,6 +415,9 @@ func (c *stubConn) AgentSecretsToken(context.Context) (string, error) {
 	return "", errors.New("the stream stub reads no projected token")
 }
 
+// LastEvent is the zero time: no test of the tmux runtime runs the turn watchdog.
+func (c *stubConn) LastEvent() time.Time { return time.Time{} }
+
 func (c *stubConn) awaitEvent(t *testing.T, want string) {
 	t.Helper()
 	deadline := time.After(10 * time.Second)

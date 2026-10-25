@@ -479,6 +479,22 @@ func (w *workflowRuntime) attach(supervision *supervision) {
 		supervision.plan.tools, w.log)
 	w.outboxWake.Store(w.outbox)
 	supervision.supervisor.OnTerminal(w.terminal)
+	supervision.supervisor.OnWedged(w.wedged)
+}
+
+// wedged publishes the turn watchdog's report (supervise.Deps.Wedged): the ladder could not bring
+// a claim's agent back, so the issue's architect is told — or the controller role, for the
+// daemon's own controller, whose claim is on no issue. It is one fact, keyed by the claim and the
+// generation the ladder relaunched, so a repeat of the same report publishes nothing twice. The
+// reporting machine calls it under its own lock, as the terminal callback is called, and a
+// failure is logged rather than raised: the daemon goes on supervising whatever it could not say.
+func (w *workflowRuntime) wedged(report supervise.WedgedTurn) {
+	c := report.Claim
+	fact := intake.TurnWedged{Issue: c.Issue, Role: c.Role, Reason: report.Reason()}
+	eventID := fmt.Sprintf("watchdog:%s:%d", c.Token, c.Generation)
+	if _, err := intake.ApplyFact(context.Background(), w.pool, "supervise", eventID, fact, w.handlers...); err != nil {
+		w.log.Error("apply the turn watchdog's report", "claim", c.Token, "error", err)
+	}
 }
 
 func (w *workflowRuntime) replayTerminal(ctx context.Context, claims []supervise.Claim) error {

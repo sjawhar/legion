@@ -988,6 +988,8 @@ func openSupervision(boot context.Context, cfg config.Config, log *slog.Logger, 
 		PhaseHolds:   p.phaseHolds,
 		TreeClosable: p.treeClosable,
 		VolumeLost:   sup.volumeLost,
+		TurnLimit:    cfg.TurnLimitFor,
+		Wedged:       sup.wedged,
 		Clock:        p.clock,
 		Log:          log,
 		Limits: supervise.Limits{

@@ -302,6 +302,33 @@ type ClaimView struct {
 	// PluginContract is the contract the claim's current registration declared, 0 when none
 	// recorded, always emitted.
 	PluginContract int `json:"pluginContract"`
+	// Watchdog is the turn watchdog's position on the claim (supervise.Claim.Watchdog), absent on
+	// every claim whose turns are producing events and on every one the ladder has never acted on.
+	Watchdog *WatchdogView `json:"watchdog,omitempty"`
+}
+
+// WatchdogView is the turn watchdog's ladder on one claim as the state shows it
+// (internal/supervise/watchdog.go): the rung it last ran (`probed`, `interrupted`, `relaunched`
+// or `reported`), when that rung ran, how long the turn had produced no event when the ladder
+// started, and every rung tried with what it found. Steps is never null.
+type WatchdogView struct {
+	Step           string    `json:"step"`
+	At             time.Time `json:"at"`
+	SilenceSeconds int       `json:"silenceSeconds"`
+	Steps          []string  `json:"steps"`
+}
+
+// WatchdogViewOf is w as the state shows it, nil for a claim the ladder holds nothing on.
+func WatchdogViewOf(w *supervise.Watchdog) *WatchdogView {
+	if w == nil {
+		return nil
+	}
+	return &WatchdogView{
+		Step:           string(w.Step),
+		At:             w.At,
+		SilenceSeconds: int(w.Silence / time.Second),
+		Steps:          append([]string{}, w.Steps...),
+	}
 }
 
 // CapabilityReportView is one session's capability report as the state shows it: when the session

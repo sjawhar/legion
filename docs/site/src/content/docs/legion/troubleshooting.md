@@ -500,6 +500,33 @@ is queued for it, since the next phase start or re-admission resumes it as befor
   409 and the claim stays `launching`; the next boot, or the relaunch, starts the claim's process.
   Nothing to do.
 
+## A turn stops making progress
+
+An agent whose process answers but whose turn produces nothing is the daemon's to recover, not
+yours: the turn watchdog probes it, interrupts the turn, and relaunches the claim on its own
+session ([A turn that stops making progress](/legion/legion/concepts/#a-turn-that-stops-making-progress)).
+`legion state` shows what it is doing on its `wedged turns` line, and the ladder's record on each
+claim:
+
+```sh
+legion state --config legion.yaml --json | jq '[.issues[].workers[].claim | select(.watchdog) | {state, watchdog}]'
+```
+
+The log lines, in the order they come: `supervise: the agent's turn has produced no event within
+its role's limit; asking the process for its state`, `supervise: the turn watchdog interrupted the
+wedged turn; waiting for its end`, `supervise: the turn watchdog relaunches the claim on its own
+session`, and `supervise: the turn watchdog's claim is working again` once the agent is back.
+
+- **A recovery reaches a human** (`supervise: the turn watchdog could not recover the claim;
+  reporting it`, and a `turn-wedged` notice on the issue's architect) only when that relaunch
+  produced no ready agent. Read the role's container log from the relaunch onward: the ladder has
+  done what `legion claims suspend` and `legion claims resume` do by hand, so what remains is a
+  process that cannot boot, which [A pod does not come up](#a-pod-does-not-come-up) covers.
+- **A role whose real work goes quiet for longer than its limit** — a subagent, a long build —
+  would be interrupted by rung 2, which costs it its current step. Raise that role's
+  `turn_watchdog_seconds`, or set it to `0` to switch the watchdog off for it, and restart the
+  daemon.
+
 ## The work loops or stops
 
 These arrive as messages on the Dispatch issue, and the architect is told:

@@ -86,6 +86,7 @@ var settingsEmitted = map[string]string{
 	"Config.ControllerLaunch":                        "controller",
 	"Config.Capabilities":                            "capabilities",
 	"Config.WorkerBackends":                          "worker_backends",
+	"Config.TurnWatchdog":                            "turn_watchdog_seconds",
 	"Runtime.Name":                                   "runtime.name",
 	"Runtime.Kubernetes":                             "runtime.kubernetes",
 	"Kubernetes.Namespace":                           "runtime.kubernetes.namespace",
@@ -241,7 +242,7 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 		"controller_wake_interval_seconds", "worker_boot_registration_deadline_intervals",
 		"launch_failure_limit", "prompt_failure_limit", "prompt_retire_limit", "envoy_url", "nats_urls",
 		"dispatch_url", "projects", "gates", "github_apps", "linger_hours", "production_check_hours", "review_round_cap",
-		"max_fix_attempts", "controller", "capabilities", "worker_backends",
+		"max_fix_attempts", "controller", "capabilities", "worker_backends", "turn_watchdog_seconds",
 	}
 	top := keysOf(t, encoded)
 	assertKeys(t, "settings", top, wantTop)
@@ -305,6 +306,12 @@ func TestSettingsOfAKubernetesConfigurationNamesEveryKeyAndNoSecret(t *testing.T
 	}
 	if want := map[string]string{"tester": "omp"}; !maps.Equal(settings.WorkerBackends, want) {
 		t.Errorf("worker_backends = %q, want %q", settings.WorkerBackends, want)
+	}
+	if want := map[string]int{
+		"architect": 7200, "controller": 600, "implementer": 0, "merger": 7200,
+		"planner": 7200, "reviewer": 21600, "tester": 7200,
+	}; !maps.Equal(settings.TurnWatchdogSeconds, want) {
+		t.Errorf("turn_watchdog_seconds = %v, want the file's controller and implementer with every other role's default", settings.TurnWatchdogSeconds)
 	}
 	if want := []string{"/bin/sh", "-c", "echo fixture-setup"}; !slices.Equal(settings.Runtime.Kubernetes.Setup, want) {
 		t.Errorf("runtime.kubernetes.setup = %q, want %q", settings.Runtime.Kubernetes.Setup, want)

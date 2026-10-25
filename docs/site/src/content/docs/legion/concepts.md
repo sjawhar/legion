@@ -367,3 +367,40 @@ its registration deadline, so the three tries of `launch_failure_limit`'s defaul
 seconds at least, never the moment one fault lasts. The wait logs `supervise: waiting before the
 next launch` with its length. The try it waits for is stored, with the charge, before the wait
 begins, so a daemon stop during it forgives nothing; the next boot launches the claim again.
+
+### A turn that stops making progress
+
+An agent can stop without dying: the process answers, the claim reads `working`, and the turn
+produces nothing more. The daemon bounds that with a per-role clock, `turn_watchdog_seconds`. The
+clock is the time since the claim's agent last produced an event of its own — a turn's start or
+end, a tool call, a message — not the turn's length, so a turn that keeps speaking is never
+touched however long it runs.
+
+Once a role's limit passes with no event, the daemon climbs a ladder, each rung only after the one
+before it has not brought the turn back:
+
+1. **Ask the process for its state.** The `get_state` frame, which starts no turn. An answer proves
+   the process is up and nothing about the turn, so it never stops the clock — only a new turn
+   event does. No answer means the process is gone, and the ladder goes straight to rung 3.
+2. **Interrupt the turn.** The same abort the daemon sends a worker whose phase another start takes
+   over: it cancels the turn's tool calls and keeps the process and its session, so a merely slow
+   turn loses its current step and nothing else. The turn's end is awaited for
+   `worker_stop_timeout_seconds`.
+3. **Relaunch the claim on its own session**, which is `legion claims suspend` followed by
+   `legion claims resume`: the process is replaced, the session resumed, the workspace and the
+   issue's branch untouched, and the outstanding task delivered again.
+4. **Report.** Only if that relaunch produces no ready agent within the registration deadline, or
+   its launch budget runs out first: the daemon publishes a `turn-wedged` notice to the issue's
+   architect — to the controller's own role for the controller's claim — naming the claim, how long
+   it was wedged and every rung that was tried, and logs the same.
+
+Each rung is recorded on the claim, so a daemon restart takes the ladder up where it left it rather
+than starting over, and `legion state` shows it (`wedged turns:`, and `watchdog` on the claim in
+`--json`). An agent that produces an event again, or becomes ready after the relaunch, clears the
+record.
+
+The defaults are several times what real turns do, measured on a deployment on 2026-10-25 over
+2,059 completed turns of every role, whose longest silence inside an open turn was 2h24m (an
+implementer running a subagent): 30 minutes for the controller, 6 hours for the implementer and
+the reviewer, 2 hours for every other role. Every role is overridable, and `0` switches the
+watchdog off for that role.

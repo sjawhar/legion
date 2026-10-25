@@ -41,7 +41,9 @@ type Conn struct {
 	tokenReads  int
 	shutdowns   int
 	aborts      int
+	stateAsks   int
 	state       runtime.ConnState
+	lastEvent   time.Time
 	failures    map[string]error
 }
 
@@ -74,10 +76,33 @@ func (c *Conn) Prompt(_ context.Context, deliveryID, message string) error {
 func (c *Conn) GetState(_ context.Context) (runtime.ConnState, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+	c.stateAsks++
 	if err := c.failures["GetState"]; err != nil {
 		return runtime.ConnState{}, err
 	}
 	return c.state, nil
+}
+
+// LastEvent is the time SetLastEvent last gave it: the agent's own events are the test's to say.
+func (c *Conn) LastEvent() time.Time {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.lastEvent
+}
+
+// SetLastEvent is the agent writing one of its own events at at — a message, a tool call — as the
+// stream's connection records it.
+func (c *Conn) SetLastEvent(at time.Time) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.lastEvent = at
+}
+
+// StateAsks is how many times the daemon asked the agent for its state (GetState).
+func (c *Conn) StateAsks() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.stateAsks
 }
 
 // Abort records the daemon asking the agent to end its turn. It ends nothing: the test ends the
