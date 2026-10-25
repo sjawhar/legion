@@ -45,7 +45,7 @@ import {
   writeSessionTitle,
 } from "@legion/envoy-client/dispatch-session-state";
 import { subscriptionRemovedTopics } from "@legion/envoy-client/dispatch-subscribe";
-import { DEFAULT_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
+import { MIN_PASS_DEADLINE_MS } from "@legion/envoy-client/envoy-settings";
 import { messageFor } from "@legion/envoy-client/errors";
 import { machineID } from "@legion/envoy-client/machine";
 import { natsAuthOptions } from "@legion/envoy-client/nats-auth";
@@ -562,7 +562,7 @@ export default function envoyExtension(pi: PiApi): void {
   // The deadline each queued task gets, read afresh at every task start. Tolerant of Envoy being
   // off, unlike `requireEnvoy`, which throws: the queues exist whatever the session resolved, and
   // a queue cannot answer a throw with a deadline.
-  const passDeadlineMs = (): number => active?.settings.passDeadlineMs ?? DEFAULT_PASS_DEADLINE_MS;
+  const passDeadlineMs = (): number => active?.settings.passDeadlineMs ?? MIN_PASS_DEADLINE_MS;
   const subscriptions = new Map<string, Subscription>();
   const delivered = createDeliveryDedupe();
   let connection: NatsConnection | undefined;
@@ -876,10 +876,10 @@ export default function envoyExtension(pi: PiApi): void {
     return inbound;
   };
 
-  const ensureConnection = async (): Promise<NatsConnection> => {
+  const ensureConnection = async (live: Fence = UNFENCED): Promise<NatsConnection> => {
     if (connection?.isClosed() === false) return connection;
     const { natsUrls, natsSeed } = requireInbound();
-    connection = await connect({
+    const dialled = await connect({
       servers: [...natsUrls],
       name: `omp-${sessionID || "unknown"}`,
       ...natsAuthOptions(natsSeed),
@@ -889,6 +889,20 @@ export default function envoyExtension(pi: PiApi): void {
       maxReconnectAttempts: -1,
       reconnectTimeWait: 2_000,
     });
+    // Another pass can establish the connection, and the session's shutdown drop it, while this
+    // dial is in flight, and an abandoned pass must not put its dial in the shared field: cleanup
+    // drains `connection` alone, and `maxReconnectAttempts: -1` keeps anything else alive for the
+    // process's life. The loser of either race is this dial, closed here rather than left dangling.
+    if (!live() || shuttingDown || connection?.isClosed() === false) {
+      await dialled.close().catch(() => {});
+      if (!shuttingDown && connection?.isClosed() === false) return connection;
+      throw new AbandonedTaskError(
+        shuttingDown
+          ? "the session shut down while its NATS dial was in flight; the connection it opened was closed"
+          : "the pass that dialled NATS was abandoned at its deadline while the dial was in flight; the connection it opened was closed"
+      );
+    }
+    connection = dialled;
     return connection;
   };
 
@@ -1310,7 +1324,7 @@ export default function envoyExtension(pi: PiApi): void {
       (candidate) => !subscriptions.has(candidate)
     );
     if (subjects.length === 0) return false;
-    const activeConnection = await ensureConnection();
+    const activeConnection = await ensureConnection(live);
     // The pass that asked for this topic was abandoned while the connection was made: it opens
     // nothing, so a subject a newer pass has since settled is not reopened behind its back.
     if (!live()) return false;
@@ -1461,7 +1475,7 @@ export default function envoyExtension(pi: PiApi): void {
       agentStreamCommandsRefreshedOnWatchAt = -Infinity;
     }
     agentStreamControlSession = session;
-    const connected = await ensureConnection();
+    const connected = await ensureConnection(live);
     // Abandoned while connecting: a newer pass's control subscription is the live one, and
     // overwriting it here would leave this session deaf to watch and replay.
     if (!live()) return;
@@ -1888,8 +1902,13 @@ export default function envoyExtension(pi: PiApi): void {
       previousSessionID: options.previousSessionID,
     });
     if (!live()) {
+      // The listener may have granted the claim while this move was abandoned. Nothing of it goes
+      // in the transcript — the move that replaced this one owns the role from here — but the hold
+      // is real at the listener, so leave it pending for the next pass to hand back. The role this
+      // process holds is untouched: this claim is not adopted, so no previous topic ends here.
+      if (result.claimed) pendingHandBacks.set(`${topic}@${id}`, { topic, id });
       throw new AbandonedTaskError(
-        `the role move that claimed ${role} for session ${id} was abandoned at its deadline while the claim was in flight; nothing was recorded`
+        `the role move that claimed ${role} for session ${id} was abandoned at its deadline while the claim was in flight; ${result.claimed ? "the hold the listener granted is left for the next pass to hand back" : "nothing was claimed"}`
       );
     }
     if (result.claimed) {
@@ -2144,7 +2163,7 @@ export default function envoyExtension(pi: PiApi): void {
     if (inbound && inboundOpenFor !== host) {
       try {
         agentSessions.add(host);
-        await ensureConnection();
+        await ensureConnection(live);
         // Each await is a place the host can move and a place this pass can be abandoned at its
         // deadline: a fenced pass opened nothing, so it records nothing as open either.
         if (!live()) return false;
@@ -2216,6 +2235,12 @@ export default function envoyExtension(pi: PiApi): void {
     let restored = false;
     const failed: { readonly key: string; readonly topic: string; readonly id: string }[] = [];
     for (const [key, hold] of pendingHandBacks) {
+      // Abandoned at the deadline, mid-hand-back: the move that replaced this one settles what is
+      // still pending, so stop before the delete — a `Map` iterator visits entries inserted after
+      // it was created, and an entry a session event added behind this loop belongs to that move,
+      // not this one. The holds whose hand-back already failed are restored below: they are in
+      // neither map while this runs, and dropping them would leak them with nothing to settle them.
+      if (!live()) break;
       pendingHandBacks.delete(key);
       if (wanted !== undefined && hold.topic === ROLE_TOPIC_PREFIX + wanted) {
         claimedRoleTopic = hold.topic;
@@ -2235,13 +2260,13 @@ export default function envoyExtension(pi: PiApi): void {
           });
         });
     }
-    // Abandoned at the deadline during a hand-back: the move that replaced this one settles the
-    // holds, and neither map is written behind it.
-    if (!live()) return false;
     for (const { key, topic, id } of failed) {
       if (id === host) pendingHandBacks.set(key, { topic, id });
       else abandonedHolds.set(topic, { id });
     }
+    // Abandoned during the last hand-back, or at the break above: the restore this pass made is
+    // the replacing move's to decide, so answer that no hold came back.
+    if (!live()) return false;
     return restored;
   };
 

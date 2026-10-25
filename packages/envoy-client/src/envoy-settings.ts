@@ -21,12 +21,16 @@ export const DEFAULT_ENVOY_URL = "http://127.0.0.1:9020";
 // deployment it doesn't match. An empty natsUrls means "inbound messaging not configured" -
 // consumers must degrade loudly instead of dialing an invented address.
 // The Envoy listener expires a session record 300 s after its last write
-// (`OpenSessionRegistry`'s default `ttl`, `packages/envoy/internal/session/registry.go`). A record
-// that expires unless refreshed is renewed at a third of its lifetime, so two whole refreshes may
-// fail before a live session's record is dropped.
-export const DEFAULT_HEARTBEAT_MS = 100_000;
-/** The deadline a pass gets when nothing names one and the heartbeat is shorter. */
-export const DEFAULT_PASS_DEADLINE_MS = 30_000;
+// (`OpenSessionRegistry`'s default `ttl`, `packages/envoy/internal/session/registry.go`). The
+// interval is set so three refresh attempts plus one whole listener call's budget (10 250 ms: two
+// 5 000 ms attempts and the 250 ms retry delay between them, `transport.ts`) fit inside that
+// lifetime — 3 × 90 000 + 10 250 = 280 250 ms — so two whole refreshes may fail and the third
+// still completes before the record is dropped. The previous 100 000 bought nothing: three
+// attempts landed on 300 000 ms exactly, the third had not yet paid for its round trip, and
+// `setInterval` only ever fires late, so what it really allowed was one failed refresh.
+export const DEFAULT_HEARTBEAT_MS = 90_000;
+/** The floor under a pass deadline when nothing names one and the heartbeat is shorter than it. */
+export const MIN_PASS_DEADLINE_MS = 30_000;
 const MIN_INTERVAL_MS = 25;
 
 /** The variables `envoySettings` consults, by name, over whatever else the environment holds. */
@@ -94,7 +98,9 @@ export interface EnabledEnvoySettings {
   /** The bound on one task of the pi-envoy plugin's serial queues, so a task that never settles
    * cannot hold the next heartbeat tick, session event or Legion claim behind it. The default
    * never cuts a healthy pass short: the worst legitimate pass is about one 20 s NATS dial plus a
-   * few `AbortSignal.timeout(5000)` HTTP calls. */
+   * few `AbortSignal.timeout(5000)` HTTP calls. Never shorter than `heartbeatMs`: an explicit
+   * `ENVOY_PASS_DEADLINE_MS` below it is raised to it, so a caller that wants a short deadline
+   * must shorten `ENVOY_HEARTBEAT_MS` with it. */
   readonly passDeadlineMs: number;
 }
 
@@ -246,15 +252,21 @@ export function envoySettings(
     return Number.isFinite(parsed) && parsed > 0 ? Math.max(parsed, MIN_INTERVAL_MS) : fallback;
   };
   const heartbeatMs = intervalMs(env.ENVOY_HEARTBEAT_MS, DEFAULT_HEARTBEAT_MS);
+  // The pass deadline is never shorter than the heartbeat: a shorter one abandons every pass
+  // before the next tick, so the heartbeat's `healing` latch — and the registration backstop that
+  // runs under it (`ensureHeartbeat`, packages/pi-envoy/extensions/envoy.ts) — would be false at
+  // every tick, while a pass wedged before `registerSession` never registers at all. A caller that
+  // wants a short deadline must shorten `ENVOY_HEARTBEAT_MS` with it. `MIN_INTERVAL_MS` has
+  // nothing left to do here: the result is at least `heartbeatMs`, which it already floors.
   return {
     enabled: true,
     url: normalizeEnvoyUrl(url),
     token,
     inbound,
     heartbeatMs,
-    passDeadlineMs: intervalMs(
-      env.ENVOY_PASS_DEADLINE_MS,
-      Math.max(heartbeatMs, DEFAULT_PASS_DEADLINE_MS)
+    passDeadlineMs: Math.max(
+      intervalMs(env.ENVOY_PASS_DEADLINE_MS, MIN_PASS_DEADLINE_MS),
+      heartbeatMs
     ),
   };
 }
